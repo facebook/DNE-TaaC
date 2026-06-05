@@ -286,7 +286,7 @@ class TrafficItemNotFoundError(Exception):
     pass
 
 
-def get_logger():
+def get_logger() -> logging.Logger:
     LOGGING_FMT = "%(asctime)s [%(levelname)-8s] %(message)s"
     logging.basicConfig(
         level=logging.DEBUG, format=LOGGING_FMT, datefmt="%Y-%m-%d %H:%M:%S"
@@ -345,10 +345,10 @@ class VportIndex:
     topology_name: t.Optional[str] = None
 
 
-def require_traffic_item(func: t.Callable):
+def require_traffic_item(func: t.Callable) -> t.Callable:
     """Decorator to skip the function execution if no traffic items are found"""
 
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self, *args, **kwargs) -> t.Any:
         if not self.has_traffic_items():
             self.logger.debug(
                 f"[GLOBAL] No traffic items found in the IXIA setup! Skipping {func.__name__}."
@@ -359,14 +359,14 @@ def require_traffic_item(func: t.Callable):
     return wrapper
 
 
-def external_api(func: t.Callable):
-    def wrapper(self, *args, **kwargs):
+def external_api(func: t.Callable) -> t.Callable:
+    def wrapper(self, *args, **kwargs) -> t.Any:
         return func(self, *args, **kwargs)
 
     return wrapper
 
 
-def split_list_into_chunks(list_to_split: list, chunk_size: int):
+def split_list_into_chunks(list_to_split: list, chunk_size: int) -> t.List[list]:
     return [
         list_to_split[i : i + chunk_size]
         for i in range(0, len(list_to_split), chunk_size)
@@ -2854,7 +2854,9 @@ class Ixia:
         )
         time.sleep(sleep_time_between_toggle_s)
 
-    def get_bgp_device_group_name(self, all_device_groups):
+    def get_bgp_device_group_name(
+        self, all_device_groups: t.List["DeviceGroup"]
+    ) -> t.List[str]:
         bgp_device_group_name = []
         for device_group in all_device_groups:
             for ethernet in device_group.Ethernet.find():
@@ -4326,6 +4328,28 @@ class Ixia:
         setup_start = time.time()
         # Use warning level so messages pass through suppress_console_logs
         _log = self.logger.warning
+
+        # If a previous retry attempt created a session, destroy it before
+        # starting fresh.  Reusing the same session via NewConfig() causes a
+        # race condition: the old Connection's in-flight PATCH operations may
+        # still be committing server-side when NewConfig() wipes the SDM
+        # registry, leading to NullReferenceException in IxNetwork.
+        if self.session_id and not self.is_existing_session:
+            _log(
+                f"{_YELLOW}[IXIA]{_RESET} Destroying session "
+                f"{_YELLOW}{self.session_id}{_RESET} from previous failed "
+                f"attempt before retry"
+            )
+            try:
+                if self.session:
+                    self.session.Session.remove()
+            except Exception:
+                pass
+            self.session_id = None
+            self.vport_indices = {}
+            self.tag_name_to_device_group_name_list = defaultdict(list)
+            self.ptp_configured = False
+
         _log(f"{_BG_BLUE}{_WHITE}{_BOLD} IXIA SETUP {_RESET}")
 
         # ── Step 1: Connect ──────────────────────────────────────

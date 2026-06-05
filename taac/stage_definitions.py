@@ -30,6 +30,7 @@ from taac.step_definitions import (
     create_daemon_control_step,
     create_drain_convergence_verification_step,
     create_interface_flap_step,
+    create_interface_permanent_flap_step,
     create_ixia_device_group_toggle_step,
     create_ixia_packet_capture_step,
     create_longevity_step,
@@ -46,7 +47,9 @@ from taac.step_definitions import (
     create_set_peer_groups_policy_step,
     create_set_route_filter_step,
     create_start_stop_bgp_peers_step,
+    create_system_reboot_step,
     create_tcpdump_step,
+    create_thread_cpu_monitoring_step,
     create_validation_step,
     create_verify_port_operational_state_step,
     create_verify_port_speed_step_v2,
@@ -54,59 +57,16 @@ from taac.step_definitions import (
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
-from taac.test_as_a_config.types import ConcurrentStep, Params, Stage, Step, StepName
-
-
-def create_thread_cpu_monitoring_step(
-    device_name: str,
-    duration_minutes: int,
-    thread_cpu_monitoring_interval_seconds: int = 5,
-    thread_name_filter: list[str] | None = None,
-    enable_bgp_events: bool = True,
-    enable_perf_profiling: bool = False,
-    enable_offcpu_profiling: bool = False,
-    enable_socket_monitoring: bool = False,
-) -> Step:
-    """
-    Create a BGP++ thread CPU monitoring step.
-
-    This helper function creates a custom step for monitoring BGP++ thread CPU
-    utilization during convergence. Can be reused in multiple test stages.
-
-    Args:
-        device_name: Name of the device to monitor
-        duration_minutes: Monitoring duration in minutes
-        thread_cpu_monitoring_interval_seconds: CPU sampling interval (default: 5s)
-        thread_name_filter: List of thread names to monitor
-                           - None (default): Plot top 10 threads by CPU
-                           - ["bgpcpp-fiber_bg", "bgpcpp-peer_man"]: Specific threads
-        enable_bgp_events: Enable BGP event tracking (default: True)
-        enable_perf_profiling: Enable perf-based profiling (default: False)
-        enable_offcpu_profiling: Enable off-CPU profiling (default: False)
-        enable_socket_monitoring: Enable socket monitoring (default: False)
-
-    Returns:
-        Step object for BGP++ thread CPU monitoring
-    """
-    return Step(
-        name=StepName.CUSTOM_STEP,
-        description="Monitor BGP++ thread CPU during convergence",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "test_bgp_thread_cpu_monitor_eos_bgp_plus_plus",
-                    "hostname": device_name,
-                    "duration_minutes": duration_minutes,
-                    "interval_seconds": thread_cpu_monitoring_interval_seconds,
-                    "thread_name_filter": thread_name_filter,
-                    "enable_bgp_events": enable_bgp_events,
-                    "enable_perf_profiling": enable_perf_profiling,
-                    "enable_offcpu_profiling": enable_offcpu_profiling,
-                    "enable_socket_monitoring": enable_socket_monitoring,
-                }
-            )
-        ),
-    )
+from taac.test_as_a_config.types import (
+    ConcurrentStep,
+    Params,
+    Service,
+    ServiceInterruptionTrigger,
+    Stage,
+    Step,
+    StepName,
+    SystemRebootTrigger,
+)
 
 
 def create_bgp_restart_test_stage(
@@ -733,9 +693,45 @@ def create_port_channel_initial_setup_stage(
     )
 
 
+def create_port_channel_initial_setup_stage_with_permanent_disable(
+    port_channel_name: str,
+    interfaces_to_disable: list[str],
+    expected_port_operational_state: bool,
+) -> Stage:
+    """
+    Create the initial setup stage for port channel testing.
+
+    This stage verifies the port channel is up, disables specified interfaces,
+    then verifies the expected port operational state.
+
+    Args:
+        port_channel_name: Name of the port channel to verify
+        interfaces_to_disable: List of interfaces to disable
+        expected_port_operational_state: Expected operational state after disabling interfaces
+
+    Returns:
+        Stage object for port channel initial setup
+    """
+    return Stage(
+        steps=[
+            create_verify_port_operational_state_step(
+                interfaces=[port_channel_name], operational_state=True
+            ),
+            create_interface_permanent_flap_step(
+                enable=False, interfaces=interfaces_to_disable
+            ),
+            create_verify_port_operational_state_step(
+                interfaces=[port_channel_name],
+                operational_state=expected_port_operational_state,
+            ),
+        ]
+    )
+
+
 def create_port_channel_concurrent_flap_stage(
     interfaces_to_flap: list[str],
     iteration: int = 5,
+    cold_boot: bool = False,
 ) -> Stage:
     """
     Create a concurrent stage for port channel link flapping with agent restart.
@@ -745,6 +741,7 @@ def create_port_channel_concurrent_flap_stage(
     Args:
         interfaces_to_flap: List of interfaces to flap
         iteration: Number of iterations to run
+        cold_boot: If True, perform cold boot instead of warm boot
 
     Returns:
         Stage object for concurrent port channel flapping
@@ -768,11 +765,69 @@ def create_port_channel_concurrent_flap_stage(
                     create_service_interruption_step(
                         service=taac_types.Service.AGENT,
                         trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        create_cold_boot_file=cold_boot,
                     ),
                     create_service_convergence_step(),
                 ],
             ),
         ],
+    )
+
+
+def create_port_channel_flap_only_stage(
+    interfaces_to_flap: list[str],
+    iteration: int = 1,
+) -> Stage:
+    """
+    Create a stage for port channel link flapping without agent restart.
+
+    Args:
+        interfaces_to_flap: List of interfaces to flap
+        iteration: Number of iterations to run
+
+    Returns:
+        Stage object for port channel flapping only
+    """
+    return Stage(
+        iteration=iteration,
+        steps=[
+            create_interface_flap_step(enable=False, interfaces=interfaces_to_flap),
+            create_interface_flap_step(enable=True, interfaces=interfaces_to_flap),
+        ],
+    )
+
+
+def create_port_channel_permanent_teardown_stage(
+    port_channel_name: str,
+    interfaces_to_enable: list[str],
+    expected_port_operational_state: bool,
+) -> Stage:
+    """
+    Create the teardown stage for port channel testing.
+
+    This stage verifies the expected port operational state, enables all interfaces,
+    then verifies the port channel is up.
+
+    Args:
+        port_channel_name: Name of the port channel to verify
+        interfaces_to_enable: List of interfaces to enable
+
+    Returns:
+        Stage object for port channel teardown
+    """
+    return Stage(
+        steps=[
+            create_verify_port_operational_state_step(
+                interfaces=[port_channel_name],
+                operational_state=expected_port_operational_state,
+            ),
+            create_interface_permanent_flap_step(
+                enable=True, interfaces=interfaces_to_enable
+            ),
+            create_verify_port_operational_state_step(
+                interfaces=[port_channel_name], operational_state=True
+            ),
+        ]
     )
 
 
@@ -3512,4 +3567,184 @@ def create_revert_route_storm_stage(
             )
         ],
         description="Revert route storm attributes to defaults",
+    )
+
+
+# =============================================================================
+# COMMON STAGE FACTORIES
+# =============================================================================
+
+import typing as t
+
+
+def create_longevity_stage(
+    duration: int = 60,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """
+    Create a stage with a single longevity step.
+
+    Args:
+        duration: Duration in seconds to wait
+        stage_id: Optional stage identifier
+
+    Returns:
+        Stage with a longevity step
+    """
+    return Stage(
+        id=stage_id,
+        steps=[create_longevity_step(duration=duration)],
+    )
+
+
+def create_service_restart_trigger_stage(
+    service: Service,
+    trigger: ServiceInterruptionTrigger = ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+    convergence_services: t.Optional[t.List[Service]] = None,
+    timeout: int = 600,
+    longevity_duration: t.Optional[int] = None,
+    iteration: int = 1,
+    create_cold_boot_file: bool = False,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """
+    Create a unified service restart stage: interrupt + convergence + optional longevity.
+
+    Covers warmboot, coldboot, BGP restart, service crash, and any other
+    service restart pattern by parameterizing the service, trigger, and
+    convergence services.
+
+    Args:
+        service: Service to restart (e.g., Service.AGENT, Service.BGP)
+        trigger: How to interrupt the service (SYSTEMCTL_RESTART, CRASH, etc.)
+        convergence_services: Services to wait for convergence (default: [AGENT])
+        timeout: Convergence timeout in seconds
+        longevity_duration: If set, append a longevity step with this duration
+        iteration: Number of times to repeat the stage
+        create_cold_boot_file: If True, create cold boot file (for agent coldboot)
+        stage_id: Optional stage identifier
+
+    Returns:
+        Stage with service restart steps
+    """
+    if convergence_services is None:
+        convergence_services = [Service.AGENT]
+    steps = [
+        create_service_interruption_step(
+            service=service,
+            trigger=trigger,
+            create_cold_boot_file=create_cold_boot_file,
+        ),
+        create_service_convergence_step(services=convergence_services, timeout=timeout),
+    ]
+    if longevity_duration is not None:
+        steps.append(create_longevity_step(duration=longevity_duration))
+    return Stage(id=stage_id, steps=steps, iteration=iteration)
+
+
+def create_warmboot_trigger_stage(
+    services: t.Optional[t.List[Service]] = None,
+    timeout: int = 600,
+    longevity_duration: t.Optional[int] = None,
+    iteration: int = 1,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """Convenience wrapper for agent warmboot. See create_service_restart_trigger_stage."""
+    return create_service_restart_trigger_stage(
+        service=Service.AGENT,
+        convergence_services=services,
+        timeout=timeout,
+        longevity_duration=longevity_duration,
+        iteration=iteration,
+        stage_id=stage_id,
+    )
+
+
+def create_coldboot_trigger_stage(
+    services: t.Optional[t.List[Service]] = None,
+    timeout: int = 900,
+    longevity_duration: t.Optional[int] = None,
+    iteration: int = 1,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """Convenience wrapper for agent coldboot. See create_service_restart_trigger_stage."""
+    return create_service_restart_trigger_stage(
+        service=Service.AGENT,
+        convergence_services=services,
+        timeout=timeout,
+        longevity_duration=longevity_duration,
+        iteration=iteration,
+        create_cold_boot_file=True,
+        stage_id=stage_id,
+    )
+
+
+def create_bgp_restart_trigger_stage(
+    services: t.Optional[t.List[Service]] = None,
+    timeout: int = 600,
+    longevity_duration: t.Optional[int] = None,
+    iteration: int = 1,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """Convenience wrapper for BGP restart. See create_service_restart_trigger_stage."""
+    if services is None:
+        services = [Service.AGENT, Service.BGP]
+    return create_service_restart_trigger_stage(
+        service=Service.BGP,
+        convergence_services=services,
+        timeout=timeout,
+        longevity_duration=longevity_duration,
+        iteration=iteration,
+        stage_id=stage_id,
+    )
+
+
+def create_service_crash_stage(
+    service: Service,
+    convergence_services: t.Optional[t.List[Service]] = None,
+    longevity_duration: int = 180,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """Convenience wrapper for service crash. See create_service_restart_trigger_stage."""
+    return create_service_restart_trigger_stage(
+        service=service,
+        trigger=ServiceInterruptionTrigger.CRASH,
+        convergence_services=convergence_services,
+        longevity_duration=longevity_duration,
+        stage_id=stage_id,
+    )
+
+
+def create_device_reboot_stage(
+    trigger: SystemRebootTrigger = SystemRebootTrigger.FULL_SYSTEM_REBOOT,
+    convergence_services: t.Optional[t.List[Service]] = None,
+    timeout: int = 600,
+    longevity_duration: int = 300,
+    stage_id: t.Optional[str] = None,
+) -> Stage:
+    """
+    Create a device reboot stage: system reboot + convergence + longevity.
+
+    Args:
+        trigger: Reboot trigger type
+        convergence_services: Services to wait for convergence (default: [AGENT])
+        timeout: Convergence timeout in seconds
+        longevity_duration: Duration in seconds for post-reboot longevity soak
+        stage_id: Optional stage identifier
+
+    Returns:
+        Stage with device reboot steps
+    """
+    if convergence_services is None:
+        convergence_services = [Service.AGENT]
+    return Stage(
+        id=stage_id,
+        steps=[
+            create_system_reboot_step(trigger=trigger),
+            create_service_convergence_step(
+                services=convergence_services,
+                timeout=timeout,
+            ),
+            create_longevity_step(duration=longevity_duration),
+        ],
     )

@@ -34,12 +34,16 @@ class RegisterPortChannelMinLinkPercentagePatchers(Step[taac_types.BaseInput]):
             params (Dict[str, Any]): Parameters including:
                 - port_channel_name (str): The name of the port channel to configure.
                 - min_link_percentage (float): The minimum link capacity percentage to set.
+                - min_link_up_percentage (optional) (float): The minimum link up percentage to set.
 
         This method registers and applies the patcher on the local device and,
         if applicable, on the neighbor device connected to the port channel.
         """
         port_channel_name = params["port_channel_name"]
         min_link_percentage = params.get("min_link_percentage")
+        min_link_up_percentage = None
+        if "min_link_up_percentage" in params:
+            min_link_up_percentage = params["min_link_up_percentage"]
         patcher_name = params.get("patcher_name", PATCHER_NAME)
         register_patchers = params.get("register_patchers", True)
         neighbor_hostname, neighbor_interface = none_throws(
@@ -49,9 +53,10 @@ class RegisterPortChannelMinLinkPercentagePatchers(Step[taac_types.BaseInput]):
             # pyre-ignore
             self.driver,
             register_patchers,
+            patcher_name,
             port_channel_name,
             min_link_percentage,
-            patcher_name,
+            min_link_up_percentage,
         )
         # Register patcher for the neighbor device, if applicable
         if "eb" not in neighbor_hostname:
@@ -76,34 +81,46 @@ class RegisterPortChannelMinLinkPercentagePatchers(Step[taac_types.BaseInput]):
                 #  `AbstractSwitch`.
                 neighbor_driver,
                 register_patchers,
+                patcher_name,
                 neighbor_port_channel_name,
                 min_link_percentage,
-                patcher_name,
+                min_link_up_percentage,
             )
 
-    def _build_patcher_args(self, port_channel_name: str, min_link_percentage: float):
+    def _build_patcher_args(
+        self,
+        port_channel_name: str,
+        min_link_percentage: float,
+        min_link_up_percentage: t.Optional[float] = None,
+    ):
         """
         Build the arguments dictionary for the patcher function.
 
         Args:
             port_channel_name (str): The name of the port channel.
             min_link_percentage (float): The minimum link capacity percentage.
+            min_link_up_percentage (optional) (float): The minimum link up percentage.
 
         Returns:
             Dict[str, str]: Arguments for the patcher function.
         """
-        return {
+        patcher_args = {
             "link_percentage": str(min_link_percentage),
             "port_channel_name": port_channel_name,
         }
+        if min_link_up_percentage is not None:
+            patcher_args["min_link_up_percentage"] = str(min_link_up_percentage)
+
+        return patcher_args
 
     async def _register_and_apply_port_channel_min_link_percentage_patcher(
         self,
         driver: "FbossSwitch",
         register_patcher: bool,
+        patcher_name: str,
         port_channel_name: str,
         min_link_percentage: t.Optional[float],
-        patcher_name: str,
+        min_link_up_percentage: t.Optional[float] = None,
     ):
         """
         Register the patcher on the given driver and apply it by restarting the agent.
@@ -122,7 +139,9 @@ class RegisterPortChannelMinLinkPercentagePatchers(Step[taac_types.BaseInput]):
             await driver.async_register_python_patcher(
                 patcher_name=patcher_name,
                 patcher_args=self._build_patcher_args(
-                    port_channel_name, none_throws(min_link_percentage)
+                    port_channel_name,
+                    none_throws(min_link_percentage),
+                    min_link_up_percentage,
                 ),
                 config_name=AGENT_CONFIG,
                 py_func_name="set_port_channel_min_link_capacity",

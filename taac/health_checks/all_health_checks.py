@@ -27,6 +27,9 @@ from taac.health_checks.abstract_health_check import (
 from taac.health_checks.abstract_snapshot_health_check import (
     AbstractSnapshotHealthCheck,
 )
+from taac.health_checks.device_health_checks.arista_fboss_next_hop_group_validity_health_check import (
+    AristaFbossNextHopValidityHealthCheck,
+)
 from taac.health_checks.device_health_checks.bgp_convergence_health_check import (
     BgpConvergenceHealthCheck,
 )
@@ -96,8 +99,26 @@ from taac.health_checks.device_health_checks.memory_utilization_health_check imp
 from taac.health_checks.device_health_checks.oomd_kill_health_check import (
     OomdKillHealthCheck,
 )
+from taac.health_checks.device_health_checks.openr_adjacency_health_check import (
+    OpenrAdjacencyHealthCheck,
+)
+from taac.health_checks.device_health_checks.openr_fib_validate_health_check import (
+    OpenrFibValidateHealthCheck,
+)
+from taac.health_checks.device_health_checks.openr_initialized_health_check import (
+    OpenrInitializedHealthCheck,
+)
+from taac.health_checks.device_health_checks.openr_overload_state_health_check import (
+    OpenrOverloadStateHealthCheck,
+)
+from taac.health_checks.device_health_checks.openr_spark_neighbor_health_check import (
+    OpenrSparkNeighborHealthCheck,
+)
 from taac.health_checks.device_health_checks.pfc_wd_health_check import (
     PfcWdHealthCheck,
+)
+from taac.health_checks.device_health_checks.port_channel_expected_state_health_check import (
+    PortChannelExpectedStateHealthCheck,
 )
 from taac.health_checks.device_health_checks.port_counters_health_check import (
     PortCountersHealthCheck,
@@ -174,6 +195,9 @@ from taac.health_checks.snapshot_health_checks.qos_dscp_tx_queue_health_check im
 from taac.health_checks.topology_health_checks.ndp_health_check import (
     NdpHealthCheck,
 )
+from taac.health_checks.topology_health_checks.openr_kvstore_consistency_health_check import (
+    OpenrKvstoreConsistencyHealthCheck,
+)
 from taac.health_check.health_check import types as hc_types
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
@@ -241,6 +265,14 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     RouteConvergenceTimeHealthCheck,
     DlbResourceStickinessHealthCheck,
     PortChannelStateHealthCheck,
+    OpenrSparkNeighborHealthCheck,
+    OpenrInitializedHealthCheck,
+    OpenrAdjacencyHealthCheck,
+    OpenrFibValidateHealthCheck,
+    OpenrOverloadStateHealthCheck,
+    OpenrKvstoreConsistencyHealthCheck,
+    AristaFbossNextHopValidityHealthCheck,
+    PortChannelExpectedStateHealthCheck,
 ]
 
 if not TAAC_OSS:

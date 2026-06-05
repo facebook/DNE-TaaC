@@ -49,6 +49,7 @@ class BgpMultipathNextHopCountHealthCheck(
         - ebgp_only: If True, only consider eBGP routes (routes with non-empty AS_PATH). Default: True for discovery mode.
     """
 
+    # TODO: Change to BGP_MULTIPATH_NEXT_HOP_COUNT_CHECK once thrift enum lands
     CHECK_NAME = hc_types.CheckName.NEXT_HOP_COUNT_CHECK
     OPERATING_SYSTEMS = ["EOS"]
 

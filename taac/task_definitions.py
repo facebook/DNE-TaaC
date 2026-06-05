@@ -150,6 +150,7 @@ def create_coop_apply_patchers_task(
     hostnames: t.List[str],
     config_name: str = "bgpcpp",
     do_warmboot: bool = False,
+    do_coldboot: bool = False,
 ) -> Task:
     """
     Create a task to apply registered patchers on device(s).
@@ -158,6 +159,8 @@ def create_coop_apply_patchers_task(
         hostnames: List of hostnames to apply patchers on
         config_name: Config type to apply (default: "bgpcpp")
         do_warmboot: Whether to perform a warmboot after applying (default: False)
+        do_coldboot: Whether to perform a coldboot after applying (default: False).
+            Required for port-channel agent patchers (min-link, agg-port creation, etc.)
 
     Returns:
         Task object to apply patchers
@@ -166,7 +169,9 @@ def create_coop_apply_patchers_task(
         "hostnames": hostnames,
         "config_name": config_name,
     }
-    if do_warmboot:
+    if do_coldboot:
+        params["do_coldboot"] = True
+    elif do_warmboot:
         params["do_warmboot"] = True
 
     return Task(
@@ -333,6 +338,211 @@ def create_configure_eos_parallel_bgp_peers_task(
 
     return Task(
         task_name="configure_eos_parallel_bgp_peers",
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_eos_bgp_peer_group_task(
+    hostname: str,
+    peer_group_name: str,
+    register: bool = True,
+    remote_as: t.Optional[int] = None,
+    description: t.Optional[str] = None,
+    update_source: t.Optional[str] = None,
+    activate: bool = True,
+    ipv4_unicast: bool = True,
+    ipv6_unicast: bool = False,
+    route_map_in: t.Optional[str] = None,
+    route_map_out: t.Optional[str] = None,
+    next_hop_self: bool = False,
+    out_delay: t.Optional[int] = None,
+    timers_keepalive: t.Optional[int] = None,
+    timers_holdtime: t.Optional[int] = None,
+    send_community: bool = False,
+    maximum_routes: t.Optional[int] = None,
+    maximum_routes_warning_limit: t.Optional[int] = None,
+    maximum_routes_warning_only: bool = False,
+    local_as: t.Optional[int] = None,
+    local_as_no_prepend: bool = False,
+    local_as_replace_as: bool = False,
+    local_as_fallback: bool = False,
+    graceful_restart_helper: bool = False,
+    send_community_link_bandwidth: bool = False,
+    link_bandwidth_aggregate: t.Optional[str] = None,
+) -> Task:
+    """
+    Create a task to create or remove a BGP peer group on an Arista EOS device.
+
+    This is the EOS ar-bgp equivalent of the FBOSS add_peer_group_patcher COOP
+    patcher. It wraps AristaSwitch.async_create_bgp_peer_group() to configure
+    peer groups via EOS CLI commands.
+
+    When register=False, the task removes the peer group by calling
+    AristaSwitch.async_remove_bgp_peer_group(). Only hostname and
+    peer_group_name are needed for removal.
+
+    Args:
+        hostname: Hostname of the EOS device
+        peer_group_name: Name of the BGP peer group (e.g., "PEERGROUP_BAG_STSW_V6")
+        register: If True (default), create the peer group. If False, remove it.
+        remote_as: Remote AS number for the peer group
+        description: Description for the peer group
+        update_source: Interface to use as source for BGP packets
+        activate: Whether to activate the peer group in the address family
+        ipv4_unicast: Configure for IPv4 unicast address family
+        ipv6_unicast: Configure for IPv6 unicast address family
+        route_map_in: Inbound route-map name (ingress policy)
+        route_map_out: Outbound route-map name (egress policy)
+        next_hop_self: Whether to set next-hop-self
+        out_delay: Out delay in seconds
+        timers_keepalive: BGP keepalive timer in seconds
+        timers_holdtime: BGP hold timer in seconds
+        send_community: Whether to send community attribute
+        maximum_routes: Maximum number of routes to accept
+        maximum_routes_warning_limit: Warning limit for maximum routes
+        maximum_routes_warning_only: Whether to only warn when max routes exceeded
+        local_as: Local AS number override
+        local_as_no_prepend: Do not prepend local AS to AS path
+        local_as_replace_as: Replace AS number with local AS
+        local_as_fallback: Use local AS as fallback
+        graceful_restart_helper: Enable graceful restart helper mode
+        send_community_link_bandwidth: Send community link bandwidth
+        link_bandwidth_aggregate: Link bandwidth aggregate value
+
+    Returns:
+        Task object to create or remove the EOS BGP peer group
+    """
+    params: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "peer_group_name": peer_group_name,
+    }
+
+    if not register:
+        params["register"] = False
+        return Task(
+            task_name="create_eos_bgp_peer_group",
+            params=Params(json_params=json.dumps(params)),
+        )
+
+    optional_params = {
+        "remote_as": remote_as,
+        "description": description,
+        "update_source": update_source,
+        "route_map_in": route_map_in,
+        "route_map_out": route_map_out,
+        "out_delay": out_delay,
+        "timers_keepalive": timers_keepalive,
+        "timers_holdtime": timers_holdtime,
+        "maximum_routes": maximum_routes,
+        "maximum_routes_warning_limit": maximum_routes_warning_limit,
+        "local_as": local_as,
+        "link_bandwidth_aggregate": link_bandwidth_aggregate,
+    }
+    for key, value in optional_params.items():
+        if value is not None:
+            params[key] = value
+
+    bool_params = {
+        "activate": (activate, True),
+        "ipv4_unicast": (ipv4_unicast, True),
+        "ipv6_unicast": (ipv6_unicast, False),
+        "next_hop_self": (next_hop_self, False),
+        "send_community": (send_community, False),
+        "maximum_routes_warning_only": (maximum_routes_warning_only, False),
+        "local_as_no_prepend": (local_as_no_prepend, False),
+        "local_as_replace_as": (local_as_replace_as, False),
+        "local_as_fallback": (local_as_fallback, False),
+        "graceful_restart_helper": (graceful_restart_helper, False),
+        "send_community_link_bandwidth": (send_community_link_bandwidth, False),
+    }
+    for key, (value, default) in bool_params.items():
+        if value != default:
+            params[key] = value
+
+    return Task(
+        task_name="create_eos_bgp_peer_group",
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_eos_bgp_prefix_list_task(
+    hostname: str,
+    prefix_list_name: str,
+    peer_group_name: str | t.List[str],
+    prefix: t.Optional[str] = None,
+    direction: str = "in",
+    prefix_length: t.Optional[int] = None,
+    seq: t.Optional[int] = None,
+    register: bool = True,
+    is_ipv6: bool = True,
+) -> Task:
+    """
+    Create a task to add or remove a prefix-list on one or more EOS BGP peer
+    groups.
+
+    This is the EOS ar-bgp equivalent of the FBOSS
+    add_bgp_policy_match_prefix_to_propagate_routes COOP patcher. It creates an
+    EOS prefix-list entry and attaches it to peer group(s) under the appropriate
+    address-family. Call once per prefix, similar to the FBOSS patcher pattern.
+
+    When peer_group_name is a list, the prefix-list is attached to / detached
+    from all peer groups in a single CLI transaction. On removal, the
+    prefix-list is detached from every peer group before the prefix-list itself
+    is deleted.
+
+    When register=False, the task removes the prefix-list from the peer group(s)
+    and deletes the prefix-list. Only hostname, prefix_list_name, peer_group_name,
+    direction, and is_ipv6 (or prefix) are needed for removal.
+
+    Args:
+        hostname: Hostname of the EOS device
+        prefix_list_name: Name of the prefix-list (e.g., "ALLOW_BAG_STSW_V6_PREFIXES")
+        peer_group_name: Peer group(s) to attach the prefix-list to. Accepts a
+            single name or a list of names.
+        prefix: IP prefix to permit (e.g., "5000::/16", "10.0.0.0/8").
+            Required when register=True.
+        direction: "in" or "out" for inbound/outbound filtering
+        prefix_length: Max prefix length for the "le" keyword. Defaults to 128
+            for IPv6, 32 for IPv4 (auto-detected from prefix).
+        seq: Optional sequence number for the prefix-list entry, useful when
+            adding multiple entries to the same prefix-list via separate tasks
+        register: If True (default), create prefix-list and attach. If False, remove.
+        is_ipv6: Whether this is an IPv6 prefix-list (only used when register=False
+            and prefix is not provided, to determine ip vs ipv6 command)
+
+    Returns:
+        Task object to add or remove the prefix-list
+    """
+    params: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "prefix_list_name": prefix_list_name,
+        "peer_group_name": peer_group_name,
+    }
+
+    if not register:
+        params["register"] = False
+        params["direction"] = direction
+        if prefix is not None:
+            params["prefix"] = prefix
+        else:
+            params["is_ipv6"] = is_ipv6
+        return Task(
+            task_name="add_eos_bgp_prefix_list_to_peer_group",
+            params=Params(json_params=json.dumps(params)),
+        )
+
+    if prefix is None:
+        raise ValueError("prefix is required when register=True")
+
+    params["prefix"] = prefix
+    params["direction"] = direction
+    if prefix_length is not None:
+        params["prefix_length"] = prefix_length
+    if seq is not None:
+        params["seq"] = seq
+
+    return Task(
+        task_name="add_eos_bgp_prefix_list_to_peer_group",
         params=Params(json_params=json.dumps(params)),
     )
 
@@ -2055,4 +2265,175 @@ def create_cpu_stress_teardown_task(hostname: str) -> Task:
                 }
             )
         ),
+    )
+
+
+def create_deploy_exabgp_task(
+    hostname: str,
+    remote_path: str = "/tmp/exabgpd.par",
+    fbpkg_name: str = "exabgp",
+) -> Task:
+    """Deploy ExaBGP PAR file from fbpkg to a FBOSS device.
+
+    Fetches the exabgp fbpkg on the test runner, then SCPs the
+    exabgpd.par binary to the device via Paramiko SFTP.
+    """
+    return Task(
+        task_name="deploy_exabgp",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hostname": hostname,
+                    "remote_path": remote_path,
+                    "fbpkg_name": fbpkg_name,
+                }
+            )
+        ),
+    )
+
+
+def create_ixia_preflight_task(
+    chassis_hostname: str,
+    max_cpu: float = 80.0,
+    max_memory: float = 80.0,
+    max_sessions: int = 8,
+    test_ports: t.Optional[t.List[str]] = None,
+) -> Task:
+    """Pre-flight health check for an IXIA chassis.
+
+    Runs before IXIA session setup to validate the chassis is healthy.
+    Fails the test early if the chassis is down, has no active cards,
+    or has active CRC errors on ports used by the test.
+    Warns (but continues) if CPU/memory is high or too many sessions exist.
+
+    Args:
+        chassis_hostname: IXIA chassis hostname
+        max_cpu: CPU warning threshold (default 80%)
+        max_memory: Memory warning threshold (default 80%)
+        max_sessions: Max active sessions warning threshold (default 8)
+        test_ports: IXIA slot/port pairs used by this test (e.g., ["7/1", "7/2"]).
+            CRC errors on these ports are blockers. CRC on other ports is informational.
+    """
+    return Task(
+        task_name="ixia_preflight",
+        ixia_needed=False,
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "chassis_hostname": chassis_hostname,
+                    "max_cpu": max_cpu,
+                    "max_memory": max_memory,
+                    "max_sessions": max_sessions,
+                    "test_ports": test_ports or [],
+                }
+            )
+        ),
+    )
+
+
+def create_cleanup_exabgp_task(
+    hostname: str,
+    restart_bgpd: bool = True,
+    remote_path: str = "/tmp/exabgpd.par",
+    config_path: str = "/tmp/exabgp.conf",
+) -> Task:
+    """Stop ExaBGP and clean up deployed files on a FBOSS device.
+
+    Kills the ExaBGP process, removes all deployed files, and
+    optionally restarts BGP++ to restore the device to its original state.
+    """
+    return Task(
+        task_name="cleanup_exabgp",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hostname": hostname,
+                    "remote_path": remote_path,
+                    "config_path": config_path,
+                    "restart_bgpd": restart_bgpd,
+                }
+            )
+        ),
+    )
+
+
+def create_backup_running_config_task(
+    hostname: str,
+    backup_file: t.Optional[str] = None,
+) -> Task:
+    """
+    Create a task to backup the running config of an Arista EOS device.
+
+    The backup is saved to the device's flash storage via
+    ``copy running-config flash:<name>``. If no backup_file is provided,
+    a timestamp-based name is auto-generated.
+
+    Args:
+        hostname: Hostname of the EOS device
+        backup_file: Optional backup filename (without ``flash:`` prefix).
+            If not provided, a timestamp-based name is generated automatically.
+
+    Returns:
+        Task object to backup the running config
+    """
+    params: t.Dict[str, t.Any] = {"hostname": hostname}
+    if backup_file is not None:
+        params["backup_file"] = backup_file
+
+    return Task(
+        task_name="backup_running_config",
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_restore_running_config_task(
+    hostname: str,
+    backup_file: str,
+) -> Task:
+    """
+    Create a task to restore the running config of an Arista EOS device.
+
+    Restores the configuration via ``configure replace flash:<name>``,
+    atomically replacing the running config with the backup.
+
+    Args:
+        hostname: Hostname of the EOS device
+        backup_file: Backup filename to restore from, e.g.
+            ``flash:taac_backup_20251114_162530``
+
+    Returns:
+        Task object to restore the running config
+    """
+    return Task(
+        task_name="restore_running_config",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hostname": hostname,
+                    "backup_file": backup_file,
+                }
+            )
+        ),
+    )
+
+
+def create_set_port_channel_min_link_patcher_task(
+    hostname: str,
+    port_channel_name: str,
+    min_link_percentage: t.Union[int, float],
+    min_link_up_percentage: t.Optional[t.Union[int, float]] = None,
+    description: t.Optional[str] = "Register port channel min link percentage patcher",
+    patcher_name: str = "configure_port_channel_min_link_percentage",
+) -> Task:
+    params_dict: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "port_channel_name": port_channel_name,
+        "patcher_name": patcher_name,
+        "description": description,
+        "min_link_percentage": min_link_percentage,
+        "min_link_up_percentage": min_link_up_percentage,
+    }
+    return Task(
+        task_name="set_port_channel_min_link_patcher",
+        params=Params(json_params=json.dumps(params_dict)),
     )

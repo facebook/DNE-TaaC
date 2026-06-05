@@ -136,15 +136,21 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertIn("network_group_regex", result.message)
 
     async def test_run_all_iterations_pass(self):
-        """Test _run returns PASS when all ADD/DELETE iterations succeed."""
+        """Test _run returns PASS when all DELETE/ADD iterations succeed."""
         # Setup: mock driver returns valid time and metrics
+        # With DELETE→ADD order, 1 iteration needs:
+        # Iter 1 DELETE: capture start time + awk output
+        # Iter 1 ADD: capture start time + awk output
         self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
             side_effect=[
-                # Iter 1 ADD - capture start time (skipped validation, just toggle)
                 # Iter 1 DELETE - capture start time
                 "14:30:00.000000",
                 # Iter 1 DELETE - awk output
                 "METRICS 0 1000 5 5.000000 14:30:00 14:30:05",
+                # Iter 1 ADD - capture start time
+                "14:30:10.000000",
+                # Iter 1 ADD - awk output
+                "METRICS 1000 0 5 8.000000 14:30:10 14:30:18",
             ]
         )
 

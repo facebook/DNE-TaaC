@@ -1354,6 +1354,7 @@ class TaacRunner:
         # pyre-fixme[16]: `Optional` has no attribute `__iter__`.
         enabled_playbooks = [p for p in playbooks if p.enabled]
         total_playbooks = len(enabled_playbooks)
+        failed_playbooks: t.List[t.Tuple[str, str, Exception]] = []
         for dut in duts:
             test_device = self.topology.get_device_by_name(dut)
             for pb_idx, playbook in enumerate(enabled_playbooks, 1):
@@ -1365,7 +1366,23 @@ class TaacRunner:
                 )
                 self.logger.info(f"\033[1m\033[36m{'=' * 70}\033[0m")
                 self._current_playbook = playbook
-                await self.run_test_case(playbook, test_device)
+                try:
+                    await self.run_test_case(playbook, test_device)
+                except Exception as e:
+                    failed_playbooks.append((playbook.name, dut, e))
+                    self.logger.error(
+                        f"\033[31m  Playbook '{playbook.name}' failed on "
+                        f"{dut}: {e}\033[0m"
+                    )
+                    self.logger.info(
+                        f"\033[33m  Continuing to next playbook "
+                        f"({pb_idx}/{total_playbooks} complete)...\033[0m"
+                    )
+        if failed_playbooks:
+            names = ", ".join(f"{name} ({dut})" for name, dut, _ in failed_playbooks)
+            raise TestCaseFailure(
+                f"{len(failed_playbooks)} playbook(s) failed: {names}"
+            ) from failed_playbooks[-1][2]
 
     async def run_steps(
         self,

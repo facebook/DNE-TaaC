@@ -8,7 +8,10 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from neteng.test_infra.dne.taac.utils.common import async_everpaste_str, async_get_fburl
-from taac.utils.json_thrift_utils import try_json_to_thrift
+from taac.utils.json_thrift_utils import (
+    try_json_loads,
+    try_json_to_thrift,
+)
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 
@@ -23,19 +26,19 @@ class PortStateHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         disabled_interfaces = check_params.get("disabled_interfaces", [])
+        if isinstance(disabled_interfaces, str):
+            disabled_interfaces = try_json_loads(disabled_interfaces, [])
         if disabled_interfaces:
             disabled_interfaces = [
                 try_json_to_thrift(interface, taac_types.TestInterface)
                 for interface in disabled_interfaces
             ]
-        disabled_interface_names = []
+        disabled_interface_names = set()
         for disabled_interface in disabled_interfaces:
             if disabled_interface.switch_name == obj.name:
-                disabled_interface_names.append(disabled_interface.interface_name)
-            elif disabled_interface.neighbor_switch_name == obj.name:
-                disabled_interface_names.append(
-                    disabled_interface.neighbor_interface_name
-                )
+                disabled_interface_names.add(disabled_interface.interface_name)
+            if disabled_interface.neighbor_switch_name == obj.name:
+                disabled_interface_names.add(disabled_interface.neighbor_interface_name)
         enabled_interface_names = [
             interface.interface_name
             for interface in obj.interfaces

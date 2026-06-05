@@ -39,6 +39,9 @@ from taac.internal.tasks.bgp_weight_policy_task import (
 from taac.internal.tasks.device_provisioning_task import (
     DeviceProvisioningTask,
 )
+from taac.internal.tasks.ixia_preflight_task import (
+    IxiaPreflightTask,
+)
 from taac.tasks.all import (
     AddBgpPolicyMatchPrefixToPropagateRoutes,
     AddStressStaticRoutes,
@@ -57,14 +60,30 @@ from taac.tasks.all import (
     IsolatePorts,
     RunCommandsOnShell,
     ScpFile,
+    SetPortChannelMinLinkPatcherTask,
     WaitForAgentConvergenceTask,
     WaitForBgpConvergenceTask,
+)
+from taac.tasks.bgp_policy_generator_task import (
+    GenerateCommunityBgpPolicyAndInjectTask,
+    GenerateCommunityBgpPolicyTask,
+    GenerateMultipleCommunityBgpPoliciesTask,
 )
 from taac.tasks.bgp_tcpdump_task import BgpTcpdumpTask
 from taac.tasks.configure_bgpcpp_startup_task import (
     ConfigureBgpcppStartupTask,
 )
-from taac.tasks.eos import ConfigureEosParallelBgpPeers
+from taac.tasks.deploy_exabgp_task import (
+    CleanupExaBGPTask,
+    DeployExaBGPTask,
+)
+from taac.tasks.eos import (
+    AddEosBgpPrefixListToPeerGroup,
+    BackupRunningConfigTask,
+    ConfigureEosParallelBgpPeers,
+    CreateEosBgpPeerGroup,
+    RestoreRunningConfigTask,
+)
 from taac.tasks.interface_ip_configuration_task import (
     InterfaceIpCleanupTask,
     InterfaceIpConfigurationTask,
@@ -150,8 +169,19 @@ TASK_REGISTRY = [
     SetPeerGroupEnforceFirstAsTask,
     GetEnforceFirstAsRejectsTask,
     ConfigureBgpcppStartupTask,
+    AddEosBgpPrefixListToPeerGroup,
+    BackupRunningConfigTask,
     ConfigureEosParallelBgpPeers,
+    CreateEosBgpPeerGroup,
+    RestoreRunningConfigTask,
     VerifyBestPathChangesTask,
+    DeployExaBGPTask,
+    CleanupExaBGPTask,
+    IxiaPreflightTask,
+    GenerateCommunityBgpPolicyTask,
+    GenerateMultipleCommunityBgpPoliciesTask,
+    GenerateCommunityBgpPolicyAndInjectTask,
+    SetPortChannelMinLinkPatcherTask,
 ]
 
 if not TAAC_OSS:

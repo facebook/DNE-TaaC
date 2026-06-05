@@ -165,7 +165,11 @@ if not TAAC_OSS:
     from openr.py.openr.cli.utils.commands import OpenrCtrlCmd
     from openr.py.openr.clients.openr_client import get_openr_ctrl_cpp_client
     from openr.thrift.KvStore.thrift_types import KeyDumpParams
-    from openr.thrift.OpenrCtrl.thrift_types import AdjacenciesFilter
+    from openr.thrift.OpenrCtrl.thrift_types import (
+        AdjacenciesFilter,
+        AdvertisedRouteFilter,
+        ReceivedRouteFilter,
+    )
     from openr.thrift.Platform.types import FibClient
     from openr.thrift.Types.thrift_types import AdjacencyDatabase
 from thrift.py3.exceptions import Error as ThriftError
@@ -2746,8 +2750,6 @@ class FbossSwitch(AbstractSwitch):
                 "OpenR KvStore sync validation requires Meta-internal OpenR infrastructure. "
                 "Not available in OSS mode."
             )
-        # pyre-fixme[61]: `area_nodes_map` is undefined, or not always defined.
-        area_nodes_map
         area_nodes_map: DefaultDict[str, List[str]] = defaultdict(list)
         for node in nodes:
             async with get_openr_ctrl_cpp_client(to_fb_fqdn(node)) as client:
@@ -4324,6 +4326,24 @@ class FbossSwitch(AbstractSwitch):
             bgp_local_config = await bgp_client.getBgpLocalConfig()
             return bgp_local_config.local_confed_as_4_byte
 
+    async def async_get_bgp_drain_state(self) -> t.Dict[str, t.Any]:
+        """Returns BGP-level drain state from bgpcpp (getDrainState thrift).
+
+        This is different from switch-level drain (async_is_switch_drained).
+        BGP drain means bgpcpp has drain policies active, which is what
+        'fboss2 show bgp summary' reports as 'BGP Switch Drain State'.
+        """
+        async with await self._get_bgp_client() as bgp_client:
+            drain_state = await bgp_client.getDrainState()
+            return {
+                "drain_state": drain_state.drain_state.name
+                if drain_state.drain_state is not None
+                else "UNKNOWN",
+                "drained_interfaces": list(drain_state.drained_interfaces)
+                if drain_state.drained_interfaces
+                else [],
+            }
+
     async def async_get_all_interface_names(
         self,
     ) -> List[str]:
@@ -4779,3 +4799,532 @@ class FbossSwitch(AbstractSwitch):
             "FBOSS static route retrieval not fully implemented - returning empty dict"
         )
         return routes
+
+    # =========================================================================
+    # Breeze / Open/R Thrift Diagnostic Methods
+    # =========================================================================
+
+    async def async_get_openr_spark_neighbors(self) -> Sequence:
+        """
+        Returns discovered Open/R Spark neighbors with state
+        (ESTABLISHED/RESTART), area, interface, and RTT.
+        Thrift equivalent of ``breeze spark neighbors``.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR Spark operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            neighbors = await client.getNeighbors()
+        self.logger.info(f"{self.hostname}: found {len(neighbors)} Spark neighbor(s)")
+        return neighbors
+
+    async def async_get_openr_lm_links(self):
+        """
+        Returns monitored interfaces with status, addresses, metrics,
+        and overload state from Open/R Link Monitor.
+        Thrift equivalent of ``breeze lm links``.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR Link Monitor operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            links = await client.getInterfaces()
+        self.logger.info(
+            f"{self.hostname}: retrieved Link Monitor dump "
+            f"({len(links.interfaceDetails)} interface(s))"
+        )
+        return links
+
+    async def async_get_openr_kvstore_adj(self) -> Dict[str, Any]:
+        """
+        Returns the adjacency database from all nodes in every area
+        from Open/R KvStore.
+        Thrift equivalent of ``breeze kvstore adj``.
+
+        Returns a dict mapping area -> Publication (KvStore key/vals
+        filtered to ``adj:`` prefix).
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        params = KeyDumpParams(keys=["adj:"])
+        result: Dict[str, Any] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                publication = await client.getKvStoreKeyValsFilteredArea(params, area)
+                result[area] = publication
+        self.logger.info(f"{self.hostname}: retrieved kvstore adj for area(s) {areas}")
+        return result
+
+    async def async_get_openr_kvstore_prefixes(self) -> Dict[str, Any]:
+        """
+        Returns all advertised prefixes from all nodes in Open/R KvStore.
+        Thrift equivalent of ``breeze kvstore prefixes``.
+
+        Returns a dict mapping area -> Publication (KvStore key/vals
+        filtered to ``prefix:`` prefix).
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        params = KeyDumpParams(keys=["prefix:"])
+        result: Dict[str, Any] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                publication = await client.getKvStoreKeyValsFilteredArea(params, area)
+                result[area] = publication
+        self.logger.info(
+            f"{self.hostname}: retrieved kvstore prefixes for area(s) {areas}"
+        )
+        return result
+
+    async def async_get_openr_kvstore_kv_signature(self) -> Dict[str, str]:
+        """
+        Returns a SHA-256 hash of the KvStore per area.  All switches in
+        the same area must produce the same signature when in sync.
+        Thrift equivalent of ``breeze kvstore kv-signature``.
+
+        Returns a dict mapping area -> hex-digest signature string.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        import hashlib
+
+        params = KeyDumpParams()
+        result: Dict[str, str] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                publication = await client.getKvStoreHashFilteredArea(params, area)
+                hashes = sorted(str(v.hash) for v in publication.keyVals.values())
+                signature = hashlib.sha256("".join(hashes).encode()).hexdigest()
+                result[area] = signature
+        self.logger.info(f"{self.hostname}: kvstore kv-signature per area: {result}")
+        return result
+
+    async def async_get_openr_kvstore_peers(self) -> Dict[str, Any]:
+        """
+        Returns KvStore peer sync status (IDLE/SYNCING/SYNCED) per area.
+        Thrift equivalent of ``breeze kvstore peers``.
+
+        Returns a dict mapping area -> PeersMap (map<string, PeerSpec>).
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        result: Dict[str, Any] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                peers = await client.getKvStorePeersArea(area)
+                result[area] = peers
+        self.logger.info(
+            f"{self.hostname}: retrieved kvstore peers for area(s) {areas}"
+        )
+        return result
+
+    async def async_get_openr_decision_routes(self):
+        """
+        Returns all computed routes with next-hops from the
+        Open/R Decision module.
+        Thrift equivalent of ``breeze decision routes``.
+
+        Returns a RouteDatabase for this node.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR Decision operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            route_db = await client.getRouteDbComputed("")
+        self.logger.info(
+            f"{self.hostname}: Decision computed "
+            f"{len(route_db.unicastRoutes)} unicast route(s), "
+            f"{len(route_db.mplsRoutes)} MPLS route(s)"
+        )
+        return route_db
+
+    async def async_get_openr_decision_validate(self) -> Dict[str, Any]:
+        """
+        Retrieves Decision adjacency DBs, received prefix DBs, and
+        initialization events for validation.
+        Thrift equivalent of ``breeze decision validate``.
+
+        Returns a dict with initialization_events, adjacency_dbs,
+        and prefix_dbs.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR Decision operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            init_events = await client.getInitializationEvents()
+            adj_filter = AdjacenciesFilter(selectAreas=set())
+            decision_adj_dbs = await client.getDecisionAdjacenciesFiltered(adj_filter)
+            route_filter = ReceivedRouteFilter()
+            decision_prefix_dbs = await client.getReceivedRoutesFiltered(route_filter)
+        self.logger.info(
+            f"{self.hostname}: Decision validate — "
+            f"{len(init_events)} init event(s), "
+            f"{len(decision_adj_dbs)} adj DB(s), "
+            f"{len(decision_prefix_dbs)} prefix DB(s)"
+        )
+        return {
+            "initialization_events": init_events,
+            "adjacency_dbs": decision_adj_dbs,
+            "prefix_dbs": decision_prefix_dbs,
+        }
+
+    async def async_get_openr_fib_routes(self):
+        """
+        Returns routes from the Open/R FIB module (what Open/R has
+        programmed into the platform).
+        Thrift equivalent of ``breeze fib routes-installed``.
+
+        Returns a RouteDatabase.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR FIB operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            route_db = await client.getRouteDb()
+        self.logger.info(
+            f"{self.hostname}: FIB module has "
+            f"{len(route_db.unicastRoutes)} unicast route(s), "
+            f"{len(route_db.mplsRoutes)} MPLS route(s)"
+        )
+        return route_db
+
+    async def async_validate_openr_fib(self) -> Dict[str, Any]:
+        """
+        Compares Decision-computed routes vs FIB-programmed routes and
+        reports mismatches.
+        Thrift equivalent of ``breeze fib validate``.
+
+        Returns a dict with decision_route_db, fib_route_db,
+        missing_in_fib, extra_in_fib, and a boolean ``match`` flag.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR FIB operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            decision_route_db = await client.getRouteDbComputed("")
+            fib_route_db = await client.getRouteDb()
+
+        decision_prefixes = {str(r.dest) for r in decision_route_db.unicastRoutes}
+        fib_prefixes = {str(r.dest) for r in fib_route_db.unicastRoutes}
+        missing_in_fib = decision_prefixes - fib_prefixes
+        extra_in_fib = fib_prefixes - decision_prefixes
+        match = len(missing_in_fib) == 0 and len(extra_in_fib) == 0
+
+        self.logger.info(
+            f"{self.hostname}: FIB validate — match={match}, "
+            f"{len(missing_in_fib)} missing in FIB, "
+            f"{len(extra_in_fib)} extra in FIB"
+        )
+        return {
+            "decision_route_db": decision_route_db,
+            "fib_route_db": fib_route_db,
+            "missing_in_fib": missing_in_fib,
+            "extra_in_fib": extra_in_fib,
+            "match": match,
+        }
+
+    async def async_get_openr_advertised_routes(self) -> Sequence:
+        """
+        Returns prefixes this switch is advertising via
+        Open/R PrefixManager.
+        Thrift equivalent of ``breeze prefixmgr advertised-routes``.
+
+        Returns a list of AdvertisedRouteDetail.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR PrefixManager operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            route_filter = AdvertisedRouteFilter()
+            advertised_routes = await client.getAdvertisedRoutesFiltered(route_filter)
+        self.logger.info(
+            f"{self.hostname}: PrefixManager advertising "
+            f"{len(advertised_routes)} route(s)"
+        )
+        return advertised_routes
+
+    async def async_validate_openr(self) -> Dict[str, Any]:
+        """
+        Retrieves overall Open/R health data: initialization events,
+        running config, Spark neighbors, and Link Monitor state.
+        Thrift equivalent of ``breeze openr validate``.
+
+        Returns a dict with initialization_events, config, neighbors,
+        and links.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR validation requires Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            init_events = await client.getInitializationEvents()
+            config = await client.getRunningConfigThrift()
+            neighbors = await client.getNeighbors()
+            links = await client.getInterfaces()
+        self.logger.info(
+            f"{self.hostname}: OpenR validate — "
+            f"{len(init_events)} init event(s), "
+            f"{len(neighbors)} neighbor(s), "
+            f"{len(links.interfaceDetails)} interface(s)"
+        )
+        return {
+            "initialization_events": init_events,
+            "config": config,
+            "neighbors": neighbors,
+            "links": links,
+        }
+
+    async def async_get_openr_monitor_counters(self) -> Mapping[str, int]:
+        """
+        Returns Open/R runtime counters (memory, CPU, SPF time, flood
+        rate, etc.) via fb303.
+        Thrift equivalent of ``breeze monitor counters``.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR monitor operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            counters = await client.getCounters()
+        self.logger.info(
+            f"{self.hostname}: retrieved {len(counters)} monitor counter(s)"
+        )
+        return counters
+
+    # =========================================================================
+    # Open/R Thrift Action Methods (write operations)
+    # =========================================================================
+
+    async def async_set_openr_node_overload(self) -> None:
+        """Set node overload (hard-drain) on this switch via OpenR Thrift."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR overload operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.setNodeOverload()
+        self.logger.info(f"{self.hostname}: node overload SET")
+
+    async def async_unset_openr_node_overload(self) -> None:
+        """Clear node overload (hard-drain) on this switch via OpenR Thrift."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR overload operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.unsetNodeOverload()
+        self.logger.info(f"{self.hostname}: node overload CLEARED")
+
+    async def async_set_openr_link_overload(self, interface_name: str) -> None:
+        """Set link overload on a specific interface via OpenR Thrift."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR overload operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.setInterfaceOverload(interface_name)
+        self.logger.info(f"{self.hostname}: link overload SET on {interface_name}")
+
+    async def async_unset_openr_link_overload(self, interface_name: str) -> None:
+        """Clear link overload on a specific interface via OpenR Thrift."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR overload operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.unsetInterfaceOverload(interface_name)
+        self.logger.info(f"{self.hostname}: link overload CLEARED on {interface_name}")
+
+    async def async_set_openr_node_metric_increment(
+        self, metric_increment: int
+    ) -> None:
+        """
+        Increase the node-level metric by the given increment (soft-drain).
+        All adjacencies on this node will have their metric increased.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR metric operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.setNodeInterfaceMetricIncrement(metric_increment)
+        self.logger.info(
+            f"{self.hostname}: node metric increment SET to {metric_increment}"
+        )
+
+    async def async_unset_openr_node_metric_increment(self) -> None:
+        """Clear the node-level metric increment (undo soft-drain)."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR metric operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.unsetNodeInterfaceMetricIncrement()
+        self.logger.info(f"{self.hostname}: node metric increment CLEARED")
+
+    async def async_set_openr_link_metric_increment(
+        self, interface_names: List[str], metric_increment: int
+    ) -> None:
+        """
+        Increase the metric on specific interfaces by the given increment.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR metric operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.setInterfaceMetricIncrementMulti(
+                interface_names, metric_increment
+            )
+        self.logger.info(
+            f"{self.hostname}: link metric increment SET to "
+            f"{metric_increment} on {interface_names}"
+        )
+
+    async def async_unset_openr_link_metric_increment(
+        self, interface_names: List[str]
+    ) -> None:
+        """Clear the metric increment on specific interfaces."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR metric operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.unsetInterfaceMetricIncrementMulti(interface_names)
+        self.logger.info(
+            f"{self.hostname}: link metric increment CLEARED on {interface_names}"
+        )
+
+    async def async_openr_advertise_prefix(self, prefix: str) -> None:
+        """
+        Advertise a prefix via Open/R PrefixManager.
+        prefix: CIDR string, e.g. "10.99.0.0/24"
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR PrefixManager operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        from openr.py.openr.utils.ipnetwork import ip_str_to_prefix
+        from openr.thrift.Network.thrift_types import PrefixType
+        from openr.thrift.Types.thrift_types import PrefixEntry
+
+        network = ip_network(prefix, strict=False)
+        prefix_entry = PrefixEntry(
+            prefix=ip_str_to_prefix(prefix),
+            type=PrefixType.BREEZE,
+        )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.advertisePrefixes([prefix_entry])
+        self.logger.info(
+            f"{self.hostname}: advertised prefix {prefix} via PrefixManager"
+        )
+
+    async def async_openr_withdraw_prefix(self, prefix: str) -> None:
+        """
+        Withdraw a prefix from Open/R PrefixManager.
+        prefix: CIDR string, e.g. "10.99.0.0/24"
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR PrefixManager operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        from openr.py.openr.utils.ipnetwork import ip_str_to_prefix
+        from openr.thrift.Network.thrift_types import PrefixType
+        from openr.thrift.Types.thrift_types import PrefixEntry
+
+        prefix_entry = PrefixEntry(
+            prefix=ip_str_to_prefix(prefix),
+            type=PrefixType.BREEZE,
+        )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.withdrawPrefixes([prefix_entry])
+        self.logger.info(
+            f"{self.hostname}: withdrew prefix {prefix} from PrefixManager"
+        )
+
+    async def async_add_iptables_rule(self, rule: str, ipv6: bool = False) -> None:
+        """
+        Add an iptables/ip6tables rule on the switch via SSH.
+        rule: the rule arguments, e.g. "-I INPUT -p udp --dport 6666 -j DROP"
+        """
+        cmd = f"{'ip6tables' if ipv6 else 'iptables'} {rule}"
+        await self.async_run_cmd_on_shell(cmd)
+        self.logger.info(f"{self.hostname}: added iptables rule: {cmd}")
+
+    async def async_remove_iptables_rule(self, rule: str, ipv6: bool = False) -> None:
+        """
+        Remove an iptables/ip6tables rule on the switch via SSH.
+        rule: the rule arguments with -D, e.g. "-D INPUT -p udp --dport 6666 -j DROP"
+        """
+        cmd = f"{'ip6tables' if ipv6 else 'iptables'} {rule}"
+        await self.async_run_cmd_on_shell(cmd)
+        self.logger.info(f"{self.hostname}: removed iptables rule: {cmd}")
+
+    @async_retryable(retries=30, sleep_time=2)
+    async def async_wait_for_openr_initialized(self) -> Mapping[Any, int]:
+        """
+        Poll until Open/R reports INITIALIZED via initialization events.
+        Retries up to 30 times (60 seconds) with 2-second intervals.
+        Returns the initialization events dict on success.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR initialization check requires Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            init_events = await client.getInitializationEvents()
+        if not init_events:
+            raise RuntimeError(
+                f"{self.hostname}: OpenR not yet initialized (no init events)"
+            )
+        self.logger.info(
+            f"{self.hostname}: OpenR initialized with {len(init_events)} event(s)"
+        )
+        return init_events

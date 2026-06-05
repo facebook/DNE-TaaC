@@ -16,6 +16,188 @@ from taac.tasks.base_task import BaseTask
 from taac.utils import arista_utils
 
 
+class CreateEosBgpPeerGroup(BaseTask):
+    """
+    Create a BGP peer group on an Arista EOS device.
+
+    This task wraps AristaSwitch.async_create_bgp_peer_group() to create a BGP
+    peer group via EOS CLI commands. It is the EOS ar-bgp equivalent of the FBOSS
+    add_peer_group_patcher COOP patcher.
+
+    Example params:
+        {
+            "hostname": "bag002.snc1",
+            "peer_group_name": "PEERGROUP_BAG_STSW_V6",
+            "remote_as": 65000,
+            "description": "BGP peering to STSW IPv6",
+            "route_map_in": "PROPAGATE_BAG_STSW_IN",
+            "route_map_out": "PROPAGATE_BAG_STSW_OUT",
+            "next_hop_self": true,
+            "graceful_restart_helper": true,
+            "timers_keepalive": 10,
+            "timers_holdtime": 30,
+            "ipv4_unicast": false,
+            "ipv6_unicast": true,
+            "maximum_routes": 90000,
+            "maximum_routes_warning_limit": 0,
+            "maximum_routes_warning_only": true
+        }
+    """
+
+    NAME = "create_eos_bgp_peer_group"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        from taac.internal.driver.arista_switch import (
+            AristaSwitch,
+        )
+
+        hostname = params["hostname"]
+        peer_group_name = params["peer_group_name"]
+        register = params.get("register", True)
+
+        driver = AristaSwitch(hostname, logger=self.logger)
+
+        if not register:
+            self.logger.info(
+                f"Removing BGP peer group '{peer_group_name}' on {hostname}"
+            )
+            await driver.async_remove_bgp_peer_group(peer_group_name)
+            self.logger.info(
+                f"Successfully removed BGP peer group '{peer_group_name}' on {hostname}"
+            )
+            return
+
+        kwargs: t.Dict[str, t.Any] = {"peer_group_name": peer_group_name}
+
+        optional_fields = [
+            "remote_as",
+            "description",
+            "update_source",
+            "activate",
+            "ipv4_unicast",
+            "ipv6_unicast",
+            "route_map_in",
+            "route_map_out",
+            "next_hop_self",
+            "out_delay",
+            "timers_keepalive",
+            "timers_holdtime",
+            "send_community",
+            "maximum_routes",
+            "maximum_routes_warning_limit",
+            "maximum_routes_warning_only",
+            "local_as",
+            "local_as_no_prepend",
+            "local_as_replace_as",
+            "local_as_fallback",
+            "graceful_restart_helper",
+            "send_community_link_bandwidth",
+            "link_bandwidth_aggregate",
+        ]
+
+        for field in optional_fields:
+            if field in params:
+                kwargs[field] = params[field]
+
+        self.logger.info(f"Creating BGP peer group '{peer_group_name}' on {hostname}")
+        await driver.async_create_bgp_peer_group(**kwargs)
+        self.logger.info(
+            f"Successfully created BGP peer group '{peer_group_name}' on {hostname}"
+        )
+
+
+class AddEosBgpPrefixListToPeerGroup(BaseTask):
+    """
+    Add a prefix-list and attach it to one or more BGP peer groups on an Arista
+    EOS device.
+
+    This is the EOS ar-bgp equivalent of the FBOSS
+    add_bgp_policy_match_prefix_to_propagate_routes COOP patcher. Instead of
+    modifying BGP++ policy terms, it creates an EOS prefix-list and attaches it
+    to peer group(s) under the appropriate address-family.
+
+    peer_group_name can be a single string or a list of strings. When a list is
+    provided, the prefix-list is attached to / detached from all peer groups in
+    a single CLI transaction. On removal, the prefix-list is detached from every
+    peer group before deleting the prefix-list itself.
+
+    When register=False, removes the prefix-list attachment and deletes the
+    prefix-list.
+
+    Example params:
+        {
+            "hostname": "bag002.snc1",
+            "prefix_list_name": "ALLOW_BAG_STSW_V6_PREFIXES",
+            "prefix": "5000::/16",
+            "peer_group_name": ["PEERGROUP_BAG_STSW_V6", "PEERGROUP_BAG_CBAG_V6"],
+            "direction": "in",
+            "prefix_length": 128,
+            "seq": 10
+        }
+    """
+
+    NAME = "add_eos_bgp_prefix_list_to_peer_group"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        import ipaddress as ipaddress_mod
+
+        from taac.internal.driver.arista_switch import (
+            AristaSwitch,
+        )
+
+        hostname = params["hostname"]
+        prefix_list_name = params["prefix_list_name"]
+        peer_group_name = params["peer_group_name"]
+        register = params.get("register", True)
+
+        driver = AristaSwitch(hostname, logger=self.logger)
+
+        if not register:
+            is_ipv6 = params.get("is_ipv6", True)
+            if "prefix" in params:
+                network = ipaddress_mod.ip_network(params["prefix"], strict=False)
+                is_ipv6 = network.version == 6
+            direction = params.get("direction", "in")
+
+            self.logger.info(
+                f"Removing prefix-list '{prefix_list_name}' from peer group(s) "
+                f"'{peer_group_name}' on {hostname}"
+            )
+            await driver.async_remove_bgp_prefix_list_from_peer_group(
+                prefix_list_name=prefix_list_name,
+                peer_group_name=peer_group_name,
+                direction=direction,
+                is_ipv6=is_ipv6,
+            )
+            self.logger.info(
+                f"Successfully removed prefix-list '{prefix_list_name}' from "
+                f"peer group(s) '{peer_group_name}' on {hostname}"
+            )
+            return
+
+        prefix = params["prefix"]
+        direction = params.get("direction", "in")
+        prefix_length = params.get("prefix_length")
+        seq = params.get("seq")
+
+        self.logger.info(
+            f"Adding prefix-list '{prefix_list_name}' with prefix '{prefix}' "
+            f"to peer group(s) '{peer_group_name}' ({direction}) on {hostname}"
+        )
+        await driver.async_add_bgp_prefix_list_to_peer_group(
+            prefix_list_name=prefix_list_name,
+            prefix=prefix,
+            peer_group_name=peer_group_name,
+            direction=direction,
+            prefix_length=prefix_length,
+            seq=seq,
+        )
+        self.logger.info(
+            f"Successfully added prefix-list '{prefix_list_name}' to peer group(s) "
+            f"'{peer_group_name}' ({direction}) on {hostname}"
+        )
+
+
 class ConfigureEosParallelBgpPeers(BaseTask):
     """
     Configure parallel BGP peers on an Arista EOS device.
@@ -62,6 +244,9 @@ class ConfigureEosParallelBgpPeers(BaseTask):
         )
 
         hostname = params["hostname"]
+
+        # Flag to either add new bgp peers or remove existing bgp peers
+        register = params.get("register", True)
         config_json = self.merge_config(params)
 
         driver = AristaSwitch(hostname, logger=self.logger)
@@ -106,7 +291,27 @@ class ConfigureEosParallelBgpPeers(BaseTask):
                                 config, peer_addr, remote_asn, interface
                             )
                         )
+            if not register:
+                # remove all bgp peers
+                if bgp_neighbor_args:
+                    self.logger.info(
+                        f"Removing {len(bgp_neighbor_args)} BGP neighbors on {interface}"
+                    )
+                    for kwargs in bgp_neighbor_args:
+                        await driver.async_remove_bgp_neighbor(kwargs["peer_ip_addr"])
 
+                # remove all secondary ips
+                self.logger.info(f"Removing secondary IPs on {interface}")
+                await arista_utils.clear_interface_secondary_ips(
+                    driver,
+                    interface,
+                    ipv4_addresses=all_ipv4_ips or None,
+                    ipv6_addresses=all_ipv6_ips or None,
+                    clear_existing=configs[0].get("clear_existing", False),
+                    all_secondary=configs[0].get("all_secondary", False),
+                    logger_instance=self.logger,
+                )
+                continue
             # Step 1: Assign IPs to the interface
             total_ips = len(all_ipv4_ips) + len(all_ipv6_ips)
             self.logger.info(f"Configuring {total_ips} IP addresses on {interface}")
@@ -220,3 +425,70 @@ class ConfigureEosParallelBgpPeers(BaseTask):
             kwargs["graceful_restart_helper"] = True
 
         return kwargs
+
+
+class BackupRunningConfigTask(BaseTask):
+    """
+    Backup the running config of an Arista EOS device.
+
+    This task wraps arista_utils.save_running_config() to backup the running config.
+    The actual backup filename is stored in shared data under the key
+    "backup_running_config_<hostname>" so that RestoreRunningConfigTask can retrieve it.
+    """
+
+    NAME = "backup_running_config"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        from taac.internal.driver.arista_switch import (
+            AristaSwitch,
+        )
+
+        hostname = params["hostname"]
+        backup_file = params.get("backup_file")
+
+        driver = AristaSwitch(hostname, logger=self.logger)
+
+        self.logger.info(
+            f"Backing up running config on {hostname}"
+            + (f" to {backup_file}" if backup_file else " (auto-generated name)")
+        )
+        actual_backup_file = await arista_utils.save_running_config(
+            driver, backup_name=backup_file, logger_instance=self.logger
+        )
+
+        self.logger.info(
+            f"Successfully backed up running config on {hostname} to {actual_backup_file}"
+        )
+
+
+class RestoreRunningConfigTask(BaseTask):
+    """
+    Restore the running config of an Arista EOS device.
+
+    This task wraps arista_utils.restore_running_config() to restore the running config
+    from a backup file
+
+    Backup file name must be of format: flash:<backup file name>
+    Example: flash:running_config_2023-10-10_10-10-10
+    """
+
+    NAME = "restore_running_config"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        from taac.internal.driver.arista_switch import (
+            AristaSwitch,
+        )
+
+        hostname = params["hostname"]
+        backup_file = params.get("backup_file")
+
+        if backup_file is None:
+            raise ValueError("backup_file must be provided")
+
+        driver = AristaSwitch(hostname, logger=self.logger)
+
+        self.logger.info(f"Restoring running config from {backup_file}")
+        await arista_utils.restore_running_config(
+            driver, backup_file=backup_file, logger_instance=self.logger
+        )
+        self.logger.info(f"Successfully restored running config from {backup_file}")

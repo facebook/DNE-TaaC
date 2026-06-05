@@ -8,7 +8,10 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from neteng.test_infra.dne.taac.utils.common import async_everpaste_str, async_get_fburl
-from taac.utils.json_thrift_utils import try_json_to_thrift
+from taac.utils.json_thrift_utils import (
+    try_json_loads,
+    try_json_to_thrift,
+)
 from taac.utils.oss_taac_lib_utils import (
     async_retryable,
     to_fb_fqdn,
@@ -23,27 +26,30 @@ def is_fabric_interface(name: str) -> bool:
 
 class LldpHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
     CHECK_NAME = hc_types.CheckName.LLDP_CHECK
+    OPERATING_SYSTEMS = [
+        "FBOSS",
+        "EOS",
+    ]
 
-    async def _run(
+    def _get_enabled_and_disabled_interfaces(
         self,
         obj: TestDevice,
-        input: hc_types.BaseHealthCheckIn,
         check_params: t.Dict[str, t.Any],
-    ) -> hc_types.HealthCheckResult:
+    ) -> t.Tuple[t.List[taac_types.TestInterface], t.List[taac_types.TestInterface]]:
         disabled_interfaces = check_params.get("disabled_interfaces", [])
+        if isinstance(disabled_interfaces, str):
+            disabled_interfaces = try_json_loads(disabled_interfaces, [])
         if disabled_interfaces:
             disabled_interfaces = [
                 try_json_to_thrift(interface, taac_types.TestInterface)
                 for interface in disabled_interfaces
             ]
-        disabled_interface_names = []
+        disabled_interface_names = set()
         for disabled_interface in disabled_interfaces:
             if disabled_interface.switch_name == obj.name:
-                disabled_interface_names.append(disabled_interface.interface_name)
-            elif disabled_interface.neighbor_switch_name == obj.name:
-                disabled_interface_names.append(
-                    disabled_interface.neighbor_interface_name
-                )
+                disabled_interface_names.add(disabled_interface.interface_name)
+            if disabled_interface.neighbor_switch_name == obj.name:
+                disabled_interface_names.add(disabled_interface.neighbor_interface_name)
         enabled_interfaces = []
         for interface in obj.interfaces:
             if (
@@ -51,6 +57,33 @@ class LldpHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
                 and not is_fabric_interface(interface.interface_name)
             ):
                 enabled_interfaces.append(interface)
+        return enabled_interfaces, disabled_interfaces
+
+    async def _run(
+        self,
+        obj: TestDevice,
+        input: hc_types.BaseHealthCheckIn,
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        enabled_interfaces, disabled_interfaces = (
+            self._get_enabled_and_disabled_interfaces(obj, check_params)
+        )
+        await self.async_validate_lldp_neighbors(
+            enabled_interfaces, disabled_interfaces
+        )
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.PASS,
+        )
+
+    async def _run_arista(
+        self,
+        obj: TestDevice,
+        input: hc_types.BaseHealthCheckIn,
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        enabled_interfaces, disabled_interfaces = (
+            self._get_enabled_and_disabled_interfaces(obj, check_params)
+        )
         await self.async_validate_lldp_neighbors(
             enabled_interfaces, disabled_interfaces
         )

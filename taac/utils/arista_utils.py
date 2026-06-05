@@ -1023,7 +1023,7 @@ def generate_ipv6_secondary_addresses(
     Generate IPv6 secondary addresses for BGP peers.
 
     Args:
-        base_network: Base network (e.g., "2401:db00:e50d:11:8")
+        base_network: Base network (e.g., "2001:db8:1:1:8")
         peer_count: Number of peers (BGP sessions)
         start_offset: Starting offset for IPv6 addresses (default: 0x10 = 16)
 
@@ -1031,8 +1031,8 @@ def generate_ipv6_secondary_addresses(
         List of IPv6 addresses with /127 prefix
 
     Example:
-        >>> generate_ipv6_secondary_addresses("2401:db00:e50d:11:8", 3)
-        ["2401:db00:e50d:11:8::10/127", "2401:db00:e50d:11:8::12/127", "2401:db00:e50d:11:8::14/127"]
+        >>> generate_ipv6_secondary_addresses("2001:db8:1:1:8", 3)
+        ["2001:db8:1:1:8::10/127", "2001:db8:1:1:8::12/127", "2001:db8:1:1:8::14/127"]
     """
     addresses = []
     for i in range(peer_count):
@@ -1058,7 +1058,7 @@ async def configure_interface_secondary_ips(
         driver: Device driver instance
         interface: Interface name (e.g., "Ethernet3/1/1")
         ipv4_addresses: List of IPv4 addresses to configure (e.g., ["10.163.28.10/31", ...])
-        ipv6_addresses: List of IPv6 addresses to configure (e.g., ["2401:db00:e50d:11:8::10/127", ...])
+        ipv6_addresses: List of IPv6 addresses to configure (e.g., ["2001:db8:1:1:8::10/127", ...])
         clear_existing: If True, clear existing IP addresses before configuring new ones (default: True)
         all_secondary: If True, add ALL IPv4 addresses as secondary (no primary).
             Use this when appending IPs to an interface that already has a primary
@@ -1073,7 +1073,7 @@ async def configure_interface_secondary_ips(
         ...     driver,
         ...     "Ethernet3/1/1",
         ...     ipv4_addresses=["10.163.28.10/31", "10.163.28.12/31"],
-        ...     ipv6_addresses=["2401:db00:e50d:11:8::10/127"],
+        ...     ipv6_addresses=["2001:db8:1:1:8::10/127"],
         ... )
     """
     log = logger_instance or logger
@@ -1130,6 +1130,107 @@ async def configure_interface_secondary_ips(
         error_msg = (
             f"[ARISTA_UTILS] Failed to configure secondary IPs on {interface}: {e}"
         )
+        log.error(error_msg)
+        raise ValueError(error_msg) from e
+
+
+async def clear_interface_secondary_ips(
+    driver: t.Any,
+    interface: str,
+    ipv4_addresses: t.Optional[List[str]] = None,
+    ipv6_addresses: t.Optional[List[str]] = None,
+    clear_existing: bool = False,
+    all_secondary: bool = False,
+    logger_instance: t.Optional[logging.Logger] = None,
+) -> None:
+    """
+    Clear secondary IP addresses on an Arista interface.
+
+    Args:
+        driver: Device driver instance
+        interface: Interface name (e.g., "Ethernet3/1/1")
+        ipv4_addresses: List of IPv4 addresses to clear (e.g., ["10.163.28.10/31", ...])
+        ipv6_addresses: List of IPv6 addresses to clear (e.g., ["2001:db8:1:1:8::10/127", ...])
+        clear_existing: If True, clear all existing IP addresses (default: False)
+            Primary IP address can only be cleared if no secondary IPs remain.
+            Hence, clear_existing_ip4 is False by default.
+            No `all_secondary` option as all IPv4 to be removed will be secondary.
+            If primary is also to be removed, clear_existing_ip4 must be True.
+        all_secondary: If True, all IPv4 removed
+        logger_instance: Optional logger instance
+
+    Raises:
+        ValueError: If configuration fails
+
+    Example:
+        >>> await clear_interface_secondary_ips
+        ...     driver,
+        ...     "Ethernet3/1/1",
+        ...     ipv4_addresses=["10.163.28.10/31", "10.163.28.11/31"],
+        ...     ipv6_addresses=["2001:db8:1:1:8::10/127"],
+        ... )
+    """
+    log = logger_instance or logger
+
+    ipv4_addresses = ipv4_addresses or []
+    ipv6_addresses = ipv6_addresses or []
+
+    if not clear_existing and len(ipv4_addresses) == 0 and len(ipv6_addresses) == 0:
+        log.info(f"[ARISTA_UTILS] No IPs to clear on {interface}, exiting")
+        return
+
+    try:
+        # Build configuration commands
+        commands = [
+            f"interface {interface}",
+            "no switchport",  # Ensure L3 mode
+        ]
+
+        if clear_existing:
+            log.info(f"[ARISTA_UTILS] Clearing existing IP addresses on {interface}")
+            commands.extend(
+                [
+                    "no ip address",  # Remove all IPv4 addresses
+                    "no ipv6 address",  # Remove all IPv6 addresses
+                ]
+            )
+        else:
+            if len(ipv6_addresses) > 0:
+                log.info(
+                    f"[ARISTA_UTILS] Clearing {len(ipv6_addresses)} IPv6 addresses on {interface}"
+                )
+                for ipv6 in ipv6_addresses:
+                    commands.append(f"no ipv6 address {ipv6}")
+            if len(ipv4_addresses) > 0:
+                if all_secondary:
+                    # Clear specific seconday IPv4 addresses
+                    log.info(
+                        f"[ARISTA_UTILS] Clearing {len(ipv4_addresses)} seconday IPv4 addresses on {interface}"
+                    )
+                    for ipv4 in ipv4_addresses:
+                        commands.append(f"no ip address {ipv4} secondary")
+                else:
+                    # all ips are secondary, expect the first
+                    log.info(
+                        f"[ARISTA_UTILS] Clearing {len(ipv4_addresses)} IPv4 addresses on {interface}"
+                    )
+                    for ipv4 in ipv4_addresses[1:]:
+                        commands.append(f"no ip address {ipv4} secondary")
+                    commands.append(f"no ip address {ipv4_addresses[0]}")
+
+        # Apply configuration
+        config_block = "\n".join(commands)
+        log.info(f"[ARISTA_UTILS] Applying interface configuration:\n{config_block}")
+
+        await driver.async_run_cmd_on_shell(f"configure\n{config_block}\nend")
+
+        log.info(
+            f"[ARISTA_UTILS] Successfully cleared IPs on {interface}: "
+            f"{len(ipv4_addresses or [])} IPv4, {len(ipv6_addresses or [])} IPv6"
+        )
+
+    except Exception as e:
+        error_msg = f"[ARISTA_UTILS] Failed to clear IPs on {interface}: {e}"
         log.error(error_msg)
         raise ValueError(error_msg) from e
 

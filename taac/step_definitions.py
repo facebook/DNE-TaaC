@@ -120,6 +120,81 @@ def create_custom_step(
     )
 
 
+def create_record_jq_timestamp_step(
+    var_name: str,
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a step to record the current timestamp as a jq variable.
+
+    Args:
+        var_name: Name of the jq variable to store the timestamp in
+        description: Custom description for the step
+
+    Returns:
+        Step object for recording a jq timestamp
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Record timestamp as '{var_name}'",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "record_jq_timestamp",
+                    "var_name": var_name,
+                }
+            )
+        ),
+    )
+
+
+def create_thread_cpu_monitoring_step(
+    device_name: str,
+    duration_minutes: int,
+    thread_cpu_monitoring_interval_seconds: int = 5,
+    thread_name_filter: t.Optional[t.List[str]] = None,
+    enable_bgp_events: bool = True,
+    enable_perf_profiling: bool = False,
+    enable_offcpu_profiling: bool = False,
+    enable_socket_monitoring: bool = False,
+) -> Step:
+    """
+    Create a BGP++ thread CPU monitoring step.
+
+    Args:
+        device_name: Name of the device to monitor
+        duration_minutes: Monitoring duration in minutes
+        thread_cpu_monitoring_interval_seconds: CPU sampling interval (default: 5s)
+        thread_name_filter: List of thread names to monitor (None = top 10 by CPU)
+        enable_bgp_events: Enable BGP event tracking (default: True)
+        enable_perf_profiling: Enable perf-based profiling (default: False)
+        enable_offcpu_profiling: Enable off-CPU profiling (default: False)
+        enable_socket_monitoring: Enable socket monitoring (default: False)
+
+    Returns:
+        Step object for BGP++ thread CPU monitoring
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description="Monitor BGP++ thread CPU during convergence",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "test_bgp_thread_cpu_monitor_eos_bgp_plus_plus",
+                    "hostname": device_name,
+                    "duration_minutes": duration_minutes,
+                    "interval_seconds": thread_cpu_monitoring_interval_seconds,
+                    "thread_name_filter": thread_name_filter,
+                    "enable_bgp_events": enable_bgp_events,
+                    "enable_perf_profiling": enable_perf_profiling,
+                    "enable_offcpu_profiling": enable_offcpu_profiling,
+                    "enable_socket_monitoring": enable_socket_monitoring,
+                }
+            )
+        ),
+    )
+
+
 def create_run_task_step(
     task_name: str,
     params_dict: t.Dict[str, t.Any],
@@ -961,20 +1036,20 @@ def create_combined_flap_step(
 def create_register_port_channel_min_link_percentage_patcher_step(
     port_channel_name: str,
     min_link_percentage: t.Optional[t.Union[int, float]] = None,
+    min_link_up_percentage: t.Optional[t.Union[int, float]] = None,
+    patcher_name: t.Optional[str] = None,
+    description: t.Optional[str] = "Register port channel min link percentage patcher",
     register_patchers: bool = True,
-    description: t.Optional[str] = None,
 ) -> Step:
     """
-    Create a step to register/unregister port channel min link percentage patcher.
-
+    Create a step to register or unregister the port channel min link percentage patcher.
     Args:
-        port_channel_name: Name of the port channel
-        min_link_percentage: Minimum link percentage (required when registering)
-        register_patchers: True to register, False to unregister
+        register_patcher: True to register the patcher, False to unregister it
+        port_channel_name: Name of the port channel to configure
+        min_link_percentage: Minimum link capacity percentage to set
+        min_link_up_percentage: Minimum link up percentage to set (optional)
         description: Custom description for the step
-
-    Returns:
-        Step object for port channel min link percentage patcher
+        patcher_name: Name of the patcher to register (optional)
     """
     params_dict: t.Dict[str, t.Any] = {
         "port_channel_name": port_channel_name,
@@ -983,10 +1058,18 @@ def create_register_port_channel_min_link_percentage_patcher_step(
         params_dict["min_link_percentage"] = min_link_percentage
     if not register_patchers:
         params_dict["register_patchers"] = register_patchers
+    if min_link_up_percentage is not None:
+        params_dict["min_link_up_percentage"] = min_link_up_percentage
+    if patcher_name is not None:
+        params_dict["patcher_name"] = patcher_name
+    if description is not None:
+        params_dict["description"] = description
 
     return Step(
         name=StepName.REGISTER_PORT_CHANNEL_MIN_LINK_PERCENTAGE_PATCHERS,
-        step_params=Params(json_params=json.dumps(params_dict)),
+        step_params=Params(
+            json_params=json.dumps(params_dict),
+        ),
         description=description,
     )
 
@@ -2529,3 +2612,448 @@ def create_sc_8_steps(
     )
 
     return steps
+
+
+# =============================================================================
+# GENERIC PATCHER STEPS
+# =============================================================================
+
+
+def create_unregister_patcher_step(
+    patcher_name: str,
+    config_name: str = "agent",
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a step to unregister a COOP patcher.
+
+    Args:
+        patcher_name: Name of the patcher to unregister
+        config_name: Config the patcher is registered against (default: "agent")
+        description: Custom description for the step
+
+    Returns:
+        Step object that unregisters the patcher
+    """
+    return Step(
+        name=StepName.REGISTER_PATCHER_STEP,
+        input_json=thrift_to_json(
+            taac_types.RegisterPatcherInput(
+                register_patcher=False,
+                name=patcher_name,
+                config_name=config_name,
+            )
+        ),
+        description=description or f"Unregister patcher '{patcher_name}'",
+    )
+
+
+# =============================================================================
+# LOOPBACK SHUTDOWN STEPS
+# =============================================================================
+
+
+def create_shutdown_loopback_step(
+    register_patcher: bool = True,
+    loopback_name: str = "fbossLoopback0",
+    patcher_name: str = "shutdown_loopback_test",
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a step to shut or unshut a loopback interface via the COOP
+    shutdown_loopback patcher. Used for NHT convergence testing.
+
+    When register_patcher=True (shut): removes all IP addresses from the
+    loopback in the FBOSS agent config, making it unreachable.
+
+    When register_patcher=False (unshut): unregisters the patcher so COOP
+    regenerates the original config with loopback IPs restored.
+
+    Args:
+        register_patcher: True to shut loopback, False to restore it
+        loopback_name: Name of the loopback interface (default: fbossLoopback0)
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+
+    Returns:
+        Step object that registers or unregisters the shutdown_loopback patcher
+    """
+    if register_patcher:
+        return Step(
+            name=StepName.REGISTER_PATCHER_STEP,
+            input_json=thrift_to_json(
+                taac_types.RegisterPatcherInput(
+                    register_patcher=True,
+                    config_name="agent",
+                    name=patcher_name,
+                    py_func_name="shutdown_loopback",
+                    kwargs={"loopback_name": loopback_name},
+                    description=description or f"Shutdown loopback {loopback_name}",
+                )
+            ),
+            description=description or f"Shutdown loopback {loopback_name}",
+        )
+    else:
+        return Step(
+            name=StepName.REGISTER_PATCHER_STEP,
+            input_json=thrift_to_json(
+                taac_types.RegisterPatcherInput(
+                    register_patcher=False,
+                    config_name="agent",
+                    name=patcher_name,
+                )
+            ),
+            description=description or "Restore loopback (unregister patcher)",
+        )
+
+
+def create_interface_permanent_flap_step(
+    interfaces: list[str],
+    register_patcher: bool = True,
+    enable: bool = True,
+    patcher_name: str = "permanently_disable_interface_patcher",
+    description: t.Optional[str] = "Permanently disable interface",
+) -> Step:
+    """
+    Create a step to shut or unshut a interface via the COOP
+    change_port_admin_state patcher.
+
+    Args:
+        register_patcher: True to shut interface, False to restore it
+        interfaces: Name of the interface
+        patcher_name: Name to register/unregister the patcher as (default: permanently_disable_interface_patcher)
+        description: Custom description for the step
+
+    returns:
+        Step object that registers or unregisters the permanently_disable_interface_patcher patcher
+    """
+    kwargs = {}
+    for interface in interfaces:
+        kwargs[interface] = "enable" if enable else "disable"
+
+    if register_patcher:
+        return Step(
+            name=StepName.REGISTER_PATCHER_STEP,
+            input_json=thrift_to_json(
+                taac_types.RegisterPatcherInput(
+                    register_patcher=True,
+                    config_name="agent",
+                    name=patcher_name,
+                    py_func_name="shutdown_loopback",
+                    kwargs=kwargs,
+                    description=description,
+                )
+            ),
+        )
+    else:
+        return Step(
+            name=StepName.REGISTER_PATCHER_STEP,
+            input_json=thrift_to_json(
+                taac_types.RegisterPatcherInput(
+                    register_patcher=False,
+                    config_name="agent",
+                    name=patcher_name,
+                )
+            ),
+        )
+
+
+# =============================================================================
+# OPENR PATCHER STEPS
+# =============================================================================
+
+
+def _create_openr_patcher_step(
+    py_func_name: str,
+    kwargs: t.Dict[str, str],
+    patcher_name: t.Optional[str],
+    description: t.Optional[str],
+    register_patcher: bool = True,
+) -> Step:
+    if patcher_name is None:
+        patcher_name = f"{py_func_name}_config"
+
+    if not register_patcher:
+        return Step(
+            name=StepName.REGISTER_PATCHER_STEP,
+            input_json=thrift_to_json(
+                taac_types.RegisterPatcherInput(
+                    register_patcher=False,
+                    config_name="openr",
+                    name=patcher_name,
+                )
+            ),
+        )
+
+    return Step(
+        name=StepName.REGISTER_PATCHER_STEP,
+        input_json=thrift_to_json(
+            taac_types.RegisterPatcherInput(
+                register_patcher=True,
+                config_name="openr",
+                name=patcher_name,
+                py_func_name=py_func_name,
+                kwargs=kwargs,
+                description=description,
+            )
+        ),
+    )
+
+
+def create_update_openr_area_id_step(
+    area_updates: t.List[t.Dict[str, str]],
+    register_patcher: bool = True,
+    patcher_name: str = "update_openr_area_id_config",
+    description: t.Optional[str] = "Update OpenR area IDs",
+) -> Step:
+    """
+    Create a step to update OpenR area IDs via the COOP update_openr_area_id
+    patcher. Used for OpenR Qualification.
+
+    When register_patcher=True (update): registers the patcher with the given
+    area updates, which will be applied to the OpenR config.
+
+    When register_patcher=False (restore): unregisters the patcher so COOP
+    regenerates the original config with the original area IDs.
+
+    Args:
+        area_updates: List of area updates to apply
+            Format:
+                area_updates = [
+                    {
+                        "old_area_id": "area1",
+                        "new_area_id": "area2",
+                    },
+                    {
+                        "old_area_id": "area3",
+                        "new_area_id": "area4",
+                    },
+                ]
+        register_patcher: True to update area IDs, False to restore them
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+
+    Returns:
+        Step object that registers or unregisters the update_openr_area_id patcher
+
+
+    Patcher takes input in the form of comma-separated key-value pairs.
+    Example:
+        Above area_updates would be passed as:
+        "area_map": "area1:area2,area3:area4"
+    """
+    if register_patcher:
+        if area_updates is None or len(area_updates) == 0:
+            raise ValueError(
+                "No area updates provided for update_openr_area_id patcher. Provide the input as a list of dictionaries with keys 'old_area_id' and 'new_area_id' for each area update. Example: [{'old_area_id': 'area1', 'new_area_id': 'area2'}, {'old_area_id': 'area3', 'new_area_id': 'area4'}]"
+            )
+
+        area_map = []
+        for update in area_updates:
+            if "old_area_id" not in update or "new_area_id" not in update:
+                raise ValueError(
+                    "Invalid area update provided. Each update must have keys 'old_area_id' and 'new_area_id'. Example: [{'old_area_id': 'area1', 'new_area_id': 'area2'}, {'old_area_id': 'area3', 'new_area_id': 'area4'}]"
+                )
+            area_map.append(f"{update['old_area_id']}:{update['new_area_id']}")
+        kwargs = {"area_map": ",".join(area_map)}
+    else:
+        kwargs = {}
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_area_id",
+        kwargs=kwargs,
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )
+
+
+def create_update_openr_watchdog_step(
+    register_patcher: bool = True,
+    interval_s: t.Optional[str] = None,
+    thread_timeout_s: t.Optional[str] = None,
+    max_memory_mb: t.Optional[str] = None,
+    patcher_name: str = "update_openr_watchdog_config",
+    description: t.Optional[str] = "Update OpenR watchdog config",
+) -> Step:
+    """
+    Create a step to update OpenR watchdog config via the COOP
+    update_openr_watchdog patcher.
+
+    Only updates fields that are explicitly provided; others are left unchanged.
+    Always enables watchdog.
+
+    Args:
+        register_patcher: True to update watchdog, False to restore
+        interval_s: Watchdog check interval in seconds
+        thread_timeout_s: Thread timeout in seconds
+        max_memory_mb: Max memory in MB
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+    """
+    kwargs = {}
+    if interval_s is not None:
+        kwargs["interval_s"] = interval_s
+    if thread_timeout_s is not None:
+        kwargs["thread_timeout_s"] = thread_timeout_s
+    if max_memory_mb is not None:
+        kwargs["max_memory_mb"] = max_memory_mb
+
+    if register_patcher and not kwargs:
+        raise ValueError(
+            "At least one of 'interval_s', 'thread_timeout_s', or 'max_memory_mb' "
+            "must be provided for update_openr_watchdog patcher."
+        )
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_watchdog",
+        kwargs=kwargs,
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )
+
+
+def create_update_openr_kvstore_key_ttl_step(
+    register_patcher: bool = True,
+    key_ttl_ms: t.Optional[str] = None,
+    patcher_name: str = "update_openr_kvstore_key_ttl_config",
+    description: t.Optional[str] = "Update OpenR kvstore key TTL",
+) -> Step:
+    """
+    Create a step to update OpenR kvstore key TTL via the COOP
+    update_openr_kvstore_key_ttl patcher.
+
+    Args:
+        register_patcher: True to update key TTL, False to restore
+        key_ttl_ms: Key TTL in milliseconds
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+    """
+    if register_patcher and not key_ttl_ms:
+        raise ValueError(
+            "'key_ttl_ms' must be provided for update_openr_kvstore_key_ttl patcher."
+        )
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_kvstore_key_ttl",
+        kwargs={"key_ttl_ms": key_ttl_ms} if key_ttl_ms else {},
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )
+
+
+def create_update_openr_spark_gr_timer_step(
+    register_patcher: bool = True,
+    graceful_restart_time_s: t.Optional[str] = None,
+    patcher_name: str = "update_openr_spark_gr_timer_config",
+    description: t.Optional[str] = "Update OpenR spark GR timer",
+) -> Step:
+    """
+    Create a step to update OpenR spark graceful restart timer via the COOP
+    update_openr_spark_gr_timer patcher.
+
+    Args:
+        register_patcher: True to update GR timer, False to restore
+        graceful_restart_time_s: Graceful restart time in seconds
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+    """
+    if register_patcher and not graceful_restart_time_s:
+        raise ValueError(
+            "'graceful_restart_time_s' must be provided for "
+            "update_openr_spark_gr_timer patcher."
+        )
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_spark_gr_timer",
+        kwargs={"graceful_restart_time_s": graceful_restart_time_s}
+        if graceful_restart_time_s
+        else {},
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )
+
+
+def create_update_openr_decision_debounce_step(
+    register_patcher: bool = True,
+    debounce_min_ms: t.Optional[str] = None,
+    debounce_max_ms: t.Optional[str] = None,
+    patcher_name: str = "update_openr_decision_debounce_config",
+    description: t.Optional[str] = "Update OpenR decision debounce timers",
+) -> Step:
+    """
+    Create a step to update OpenR decision debounce timers via the COOP
+    update_openr_decision_debounce patcher.
+
+    Only updates fields that are explicitly provided; others are left unchanged.
+
+    Args:
+        register_patcher: True to update debounce timers, False to restore
+        debounce_min_ms: Minimum debounce time in milliseconds
+        debounce_max_ms: Maximum debounce time in milliseconds
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+    """
+    kwargs = {}
+    if debounce_min_ms is not None:
+        kwargs["debounce_min_ms"] = debounce_min_ms
+    if debounce_max_ms is not None:
+        kwargs["debounce_max_ms"] = debounce_max_ms
+
+    if register_patcher and not kwargs:
+        raise ValueError(
+            "At least one of 'debounce_min_ms' or 'debounce_max_ms' "
+            "must be provided for update_openr_decision_debounce patcher."
+        )
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_decision_debounce",
+        kwargs=kwargs,
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )
+
+
+def create_update_openr_linkflap_backoff_step(
+    register_patcher: bool = True,
+    linkflap_initial_backoff_ms: t.Optional[str] = None,
+    linkflap_max_backoff_ms: t.Optional[str] = None,
+    patcher_name: str = "update_openr_linkflap_backoff_config",
+    description: t.Optional[str] = "Update OpenR linkflap backoff timers",
+) -> Step:
+    """
+    Create a step to update OpenR linkflap backoff timers via the COOP
+    update_openr_linkflap_backoff patcher.
+
+    Only updates fields that are explicitly provided; others are left unchanged.
+
+    Args:
+        register_patcher: True to update backoff timers, False to restore
+        linkflap_initial_backoff_ms: Initial backoff time in milliseconds
+        linkflap_max_backoff_ms: Maximum backoff time in milliseconds
+        patcher_name: Name to register/unregister the patcher as
+        description: Custom description for the step
+    """
+    kwargs = {}
+    if linkflap_initial_backoff_ms is not None:
+        kwargs["linkflap_initial_backoff_ms"] = linkflap_initial_backoff_ms
+    if linkflap_max_backoff_ms is not None:
+        kwargs["linkflap_max_backoff_ms"] = linkflap_max_backoff_ms
+
+    if register_patcher and not kwargs:
+        raise ValueError(
+            "At least one of 'linkflap_initial_backoff_ms' or 'linkflap_max_backoff_ms' "
+            "must be provided for update_openr_linkflap_backoff patcher."
+        )
+
+    return _create_openr_patcher_step(
+        py_func_name="update_openr_linkflap_backoff",
+        kwargs=kwargs,
+        register_patcher=register_patcher,
+        patcher_name=patcher_name,
+        description=description,
+    )

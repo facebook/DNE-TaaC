@@ -299,6 +299,31 @@ def is_dne_test_device(func: Callable) -> Callable:
                 f"this decorator to check if it is a DNE test device. Expecting "
                 f"an object of type Class AbstractSwitch or its derivatives"
             )
+
+        # Pre-production / nano-FPF cluster allowlist. Devices in these
+        # clusters are non-customer-facing test gear that the DNE team uses
+        # for disruptive integration tests (port flaps, service restarts,
+        # NDP flush, etc.). They may not be enrolled in the legacy
+        # dne.test/dne.standalone/dne.regression SMC tiers, so we allow
+        # them by hostname substring match instead.
+        #
+        # Examples:
+        #   - gtsw00[1-8].l1002.c087.mwg2   (MWG2 nano-FPF DUT pod)
+        #   - gtsw00[1-8].l1001.c087.mwg2   (MWG2 nano-FPF remote pod)
+        #   - stsw001.s00[1-8].l202.mwg2    (MWG2 nano-FPF spine layer)
+        PREPROD_HOSTNAME_SUBSTRINGS = (
+            "c087.mwg2",  # MWG2 nano-FPF lab cluster (preprod)
+        )
+        for substr in PREPROD_HOSTNAME_SUBSTRINGS:
+            if substr in self.hostname:
+                logger.info(
+                    f"validate_dne_smc: '{self.hostname}' matches preprod "
+                    f"allowlist substring '{substr}' — skipping SMC tier "
+                    f"validation. Disruptive operations are permitted on this "
+                    f"non-production device."
+                )
+                return
+
         smc_tiers = [
             DNE_LAB_SMC_TIER,
             DNE_INFRA_SMC_TIER,
@@ -323,7 +348,9 @@ def is_dne_test_device(func: Callable) -> Callable:
         ):
             raise UnauthorizedDisruptiveEventError(
                 f"{dut_hostname_fqdn} is not part of the DNE Test devices "
-                f"listed under the '{DNE_LAB_SMC_TIER}',  {DNE_STANDALONE_SMC_TIER},  {DNE_REGRESSION_BASSET_POOL_NAME} or {DNE_LAB_SMC_TIER} SMC tier. This might "
+                f"listed under the '{DNE_LAB_SMC_TIER}',  {DNE_STANDALONE_SMC_TIER},  {DNE_REGRESSION_BASSET_POOL_NAME} or {DNE_LAB_SMC_TIER} SMC tier, "
+                f"and does not match any preprod hostname allowlist "
+                f"({', '.join(PREPROD_HOSTNAME_SUBSTRINGS)}). This might "
                 f"be a production device and hence not allowing {func.__name__}"
             )
 

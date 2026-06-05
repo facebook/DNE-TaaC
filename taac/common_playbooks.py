@@ -139,7 +139,7 @@ TEST_AGENT_WARMBOOT_PLAYBOOK = Playbook(
 )
 
 TEST_MULTIPLE_AGENT_WARMBOOT_PLAYBOOK = Playbook(
-    name="test_continuous_agent_warmboot",
+    name="test_multiple_agent_warmboot",
     stages=[
         Stage(
             steps=[
@@ -913,7 +913,7 @@ TEST_51T_NPI_DCTYPEF_PLAYBOOKS = (
         ],
     ),
     Playbook(
-        name="test_continuous_agent_warmboot",
+        name="test_51t_continuous_agent_warmboot",
         stages=[
             Stage(
                 steps=[
@@ -950,7 +950,7 @@ TEST_51T_NPI_DCTYPEF_PLAYBOOKS = (
         ],
     ),
     Playbook(
-        name="test_agent_warmboot",
+        name="test_51t_agent_warmboot",
         stages=[
             Stage(
                 steps=[

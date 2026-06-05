@@ -29,18 +29,18 @@ class RouteConvergenceTimeHealthCheck(
     AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
 ):
     """
-    Health check to validate route convergence time with automatic ADD→DELETE cycles.
+    Health check to validate route convergence time with automatic DELETE→ADD cycles.
 
-    This health check performs complete ADD→DELETE cycles for the specified iterations:
+    This health check performs complete DELETE→ADD cycles for the specified iterations:
     For each iteration:
-    1. ADD: Enable network groups → Wait → Analyze convergence
-    2. DELETE: Disable network groups → Wait → Analyze convergence
+    1. DELETE: Disable network groups → Wait → Analyze convergence
+    2. ADD: Enable network groups → Wait → Analyze convergence
 
-    Example: iterations=5 means 5 complete cycles of ADD→DELETE (10 total operations)
+    Example: iterations=5 means 5 complete cycles of DELETE→ADD (10 total operations)
 
     Key features:
     - Integrated toggle functionality (calls IXIA API directly)
-    - Automatic ADD→DELETE cycling with configurable iterations
+    - Automatic DELETE→ADD cycling with configurable iterations
     - Uses actual state update processing time (from "Update state took Xus" logs)
     - Parses RouteUpdateWrapper.cpp for route counts (Routes added/deleted)
     - Parses SwSwitch.cpp for state update timing
@@ -49,13 +49,13 @@ class RouteConvergenceTimeHealthCheck(
     Parameters:
         network_group_regex (str): Regex to match network groups for toggle.
             Example: ".*PREFIX_STRESSER_CONTIGUOUS.*"
-        iterations (int): Number of ADD→DELETE cycles to run. Default: 5
+        iterations (int): Number of DELETE→ADD cycles to run. Default: 5
         time_threshold (int): Maximum allowed time in seconds for route convergence. Default: 35
         wait_time_seconds (int): Time to wait for convergence after each toggle. Default: 60
         log_file (str): Path to the log file. Default: "/var/facebook/logs/wedge_agent.log"
 
     Usage in test config:
-        # Run 5 iterations of ADD→DELETE cycles
+        # Run 5 iterations of DELETE→ADD cycles
         PointInTimeHealthCheck(
             name=hc_types.CheckName.ROUTE_CONVERGENCE_TIME_CHECK,
             check_params=Params(json_params=json.dumps({
@@ -66,7 +66,7 @@ class RouteConvergenceTimeHealthCheck(
             })),
         )
 
-        # Single ADD→DELETE cycle
+        # Single DELETE→ADD cycle
         PointInTimeHealthCheck(
             name=hc_types.CheckName.ROUTE_CONVERGENCE_TIME_CHECK,
             check_params=Params(json_params=json.dumps({
@@ -90,11 +90,11 @@ class RouteConvergenceTimeHealthCheck(
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         """
-        Run the route convergence time health check with ADD→DELETE cycles.
+        Run the route convergence time health check with DELETE→ADD cycles.
 
         This method performs N iterations of:
-        1. ADD: Enable network groups → Wait → Analyze convergence
-        2. DELETE: Disable network groups → Wait → Analyze convergence
+        1. DELETE: Disable network groups → Wait → Analyze convergence
+        2. ADD: Enable network groups → Wait → Analyze convergence
 
         Args:
             obj (TestDevice): The device to run the health check on.
@@ -124,7 +124,6 @@ class RouteConvergenceTimeHealthCheck(
                 status=hc_types.HealthCheckStatus.ERROR,
                 message="IXIA client not available. Cannot perform toggle operation.",
             )
-        ixia = self.ixia
 
         if not network_group_regex:
             return hc_types.HealthCheckResult(
@@ -133,7 +132,7 @@ class RouteConvergenceTimeHealthCheck(
             )
 
         self.logger.info(
-            f"Starting route convergence check: {iterations} iterations of ADD→DELETE, "
+            f"Starting route convergence check: {iterations} iterations of DELETE→ADD, "
             f"network_group_regex='{network_group_regex}', threshold={time_threshold}s"
         )
 
@@ -144,43 +143,9 @@ class RouteConvergenceTimeHealthCheck(
         for iteration in range(1, iterations + 1):
             self.logger.info(f"=== Iteration {iteration}/{iterations} ===")
 
-            # Run ADD then DELETE for this iteration
-            for operation_type in ["ADD", "DELETE"]:
-                # Skip validation for Iter1-ADD since routes are already enabled
-                # when the health check starts (no ADD operations will be in logs)
-                skip_validation = iteration == 1 and operation_type == "ADD"
-
-                if skip_validation:
-                    self.logger.info(
-                        f"[Iter {iteration}] Skipping validation for initial ADD "
-                        "(routes already enabled from previous stage)"
-                    )
-                    # Still toggle to ensure state is correct, but don't validate
-                    try:
-                        ixia.activate_deactivate_bgp_prefix(
-                            active=True,
-                            network_group_name_regex=network_group_regex,
-                        )
-                        self.logger.info(
-                            f"[Iter {iteration}] Confirmed network groups are enabled"
-                        )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"[Iter {iteration}] Initial ADD toggle warning: {e}"
-                        )
-                    # Record as passed (warmup operation)
-                    all_results.append(
-                        {
-                            "iteration": iteration,
-                            "operation": operation_type,
-                            "passed": True,
-                            "time": 0,
-                            "routes": 0,
-                            "message": "Skipped (initial warmup - routes already enabled)",
-                        }
-                    )
-                    continue
-
+            # Run DELETE then ADD for this iteration
+            # This ensures routes end in ADD (enabled) state after all iterations
+            for operation_type in ["DELETE", "ADD"]:
                 result = await self._run_single_operation(
                     operation_type=operation_type,
                     network_group_regex=network_group_regex,
@@ -237,7 +202,7 @@ class RouteConvergenceTimeHealthCheck(
             status=hc_types.HealthCheckStatus.PASS,
             message=(
                 f"{context_prefix} Route convergence PASSED: "
-                f"{iterations} iterations of ADD→DELETE completed. "
+                f"{iterations} iterations of DELETE→ADD completed. "
                 f"Avg ADD: {avg_add:.3f}s, Avg DELETE: {avg_delete:.3f}s "
                 f"(threshold: {time_threshold}s)"
             ),

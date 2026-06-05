@@ -167,10 +167,19 @@ class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
     async def _get_eos_pfc_wd_counters(self, interface: str) -> t.Dict[str, int]:
         cmd = "show priority-flow-control counters watchdog | json"
         response = await self.driver.async_execute_show_json_on_shell(cmd)
-        tx_queue_data = response["interfaces"][interface]["txQueues"]["2"]
+        # Arista returns {"interfaces": {}} when no WD event has fired on any
+        # interface, and omits an interface key entirely until that interface
+        # has had its first event. Both states are functionally equivalent to
+        # stuckCount=0, recoveryCount=0 — treat missing keys as zero.
+        tx_queue_data = (
+            response.get("interfaces", {})
+            .get(interface, {})
+            .get("txQueues", {})
+            .get("2", {})
+        )
         return {
-            "stuckCount": tx_queue_data["stuckCount"],
-            "recoveryCount": tx_queue_data["recoveryCount"],
+            "stuckCount": tx_queue_data.get("stuckCount", 0),
+            "recoveryCount": tx_queue_data.get("recoveryCount", 0),
         }
 
     async def _check_threshold_condition_violated(

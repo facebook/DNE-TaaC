@@ -436,8 +436,29 @@ class CoopApplyPatchersTask(BaseTask):
         )
 
         do_warmboot = params.get("do_warmboot", False)
+        do_coldboot = params.get("do_coldboot", False)
 
-        if do_warmboot:
+        if do_coldboot:
+            create_cold_boot_file_coroutines = []
+            agent_restart_coroutines = []
+            wait_for_convergence_coroutines = []
+            for hostname in hostnames:
+                driver = await async_get_device_driver(hostname)
+                # pyre-fixme[16]: `AbstractSwitch` has no attribute
+                #  `async_create_cold_boot_file`.
+                create_cold_boot_file_coroutines.append(
+                    driver.async_create_cold_boot_file()
+                )
+                agent_restart_coroutines.append(
+                    driver.async_restart_service(FbossSystemctlServiceName.AGENT)
+                )
+                wait_for_convergence_coroutines.append(
+                    driver.async_wait_for_agent_configured()
+                )
+            await asyncio.gather(*create_cold_boot_file_coroutines)
+            await asyncio.gather(*agent_restart_coroutines)
+            await asyncio.gather(*wait_for_convergence_coroutines)
+        elif do_warmboot:
             agent_warmboot_coroutines = []
             wait_for_convergence_coroutines = []
             for hostname in hostnames:
@@ -1831,3 +1852,37 @@ class DeployEosImageTask(BaseTask):
         # Wait additional time for interfaces to stabilize after boot
         self.logger.info("  Waiting 30s for interfaces to stabilize after boot...")
         await asyncio.sleep(30)
+
+
+class SetPortChannelMinLinkPatcherTask(BaseTask):
+    NAME = "set_port_channel_min_link_patcher"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        hostname = params["hostname"]
+        port_channel_name = params["port_channel_name"]
+        min_link_percentage = params["min_link_percentage"]
+        min_link_up_percentage = params["min_link_up_percentage"]
+        patcher_name = params.get(
+            "patcher_name", "configure_port_channel_min_link_percentage"
+        )
+        description = params.get(
+            "description", f"Min link capacity for {port_channel_name}"
+        )
+
+        driver = await async_get_device_driver(hostname)
+        patcher_args = {
+            "link_percentage": str(min_link_percentage),
+            "port_channel_name": port_channel_name,
+        }
+        if min_link_up_percentage is not None:
+            patcher_args["min_link_up_percentage"] = str(min_link_up_percentage)
+
+        # pyre-fixme[16]: `AbstractSwitch` has no attribute
+        #  `async_register_python_patcher`.
+        await driver.async_register_python_patcher(
+            config_name="agent",
+            patcher_name=patcher_name,
+            py_func_name="set_port_channel_min_link_capacity",
+            patcher_args=patcher_args,
+            patcher_desc=description,
+        )

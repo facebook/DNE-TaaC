@@ -60,7 +60,7 @@ class ServiceConvergenceStep(Step[taac_types.ServiceConvergenceInput]):
             )
         if taac_types.Service.FSDB in input.services and self.is_fboss:
             timeout = (
-                input.service_convergence_timeout.get(taac_types.Service.QSFP_SERVICE)
+                input.service_convergence_timeout.get(taac_types.Service.FSDB)
                 or input.timeout
             )
             start_time = time.time()
