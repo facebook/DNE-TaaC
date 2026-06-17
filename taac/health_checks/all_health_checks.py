@@ -3,8 +3,6 @@
 import os
 import typing as t
 
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
-
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
     AbstractIxiaHealthCheck,
@@ -50,6 +48,9 @@ from taac.health_checks.device_health_checks.bgp_update_group_health_check impor
 from taac.health_checks.device_health_checks.clear_counters_health_check import (
     ClearCountersHealthCheck,
 )
+from taac.health_checks.device_health_checks.cpu_utilization_health_check import (
+    CpuUtilizationHealthCheck,
+)
 from taac.health_checks.device_health_checks.device_core_dumps_health_check import (
     DeviceCoreDumpsHealthCheck,
 )
@@ -65,6 +66,9 @@ from taac.health_checks.device_health_checks.ecmp_group_and_member_count_health_
 from taac.health_checks.device_health_checks.file_exists_health_check import (
     FileExistsHealthCheck,
 )
+from taac.health_checks.device_health_checks.generic_ods_health_check import (
+    GenericOdsHealthCheck,
+)
 from taac.health_checks.device_health_checks.hardware_capacity_health_check import (
     HardwareCapacityHealthCheck,
 )
@@ -76,6 +80,9 @@ from taac.health_checks.device_health_checks.lldp_health_check import (
 )
 from taac.health_checks.device_health_checks.log_parsing_health_check import (
     LogParsingHealthCheck,
+)
+from taac.health_checks.device_health_checks.memory_utilization_health_check import (
+    MemoryUtilizationHealthCheck,
 )
 from taac.health_checks.device_health_checks.oomd_kill_health_check import (
     OomdKillHealthCheck,
@@ -128,6 +135,15 @@ from taac.health_checks.device_health_checks.system_cpu_load_average_health_chec
 from taac.health_checks.device_health_checks.systemctl_active_state_health_check import (
     SystemctlActiveStateHealthCheck,
 )
+from taac.health_checks.device_health_checks.tm_reconciliation_firing_health_check import (
+    TmReconciliationFiringHealthCheck,
+)
+from taac.health_checks.device_health_checks.ucmp_traffic_distribution_health_check import (
+    UcmpTrafficDistributionHealthCheck,
+)
+from taac.health_checks.device_health_checks.unclean_exit_health_check import (
+    UncleanExitHealthCheck,
+)
 from taac.health_checks.device_health_checks.wedge_agent_configured_health_check import (
     WedgeAgentConfiguredHealthCheck,
 )
@@ -142,6 +158,12 @@ from taac.health_checks.dsf_health_checks.dsf_fsdb_session_health_check import (
 )
 from taac.health_checks.dsf_health_checks.dsf_fsdb_subscriber_timestamp_health_check import (
     DsfFsdbSubscriberTimestampHealthCheck,
+)
+from taac.health_checks.dsf_health_checks.dsf_pfc_health_check import (
+    DsfPfcHealthCheck,
+)
+from taac.health_checks.dsf_health_checks.dsf_traffic_rebalance_health_check import (
+    DsfTrafficRebalanceHealthCheck,
 )
 from taac.health_checks.ixia_health_checks.ixia_packet_loss_health_check import (
     IxiaPacketLossHealthCheck,
@@ -190,6 +212,8 @@ from taac.health_checks.topology_health_checks.openr_kvstore_consistency_health_
 )
 from taac.health_check.health_check import types as hc_types
 
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
 HealthCheck = t.Union[
     t.Type[AbstractIxiaHealthCheck],
     t.Type[AbstractDeviceHealthCheck],
@@ -202,23 +226,23 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     DrainStateHealthCheck,
     DsfDrainStateHealthCheck,
     DsfFabricReachabilityHealthCheck,
-    # DsfTrafficRebalanceHealthCheck,  # neteng.test_infra.dne.taac dep, excluded in OSS
+    DsfTrafficRebalanceHealthCheck,
     DsfFsdbSessionHealthCheck,
     DsfFsdbSubscriberTimestampHealthCheck,
     NdpHealthCheck,
     IxiaPortStatsHealthCheck,
     SystemctlActiveStateHealthCheck,
     WedgeAgentConfiguredHealthCheck,
-    # DsfPfcHealthCheck,  # neteng.test_infra.dne.taac dep, excluded in OSS
+    DsfPfcHealthCheck,
     CoreDumpsHealthCheck,
     PortStateHealthCheck,
     LldpHealthCheck,
     IxiaTrafficRateHealthCheck,
     PfcWdHealthCheck,
     CpuQueueHealthCheck,
-    # UncleanExitHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
-    # CpuUtilizationHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
-    # MemoryUtilizationHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
+    UncleanExitHealthCheck,
+    CpuUtilizationHealthCheck,
+    MemoryUtilizationHealthCheck,
     BgpSessionEstablishedHealthCheck,
     BgpConvergenceHealthCheck,
     BgpGracefulRestartHealthCheck,
@@ -228,7 +252,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     BgpNonBestRouteHealthCheck,
     BgpTcpdumpHealthCheck,
     L2EntryThresholdHealthCheck,
-    # GenericOdsHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
+    GenericOdsHealthCheck,
     OomdKillHealthCheck,
     EcmpGroupAndMemberCountHealthCheck,
     DeviceCoreDumpsHealthCheck,
@@ -248,7 +272,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     BgpFibProgrammingCheck,
     PortSpeedHealthCheck,
     PortSpeedSnapshotHealthCheck,
-    # UcmpTrafficDistributionHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
+    UcmpTrafficDistributionHealthCheck,
     BgpRouteCountVerificationHealthCheck,
     BgpMultipathNextHopCountHealthCheck,
     RouteConvergenceTimeHealthCheck,
@@ -262,7 +286,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     OpenrKvstoreConsistencyHealthCheck,
     AristaFbossNextHopValidityHealthCheck,
     PortChannelExpectedStateHealthCheck,
-    # TmReconciliationFiringHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
+    TmReconciliationFiringHealthCheck,
     TmKernelStateSnapshotHealthCheck,
 ]
 

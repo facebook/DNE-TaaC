@@ -6,7 +6,6 @@ import copy
 import ipaddress
 import itertools
 import json
-import os
 import random
 import re
 import tempfile
@@ -15,15 +14,11 @@ import typing as t
 from collections import defaultdict
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
-
-if not TAAC_OSS:
-    from configerator.client import ConfigeratorClient
-    from libfb.py.asyncio.thrift import get_direct_client
-    from neteng.fboss.lib.hostname_utils import get_role_from_hostname
-    from neteng.netcastle.utils.paramiko_utils import ParamikoClient
-
+from configerator.client import ConfigeratorClient
+from libfb.py.asyncio.thrift import get_direct_client
 from neteng.fboss.ctrl.types import PortInfoThrift
+from neteng.fboss.lib.hostname_utils import get_role_from_hostname
+from neteng.netcastle.utils.paramiko_utils import ParamikoClient
 from taac.constants import ARISTA_DAEMON_EXEC_SCRIPTS
 from taac.driver.driver_constants import (
     DNE_TEST_REGRESSION_NAME,
@@ -47,27 +42,11 @@ from taac.utils.oss_taac_lib_utils import (
     get_ipv6_for_host,
     none_throws,
 )
-
-# `t.TYPE_CHECKING or` keeps the real VipService types visible to Pyre (which
-# can't resolve the runtime TAAC_OSS env check); without it the OSS `t.Any`
-# stubs below would mask attributes like TVipScope.PRIVATE_REGIONAL.
-if t.TYPE_CHECKING or not TAAC_OSS:
-    from taac.utils.system_stress_utils import (
-        async_get_memory_current_pct,
-    )
-    from nettools.vipinjector.VipService.clients import VipService
-    from nettools.vipinjector.VipService.types import (
-        TVipPreference,
-        TVipRoute,
-        TVipScope,
-    )
-else:
-    # OSS mode: VipInjector not available, provide stubs for type annotations
-    TVipPreference = t.Any  # type: ignore
-    TVipRoute = t.Any  # type: ignore
-    TVipScope = t.Any  # type: ignore
-    VipService = t.Any  # type: ignore
-
+from taac.utils.system_stress_utils import (
+    async_get_memory_current_pct,
+)
+from nettools.vipinjector.VipService.clients import VipService
+from nettools.vipinjector.VipService.types import TVipPreference, TVipRoute, TVipScope
 from taac.test_as_a_config import types as taac_types
 
 IPAddress = t.Union[IPv4Address, IPv6Address]
@@ -839,12 +818,6 @@ class CreateVipInjectors(BaseTask):
         vips: t.List[TVipRoute],
         port: int = 3333,
     ) -> int:
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "CreateVipInjectors requires the Meta-internal "
-                "libfb.py.asyncio.thrift.get_direct_client and cannot run "
-                "under TAAC_OSS=1."
-            )
         async with get_direct_client(
             VipService, host=str(vipserver_ip), port=port
         ) as vsclient:
@@ -860,12 +833,6 @@ class CreateVipInjectors(BaseTask):
         vipserver_ip: IPAddress,
         port: int = 3333,
     ) -> t.Sequence[str]:
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "CreateVipInjectors requires the Meta-internal "
-                "libfb.py.asyncio.thrift.get_direct_client and cannot run "
-                "under TAAC_OSS=1."
-            )
         async with get_direct_client(
             VipService, host=str(vipserver_ip), port=port
         ) as vsclient:
@@ -889,11 +856,6 @@ class ScpFile(BaseTask):
     NAME = "scp_file"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "ScpFile requires the Meta-internal ConfigeratorClient and "
-                "ParamikoClient and cannot run under TAAC_OSS=1."
-            )
         self.logger.info(f"Running {self.NAME} task with params: {params}")
         hostname = params["hostname"]
         remote_path = params["remote_path"]
@@ -1046,11 +1008,6 @@ class InjectBgpPolicyStatements(BaseTask):
         """
         Fetch BGP policy from configerator.
         """
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "InjectBgpPolicyStatements requires the Meta-internal "
-                "ConfigeratorClient and cannot run under TAAC_OSS=1."
-            )
         try:
             self.logger.info(f"Fetching BGP policy from {config_path}")
             with ConfigeratorClient() as client:
@@ -1498,12 +1455,6 @@ class AddBgpPolicyMatchPrefixToPropagateRoutes(BaseTask):
         await asyncio.gather(*tasks)
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "AddBgpPolicyMatchPrefixToPropagateRoutes requires the "
-                "Meta-internal neteng.fboss.lib.hostname_utils.get_role_from_hostname "
-                "and cannot run under TAAC_OSS=1."
-            )
         hostnames = params["hostnames"]
         prefixes = params["prefixes"]
         path = params["path"]  # eg: ["BC", "FX", "BC"]
@@ -1561,11 +1512,6 @@ class AristaCreateFileFromConfig(BaseTask):
                 - file_path: Path to the file on the device (required)
                 - chunk_size: Size of each chunk (default: DEFAULT_CHUNK_SIZE)
         """
-        if TAAC_OSS:
-            raise NotImplementedError(
-                "AristaCreateFileFromConfig requires the Meta-internal "
-                "ConfigeratorClient and cannot run under TAAC_OSS=1."
-            )
         hostname = params["hostname"]
         configerator_path = params["configerator_path"]
         file_path = params["file_path"]

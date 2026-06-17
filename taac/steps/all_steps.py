@@ -3,15 +3,7 @@
 import os
 import typing as t
 
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
-
-# CustomStep lives under taac.internal which isn't shipped in the OSS slice.
-# SystemRebootStep and ValidationStep are now public via taac.steps.step_definitions
-# (upstream restructure), so only CustomStep still needs gating.
-# `t.TYPE_CHECKING or` keeps CustomStep visible to Pyre so the conditional
-# OSS_STEPS.append(CustomStep) below doesn't trip "may be uninitialized".
-if t.TYPE_CHECKING or not TAAC_OSS:
-    from taac.internal.steps.custom_step import CustomStep
+from taac.internal.steps.custom_step import CustomStep
 from taac.steps.step import Step
 from taac.steps.step_definitions import (
     AllocateCgroupSliceMemory,
@@ -39,6 +31,8 @@ from taac.steps.step_definitions import (
 )
 from taac.test_as_a_config import types as taac_types
 
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
 OSS_STEPS: t.List[t.Type[Step]] = [
     DummyStep,
     ServiceInterruptionStep,
@@ -47,11 +41,9 @@ OSS_STEPS: t.List[t.Type[Step]] = [
     InterfaceFlapStep,
     LongevityStep,
     RunSSHCmdStep,
-    # SystemRebootStep is selectable under OSS but its run() calls
-    # wait_for_ping_reachable (netcastle, gated) and will raise
-    # NotImplementedError at execution time.
     SystemRebootStep,
     ValidationStep,
+    CustomStep,
     RegisterPatcherStep,
     InvokeIxiaApiStep,
     AllocateCgroupSliceMemory,
@@ -66,11 +58,6 @@ OSS_STEPS: t.List[t.Type[Step]] = [
     VerifyFileModificationTimeStep,
     RegisterSpeedFlipPatcherStep,
 ]
-
-# CustomStep lives under taac.internal — only add to OSS_STEPS when running
-# against the Meta-internal environment.
-if not TAAC_OSS:
-    OSS_STEPS.append(CustomStep)
 
 if not TAAC_OSS:
     from taac.internal.steps.internal_steps import INTERNAL_STEPS

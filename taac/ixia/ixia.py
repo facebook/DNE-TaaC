@@ -42,49 +42,25 @@ from taac.utils.oss_taac_lib_utils import (
     retryable,
     to_fb_uqdn,
 )
-
-# The monorepo ships these constants at neteng.test_infra.ixia.ixnetwork_restpy.constants;
-# in OSS we vendor a copy alongside this module.
-if TAAC_OSS:
-    from taac.ixia.ixnetwork_restpy_constants import (
-        ALLOWED_IPV4_ADVERTISEMENTS,
-        ALLOWED_IPV6_ADVERTISEMENTS,
-        API_SERVER_PASSWORD,
-        API_SERVER_USERNAME,
-        DESIRED_BGP_V4_PEER_NAME,
-        DESIRED_BGP_V4_PREFIX_NAME,
-        DESIRED_BGP_V6_PEER_NAME,
-        DESIRED_BGP_V6_PREFIX_NAME,
-        DESIRED_DEVICE_GROUP_NAME,
-        DESIRED_ETHERNET_NAME,
-        DESIRED_IPV4_NAME,
-        DESIRED_IPV6_NAME,
-        DESIRED_IPV6_PTP_NAME,
-        DESIRED_TOPOLOGY_NAME,
-        DESIRED_V4_BGP_PREFIX_NAME,
-        DESIRED_V6_BGP_PREFIX_NAME,
-        DESIRED_VPORT_NAME,
-    )
-else:
-    from neteng.test_infra.ixia.ixnetwork_restpy.constants import (
-        ALLOWED_IPV4_ADVERTISEMENTS,
-        ALLOWED_IPV6_ADVERTISEMENTS,
-        API_SERVER_PASSWORD,
-        API_SERVER_USERNAME,
-        DESIRED_BGP_V4_PEER_NAME,
-        DESIRED_BGP_V4_PREFIX_NAME,
-        DESIRED_BGP_V6_PEER_NAME,
-        DESIRED_BGP_V6_PREFIX_NAME,
-        DESIRED_DEVICE_GROUP_NAME,
-        DESIRED_ETHERNET_NAME,
-        DESIRED_IPV4_NAME,
-        DESIRED_IPV6_NAME,
-        DESIRED_IPV6_PTP_NAME,
-        DESIRED_TOPOLOGY_NAME,
-        DESIRED_V4_BGP_PREFIX_NAME,
-        DESIRED_V6_BGP_PREFIX_NAME,
-        DESIRED_VPORT_NAME,
-    )
+from neteng.test_infra.ixia.ixnetwork_restpy.constants import (
+    ALLOWED_IPV4_ADVERTISEMENTS,
+    ALLOWED_IPV6_ADVERTISEMENTS,
+    API_SERVER_PASSWORD,
+    API_SERVER_USERNAME,
+    DESIRED_BGP_V4_PEER_NAME,
+    DESIRED_BGP_V4_PREFIX_NAME,
+    DESIRED_BGP_V6_PEER_NAME,
+    DESIRED_BGP_V6_PREFIX_NAME,
+    DESIRED_DEVICE_GROUP_NAME,
+    DESIRED_ETHERNET_NAME,
+    DESIRED_IPV4_NAME,
+    DESIRED_IPV6_NAME,
+    DESIRED_IPV6_PTP_NAME,
+    DESIRED_TOPOLOGY_NAME,
+    DESIRED_V4_BGP_PREFIX_NAME,
+    DESIRED_V6_BGP_PREFIX_NAME,
+    DESIRED_VPORT_NAME,
+)
 from uhd_restpy.assistants.sessions.sessionassistant import (
     SessionAssistant as UhdSessionAssistant,
 )
@@ -5077,6 +5053,47 @@ class Ixia:
                 f"Postfilter BGP Peer: {[bgp_peer.Name for bgp_peer in bgp_peers]}"
             )
         return bgp_peers
+
+    def get_bgp_session_addresses(
+        self, regex: str, session_idx: int, ignore_case: bool = False
+    ) -> t.Tuple[str, str]:
+        """Resolve the ``(peer_ip, dut_ip)`` pair for a 1-based BGP session index.
+
+        For the first BGP peer (device group) whose name matches ``regex``,
+        returns the addresses for session ``session_idx``:
+          - ``peer_ip``: the IXIA-side neighbor address -- the UPDATE *destination*
+            when the DUT dumps routes to the peer,
+          - ``dut_ip``: the DUT-side address the peer points at -- the UPDATE
+            *source*.
+
+        These are used to scope a packet capture to a single DUT->peer direction,
+        which is required to compare exactly what the DUT sent each peer (an IXIA
+        vport carries every session on the link, plus the peers' own
+        advertisements back to the DUT).
+        """
+        peers = self.find_bgp_peers(regex, ignore_case)
+        if not peers:
+            raise ValueError(f"No BGP peer matches regex {regex!r}")
+        peer = peers[0]
+        idx = session_idx - 1
+        if idx < 0:
+            raise ValueError(f"session_idx must be >= 1; got {session_idx}")
+        # DutIp lives on the BGP peer; the peer's own address lives on the parent
+        # IP (Ipv6/Ipv4) stack. Both are Multivalues with one entry per session.
+        dut_ips = list(peer.DutIp.Values)
+        ip_stack = peer.parent
+        peer_ips = list(ip_stack.Address.Values)
+        if idx >= len(dut_ips) or idx >= len(peer_ips):
+            raise ValueError(
+                f"session_idx {session_idx} out of range for peer {peer.Name!r}: "
+                f"{len(peer_ips)} session address(es), {len(dut_ips)} DUT IP(s)"
+            )
+        peer_ip, dut_ip = peer_ips[idx], dut_ips[idx]
+        self.logger.info(
+            f"BGP session {session_idx} of {peer.Name!r}: "
+            f"DUT {dut_ip} -> peer {peer_ip}"
+        )
+        return peer_ip, dut_ip
 
     def find_bgp_ipv6_peer(self, port_identifier: str) -> t.Optional["BgpIpv6Peer"]:
         """Finds the BGP peer in the IXIA setup"""

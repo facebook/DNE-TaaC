@@ -14,17 +14,7 @@ from datetime import datetime
 from textwrap import wrap
 from typing import Type
 
-# pyjq is optional — the package is incompatible with Python 3.12+ and
-# has not been updated upstream. Only needed for jq-expression evaluation
-# in parameter evaluation; pyjq_compile / eval_jq raise a clear
-# ImportError if called without it.
-try:
-    import pyjq
-
-    HAS_PYJQ = True
-except ImportError:
-    HAS_PYJQ = False
-
+import pyjq
 from neteng.test_infra.dne.taac.constants import TestDevice, TestResult
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
@@ -309,22 +299,10 @@ def timeit(callable: t.Callable):
 
 @memoize_forever
 def pyjq_compile(script: str):
-    if not HAS_PYJQ:
-        raise ImportError(
-            "pyjq is not available. This feature requires pyjq which is "
-            "incompatible with Python 3.12+. Install pyjq for Python 3.11 or "
-            "earlier, or use an alternative JQ implementation."
-        )
     return pyjq.compile(script)
 
 
 def eval_jq(jq_expr: str, jq_vars: t.Dict[str, t.Any]) -> t.Any:
-    if not HAS_PYJQ:
-        raise ImportError(
-            "pyjq is not available. This feature requires pyjq which is "
-            "incompatible with Python 3.12+. Install pyjq for Python 3.11 or "
-            "earlier, or use an alternative JQ implementation."
-        )
     jq_vals = pyjq_compile(jq_expr).apply(jq_vars)
     if not jq_vals:
         return None

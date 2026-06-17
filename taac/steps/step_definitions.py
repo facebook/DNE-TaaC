@@ -11,61 +11,18 @@ import asyncio
 import ipaddress
 import itertools
 import json
-import os
 import time
 import typing as t
 from collections import defaultdict
 from dataclasses import dataclass
 
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
-
-if not TAAC_OSS:
-    from libfb.py.asyncio.await_utils import convert_to_async
-else:
-
-    async def convert_to_async(fn, *args, **kwargs):  # type: ignore
-        """OSS stub - libfb's convert_to_async wraps a sync callable in a thread."""
-        raise NotImplementedError(
-            "convert_to_async requires Meta-internal libfb; not available in OSS mode."
-        )
-
-
+from libfb.py.asyncio.await_utils import convert_to_async
 from neteng.fboss.ctrl.thrift_types import DsfSessionState
 from neteng.fboss.switch_config.thrift_mutable_types import PortSpeed
 from neteng.fboss.switch_config.thrift_types import SwitchDrainState
-
-if not TAAC_OSS:
-    from neteng.netcastle.exceptions import TestbedError
-else:
-
-    class TestbedError(Exception):  # type: ignore
-        """OSS stub - netcastle TestbedError isn't shipped."""
-
-        pass
-
-
-if not TAAC_OSS:
-    from neteng.netcastle.utils.health_check_utils import async_get_fboss_versions
-else:
-
-    async def async_get_fboss_versions(hostname):  # type: ignore
-        """OSS stub - netcastle health-check helper isn't shipped."""
-        raise NotImplementedError(
-            "async_get_fboss_versions requires Meta-internal netcastle; not available in OSS mode."
-        )
-
-
-if not TAAC_OSS:
-    from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
-else:
-
-    async def wait_for_ping_reachable(*args, **kwargs):  # type: ignore
-        """OSS stub - netcastle reachability helper isn't shipped."""
-        raise NotImplementedError(
-            "wait_for_ping_reachable requires Meta-internal netcastle; not available in OSS mode."
-        )
-
-
+from neteng.netcastle.exceptions import TestbedError
+from neteng.netcastle.utils.health_check_utils import async_get_fboss_versions
+from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
 from taac.constants import (
     FAILED_HC_STATUSES,
     OpenRRouteAction,
@@ -90,44 +47,11 @@ from taac.health_checks.all_health_checks import (
 from taac.health_checks.healthcheck_definitions import (
     create_next_hop_count_check,
 )
-
-if not TAAC_OSS:
-    from taac.internal.coop_utils import async_unregister_patcher
-else:
-
-    async def async_unregister_patcher(*args, **kwargs):  # type: ignore
-        """OSS stub - taac.internal.coop_utils isn't shipped."""
-        raise NotImplementedError(
-            "async_unregister_patcher requires Meta-internal taac.internal.coop_utils."
-        )
-
-
-if not TAAC_OSS:
-    from taac.internal.drainer_utils import async_nds_drain
-else:
-
-    async def async_nds_drain(*args, **kwargs):  # type: ignore
-        """OSS stub - taac.internal.drainer_utils isn't shipped."""
-        raise NotImplementedError(
-            "async_nds_drain requires Meta-internal taac.internal.drainer_utils."
-        )
-
-
-if t.TYPE_CHECKING or not TAAC_OSS:
-    from taac.internal.utils.openr_route_utils import (
-        OpenRRouteManager,
-    )
-else:
-
-    class OpenRRouteManager:  # type: ignore
-        """OSS stub - taac.internal.utils.openr_route_utils isn't shipped."""
-
-        def __init__(self, *args, **kwargs):
-            raise NotImplementedError(
-                "OpenRRouteManager requires Meta-internal taac.internal.utils.openr_route_utils."
-            )
-
-
+from taac.internal.coop_utils import async_unregister_patcher
+from taac.internal.drainer_utils import async_nds_drain
+from taac.internal.utils.openr_route_utils import (
+    OpenRRouteManager,
+)
 from neteng.test_infra.dne.taac.steps.step import Step as StepBase
 from taac.tasks.utils import run_task
 from taac.utils.common import (
@@ -159,43 +83,8 @@ from taac.utils.system_stress_utils import (
     async_get_memory_current_pct,
 )
 from taac.utils.taac_log_formatter import log_results_table
-
-if t.TYPE_CHECKING or not TAAC_OSS:
-    from rfe.scubadata.scubadata_py3 import Sample, ScubaData
-else:
-
-    class Sample:  # type: ignore
-        """OSS stub - rfe.scubadata.scubadata_py3.Sample isn't shipped."""
-
-        def __init__(self, *args, **kwargs):
-            raise NotImplementedError(
-                "rfe.scubadata.scubadata_py3.Sample is Meta-internal; not shipped under OSS."
-            )
-
-    class ScubaData:  # type: ignore
-        """OSS stub - rfe.scubadata.scubadata_py3.ScubaData isn't shipped."""
-
-        TIME_COLUMN = "time"  # constant used by callers; harmless under OSS
-
-        def __init__(self, *args, **kwargs):
-            raise NotImplementedError(
-                "rfe.scubadata.scubadata_py3.ScubaData is Meta-internal; not shipped under OSS."
-            )
-
-
-if not TAAC_OSS:
-    from service_automation.fboss.remediations.utils.bmc_helper import (
-        run_bmc_cmd_hwcontrol,
-    )
-else:
-
-    def run_bmc_cmd_hwcontrol(*args, **kwargs):  # type: ignore
-        """OSS stub - service_automation.fboss.remediations isn't shipped."""
-        raise NotImplementedError(
-            "run_bmc_cmd_hwcontrol requires Meta-internal service_automation; not shipped under OSS."
-        )
-
-
+from rfe.scubadata.scubadata_py3 import Sample, ScubaData
+from service_automation.fboss.remediations.utils.bmc_helper import run_bmc_cmd_hwcontrol
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (

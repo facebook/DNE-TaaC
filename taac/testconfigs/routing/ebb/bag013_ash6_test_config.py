@@ -7,10 +7,16 @@ This device is reserved for ad-hoc testing. The default config has an empty
 playbook list so the device setup / IXIA topology can be used for manual
 runs.
 
-The ``_UPDATE_GROUP`` sibling variant adds the BGP++ Update Group qualification 2.7.2 sustained
-link-flap playbook (see ``create_2_7_2_sustained_link_flap_playbook``):
-rotates flapping the three IXIA-facing ports on independent cadences and
-asserts no cross-group BGP session disruption after each cycle.
+The ``_UPDATE_GROUP`` sibling variant adds two BGP++ Update Group qualification
+playbooks:
+- 2.1.1 initial-dump-identical-routes (see
+  ``_create_2_1_1_initial_dump_identical_routes_playbook``): verifies update-group
+  membership and that two iBGP peers in the same group receive identical initial
+  dumps (NLRI/AS_PATH/LOCAL_PREF/COMMUNITY/MED; only next-hop may differ), plus
+  BGP-MON add-path separation. Full parity with the eb03.lab.ash6 2.1.1 test.
+- 2.7.2 sustained link-flap (see ``create_update_group_sustained_link_flap_playbook``):
+  rotates flapping the three IXIA-facing ports on independent cadences and
+  asserts no cross-group BGP session disruption after each cycle.
 
 Device: bag013.ash6
 IXIA Chassis: ares1-my24520014
@@ -22,6 +28,7 @@ IXIA Ports:
 
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_graceful_restart_check,
     create_bgp_session_establish_check,
     create_bgp_update_group_check,
     create_cpu_utilization_check,
@@ -29,7 +36,13 @@ from taac.health_checks.healthcheck_definitions import (
     create_memory_utilization_check,
 )
 from taac.playbooks.playbook_definitions import (
+    build_arista_ebb_scale_playbook,
     create_update_group_sustained_link_flap_playbook,
+)
+from taac.routing.ebb.ebb_bgp_plus_plus_test_config.common_health_checks import (
+    BGP_STANDARD_POSTCHECKS,
+    BGP_STANDARD_PRECHECKS,
+    BGP_STANDARD_SNAPSHOT_CHECKS,
 )
 from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.conveyor_common_tasks import (
     get_common_setup_tasks,
@@ -65,9 +78,18 @@ from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.c
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
+    PEERGROUP_BGP_MON,
+    PEERGROUP_EBGP_V6,
+    PEERGROUP_IBGP_V4,
+    PEERGROUP_IBGP_V6,
 )
 from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ixia_config_for_ebb_scale import (
     create_ebb_scale_basic_port_configs,
+)
+from taac.stages.stage_definitions import create_steps_stage
+from taac.steps.step_definitions import (
+    create_custom_step,
+    create_validation_step,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
@@ -251,6 +273,138 @@ def _bag013_2_7_2_prechecks():
     ]
 
 
+def _create_2_1_1_initial_dump_identical_routes_playbook():
+    """Build the BGP++ Update Group qualification 2.1.1 playbook for bag013.
+
+    Mirrors the eb03.lab.ash6 2.1.1 playbook (full parity): one validation step
+    running ``BGP_UPDATE_GROUP_CHECK`` (backed by ``getUpdateGroupInfo`` /
+    ``show bgpcpp update-group``) followed by the dedicated dump-compare custom
+    step.
+
+    The membership check verifies:
+      - all iBGP IPv6 peers (peer-group EB-EB-V6) are in the SAME update group,
+      - all eBGP IPv6 peers (EB-FA-V6) are in a DIFFERENT update group,
+      - BGP Monitor peers are in their OWN update group (distinct from both),
+      - all iBGP peers in the shared group received an IDENTICAL number of
+        routes from the DUT (single distribution path).
+
+    Pre-conditions (per the Update Group Test Plan 2.1.1):
+      1. No established BGP sessions at the start -- satisfied by the
+         cold-start setup (fresh BGP++ config deploy + daemon start). Not
+         assertable as a precheck (by precheck time the setup has already
+         brought sessions up); the session-establish precheck instead confirms
+         the post-convergence state the test then inspects.
+      2. Update Group enabled + active -- enabled at setup
+         (``enable_update_group=True``).
+      3. GR is NOT enabled on the iBGP-mesh -- asserted by the GR prechecks
+         below (V6 + V4), reusing ``create_bgp_graceful_restart_check``.
+      4. IAR (Immediate Advertisement of Routes) enabled -- IAR is enabled by
+         default in the EBB environment, so no explicit check is needed.
+
+    Returns:
+        A ``Playbook`` named ``bag013_2_1_1_initial_dump_identical_routes``.
+    """
+    prechecks = [
+        *BGP_STANDARD_PRECHECKS,
+        # Pre-condition 3: GR must NOT be enabled on the iBGP mesh (V6 + V4).
+        create_bgp_graceful_restart_check(
+            peer_group_name=PEERGROUP_IBGP_V6,
+            expected_graceful_restart_enabled=False,
+            check_id="bag013_2_1_1_gr_disabled_ibgp_v6",
+        ),
+        create_bgp_graceful_restart_check(
+            peer_group_name=PEERGROUP_IBGP_V4,
+            expected_graceful_restart_enabled=False,
+            check_id="bag013_2_1_1_gr_disabled_ibgp_v4",
+        ),
+    ]
+    verify_step = create_validation_step(
+        point_in_time_checks=[
+            create_bgp_update_group_check(
+                # iBGP-V6, eBGP-V6 and BGP-MON must each have Established peers in
+                # the update-group table. (A peer-group may form more than one
+                # update group -- one per distinct egress policy -- which is
+                # expected, not a failure.)
+                peer_group_substrings=[
+                    PEERGROUP_IBGP_V6,
+                    PEERGROUP_EBGP_V6,
+                    PEERGROUP_BGP_MON,
+                ],
+                # Passing criterion 5: total update groups == number of distinct
+                # outbound-policy configs (one per peer-group per AFI + BGP-MON):
+                # EB-EB-V4, EB-EB-V6, EB-FA-V4, EB-FA-V6, BGP-MON = 5.
+                expected_group_count=5,
+                # Golden values (full parity with eb03):
+                #   EB-EB-V6 -> policy EB-EB-OUT, 496 members
+                #     (62/plane x 4 planes x 2 (DC+MP))
+                #   EB-FA-V6 -> policy EB-FA-OUT, 140 members
+                #   BGP-MON  -> policy PROPAGATE_EVERYTHING_OUT, 2 members
+                expected_member_counts={
+                    PEERGROUP_IBGP_V6: 496,
+                    PEERGROUP_EBGP_V6: 140,
+                    PEERGROUP_BGP_MON: 2,
+                },
+                expected_policy_names={
+                    PEERGROUP_IBGP_V6: ["EB-EB-OUT"],
+                    PEERGROUP_EBGP_V6: ["EB-FA-OUT"],
+                    PEERGROUP_BGP_MON: ["PROPAGATE_EVERYTHING_OUT"],
+                },
+                check_id="bag013_2_1_1_update_group_membership",
+            )
+        ],
+        description=(
+            "BGP++ Update Group qualification 2.1.1 -- verify EB-EB-V6 iBGP (496 "
+            "members, EB-EB-OUT), EB-FA-V6 eBGP (140, EB-FA-OUT) and BGP-MON "
+            "(2, PROPAGATE_EVERYTHING_OUT) form distinct update groups, with 5 "
+            "groups total (one per peer-group per AFI + BGP-MON)."
+        ),
+    )
+    # Steps 6-7: capture the initial-dump UPDATEs to two iBGP peers in the same
+    # update group and assert they are identical (NLRI/AS_PATH/LOCAL_PREF/
+    # COMMUNITY/MED; only next-hop may differ). Runs as a custom step that flaps
+    # BOTH iBGP peers TOGETHER under a single capture (brings both down, settles,
+    # then brings both up) so they rejoin the update group at the same point in
+    # its dump cycle and receive the same synchronized distribution -- flapping
+    # one peer at a time is invalid (a peer rejoining an already-converged group
+    # alone gets a different slice of the table). It captures on the iBGP vport,
+    # then parses + compares the pcaps. Requires a full IXIA run (capture won't
+    # work under --skip-setup-tasks).
+    pcap_compare_step = create_custom_step(
+        params_dict={
+            "custom_step_name": "test_bgp_update_group_dump_compare",
+            "hostname": DEVICE_NAME,
+            "ixia_capture_interface": IXIA_INTERFACE_MIMIC_IBGP,
+            # IXIA BGP-peer names (from the session topology), not peer-group
+            # names. Two sessions of one iBGP-V6 device group -- both land in
+            # update group 0 (all EB-EB-V6 peers share one group).
+            "ibgp_peer_regex": "BGP_PEER_IPV6_IBGP_PLANE_1_REMOTE_EB",
+            "ibgp_peer_session_indices": [1, 2],
+            "capture_duration_seconds": 90,
+            "settle_seconds": 10,
+            # Criterion 4: BGP-Monitor (add-path capable) UPDATEs must be
+            # add-path formatted (distinct from iBGP).
+            "bgp_mon_capture_interface": IXIA_INTERFACE_MIMIC_BGP_MON,
+            "bgp_mon_peer_regex": "BGP_PEER_IPV6_BGP_MON",
+            "bgp_mon_session_index": 1,
+        },
+        description=(
+            "BGP++ Update Group 2.1.1 steps 6-7 -- capture and compare the "
+            "initial-dump UPDATEs to two iBGP peers in the same update group "
+            "(identical NLRI/AS_PATH/LOCAL_PREF/COMMUNITY/MED; next-hop may differ)."
+        ),
+    )
+    return build_arista_ebb_scale_playbook(
+        name="bag013_2_1_1_initial_dump_identical_routes",
+        stages=[
+            create_steps_stage(steps=[verify_step]),
+            create_steps_stage(steps=[pcap_compare_step]),
+        ],
+        prechecks=prechecks,
+        postchecks=BGP_STANDARD_POSTCHECKS,
+        snapshot_checks=BGP_STANDARD_SNAPSHOT_CHECKS,
+    )
+
+
 def create_bag013_ash6_conveyor_test_config(
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
@@ -326,6 +480,9 @@ def create_bag013_ash6_conveyor_test_config(
 
     playbooks = (
         [
+            # 2.1.1 Initial Dump: all peers in the same group receive identical
+            # routes (membership + dump-compare). Full parity with eb03.
+            _create_2_1_1_initial_dump_identical_routes_playbook(),
             create_update_group_sustained_link_flap_playbook(
                 device_name=DEVICE_NAME,
                 port_schedule=_PORT_SCHEDULE,
@@ -334,7 +491,7 @@ def create_bag013_ash6_conveyor_test_config(
                 # postchecks/snapshot_checks left None -- factory defaults
                 # cover the spec (BGP_STANDARD_POSTCHECKS + load-avg<12 +
                 # BGP_STANDARD_SNAPSHOT_CHECKS).
-            )
+            ),
         ]
         if enable_update_group
         else []
