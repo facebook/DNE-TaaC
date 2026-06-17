@@ -23,6 +23,7 @@ IXIA Ports:
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
+    create_bgp_update_group_check,
     create_cpu_utilization_check,
     create_drain_state_check,
     create_memory_utilization_check,
@@ -239,6 +240,14 @@ def _bag013_2_7_2_prechecks():
         create_cpu_utilization_check(
             threshold=400.0, start_time_jq_var="test_case_start_time"
         ),
+        # Confirm BGP++ ``update_group`` is actually active on the running
+        # daemon before the flap loop starts. Mirrors the setup-task-level
+        # ``Cli -p15 -c 'show bgpcpp update-group'`` guard in
+        # ``conveyor_common_tasks._get_control_plane_tasks`` (D108374944), but
+        # goes through the ``getUpdateGroupInfo`` thrift API (D108632994)
+        # instead of CLI parsing. Provides a second, structured early-fail if
+        # the patch silently regressed between setup completion and prechecks.
+        create_bgp_update_group_check(expect_enabled=True),
     ]
 
 
