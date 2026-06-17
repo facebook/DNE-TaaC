@@ -6,14 +6,6 @@ import typing as t
 
 from taac.constants import OS_TO_DEVICE_OS_TYPE_MAP
 from taac.driver.abstract_switch import AbstractSwitch
-from taac.internal.driver.arista_fboss_switch import (
-    AristaFbossSwitch,
-)
-from taac.internal.driver.arista_switch import AristaSwitch
-from taac.internal.driver.cisco_switch import CiscoSwitch
-from taac.internal.driver.fboss_switch_internal import (
-    FbossSwitchInternal,
-)
 from taac.utils.oss_taac_lib_utils import (
     async_memoize_timed,
     ConsoleFileLogger,
@@ -24,13 +16,28 @@ from taac.test_as_a_config import types as taac_types
 LOGGER: ConsoleFileLogger = get_root_logger()
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
-DEVICE_OS_DRIVER_CLASS_MAP = {
-    taac_types.DeviceOsType.FBOSS: FbossSwitchInternal,
-    taac_types.DeviceOsType.ARISTA_OS: AristaSwitch,
-    taac_types.DeviceOsType.CISCO: CiscoSwitch,
-    taac_types.DeviceOsType.IOSXR: CiscoSwitch,
-    taac_types.DeviceOsType.ARISTA_FBOSS: AristaFbossSwitch,
-}
+# Meta-internal drivers — only importable outside OSS mode. In OSS, the
+# map is empty and users are expected to register their own drivers via
+# add_host_to_device_os_type_data() / custom subclasses of AbstractSwitch.
+if not TAAC_OSS:
+    from taac.internal.driver.arista_fboss_switch import (
+        AristaFbossSwitch,
+    )
+    from taac.internal.driver.arista_switch import AristaSwitch
+    from taac.internal.driver.cisco_switch import CiscoSwitch
+    from taac.internal.driver.fboss_switch_internal import (
+        FbossSwitchInternal,
+    )
+
+    DEVICE_OS_DRIVER_CLASS_MAP = {
+        taac_types.DeviceOsType.FBOSS: FbossSwitchInternal,
+        taac_types.DeviceOsType.ARISTA_OS: AristaSwitch,
+        taac_types.DeviceOsType.CISCO: CiscoSwitch,
+        taac_types.DeviceOsType.IOSXR: CiscoSwitch,
+        taac_types.DeviceOsType.ARISTA_FBOSS: AristaFbossSwitch,
+    }
+else:
+    DEVICE_OS_DRIVER_CLASS_MAP = {}
 
 HOST_TO_DEVICE_OS_TYPE_MAP = {}
 HOST_TO_DRIVER_ARGS_MAP = {}

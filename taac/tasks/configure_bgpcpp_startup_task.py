@@ -24,11 +24,19 @@ Usage in test configs:
     )
 """
 
+import os
 import typing as t
 
-from taac.internal.tasks.bgp_weight_policy_task import (
-    AristaSSHHelper,
-)
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+# AristaSSHHelper lives under taac/internal/tasks/, a Meta-internal
+# subpackage not shipped in the OSS slice. The task class itself is
+# still registered in OSS mode (see tasks/registry.py), but invoking
+# run() requires the Meta-internal SSH helper and will raise below.
+if not TAAC_OSS:
+    from taac.internal.tasks.bgp_weight_policy_task import (
+        AristaSSHHelper,
+    )
 from taac.tasks.base_task import BaseTask
 
 
@@ -59,6 +67,11 @@ class ConfigureBgpcppStartupTask(BaseTask):
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """Run the task to configure bgpcpp startup flags."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "ConfigureBgpcppStartupTask requires the Meta-internal "
+                "AristaSSHHelper and cannot run under TAAC_OSS=1."
+            )
         hostname = params["hostname"]
         flags = params["flags"]
         ssh_user = params.get("ssh_user", "admin")

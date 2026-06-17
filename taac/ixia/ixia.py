@@ -31,6 +31,9 @@ from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
 from ixnetwork_restpy.files import Files
+from taac.libs.custom_payload_registry import (
+    get_custom_frame_payload,
+)
 from taac.utils.common import timeit
 from taac.utils.oss_taac_lib_utils import (
     await_sync,
@@ -39,25 +42,49 @@ from taac.utils.oss_taac_lib_utils import (
     retryable,
     to_fb_uqdn,
 )
-from neteng.test_infra.ixia.ixnetwork_restpy.constants import (
-    ALLOWED_IPV4_ADVERTISEMENTS,
-    ALLOWED_IPV6_ADVERTISEMENTS,
-    API_SERVER_PASSWORD,
-    API_SERVER_USERNAME,
-    DESIRED_BGP_V4_PEER_NAME,
-    DESIRED_BGP_V4_PREFIX_NAME,
-    DESIRED_BGP_V6_PEER_NAME,
-    DESIRED_BGP_V6_PREFIX_NAME,
-    DESIRED_DEVICE_GROUP_NAME,
-    DESIRED_ETHERNET_NAME,
-    DESIRED_IPV4_NAME,
-    DESIRED_IPV6_NAME,
-    DESIRED_IPV6_PTP_NAME,
-    DESIRED_TOPOLOGY_NAME,
-    DESIRED_V4_BGP_PREFIX_NAME,
-    DESIRED_V6_BGP_PREFIX_NAME,
-    DESIRED_VPORT_NAME,
-)
+
+# The monorepo ships these constants at neteng.test_infra.ixia.ixnetwork_restpy.constants;
+# in OSS we vendor a copy alongside this module.
+if TAAC_OSS:
+    from taac.ixia.ixnetwork_restpy_constants import (
+        ALLOWED_IPV4_ADVERTISEMENTS,
+        ALLOWED_IPV6_ADVERTISEMENTS,
+        API_SERVER_PASSWORD,
+        API_SERVER_USERNAME,
+        DESIRED_BGP_V4_PEER_NAME,
+        DESIRED_BGP_V4_PREFIX_NAME,
+        DESIRED_BGP_V6_PEER_NAME,
+        DESIRED_BGP_V6_PREFIX_NAME,
+        DESIRED_DEVICE_GROUP_NAME,
+        DESIRED_ETHERNET_NAME,
+        DESIRED_IPV4_NAME,
+        DESIRED_IPV6_NAME,
+        DESIRED_IPV6_PTP_NAME,
+        DESIRED_TOPOLOGY_NAME,
+        DESIRED_V4_BGP_PREFIX_NAME,
+        DESIRED_V6_BGP_PREFIX_NAME,
+        DESIRED_VPORT_NAME,
+    )
+else:
+    from neteng.test_infra.ixia.ixnetwork_restpy.constants import (
+        ALLOWED_IPV4_ADVERTISEMENTS,
+        ALLOWED_IPV6_ADVERTISEMENTS,
+        API_SERVER_PASSWORD,
+        API_SERVER_USERNAME,
+        DESIRED_BGP_V4_PEER_NAME,
+        DESIRED_BGP_V4_PREFIX_NAME,
+        DESIRED_BGP_V6_PEER_NAME,
+        DESIRED_BGP_V6_PREFIX_NAME,
+        DESIRED_DEVICE_GROUP_NAME,
+        DESIRED_ETHERNET_NAME,
+        DESIRED_IPV4_NAME,
+        DESIRED_IPV6_NAME,
+        DESIRED_IPV6_PTP_NAME,
+        DESIRED_TOPOLOGY_NAME,
+        DESIRED_V4_BGP_PREFIX_NAME,
+        DESIRED_V6_BGP_PREFIX_NAME,
+        DESIRED_VPORT_NAME,
+    )
 from uhd_restpy.assistants.sessions.sessionassistant import (
     SessionAssistant as UhdSessionAssistant,
 )
@@ -452,6 +479,7 @@ class Ixia:
         api_key: t.Optional[str] = None,
         password: t.Optional[str] = API_SERVER_PASSWORD,
         username: t.Optional[str] = API_SERVER_USERNAME,
+        ixia_recovery: t.Optional[t.Any] = None,
     ) -> None:
         """Instantiates the object of class Ixia
 
@@ -587,6 +615,28 @@ class Ixia:
         self._capture_stopped: bool = (
             False  # Track if we've already stopped packet capture
         )
+        # Opt-in IXIA REST API tier soft recovery on 5xx during connect().
+        # Type-annotated as Any because the Thrift type cannot be imported
+        # from this OSS-shared module. The real type is
+        # `taac.test_as_a_config.types.IxiaRecovery`.
+        #
+        # NOTE on `max_attempts`: the per-call retry loop here is structured
+        # to allow exactly ONE in-band recovery attempt per `connect()`
+        # invocation regardless of the configured `max_attempts`. Multi-shot
+        # in-band retry is intentionally NOT implemented because the outer
+        # `@retryable(num_tries=3)` on `_create_basic_setup` already
+        # re-enters `connect()` up to 3 times, and the budget is reset on
+        # each entry (see the reset block at the top of
+        # `_create_basic_setup`). The `max_attempts` field is reserved for a
+        # future loop refactor; for now `_DEFAULT_IXIA_RECOVERY.max_attempts`
+        # is 1 and any larger value will be silently capped at 1 per
+        # `connect()` invocation.
+        self.ixia_recovery: t.Optional[t.Any] = ixia_recovery
+        # Tracks remaining recovery attempts inside this `_create_basic_setup`
+        # invocation. Reset by `_create_basic_setup` before each retry round.
+        self._ixia_recovery_attempts_remaining: int = (
+            ixia_recovery.max_attempts if ixia_recovery else 1
+        )
 
     @staticmethod
     def get_formatted_ip_address(ixia_server_ip: str) -> str:
@@ -671,17 +721,47 @@ class Ixia:
         SessionAssistant = (
             UhdSessionAssistant if self.is_uhd_chassis else IxnSessionAssistant
         )
-        self.session = SessionAssistant(
-            # pyrefly: ignore [bad-argument-type]
-            IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
-            RestPort=None,
-            UserName=self.username,
-            Password=self.password,
-            SessionName=self.session_name,
-            SessionId=self.session_id,
-            ApiKey=self.ApiKey,
-            ClearConfig=self.cleanup_config if not self.is_existing_session else False,
-        )
+        try:
+            self.session = SessionAssistant(
+                # pyrefly: ignore [bad-argument-type]
+                IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
+                RestPort=None,
+                UserName=self.username,
+                Password=self.password,
+                SessionName=self.session_name,
+                SessionId=self.session_id,
+                ApiKey=self.ApiKey,
+                ClearConfig=(
+                    self.cleanup_config if not self.is_existing_session else False
+                ),
+            )
+        except Exception as exc:
+            if not self._should_attempt_recovery(exc):
+                raise
+            self._ixia_recovery_attempts_remaining -= 1
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} SessionAssistant failed with 5xx — "
+                f"attempting in-band recovery: {type(exc).__name__}: {exc!r}"
+            )
+            recovered = self._attempt_inband_recovery()
+            if not recovered:
+                raise
+            self.logger.info(
+                f"{_GREEN}[IXIA]{_RESET} Recovery succeeded — retrying SessionAssistant"
+            )
+            self.session = SessionAssistant(
+                # pyrefly: ignore [bad-argument-type]
+                IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
+                RestPort=None,
+                UserName=self.username,
+                Password=self.password,
+                SessionName=self.session_name,
+                SessionId=self.session_id,
+                ApiKey=self.ApiKey,
+                ClearConfig=(
+                    self.cleanup_config if not self.is_existing_session else False
+                ),
+            )
 
         # Re-populating the Session ID and Name if a new one was created
         # as the user left them to default input as None
@@ -699,6 +779,77 @@ class Ixia:
         )
 
         self.ixnetwork = self.session.Ixnetwork
+
+    _RECOVERY_TRIGGER_TOKENS: t.Tuple[str, ...] = ("502", "503", "504")
+
+    def _should_attempt_recovery(self, exc: BaseException) -> bool:
+        """Decide whether to invoke `ixia_recovery_lib.restart_ixnetwork`.
+
+        Returns True only when ALL hold:
+        - The TestConfig opted in (or omitted opt-out — see
+          `_DEFAULT_IXIA_RECOVERY` in `libs/test_setup_orchestrator.py`).
+        - `_ixia_recovery_attempts_remaining > 0` for this `connect()` round.
+        - The exception's stringified message contains a 5xx token (502/503/
+          504). We grep the message because `ixnetwork-restpy` wraps the
+          underlying `HTTPError` and the wrapper type does not preserve the
+          status code as an attribute we can read.
+        """
+        if self.ixia_recovery is None or not getattr(
+            self.ixia_recovery, "enabled", False
+        ):
+            return False
+        if self._ixia_recovery_attempts_remaining <= 0:
+            return False
+        msg = f"{type(exc).__name__}: {exc!s}"
+        return any(token in msg for token in self._RECOVERY_TRIGGER_TOKENS)
+
+    def _attempt_inband_recovery(self) -> bool:
+        """Best-effort soft restart of `ixnetworkweb` via `ixia_recovery_lib`.
+
+        Returns True iff the lib reports success AND `/api/v1/sessions`
+        returned 200 within the poll window. Any exception inside the lib
+        is logged and treated as a recovery failure.
+        """
+        # OSS guard: `ixia_recovery_lib` is internal-only (the surrounding
+        # file is OSS-shared). Skip in OSS builds without even attempting
+        # the import, matching the convention used by `fetch_ixia_credentials`
+        # elsewhere in this module. See `.llms/skills/taac_oss_privacy_rules.md`.
+        if TAAC_OSS:
+            return False
+        # Lazy import: keeps the dep chain off the hot connect path and
+        # prevents a circular import.
+        try:
+            from taac.internal.utils.ixia_recovery_lib import (
+                restart_ixnetwork,
+            )
+        except ImportError as ie:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} ixia_recovery_lib not importable "
+                f"({ie!r}) — skipping in-band recovery"
+            )
+            return False
+        cooldown = getattr(self.ixia_recovery, "cooldown_minutes", 30)
+        try:
+            result = restart_ixnetwork(
+                chassis_hostname=str(self.primary_chassis_ip),
+                username=str(self.username),
+                password=self.password,
+                cooldown_minutes=int(cooldown),
+                triggered_by="phase2_inband",
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} in-band recovery raised "
+                f"unexpectedly: {type(e).__name__}: {e!r}"
+            )
+            return False
+        if not result.get("success"):
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} in-band recovery refused/failed: "
+                f"blocked_reason={result.get('blocked_reason')!r}"
+            )
+            return False
+        return True
 
     def assign_ports(self, port_configs: t.Sequence[ixia_types.PortConfig]) -> None:
         """API to assign ports to the IXIA setup by creating new vport instances
@@ -1406,6 +1557,25 @@ class Ixia:
         ]
         config_element.FramePayload.update(Type=frame_payload_pattern_raw)
 
+    def configure_custom_frame_payload(
+        self,
+        config_element: "ConfigElement",
+        custom_hex_pattern: str,
+    ) -> None:
+        """Override FramePayload with raw custom bytes.
+
+        Used to inject a structurally valid protocol body (e.g. a 28-byte ARP
+        request) into RAW traffic items where the IxNetwork stack template is
+        unavailable or unreliable. Bytes are placed at the start of the frame
+        payload (after the explicit packet header stacks); IxNetwork zero-pads
+        the remaining bytes to the configured frame size.
+        """
+        config_element.FramePayload.update(
+            Type="custom",
+            CustomPattern=custom_hex_pattern,
+            CustomRepeat=False,
+        )
+
     def configure_crc_type(
         self, config_element: "ConfigElement", crc_type: ixia_types.CrcType
     ) -> None:
@@ -1879,6 +2049,16 @@ class Ixia:
                 f"[{traffic_item_name}] Successfully configured the frame "
                 "level parameters for this traffic item"
             )
+
+            custom_frame_payload = get_custom_frame_payload(traffic_item_name)
+            if custom_frame_payload is not None:
+                self.configure_custom_frame_payload(
+                    config_element, custom_frame_payload
+                )
+                self.logger.info(
+                    f"[{traffic_item_name}] Applied custom frame payload "
+                    f"({len(custom_frame_payload) // 2} bytes) from registry"
+                )
 
             # [STEP 5]: Configure all traffic rate related parameters
             self.configure_rate_setup(config_element, traffic_item_info)
@@ -4540,6 +4720,14 @@ class Ixia:
         setup_start = time.time()
         # Use warning level so messages pass through suppress_console_logs
         _log = self.logger.warning
+
+        # Reset the in-band-recovery budget for THIS attempt of
+        # `_create_basic_setup`. The outer `@retryable(num_tries=3)` may call
+        # us up to 3 times; on each call we get a fresh budget so a recovered
+        # chassis isn't denied recovery on a later transient 5xx.
+        self._ixia_recovery_attempts_remaining = (
+            self.ixia_recovery.max_attempts if self.ixia_recovery else 1
+        )
 
         # If a previous retry attempt created a session, destroy it before
         # starting fresh.  Reusing the same session via NewConfig() causes a

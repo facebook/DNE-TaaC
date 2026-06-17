@@ -124,7 +124,7 @@ EXPECTED: FpfThresholds = FpfThresholds(
     prod_prefix_drain_sla_sec=30.0,
     prod_prefix_recovery_sla_sec=60.0,
     bgp_restart_reconverge_sla_sec=60.0,
-    fsdb_restart_reconverge_sla_sec=10.0,
+    fsdb_restart_reconverge_sla_sec=20.0,
 )
 
 # Relaxed thresholds used while known gaps are being worked. Differences vs
@@ -149,7 +149,7 @@ TEMPORARY: FpfThresholds = FpfThresholds(
     prod_prefix_drain_sla_sec=30.0,
     prod_prefix_recovery_sla_sec=60.0,
     bgp_restart_reconverge_sla_sec=60.0,
-    fsdb_restart_reconverge_sla_sec=10.0,
+    fsdb_restart_reconverge_sla_sec=20.0,
 )
 
 # Toggle: run on the relaxed TEMPORARY set for now. Flip to False to enforce

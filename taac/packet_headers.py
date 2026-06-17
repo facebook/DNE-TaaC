@@ -15,6 +15,7 @@ from taac.constants import (
     DHCPV6_MULTICAST_ADDR,
     DHCPV6_RELAY_PORT,
     DHCPV6_SERVER_MULTICAST_ADDR,
+    DHCPV6_SERVER_MULTICAST_MAC,
     DHCPV6_SERVER_PORT,
     ICMPV4_TYPE_DEST_UNREACHABLE,
     ICMPV4_TYPE_ECHO_REPLY,
@@ -1550,10 +1551,16 @@ LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
     ),
 ]
 
-# ARP Request with Broadcast destination (for CPU queue testing)
-# Note: IXIA doesn't have an ARP protocol template available.
-# We configure only the Ethernet layer with ARP EtherType (0x0806).
-# The ARP payload will be part of the raw frame data.
+# ARP Request with Broadcast destination (for CPU queue testing).
+#
+# IxNetwork's `^arp$` stack template is unusable on this chassis SDK — appending
+# it hangs the IxNetwork REST API for 30s with no response, triggering a session
+# teardown + setup retry loop. So we build only the Ethernet header (with
+# EtherType=0x0806) and pin the traffic item to a 64 B frame in
+# cpu_queue_test_config.py. IXIA fills the trailing 50 B with its
+# `frame_payload_pattern` default (incrementByte) which is enough to give the
+# silicon a syntactically present (if semantically nonsense) ARP body to
+# classify — that's all CoPP needs to punt the frame to the high queue.
 ARP_REQUEST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
     taac_types.PacketHeader(
         query=ixia_types.Query(
@@ -1577,10 +1584,8 @@ ARP_REQUEST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Source MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StartValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
                     }
                 ),
             ),
@@ -1588,10 +1593,10 @@ ARP_REQUEST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
     ),
 ]
 
-# ARP Response with unicast destination (Switch MAC) for CPU queue testing
-# Note: IXIA doesn't have an ARP protocol template available.
-# We configure only the Ethernet layer with ARP EtherType (0x0806).
-# The destination MAC is resolved from the endpoint's MAC address via reference.
+# ARP Response with unicast destination (Switch MAC) for CPU queue testing.
+# Same structure as the request above — see that comment for why we don't
+# append IxNetwork's `^arp$` stack. Destination MAC resolves to the switch MAC
+# via DST_MAC_ADDRESS reference.
 ARP_RESPONSE_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
     taac_types.PacketHeader(
         query=ixia_types.Query(
@@ -1606,13 +1611,11 @@ ARP_RESPONSE_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
                     }
                 ),
                 references={
-                    "StartValue": taac_types.Reference(
+                    "SingleValue": taac_types.Reference(
                         type=taac_types.ReferenceType.DST_MAC_ADDRESS
                     ),
                 },
@@ -1621,10 +1624,8 @@ ARP_RESPONSE_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Source MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StartValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
                     }
                 ),
             ),
@@ -2474,10 +2475,17 @@ NDP_RA_MULTICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
 #############################################################
 
 
-# NDP Neighbor Solicitation (NS) Unicast Traffic Headers
-# SMAC: Ixia MAC, DMAC: Switch MAC, SIP: Ixia link-local, DIP: Switch link-local, DSCP: 48
+# NDP Neighbor Solicitation (NS) with LL source IPv6 (CPU_021).
+#
+# Cat 4 spec mandates a MULTICAST destination for NDP NS — silicon's CoPP
+# `NDP -> HIGH queue` rule only elevates multicast NDP. Using the all-nodes
+# form (33:33:00:00:00:01 / ff02::1) since it's a fixed constant; the
+# solicited-node form (ff02::1:ffXX:XXXX) would require templating the
+# target's lower-24-bit IPv6 and isn't required by spec.
+#
+# (Name kept as _UNICAST_ for compat with existing imports; refers to the
+# single-flow nature, not the L2/L3 destination addressing.)
 NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
-    # Ethernet Layer: Set source MAC to Ixia, destination to switch MAC (unicast)
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="^ethernet$", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2487,16 +2495,10 @@ NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_MAC,
                     }
                 ),
-                references={
-                    "StartValue": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_MAC_ADDRESS
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Source MAC Address"),
@@ -2509,7 +2511,6 @@ NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             ),
         ],
     ),
-    # IPv6 Layer: Use Ixia link-local source, switch link-local destination, DSCP: 48
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="^ipv6$", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2531,15 +2532,10 @@ NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "valueList",
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_IPV6,
                     }
                 ),
-                references={
-                    "ValueList": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_LINK_LOCAL_IPV6_ADDRESS,
-                        data_type=taac_types.DataType.LIST,
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Traffic Class"),
@@ -2559,7 +2555,6 @@ NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             ),
         ],
     ),
-    # ICMPv6 Layer: Set message type to Neighbor Solicitation (135)
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="icmpv6", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2580,10 +2575,13 @@ NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
     ),
 ]
 
-# NDP Neighbor Advertisement (NA) Unicast Traffic Headers
-# SMAC: Ixia MAC, DMAC: Switch MAC, SIP: Ixia link-local, DIP: Switch link-local, DSCP: 48
+# NDP Neighbor Advertisement (NA) with LL source IPv6 (CPU_033).
+# Cat 4 spec: DMAC=33:33:00:00:00:01, DIP=ff02::1 (all-nodes multicast).
+# DSCP=48 keeps the IPv6 Traffic Class consistent with the sibling NS/RA
+# headers — Midhun confirmed silicon's `ff02::/fe80:: -> HIGH` CoPP rule
+# is DSCP-keyed, with DSCP=48 elevating to HIGH and other values landing
+# on MID.
 NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
-    # Ethernet Layer: Set source MAC to Ixia, destination to switch MAC (unicast)
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="^ethernet$", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2593,16 +2591,10 @@ NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_MAC,
                     }
                 ),
-                references={
-                    "StartValue": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_MAC_ADDRESS
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Source MAC Address"),
@@ -2615,7 +2607,6 @@ NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             ),
         ],
     ),
-    # IPv6 Layer: Use Ixia link-local source, switch link-local destination, DSCP: 48
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="^ipv6$", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2637,15 +2628,10 @@ NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "valueList",
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_IPV6,
                     }
                 ),
-                references={
-                    "ValueList": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_LINK_LOCAL_IPV6_ADDRESS,
-                        data_type=taac_types.DataType.LIST,
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Traffic Class"),
@@ -2665,7 +2651,6 @@ NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             ),
         ],
     ),
-    # ICMPv6 Layer: Set message type to Neighbor Advertisement (136)
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="icmpv6", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2805,16 +2790,10 @@ NDP_RA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_MAC,
                     }
                 ),
-                references={
-                    "StartValue": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_MAC_ADDRESS
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Source MAC Address"),
@@ -2827,7 +2806,8 @@ NDP_RA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             ),
         ],
     ),
-    # IPv6 Layer: Use Ixia link-local source, switch link-local destination, DSCP: 48
+    # Per Cat 4 spec for CPU_035: DIP=ff02::1 (all-nodes mcast). DSCP=48
+    # set per Midhun's CoPP rule (ff02::/fe80:: + DSCP=48 -> HIGH).
     taac_types.PacketHeader(
         query=ixia_types.Query(
             regex="^ipv6$", query_type=ixia_types.QueryType.STACK_TYPE_ID
@@ -2849,15 +2829,10 @@ NDP_RA_UNICAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "valueList",
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_IPV6,
                     }
                 ),
-                references={
-                    "ValueList": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_LINK_LOCAL_IPV6_ADDRESS,
-                        data_type=taac_types.DataType.LIST,
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Traffic Class"),
@@ -4952,29 +4927,28 @@ DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             regex="^ethernet$", query_type=ixia_types.QueryType.STACK_TYPE_ID
         ),
         fields=[
+            # DMAC tracks the IPv6 DIP scope: DIP is ff02::1:2 (all-DHCP-
+            # servers multicast), so the Ethernet DMAC must be the RFC 2464
+            # mapping 33:33:00:01:00:02. Previously this used a
+            # DST_MAC_ADDRESS reference resolving to the switch's unicast
+            # MAC — that produced an L2-malformed frame (mcast IPv6 dst
+            # wrapped in unicast eth dst) which silicon could reject or
+            # mishandle at CoPP classification.
             taac_types.Field(
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DHCPV6_SERVER_MULTICAST_MAC,
                     }
                 ),
-                references={
-                    "StartValue": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_MAC_ADDRESS
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Source MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StartValue": DEFAULT_SRC_MAC_ADDRESS,
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DEFAULT_SRC_MAC_ADDRESS,
                     }
                 ),
             ),
@@ -4992,10 +4966,8 @@ DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Source Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StartValue": DHCPV6_MULTICAST_ADDR,
-                        "StepValue": "::1",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DHCPV6_MULTICAST_ADDR,
                     }
                 ),
             ),
@@ -5003,8 +4975,8 @@ DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "valueList",
-                        "ValueList": [DHCPV6_SERVER_MULTICAST_ADDR],
+                        "ValueType": "singleValue",
+                        "SingleValue": DHCPV6_SERVER_MULTICAST_ADDR,
                     }
                 ),
             ),
@@ -5070,16 +5042,10 @@ NDP_NS_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_MAC,
                     }
                 ),
-                references={
-                    "StartValue": taac_types.Reference(
-                        type=taac_types.ReferenceType.DST_MAC_ADDRESS
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Source MAC Address"),
@@ -5119,15 +5085,10 @@ NDP_NS_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Destination Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "valueList",
+                        "ValueType": "singleValue",
+                        "SingleValue": NDP_ALL_NODES_MULTICAST_IPV6,
                     }
                 ),
-                references={
-                    "ValueList": taac_types.Reference(
-                        type=taac_types.ReferenceType.SRC_GATEWAY_IPV6_ADDRESS,
-                        data_type=taac_types.DataType.LIST,
-                    ),
-                },
             ),
             taac_types.Field(
                 query=ixia_types.Query(regex="Traffic Class"),
@@ -5194,10 +5155,8 @@ ARP_RESPONSE_BCAST_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
                 query=ixia_types.Query(regex="Source MAC Address"),
                 attrs_json=json.dumps(
                     {
-                        "ValueType": "increment",
-                        "StartValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
-                        "StepValue": "00:00:00:00:00:00",
-                        "CountValue": 1,
+                        "ValueType": "singleValue",
+                        "SingleValue": DEFAULT_SRC_MAC_ADDRESS,  # IXIA MAC
                     }
                 ),
             ),

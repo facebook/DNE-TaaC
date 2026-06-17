@@ -683,6 +683,64 @@ def create_bgp_graceful_restart_check(
     )
 
 
+def create_bgp_update_group_check(
+    peer_group_substrings: t.Optional[t.List[str]] = None,
+    expected_member_counts: t.Optional[t.Dict[str, int]] = None,
+    expected_policy_names: t.Optional[t.Dict[str, t.List[str]]] = None,
+    expected_group_count: t.Optional[int] = None,
+    expect_enabled: bool = True,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Create a point-in-time BGP++ Update Group check.
+
+    Backed by the ``getUpdateGroupInfo`` thrift API (the data shown by
+    ``show bgpcpp update-group``). Reusable across Update Group test cases.
+    Verifies the things we care about: number of update groups, number of
+    members, and the egress policy name groups are keyed on.
+
+    A peer-group may map to one OR MORE update groups (the update group is keyed
+    on ``TUpdateGroupKey``, of which ``peer_group_name`` is only one field), so
+    member/policy assertions are made over the whole set of groups a peer-group
+    forms -- the check never fails merely because a peer-group spans multiple
+    update groups.
+
+    Args:
+        peer_group_substrings: Peer-group substrings (e.g.
+            ``["EB-EB-V6", "EB-FA-V6", "BGP-MON"]``) matched against each update
+            group's ``group_key.peer_group_name`` or its Established peers'
+            descriptions. Each must match at least one update group with
+            Established peers (else FAIL).
+        expected_member_counts: Optional substring -> expected TOTAL number of
+            ESTABLISHED members across all update groups the peer-group forms
+            (cross-referenced with getBgpSessions, since getUpdateGroupInfo's
+            per-peer session_state is unreliable).
+        expected_policy_names: Optional substring -> the exact SET (list) of
+            egress policy names (``group_key.egress_policy_name``) the
+            peer-group's update groups must be keyed on. A peer-group forms one
+            update group per distinct egress policy, so pass a list, e.g.
+            ``{"EB-EB-V6": ["IBGP-V6-EGRESS"]}`` or ``{"EB-FA-V6": ["A", "B"]}``.
+        expected_group_count: When set, assert the total update-group count.
+        expect_enabled: Assert ``enable_update_group`` is True (default True).
+        check_id: Optional unique identifier for the check.
+
+    Returns:
+        A `PointInTimeHealthCheck` with `name=BGP_UPDATE_GROUP_CHECK`.
+    """
+    params: t.Dict[str, t.Any] = {
+        "peer_group_substrings": peer_group_substrings or [],
+        "expected_member_counts": expected_member_counts or {},
+        "expected_policy_names": expected_policy_names or {},
+        "expect_enabled": expect_enabled,
+    }
+    if expected_group_count is not None:
+        params["expected_group_count"] = expected_group_count
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.BGP_UPDATE_GROUP_CHECK,
+        check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
 def create_hardware_capacity_check(
     fec_threshold: t.Optional[t.Any] = None,
     ecmp_threshold: t.Optional[t.Any] = None,
@@ -2383,6 +2441,52 @@ def create_fpf_hrt_plane_status_check(
     )
 
 
+def create_fpf_hrt_session_stat_check(
+    mode: str = "disruption",
+    expected_connected: int = 32,
+    expected_connected_during: int = 28,
+    impacted_lanes: t.Optional[t.List[int]] = None,
+    recovery_min_sec: float = 60.0,
+    lookback_sec: int = 900,
+    window_start: t.Optional[float] = None,
+    window_end: t.Optional[float] = None,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """FPF_HRT_SESSION_STAT_CHECK — HRT CONNECTED FSDB-session census statistics.
+
+    Postcheck over the ``hrt_fsdb_session`` collector (per-host CONNECTED census,
+    polled every 3s with a per-lane breakdown).
+
+    mode="disruption" (default): two signals over the test window. Signal 1 — the
+    CONNECTED count drops to ``expected_connected_during`` (e.g. 28 when lane 0 of
+    all 4 GPUs is impacted: 32 - 4) and the ``impacted_lanes`` show churn.
+    Signal 2 — after the disruption stops the count recovers to
+    ``expected_connected`` (32) and holds for >= ``recovery_min_sec``. SKIPs if
+    the disruption was verified ineffective.
+
+    mode="stable": the CONNECTED count stays at ``expected_connected`` across the
+    whole window with no churn.
+    """
+    params: t.Dict[str, t.Any] = {
+        "mode": mode,
+        "expected_connected": expected_connected,
+        "expected_connected_during": expected_connected_during,
+        "recovery_min_sec": recovery_min_sec,
+        "lookback_sec": lookback_sec,
+    }
+    if impacted_lanes is not None:
+        params["impacted_lanes"] = impacted_lanes
+    if window_start is not None:
+        params["window_start"] = window_start
+    if window_end is not None:
+        params["window_end"] = window_end
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_HRT_SESSION_STAT_CHECK,
+        check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
 def create_fpf_hrt_system_memory_check(
     hosts: t.Optional[t.List[str]] = None,
     entity_desc: t.Optional[str] = None,
@@ -2482,6 +2586,7 @@ def create_fpf_host_spray_check(
     max_spread_gbps: t.Optional[float] = None,
     impacted_lanes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
     impacted_max_gbps: t.Optional[float] = None,
+    all_samples: bool = False,
     lookback_sec: int = 900,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
@@ -2499,10 +2604,23 @@ def create_fpf_host_spray_check(
         (default 2 Gbps) — the spraying-fairness bound.
     Only explicitly provided params are emitted; the rest fall back to the
     health check's own defaults (which read fpf_thresholds.ACTIVE).
+
+    Args:
+        all_samples: When False (default) the check evaluates only each lane's
+            LATEST sample in the window (transform ``...,latest`` — a single
+            point-in-time snapshot of egress fairness). When True the
+            ``latest`` reducer is dropped from the transform so EVERY sample
+            across the window is returned for ALL beth lanes (beth0-3) of every
+            host, and the check asserts the per-lane floor (Signal 1) + spread
+            (Signal 2) hold on EACH sample independently — failing if ANY single
+            sample on ANY lane/host dips below the floor or breaks the spread.
+            Use for sustained-fairness validation over a longevity window.
     """
     params: t.Dict[str, t.Any] = {
         "lookback_sec": lookback_sec,
     }
+    if all_samples:
+        params["all_samples"] = True
     if hosts is not None:
         params["hosts"] = hosts
     if entity_desc is not None:

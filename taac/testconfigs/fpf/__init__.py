@@ -41,6 +41,39 @@ from taac.testconfigs.fpf.fpf_tc26_qsfp_service_restart import (
 from taac.testconfigs.fpf.fpf_tc27_agent_coldboot import (
     TEST_CONFIG as FPF_TC27_AGENT_COLDBOOT,
 )
+from taac.testconfigs.fpf.fpf_tc28_fsdb_kill import (
+    TEST_CONFIG as FPF_TC28_FSDB_KILL,
+)
+from taac.testconfigs.fpf.fpf_tc29_fsdb_gr_stop30_reenable import (
+    TEST_CONFIG as FPF_TC29_FSDB_GR_STOP30_REENABLE,
+)
+from taac.testconfigs.fpf.fpf_tc30_fsdb_gr_stop180_no_reenable import (
+    TEST_CONFIG as FPF_TC30_FSDB_GR_STOP180_NO_REENABLE,
+)
+from taac.testconfigs.fpf.fpf_tc31_fsdb_enable_recover import (
+    TEST_CONFIG as FPF_TC31_FSDB_ENABLE_RECOVER,
+)
+from taac.testconfigs.fpf.fpf_tc32_downlink_flaps import (
+    TEST_CONFIG as FPF_TC32_DOWNLINK_FLAPS,
+)
+from taac.testconfigs.fpf.fpf_tc33_gtsw_stsw_links_down import (
+    TEST_CONFIG as FPF_TC33_GTSW_STSW_LINKS_DOWN,
+)
+from taac.testconfigs.fpf.fpf_tc34_stsw_drain_reinject import (
+    TEST_CONFIG as FPF_TC34_STSW_DRAIN_REINJECT,
+)
+from taac.testconfigs.fpf.fpf_tc35_stsw_undrain_reinject import (
+    TEST_CONFIG as FPF_TC35_STSW_UNDRAIN_REINJECT,
+)
+from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
+    TEST_CONFIG as FPF_TC36_STSW_ALL_CONNECTIONS_DOWN,
+)
+from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
+    TEST_CONFIG as FPF_TC37_NIC_SIDE_LINK_FLAP,
+)
+from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
+    TEST_CONFIG as FPF_TC38_PERSISTENT_NDP_CLEAR,
+)
 
 __all__ = [
     "FPF_STRESS_TEST_CONFIG",
@@ -56,4 +89,15 @@ __all__ = [
     "FPF_TC25_WEDGE_AGENT_RESTART",
     "FPF_TC26_QSFP_SERVICE_RESTART",
     "FPF_TC27_AGENT_COLDBOOT",
+    "FPF_TC28_FSDB_KILL",
+    "FPF_TC29_FSDB_GR_STOP30_REENABLE",
+    "FPF_TC30_FSDB_GR_STOP180_NO_REENABLE",
+    "FPF_TC31_FSDB_ENABLE_RECOVER",
+    "FPF_TC32_DOWNLINK_FLAPS",
+    "FPF_TC33_GTSW_STSW_LINKS_DOWN",
+    "FPF_TC34_STSW_DRAIN_REINJECT",
+    "FPF_TC35_STSW_UNDRAIN_REINJECT",
+    "FPF_TC36_STSW_ALL_CONNECTIONS_DOWN",
+    "FPF_TC37_NIC_SIDE_LINK_FLAP",
+    "FPF_TC38_PERSISTENT_NDP_CLEAR",
 ]

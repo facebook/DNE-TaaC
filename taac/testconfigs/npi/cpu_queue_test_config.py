@@ -12,6 +12,9 @@ import asyncio
 import json
 
 from ixia.ixia import types as ixia_types
+from taac.libs.custom_payload_registry import (
+    register_custom_frame_payload,
+)
 from taac.packet_headers import (
     ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
     ARP_RESPONSE_BCAST_TRAFFIC_PACKET_HEADERS,
@@ -79,6 +82,48 @@ from taac.task_definitions import (
 from taac.utils.netwhoami_utils import fetch_whoami
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
+
+
+# Valid 28-byte ARP body bytes (RFC 826 over Ethernet/IPv4) injected into the
+# 3 ARP traffic items via the custom-payload registry. With only an Ethernet
+# header in the explicit packet_headers stack and the IxNetwork incrementByte
+# default fill, the silicon rejects every frame at ingress validation
+# (eth1/13/3.in_discards grows at the full IXIA Tx rate). Supplying a real
+# ARP body lets the silicon classify the frame instead of dropping it.
+#
+# Body layout (28 bytes):
+#   htype=0001 ptype=0800 hlen=06 plen=04 oper=<01 req | 02 reply>
+#   SHA = 00:11:01:00:00:01   (DEFAULT_SRC_MAC_ADDRESS, the IXIA-side MAC)
+#   SPA = 10.0.254.1          (synthetic IXIA-side IPv4)
+#   THA = 00:00:00:00:00:00   (request) or 00:11:01:00:00:02 (reply, fake DUT MAC)
+#   TPA = 10.0.254.254        (synthetic DUT-side IPv4)
+#
+# The synthetic IPs aren't on any real DUT interface subnet — the silicon's
+# structural ARP body validation should still pass (htype/ptype/hlen/plen/oper
+# all valid), allowing CoPP to classify the frame as ARP and punt to its
+# configured queue. Whether the silicon's "create ARP entry" path also
+# accepts these (Pavan/Midhun's request) depends on whether the SPA/TPA must
+# match a DUT-known subnet — if so, we'd need to template the IPs to match
+# the actual `eth1/13/3` address.
+_ARP_REQUEST_BODY_HEX = "00010800060400010011010000010a00fe010000000000000a00fefe"
+_ARP_RESPONSE_BODY_HEX = "00010800060400020011010000010a00fe010011010000020a00fefe"
+_ARP_RESPONSE_BCAST_BODY_HEX = _ARP_RESPONSE_BODY_HEX
+
+
+def _register_arp_custom_payloads() -> None:
+    """Wire the 28-byte ARP body bytes into the IXIA custom-payload registry.
+
+    Invoked from `create_npi_cpu_queue_test_config(...)` so the registration is
+    bound to test config construction rather than executing as a module-import
+    side effect.
+    """
+    register_custom_frame_payload("TEST_RAW_ARP_REQUEST_TRAFFIC", _ARP_REQUEST_BODY_HEX)
+    register_custom_frame_payload(
+        "TEST_RAW_ARP_RESPONSE_TRAFFIC", _ARP_RESPONSE_BODY_HEX
+    )
+    register_custom_frame_payload(
+        "TEST_RAW_ARP_RESPONSE_BCAST_TRAFFIC", _ARP_RESPONSE_BCAST_BODY_HEX
+    )
 
 
 def get_cpu_queue_constants(hostname: str):
@@ -213,6 +258,10 @@ def create_npi_cpu_queue_test_config(
     Returns:
         TestConfig: The DC-TypeF NPI CPU queue TestConfig.
     """
+    # Wire ARP body bytes into the IXIA custom-payload registry. Bound to
+    # test-config construction (not a module-import side effect) so the
+    # IXIA wrapper sees the entries only when this test config is built.
+    _register_arp_custom_payloads()
     # Get hardware-specific CPU queue constants
     low_queue, mid_queue, high_queue = get_cpu_queue_constants(device_name)
     # Create and return the complete test configuration
@@ -1000,6 +1049,14 @@ def create_npi_cpu_queue_test_config(
                 traffic_type=ixia_types.TrafficType.RAW,
                 bidirectional=False,
                 packet_headers=ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
+                # ARP-on-Ethernet is exactly 14 (eth) + 28 (arp) = 42 B;
+                # pad to the 64 B Ethernet minimum so the silicon parses it
+                # as a real ARP rather than rejecting it as malformed at
+                # ingress (in_discards). Without this we inherit IXIA's
+                # 400 B RAW default, which the silicon drops as invalid.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=64
+                ),
             ),
             taac_types.BasicTrafficItemConfig(
                 src_endpoints=[
@@ -1020,6 +1077,10 @@ def create_npi_cpu_queue_test_config(
                 traffic_type=ixia_types.TrafficType.RAW,
                 bidirectional=False,
                 packet_headers=ARP_RESPONSE_TRAFFIC_PACKET_HEADERS,
+                # Standard ARP frame size; see TEST_RAW_ARP_REQUEST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=64
+                ),
             ),
             # CPU_019: ARP-response with broadcast DMAC. Same payload as
             # TEST_RAW_ARP_RESPONSE_TRAFFIC (CPU_018) but with the Ethernet
@@ -1043,6 +1104,10 @@ def create_npi_cpu_queue_test_config(
                 traffic_type=ixia_types.TrafficType.RAW,
                 bidirectional=False,
                 packet_headers=ARP_RESPONSE_BCAST_TRAFFIC_PACKET_HEADERS,
+                # Standard ARP frame size; see TEST_RAW_ARP_REQUEST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=64
+                ),
             ),
             taac_types.BasicTrafficItemConfig(
                 src_endpoints=[
@@ -1464,6 +1529,13 @@ def create_npi_cpu_queue_test_config(
                 line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
                 line_rate=2000,
                 traffic_type=ixia_types.TrafficType.RAW,
+                # 14 (eth) + 40 (ipv6) + 24 (NS body) + 8 (NDP source-LL
+                # option) = 86 B; pin frame size so we don't inherit IXIA's
+                # 400 B RAW default and pollute the test with oversized
+                # frames.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=86
+                ),
                 bidirectional=False,
                 packet_headers=NDP_NS_UNICAST_TRAFFIC_PACKET_HEADERS,
             ),
@@ -1485,6 +1557,10 @@ def create_npi_cpu_queue_test_config(
                 line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
                 line_rate=2000,
                 traffic_type=ixia_types.TrafficType.RAW,
+                # Pin NDP NS frame size; see TEST_NDP_NS_UNICAST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=86
+                ),
                 bidirectional=False,
                 packet_headers=NDP_NS_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS,
             ),
@@ -1505,6 +1581,10 @@ def create_npi_cpu_queue_test_config(
                 line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
                 line_rate=2000,
                 traffic_type=ixia_types.TrafficType.RAW,
+                # NDP NA also 86 B; see TEST_NDP_NS_UNICAST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=86
+                ),
                 bidirectional=False,
                 packet_headers=NDP_NA_UNICAST_TRAFFIC_PACKET_HEADERS,
             ),
@@ -1525,6 +1605,10 @@ def create_npi_cpu_queue_test_config(
                 line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
                 line_rate=2000,
                 traffic_type=ixia_types.TrafficType.RAW,
+                # NDP RS at 86 B; see TEST_NDP_NS_UNICAST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=86
+                ),
                 bidirectional=False,
                 packet_headers=NDP_RS_UNICAST_TRAFFIC_PACKET_HEADERS,
             ),
@@ -1545,6 +1629,10 @@ def create_npi_cpu_queue_test_config(
                 line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
                 line_rate=2000,
                 traffic_type=ixia_types.TrafficType.RAW,
+                # NDP RA at 86 B; see TEST_NDP_NS_UNICAST_TRAFFIC.
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED, fixed_size=86
+                ),
                 bidirectional=False,
                 packet_headers=NDP_RA_UNICAST_TRAFFIC_PACKET_HEADERS,
             ),

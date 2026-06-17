@@ -1,10 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import os
 import time
 import typing as t
 
-from taac.internal.ods_utils import async_query_ods
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if not TAAC_OSS:
+    from taac.internal.ods_utils import async_query_ods
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
@@ -50,23 +54,37 @@ def _parse_memory_value(mem_str: str) -> int:
         return int(mem_str)
 
 
-async def async_get_memory_current_pct(
-    hostname: str,
-    slice: str,
-    start_time: int,
-    end_time: int,
-    pct: t.Optional[int] = None,
-) -> float:
-    key_desc = f"cgroup.slice.{slice}.memory.current"
-    result = await async_query_ods(
-        entity_desc=hostname,
-        key_desc=key_desc,
-        transform_desc=f"pct({pct})" if pct else "",
-        start_time=start_time,
-        end_time=end_time,
-    )
-    LOGGER.debug(result)
-    return float(list(result[hostname][key_desc].values())[-1])
+if not TAAC_OSS:
+
+    async def async_get_memory_current_pct(
+        hostname: str,
+        slice: str,
+        start_time: int,
+        end_time: int,
+        pct: t.Optional[int] = None,
+    ) -> float:
+        key_desc = f"cgroup.slice.{slice}.memory.current"
+        result = await async_query_ods(
+            entity_desc=hostname,
+            key_desc=key_desc,
+            transform_desc=f"pct({pct})" if pct else "",
+            start_time=start_time,
+            end_time=end_time,
+        )
+        LOGGER.debug(result)
+        return float(list(result[hostname][key_desc].values())[-1])
+else:
+    # OSS stub - this function requires Meta-internal ODS
+    async def async_get_memory_current_pct(
+        hostname: str,
+        slice: str,
+        start_time: int,
+        end_time: int,
+        pct: t.Optional[int] = None,
+    ) -> float:
+        raise NotImplementedError(
+            "async_get_memory_current_pct requires Meta-internal ODS and is not available in OSS mode"
+        )
 
 
 async def async_collect_peak_cpu_memory(

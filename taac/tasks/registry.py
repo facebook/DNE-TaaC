@@ -1,51 +1,61 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import os
+import typing as t
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
-if not TAAC_OSS:
-    from taac.internal.tasks.ixia_diagnostics_collection_task import (
-        IxiaDiagnosticsCollectionTask,
+# Gate all internal tasks that have Meta-specific dependencies.
+# `t.TYPE_CHECKING or` keeps the real classes visible to Pyre (which can't
+# statically resolve the runtime TAAC_OSS env check) so the conditional
+# TASK_REGISTRY.extend() below doesn't trip "may be uninitialized".
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from taac.internal.tasks.bgp_peer_group_config_task import (
+        GetEnforceFirstAsRejectsTask,
+        SetPeerGroupEnforceFirstAsTask,
+    )
+    from taac.internal.tasks.bgp_replace_peers_task import (
+        ReplaceBgpPeersTask,
+        RestoreBgpPeersTask,
+    )
+    from taac.internal.tasks.bgp_set_peer_groups_policy_task import (
+        BgpSetPeerGroupsPolicyTask,
+    )
+    from taac.internal.tasks.bgp_set_peers_policy_task import (
+        BgpSetPeersPolicyTask,
+    )
+    from taac.internal.tasks.bgp_set_route_filter_task import (
+        BgpSetRouteFilterTask,
+    )
+    from taac.internal.tasks.bgp_setting_config_task import (
+        DisableMedComparisonTask,
+        EnableMedComparisonTask,
+        SetBgpSettingConfigTask,
+    )
+    from taac.internal.tasks.bgp_verify_received_routes_task import (
+        BgpVerifyReceivedRoutesTask,
+    )
+    from taac.internal.tasks.bgp_weight_policy_task import (
+        AddBgpWeightPolicyTask,
+        RemoveBgpWeightPolicyTask,
+    )
+    from taac.internal.tasks.device_provisioning_task import (
+        DeviceProvisioningTask,
     )
     from taac.internal.tasks.openr_route_action_task import (
         OpenRRouteActionTask,
     )
-from taac.internal.tasks.bgp_peer_group_config_task import (
-    GetEnforceFirstAsRejectsTask,
-    SetPeerGroupEnforceFirstAsTask,
-)
-from taac.internal.tasks.bgp_replace_peers_task import (
-    ReplaceBgpPeersTask,
-    RestoreBgpPeersTask,
-)
-from taac.internal.tasks.bgp_set_peer_groups_policy_task import (
-    BgpSetPeerGroupsPolicyTask,
-)
-from taac.internal.tasks.bgp_set_peers_policy_task import (
-    BgpSetPeersPolicyTask,
-)
-from taac.internal.tasks.bgp_set_route_filter_task import (
-    BgpSetRouteFilterTask,
-)
-from taac.internal.tasks.bgp_setting_config_task import (
-    DisableMedComparisonTask,
-    EnableMedComparisonTask,
-    SetBgpSettingConfigTask,
-)
-from taac.internal.tasks.bgp_verify_received_routes_task import (
-    BgpVerifyReceivedRoutesTask,
-)
-from taac.internal.tasks.bgp_weight_policy_task import (
-    AddBgpWeightPolicyTask,
-    RemoveBgpWeightPolicyTask,
-)
-from taac.internal.tasks.device_provisioning_task import (
-    DeviceProvisioningTask,
-)
-from taac.internal.tasks.ixia_preflight_task import (
-    IxiaPreflightTask,
-)
+
+    # Meta-internal deps (internal.driver / netcastle.paramiko_utils): not shipped in OSS.
+    from taac.tasks.deploy_exabgp_task import (
+        CleanupExaBGPTask,
+        DeployExaBGPTask,
+    )
+    from taac.tasks.fpf_collector_tasks import (
+        FpfStartCollectorsTask,
+        FpfStopCollectorsTask,
+    )
+    from taac.tasks.full_reboot_task import FullRebootTask
 from taac.tasks.all import (
     AddBgpPolicyMatchPrefixToPropagateRoutes,
     AddStressStaticRoutes,
@@ -70,6 +80,7 @@ from taac.tasks.all import (
     WaitForAgentConvergenceTask,
     WaitForBgpConvergenceTask,
 )
+from taac.tasks.base_task import BaseTask
 from taac.tasks.bgp_policy_generator_task import (
     GenerateCommunityBgpPolicyAndInjectTask,
     GenerateCommunityBgpPolicyTask,
@@ -79,10 +90,6 @@ from taac.tasks.bgp_tcpdump_task import BgpTcpdumpTask
 from taac.tasks.configure_bgpcpp_startup_task import (
     ConfigureBgpcppStartupTask,
 )
-from taac.tasks.deploy_exabgp_task import (
-    CleanupExaBGPTask,
-    DeployExaBGPTask,
-)
 from taac.tasks.eos import (
     AddEosBgpPrefixListToPeerGroup,
     BackupRunningConfigTask,
@@ -90,15 +97,10 @@ from taac.tasks.eos import (
     CreateEosBgpPeerGroup,
     RestoreRunningConfigTask,
 )
-from taac.tasks.fpf_collector_tasks import (
-    FpfStartCollectorsTask,
-    FpfStopCollectorsTask,
-)
 from taac.tasks.fpf_ib_traffic_task import (
     FpfStartIbTrafficTask,
     FpfStopIbTrafficTask,
 )
-from taac.tasks.full_reboot_task import FullRebootTask
 from taac.tasks.interface_ip_configuration_task import (
     InterfaceIpCleanupTask,
     InterfaceIpConfigurationTask,
@@ -130,13 +132,12 @@ from taac.tasks.verify_best_path_changes_task import (
 )
 
 
-TASK_REGISTRY = [
+TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     AristaDaemonControlTask,
     AssertThriftRateLimitEnabledTask,
     BgpTcpdumpTask,
     CoopUnregisterPatchersTask,
     DeployEosImageTask,
-    DeviceProvisioningTask,
     InterfaceIpCleanupTask,
     InterfaceIpConfigurationTask,
     WaitForAgentConvergenceTask,
@@ -170,48 +171,50 @@ TASK_REGISTRY = [
     IxiaModifyBgpPrefixesCommunities,
     IxiaSetBgpPrefixesLocalPreference,
     IxiaPacketCaptureTask,
-    BgpSetRouteFilterTask,
-    BgpSetPeerGroupsPolicyTask,
-    BgpSetPeersPolicyTask,
-    BgpVerifyReceivedRoutesTask,
     NexthopGroupPoll,
     ThriftStressPeriodicTask,
     AristaCreateFileFromConfig,
     ValidateBgpcppConfigOnDevice,
-    AddBgpWeightPolicyTask,
-    RemoveBgpWeightPolicyTask,
-    ReplaceBgpPeersTask,
-    RestoreBgpPeersTask,
-    SetBgpSettingConfigTask,
-    EnableMedComparisonTask,
-    DisableMedComparisonTask,
-    SetPeerGroupEnforceFirstAsTask,
-    GetEnforceFirstAsRejectsTask,
     ConfigureBgpcppStartupTask,
+    ConfigureEosParallelBgpPeers,
+    VerifyBestPathChangesTask,
+    SetPortChannelMinLinkPatcherTask,
     AddEosBgpPrefixListToPeerGroup,
     BackupRunningConfigTask,
-    ConfigureEosParallelBgpPeers,
     CreateEosBgpPeerGroup,
     RestoreRunningConfigTask,
-    VerifyBestPathChangesTask,
-    DeployExaBGPTask,
-    CleanupExaBGPTask,
-    IxiaPreflightTask,
     GenerateCommunityBgpPolicyTask,
     GenerateMultipleCommunityBgpPoliciesTask,
     GenerateCommunityBgpPolicyAndInjectTask,
-    SetPortChannelMinLinkPatcherTask,
-    FullRebootTask,
-    FpfStartCollectorsTask,
-    FpfStopCollectorsTask,
     FpfStartIbTrafficTask,
     FpfStopIbTrafficTask,
 ]
 
+# Add internal tasks only when not in OSS mode
 if not TAAC_OSS:
-    # pyre-fixme[6]: For 1st argument expected `Type[Union[AddBgpPolicyMatchPrefixToP...
-    TASK_REGISTRY.append(OpenRRouteActionTask)
-    # pyre-fixme[6]: For 1st argument expected `Type[Union[AddBgpPolicyMatchPrefixToP...
-    TASK_REGISTRY.append(IxiaDiagnosticsCollectionTask)
+    TASK_REGISTRY.extend(
+        [
+            OpenRRouteActionTask,
+            DeviceProvisioningTask,
+            BgpSetRouteFilterTask,
+            BgpSetPeerGroupsPolicyTask,
+            BgpSetPeersPolicyTask,
+            BgpVerifyReceivedRoutesTask,
+            AddBgpWeightPolicyTask,
+            RemoveBgpWeightPolicyTask,
+            ReplaceBgpPeersTask,
+            RestoreBgpPeersTask,
+            SetBgpSettingConfigTask,
+            EnableMedComparisonTask,
+            DisableMedComparisonTask,
+            SetPeerGroupEnforceFirstAsTask,
+            GetEnforceFirstAsRejectsTask,
+            FpfStartCollectorsTask,
+            FpfStopCollectorsTask,
+            DeployExaBGPTask,
+            CleanupExaBGPTask,
+            FullRebootTask,
+        ]
+    )
 
 TASK_NAME_TO_CLASS = {task.NAME: task for task in TASK_REGISTRY}

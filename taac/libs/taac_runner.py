@@ -10,9 +10,22 @@ import time
 import typing as t
 import uuid
 from datetime import datetime
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
 from urllib.parse import quote  # noqa: F401
 
-from neteng.netcastle.exceptions import TestbedError
+if not TAAC_OSS:
+    from neteng.netcastle.exceptions import TestbedError
+else:
+    # OSS stub — netcastle isn't shipped. The only use site is an
+    # `except TestbedError:` precheck-failure handler against Meta-internal
+    # testbeds; nothing under OSS raises this, so the handler simply never
+    # matches.
+    class TestbedError(Exception):
+        pass
+
+
 from taac.constants import (
     DNE_LOG_DIR,
     FAILED_HC_STATUSES,
@@ -39,15 +52,42 @@ from taac.health_checks.all_health_checks import (
     SNAPSHOT_HEALTH_CHECKS,
 )
 from taac.ixia.taac_ixia import TaacIxia
-from taac.libs.fpf.fpf_collector_registry import (
-    set_test_case_start_time,
-)
+
+if not TAAC_OSS:
+    from taac.libs.fpf.fpf_collector_registry import (
+        set_test_case_start_time,
+    )
+else:
+    # OSS stub - taac.libs.fpf.* pulls in neteng.netcastle / taac.internal
+    # via fpf_stress_checks and friends. FPF collector is for Meta-internal
+    # performance flows; the recorded start time is read only by FPF
+    # collectors, which aren't registered under OSS, so a no-op stub is
+    # safe and the call site simply has no observable effect.
+    def set_test_case_start_time(*args, **kwargs):  # type: ignore
+        """OSS stub - FPF collector isn't shipped."""
+        pass
+
+
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.libs.periodic_task_executor import PeriodicTaskExecutor
 from taac.libs.test_setup_orchestrator import (
     TestSetupOrchestrator,
 )
-from taac.stages.stage_definitions import create_steps_stage
+
+if not TAAC_OSS:
+    from taac.stages.stage_definitions import create_steps_stage
+else:
+    # OSS stub - taac.stages package isn't vendored in this slice
+    # (new in upstream main and Meta-internal-only). Stub raises
+    # NotImplementedError so any OSS code path that constructs a
+    # steps-stage fails clearly.
+    def create_steps_stage(*args, **kwargs):  # type: ignore
+        raise NotImplementedError(
+            "create_steps_stage requires Meta-internal taac.stages.stage_definitions; "
+            "not shipped under OSS."
+        )
+
+
 from neteng.test_infra.dne.taac.steps.all_steps import NAME_TO_STEP, STEP_NAME_TO_INPUT
 from taac.steps.step import Step
 from taac.steps.step_definitions import ValidationStep
@@ -92,16 +132,31 @@ from taac.utils.taac_test_summary import (
     SectionStatus,
     TaacTestSummary,
 )
-from taac.utp.npi_result_publisher import (
-    async_publish_npi_aggregated_result,
-    extract_scope_from_device,
-)
-from taac.utp.utp_test_catalog import UTP_TEST_CATALOG
+
+if not TAAC_OSS:
+    from taac.utp.npi_result_publisher import (
+        async_publish_npi_aggregated_result,
+        extract_scope_from_device,
+    )
+else:
+    # OSS stubs - NPI result publishing requires Meta-internal XDB
+    async def async_publish_npi_aggregated_result(*args, **kwargs) -> None:  # type: ignore
+        """OSS stub - NPI result publishing not available"""
+        pass
+
+    def extract_scope_from_device(test_device: t.Any) -> t.Dict[str, str]:  # type: ignore
+        """OSS stub - returns empty scope"""
+        return {"network_type": "", "device_role": "", "platform": ""}
+
+
+if not TAAC_OSS:
+    from taac.utp.utp_test_catalog import UTP_TEST_CATALOG
+else:
+    # OSS stub - UTP catalog lives under Meta-internal taac.utp
+    UTP_TEST_CATALOG: t.List[t.Any] = []
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from tabulate import tabulate
-
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 if not TAAC_OSS:
     from taac.internal.netwhoami_utils import (
@@ -417,6 +472,12 @@ class TaacRunner:
         """
         startup_checks = self.test_config.startup_checks
         if not startup_checks:
+            return
+
+        if TAAC_OSS:
+            self.logger.warning(
+                "Startup checks skipped in OSS mode (requires ValidationStep with Meta-internal dependencies)"
+            )
             return
 
         log_section("STARTUP HEALTH CHECKS", logger=self.logger)

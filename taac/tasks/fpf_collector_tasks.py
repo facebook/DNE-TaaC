@@ -36,6 +36,7 @@ from taac.libs.fpf.fpf_stress_checks import (
     BgpRibCollector,
     FsdbRibmapCollector,
     HrtBulkCollector,
+    HrtFsdbSessionCollector,
     HrtPlaneStatusCollector,
     HrtRemoteFailureCollector,
     ProdHrtPrefixCollector,
@@ -121,6 +122,35 @@ class FpfStartCollectorsTask(BaseTask):
         register_collector("hrt", hrt_collector)
         register_collector("bgp", bgp_collector)
         register_collector("hrt_remote_failure", hrt_remote_failure_collector)
+
+        # HRT FSDB-session-count collector (getFsdbSessions CONNECTED census):
+        # tracks the per-host CONNECTED session count + per-lane breakdown for
+        # the FpfHrtSessionStatHealthCheck (disruption / stable contracts). HRT
+        # runs only on rtptest GPU hosts. Enabled by default when GPU hosts are
+        # present; mirrors how prod_hrt_prefix is conditionally started. Polls
+        # every 3s (independent of poll_interval_sec) so a sub-minute drop +
+        # recovery is captured. One collector keyed off the monitored GPU host.
+        enable_fsdb_session = bool(params.get("enable_fsdb_session_collector", True))
+        gpu_hosts = [h for h in hosts if str(h).startswith("rtptest")]
+        if enable_fsdb_session and gpu_hosts:
+            session_host: str = params.get("fsdb_session_host", gpu_hosts[0])
+            session_poll_sec: float = float(
+                params.get("fsdb_session_poll_interval_sec", 3.0)
+            )
+            session_expected: int = int(params.get("fsdb_session_expected", 32))
+            fsdb_session_collector = HrtFsdbSessionCollector(
+                host=session_host,
+                expected_connected=session_expected,
+                interval_sec=session_poll_sec,
+            )
+            fsdb_session_collector.set_append_mode(True)
+            fsdb_session_collector.start()
+            register_collector("hrt_fsdb_session", fsdb_session_collector)
+            logger.info(
+                f"[FpfStartCollectors] HRT FSDB-session collector started on "
+                f"{session_host} (expected {session_expected} CONNECTED, "
+                f"poll {session_poll_sec:.0f}s)"
+            )
 
         # Optional: production-prefix reachability collector. Only started when
         # the caller supplies prod_prefixes (list) + the host + GPU device_id —

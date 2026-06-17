@@ -3184,6 +3184,10 @@ def create_fpf_start_collectors_task(
     prod_prefix_device_id: int = 0,
     fsdb_mode: str = "ribmap",
     allow_baseline_failures: bool = False,
+    enable_fsdb_session_collector: bool = True,
+    fsdb_session_host: t.Optional[str] = None,
+    fsdb_session_poll_interval_sec: float = 3.0,
+    fsdb_session_expected: int = 32,
 ) -> Task:
     """Create a setup task that starts long-lived FPF collectors.
 
@@ -3201,6 +3205,13 @@ def create_fpf_start_collectors_task(
     per-prefix plane reachability of those production VF prefixes on
     ``prod_prefix_host`` (defaults to hosts[0]) GPU ``prod_prefix_device_id``.
     This is the collector validated by FpfProdHrtPrefixStabilityHealthCheck.
+
+    The HRT FSDB-session-count collector (HrtFsdbSessionCollector) is started by
+    default whenever rtptest GPU hosts are present (``enable_fsdb_session_collector``,
+    default True), polling ``getFsdbSessions()`` every
+    ``fsdb_session_poll_interval_sec`` (default 3s) on ``fsdb_session_host``
+    (defaults to the first rtptest host) to record the CONNECTED census + per-lane
+    breakdown consumed by FpfHrtSessionStatHealthCheck.
     """
     params: t.Dict[str, t.Any] = {
         "gtsws": gtsws,
@@ -3210,7 +3221,12 @@ def create_fpf_start_collectors_task(
         "baseline_collection_sec": baseline_collection_sec,
         "fsdb_mode": fsdb_mode,
         "allow_baseline_failures": allow_baseline_failures,
+        "enable_fsdb_session_collector": enable_fsdb_session_collector,
+        "fsdb_session_poll_interval_sec": fsdb_session_poll_interval_sec,
+        "fsdb_session_expected": fsdb_session_expected,
     }
+    if fsdb_session_host is not None:
+        params["fsdb_session_host"] = fsdb_session_host
     if prod_prefixes:
         params["prod_prefixes"] = prod_prefixes
         params["prod_prefix_host"] = prod_prefix_host or (hosts[0] if hosts else "")

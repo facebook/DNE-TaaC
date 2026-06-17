@@ -362,6 +362,12 @@ BGP_PORT: str = "179"
 RDMA_PORT: str = "4791"
 DHCPV6_MULTICAST_ADDR: str = "fe80::a00:27ff:fefe:8f95"
 DHCPV6_SERVER_MULTICAST_ADDR: str = "ff02::1:2"
+# Ethernet multicast MAC for DHCPv6 servers (ff02::1:2) per RFC 2464 §7
+# (33:33: prefix + low-32-bits of IPv6 multicast addr). Used as Ethernet
+# DMAC when the IPv6 DIP is DHCPV6_SERVER_MULTICAST_ADDR; sending a
+# multicast IPv6 destination wrapped in a unicast Ethernet DMAC produces
+# a malformed frame at L2.
+DHCPV6_SERVER_MULTICAST_MAC: str = "33:33:00:01:00:02"
 DHCPV6_SERVER_PORT: str = "547"
 DHCPV6_RELAY_PORT: str = "546"
 DHCPV4_BROADCAST_ADDR: str = "255.255.255.255"

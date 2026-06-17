@@ -36,7 +36,24 @@ from typing import (
 # =============================================================================
 # Third-party (PyPI / OSS-compatible)
 # =============================================================================
-import bunch
+if t.TYPE_CHECKING:
+    # Keep Pyre on the real `bunch` types; the runtime fallback below would
+    # otherwise widen `bunch.Bunch` to `Bunch | SimpleNamespace`, which breaks
+    # callers (and the `import *` re-export in dne/drivers/fboss_switch.py).
+    import bunch
+else:
+    try:
+        import bunch
+    except ImportError:
+        # bunch is abandoned (last updated 2011), use types.SimpleNamespace as replacement
+        from types import SimpleNamespace as Bunch
+
+        class BunchModule:
+            """Compatibility wrapper for abandoned bunch module"""
+
+            Bunch = Bunch
+
+        bunch = BunchModule()
 
 # =============================================================================
 # FBOSS thrift types & clients (already OSS'd)
@@ -44,11 +61,56 @@ import bunch
 import neteng.fboss.bgp_thrift.types as fboss_bgp_thrift_types
 import neteng.fboss.fsdb.types as fsdb_types
 import pexpect
-from fboss.fb_thrift_clients import FbossAgentClient, FbossAgentClientWrapper
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+# `t.TYPE_CHECKING or` keeps the real FbossAgentClient visible to Pyre so
+# `with self._get_fboss_agent_client() as client:` type-checks as a context
+# manager (the OSS stub below is a runtime-only fallback).
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from fboss.fb_thrift_clients import FbossAgentClient, FbossAgentClientWrapper
+else:
+    # OSS stubs - fboss.fb_thrift_clients is Meta-internal
+    # Use FbossCtrl from OSS bindings as base
+    class FbossAgentClient:  # type: ignore
+        """OSS stub - using FbossCtrl from neteng.fboss.ctrl.clients"""
+
+        def __init__(self, hostname: str, port: int = 5909, timeout: int = 30):
+            from neteng.fboss.ctrl.clients import FbossCtrl
+
+            self.hostname = hostname
+            self.port = port
+            self.timeout = timeout
+            self._client = FbossCtrl
+
+    class FbossAgentClientWrapper:  # type: ignore
+        """OSS stub - context manager wrapper for FbossCtrl"""
+
+        def __init__(self, host: str, timeout: int = 30):
+            self.host = host
+            self.timeout = timeout
+            self._client = None
+
+        def __enter__(self):
+            from neteng.fboss.ctrl.clients import FbossCtrl
+
+            # In OSS, return the client class - actual instantiation happens elsewhere
+            return FbossCtrl
+
+        def __exit__(self, *args):
+            pass
+
+
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService
-from neteng.fboss.bgp_thrift.types import TBgpPeerState, TBgpSession, TOriginatedRoute
+from neteng.fboss.bgp_thrift.types import (
+    TBgpPeerState,
+    TBgpSession,
+    TGetUpdateGroupInfoRequest,
+    TGetUpdateGroupInfoResponse,
+    TOriginatedRoute,
+)
 from neteng.fboss.ctrl.clients import FbossCtrl
 from neteng.fboss.ctrl.types import (
     AggregatePortThrift,
@@ -154,8 +216,6 @@ from taac.utils.oss_taac_lib_utils import (
     to_fb_fqdn,
     to_fb_uqdn,
 )
-
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 if not TAAC_OSS:
     from openr.py.openr.cli.utils.commands import OpenrCtrlCmd
@@ -1802,6 +1862,14 @@ class FbossSwitch(AbstractSwitch):
         async with await self._get_bgp_client() as bgp_client:
             return await bgp_client.getBgpSessions()
 
+    async def async_get_update_group_info(
+        self, group_id: t.Optional[int] = None
+    ) -> TGetUpdateGroupInfoResponse:
+        """Get BGP++ Update Group info (the API behind ``show bgpcpp update-group``)."""
+        request = TGetUpdateGroupInfoRequest(group_id=group_id)
+        async with await self._get_bgp_client() as bgp_client:
+            return await bgp_client.getUpdateGroupInfo(request)
+
     @async_retryable(
         retries=30,
         sleep_time=2,
@@ -2508,11 +2576,15 @@ class FbossSwitch(AbstractSwitch):
         return True
 
     async def async_do_rapid_interface_flaps(
-        self, interface_names: Tuple[str], interval_to_link_up: int, total_flaps: int
+        self,
+        interface_names: Tuple[str],
+        interval_to_link_up: int,
+        total_flaps: int,
+        down_time_sec: float = 0.1,
     ) -> None:
         for _ in range(total_flaps):
             interface_names_str = " ".join(interface_names)
-            flap_command = f"wedge_qsfp_util -tx_disable {interface_names_str} && sleep 0.1 && wedge_qsfp_util -tx_enable {interface_names_str}"
+            flap_command = f"wedge_qsfp_util -tx_disable {interface_names_str} && sleep {down_time_sec} && wedge_qsfp_util -tx_enable {interface_names_str}"
             await self.async_run_cmd_on_shell(flap_command)
             await asyncio.sleep(interval_to_link_up)
             self.logger.info("Flap command executed")
@@ -4384,12 +4456,16 @@ class FbossSwitch(AbstractSwitch):
         async with await self._get_bgp_client() as bgp_client:
             drain_state = await bgp_client.getDrainState()
             return {
-                "drain_state": drain_state.drain_state.name
-                if drain_state.drain_state is not None
-                else "UNKNOWN",
-                "drained_interfaces": list(drain_state.drained_interfaces)
-                if drain_state.drained_interfaces
-                else [],
+                "drain_state": (
+                    drain_state.drain_state.name
+                    if drain_state.drain_state is not None
+                    else "UNKNOWN"
+                ),
+                "drained_interfaces": (
+                    list(drain_state.drained_interfaces)
+                    if drain_state.drained_interfaces
+                    else []
+                ),
             }
 
     async def async_get_all_interface_names(

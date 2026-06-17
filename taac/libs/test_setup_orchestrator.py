@@ -45,6 +45,20 @@ _DEFAULT_IXIA_CONFIG_CACHE: taac_types.IxiaConfigCache = taac_types.IxiaConfigCa
 )
 
 
+# IIE-2 260610 soft recovery of the IXIA REST API tier (`ixnetworkweb`
+# platform app) when chassis hardware is healthy but the Jetty backend rejects
+# new `SessionAssistant` creation with 5xx. Default-on for every TestConfig
+# that does not opt out via an explicit
+# `ixia_recovery=IxiaRecovery(enabled=False)` override. TestConfigs that
+# intentionally exercise failure modes of `_create_basic_setup` (snake tests,
+# anything probing the connect path) MUST opt out.
+_DEFAULT_IXIA_RECOVERY: taac_types.IxiaRecovery = taac_types.IxiaRecovery(
+    enabled=True,
+    max_attempts=1,
+    cooldown_minutes=30,
+)
+
+
 class TestSetupOrchestrator:
     def __init__(
         self,
@@ -406,6 +420,13 @@ class TestSetupOrchestrator:
             getattr(self.test_config, "ixia_config_cache", None)
             or _DEFAULT_IXIA_CONFIG_CACHE
         )
+        # IIE-2 260610: default-on soft recovery of the ixnetworkweb platform
+        # app when SessionAssistant creation fails with 5xx. TestConfigs that
+        # intentionally exercise create_basic_setup failure modes must opt
+        # out with `ixia_recovery=IxiaRecovery(enabled=False)`.
+        ixia_recovery = (
+            getattr(self.test_config, "ixia_recovery", None) or _DEFAULT_IXIA_RECOVERY
+        )
         self.traffic_generator = TrafficGenerator(
             endpoints,
             basset_pool=self.test_config.basset_pool,
@@ -427,6 +448,7 @@ class TestSetupOrchestrator:
             skip_ixia_protocol_verification=self.test_config.skip_ixia_protocol_verification,
             ixia_protocol_verification_timeout=self.test_config.ixia_protocol_verification_timeout,
             ixia_config_cache=ixia_config_cache,
+            ixia_recovery=ixia_recovery,
         )
 
         _log(

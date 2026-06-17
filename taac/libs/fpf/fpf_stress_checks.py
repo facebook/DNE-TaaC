@@ -24,7 +24,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from neteng.netcastle.logger import get_root_logger
 from taac.internal.driver.fboss_switch_internal import (
@@ -1726,3 +1726,330 @@ class HrtPlaneStatusCollector(BaseCollector):
                     )
                 )
         return results
+
+
+# ---------------------------------------------------------------------------
+# HRT FSDB-Session-Count Collector (per-host CONNECTED session census)
+# ---------------------------------------------------------------------------
+
+
+def _session_is_connected(session: Any) -> bool:
+    return str(getattr(session, "state", None)) == "CONNECTED"
+
+
+@dataclass
+class HrtFsdbSessionRow:
+    """One poll of ``getFsdbSessions()`` on a single GPU host.
+
+    Each HRT FSDB session is keyed by (device_id = GPU, plane_id = lane). A
+    session is CONNECTED or not. ``connected`` is the total CONNECTED count
+    across all (gpu, lane); ``expected`` is the full census size (default
+    32 = 4 GPUs x 8 GTSWs). ``lane_connected`` / ``lane_total`` give the
+    per-lane breakdown (lane -> #CONNECTED / #sessions) so a check can assert
+    "lane 0 connected dropped to 0 while overall dropped to 28". ``error``
+    (non-empty) marks a poll where the HRT query failed — treated as null data
+    by the evaluator (not counted as a real 0).
+    """
+
+    timestamp: str
+    host: str
+    connected: int
+    expected: int
+    lane_connected: Dict[int, int] = field(default_factory=dict)
+    lane_total: Dict[int, int] = field(default_factory=dict)
+    error: str = ""
+
+
+@dataclass
+class FsdbSessionWindowResult:
+    """Structured verdict for an HRT FSDB-session-count evaluation window.
+
+    ``min_connected`` / ``max_connected`` bound the observed CONNECTED count
+    over the window (errored/null polls excluded). ``reached_expected`` is True
+    iff some in-window sample equalled ``expected_connected``. ``samples`` is the
+    number of non-null in-window samples; ``error_samples`` the null ones.
+    ``last_connected`` is the final non-null count. ``per_lane_min`` maps lane ->
+    min CONNECTED seen for that lane over the window (so churn on a specific lane
+    is observable). ``impacted_lane_churn`` maps each requested impacted lane to
+    whether its connected count was observed to drop below its lane_total.
+    """
+
+    host: str
+    samples: int
+    error_samples: int
+    min_connected: Optional[int]
+    max_connected: Optional[int]
+    last_connected: Optional[int]
+    reached_expected: bool
+    per_lane_min: Dict[int, int] = field(default_factory=dict)
+    impacted_lane_churn: Dict[int, bool] = field(default_factory=dict)
+    detail: str = ""
+
+
+class HrtFsdbSessionCollector(BaseCollector):
+    """Polls HRT ``getFsdbSessions()`` for one GPU host, recording the CONNECTED
+    session census per poll.
+
+    Programmatic equivalent of counting CONNECTED HRT FSDB sessions: each poll
+    captures the total CONNECTED count, the expected census size (default 32 =
+    4 GPUs x 8 GTSWs), and a per-lane breakdown (lane -> #CONNECTED / #total
+    across the 4 GPUs). A drain/kill of lane 0 on all 4 GPUs drops the overall
+    count to 28 and lane 0's connected count to 0. The ``evaluate_window``
+    helper returns a structured verdict the FpfHrtSessionStatHealthCheck
+    interprets for both the disruption (drop-then-recover) and stable (no churn)
+    contracts.
+
+    One collector instance per host (mirroring the per-host session health
+    check). A poll whose HRT query fails records an error row (null data) rather
+    than a misleading all-zero census.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        expected_connected: int = 32,
+        tmp_path: str = "/tmp/fpf_stress_hrt_fsdb_session.log",
+        interval_sec: float = 3.0,
+    ) -> None:
+        super().__init__(tmp_path, interval_sec)
+        self.host = host
+        self.expected_connected = expected_connected
+        self.rows: List[HrtFsdbSessionRow] = []
+
+    def _write_header(self, f) -> None:
+        f.write(
+            f"{'timestamp':<30}  {'host':<22}  {'connected':>9}  {'expected':>8}  "
+            f"per_lane (lane=conn/total ...)\n"
+        )
+
+    async def _poll_once(self) -> None:
+        error = ""
+        # `client.getFsdbSessions()` returns a Sequence (from generated thrift),
+        # so we annotate as Sequence rather than List to avoid invariance issues.
+        sessions: Sequence[Any] = []
+        try:
+            client_ctx = await get_hrt_client(self.host)
+            async with client_ctx as client:
+                sessions = await client.getFsdbSessions()
+        except Exception as e:
+            logger.error(f"[HrtFsdbSessionCollector] {self.host}: {e}")
+            error = f"error: {e}"
+
+        lane_connected: Dict[int, int] = {}
+        lane_total: Dict[int, int] = {}
+        connected = 0
+        if not error:
+            for s in sessions:
+                lane = getattr(s, "plane_id", None)
+                if lane is None:
+                    continue
+                lane = int(lane)
+                lane_total[lane] = lane_total.get(lane, 0) + 1
+                if _session_is_connected(s):
+                    connected += 1
+                    lane_connected[lane] = lane_connected.get(lane, 0) + 1
+                else:
+                    lane_connected.setdefault(lane, 0)
+
+        ts = _now_str()
+        row = HrtFsdbSessionRow(
+            timestamp=ts,
+            host=self.host,
+            connected=connected,
+            expected=self.expected_connected,
+            lane_connected=lane_connected,
+            lane_total=lane_total,
+            error=error,
+        )
+        self.rows.append(row)
+
+        if error:
+            rendered = error
+        else:
+            rendered = (
+                " ".join(
+                    f"{lane}={lane_connected.get(lane, 0)}/{lane_total[lane]}"
+                    for lane in sorted(lane_total)
+                )
+                or "-"
+            )
+        if self._file is not None:
+            self._file.write(
+                f"{ts:<30}  {self.host:<22}  {connected:>9}  "
+                f"{self.expected_connected:>8}  {rendered}\n"
+            )
+            self._file.flush()
+        self._write_json_row(
+            {
+                "collector": "hrt_fsdb_session",
+                "timestamp": ts,
+                "host": self.host,
+                "connected": connected,
+                "expected": self.expected_connected,
+                "lane_connected": {str(k): v for k, v in lane_connected.items()},
+                "lane_total": {str(k): v for k, v in lane_total.items()},
+                "error": error,
+            }
+        )
+
+    def evaluate_window(
+        self,
+        window_start: float,
+        window_end: float,
+        expected_connected: Optional[int] = None,
+        impacted_lanes: Optional[List[int]] = None,
+    ) -> FsdbSessionWindowResult:
+        """Summarize the CONNECTED census over [window_start, window_end].
+
+        ``expected_connected`` defaults to the collector's configured census
+        size. ``impacted_lanes`` (when given) are the lanes a disruption is
+        expected to churn; the result records, per impacted lane, whether its
+        connected count was observed to drop below its total. Errored/null polls
+        are excluded from the count statistics but counted in ``error_samples``.
+        """
+        expected = (
+            expected_connected
+            if expected_connected is not None
+            else self.expected_connected
+        )
+        impacted = [int(x) for x in (impacted_lanes or [])]
+        windowed = self.get_rows_in_window(window_start, window_end)
+
+        good = [r for r in windowed if not r.error]
+        error_samples = sum(1 for r in windowed if r.error)
+
+        if not good:
+            return FsdbSessionWindowResult(
+                host=self.host,
+                samples=0,
+                error_samples=error_samples,
+                min_connected=None,
+                max_connected=None,
+                last_connected=None,
+                reached_expected=False,
+                detail=(
+                    "no non-null in-window samples"
+                    + (f" ({error_samples} null)" if error_samples else "")
+                ),
+            )
+
+        counts = [r.connected for r in good]
+        min_connected = min(counts)
+        max_connected = max(counts)
+        last_connected = good[-1].connected
+        reached_expected = any(c == expected for c in counts)
+
+        # Per-lane minimum connected over the window.
+        per_lane_min: Dict[int, int] = {}
+        for r in good:
+            for lane, conn in r.lane_connected.items():
+                if lane not in per_lane_min or conn < per_lane_min[lane]:
+                    per_lane_min[lane] = conn
+
+        # Did each requested impacted lane churn (drop below its total)?
+        impacted_lane_churn: Dict[int, bool] = {}
+        for lane in impacted:
+            churned = False
+            for r in good:
+                total = r.lane_total.get(lane)
+                conn = r.lane_connected.get(lane)
+                if total is None or conn is None:
+                    continue
+                if conn < total:
+                    churned = True
+                    break
+            impacted_lane_churn[lane] = churned
+
+        detail = (
+            f"connected min={min_connected} max={max_connected} "
+            f"last={last_connected} (expected {expected}); "
+            f"{len(good)} samples"
+            + (f", {error_samples} null" if error_samples else "")
+        )
+        if impacted:
+            detail += " | impacted-lane churn: " + ", ".join(
+                f"L{lane}={'yes' if impacted_lane_churn[lane] else 'no'}"
+                for lane in impacted
+            )
+
+        return FsdbSessionWindowResult(
+            host=self.host,
+            samples=len(good),
+            error_samples=error_samples,
+            min_connected=min_connected,
+            max_connected=max_connected,
+            last_connected=last_connected,
+            reached_expected=reached_expected,
+            per_lane_min=per_lane_min,
+            impacted_lane_churn=impacted_lane_churn,
+            detail=detail,
+        )
+
+    def evaluate_recovery_hold(
+        self,
+        window_start: float,
+        window_end: float,
+        expected_connected: Optional[int] = None,
+        recovery_min_sec: float = 60.0,
+    ) -> Tuple[bool, Optional[float], str]:
+        """Did the CONNECTED census recover to ``expected_connected`` and hold
+        there for >= ``recovery_min_sec`` continuously up to window end?
+
+        Walks the non-null in-window samples; finds the last contiguous tail run
+        of samples at ``expected``. Returns (passed, held_sec, detail). ``passed``
+        is True iff the tail run reaches window end and spans >= recovery_min_sec
+        (a tail that is at expected but shorter than the floor fails; a census
+        that drops below expected after recovering also fails). With < 2 samples
+        the duration cannot be measured -> not passed.
+        """
+        expected = (
+            expected_connected
+            if expected_connected is not None
+            else self.expected_connected
+        )
+        good = [
+            (ts, r)
+            for r in self.get_rows_in_window(window_start, window_end)
+            if not r.error
+            for ts in [self._row_ts(r)]
+            if ts is not None
+        ]
+        good.sort(key=lambda x: x[0])
+        if not good:
+            return (False, None, "no non-null in-window samples for recovery")
+
+        # Find the start of the final contiguous tail run at expected.
+        last = good[-1][1]
+        if last.connected != expected:
+            return (
+                False,
+                None,
+                f"did not recover by window end (last={last.connected}, "
+                f"expected {expected})",
+            )
+        tail_start_ts = good[-1][0]
+        for ts, r in reversed(good):
+            if r.connected == expected:
+                tail_start_ts = ts
+            else:
+                break
+        held_sec = round(good[-1][0] - tail_start_ts, 1)
+        passed = held_sec >= recovery_min_sec
+        if passed:
+            detail = (
+                f"recovered to {expected} and held for {held_sec}s "
+                f"(>= {recovery_min_sec:.0f}s floor)"
+            )
+        else:
+            detail = (
+                f"recovered to {expected} but held only {held_sec}s "
+                f"(< {recovery_min_sec:.0f}s floor)"
+            )
+        return (passed, held_sec, detail)
+
+    @staticmethod
+    def _row_ts(row) -> Optional[float]:
+        try:
+            return _parse_ts(row.timestamp).timestamp()
+        except (ValueError, AttributeError):
+            return None

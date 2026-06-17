@@ -32,6 +32,11 @@ import re
 import time
 import typing as t
 
+from taac.internal.driver.lab_ssh_transport import (
+    async_exec as lab_ssh_async_exec,
+    lab_ssh_transport_enabled,
+    LabSshTransportError,
+)
 from taac.internal.ods_utils import (
     async_generate_ods_url,
     async_query_ods,
@@ -145,11 +150,32 @@ _SSH_OPTS = [
 async def async_ssh_run(
     host: str, cmd: str, timeout_sec: int = 30
 ) -> t.Tuple[int, str, str]:
-    """Run ``cmd`` on ``host`` as root via the ssh CLI. Returns (rc, out, err).
+    """Run ``cmd`` on ``host`` as root. Returns (rc, out, err).
+
+    Two modes (mirrors the FbossSwitch driver, but with the correct non-agent
+    fallback for GPU/RTP hosts):
+      * ``TAAC_SSH_VIA_LAB_SSH=1`` -> route through the lab-ssh daemon (CoreSSH,
+        runs outside the agent sandbox). Required for AI-agent runs, where the
+        sush2 gate blocks the in-process/CLI ssh below.
+      * unset -> the ``ssh`` CLI (picks up the caller's Meta SSH-CA cert; the
+        asyncssh keyfile path the driver falls back to does NOT carry that cert
+        and fails as root on these GPU hosts — see the SSH_USER note above).
 
     Module-level (not a method) so it is an easy monkeypatch seam for tests.
     """
     _validate_hostname(host)
+    if lab_ssh_transport_enabled():
+        try:
+            res = await lab_ssh_async_exec(
+                host=to_fqdn(host),
+                command=cmd,
+                timeout_sec=timeout_sec,
+                username=SSH_USER,
+            )
+        except LabSshTransportError as e:
+            return (-1, "", f"lab-ssh transport error on {host}: {e}")
+        rc = 124 if res.timed_out else res.exit_code
+        return (rc, res.stdout, res.stderr)
     proc = await asyncio.create_subprocess_exec(
         "ssh",
         *_SSH_OPTS,

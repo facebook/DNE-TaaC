@@ -11,18 +11,61 @@ import asyncio
 import ipaddress
 import itertools
 import json
+import os
 import time
 import typing as t
 from collections import defaultdict
 from dataclasses import dataclass
 
-from libfb.py.asyncio.await_utils import convert_to_async
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if not TAAC_OSS:
+    from libfb.py.asyncio.await_utils import convert_to_async
+else:
+
+    async def convert_to_async(fn, *args, **kwargs):  # type: ignore
+        """OSS stub - libfb's convert_to_async wraps a sync callable in a thread."""
+        raise NotImplementedError(
+            "convert_to_async requires Meta-internal libfb; not available in OSS mode."
+        )
+
+
 from neteng.fboss.ctrl.thrift_types import DsfSessionState
 from neteng.fboss.switch_config.thrift_mutable_types import PortSpeed
 from neteng.fboss.switch_config.thrift_types import SwitchDrainState
-from neteng.netcastle.exceptions import TestbedError
-from neteng.netcastle.utils.health_check_utils import async_get_fboss_versions
-from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
+
+if not TAAC_OSS:
+    from neteng.netcastle.exceptions import TestbedError
+else:
+
+    class TestbedError(Exception):  # type: ignore
+        """OSS stub - netcastle TestbedError isn't shipped."""
+
+        pass
+
+
+if not TAAC_OSS:
+    from neteng.netcastle.utils.health_check_utils import async_get_fboss_versions
+else:
+
+    async def async_get_fboss_versions(hostname):  # type: ignore
+        """OSS stub - netcastle health-check helper isn't shipped."""
+        raise NotImplementedError(
+            "async_get_fboss_versions requires Meta-internal netcastle; not available in OSS mode."
+        )
+
+
+if not TAAC_OSS:
+    from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
+else:
+
+    async def wait_for_ping_reachable(*args, **kwargs):  # type: ignore
+        """OSS stub - netcastle reachability helper isn't shipped."""
+        raise NotImplementedError(
+            "wait_for_ping_reachable requires Meta-internal netcastle; not available in OSS mode."
+        )
+
+
 from taac.constants import (
     FAILED_HC_STATUSES,
     OpenRRouteAction,
@@ -47,11 +90,44 @@ from taac.health_checks.all_health_checks import (
 from taac.health_checks.healthcheck_definitions import (
     create_next_hop_count_check,
 )
-from taac.internal.coop_utils import async_unregister_patcher
-from taac.internal.drainer_utils import async_nds_drain
-from taac.internal.utils.openr_route_utils import (
-    OpenRRouteManager,
-)
+
+if not TAAC_OSS:
+    from taac.internal.coop_utils import async_unregister_patcher
+else:
+
+    async def async_unregister_patcher(*args, **kwargs):  # type: ignore
+        """OSS stub - taac.internal.coop_utils isn't shipped."""
+        raise NotImplementedError(
+            "async_unregister_patcher requires Meta-internal taac.internal.coop_utils."
+        )
+
+
+if not TAAC_OSS:
+    from taac.internal.drainer_utils import async_nds_drain
+else:
+
+    async def async_nds_drain(*args, **kwargs):  # type: ignore
+        """OSS stub - taac.internal.drainer_utils isn't shipped."""
+        raise NotImplementedError(
+            "async_nds_drain requires Meta-internal taac.internal.drainer_utils."
+        )
+
+
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from taac.internal.utils.openr_route_utils import (
+        OpenRRouteManager,
+    )
+else:
+
+    class OpenRRouteManager:  # type: ignore
+        """OSS stub - taac.internal.utils.openr_route_utils isn't shipped."""
+
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError(
+                "OpenRRouteManager requires Meta-internal taac.internal.utils.openr_route_utils."
+            )
+
+
 from neteng.test_infra.dne.taac.steps.step import Step as StepBase
 from taac.tasks.utils import run_task
 from taac.utils.common import (
@@ -83,8 +159,43 @@ from taac.utils.system_stress_utils import (
     async_get_memory_current_pct,
 )
 from taac.utils.taac_log_formatter import log_results_table
-from rfe.scubadata.scubadata_py3 import Sample, ScubaData
-from service_automation.fboss.remediations.utils.bmc_helper import run_bmc_cmd_hwcontrol
+
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from rfe.scubadata.scubadata_py3 import Sample, ScubaData
+else:
+
+    class Sample:  # type: ignore
+        """OSS stub - rfe.scubadata.scubadata_py3.Sample isn't shipped."""
+
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError(
+                "rfe.scubadata.scubadata_py3.Sample is Meta-internal; not shipped under OSS."
+            )
+
+    class ScubaData:  # type: ignore
+        """OSS stub - rfe.scubadata.scubadata_py3.ScubaData isn't shipped."""
+
+        TIME_COLUMN = "time"  # constant used by callers; harmless under OSS
+
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError(
+                "rfe.scubadata.scubadata_py3.ScubaData is Meta-internal; not shipped under OSS."
+            )
+
+
+if not TAAC_OSS:
+    from service_automation.fboss.remediations.utils.bmc_helper import (
+        run_bmc_cmd_hwcontrol,
+    )
+else:
+
+    def run_bmc_cmd_hwcontrol(*args, **kwargs):  # type: ignore
+        """OSS stub - service_automation.fboss.remediations isn't shipped."""
+        raise NotImplementedError(
+            "run_bmc_cmd_hwcontrol requires Meta-internal service_automation; not shipped under OSS."
+        )
+
+
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
@@ -286,6 +397,363 @@ def create_fpf_record_disruption_time_step(
             json_params=json.dumps({"custom_step_name": "record_fpf_disruption_time"})
         ),
     )
+
+
+def create_fpf_repeated_service_crash_step(
+    service: taac_types.Service,
+    every_sec: int = 1,
+    duration_sec: int = 60,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Repeatedly crash a service (SIGKILL) over a window on the target device.
+
+    Drives ``async_crash_service`` (``pkill -9``) every ``every_sec`` for
+    ``duration_sec`` on the in-scope device (``device_regexes``, typically the
+    DUT GTSW). For the FSDB unclean-exit FPF test: kill ``fsdb`` every 1s for 60s
+    so the daemon never exits gracefully and the recovery path is exercised under
+    sustained churn. Implemented as a CUSTOM_STEP (no new StepName enum).
+
+    Args:
+        service: The service to crash (e.g. ``taac_types.Service.FSDB``).
+        every_sec: Seconds between successive kills (default 1).
+        duration_sec: Total crash window in seconds (default 60).
+        device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"Crash {service.name} every {every_sec}s for {duration_sec}s",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_repeated_service_crash",
+                    "service": int(service.value),
+                    "every_sec": every_sec,
+                    "duration_sec": duration_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_ndp_clear_loop_step(
+    every_sec: int = 1,
+    duration_sec: int = 120,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Repeatedly clear the NDP table over a window on the target GTSW.
+
+    Runs ``fboss2 clear ndp`` every ``every_sec`` for ``duration_sec`` — a
+    persistent NDP flush that exercises neighbor re-resolution under sustained
+    clearing during a NIC-side link-flap FPF test. Implemented as a CUSTOM_STEP
+    (no new StepName enum).
+
+    Args:
+        every_sec: Seconds between successive clears (default 1).
+        duration_sec: Total clearing window in seconds (default 120).
+        device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Clear NDP every {every_sec}s for {duration_sec}s",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_ndp_clear_loop",
+                    "every_sec": every_sec,
+                    "duration_sec": duration_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_rapid_flap_step(
+    interfaces_by_device: t.Dict[str, t.List[str]],
+    duration_sec: int,
+    flap_interval_sec: int = 1,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Rapidly flap per-device interfaces over a window.
+
+    Wraps the driver's ``async_do_rapid_interface_flaps`` (tx_disable -> sleep
+    0.1 -> tx_enable per flap). At runtime the step picks the entry in
+    ``interfaces_by_device`` matching the DUT it runs on and flaps those ports
+    ``duration_sec // flap_interval_sec`` times. Used for the all-downlinks /
+    all-uplinks rapid-flap FPF tests; the interface map is supplied by the config
+    (e.g. via LLDP discovery). Implemented as a CUSTOM_STEP (no new StepName).
+
+    Args:
+        interfaces_by_device: {device_name: [interface, ...]} resolved map.
+        duration_sec: Total flap window in seconds.
+        flap_interval_sec: Seconds between flaps (== interval_to_link_up); also
+            the per-flap cost used to derive the flap count (default 1).
+        device_regexes: Optional device-regex scope.
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"Rapid-flap interfaces for {duration_sec}s "
+        f"({', '.join(interfaces_by_device.keys())})",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_rapid_flap",
+                    "interfaces_by_device": interfaces_by_device,
+                    "duration_sec": duration_sec,
+                    "flap_interval_sec": flap_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_rapid_flap_step_lldp(
+    neighbor_pattern: t.Optional[str] = None,
+    duration_sec: int = 0,
+    flap_interval_sec: int = 1,
+    neighbor_hosts: t.Optional[t.List[str]] = None,
+    flap_down_time_sec: float = 6.0,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Rapid-flap variant that resolves interfaces from LLDP at run time.
+
+    Unlike ``create_fpf_rapid_flap_step``, which takes a pre-resolved
+    ``{device: [interface]}`` map (configs build at import time with no device
+    access), this variant defers interface selection to step execution: the
+    handler calls ``async_get_lldp_neighbors`` on the DUT driver and picks the
+    local interfaces whose LLDP remote system name matches either an explicit
+    ``neighbor_hosts`` set (exact match, preferred) or a ``neighbor_pattern``
+    (fnmatch shell glob, fallback).
+
+    The handler flaps the resolved set on a WALL-CLOCK bound: it keeps issuing
+    single flaps until ``duration_sec`` elapses, so the step always stops on
+    time even when each flap of many ports takes minutes. ``flap_down_time_sec``
+    controls how long each port is held tx_disabled per flap.
+
+    Use this for tc32/tc33-style downlink/uplink flap tests when the testbed
+    wiring may change — pass an explicit ``neighbor_hosts`` list (e.g. the
+    configured ``GPU_HOSTS``) to scope precisely, or a stable PATTERN (e.g.
+    ``"stsw*"`` for the spine) instead of hardcoding lane breakouts.
+
+    Args:
+        neighbor_pattern: fnmatch glob matched (case-insensitive) against the
+            LLDP remote system name. Drivers strip ``.tfbnw.net`` /
+            ``.facebook.com`` before exposing the name. Used only when
+            ``neighbor_hosts`` is not set.
+        duration_sec: Total flap window in seconds (wall-clock bound).
+        flap_interval_sec: Seconds between flaps / link-up settle; default 1.
+        neighbor_hosts: explicit list of remote system names to match exactly
+            (domain-stripped, case-insensitive). Preferred over the glob.
+        flap_down_time_sec: Seconds the port is held tx_disabled per flap;
+            default 6.
+        device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or (
+            "Rapid-flap LLDP-resolved interfaces "
+            f"(neighbors~={neighbor_hosts or neighbor_pattern!r}) "
+            f"for {duration_sec}s"
+        ),
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_rapid_flap_lldp",
+                    "neighbor_pattern": neighbor_pattern,
+                    "neighbor_hosts": neighbor_hosts,
+                    "duration_sec": duration_sec,
+                    "flap_interval_sec": flap_interval_sec,
+                    "down_time_sec": flap_down_time_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_nic_mstreg_flap_step(
+    host: str,
+    dev: int,
+    lane: int,
+    iterations: int = 5,
+    interval_sec: float = 2.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Real NIC-side mstreg PAOS flap of a single beth lane on a GPU host.
+
+    Issues the same admin_status DOWN/UP sequence that
+    ``scripts/pavanpatil/fpf_host_signal_test.py --flap-dev/--flap-lane`` runs
+    against the GPU NIC. The handler computes the PCIe BDF deterministically
+    from ``dev`` + ``lane`` (no ethtool probe), then loops ``iterations`` times,
+    each round running
+
+      DOWN: mstreg -d <BDF> --reg_name PAOS \\
+              --set "admin_status=2,ase=1,fd=1" -i "local_port=1"
+      UP:   mstreg -d <BDF> --reg_name PAOS \\
+              --set "admin_status=1,ase=1,fd=1" -i "local_port=1"
+
+    with ``interval_sec`` between the DOWN and the UP (and after the UP before
+    the next round). This is a real link-down event on the NIC side (the GTSW
+    sees NDP go away on the peer port and withdraws the VF on that lane), so it
+    is the genuine trigger for the tc37 NIC-side link-flap test rather than the
+    thrift-admin placeholder previously used there.
+
+    The BDF is ``"<DEV_BLOCK>:03:00.<LANE>"`` where ``DEV_BLOCK`` is fixed per
+    GPU/dev index (dev0=0000, dev1=0002, dev2=0010, dev3=0012), the middle block
+    ``03`` is constant, and the PCIe function ``00.<LANE>`` carries the lane id.
+    Example: dev0 lane1 -> ``0000:03:00.1``; dev2 lane7 -> ``0010:03:00.7``.
+
+    The step runs HOST-SIDE, not on a switch DUT: the rtptest GPU hosts are not
+    FBOSS devices, are not in ``endpoints`` as DUTs, and have no per-driver SSH
+    plumbing in TAAC. So ``device_regexes`` is not set; the handler always SSHes
+    to the supplied ``host`` (via the same ``ssh`` CLI + Meta-SSH-CA pattern
+    used by ``fpf_ib_traffic_task.async_ssh_run`` — asyncssh-key auth does NOT
+    carry the root cert, but the caller's SSH cert/agent does, exactly like
+    ``fpf_host_signal_test.py``).
+
+    Args:
+        host: GPU host (e.g. ``"rtptest1555.mwg2"``) to flap a beth lane on.
+        dev: GPU device index (0..3). Maps to the PCIe DEV_BLOCK.
+        lane: Lane within the GPU device (0..7). Maps to the PCIe function.
+        iterations: Number of DOWN/UP cycles (default 5).
+        interval_sec: Seconds between DOWN and UP, and between successive
+            cycles (default 2.0).
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or (
+            f"NIC-side mstreg PAOS flap on {host}: dev={dev} lane={lane}, "
+            f"{iterations} iteration(s) every {interval_sec}s"
+        ),
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_nic_mstreg_flap",
+                    "host": host,
+                    "dev": int(dev),
+                    "lane": int(lane),
+                    "iterations": int(iterations),
+                    "interval_sec": float(interval_sec),
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_lldp_batched_set_interface_admin_step(
+    neighbor_pattern: str,
+    enable: bool,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Resolve interfaces from LLDP at runtime, then batch admin-enable/disable.
+
+    Variant of ``create_fpf_set_interface_admin_step`` that defers interface
+    selection until step execution: the handler enumerates LLDP neighbors on
+    the DUT and matches the remote system name against ``neighbor_pattern``
+    (fnmatch shell glob), then issues a SINGLE batched
+    ``async_thrift_disable_enable_interfaces`` call over the resolved tuple.
+
+    "Batched" here means ONE open ``async_agent_client`` context with sequential
+    per-port ``setPortState`` calls inside it (FBOSS exposes no thrift RPC
+    taking a list of port IDs); this is the same primitive used by the
+    existing held-admin-down step, so semantics match. Use this for
+    tc36-style "shut all neighbor links at once" disruption where the member
+    set is testbed-specific and not knowable at config import time.
+
+    Args:
+        neighbor_pattern: fnmatch glob matched (case-insensitive) against the
+            LLDP remote system name on the DUT (e.g. ``"gtsw001*"``).
+        enable: True to enable (no-shut), False to disable (held admin-down).
+        device_regexes: Optional device-regex scope (e.g. the DUT STSW).
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or (
+            f"{'Enable' if enable else 'Disable'} ALL LLDP-resolved interfaces "
+            f"(neighbors~={neighbor_pattern!r}) in one batched thrift call"
+        ),
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_lldp_batched_set_interface_admin",
+                    "neighbor_pattern": neighbor_pattern,
+                    "is_enable": enable,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_stsw_drain_and_reinject_steps(
+    stsw: str,
+    drained: bool,
+    trigger_stsws: t.List[str],
+    prefix_count: int,
+    community_list: str,
+    drain_community: t.Optional[str] = None,
+) -> t.List[Step]:
+    """Drain (or undrain) an STSW plane, then re-inject the FPF prefixes.
+
+    Composition (no new step type): drains/undrains ``stsw`` via the existing
+    LOCAL_DRAINER drain/undrain step, then re-injects ``prefix_count`` prefixes
+    on ``trigger_stsws`` via ``create_fpf_bgp_prefix_injection_step``. When
+    draining, an optional ``drain_community`` is appended to ``community_list`` so
+    the re-injected prefixes carry the extra drain-marker community; when
+    undraining, the base ``community_list`` is used unchanged.
+
+    Used by the cascaded STSW-plane-drain + GTSW-device-drain FPF configs.
+
+    Args:
+        stsw: The STSW device to drain/undrain (LOCAL_DRAINER, device-scoped).
+        drained: True to drain, False to undrain.
+        trigger_stsws: Devices to (re-)inject prefixes on after the drain action.
+        prefix_count: Number of prefixes to inject.
+        community_list: Base community list string for the injection.
+        drain_community: Optional extra community appended to ``community_list``
+            when draining (ignored on undrain).
+
+    Returns:
+        Ordered [drain/undrain step, prefix-injection step].
+    """
+    if drained and drain_community:
+        injected_communities = f"{community_list} {drain_community}"
+    else:
+        injected_communities = community_list
+
+    action = "Drain" if drained else "Undrain"
+    return [
+        create_drain_undrain_step(
+            drain=drained,
+            drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
+            description=f"{action} STSW {stsw} (local drainer)",
+        ),
+        create_fpf_bgp_prefix_injection_step(
+            devices=trigger_stsws,
+            count=prefix_count,
+            community_list=injected_communities,
+            description=f"Re-inject {prefix_count} prefixes on "
+            f"{', '.join(trigger_stsws)} after {action.lower()} of {stsw}",
+        ),
+    ]
 
 
 def create_thread_cpu_monitoring_step(

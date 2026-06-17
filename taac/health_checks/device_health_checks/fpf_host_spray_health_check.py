@@ -25,6 +25,14 @@ Metric (ODS), per host, FOUR time series (one per lane):
 Window: test-case start time -> now (overridable). The check builds a
 host -> {lane -> avg Gbps} map, logs every value and the ODS URL, and FAILs if
 either signal is violated on any host.
+
+all_samples mode (check_param ``all_samples=True``): instead of evaluating only
+each lane's LATEST 1m sample, the ``,latest`` reducer is stripped from the
+transform so EVERY 1m sample across the window is returned for ALL beth lanes of
+EVERY host. The check then asserts the per-lane floor (Signal 1) + spread
+(Signal 2) hold on EACH sample independently, FAILing if ANY single sample on
+ANY lane/host violates. Used to prove sustained spray fairness over a longevity
+window rather than just at the final instant.
 """
 
 import re
@@ -52,6 +60,9 @@ from taac.health_check.health_check import types as hc_types
 
 DEFAULT_KEY_DESC = "regex(system.beth[0123].tx-bytes-phy.rate)"
 DEFAULT_TRANSFORM_DESC = "formula(/ $1 125000000),avg(1m),latest"
+# all_samples mode: drop the trailing ``,latest`` reducer so EVERY 1m-avg sample
+# in the window is returned per lane (not just the final point).
+DEFAULT_TRANSFORM_DESC_ALL_SAMPLES = "formula(/ $1 125000000),avg(1m)"
 DEFAULT_LOOKBACK_SEC = 900
 
 _LANE_RE = re.compile(r"(beth\d+)")
@@ -72,12 +83,107 @@ class FpfHostSprayHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheck
         min_egress_gbps (float): Signal 1 floor. Default ACTIVE threshold.
         max_spread_gbps (float): Signal 2 max per-host lane spread. Default
             ACTIVE threshold.
+        all_samples (bool): When True, evaluate EVERY per-timestamp sample of
+            every beth lane across the window (floor + spread must hold on each
+            sample) instead of only each lane's latest sample. Default False.
         lookback_sec / window_start / window_end: window overrides.
     """
 
     CHECK_NAME = hc_types.CheckName.FPF_HOST_SPRAY_CHECK
     CHECK_SCOPE = hc_types.Scope.DEFAULT
     OPERATING_SYSTEMS = ["FBOSS"]
+
+    def _build_latest_snapshot(
+        self, ods_data: t.Mapping[str, t.Mapping[str, t.Mapping[int, float]]]
+    ) -> t.Dict[str, t.Dict[str, float]]:
+        """Build a single host -> {lane -> latest-sample Gbps} snapshot."""
+        host_lanes: t.Dict[str, t.Dict[str, float]] = {}
+        for entity, key_data in sorted(ods_data.items()):
+            lanes: t.Dict[str, float] = {}
+            for key_name, ts_data in key_data.items():
+                if not ts_data:
+                    continue
+                latest_ts = max(ts_data.keys())
+                lanes[_lane_label(key_name)] = ts_data[latest_ts]
+            if lanes:
+                host_lanes[entity] = lanes
+        return host_lanes
+
+    def _build_all_sample_snapshots(
+        self, ods_data: t.Mapping[str, t.Mapping[str, t.Mapping[int, float]]]
+    ) -> t.List[t.Dict[str, t.Dict[str, float]]]:
+        """Build one host -> {lane -> Gbps} snapshot per distinct timestamp.
+
+        Unlike ``_build_latest_snapshot`` (which collapses each lane to its
+        final sample), this returns the FULL per-timestamp set so the floor +
+        spread signals can be asserted on every sample across the window. A
+        snapshot only includes the lanes that actually reported at that
+        timestamp.
+        """
+        # timestamp -> host -> {lane -> Gbps}
+        by_ts: t.Dict[int, t.Dict[str, t.Dict[str, float]]] = {}
+        for entity, key_data in sorted(ods_data.items()):
+            for key_name, ts_data in key_data.items():
+                if not ts_data:
+                    continue
+                lane = _lane_label(key_name)
+                for ts, val in ts_data.items():
+                    by_ts.setdefault(ts, {}).setdefault(entity, {})[lane] = val
+        return [by_ts[ts] for ts in sorted(by_ts)]
+
+    def _eval_snapshot(
+        self,
+        *,
+        host_lanes: t.Dict[str, t.Dict[str, float]],
+        baseline_beths: t.Set[str],
+        impacted_by_host: t.Dict[str, t.List[str]],
+        impacted_max_gbps: float,
+        min_egress_gbps: float,
+        max_spread_gbps: float,
+        s1_violations: t.List[str],
+        s2_violations: t.List[str],
+        impacted_violations: t.List[str],
+        impacted_ok_notes: t.List[str],
+    ) -> None:
+        """Evaluate floor + spread + impacted-drain on one snapshot.
+
+        Appends any violations / impacted notes onto the passed-in accumulator
+        lists. Called once (default mode) or once per sample (all_samples mode).
+        """
+        for host in sorted(host_lanes):
+            host_impacted = set(impacted_by_host.get(host, []))
+            unimpacted_vals: t.List[float] = []
+            for lane in sorted(host_lanes[host]):
+                if lane in baseline_beths:
+                    continue
+                val = host_lanes[host][lane]
+                if lane in host_impacted:
+                    if val >= impacted_max_gbps:
+                        impacted_violations.append(
+                            f"{host}/{lane}={val:.2f} >= {impacted_max_gbps:.1f} "
+                            f"(expected drained)"
+                        )
+                    else:
+                        impacted_ok_notes.append(
+                            f"{host}/{lane}={val:.2f} < {impacted_max_gbps:.1f}"
+                        )
+                    continue
+                unimpacted_vals.append(val)
+                if val <= min_egress_gbps:
+                    s1_violations.append(
+                        f"{host}/{lane}={val:.2f} <= {min_egress_gbps:.1f}"
+                    )
+            # Impacted lanes that produced no egress series at all are also fine
+            # (a down link emits nothing) — note them for visibility.
+            for lane in sorted(host_impacted - set(host_lanes[host])):
+                impacted_ok_notes.append(f"{host}/{lane}=absent (no egress)")
+            if len(unimpacted_vals) >= 2:
+                spread = max(unimpacted_vals) - min(unimpacted_vals)
+                if spread > max_spread_gbps:
+                    s2_violations.append(
+                        f"{host} spread={spread:.2f} > {max_spread_gbps:.1f} "
+                        f"(unimpacted lanes)"
+                    )
 
     async def _run(
         self,
@@ -98,8 +204,19 @@ class FpfHostSprayHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheck
                     message="No hosts/entity_desc provided for host-spray check",
                 )
 
+        # all_samples: evaluate EVERY sample per lane (sustained-fairness), not
+        # just the latest. Drives both the transform default and the per-sample
+        # evaluation path below.
+        all_samples = bool(check_params.get("all_samples", False))
         key_desc = check_params.get("key_desc", DEFAULT_KEY_DESC)
-        transform_desc = check_params.get("transform_desc", DEFAULT_TRANSFORM_DESC)
+        transform_desc = check_params.get(
+            "transform_desc",
+            (
+                DEFAULT_TRANSFORM_DESC_ALL_SAMPLES
+                if all_samples
+                else DEFAULT_TRANSFORM_DESC
+            ),
+        )
         reduce_desc = check_params.get("reduce_desc", "")
         min_egress_gbps = float(
             check_params.get("min_egress_gbps", ACTIVE.host_spray_min_egress_gbps)
@@ -165,40 +282,6 @@ class FpfHostSprayHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheck
                 message=f"No ODS data for host-spray check. URL: {ods_url}",
             )
 
-        # Build host -> {lane -> avg Gbps}, taking each lane's latest sample.
-        host_lanes: t.Dict[str, t.Dict[str, float]] = {}
-        for entity, key_data in sorted(ods_data.items()):
-            lanes: t.Dict[str, float] = {}
-            for key_name, ts_data in key_data.items():
-                if not ts_data:
-                    continue
-                latest_ts = max(ts_data.keys())
-                lanes[_lane_label(key_name)] = ts_data[latest_ts]
-            if lanes:
-                host_lanes[entity] = lanes
-
-        if not host_lanes:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=f"No host-spray lane samples in window. URL: {ods_url}",
-            )
-
-        # Log the full host -> lane -> egress map.
-        for host in sorted(host_lanes):
-            lanes = host_lanes[host]
-            lane_str = ", ".join(f"{lane}={lanes[lane]:.2f}" for lane in sorted(lanes))
-            vmax, vmin = max(lanes.values()), min(lanes.values())
-            self.logger.info(
-                f"  [host spray] {host}: {lane_str} Gbps "
-                f"(min={vmin:.2f}, max={vmax:.2f}, spread={vmax - vmin:.2f})"
-            )
-
-        # Signal 1 (floor) + Signal 2 (spread) over UNIMPACTED lanes; impacted
-        # lanes must instead be BELOW impacted_max_gbps.
-        s1_violations: t.List[str] = []
-        s2_violations: t.List[str] = []
-        impacted_violations: t.List[str] = []
-        impacted_ok_notes: t.List[str] = []
         # Baseline exclusion: drop beths for lanes already impaired at precheck
         # when the config opted in (a dead lab lane is PRE-EXISTING, not a
         # spray regression) — excluded from floor, spread, and impacted checks.
@@ -210,40 +293,60 @@ class FpfHostSprayHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheck
                     f"  [host spray] excluding baseline-impaired beths "
                     f"{sorted(baseline_beths)}"
                 )
-        for host in sorted(host_lanes):
-            host_impacted = set(impacted_by_host.get(host, []))
-            unimpacted_vals: t.List[float] = []
-            for lane in sorted(host_lanes[host]):
-                if lane in baseline_beths:
-                    continue
-                val = host_lanes[host][lane]
-                if lane in host_impacted:
-                    if val >= impacted_max_gbps:
-                        impacted_violations.append(
-                            f"{host}/{lane}={val:.2f} >= {impacted_max_gbps:.1f} "
-                            f"(expected drained)"
-                        )
-                    else:
-                        impacted_ok_notes.append(
-                            f"{host}/{lane}={val:.2f} < {impacted_max_gbps:.1f}"
-                        )
-                    continue
-                unimpacted_vals.append(val)
-                if val <= min_egress_gbps:
-                    s1_violations.append(
-                        f"{host}/{lane}={val:.2f} <= {min_egress_gbps:.1f}"
-                    )
-            # Impacted lanes that produced no egress series at all are also fine
-            # (a down link emits nothing) — note them for visibility.
-            for lane in sorted(host_impacted - set(host_lanes[host])):
-                impacted_ok_notes.append(f"{host}/{lane}=absent (no egress)")
-            if len(unimpacted_vals) >= 2:
-                spread = max(unimpacted_vals) - min(unimpacted_vals)
-                if spread > max_spread_gbps:
-                    s2_violations.append(
-                        f"{host} spread={spread:.2f} > {max_spread_gbps:.1f} "
-                        f"(unimpacted lanes)"
-                    )
+
+        # In default mode we evaluate a SINGLE host -> {lane -> latest Gbps}
+        # snapshot. In all_samples mode we evaluate EVERY per-timestamp snapshot
+        # across the window, so the floor + spread must hold on every sample.
+        if all_samples:
+            snapshots = self._build_all_sample_snapshots(ods_data)
+        else:
+            snapshots = [self._build_latest_snapshot(ods_data)]
+        snapshots = [snap for snap in snapshots if snap]
+
+        if not snapshots:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=f"No host-spray lane samples in window. URL: {ods_url}",
+            )
+
+        # Log the latest snapshot's host -> lane -> egress map for readability.
+        latest_snapshot = snapshots[-1]
+        for host in sorted(latest_snapshot):
+            lanes = latest_snapshot[host]
+            lane_str = ", ".join(f"{lane}={lanes[lane]:.2f}" for lane in sorted(lanes))
+            vmax, vmin = max(lanes.values()), min(lanes.values())
+            self.logger.info(
+                f"  [host spray] {host}: {lane_str} Gbps "
+                f"(min={vmin:.2f}, max={vmax:.2f}, spread={vmax - vmin:.2f})"
+            )
+        if all_samples:
+            self.logger.info(
+                f"  [host spray] all_samples mode: evaluating {len(snapshots)} "
+                f"sample(s) across the window (floor + spread must hold on each)"
+            )
+
+        # Signal 1 (floor) + Signal 2 (spread) over UNIMPACTED lanes; impacted
+        # lanes must instead be BELOW impacted_max_gbps. Accumulate violations
+        # across ALL evaluated snapshots (one in default mode, many in
+        # all_samples mode).
+        s1_violations: t.List[str] = []
+        s2_violations: t.List[str] = []
+        impacted_violations: t.List[str] = []
+        impacted_ok_notes: t.List[str] = []
+        num_hosts = len({host for snap in snapshots for host in snap})
+        for snapshot in snapshots:
+            self._eval_snapshot(
+                host_lanes=snapshot,
+                baseline_beths=baseline_beths,
+                impacted_by_host=impacted_by_host,
+                impacted_max_gbps=impacted_max_gbps,
+                min_egress_gbps=min_egress_gbps,
+                max_spread_gbps=max_spread_gbps,
+                s1_violations=s1_violations,
+                s2_violations=s2_violations,
+                impacted_violations=impacted_violations,
+                impacted_ok_notes=impacted_ok_notes,
+            )
 
         s1_ok = not s1_violations
         s2_ok = not s2_violations
@@ -275,12 +378,15 @@ class FpfHostSprayHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheck
                 if impacted_by_host
                 else ""
             )
+            scope = (
+                f"all {len(snapshots)} sample(s)" if all_samples else "latest sample"
+            )
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.PASS,
                 message=(
-                    f"Host spray OK for {len(host_lanes)} host(s): unimpacted lanes "
-                    f">{min_egress_gbps:.1f} Gbps, spread <={max_spread_gbps:.1f} "
-                    f"Gbps{extra} | ODS: {ods_url}"
+                    f"Host spray OK for {num_hosts} host(s) ({scope}): unimpacted "
+                    f"lanes >{min_egress_gbps:.1f} Gbps, spread "
+                    f"<={max_spread_gbps:.1f} Gbps{extra} | ODS: {ods_url}"
                 ),
             )
         parts: t.List[str] = []

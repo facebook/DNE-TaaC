@@ -113,6 +113,7 @@ class TrafficGenerator:
         skip_ixia_protocol_verification: bool = False,
         ixia_protocol_verification_timeout: int = 90,
         ixia_config_cache: t.Optional[taac_types.IxiaConfigCache] = None,
+        ixia_recovery: t.Optional[taac_types.IxiaRecovery] = None,
         *args,
         **kwargs,
     ) -> None:
@@ -145,6 +146,8 @@ class TrafficGenerator:
         self.ixia_protocol_verification_timeout = ixia_protocol_verification_timeout
         # Opt-in IXIA topology cache — see IxiaConfigCache Thrift docstring
         self.ixia_config_cache = ixia_config_cache
+        # Opt-in IXIA REST API soft recovery — see IxiaRecovery Thrift docstring
+        self.ixia_recovery = ixia_recovery
         # snake testing
         self.snake_configs = snake_configs or []
         self.is_standalone = bool(self.snake_configs)
@@ -244,6 +247,7 @@ class TrafficGenerator:
                 cleanup_failed_setup=self.cleanup_failed_setup,
                 skip_ixia_protocol_verification=self.skip_ixia_protocol_verification,
                 ixia_protocol_verification_timeout=self.ixia_protocol_verification_timeout,
+                ixia_recovery=self.ixia_recovery,
             )
 
             # Topology cache — only when (a) cache is enabled in TestConfig AND

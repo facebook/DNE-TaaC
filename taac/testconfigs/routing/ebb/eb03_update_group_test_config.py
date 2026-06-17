@@ -205,6 +205,27 @@ def create_eb03_update_group_test_config(
             ),
         ],
         host_os_type_map={DEVICE_NAME: taac_types.DeviceOsType.ARISTA_FBOSS},
+        # eb03 is a lab device netwhoami does not resolve (role/hardware show as
+        # #INVALID#), so its operating_system never becomes "EOS" and every
+        # OS-gated device health check SKIPs. Override the device metadata so
+        # operating_system="EOS" -- mirrors the eb03 full-scale config.
+        oss_mock_device_data={
+            DEVICE_NAME: taac_types.MockDeviceInfo(
+                name=DEVICE_NAME,
+                hardware="ARISTA_7516",
+                role="EB",
+                operating_system="EOS",
+                dc="ash6",
+                region="ash",
+                asset_id=12345,
+                asic="JERICHO",
+                routing_protocol="BGP",
+                dc_type="ONE",
+                network_area="BACKBONE",
+                network_area_type="BACKBONE",
+                network_type="EBB",
+            ),
+        },
         startup_checks=[],
         setup_tasks=setup_tasks,
         teardown_tasks=teardown_tasks,
