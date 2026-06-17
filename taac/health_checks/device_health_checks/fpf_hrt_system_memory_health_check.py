@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -32,7 +32,9 @@ from taac.internal.ods_utils import (
 )
 from taac.libs.fpf.fpf_collector_registry import (
     get_test_case_start_time,
+    register_artifact,
 )
+from taac.utils.common import async_get_fburl
 from taac.health_check.health_check import types as hc_types
 
 # Default HRT system-memory ODS key, transform, threshold, and window.
@@ -41,7 +43,11 @@ DEFAULT_HRT_MEMORY_KEY = (
 )
 GIB = 1024**3
 DEFAULT_THRESHOLD_GIB = 8.0
-DEFAULT_TRANSFORM_DESC = "max()"
+# ODS "max" transform: per-host max over the window, computed server-side. NOTE
+# the bare form "max" — NOT "max()": empty parens make Rapido try to parse "" as
+# a time and fail with "input time is an empty string". (The check also takes
+# max() over the returned values in Python, so it is correct either way.)
+DEFAULT_TRANSFORM_DESC = "max"
 DEFAULT_LOOKBACK_SEC = 900
 
 
@@ -108,6 +114,12 @@ class FpfHrtSystemMemoryHealthCheck(
         )
         start_time = int(window_start)
         end_time = int(window_end)
+        # Guard against a degenerate/zero-length window. This happens when the
+        # check runs as a PRECHECK: the test-case start time is ~now, so
+        # window_start == window_end and ODS would get an empty time range. Fall
+        # back to a lookback window so there is always a valid, non-empty range.
+        if end_time - start_time < 1:
+            start_time = end_time - int(lookback_sec)
 
         self.logger.info(
             f"  [HRT system memory] Querying ODS for {entity_desc} "
@@ -134,6 +146,10 @@ class FpfHrtSystemMemoryHealthCheck(
                 start_time=start_time,
                 end_time=end_time,
             )
+            try:
+                ods_url = await async_get_fburl(ods_url)
+            except Exception:
+                pass
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.SKIP,
                 message=f"No ODS data for HRT system memory. URL: {ods_url}",
@@ -173,6 +189,15 @@ class FpfHrtSystemMemoryHealthCheck(
             start_time=start_time,
             end_time=end_time,
         )
+        # Shorten to an fburl for a readable link in the result message /
+        # Everpaste. This check runs once per host-set (not per-device-many-
+        # times), so shortening on every path is fine. Best-effort: fall back to
+        # the raw chart URL on any failure.
+        try:
+            ods_url = await async_get_fburl(ods_url)
+            register_artifact("ods", "HRT system memory", ods_url)
+        except Exception as ex:
+            self.logger.warning(f"  [HRT system memory] fburl shorten failed: {ex}")
 
         if not pass_details and not violations:
             return hc_types.HealthCheckResult(

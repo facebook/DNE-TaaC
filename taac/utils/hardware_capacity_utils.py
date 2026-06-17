@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 Hardware capacity utilities for network device health checks.

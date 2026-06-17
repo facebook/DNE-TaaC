@@ -3182,8 +3182,14 @@ def create_fpf_start_collectors_task(
     prod_prefixes: t.Optional[t.List[str]] = None,
     prod_prefix_host: t.Optional[str] = None,
     prod_prefix_device_id: int = 0,
+    fsdb_mode: str = "ribmap",
+    allow_baseline_failures: bool = False,
 ) -> Task:
     """Create a setup task that starts long-lived FPF collectors.
+
+    ``fsdb_mode`` selects the FSDB ribMap read path: "ribmap" (bgp/ribMap, valid
+    on the current GTSWs) or "canonical" (bgp/canonicalRib, newer schema that
+    returns INVALID_PATH on GTSWs not exposing it). Default "ribmap".
 
     Starts the injected-prefix collectors (FSDB ribMap, HRT bulk, BGP RIB,
     HRT remote-failure) and waits for baseline data collection. Prefix
@@ -3202,6 +3208,8 @@ def create_fpf_start_collectors_task(
         "subnet_prefix": subnet_prefix,
         "poll_interval_sec": poll_interval_sec,
         "baseline_collection_sec": baseline_collection_sec,
+        "fsdb_mode": fsdb_mode,
+        "allow_baseline_failures": allow_baseline_failures,
     }
     if prod_prefixes:
         params["prod_prefixes"] = prod_prefixes
@@ -3210,6 +3218,88 @@ def create_fpf_start_collectors_task(
     return Task(
         task_name="fpf_start_collectors",
         params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_fpf_start_ib_traffic_task(
+    server: str,
+    clients: t.List[str],
+    device: str = "mlx5_34",
+    gid_iface: str = "bveth0",
+    gid_prefix: str = "2401",
+    gid_index: t.Optional[int] = None,
+    port: int = 15000,
+    min_egress_gbps: float = 10.0,
+    settle_sec: int = 120,
+    ods_window_sec: int = 120,
+    msg_size: t.Optional[int] = None,
+    qp: t.Optional[int] = None,
+    tclass: t.Optional[int] = None,
+    iters: t.Optional[int] = None,
+    key_desc: t.Optional[str] = None,
+    reduce_desc: t.Optional[str] = None,
+    transform_desc: t.Optional[str] = None,
+) -> Task:
+    """Create a setup task that starts ib_write_bw RDMA traffic and validates egress.
+
+    SSHes to ``server`` and each host in ``clients``, starts long-lived
+    ``ib_write_bw`` (server then clients) on RDMA ``device`` (default mlx5_34 /
+    VF1), confirms the processes are up, waits ``settle_sec`` (default 120s),
+    then queries ODS to confirm each host is egressing more than
+    ``min_egress_gbps`` (default 10 Gbps cumulative across beth0-3). The task
+    RAISES (failing setup, aborting the test) with a clear per-host message if
+    traffic is not flowing. On success the traffic is left running for the test;
+    pair with ``create_fpf_stop_ib_traffic_task`` as a teardown task.
+
+    The RoCEv2 GID index (``-x``) is discovered per host at runtime from
+    ``show_gids`` (selecting the ``gid_iface`` v2 GID whose address matches
+    ``gid_prefix``, e.g. ``show_gids | grep bveth0 | grep v2 | grep 2401`` ->
+    index in the 3rd field). Pass ``gid_index`` only to override the probe.
+
+    Only explicitly-provided optional params are emitted; the rest fall back to
+    the task's own defaults.
+    """
+    params: t.Dict[str, t.Any] = {
+        "server": server,
+        "clients": clients,
+        "device": device,
+        "gid_iface": gid_iface,
+        "gid_prefix": gid_prefix,
+        "port": port,
+        "min_egress_gbps": min_egress_gbps,
+        "settle_sec": settle_sec,
+        "ods_window_sec": ods_window_sec,
+    }
+    if gid_index is not None:
+        params["gid_index"] = gid_index
+    if msg_size is not None:
+        params["msg_size"] = msg_size
+    if qp is not None:
+        params["qp"] = qp
+    if tclass is not None:
+        params["tclass"] = tclass
+    if iters is not None:
+        params["iters"] = iters
+    if key_desc is not None:
+        params["key_desc"] = key_desc
+    if reduce_desc is not None:
+        params["reduce_desc"] = reduce_desc
+    if transform_desc is not None:
+        params["transform_desc"] = transform_desc
+    return Task(
+        task_name="fpf_start_ib_traffic",
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_fpf_stop_ib_traffic_task(
+    server: str,
+    clients: t.List[str],
+) -> Task:
+    """Create a teardown task that stops ib_write_bw traffic on server + clients."""
+    return Task(
+        task_name="fpf_stop_ib_traffic",
+        params=Params(json_params=json.dumps({"server": server, "clients": clients})),
     )
 
 

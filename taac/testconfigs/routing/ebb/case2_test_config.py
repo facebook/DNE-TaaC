@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 TCP Socket Experiment — Case 2 Test Configuration.

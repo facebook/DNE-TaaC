@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 BGP Path Scale Test Configuration for Viper EDSW003.N001.L201.SNC1

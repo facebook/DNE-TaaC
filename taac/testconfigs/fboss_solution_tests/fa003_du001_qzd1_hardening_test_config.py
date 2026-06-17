@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """FA003_DU001_QZD1_HARDENING — Non-CICD residue TestConfig.

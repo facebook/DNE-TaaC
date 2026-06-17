@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 Per-platform / per-variant thrift stress payloads for ThriftStressPeriodicTask.

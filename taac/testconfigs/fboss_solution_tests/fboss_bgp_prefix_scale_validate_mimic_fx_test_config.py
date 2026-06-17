@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """FBOSS_BGP_PREFIX_SCALE_VALIDATE_MIMIC_FX — Non-CICD residue TestConfig.

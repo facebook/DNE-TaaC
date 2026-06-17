@@ -1,5 +1,5 @@
 # pyre-strict
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """
 Cache manager for IxNetwork topology configurations (ixncfg files).

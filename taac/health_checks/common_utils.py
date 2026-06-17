@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import sys
 import typing as t

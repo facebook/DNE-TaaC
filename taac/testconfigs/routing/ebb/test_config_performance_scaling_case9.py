@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Arista BGP++ performance scaling test case 9: bounded ECMP sets.
 

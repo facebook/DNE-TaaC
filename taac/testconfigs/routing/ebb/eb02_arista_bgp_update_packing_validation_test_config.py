@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """EB02_ARISTA_BGP_UPDATE_PACKING_VALIDATION — EBB B17 TestConfig.

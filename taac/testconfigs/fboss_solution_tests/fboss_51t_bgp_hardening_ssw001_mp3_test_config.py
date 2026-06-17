@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """FBOSS_51T_BGP_HARDENING_SSW001_MP3 — Non-CICD residue TestConfig.

@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -45,6 +45,126 @@ from taac.libs.fpf.fpf_stress_checks import (
 
 _collectors: t.Dict[str, t.Any] = {}
 _test_case_start_time: float = 0.0
+# Debug artifacts (category, label, url) generated during a test case — collector
+# detail Everpastes and ODS query links — accumulated so a consolidated summary
+# table can be emitted at teardown for easy access. Cleared by clear_all().
+_artifacts: t.List[t.Tuple[str, str, str]] = []
+
+# --- Disruption-effectiveness gate (#1) -----------------------------------
+# Set by the fpf_verify_disruption custom step after the disable/drain: whether
+# the targeted interface(s) actually changed state (admin DISABLED / oper DOWN).
+# None = not verified; True/False = verified effective/ineffective. Downstream
+# lane checks consult this and SKIP (inconclusive) rather than FAIL when the
+# disruption never took effect, so one clear signal replaces N confusing ones.
+_disruption_effective: t.Optional[bool] = None
+_disruption_effective_detail: str = ""
+
+# --- Baseline-impaired lanes (#2) -----------------------------------------
+# host -> set(lane) that were ALREADY impaired at precheck (e.g. a degraded lab
+# lane like gtsw003/plane2). Recorded by the FSDB-session precheck. When a test
+# config sets allow_baseline_failures, postcheck lane assertions exclude these
+# lanes (a failure there is PRE-EXISTING, not a test regression).
+_baseline_impaired_lanes: t.Dict[str, t.Set[int]] = {}
+_allow_baseline_failures: bool = False
+
+
+def set_disruption_effective(effective: bool, detail: str = "") -> None:
+    global _disruption_effective, _disruption_effective_detail
+    _disruption_effective = effective
+    _disruption_effective_detail = detail
+
+
+def get_disruption_effective() -> t.Tuple[t.Optional[bool], str]:
+    return _disruption_effective, _disruption_effective_detail
+
+
+def disruption_inconclusive_skip() -> t.Optional[str]:
+    """If a disruption was explicitly verified INEFFECTIVE this playbook, return a
+    human-readable skip reason for disrupt-asserting checks to surface as SKIP
+    (inconclusive) instead of FAIL. None when effective or not verified."""
+    if _disruption_effective is False:
+        return (
+            f"INCONCLUSIVE — disruption did not take effect "
+            f"({_disruption_effective_detail}); the targeted link never went down, "
+            f"so this disrupted-state assertion cannot be evaluated"
+        )
+    return None
+
+
+def set_baseline_impaired_lanes(host_to_lanes: t.Dict[str, t.Set[int]]) -> None:
+    global _baseline_impaired_lanes
+    _baseline_impaired_lanes = {h: set(v) for h, v in host_to_lanes.items()}
+
+
+def get_baseline_impaired_lanes() -> t.Dict[str, t.Set[int]]:
+    return {h: set(v) for h, v in _baseline_impaired_lanes.items()}
+
+
+def baseline_impaired_lane_union() -> t.Set[int]:
+    """All lanes impaired at baseline on any host (host-agnostic view)."""
+    out: t.Set[int] = set()
+    for lanes in _baseline_impaired_lanes.values():
+        out |= lanes
+    return out
+
+
+def set_allow_baseline_failures(allow: bool) -> None:
+    global _allow_baseline_failures
+    _allow_baseline_failures = allow
+
+
+def get_allow_baseline_failures() -> bool:
+    return _allow_baseline_failures
+
+
+def register_artifact(category: str, label: str, url: str) -> None:
+    """Record a debug artifact link (category e.g. 'collector'/'ods', a label,
+    and the URL) for the consolidated end-of-test artifacts summary."""
+    if url:
+        _artifacts.append((category, label, url))
+
+
+def get_artifacts() -> t.List[t.Tuple[str, str, str]]:
+    return list(_artifacts)
+
+
+# Per-check results (name, status, reason, classification) recorded by the FPF
+# checks for the consolidated FAILURE TRIAGE table at teardown. classification:
+# OK / NEW (regression) / PRE-EXISTING (baseline) / INCONCLUSIVE (disruption
+# didn't take). Cleared by clear_all().
+_check_results: t.List[t.Tuple[str, str, str, str]] = []
+
+
+def register_check_result(
+    name: str, status: str, reason: str = "", classification: str = ""
+) -> None:
+    """Record a check's verdict for the teardown FAILURE TRIAGE table. If
+    classification is omitted it is inferred from status/reason."""
+    if not classification:
+        r = reason.lower()
+        if status == "PASS":
+            classification = "OK"
+        elif "inconclusive" in r:
+            classification = "INCONCLUSIVE"
+        elif "pre-existing" in r or "baseline" in r:
+            classification = "PRE-EXISTING"
+        elif status == "SKIP":
+            classification = "SKIP"
+        else:
+            classification = "NEW"
+    _check_results.append((name, status, reason, classification))
+
+
+def get_check_results() -> t.List[t.Tuple[str, str, str, str]]:
+    return list(_check_results)
+
+
+# Wall-clock epoch of the disruptive action (interface flap / link drain),
+# recorded at runtime by the record_fpf_disruption_time custom step. 0.0 means
+# "not recorded"; link-event transition checks then fall back to a
+# disruption-relative heuristic. Distinct from test_case_start_time, which is
+# set at the START of the playbook (before inject + stabilization).
+_disruption_time: float = 0.0
 
 # Signal 1: end-to-end convergence ceiling. Includes any stimulus push
 # duration. 180s allows ~110s for 10k-prefix injection + ~70s propagation.
@@ -72,6 +192,65 @@ def get_test_case_start_time() -> float:
     return _test_case_start_time
 
 
+async def everpaste_details_suffix(
+    title: str,
+    lines: t.List[str],
+    collectors: t.Optional[t.List[t.Any]] = None,
+    window_start: t.Optional[float] = None,
+    window_end: t.Optional[float] = None,
+    result_status: t.Optional[str] = None,
+    result_reason: str = "",
+) -> str:
+    """Upload ``lines`` (plus, when ``collectors`` + window are given, each
+    collector's human-readable poll table for [window_start, window_end]) to
+    Everpaste and return a ``"  |  Details: <url>"`` suffix to append to a
+    collector-based health-check message.
+
+    The per-poll table is the key debugging aid: it shows the actual counts the
+    collector observed over the test-case window, so a failure is explainable
+    from the link alone (no log spelunking). Returns "" on empty input or on any
+    everpaste/fburl failure — a cosmetic link must never turn a check into an
+    error.
+    """
+    if not lines and not collectors:
+        return ""
+    from taac.utils.common import (
+        async_everpaste_str,
+        async_get_fburl_retry,
+    )
+
+    body_lines = list(lines)
+    if collectors and window_start is not None and window_end is not None:
+        for c in collectors:
+            if c is None or not hasattr(c, "format_window_table"):
+                continue
+            label = getattr(c, "host", None) or type(c).__name__
+            body_lines += [
+                "",
+                f"=== collector poll table [{label}] (test-case window) ===",
+                c.format_window_table(window_start, window_end),
+            ]
+    body = title + "\n" + "\n".join(body_lines)
+    try:
+        url = await async_everpaste_str(body, color=1)
+        url = await async_get_fburl_retry(url)
+        register_artifact("collector", title, url)
+        if result_status is not None:
+            register_check_result(title, result_status, result_reason)
+        return f"  |  Details: {url}"
+    except Exception:
+        return ""
+
+
+def set_disruption_time(ts: float) -> None:
+    global _disruption_time
+    _disruption_time = ts
+
+
+def get_disruption_time() -> float:
+    return _disruption_time
+
+
 def register_collector(name: str, collector: t.Any) -> None:
     _collectors[name] = collector
 
@@ -85,15 +264,29 @@ def get_all_collectors() -> t.Dict[str, t.Any]:
 
 
 def clear_all() -> None:
-    global _test_case_start_time
+    global _test_case_start_time, _disruption_time
+    global _disruption_effective, _disruption_effective_detail
+    global _baseline_impaired_lanes, _allow_baseline_failures
     _collectors.clear()
+    _artifacts.clear()
+    _check_results.clear()
     _test_case_start_time = 0.0
+    _disruption_time = 0.0
+    _disruption_effective = None
+    _disruption_effective_detail = ""
+    _baseline_impaired_lanes = {}
+    _allow_baseline_failures = False
 
 
 def _row_matches_device(row: t.Any, device: str) -> bool:
-    # Match by `gtsw` for FSDB/BGP rows, by `host` for HRT rows (so per-lane
-    # checks don't merge samples across hosts). Fall through to True only if
-    # the row carries no device-identifying field.
+    # Per-lane HRT rows (HrtBulkRow / HrtRemoteFailureRow) carry `lane_counts`
+    # and are discriminated by lane via `_row_value(lane_id=...)`, not by the
+    # caller's `device` string (which for these checks is the pseudo-label
+    # "HRT L{lane}", never a hostname). Match them unconditionally so the
+    # 3-signal evaluation sees the same per-lane samples as evaluate_per_lane.
+    if hasattr(row, "lane_counts"):
+        return True
+    # FSDB/BGP rows: match by `gtsw` (their device IS the GTSW hostname).
     if hasattr(row, "gtsw"):
         return row.gtsw == device
     if hasattr(row, "host"):
@@ -319,3 +512,87 @@ def evaluate_three_signals(
         f"{'PASS' if result.signal3_stability_ok else 'FAIL'} — {result.signal3_stability_detail}"
     )
     return result
+
+
+def evaluate_restart_reconverge(
+    collector: t.Any,
+    lane_map: t.Dict[int, str],
+    expected: int,
+    disruption_ts: float,
+    window_end: float,
+    reconverge_sla_sec: float,
+    match_field: str = "matched",
+) -> t.List[t.Tuple[int, str, bool, t.Optional[float], int, str]]:
+    """Per-device RIB reconverge contract for a SERVICE RESTART.
+
+    During a restart the restarted device's thrift queries go
+    null/unresponsive for a few polls — those samples are TOLERATED (not a
+    failure). Each device's RIB must return to (or hold at) ``expected`` within
+    ``reconverge_sla_sec`` of ``disruption_ts`` (the recorded restart moment). A
+    device whose count never dropped (only nulls) passes with reconverge ~0s.
+
+    A poll is treated as null/unresponsive when its ``notes`` starts with
+    "error:" or the match field is None. Returns a list of
+    (lane, device, passed, reconverge_sec, null_count, detail).
+    """
+    from taac.libs.fpf.fpf_stress_checks import _parse_ts
+
+    rows = collector.get_rows_in_window(disruption_ts, window_end)
+    results: t.List[t.Tuple[int, str, bool, t.Optional[float], int, str]] = []
+    for lane_id, device in sorted(lane_map.items()):
+        drows = [r for r in rows if getattr(r, "gtsw", None) == device]
+        good: t.List[t.Tuple[float, int]] = []
+        null_count = 0
+        for r in drows:
+            notes = getattr(r, "notes", "") or ""
+            matched = getattr(r, match_field, None)
+            if notes.startswith("error:") or matched is None:
+                null_count += 1
+                continue
+            try:
+                ts = _parse_ts(r.timestamp).timestamp()
+            except (ValueError, AttributeError):
+                continue
+            good.append((ts, int(matched)))
+        good.sort(key=lambda x: x[0])
+        if not good:
+            results.append(
+                (
+                    lane_id,
+                    device,
+                    False,
+                    None,
+                    null_count,
+                    f"no non-null samples after restart ({null_count} null tolerated)",
+                )
+            )
+            continue
+        reconverge_sec: t.Optional[float] = None
+        for ts, m in good:
+            if m >= expected:
+                reconverge_sec = round(ts - disruption_ts, 1)
+                break
+        last = good[-1][1]
+        passed = (
+            reconverge_sec is not None
+            and reconverge_sec <= reconverge_sla_sec
+            and last >= expected
+        )
+        if reconverge_sec is None:
+            detail = (
+                f"never reached {expected} after restart "
+                f"(last={last}, {null_count} null tolerated)"
+            )
+        elif not passed:
+            detail = (
+                f"reconverged to {expected} in {reconverge_sec}s "
+                f"> {reconverge_sla_sec:.0f}s SLA (last={last})"
+            )
+        else:
+            detail = (
+                f"reconverged to {expected} in {reconverge_sec}s "
+                f"(SLA {reconverge_sla_sec:.0f}s); {null_count} null sample(s) "
+                f"tolerated"
+            )
+        results.append((lane_id, device, passed, reconverge_sec, null_count, detail))
+    return results

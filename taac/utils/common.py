@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
 import getpass
@@ -50,6 +51,33 @@ def get_fburl(url: str) -> str:
 async def async_get_fburl(url: str) -> str:
     """Async version of get_fburl."""
     return get_fburl(url)
+
+
+async def async_get_fburl_retry(
+    url: str, attempts: int = 4, delay_sec: float = 0.75
+) -> str:
+    """``async_get_fburl`` that rides out transient fburl-tier throttling.
+
+    ``get_fburl_with_fallback`` returns the ORIGINAL url on throttle/failure
+    (it never raises), so a result equal to the input means shortening did not
+    happen. When many checks shorten concurrently (e.g. a playbook with a dozen
+    postchecks), the fburl tier throttles and callers get the long raw url back.
+    Retry a few times with a short backoff before giving up and returning the
+    raw url. Best-effort: a cosmetic link must never fail a check.
+    """
+    import asyncio
+
+    short = url
+    for i in range(max(1, attempts)):
+        try:
+            short = await async_get_fburl(url)
+        except Exception:
+            short = url
+        if short and short != url:
+            return short
+        if i < attempts - 1:
+            await asyncio.sleep(delay_sec)
+    return short
 
 
 async def async_log_to_file_oss(content: str, prefix: str = "taac") -> str:

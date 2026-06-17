@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """Unit tests for FpfHrtFsdbSessionHealthCheck."""
@@ -51,7 +51,7 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self.health_check._run(self.device, input_data, CHECK_PARAMS)
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
-        self.assertIn("All 32", result.message)
+        self.assertIn("32/32", result.message)
 
     @patch(
         "neteng.test_infra.dne.taac.health_checks.device_health_checks"
@@ -74,7 +74,7 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("30/32", result.message)
-        self.assertIn("session_30", result.message)
+        self.assertIn("CONNECTED", result.message)
 
     @patch(
         "neteng.test_infra.dne.taac.health_checks.device_health_checks"
@@ -127,7 +127,7 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self.health_check._run(self.device, input_data, params)
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
-        self.assertIn("All 16", result.message)
+        self.assertIn("16/16", result.message)
 
     @patch(
         "neteng.test_infra.dne.taac.health_checks.device_health_checks"
@@ -147,7 +147,7 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self.health_check._run(self.device, input_data, CHECK_PARAMS)
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
-        self.assertIn("20/32", result.message)
+        self.assertIn("expected 32", result.message)
 
     async def test_no_hosts_returns_skip(self):
         """No hosts in check_params should return SKIP."""
@@ -177,6 +177,74 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
         self.assertEqual(mock_get_hrt_client.call_count, 2)
+
+    @staticmethod
+    def _grid_sessions(down=None):
+        """Full 4x8 session grid with realistic device_id/plane_id; ``down`` is
+        {gpu: {lanes}} marked DISCONNECTED."""
+        down = down or {}
+        out = []
+        for gpu in range(4):
+            for lane in range(8):
+                state = "DISCONNECTED" if lane in down.get(gpu, set()) else "CONNECTED"
+                s = MagicMock()
+                s.name = f"g{gpu}l{lane}"
+                s.device_id = gpu
+                s.plane_id = lane
+                s.state = state
+                out.append(s)
+        return out
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks"
+        ".fpf_hrt_fsdb_session_health_check.get_hrt_client"
+    )
+    async def test_interface_disable_impacted_lane_reconciles_pass(
+        self, mock_get_hrt_client
+    ):
+        """GPU0 lane0 disabled -> 31/32 overall and dev0 lane0 DOWN -> PASS."""
+        sessions = self._grid_sessions(down={0: {0}})
+        mock_client = AsyncMock()
+        mock_client.getFsdbSessions.return_value = sessions
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_get_hrt_client.return_value = mock_client
+
+        params = {
+            "hosts": [GPU_HOST],
+            "impacted_lanes_by_host_gpu": {GPU_HOST: {0: [0]}},
+            "reconcile_device_id": 0,
+        }
+        result = await self.health_check._run(
+            self.device, hc_types.BaseHealthCheckIn(), params
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("31/32", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks"
+        ".fpf_hrt_fsdb_session_health_check.get_hrt_client"
+    )
+    async def test_interface_disable_lane_still_connected_fails(
+        self, mock_get_hrt_client
+    ):
+        """GPU0 lane0 expected down but still CONNECTED -> FAIL (Signal 2)."""
+        sessions = self._grid_sessions(down={})  # nothing actually down
+        mock_client = AsyncMock()
+        mock_client.getFsdbSessions.return_value = sessions
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_get_hrt_client.return_value = mock_client
+
+        params = {
+            "hosts": [GPU_HOST],
+            "impacted_lanes_by_host_gpu": {GPU_HOST: {0: [0]}},
+            "reconcile_device_id": 0,
+        }
+        result = await self.health_check._run(
+            self.device, hc_types.BaseHealthCheckIn(), params
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
 
     def test_check_scope_is_default(self):
         """CHECK_SCOPE should be DEFAULT (run once on DUT, not per endpoint)."""

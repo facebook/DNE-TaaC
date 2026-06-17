@@ -1,3 +1,4 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
 package "meta.com/neteng/test_infra/dne/utils/qos_config"
 
 namespace py neteng.test_infra.dne.utils.qos_config

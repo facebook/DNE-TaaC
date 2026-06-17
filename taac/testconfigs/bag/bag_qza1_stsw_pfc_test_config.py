@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 Multi-node BAG <-> STSW PFC Test Configuration

@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """EB01-ARISTA_MIMIC_EBB_TEST_FULL_SCALE_WITHOUT_OPEN_R — EBB B17 TestConfig.

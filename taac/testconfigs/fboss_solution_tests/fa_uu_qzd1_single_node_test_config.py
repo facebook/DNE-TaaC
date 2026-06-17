@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Single-node FA/UU FBOSS qualification TestConfig for the QZD1 lab.
 

@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """SNC1 C084 DSF FR4 lite-optics TestConfig.
 

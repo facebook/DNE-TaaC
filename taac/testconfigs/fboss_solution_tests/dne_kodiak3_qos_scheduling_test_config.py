@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """DNE_KODIAK3_QOS_SCHEDULING_CICD_NODE — CICD_TC TestConfig.

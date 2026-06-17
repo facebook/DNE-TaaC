@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -11,7 +11,12 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from taac.libs.fpf.fpf_collector_registry import (
+    baseline_impaired_lane_union,
+    disruption_inconclusive_skip,
+    everpaste_details_suffix,
+    get_allow_baseline_failures,
     get_collector,
+    get_disruption_time,
     get_test_case_start_time,
 )
 from taac.libs.fpf.fpf_stress_checks import _parse_ts
@@ -51,9 +56,27 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         direction: str = check_params.get("direction", "drain")
         max_convergence_sec: int = check_params.get("max_convergence_sec", 120)
         use_live = check_params.get("use_live_collectors", False)
+        if direction == "drain":
+            _skip = disruption_inconclusive_skip()
+            if _skip:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.SKIP, message=_skip
+                )
+        # Baseline exclusion: for the "stable" (unimpacted-lane) assertion, drop
+        # lanes already impaired at precheck when the config opted in — a
+        # remote-failure on a known-degraded lab lane is PRE-EXISTING.
+        if direction == "stable" and get_allow_baseline_failures():
+            baseline = baseline_impaired_lane_union()
+            kept = [lane for lane in lanes if lane not in baseline]
+            if baseline:
+                self.logger.info(
+                    f"  [HRT remote_failure] excluding baseline-impaired lanes "
+                    f"{sorted(baseline & set(lanes))} from stable assertion"
+                )
+            lanes = kept
 
         if use_live:
-            return self._evaluate_from_live_collector(
+            return await self._evaluate_from_live_collector(
                 lanes, expected_per_lane, direction, max_convergence_sec, check_params
             )
 
@@ -61,7 +84,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             lanes, expected_per_lane, direction, max_convergence_sec, check_params
         )
 
-    def _evaluate_from_live_collector(
+    async def _evaluate_from_live_collector(
         self,
         lanes: t.List[int],
         expected_per_lane: t.Dict[int, int],
@@ -76,12 +99,33 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 message="No live HRT remote-failure collector in registry",
             )
 
+        # Lane -> host-NIC mapping note (e.g. "→ beth0@rtptest1544") for messages.
+        lane_labels: t.Dict[str, str] = check_params.get("lane_labels", {})
+
+        def _lbl(lane: int) -> str:
+            note = lane_labels.get(str(lane), "")
+            return f" {note}" if note else ""
+
+        # Restrict to the host(s) whose lane was actually impacted — the remote
+        # host keeps the route on the same lane, so evaluating it is a false FAIL.
+        only_hosts: t.Optional[t.List[str]] = check_params.get("only_hosts") or None
+
         window_end = check_params.get("window_end", time.time())
         tc_start = get_test_case_start_time()
         lookback_sec = check_params.get("lookback_sec", 900)
-        window_start = check_params.get(
-            "window_start", tc_start if tc_start else window_end - lookback_sec
-        )
+        # For the "stable" assertion on the impacted lane, anchor the window at the
+        # recorded disruption time (the drain/disable moment) rather than the
+        # test-case start. The negative-route count legitimately blips during the
+        # pre-disruption prefix INJECTION ramp (observed: L0=100 for one ~3s sample
+        # minutes before the drain); starting at tc_start would count that
+        # injection artifact as a drain-time regression. Falls back to tc_start
+        # when no disruption time was recorded (disruption_time defaults to 0.0).
+        default_start = tc_start if tc_start else window_end - lookback_sec
+        if direction == "stable":
+            disruption_ts = get_disruption_time()
+            if disruption_ts > 0:
+                default_start = disruption_ts
+        window_start = check_params.get("window_start", default_start)
 
         self.logger.info(
             f"  [HRT remote_failure live] direction={direction} "
@@ -96,6 +140,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             expected_per_lane=expected_per_lane,
             direction=direction,
             max_convergence_sec=max_convergence_sec,
+            only_hosts=only_hosts,
         )
 
         failures = [r for r in per_lane_results if not r.passed]
@@ -105,26 +150,44 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 f"  [HRT remote_failure live] Lane {r.lane}: [{status}] {r.detail}"
             )
 
+        details = await everpaste_details_suffix(
+            f"HRT remote-failure ({direction}) — per-lane detail",
+            [
+                f"Lane {r.lane}{_lbl(r.lane)}: [{'PASS' if r.passed else 'FAIL'}] "
+                f"{r.detail}"
+                for r in per_lane_results
+            ],
+            collectors=[collector],
+            window_start=window_start,
+            window_end=window_end,
+            result_status=("FAIL" if failures else "PASS"),
+            result_reason="; ".join(
+                f"Lane {r.lane}{_lbl(r.lane)}: {r.detail}" for r in failures
+            )[:300],
+        )
+
         timeout_count = collector.timeout_count_in_window(window_start, window_end)
         if timeout_count > 0:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=(
                     f"Got null data — {timeout_count} poll timeout(s) in window "
-                    f"[{window_start:.0f}, {window_end:.0f}]"
+                    f"[{window_start:.0f}, {window_end:.0f}]{details}"
                 ),
             )
 
         if failures:
-            fail_summary = "; ".join(f"Lane {r.lane}: {r.detail}" for r in failures)
+            fail_summary = "; ".join(
+                f"Lane {r.lane}{_lbl(r.lane)}: {r.detail}" for r in failures
+            )
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
-                message=fail_summary,
+                message=fail_summary + details,
             )
         pass_summary = "; ".join(f"Lane {r.lane}: {r.detail}" for r in per_lane_results)
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
-            message=f"All lanes OK ({direction}) — {pass_summary}",
+            message=f"All lanes OK ({direction}) — {pass_summary}{details}",
         )
 
     def _evaluate_from_jsonl(

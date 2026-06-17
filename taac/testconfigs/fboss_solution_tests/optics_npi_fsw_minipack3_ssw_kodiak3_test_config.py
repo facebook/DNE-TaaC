@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """OPTICS_NPI_FSW_MINIPACK3_SSW_KODIAK3 — CICD_TC TestConfig.

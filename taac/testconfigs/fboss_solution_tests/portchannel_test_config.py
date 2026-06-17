@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Port-channel TestConfig builders (FAUU + DU, QZD1 lab).
 

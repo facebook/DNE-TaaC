@@ -1,3 +1,4 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
 namespace py neteng.test_infra.ixia.ixnetwork_restpy.ixia_config_thrift
 namespace py3 neteng.test_infra.ixia.ixnetwork_restpy
 namespace cpp2 facebook.neteng.test_infra.ixia.ixnetwork_restpy

@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -42,7 +42,9 @@ class FpfOdsCounterHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChec
         key_desc (str): ODS key regex (e.g., regex(fboss.agent.eth.*discards.sum.60),filter(.*in_dst_null.*))
         validation_expr (str): Comparison expression (e.g., "<= 10000")
         reduce_desc (str): ODS reduce function (default: "")
-        transform_desc (str): ODS transform function (default: "max()")
+        transform_desc (str): ODS transform function (default: "max"). NOTE the
+            bare form — NOT "max()": empty parens make Rapido parse "" as a time
+            and fail with "input time is an empty string".
         counter_name (str): Human-readable counter name for logging (default: "ODS counter")
     """
 
@@ -60,7 +62,7 @@ class FpfOdsCounterHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChec
         key_desc = check_params["key_desc"]
         validation_expr = check_params["validation_expr"]
         reduce_desc = check_params.get("reduce_desc", "")
-        transform_desc = check_params.get("transform_desc", "max()")
+        transform_desc = check_params.get("transform_desc", "max")
         counter_name = check_params.get("counter_name", "ODS counter")
 
         tc_start = get_test_case_start_time()

@@ -1,5 +1,5 @@
 # pyre-strict
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase

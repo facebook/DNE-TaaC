@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """CHRONOS_NODE_FULL_SCALE_P006_QZD1 — CICD_TC TestConfig.

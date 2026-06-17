@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Generic NetworkAI TestConfig builders + shared traffic/playbook helpers.
 

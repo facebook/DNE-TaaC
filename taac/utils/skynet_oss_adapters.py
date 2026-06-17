@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Adapter utilities for mapping OSS CSV circuit data to Skynet-like objects."""
 

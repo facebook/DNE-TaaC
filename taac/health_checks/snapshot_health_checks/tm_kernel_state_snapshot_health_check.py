@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """KERNEL_STATE_SNAPSHOT_CHECK — composite kernel-state preservation HC for TAAC.

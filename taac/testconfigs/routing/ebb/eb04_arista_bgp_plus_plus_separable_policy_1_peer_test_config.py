@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """EB04_ARISTA_BGP_PLUS_PLUS_SEPARABLE_POLICY_1_PEER — EBB B17 TestConfig.

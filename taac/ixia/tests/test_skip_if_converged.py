@@ -1,5 +1,5 @@
 # pyre-unsafe
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 """Unit tests for skip-if-already-converged helpers + `configure_bgp_peers_flap` integration.
 
 Pain #1 Lever E. Validates:

@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """QOS_SCHEDULING_KODIAK3_RB001_01_QXT1 — CICD_TC TestConfig.

@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """BGP_AND_FBOSS_PLATFORM_HARDENING self-entry — Non-CICD residue TestConfig.

@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import os
 
@@ -92,6 +93,10 @@ from taac.tasks.eos import (
 from taac.tasks.fpf_collector_tasks import (
     FpfStartCollectorsTask,
     FpfStopCollectorsTask,
+)
+from taac.tasks.fpf_ib_traffic_task import (
+    FpfStartIbTrafficTask,
+    FpfStopIbTrafficTask,
 )
 from taac.tasks.full_reboot_task import FullRebootTask
 from taac.tasks.interface_ip_configuration_task import (
@@ -199,6 +204,8 @@ TASK_REGISTRY = [
     FullRebootTask,
     FpfStartCollectorsTask,
     FpfStopCollectorsTask,
+    FpfStartIbTrafficTask,
+    FpfStopIbTrafficTask,
 ]
 
 if not TAAC_OSS:

@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """Arista BGP++ performance scaling test case 4: transient memory peer scale.
 

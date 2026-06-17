@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch

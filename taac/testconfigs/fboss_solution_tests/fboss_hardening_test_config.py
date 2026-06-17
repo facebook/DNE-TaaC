@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """FBOSS hardening TestConfig builders for Wedge100S and Wedge400C.
 

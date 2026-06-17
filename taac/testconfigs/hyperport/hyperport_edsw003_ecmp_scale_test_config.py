@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 ECMP Scale Test Configuration for EDSW003.N001.L201.SNC1 (3-port topology)

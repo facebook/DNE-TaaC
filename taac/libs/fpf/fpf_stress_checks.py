@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -39,6 +39,7 @@ from taac.libs.fpf.fpf_hrt_bulk_tracker import (
 )
 from taac.libs.fpf.fpf_hrt_polling import get_hrt_client
 from taac.libs.fpf.fpf_prod_hrt_prefix import (
+    build_plane_status_map,
     build_prefix_map,
     normalize_prefix,
     PrefixReachability,
@@ -463,6 +464,31 @@ class BaseCollector:
                 windowed.append(row)
         return windowed
 
+    def format_window_table(
+        self, window_start: float, window_end: float, max_rows: int = 4000
+    ) -> str:
+        """Human-readable table of this collector's polled rows within the test-
+        case window — the same per-poll data written to the .log file, sliced to
+        [window_start, window_end]. Used to attach a debuggable poll table to the
+        collector-based health-check Everpaste detail. Generic over the row
+        dataclass (header = field names, one line per poll); capped at max_rows.
+        """
+        import dataclasses
+
+        rows = self.get_rows_in_window(window_start, window_end)
+        if not rows:
+            return "(no collector rows in test-case window)"
+        try:
+            field_names = [f.name for f in dataclasses.fields(rows[0])]
+        except TypeError:
+            return "\n".join(str(r) for r in rows[:max_rows])
+        lines = ["  ".join(field_names)]
+        for r in rows[:max_rows]:
+            lines.append("  ".join(str(getattr(r, fn, "")) for fn in field_names))
+        if len(rows) > max_rows:
+            lines.append(f"... ({len(rows) - max_rows} more rows truncated)")
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # FSDB RibMap Collector
@@ -478,7 +504,7 @@ class FsdbRibmapCollector(BaseCollector):
         subnet_prefix: str,
         tmp_path: str = "/tmp/fpf_stress_fsdb_ribmap.log",
         interval_sec: float = 2.0,
-        fsdb_mode: str = "canonical",
+        fsdb_mode: str = "ribmap",
     ) -> None:
         super().__init__(tmp_path, interval_sec)
         self.gtsws = gtsws
@@ -781,10 +807,19 @@ class HrtBulkCollector(BaseCollector):
         window_end: float,
         lanes: List[int],
         expected_per_lane: Optional[Dict[int, int]] = None,
+        only_hosts: Optional[List[str]] = None,
     ) -> List[PerLaneResult]:
-        """Time-windowed variant of evaluate_per_lane."""
+        """Time-windowed variant of evaluate_per_lane.
+
+        ``only_hosts`` (when given) restricts evaluation to rows from those hosts
+        — used by link-event checks that should assert only on the host whose
+        lane was actually impacted, ignoring the unimpacted remote host(s).
+        """
         trigger_time = datetime.fromtimestamp(window_start, tz=timezone.utc)
         windowed = self.get_rows_in_window(window_start, window_end)
+        if only_hosts:
+            allow = set(only_hosts)
+            windowed = [r for r in windowed if getattr(r, "host", None) in allow]
         saved_rows = self.rows
         try:
             self.rows = windowed
@@ -1196,6 +1231,7 @@ class HrtRemoteFailureCollector(BaseCollector):
             max_seen = 0
             nonzero_count = 0
             total_rows = 0
+            last_count = 0
             for row in self.rows:
                 if lane_id >= len(row.lane_counts):
                     continue
@@ -1205,8 +1241,25 @@ class HrtRemoteFailureCollector(BaseCollector):
                     max_seen = count
                 if count != 0:
                     nonzero_count += 1
+                last_count = count
 
+            # Strict: every in-window sample must be 0. The window MUST start at
+            # the recorded disruption time (callers scope via
+            # ``evaluate_per_lane_window(window_start=disruption_time, ...)``) so
+            # the pre-disruption injection ramp is excluded — the negative-route
+            # count legitimately blips during prefix injection (e.g. L0=100 for a
+            # single ~3s sample) ~minutes BEFORE the drain, and that artifact must
+            # not be counted against drain stability. Within the post-disruption
+            # window a device/link drain produces NO negative-route blip on the
+            # impacted lane, so any nonzero is a real regression.
             passed = nonzero_count == 0
+            if passed:
+                detail = f"stable at 0 across {total_rows} samples"
+            else:
+                detail = (
+                    f"saw nonzero in {nonzero_count}/{total_rows} "
+                    f"samples (max={max_seen}, last={last_count})"
+                )
             results.append(
                 PerLaneResult(
                     lane=lane_id,
@@ -1216,12 +1269,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     expected=0,
                     actual=max_seen,
                     convergence_sec=None,
-                    detail=(
-                        f"stable at 0 across {total_rows} samples"
-                        if passed
-                        else f"saw nonzero in {nonzero_count}/{total_rows} "
-                        f"samples (max={max_seen})"
-                    ),
+                    detail=detail,
                 )
             )
         return results
@@ -1234,10 +1282,19 @@ class HrtRemoteFailureCollector(BaseCollector):
         expected_per_lane: Optional[Dict[int, int]] = None,
         direction: str = "drain",
         max_convergence_sec: int = 120,
+        only_hosts: Optional[List[str]] = None,
     ) -> List[PerLaneResult]:
-        """Time-windowed variant for use by health checks."""
+        """Time-windowed variant for use by health checks.
+
+        ``only_hosts`` (when given) restricts evaluation to rows from those hosts
+        — link-event checks assert only on the impacted host's lane, ignoring the
+        unimpacted remote host(s).
+        """
         trigger_time = datetime.fromtimestamp(window_start, tz=timezone.utc)
         windowed = self.get_rows_in_window(window_start, window_end)
+        if only_hosts:
+            allow = set(only_hosts)
+            windowed = [r for r in windowed if getattr(r, "host", None) in allow]
         saved_rows = self.rows
         try:
             self.rows = windowed
@@ -1442,3 +1499,230 @@ class ProdHrtPrefixCollector(BaseCollector):
             return _parse_ts(row.timestamp).timestamp()
         except (ValueError, AttributeError):
             return None
+
+
+# ---------------------------------------------------------------------------
+# HRT Plane-Status Collector (per-device plane Up/Drained state)
+# ---------------------------------------------------------------------------
+
+# Canonical plane (lane) count per GPU device — beth0..beth7.
+NUM_PLANES: int = NUM_LANES
+
+
+@dataclass
+class HrtPlaneStatusRow:
+    """One poll of ``hrtctl show plane-status --device N`` for a single device.
+
+    ``plane_states`` maps plane_id -> PlaneState name (e.g. ``"UP"``,
+    ``"DRAINED"``, ``"DOWN"``, ``"UNKNOWN"``). Empty when the poll returned no
+    entries for the device (treated as missing/null data downstream).
+    """
+
+    timestamp: str
+    host: str
+    device_id: int
+    plane_states: Dict[int, str] = field(default_factory=dict)
+
+
+@dataclass
+class PlaneStatusResult:
+    """Per-plane verdict over an evaluation window."""
+
+    plane: int
+    passed: bool
+    expected_state: str
+    observed_state: str
+    samples: int
+    detail: str = ""
+
+
+class HrtPlaneStatusCollector(BaseCollector):
+    """Polls HRT ``getPlaneStatus()`` for one GPU device, per-plane State.
+
+    Programmatic equivalent of ``hrtctl show plane-status --device N``: each poll
+    captures the State of every plane (beth0..beth7) on the device. Two postcheck
+    contracts are supported via the evaluate_* helpers:
+
+      - all_up: every plane is UP across the whole window (non-drained
+        scenarios — baseline, interface enable, link/device undrain).
+      - drain : the impacted plane(s) reach DRAINED and remain so by window end,
+        while every other plane stays UP (link OR device drain — from the GPU's
+        plane-status view a device drain of the GTSW serving a plane looks the
+        same as a link drain of that plane).
+    """
+
+    def __init__(
+        self,
+        host: str,
+        device_id: int,
+        tmp_path: str = "/tmp/fpf_stress_hrt_plane_status.log",
+        interval_sec: float = 3.0,
+        num_planes: int = NUM_PLANES,
+    ) -> None:
+        super().__init__(tmp_path, interval_sec)
+        self.host = host
+        self.device_id = device_id
+        self.num_planes = num_planes
+        self.rows: List[HrtPlaneStatusRow] = []
+
+    def _write_header(self, f) -> None:
+        f.write(
+            f"{'timestamp':<30}  {'host':<22}  {'device':<7}  "
+            f"plane_states (plane=STATE ...)\n"
+        )
+
+    async def _poll_once(self) -> None:
+        states: Dict[int, str] = {}
+        try:
+            client_ctx = await get_hrt_client(self.host)
+            async with client_ctx as client:
+                plane_status_entries = await client.getPlaneStatus()
+            by_dev = build_plane_status_map(plane_status_entries, {self.device_id})
+            states = {int(p): str(s) for p, s in by_dev.get(self.device_id, {}).items()}
+        except Exception as e:
+            logger.error(
+                f"[HrtPlaneStatusCollector] {self.host} dev{self.device_id}: {e}"
+            )
+            states = {}
+
+        ts = _now_str()
+        self.rows.append(
+            HrtPlaneStatusRow(
+                timestamp=ts,
+                host=self.host,
+                device_id=self.device_id,
+                plane_states=states,
+            )
+        )
+        rendered = " ".join(f"{p}={states[p]}" for p in sorted(states)) or "-"
+        if self._file is not None:
+            self._file.write(
+                f"{ts:<30}  {self.host:<22}  {self.device_id:<7}  {rendered}\n"
+            )
+            self._file.flush()
+        self._write_json_row(
+            {
+                "collector": "hrt_plane_status",
+                "timestamp": ts,
+                "host": self.host,
+                "device_id": self.device_id,
+                "plane_states": {str(p): s for p, s in states.items()},
+            }
+        )
+
+    def _planes(self, expected_planes: Optional[List[int]]) -> List[int]:
+        if expected_planes is not None:
+            return sorted(expected_planes)
+        return list(range(self.num_planes))
+
+    def evaluate_all_up_window(
+        self,
+        window_start: float,
+        window_end: float,
+        expected_planes: Optional[List[int]] = None,
+    ) -> List[PlaneStatusResult]:
+        """Every plane must be UP in every in-window sample."""
+        windowed = self.get_rows_in_window(window_start, window_end)
+        results: List[PlaneStatusResult] = []
+        for plane in self._planes(expected_planes):
+            samples = 0
+            bad_state: Optional[str] = None
+            bad_ts: Optional[str] = None
+            last_state = "MISSING"
+            for r in windowed:
+                samples += 1
+                st = r.plane_states.get(plane)
+                last_state = st if st is not None else "MISSING"
+                if st != "UP" and bad_state is None:
+                    bad_state = last_state
+                    bad_ts = r.timestamp
+            passed = bad_state is None and samples > 0
+            if samples == 0:
+                detail = "no in-window samples"
+            elif passed:
+                detail = f"UP across {samples} samples"
+            else:
+                detail = f"not UP — saw {bad_state} at {bad_ts} (last={last_state})"
+            results.append(
+                PlaneStatusResult(
+                    plane=plane,
+                    passed=passed,
+                    expected_state="UP",
+                    observed_state=last_state,
+                    samples=samples,
+                    detail=detail,
+                )
+            )
+        return results
+
+    def evaluate_drain_window(
+        self,
+        window_start: float,
+        window_end: float,
+        impacted_planes: List[int],
+        expected_planes: Optional[List[int]] = None,
+    ) -> List[PlaneStatusResult]:
+        """Impacted plane(s) DRAINED by window end; all other planes stay UP.
+
+        The window MUST start at the recorded disruption time so the impacted
+        plane's pre-drain UP samples are excluded (a drain takes a few seconds to
+        reflect). An impacted plane PASSES iff its last in-window sample is
+        DRAINED; a non-impacted plane PASSES iff it is UP in every sample.
+        """
+        impacted = {int(p) for p in impacted_planes}
+        windowed = self.get_rows_in_window(window_start, window_end)
+        results: List[PlaneStatusResult] = []
+        for plane in self._planes(expected_planes):
+            states = [(r.timestamp, r.plane_states.get(plane)) for r in windowed]
+            samples = len(states)
+            last_state = states[-1][1] if states else None
+            last_disp = last_state if last_state is not None else "MISSING"
+            if plane in impacted:
+                reached = any(st == "DRAINED" for _ts, st in states)
+                passed = samples > 0 and last_state == "DRAINED"
+                if samples == 0:
+                    detail = "no in-window samples"
+                elif passed:
+                    detail = f"DRAINED by window end across {samples} samples"
+                elif reached:
+                    detail = f"reached DRAINED but left it (last={last_disp})"
+                else:
+                    detail = (
+                        f"never DRAINED (last={last_disp}) — drain not reflected "
+                        f"on impacted plane"
+                    )
+                results.append(
+                    PlaneStatusResult(
+                        plane=plane,
+                        passed=passed,
+                        expected_state="DRAINED",
+                        observed_state=last_disp,
+                        samples=samples,
+                        detail=detail,
+                    )
+                )
+            else:
+                bad_state: Optional[str] = None
+                bad_ts: Optional[str] = None
+                for ts, st in states:
+                    if st != "UP" and bad_state is None:
+                        bad_state = st if st is not None else "MISSING"
+                        bad_ts = ts
+                passed = bad_state is None and samples > 0
+                if samples == 0:
+                    detail = "no in-window samples"
+                elif passed:
+                    detail = f"UP across {samples} samples"
+                else:
+                    detail = f"unexpectedly not UP — {bad_state} at {bad_ts}"
+                results.append(
+                    PlaneStatusResult(
+                        plane=plane,
+                        passed=passed,
+                        expected_state="UP",
+                        observed_state=last_disp,
+                        samples=samples,
+                        detail=detail,
+                    )
+                )
+        return results

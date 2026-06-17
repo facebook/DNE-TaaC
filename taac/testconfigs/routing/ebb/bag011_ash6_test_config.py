@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 BGP++ Conveyor Test Configurations for bag011.ash6.

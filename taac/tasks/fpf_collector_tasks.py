@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -28,12 +28,15 @@ from taac.internal.driver.fboss_switch_internal import (
 from taac.libs.fpf.fpf_collector_registry import (
     clear_all,
     get_all_collectors,
+    get_artifacts,
+    get_check_results,
     register_collector,
 )
 from taac.libs.fpf.fpf_stress_checks import (
     BgpRibCollector,
     FsdbRibmapCollector,
     HrtBulkCollector,
+    HrtPlaneStatusCollector,
     HrtRemoteFailureCollector,
     ProdHrtPrefixCollector,
 )
@@ -61,6 +64,19 @@ class FpfStartCollectorsTask(BaseTask):
         baseline_collection_sec: int = params.get(
             "baseline_collection_sec", BASELINE_COLLECTION_SEC
         )
+        # FSDB ribMap read path: "ribmap" -> bgp/ribMap (valid on current GTSWs),
+        # "canonical" -> bgp/canonicalRib (newer schema; INVALID_PATH on GTSWs
+        # that don't expose it yet). Default "ribmap".
+        fsdb_mode: str = params.get("fsdb_mode", "ribmap")
+        # When True, postcheck lane assertions exclude lanes already impaired at
+        # precheck (baseline) — a failure on a known-degraded lab lane is
+        # PRE-EXISTING, not a test regression, so the test can pass on the
+        # healthy + test-impacted lanes. Set in the registry for the checks.
+        from taac.libs.fpf.fpf_collector_registry import (
+            set_allow_baseline_failures,
+        )
+
+        set_allow_baseline_failures(bool(params.get("allow_baseline_failures", False)))
 
         logger.info(
             f"[FpfStartCollectors] Starting collectors for {len(gtsws)} GTSWs, "
@@ -71,6 +87,7 @@ class FpfStartCollectorsTask(BaseTask):
             gtsws=gtsws,
             subnet_prefix=subnet_prefix,
             interval_sec=poll_interval_sec,
+            fsdb_mode=fsdb_mode,
         )
         fsdb_collector.set_append_mode(True)
 
@@ -127,6 +144,22 @@ class FpfStartCollectorsTask(BaseTask):
                 f"{prod_host} dev{prod_device_id} for {len(prod_prefixes)} prefix(es)"
             )
 
+            # Device-level HRT plane-status collector (hrtctl show plane-status):
+            # tracks per-plane Up/Drained state on the same monitored GPU device.
+            # Consumed by FpfHrtPlaneStatusHealthCheck (all_up / drain contracts).
+            plane_status_collector = HrtPlaneStatusCollector(
+                host=prod_host,
+                device_id=prod_device_id,
+                interval_sec=poll_interval_sec,
+            )
+            plane_status_collector.set_append_mode(True)
+            plane_status_collector.start()
+            register_collector("hrt_plane_status", plane_status_collector)
+            logger.info(
+                f"[FpfStartCollectors] HRT plane-status collector started on "
+                f"{prod_host} dev{prod_device_id}"
+            )
+
         logger.info(
             f"[FpfStartCollectors] Collectors started. Waiting "
             f"{baseline_collection_sec}s for baseline data collection"
@@ -177,5 +210,105 @@ class FpfStopCollectorsTask(BaseTask):
 
             await asyncio.gather(*[_withdraw_on_device(d) for d in trigger_stsws])
         finally:
+            await self._emit_artifacts_summary()
             clear_all()
         logger.info("[FpfStopCollectors] All collectors stopped, prefixes withdrawn")
+
+    async def _emit_artifacts_summary(self) -> None:
+        """Emit the single consolidated FPF test-case summary at teardown.
+
+        ONE Everpaste (and one log block) containing BOTH:
+          1. the FAILURE TRIAGE table (every check's verdict / class / reason), and
+          2. the DEBUG ARTIFACTS table (every collector per-poll Everpaste link and
+             every ODS query link generated during the test case).
+
+        This is the "single place" to start any FPF failure investigation — no
+        scrolling the per-check log lines. Best-effort; never raises."""
+        try:
+            triage_table = self._build_triage_table()  # may be ""
+            artifacts = get_artifacts()
+            artifacts_table = self._build_artifacts_table(artifacts)  # may be ""
+
+            blocks = [b for b in (triage_table, artifacts_table) if b]
+            if not blocks:
+                return
+            body = "\n\n".join(blocks)
+            # Log both tables inline so they're visible without opening a link.
+            logger.info("\n" + body)
+
+            from taac.utils.common import (
+                async_everpaste_str,
+                async_get_fburl,
+            )
+
+            try:
+                summary_url = await async_get_fburl(
+                    await async_everpaste_str(body, color=0)
+                )
+                logger.warning(
+                    f"[FpfStopCollectors] ⭐ FPF TEST-CASE SUMMARY "
+                    f"({len(artifacts)} artifact link(s)) — triage + all "
+                    f"collector/ODS links in one place: {summary_url}"
+                )
+            except Exception as e:
+                logger.warning(f"[FpfStopCollectors] summary everpaste failed: {e}")
+        except Exception as e:
+            logger.warning(f"[FpfStopCollectors] test-case summary skipped: {e}")
+
+    def _build_triage_table(self) -> str:
+        """Build the FAILURE TRIAGE table (every link-event health check's
+        verdict, reason, and classification: OK / NEW regression / PRE-EXISTING
+        baseline / INCONCLUSIVE disruption / SKIP). Returns "" if no results."""
+        results = get_check_results()
+        if not results:
+            return ""
+        # Sort so failures/regressions float to the top, OK sinks to the bottom.
+        order = {
+            "NEW": 0,
+            "INCONCLUSIVE": 1,
+            "PRE-EXISTING": 2,
+            "SKIP": 3,
+            "OK": 4,
+        }
+        results = sorted(results, key=lambda r: order.get(r[3], 9))
+        lines = [
+            "FPF FAILURE TRIAGE",
+            "=" * 100,
+            f"{'CHECK':<40}  {'VERDICT':<8}  {'CLASS':<13}  REASON",
+            "-" * 100,
+        ]
+        for name, status, reason, classification in results:
+            reason_short = (reason or "")[:60]
+            lines.append(
+                f"{name[:40]:<40}  {status:<8}  {classification:<13}  {reason_short}"
+            )
+        n_new = sum(1 for r in results if r[3] == "NEW")
+        n_pre = sum(1 for r in results if r[3] == "PRE-EXISTING")
+        n_inc = sum(1 for r in results if r[3] == "INCONCLUSIVE")
+        lines.append("-" * 100)
+        lines.append(
+            f"Totals: {len(results)} checks — {n_new} NEW (regression), "
+            f"{n_pre} PRE-EXISTING (baseline), {n_inc} INCONCLUSIVE (disruption)"
+        )
+        if n_new:
+            logger.warning(
+                f"[FpfStopCollectors] FPF TRIAGE: {n_new} NEW regression(s) — "
+                f"see FPF TEST-CASE SUMMARY"
+            )
+        return "\n".join(lines)
+
+    def _build_artifacts_table(self, artifacts: t.List[t.Tuple[str, str, str]]) -> str:
+        """Build the DEBUG ARTIFACTS table — every collector per-poll Everpaste
+        link and every ODS query link generated during the test case. Returns ""
+        if nothing was registered."""
+        if not artifacts:
+            return ""
+        lines = [
+            "FPF TEST-CASE DEBUG ARTIFACTS (collector Everpaste + ODS query links)",
+            "=" * 80,
+            f"{'CATEGORY':<12}  {'LABEL':<48}  URL",
+            "-" * 80,
+        ]
+        for category, label, url in artifacts:
+            lines.append(f"{category:<12}  {label:<48}  {url}")
+        return "\n".join(lines)

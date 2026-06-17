@@ -155,6 +155,139 @@ def create_record_jq_timestamp_step(
     )
 
 
+def create_fpf_set_interface_admin_step(
+    interfaces: t.List[str],
+    enable: bool,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Disable/enable interface(s) on the live agent via thrift (held).
+
+    Unlike ``create_interface_permanent_flap_step`` (COOP change_port_admin_state
+    config patcher — only patches config, does not shut the running port without
+    a reload/warmboot), this sets the agent port admin state immediately via
+    ``setPortState`` and holds it until changed. Use it for FPF interface-disable
+    tests that must have the port actually down during the assertion window; pair
+    a disable (enable=False) with an enable (enable=True) to restore.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"{'Enable' if enable else 'Disable'} {interfaces} (thrift admin state)",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_set_interface_admin",
+                    "interfaces": interfaces,
+                    "is_enable": enable,
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_drain_interface_step(
+    interfaces: t.Optional[t.List[str]],
+    drain: bool,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Soft-drain / undrain via the on-box LOCAL_DRAINER, calling the driver
+    directly. With ``interfaces`` -> per-port (``async_softdrain_interface`` /
+    ``async_undrain_interface``); with EMPTY/None ``interfaces`` -> device-level
+    soft-drain of the whole DUT (``async_onbox_softdrain_device`` /
+    ``async_onbox_undrain_device``).
+
+    Unlike ``create_drain_undrain_step(interfaces=...)`` (whose LOCAL_DRAINER path
+    resolves the interface against the discovered fabric topology and raises
+    "Interface not found" for the GPU-facing GTSW port), the per-port path here
+    passes the name straight to the drainer — the GPU-facing port is a real agent
+    port but is not in the fabric-discovered interface list. And unlike the
+    generic device path (which HARD-drains via ``async_onbox_drain_device``), the
+    device path here SOFT-drains for the control-up/data-drains contract. Use for
+    FPF link drain/undrain (per-port) and device drain/undrain (no interfaces).
+    """
+    intfs = interfaces or []
+    if intfs:
+        default_desc = f"{'Soft-drain' if drain else 'Undrain'} {intfs} (local drainer)"
+    else:
+        default_desc = f"{'Soft-drain' if drain else 'Undrain'} DEVICE (local drainer)"
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or default_desc,
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_drain_interface",
+                    "interfaces": intfs,
+                    "is_drain": drain,
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_verify_disruption_step(
+    interfaces: t.List[str],
+    expect_admin_enabled: bool = False,
+    expect_oper_up: bool = False,
+    mode: str = "admin_oper",
+    expect_drained: bool = True,
+    fail_if_ineffective: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Disruption-effectiveness gate: verify the disrupted interface(s) actually
+    changed state on the live agent and record the verdict so downstream lane
+    checks SKIP (inconclusive) instead of FAILing when the disruption did not
+    take. Place right after the disrupt/longevity.
+
+    mode="admin_oper" (default): verify admin/oper state via wedge_agent thrift.
+    Defaults expect the port DOWN (admin DISABLED, oper DOWN), i.e. a disable.
+
+    mode="drain": verify each port's ``isDrained`` flag (getPortInfo) matches
+    ``expect_drained`` — the correct signal for a link DRAIN, where the port
+    stays admin=ENABLED / oper=UP by design (control up, data depreferenced).
+
+    fail_if_ineffective=True RAISES (fails the step / aborts the playbook) when
+    the disruption did not take, instead of only recording it for downstream
+    SKIP. Use for a disable, where a no-op makes the whole test meaningless.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Verify disruption effective on {interfaces}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_verify_disruption",
+                    "interfaces": interfaces,
+                    "mode": mode,
+                    "expect_admin_enabled": expect_admin_enabled,
+                    "expect_oper_up": expect_oper_up,
+                    "expect_drained": expect_drained,
+                    "fail_if_ineffective": fail_if_ineffective,
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_record_disruption_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record the FPF disruption wall-clock time into the collector registry.
+
+    Place immediately before the interface flap / link drain in a link-event
+    disrupt playbook. The prod/broad-prefix transition health check then measures
+    the reachable->unreachable transition from this exact moment (30s SLA),
+    rather than from test_case_start (which precedes the long stabilization).
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF disruption time",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "record_fpf_disruption_time"})
+        ),
+    )
+
+
 def create_thread_cpu_monitoring_step(
     device_name: str,
     duration_minutes: int,
@@ -825,14 +958,20 @@ def create_service_restart_steps(
 def create_drain_undrain_step(
     drain: bool,
     drain_handler: t.Optional[taac_types.DrainHandler] = None,
+    interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """
-    Create a step to drain or undrain a device.
+    Create a step to drain or undrain a device, or specific interfaces.
 
     Args:
         drain: True to drain, False to undrain
         drain_handler: Optional drain handler (e.g., LOCAL_DRAINER)
+        interfaces: Optional list of interface names to scope the drain to
+            specific links instead of the whole device. With LOCAL_DRAINER each
+            interface is soft-drained on-box (BGP depreference, data plane stays
+            up); with NDS the interface list is passed through to the NDS drain.
+            When omitted, the whole device is drained.
         description: Custom description for the step
 
     Returns:
@@ -842,10 +981,15 @@ def create_drain_undrain_step(
     if drain_handler is not None:
         input_kwargs["drain_handler"] = drain_handler
 
+    step_params = None
+    if interfaces:
+        step_params = Params(json_params=json.dumps({"interfaces": interfaces}))
+
     return Step(
         name=StepName.DRAIN_UNDRAIN_STEP,
         description=description,
         input_json=thrift_to_json(taac_types.DrainUndrainInput(**input_kwargs)),
+        step_params=step_params,
     )
 
 
@@ -4512,7 +4656,19 @@ class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
             ]
         interface_names = [interface.interface_name for interface in interfaces]
         if input.drain_handler == taac_types.DrainHandler.LOCAL_DRAINER:
-            if input.drain:
+            if interface_names:
+                # Per-port (link) drain: soft-drain each interface on-box
+                # (depreferences BGP advertisements without bringing the link
+                # down at the data plane). undrain_interface reverses it.
+                # softdrain/undrain_interface are FbossSwitch-only; cast to Any
+                # to avoid importing FbossSwitch here (keeps the BUCK target light).
+                fboss_driver = t.cast(t.Any, self.driver)
+                for name in interface_names:
+                    if input.drain:
+                        await fboss_driver.async_softdrain_interface(name)
+                    else:
+                        await fboss_driver.async_undrain_interface(name)
+            elif input.drain:
                 await self.driver.async_onbox_drain_device()
             else:
                 await self.driver.async_onbox_undrain_device()

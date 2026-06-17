@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 import asyncio
@@ -16,7 +16,7 @@ from taac.internal.ods_utils import (
     async_generate_ods_url,
     async_query_ods,
 )
-from taac.utils.common import async_get_fburl
+from taac.utils.common import async_get_fburl_retry
 from taac.utils.health_check_utils import format_timestamp
 from taac.health_check.health_check import types as hc_types
 from tabulate import tabulate
@@ -276,7 +276,7 @@ class MemoryUtilizationHealthCheck(
             start_time=int(start_time),
             end_time=int(end_time),
         )
-        ods_url = await async_get_fburl(ods_query_url)
+        ods_url = await async_get_fburl_retry(ods_query_url)
 
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.FAIL,
@@ -429,12 +429,15 @@ class MemoryUtilizationHealthCheck(
             start_time=int(start_time),
             end_time=int(end_time),
         )
+        # Shorten to an fburl for the summary table so the log carries the short
+        # link, not the long raw ODS URL. Fall back to the raw URL if the
+        # (throttled) fburl tier is unavailable — a cosmetic link must never turn
+        # a passing check into an error.
+        try:
+            ods_query_url = await async_get_fburl_retry(ods_query_url)
+        except Exception:
+            pass
 
-        # Display service data table with the raw ODS URL. This pass-path table
-        # is a debug-info convenience, so we do NOT shorten through the throttled
-        # fburl tier here (it previously fired on every device on every run
-        # regardless of pass/fail). The FAIL path shortens its own
-        # failing-services-only link in _generate_failure_result.
         if service_data_list:
             table_output = self._format_memory_utilization_table(
                 service_data_list, ods_query_url

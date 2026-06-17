@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 TAAC Serf Utils - Abstraction layer for hostname/IP lookups.

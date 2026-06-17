@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """TestConfig + stage builders for port-speed-flip qualification.
 

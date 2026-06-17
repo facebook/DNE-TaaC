@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -10,8 +10,11 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from taac.libs.fpf.fpf_collector_registry import (
+    disruption_inconclusive_skip,
+    everpaste_details_suffix,
     get_all_collectors,
     get_collector,
+    get_disruption_time,
     get_test_case_start_time,
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import normalize_prefix
@@ -157,7 +160,7 @@ def _evaluate_host(
         # fixed expected set was supplied via check_params.
         baseline = fixed_expected or _baseline_of(samples[0][2])
         first_impact: t.Optional[t.Dict[str, t.Any]] = None
-        for ts, ts_str, rb in samples:
+        for _ts, ts_str, rb in samples:
             # Integrity: every plane field must be a real integer list.
             null_field = False
             for fld in _LIST_FIELDS:
@@ -196,6 +199,296 @@ def _evaluate_host(
     res.s2_ok = not res.null_issues
     res.s1_ok = not res.compliance_issues
     if not res.s2_ok or not res.s1_ok:
+        res.status = "FAIL"
+    else:
+        res.status = "PASS"
+    return res
+
+
+def _evaluate_host_transition(
+    host: str,
+    collector: t.Any,
+    window_start: float,
+    window_end: float,
+    target_norms: t.Optional[t.Set[str]],
+    impacted_planes: t.Set[int],
+    max_transition_sec: float,
+    disruption_ts: t.Optional[float],
+) -> _HostResult:
+    """Link-event transition contract for one host.
+
+    For every monitored prefix, each impacted plane that was reachable at the
+    window baseline MUST leave the reachable set (go drained/unreachable) and do
+    so within ``max_transition_sec``. The transition latency is measured from
+    ``disruption_ts`` when supplied, else from the plane's last still-reachable
+    sample before the drop (disruption-relative latency). A plane that never
+    drops, or drops too slowly, fails. By the final in-window sample the
+    impacted planes must not be reachable.
+    """
+    res = _HostResult(host)
+    rows = collector.get_rows_in_window(window_start, window_end)
+    timeline = _prefix_samples(rows, target_norms)
+    if not timeline:
+        res.status = "SKIP"
+        return res
+
+    timeout_count = collector.timeout_count_in_window(window_start, window_end)
+    if timeout_count > 0:
+        res.null_issues.append(
+            f"{timeout_count} poll timeout(s) recorded null data (>2min)"
+        )
+
+    res.n_prefixes = len(timeline)
+    any_relevant = False
+    for norm in sorted(timeline):
+        info = timeline[norm]
+        display = info["display"]
+        samples = info["samples"]
+        baseline_reachable = set(samples[0][2].reachable_planes)
+        relevant = sorted(impacted_planes & baseline_reachable)
+        if not relevant:
+            # This prefix is not carried on any impacted plane (e.g. a remote
+            # VF2 prefix when a VF1 lane was disabled) — skip from transition.
+            continue
+        any_relevant = True
+        res.n_samples += len(samples)
+        final_reachable = set(samples[-1][2].reachable_planes)
+        for plane in relevant:
+            last_reachable_ts: t.Optional[float] = None
+            drop_ts: t.Optional[float] = None
+            drop_str = ""
+            for ts, ts_str, rb in samples:
+                if plane in set(rb.reachable_planes):
+                    if drop_ts is None:
+                        last_reachable_ts = ts
+                else:
+                    if drop_ts is None:
+                        drop_ts = ts
+                        drop_str = ts_str
+            if drop_ts is None:
+                res.compliance_issues.append(
+                    f"{display} plane {plane} never left reachable "
+                    f"(link-disable did not take)"
+                )
+                continue
+            ref = disruption_ts if disruption_ts is not None else last_reachable_ts
+            if ref is None:
+                # Plane was already non-reachable from the very first sample;
+                # treat as an immediate (0s) transition.
+                ref = drop_ts
+            transition_sec = round(drop_ts - ref, 1)
+            if transition_sec > max_transition_sec:
+                res.compliance_issues.append(
+                    f"{display} plane {plane} went unreachable in "
+                    f"{transition_sec}s > {max_transition_sec:.0f}s SLA @ {drop_str}"
+                )
+            elif plane in final_reachable:
+                res.compliance_issues.append(
+                    f"{display} plane {plane} flapped back to reachable by "
+                    f"window end (not durably down)"
+                )
+            else:
+                res.impacts.append(
+                    {
+                        "display": display,
+                        "device_ids": sorted(samples[0][2].device_ids),
+                        "ts_str": drop_str,
+                        "lost": [plane],
+                        "gained": [],
+                        "baseline": {"reachable_planes": sorted(baseline_reachable)},
+                        "rb": samples[-1][2],
+                        "transition_sec": transition_sec,
+                    }
+                )
+
+    res.s2_ok = not res.null_issues
+    res.s1_ok = not res.compliance_issues
+    if not any_relevant and res.s2_ok:
+        # No monitored prefix sits on an impacted plane on this host.
+        res.status = "SKIP"
+    elif not res.s1_ok or not res.s2_ok:
+        res.status = "FAIL"
+    else:
+        res.status = "PASS"
+    return res
+
+
+def _evaluate_host_local_drain(
+    host: str,
+    collector: t.Any,
+    window_start: float,
+    window_end: float,
+    local_norms: t.Set[str],
+    impacted_planes: t.Set[int],
+    max_drain_sec: float,
+    disruption_ts: t.Optional[float],
+    to_drained: bool,
+) -> _HostResult:
+    """Local-vs-remote drain/undrain contract for one host.
+
+    Splits monitored prefixes into LOCAL (this host's own, ``local_norms``) and
+    REMOTE (everything else). Three signals on the LOCAL prefixes' impacted
+    plane(s); a no-churn assertion on the REMOTE prefixes:
+
+      ``to_drained=True`` (DRAIN): each impacted plane that was reachable at the
+        baseline must move into ``drained_planes`` (Signal 1), must NOT land in
+        ``unreachable_planes`` — drained, not unavailable (Signal 2), and must do
+        so within ``max_drain_sec`` of ``disruption_ts`` (Signal 3).
+      ``to_drained=False`` (UNDRAIN): each impacted plane must LEAVE
+        ``drained_planes`` and return to ``reachable_planes`` within
+        ``max_drain_sec`` (Signals 1+3); it must not be left unreachable
+        (Signal 2).
+
+    REMOTE prefixes must show NO churn: their reachable plane set is unchanged
+    across the whole window (a drain of THIS host's local advert must not move a
+    remote destination's reachability).
+    """
+    res = _HostResult(host)
+    rows = collector.get_rows_in_window(window_start, window_end)
+    timeline = _prefix_samples(rows, None)
+    if not timeline:
+        res.status = "SKIP"
+        return res
+
+    timeout_count = collector.timeout_count_in_window(window_start, window_end)
+    if timeout_count > 0:
+        res.null_issues.append(
+            f"{timeout_count} poll timeout(s) recorded null data (>2min)"
+        )
+
+    res.n_prefixes = len(timeline)
+    any_relevant = False
+
+    def _split(
+        samples: t.List[t.Any],
+    ) -> t.Tuple[t.Any, t.List[t.Any]]:
+        """(pre-disruption baseline sample, post-disruption samples).
+
+        Anchoring the baseline at the sample JUST BEFORE the recorded disruption
+        time makes the check robust to a dirty starting state (e.g. a plane left
+        drained by a prior aborted run): we judge the transition the disruption
+        actually caused, measured from the disruption moment, not from whatever
+        the window happened to open on.
+        """
+        if disruption_ts is None:
+            return samples[0][2], samples
+        pre = [s for s in samples if s[0] <= disruption_ts]
+        post = [s for s in samples if s[0] > disruption_ts]
+        base = pre[-1][2] if pre else samples[0][2]
+        return base, (post if post else samples)
+
+    for norm in sorted(timeline):
+        info = timeline[norm]
+        display = info["display"]
+        samples = info["samples"]
+        res.n_samples += len(samples)
+        is_local = norm in local_norms
+        base_rb, post_samples = _split(samples)
+
+        if not is_local:
+            # REMOTE prefix: reachable set must not change through the disruption.
+            baseline_reachable = set(base_rb.reachable_planes)
+            for _ts, ts_str, rb in post_samples:
+                if set(rb.reachable_planes) != baseline_reachable:
+                    res.compliance_issues.append(
+                        f"REMOTE {display} churned at {ts_str}: reachable "
+                        f"{_fmt(sorted(baseline_reachable))}->"
+                        f"{_fmt(sorted(rb.reachable_planes))} "
+                        f"(expected no change on a local-host drain)"
+                    )
+                    break
+            continue
+
+        # LOCAL prefix: assert the drain/undrain transition on impacted planes.
+        baseline_reachable = set(base_rb.reachable_planes)
+        baseline_drained = set(base_rb.drained_planes)
+        # On DRAIN the relevant planes are those reachable just before the drain;
+        # on UNDRAIN they are the impacted planes drained just before the undrain.
+        if to_drained:
+            relevant = sorted(impacted_planes & baseline_reachable)
+        else:
+            relevant = sorted(impacted_planes & baseline_drained)
+            if not relevant:
+                relevant = sorted(impacted_planes)
+        if not relevant:
+            continue
+        any_relevant = True
+        final_rb = samples[-1][2]
+        baseline_unreach = set(base_rb.unreachable_planes)
+        for plane in relevant:
+            transition_ts: t.Optional[float] = None
+            for ts, _ts_str, rb in post_samples:
+                in_drained = plane in set(rb.drained_planes)
+                in_reach = plane in set(rb.reachable_planes)
+                if to_drained and in_drained and transition_ts is None:
+                    transition_ts = ts
+                if (
+                    not to_drained
+                    and in_reach
+                    and not in_drained
+                    and transition_ts is None
+                ):
+                    transition_ts = ts
+
+            want = "drained" if to_drained else "reachable"
+            # Signal 1: the impacted plane reached the expected state.
+            if transition_ts is None:
+                res.compliance_issues.append(
+                    f"LOCAL {display} plane {plane} never became {want} "
+                    f"({'drain' if to_drained else 'undrain'} did not take)"
+                )
+                continue
+            # Signal 2: a DRAINED prefix-plane is inherently also a negative route
+            # (it shows up in unreachable) — that is the EXPECTED consequence of an
+            # intentional drain, not a fault. So "not unavailable" means: no plane
+            # went unreachable WITHOUT being drained, and (undrain) the plane is
+            # not left unreachable. Checked per-prefix below for drain; per-plane
+            # here for undrain.
+            if not to_drained and plane in set(final_rb.unreachable_planes):
+                res.compliance_issues.append(
+                    f"LOCAL {display} plane {plane} left UNREACHABLE after undrain "
+                    f"(expected reachable)"
+                )
+            # Signal 3: within SLA, measured from the disruption moment.
+            ref = disruption_ts if disruption_ts is not None else post_samples[0][0]
+            latency = round(transition_ts - ref, 1)
+            if latency > max_drain_sec:
+                res.compliance_issues.append(
+                    f"LOCAL {display} plane {plane} became {want} in {latency}s "
+                    f"> {max_drain_sec:.0f}s SLA"
+                )
+            else:
+                res.impacts.append(
+                    {
+                        "display": display,
+                        "device_ids": sorted(base_rb.device_ids),
+                        "ts_str": "",
+                        "lost": [plane] if to_drained else [],
+                        "gained": [] if to_drained else [plane],
+                        "baseline": {"reachable_planes": sorted(baseline_reachable)},
+                        "rb": final_rb,
+                        "transition_sec": latency,
+                    }
+                )
+
+        # Signal 2 (drain): "no unavailable planes". A drained plane is expected
+        # to also show as a negative route (unreachable) — that is fine. But any
+        # plane that became unreachable WITHOUT being drained (beyond the steady
+        # baseline) is a genuine outage, not a drain.
+        if to_drained:
+            new_unreach = set(final_rb.unreachable_planes) - baseline_unreach
+            unexplained = new_unreach - set(final_rb.drained_planes)
+            if unexplained:
+                res.compliance_issues.append(
+                    f"LOCAL {display} plane(s) {sorted(unexplained)} went "
+                    f"UNAVAILABLE (unreachable without being drained)"
+                )
+
+    res.s2_ok = not res.null_issues
+    res.s1_ok = not res.compliance_issues
+    if not any_relevant and res.s2_ok and not res.compliance_issues:
+        res.status = "SKIP"
+    elif not res.s1_ok or not res.s2_ok:
         res.status = "FAIL"
     else:
         res.status = "PASS"
@@ -285,6 +578,19 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             "window_start", tc_start if tc_start else window_end - lookback_sec
         )
 
+        mode = check_params.get("mode", "stability")
+        # settle_sec: skip the first settle_sec of the window before evaluating
+        # stability. Used by the restore/recovery phase: the per-prefix baseline
+        # is the first IN-WINDOW sample, so without this the baseline captures the
+        # still-degraded state at window start (the re-enable hasn't recovered the
+        # plane yet) and the subsequent recovery (plane comes back) is flagged as
+        # a regression. Advancing the window start past the recovery makes the
+        # baseline the healthy steady state and the tail validates it stays
+        # stable. Not applied to transition mode (which needs the full window).
+        settle_sec = float(check_params.get("settle_sec", 0))
+        if settle_sec > 0 and mode == "stability":
+            window_start = min(window_start + settle_sec, window_end)
+
         prefix_filter = check_params.get("prefixes")
         target_norms = (
             {normalize_prefix(p) for p in prefix_filter} if prefix_filter else None
@@ -321,19 +627,75 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                 ),
             }
 
+        # mode="transition" (link-event): impacted planes must go reachable->
+        # unreachable within max_transition_sec. mode="local_drain"/"local_undrain"
+        # (see _evaluate_host_local_drain): LOCAL prefix impacted plane transitions
+        # to/from drained within max_drain_sec while REMOTE prefixes don't churn.
+        # Default "stability" (read above). The drain-direction modes SKIP when the
+        # disruption was verified ineffective.
+        if mode in ("transition", "local_drain"):
+            _skip = disruption_inconclusive_skip()
+            if _skip:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.SKIP, message=_skip
+                )
+        impacted_by_host: t.Dict[str, t.List[int]] = (
+            check_params.get("impacted_planes_by_host", {}) or {}
+        )
+        max_transition_sec = float(check_params.get("max_transition_sec", 30.0))
+        # LOCAL prefix set (this host's own advertised prefixes). Everything else
+        # monitored is treated as REMOTE for the local_drain/local_undrain modes.
+        local_norms: t.Set[str] = {
+            normalize_prefix(p) for p in (check_params.get("local_prefixes") or [])
+        }
+        max_drain_sec = float(check_params.get("max_drain_sec", 30.0))
+        # Reference for the transition SLA: explicit check_param wins; else the
+        # disruption time recorded at runtime by the record_fpf_disruption_time
+        # step (the actual interface-flap / drain moment); else None, which makes
+        # _evaluate_host_transition fall back to the last-reachable-sample
+        # heuristic.
+        disruption_ts = check_params.get("disruption_ts")
+        if disruption_ts is None:
+            recorded = get_disruption_time()
+            disruption_ts = recorded if recorded > 0 else None
+
         host_results: t.List[_HostResult] = []
         for host, collector in collectors:
-            res = _evaluate_host(
-                host,
-                collector,
-                window_start,
-                window_end,
-                target_norms,
-                fixed_expected,
-            )
+            if mode in ("local_drain", "local_undrain"):
+                res = _evaluate_host_local_drain(
+                    host,
+                    collector,
+                    window_start,
+                    window_end,
+                    local_norms,
+                    {int(p) for p in impacted_by_host.get(host, [])},
+                    max_drain_sec,
+                    float(disruption_ts) if disruption_ts is not None else None,
+                    to_drained=(mode == "local_drain"),
+                )
+            elif mode == "transition":
+                res = _evaluate_host_transition(
+                    host,
+                    collector,
+                    window_start,
+                    window_end,
+                    target_norms,
+                    {int(p) for p in impacted_by_host.get(host, [])},
+                    max_transition_sec,
+                    float(disruption_ts) if disruption_ts is not None else None,
+                )
+            else:
+                res = _evaluate_host(
+                    host,
+                    collector,
+                    window_start,
+                    window_end,
+                    target_norms,
+                    fixed_expected,
+                )
             host_results.append(res)
             self.logger.info(
-                f"  [prod HRT prefix][{host}] VERDICT {res.status} — "
+                f"  [prod HRT prefix][{host}] mode={mode} VERDICT {res.status} — "
                 f"S1 {'PASS' if res.s1_ok else 'FAIL'}, "
                 f"S2 {'PASS' if res.s2_ok else 'FAIL'}, "
                 f"{len(res.impacts)} impacted prefix(es)"
@@ -355,7 +717,19 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             agg = "PASS"
             status = hc_types.HealthCheckStatus.PASS
 
+        report = _format_report(host_results, agg)
+        details = await everpaste_details_suffix(
+            "Prod HRT prefix stability — full per-host report",
+            report.splitlines(),
+            collectors=[c for _host, c in collectors],
+            window_start=window_start,
+            window_end=window_end,
+            result_status=("FAIL" if agg == "FAIL" else "PASS"),
+            result_reason=(
+                report.splitlines()[1] if len(report.splitlines()) > 1 else ""
+            )[:300],
+        )
         return hc_types.HealthCheckResult(
             status=status,
-            message=_format_report(host_results, agg),
+            message=report + details,
         )

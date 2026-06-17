@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -86,7 +86,13 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, TextIO
 
-from neteng.fboss.bgp_attr.types import TBgpAfi, TBgpCommunity, TIpPrefix
+from neteng.fboss.bgp_attr.types import (
+    TAsPathSeg,
+    TAsPathSegType,
+    TBgpAfi,
+    TBgpCommunity,
+    TIpPrefix,
+)
 from neteng.fboss.bgp_route_types.types import TRibEntry
 from neteng.fboss.bgp_thrift.types import TBgpAttributes
 from neteng.netcastle.logger import get_root_logger
@@ -106,6 +112,84 @@ logger = get_root_logger()
 
 DEFAULT_DEVICE = "gtsw001.l1002.c087.mwg2"
 DEFAULT_PREFIX = "5000:dd::/64"
+
+
+# ---------------------------------------------------------------------------
+# Pod Mosaic — per-pod origin-ASN injection
+# ---------------------------------------------------------------------------
+#
+# "Pod Mosaic" partitions the injected prefix set into N contiguous buckets
+# ("pods") and injects each bucket with a distinct origin ASN as the only
+# entry in a single-AS_SEQUENCE AS_PATH. Communities stay IDENTICAL across
+# every bucket — the only thing that varies is the origin ASN. The path
+# LENGTH is constant (always one ASN), so any AS-path-length-aware policy
+# treats every bucket the same.
+#
+# The presets below are SYNTHETIC test ASNs from the 4203699xxx block —
+# recognizable as test traffic, collision-free with any real-fleet ASN.
+# Operators can override via --pod-asn-list to use real fleet ASNs.
+
+POD_MOSAIC_PRESETS: Dict[str, List[int]] = {
+    # 10 synthetic test ASNs (recognizable as test traffic, collision-free)
+    "mwg2-placeholder-10": list(range(4203699001, 4203699011)),
+}
+
+# Pod ASNs in these ranges would be silently dropped by bgpd's loop-detection
+# check (the local STSW peer or an upstream L1002 testbed peer would see its
+# own ASN in the AS_PATH and reject the route). Any --pod-asn-list value that
+# falls in here is a hard error.
+POD_MOSAIC_LOOP_DENY_RANGES: List[range] = [
+    range(4203601901, 4203601909),  # STSW-self: 4203601901-4203601908
+    range(4203601009, 4203601017),  # L1002 testbed: 4203601009-4203601016
+]
+
+
+def pod_mosaic_loop_deny_violations(asns: Sequence[int]) -> List[int]:
+    """Return the subset of `asns` that fall inside any loop-deny range."""
+    bad: List[int] = []
+    for asn in asns:
+        for r in POD_MOSAIC_LOOP_DENY_RANGES:
+            if asn in r:
+                bad.append(asn)
+                break
+    return bad
+
+
+def partition_prefixes_into_pods(prefix_count: int, pods: int) -> List[int]:
+    """Return a list of length `prefix_count` mapping prefix-index -> pod-index.
+
+    Contiguous-block partition: bucket k owns indices [k*per, (k+1)*per).
+    Remainder is distributed +1 to the LOWEST-INDEX buckets so the first
+    `prefix_count % pods` buckets get one extra prefix.
+    """
+    if pods <= 0:
+        raise ValueError(f"pods must be >= 1, got {pods}")
+    if prefix_count < pods:
+        raise ValueError(
+            f"prefix_count ({prefix_count}) must be >= pods ({pods}) so every "
+            f"pod has at least one prefix"
+        )
+    base = prefix_count // pods
+    extra = prefix_count % pods
+    assignment: List[int] = []
+    idx = 0
+    for k in range(pods):
+        size = base + (1 if k < extra else 0)
+        assignment.extend([k] * size)
+        idx += size
+    assert len(assignment) == prefix_count
+    return assignment
+
+
+def build_pod_mosaic_as_path_map(
+    prefixes: Sequence[TIpPrefix], pod_asn_list: Sequence[int]
+) -> Dict[TIpPrefix, List[int]]:
+    """Return {prefix: [origin_asn]} mapping each prefix to its bucket's
+    single-ASN AS_PATH origin.
+    """
+    assignment = partition_prefixes_into_pods(len(prefixes), len(pod_asn_list))
+    return {p: [pod_asn_list[assignment[i]]] for i, p in enumerate(prefixes)}
+
 
 # Preset community lists, named by originating device role. Only the
 # PATH_COMMUNITY (ASN 65441) values differ between sets — the remaining
@@ -244,20 +328,74 @@ class ValidationResult:
     rib_lookup_paths: int
     community_lookup_passed: bool
     community_lookup_prefix_found: bool
+    # Pod Mosaic as_path checks. as_path_check_required is False when no
+    # --pods was requested (backcompat path); the other fields are then
+    # ignored.
+    as_path_check_required: bool = False
+    as_path_passed: bool = False
+    as_path_expected_asn: Optional[int] = None
+    as_path_actual_asn: Optional[int] = None
+    pod_bucket: Optional[int] = None
+
+
+def build_inject_networks(
+    prefixes: Sequence[TIpPrefix],
+    communities: Sequence[TBgpCommunity],
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None,
+) -> Dict[TIpPrefix, TBgpAttributes]:
+    """Build the {prefix -> TBgpAttributes} dict passed to async_add_networks().
+
+    The community list is identical across every returned attrs (UNCHANGED
+    relative to today). When `prefix_as_path` is None, every prefix maps to
+    the SAME shared TBgpAttributes object (byte-identical to the pre-Pod-Mosaic
+    behavior). When provided, each prefix gets its own TBgpAttributes carrying
+    that same community list plus a single-segment AS_SEQUENCE AS_PATH
+    containing the per-bucket origin ASN(s). originator_id / cluster_list /
+    local_pref are intentionally left unset.
+    """
+    communities_list = list(communities)
+    if prefix_as_path is None:
+        attrs = TBgpAttributes(communities=communities_list)
+        return {p: attrs for p in prefixes}
+    networks: Dict[TIpPrefix, TBgpAttributes] = {}
+    for p in prefixes:
+        asns = prefix_as_path.get(p)
+        if asns:
+            as_path = [
+                TAsPathSeg(
+                    seg_type=TAsPathSegType.AS_SEQUENCE,
+                    asns_4_byte=list(asns),
+                )
+            ]
+            networks[p] = TBgpAttributes(
+                communities=communities_list,
+                as_path=as_path,
+            )
+        else:
+            networks[p] = TBgpAttributes(communities=communities_list)
+    return networks
 
 
 async def inject_prefixes(
     driver: FbossSwitchInternal,
     prefixes: Sequence[TIpPrefix],
     communities: Sequence[TBgpCommunity],
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None,
 ) -> None:
-    """Bulk-inject prefixes with the same communities via a single addNetworks() call."""
-    attrs = TBgpAttributes(communities=list(communities))
-    networks = {p: attrs for p in prefixes}
+    """Bulk-inject prefixes via a single addNetworks() call.
+
+    Communities are identical across every prefix. If `prefix_as_path` is
+    provided, each prefix additionally carries a per-bucket AS_SEQUENCE
+    AS_PATH (one segment, one ASN — length stays constant across buckets,
+    only the origin ASN varies). When omitted, behavior is byte-identical
+    to the pre-Pod-Mosaic implementation.
+    """
+    networks = build_inject_networks(prefixes, communities, prefix_as_path)
     bgp = await driver.bgp()
+    pod_mosaic_msg = " with per-pod AS_PATH" if prefix_as_path else ""
     logger.info(
         f"[{driver.hostname}] Injecting {len(prefixes)} prefix(es) with "
-        f"{len(communities)} communities via addNetworks(): "
+        f"{len(communities)} communities{pod_mosaic_msg} via addNetworks(): "
         f"{', '.join(prefix_to_str(p) for p in prefixes[:5])}"
         f"{'...' if len(prefixes) > 5 else ''}"
     )
@@ -304,10 +442,83 @@ def _index_rib_entries(entries) -> Dict[str, int]:
     return out
 
 
+def _extract_origin_asn(entry: TRibEntry) -> Optional[int]:
+    """Return the origin ASN of the first path's first AS_SEQUENCE segment,
+    preferring asns_4_byte over the deprecated 2-byte `asns` field.
+
+    Returns None if no path / no as_path / empty segment is present.
+    """
+    if not entry.paths:
+        return None
+    # entry.paths is map<string, list<TBgpPath>>. Pick any group; for our
+    # locally-originated routes there's only one path.
+    for _group, path_list in entry.paths.items():
+        for path in path_list:
+            as_path = getattr(path, "as_path", None)
+            if not as_path:
+                continue
+            seg = as_path[0]
+            asns_4b = getattr(seg, "asns_4_byte", None) or []
+            if asns_4b:
+                return int(asns_4b[0])
+            asns_legacy = getattr(seg, "asns", None) or []
+            if asns_legacy:
+                return int(asns_legacy[0])
+            return None
+    return None
+
+
+def _index_rib_origin_asns(entries) -> Dict[str, Optional[int]]:
+    """Build prefix-normalized -> origin-ASN index from a TRibEntry list."""
+    out: Dict[str, Optional[int]] = {}
+    for entry in entries:
+        norm = _normalize_prefix(_entry_prefix_str(entry))
+        if norm is None:
+            continue
+        out[norm] = _extract_origin_asn(entry)
+    return out
+
+
+def _expected_origin_asns(
+    prefixes: Sequence[TIpPrefix],
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]],
+) -> Dict[TIpPrefix, Optional[int]]:
+    """For each injected prefix, the expected origin ASN (first ASN of the
+    first segment we sent). Returns None for prefixes with no AS_PATH.
+    """
+    out: Dict[TIpPrefix, Optional[int]] = {}
+    if prefix_as_path is None:
+        return dict.fromkeys(prefixes)
+    for p in prefixes:
+        asns = prefix_as_path.get(p)
+        out[p] = int(asns[0]) if asns else None
+    return out
+
+
+def _partition_buckets(
+    prefixes: Sequence[TIpPrefix],
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]],
+    pod_asn_list: Optional[Sequence[int]] = None,
+) -> Dict[TIpPrefix, Optional[int]]:
+    """Return {prefix: bucket_index}. Bucket index is the position of the
+    prefix's expected origin ASN inside pod_asn_list, or None when Pod
+    Mosaic is not in use."""
+    if prefix_as_path is None or pod_asn_list is None:
+        return dict.fromkeys(prefixes)
+    asn_to_bucket = {asn: i for i, asn in enumerate(pod_asn_list)}
+    out: Dict[TIpPrefix, Optional[int]] = {}
+    for p in prefixes:
+        asns = prefix_as_path.get(p)
+        out[p] = asn_to_bucket.get(asns[0]) if asns else None
+    return out
+
+
 async def validate_injection_bulk(
     driver: FbossSwitchInternal,
     injected_prefixes: Sequence[TIpPrefix],
     communities: Sequence[TBgpCommunity],
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None,
+    pod_asn_list: Optional[Sequence[int]] = None,
 ) -> List[ValidationResult]:
     """Validate all injected prefixes with TWO bulk thrift calls:
 
@@ -317,6 +528,11 @@ async def validate_injection_bulk(
 
     Then check each injected prefix against the in-memory indices.
     Scales O(1) per injected prefix instead of O(N) thrift calls.
+
+    Pod Mosaic: when `prefix_as_path` is provided, the RIB index also yields
+    each prefix's origin ASN (paths[*][0].as_path[0].asns_4_byte[0]) and we
+    assert it equals the per-bucket expected origin we injected. If
+    `prefix_as_path` is None, the AS_PATH check is skipped (backcompat).
     """
     bgp = await driver.bgp()
 
@@ -332,6 +548,9 @@ async def validate_injection_bulk(
         f"building index ..."
     )
     rib_index = _index_rib_entries(rib_entries)
+    rib_origin_index = (
+        _index_rib_origin_asns(rib_entries) if prefix_as_path is not None else {}
+    )
 
     # --- 2. Bulk community-filtered RIB (single call) ---
     community_ids = [f"{c.asn}:{c.value}" for c in communities]
@@ -352,6 +571,9 @@ async def validate_injection_bulk(
         if (norm := _normalize_prefix(_entry_prefix_str(entry))) is not None
     }
 
+    expected_origin = _expected_origin_asns(injected_prefixes, prefix_as_path)
+    bucket_map = _partition_buckets(injected_prefixes, prefix_as_path, pod_asn_list)
+
     # --- 3. Per-prefix lookup against indices (no more thrift calls) ---
     results: List[ValidationResult] = []
     for p in injected_prefixes:
@@ -359,12 +581,31 @@ async def validate_injection_bulk(
         paths = rib_index.get(target_norm, 0) if target_norm else 0
         in_rib = target_norm is not None and target_norm in rib_index
         in_comm = target_norm is not None and target_norm in comm_prefix_set
+
+        as_path_required = prefix_as_path is not None
+        exp_asn = expected_origin.get(p)
+        actual_asn: Optional[int] = None
+        as_path_passed = True
+        if as_path_required:
+            actual_asn = rib_origin_index.get(target_norm) if target_norm else None
+            # If the prefix wasn't injected with an AS_PATH (exp_asn is None),
+            # skip the assertion for that one (treat as pass).
+            if exp_asn is None:
+                as_path_passed = True
+            else:
+                as_path_passed = actual_asn == exp_asn
+
         results.append(
             ValidationResult(
                 rib_lookup_passed=in_rib,
                 rib_lookup_paths=paths,
                 community_lookup_passed=bool(comm_prefix_set),
                 community_lookup_prefix_found=in_comm,
+                as_path_check_required=as_path_required,
+                as_path_passed=as_path_passed,
+                as_path_expected_asn=exp_asn,
+                as_path_actual_asn=actual_asn,
+                pod_bucket=bucket_map.get(p),
             )
         )
     return results
@@ -376,28 +617,97 @@ def print_report(
     communities: Sequence[str],
     results: Sequence[ValidationResult],
     out: TextIO = sys.stdout,
+    pod_asn_list: Optional[Sequence[int]] = None,
 ) -> bool:
+    pod_mosaic = any(r.as_path_check_required for r in results)
     all_passed = all(
-        r.rib_lookup_passed and r.community_lookup_prefix_found for r in results
+        r.rib_lookup_passed
+        and r.community_lookup_prefix_found
+        and (not r.as_path_check_required or r.as_path_passed)
+        for r in results
     )
     print("\n" + "=" * 78, file=out)
     print(f"  BGP prefix injection report — {device}", file=out)
     print("=" * 78, file=out)
     print(f"  Communities:   {len(communities)} attached", file=out)
     print(f"    {', '.join(communities)}", file=out)
+    if pod_mosaic and pod_asn_list is not None:
+        print(
+            f"  Pod Mosaic:    {len(pod_asn_list)} pod(s); "
+            f"pod ASNs = {list(pod_asn_list)}",
+            file=out,
+        )
     print("-" * 78, file=out)
-    print(f"  {'Prefix':<38} {'RIB by prefix':<16} {'RIB by community':<18}", file=out)
-    print(f"  {'-' * 38} {'-' * 16} {'-' * 18}", file=out)
+    if pod_mosaic:
+        print(
+            f"  {'Prefix':<38} {'RIB by prefix':<16} {'RIB by community':<18} "
+            f"{'AS_PATH (bucket: expected -> actual)':<40}",
+            file=out,
+        )
+        print(
+            f"  {'-' * 38} {'-' * 16} {'-' * 18} {'-' * 40}",
+            file=out,
+        )
+    else:
+        print(
+            f"  {'Prefix':<38} {'RIB by prefix':<16} {'RIB by community':<18}",
+            file=out,
+        )
+        print(f"  {'-' * 38} {'-' * 16} {'-' * 18}", file=out)
     for prefix_str, r in zip(prefix_strs, results):
         by_pref = (
             f"{'PASS' if r.rib_lookup_passed else 'FAIL'} (paths={r.rib_lookup_paths})"
         )
         by_comm = "PASS" if r.community_lookup_prefix_found else "FAIL"
-        print(f"  {prefix_str:<38} {by_pref:<16} {by_comm:<18}", file=out)
+        if pod_mosaic:
+            if r.as_path_check_required and r.as_path_expected_asn is not None:
+                ap_status = "PASS" if r.as_path_passed else "FAIL"
+                ap_desc = (
+                    f"{ap_status} (b{r.pod_bucket}: "
+                    f"{r.as_path_expected_asn} -> {r.as_path_actual_asn})"
+                )
+            else:
+                ap_desc = "SKIP"
+            print(
+                f"  {prefix_str:<38} {by_pref:<16} {by_comm:<18} {ap_desc:<40}",
+                file=out,
+            )
+        else:
+            print(f"  {prefix_str:<38} {by_pref:<16} {by_comm:<18}", file=out)
+    if pod_mosaic:
+        per_bucket = _summarize_pod_buckets(results)
+        print("-" * 78, file=out)
+        print("  Per-bucket AS_PATH summary:", file=out)
+        for bucket, (passed, total, expected) in sorted(per_bucket.items()):
+            print(
+                f"    bucket {bucket} (expected_origin={expected}): "
+                f"{passed}/{total} prefixes matched",
+                file=out,
+            )
     print("-" * 78, file=out)
     print(f"  OVERALL: {'PASS' if all_passed else 'FAIL'}", file=out)
     print("=" * 78 + "\n", file=out)
     return all_passed
+
+
+def _summarize_pod_buckets(
+    results: Sequence[ValidationResult],
+) -> Dict[int, tuple]:
+    """Group results by pod_bucket, returning {bucket -> (pass_count,
+    total_count, expected_origin)}. Skips entries with no bucket/no
+    AS_PATH check.
+    """
+    out: Dict[int, List[ValidationResult]] = {}
+    for r in results:
+        if not r.as_path_check_required or r.pod_bucket is None:
+            continue
+        out.setdefault(r.pod_bucket, []).append(r)
+    summary: Dict[int, tuple] = {}
+    for bucket, rs in out.items():
+        passed = sum(1 for r in rs if r.as_path_passed)
+        expected = rs[0].as_path_expected_asn
+        summary[bucket] = (passed, len(rs), expected)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +838,74 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override the expected plane (lane). Default is auto-derived "
         "from --device (gtsw00N -> plane N-1).",
+    )
+    # ----- Pod Mosaic flags ----------------------------------------------
+    parser.add_argument(
+        "--pods",
+        type=int,
+        default=1,
+        help=(
+            "Pod Mosaic: split the injected prefix set into N contiguous "
+            "buckets and give each bucket a distinct ORIGIN ASN as the "
+            "only entry in a one-segment AS_SEQUENCE AS_PATH. The path "
+            "LENGTH stays constant (always 1 ASN); only the origin ASN "
+            "varies. Communities are NOT varied — every bucket carries "
+            "the same community list. Default 1 = backcompat (no AS_PATH). "
+            "Requires --pod-asn-preset, --pod-asn-list, or --base-asn-path "
+            "when N>=2."
+        ),
+    )
+    parser.add_argument(
+        "--pod-asn-preset",
+        choices=sorted(POD_MOSAIC_PRESETS.keys()),
+        default=None,
+        help=(
+            "Pod Mosaic: name of a built-in pod ASN preset. "
+            "'mwg2-placeholder-10' = [4203699001..4203699010] — synthetic "
+            "test ASNs (recognizable as test traffic, collision-free with "
+            "any real-fleet ASN). Mutually exclusive with --pod-asn-list "
+            "and --base-asn-path."
+        ),
+    )
+    parser.add_argument(
+        "--pod-asn-list",
+        default=None,
+        help=(
+            "Pod Mosaic: comma-separated list of 4-byte origin ASNs (one "
+            "per pod). Length MUST equal --pods. Rejected if any ASN falls "
+            "in the loop-deny ranges (STSW-self 4203601901-4203601908 or "
+            "L1002 testbed 4203601009-4203601016) because bgpd would drop "
+            "such a route via its loop-detection check. Mutually exclusive "
+            "with --pod-asn-preset and --base-asn-path."
+        ),
+    )
+    parser.add_argument(
+        "--base-asn-path",
+        type=int,
+        default=None,
+        help=(
+            "Pod Mosaic: starting 4-byte origin ASN for an arithmetic-"
+            "progression list. The pod-ASN list is generated as "
+            "[base, base + step, base + 2*step, ..., base + (--pods - 1) * step] "
+            "where step is --increment-asn-per-pod (default 1). Length is "
+            "implicitly --pods, so --pods MUST be set explicitly with this "
+            "flag. Loop-deny guard still applies on the GENERATED list. "
+            "Mutually exclusive with --pod-asn-preset and --pod-asn-list. "
+            "Example: --pods 144 --base-asn-path 4203699001 yields "
+            "[4203699001..4203699144]."
+        ),
+    )
+    parser.add_argument(
+        "--increment-asn-per-pod",
+        type=int,
+        default=1,
+        help=(
+            "Pod Mosaic: step between consecutive pod ASNs when using "
+            "--base-asn-path. Default 1 (consecutive ASNs). Must be non-zero "
+            "(otherwise all pods would share the same ASN). Negative values "
+            "are allowed for descending blocks. Ignored unless "
+            "--base-asn-path is set."
+        ),
     )
     return parser.parse_args()
 
@@ -734,6 +1112,115 @@ def resolve_device_strs(args: argparse.Namespace) -> List[str]:
     return [args.device]
 
 
+def _parse_pod_asn_csv(csv: str) -> List[int]:
+    """Parse a comma-separated string of integer 4-byte ASNs."""
+    out: List[int] = []
+    for tok in csv.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError as e:
+            raise ValueError(
+                f"--pod-asn-list contains non-integer entry {tok!r}"
+            ) from e
+    return out
+
+
+def resolve_pod_mosaic(
+    args: argparse.Namespace, prefix_count: int
+) -> Optional[List[int]]:
+    """Validate Pod Mosaic flags and return the per-pod ASN list, or None
+    when Pod Mosaic is not requested (backcompat path).
+
+    Three mutually-exclusive ASN sources:
+      1. --pod-asn-preset NAME — pick a built-in list
+      2. --pod-asn-list "a,b,c,..." — explicit CSV
+      3. --base-asn-path BASE [--increment-asn-per-pod STEP=1]
+            — arithmetic progression [BASE, BASE+STEP, ..., BASE+(pods-1)*STEP]
+
+    Raises ValueError on any composition / loop-deny violation.
+    """
+    pods = int(getattr(args, "pods", 1) or 1)
+    preset = getattr(args, "pod_asn_preset", None)
+    csv = getattr(args, "pod_asn_list", None)
+    base_asn = getattr(args, "base_asn_path", None)
+    # NOTE: do NOT use `... or 1` here — 0 is a legitimate value the user can
+    # pass, and `0 or 1` would silently coerce it to 1 and skip the
+    # "must be non-zero" rejection below.
+    raw_step = getattr(args, "increment_asn_per_pod", 1)
+    step_asn = 1 if raw_step is None else int(raw_step)
+
+    sources_set = sum(1 for x in (preset, csv, base_asn) if x is not None)
+    if sources_set > 1:
+        raise ValueError(
+            "--pod-asn-preset, --pod-asn-list, and --base-asn-path are "
+            "mutually exclusive; pick exactly one."
+        )
+
+    if pods <= 1 and sources_set == 0:
+        return None  # Backcompat: nothing to do.
+
+    if pods >= 2 and sources_set == 0:
+        raise ValueError(
+            f"--pods {pods} requires one of --pod-asn-preset, "
+            "--pod-asn-list, or --base-asn-path "
+            "(no silent auto-generation of pod ASNs)."
+        )
+
+    if preset is not None:
+        pod_asn_list = list(POD_MOSAIC_PRESETS[preset])
+    elif csv is not None:
+        pod_asn_list = _parse_pod_asn_csv(csv)
+    else:
+        # base_asn is set. Length is implicit from --pods, which MUST be
+        # explicit here — no preset/list to derive length from.
+        assert base_asn is not None
+        if pods <= 1:
+            raise ValueError(
+                "--base-asn-path requires --pods >= 2 (no implicit length "
+                "available; set --pods explicitly)."
+            )
+        if step_asn == 0:
+            raise ValueError(
+                "--increment-asn-per-pod must be non-zero (otherwise every "
+                "pod would share the same ASN)."
+            )
+        pod_asn_list = [int(base_asn) + i * step_asn for i in range(pods)]
+
+    # When the user passed --pod-asn-preset or --pod-asn-list with no --pods,
+    # implicitly take the list length as the pod count so the flags are
+    # self-consistent.
+    if pods <= 1 and (preset is not None or csv is not None):
+        pods = len(pod_asn_list)
+
+    if len(pod_asn_list) != pods:
+        raise ValueError(
+            f"Pod Mosaic: len(pod_asn_list)={len(pod_asn_list)} must equal "
+            f"--pods={pods}."
+        )
+
+    violations = pod_mosaic_loop_deny_violations(pod_asn_list)
+    if violations:
+        raise ValueError(
+            "Pod Mosaic: pod ASN(s) "
+            f"{violations} fall in the loop-deny ranges "
+            f"{[(r.start, r.stop - 1) for r in POD_MOSAIC_LOOP_DENY_RANGES]}; "
+            "bgpd would silently drop these as loop violations."
+        )
+
+    if prefix_count < pods:
+        raise ValueError(
+            f"Pod Mosaic: prefix_count ({prefix_count}) must be >= --pods "
+            f"({pods}) so every pod owns at least one prefix."
+        )
+
+    # Stash the resolved pods count back on args so downstream code can read it.
+    args.pods = pods
+    return pod_asn_list
+
+
 async def run(args: argparse.Namespace) -> int:
     community_strs = resolve_community_strs(args)
     if not community_strs:
@@ -753,6 +1240,21 @@ async def run(args: argparse.Namespace) -> int:
     prefixes = [build_tip_prefix(p) for p in prefix_strs]
     communities = build_communities(community_strs)
     display_strs = [prefix_to_str(p) for p in prefixes]
+
+    # Pod Mosaic resolution (validates flags, returns None on backcompat path).
+    try:
+        pod_asn_list = resolve_pod_mosaic(args, len(prefixes))
+    except ValueError as e:
+        logger.error(f"Pod Mosaic flag error: {e}")
+        return 2
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None
+    if pod_asn_list is not None:
+        prefix_as_path = build_pod_mosaic_as_path_map(prefixes, pod_asn_list)
+        logger.info(
+            f"Pod Mosaic active: --pods={args.pods}, "
+            f"pod_asn_list={pod_asn_list}; "
+            f"{len(prefixes)} prefix(es) partitioned across {args.pods} buckets"
+        )
 
     devices = resolve_device_strs(args)
     logger.info(
@@ -775,6 +1277,8 @@ async def run(args: argparse.Namespace) -> int:
                 display_strs,
                 community_strs,
                 out=buf,
+                prefix_as_path=prefix_as_path,
+                pod_asn_list=pod_asn_list,
             )
         except Exception as e:
             print(f"\n  EXCEPTION on {device}: {e!r}\n", file=buf)
@@ -864,6 +1368,8 @@ async def run_for_device(
     display_strs: Sequence[str],
     community_strs: Sequence[str],
     out: TextIO = sys.stdout,
+    prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None,
+    pod_asn_list: Optional[Sequence[int]] = None,
 ) -> bool:
     """Inject/withdraw/validate against one device. Returns True on success."""
     logger.info(f"Connecting to {device} via FbossSwitchInternal ...")
@@ -878,7 +1384,7 @@ async def run_for_device(
         )
         return True
 
-    await inject_prefixes(driver, list(prefixes), communities)
+    await inject_prefixes(driver, list(prefixes), communities, prefix_as_path)
 
     if args.no_validate:
         logger.info("Validation skipped (--no-validate)")
@@ -890,9 +1396,20 @@ async def run_for_device(
             await withdraw_prefixes(driver, list(prefixes))
         return True
 
-    results = await validate_injection_bulk(driver, prefixes, communities)
+    results = await validate_injection_bulk(
+        driver,
+        prefixes,
+        communities,
+        prefix_as_path=prefix_as_path,
+        pod_asn_list=pod_asn_list,
+    )
     passed = print_report(
-        device, list(display_strs), list(community_strs), results, out=out
+        device,
+        list(display_strs),
+        list(community_strs),
+        results,
+        out=out,
+        pod_asn_list=list(pod_asn_list) if pod_asn_list is not None else None,
     )
 
     if args.show_fsdb_communities:

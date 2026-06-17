@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 from taac.test_as_a_config.types import TrafficEndpoint
 

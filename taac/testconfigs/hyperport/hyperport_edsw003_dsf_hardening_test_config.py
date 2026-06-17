@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 DSF Hardening Test Configuration for EDSW003.N001.L201.SNC1

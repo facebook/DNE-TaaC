@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 import unittest
@@ -39,7 +39,7 @@ class GenericOdsHealthCheckFburlTest(unittest.IsolatedAsyncioTestCase):
         }
 
     @patch(
-        f"{MODULE}.async_get_fburl",
+        f"{MODULE}.async_get_fburl_retry",
         new_callable=AsyncMock,
         return_value="https://fburl.com/x",
     )
@@ -60,7 +60,7 @@ class GenericOdsHealthCheckFburlTest(unittest.IsolatedAsyncioTestCase):
         mock_fburl.assert_not_awaited()
 
     @patch(
-        f"{MODULE}.async_get_fburl",
+        f"{MODULE}.async_get_fburl_retry",
         new_callable=AsyncMock,
         return_value="https://fburl.com/x",
     )
@@ -81,7 +81,31 @@ class GenericOdsHealthCheckFburlTest(unittest.IsolatedAsyncioTestCase):
         mock_fburl.assert_awaited_once_with("https://ods/raw")
 
     @patch(
-        f"{MODULE}.async_get_fburl",
+        f"{MODULE}.async_get_fburl_retry",
+        new_callable=AsyncMock,
+        return_value="https://fburl.com/x",
+    )
+    @patch(
+        f"{MODULE}.async_generate_ods_url",
+        new_callable=AsyncMock,
+        return_value="https://ods/raw",
+    )
+    @patch(f"{MODULE}.eval_jq", return_value={"100": 150.0})
+    @patch(f"{MODULE}.async_query_ods", new_callable=AsyncMock)
+    async def test_informational_breach_reports_pass(
+        self, mock_query, mock_jq, mock_ods_url, mock_fburl
+    ) -> None:
+        """A threshold breach with informational=True is a PASS (not FAIL), with
+        an [INFORMATIONAL] message — used for expected transient discards during
+        a disruptive restart/coldboot."""
+        mock_query.return_value = {"dev1": {"fboss.some.counter": {"100": 150.0}}}
+        params = {**self.check_params, "informational": True}
+        result = await self.check._run(self.device, self.input, params)
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("[INFORMATIONAL]", result.message or "")
+
+    @patch(
+        f"{MODULE}.async_get_fburl_retry",
         new_callable=AsyncMock,
         return_value="https://fburl.com/x",
     )

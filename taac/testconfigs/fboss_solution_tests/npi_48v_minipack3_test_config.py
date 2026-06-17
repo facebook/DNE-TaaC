@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """NPI_48V_MINIPACK3_TEST_CONFIGS — TestConfig (dead-code preservation).

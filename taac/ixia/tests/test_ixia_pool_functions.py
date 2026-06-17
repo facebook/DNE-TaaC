@@ -1,5 +1,5 @@
 # pyre-unsafe
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 import unittest
 from unittest.mock import MagicMock, patch
 

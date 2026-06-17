@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """Canonical health check factory functions.
@@ -2031,12 +2031,32 @@ def create_fpf_stale_prefix_check(
 def create_fpf_hrt_fsdb_session_check(
     hosts: t.Optional[t.List[str]] = None,
     expected_session_count: t.Optional[int] = None,
+    impacted_lanes_by_host_gpu: t.Optional[
+        t.Dict[str, t.Dict[int, t.List[int]]]
+    ] = None,
+    reconcile_device_id: t.Optional[int] = None,
+    planes_per_gpu: t.Optional[int] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
-    """FPF_HRT_FSDB_SESSION_CHECK — verify HRT FSDB sessions are CONNECTED."""
+    """FPF_HRT_FSDB_SESSION_CHECK — verify HRT FSDB sessions are CONNECTED.
+
+    Two signals (per host): (1) overall CONNECTED count == expected minus the
+    impacted (gpu, lane) links; (2) per-device reconciliation on
+    ``reconcile_device_id`` — impacted lanes DOWN, the rest CONNECTED.
+
+    ``impacted_lanes_by_host_gpu`` maps host -> {gpu_id -> [lanes]}. Omit it (or
+    pass empty) for the stable-state / enable / undrain / link-drain contract
+    where every session must be CONNECTED.
+    """
     params: t.Dict[str, t.Any] = {"hosts": hosts or []}
     if expected_session_count is not None:
         params["expected_session_count"] = expected_session_count
+    if impacted_lanes_by_host_gpu is not None:
+        params["impacted_lanes_by_host_gpu"] = impacted_lanes_by_host_gpu
+    if reconcile_device_id is not None:
+        params["reconcile_device_id"] = reconcile_device_id
+    if planes_per_gpu is not None:
+        params["planes_per_gpu"] = planes_per_gpu
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_FSDB_SESSION_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -2049,21 +2069,44 @@ def create_fpf_fsdb_ribmap_convergence_check(
     expected_matched: int = 20000,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
+    settle_sec: t.Optional[float] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
+    signal1_e2e_max_sec: t.Optional[float] = None,
+    signal2_local_max_sec: t.Optional[float] = None,
+    signal3_stability_duration_sec: t.Optional[float] = None,
+    mode: t.Optional[str] = None,
+    reconverge_sla_sec: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
-    """FPF_FSDB_RIBMAP_CONVERGENCE_CHECK — FSDB ribMap convergence per lane."""
+    """FPF_FSDB_RIBMAP_CONVERGENCE_CHECK — FSDB ribMap convergence per lane.
+
+    mode="restart": tolerate null/unresponsive polls during an FSDB restart and
+    assert each device's ribMap returns to expected_matched within
+    ``reconverge_sla_sec`` of the recorded restart moment.
+    """
     params: t.Dict[str, t.Any] = {
         "lane_map": lane_map or {},
         "expected_matched": expected_matched,
         "trigger_delay_sec": trigger_delay_sec,
         "use_live_collectors": use_live_collectors,
     }
+    if settle_sec is not None:
+        params["settle_sec"] = settle_sec
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
         params["window_end"] = window_end
+    if signal1_e2e_max_sec is not None:
+        params["signal1_e2e_max_sec"] = signal1_e2e_max_sec
+    if signal2_local_max_sec is not None:
+        params["signal2_local_max_sec"] = signal2_local_max_sec
+    if signal3_stability_duration_sec is not None:
+        params["signal3_stability_duration_sec"] = signal3_stability_duration_sec
+    if mode is not None:
+        params["mode"] = mode
+    if reconverge_sla_sec is not None:
+        params["reconverge_sla_sec"] = reconverge_sla_sec
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_FSDB_RIBMAP_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -2076,21 +2119,44 @@ def create_fpf_bgp_rib_convergence_check(
     expected_matched: int = 20000,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
+    settle_sec: t.Optional[float] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
+    signal1_e2e_max_sec: t.Optional[float] = None,
+    signal2_local_max_sec: t.Optional[float] = None,
+    signal3_stability_duration_sec: t.Optional[float] = None,
+    mode: t.Optional[str] = None,
+    reconverge_sla_sec: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
-    """FPF_BGP_RIB_CONVERGENCE_CHECK — BGP RIB convergence per lane."""
+    """FPF_BGP_RIB_CONVERGENCE_CHECK — BGP RIB convergence per lane.
+
+    mode="restart": tolerate null/unresponsive polls during a bgpd (or
+    wedge_agent warmboot) restart and assert each device's BGP RIB returns to
+    expected_matched within ``reconverge_sla_sec`` of the recorded restart moment.
+    """
     params: t.Dict[str, t.Any] = {
         "lane_map": lane_map or {},
         "expected_matched": expected_matched,
         "trigger_delay_sec": trigger_delay_sec,
         "use_live_collectors": use_live_collectors,
     }
+    if settle_sec is not None:
+        params["settle_sec"] = settle_sec
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
         params["window_end"] = window_end
+    if signal1_e2e_max_sec is not None:
+        params["signal1_e2e_max_sec"] = signal1_e2e_max_sec
+    if signal2_local_max_sec is not None:
+        params["signal2_local_max_sec"] = signal2_local_max_sec
+    if signal3_stability_duration_sec is not None:
+        params["signal3_stability_duration_sec"] = signal3_stability_duration_sec
+    if mode is not None:
+        params["mode"] = mode
+    if reconverge_sla_sec is not None:
+        params["reconverge_sla_sec"] = reconverge_sla_sec
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -2103,21 +2169,55 @@ def create_fpf_hrt_bulk_convergence_check(
     expected_per_lane: t.Optional[t.Dict[str, int]] = None,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
+    impacted_lanes: t.Optional[t.List[int]] = None,
+    withdrawn_max_count: t.Optional[int] = None,
+    lane_labels: t.Optional[t.Dict[str, str]] = None,
+    only_hosts: t.Optional[t.List[str]] = None,
+    settle_sec: t.Optional[float] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
+    signal1_e2e_max_sec: t.Optional[float] = None,
+    signal2_local_max_sec: t.Optional[float] = None,
+    signal3_stability_duration_sec: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
-    """FPF_HRT_BULK_CONVERGENCE_CHECK — HRT bulk convergence per lane."""
+    """FPF_HRT_BULK_CONVERGENCE_CHECK — HRT bulk convergence per lane.
+
+    ``impacted_lanes`` flips those lanes to the withdrawn contract (their last
+    in-window sample must be <= ``withdrawn_max_count``, default 0) for
+    link-event tests; the remaining ``lanes`` keep the full 3-signal
+    convergence evaluation. ``lane_labels`` maps each lane (str key) to a human
+    mapping note (e.g. "→ beth0 on rtptest1544") surfaced in check messages.
+    ``only_hosts`` restricts evaluation to those GPU host(s) — for a link event
+    only the impacted host's lane withdraws, so the unimpacted remote host must
+    be excluded or it is a false FAIL.
+    """
     params: t.Dict[str, t.Any] = {
         "lanes": lanes or [],
         "expected_per_lane": expected_per_lane or {},
         "trigger_delay_sec": trigger_delay_sec,
         "use_live_collectors": use_live_collectors,
     }
+    if impacted_lanes is not None:
+        params["impacted_lanes"] = impacted_lanes
+    if lane_labels:
+        params["lane_labels"] = lane_labels
+    if only_hosts:
+        params["only_hosts"] = only_hosts
+    if settle_sec is not None:
+        params["settle_sec"] = settle_sec
+    if withdrawn_max_count is not None:
+        params["withdrawn_max_count"] = withdrawn_max_count
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
         params["window_end"] = window_end
+    if signal1_e2e_max_sec is not None:
+        params["signal1_e2e_max_sec"] = signal1_e2e_max_sec
+    if signal2_local_max_sec is not None:
+        params["signal2_local_max_sec"] = signal2_local_max_sec
+    if signal3_stability_duration_sec is not None:
+        params["signal3_stability_duration_sec"] = signal3_stability_duration_sec
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_BULK_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -2132,11 +2232,20 @@ def create_fpf_hrt_remote_failure_convergence_check(
     max_convergence_sec: int = 120,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
+    lane_labels: t.Optional[t.Dict[str, str]] = None,
+    only_hosts: t.Optional[t.List[str]] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
-    """FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK — HRT negative-route convergence per lane."""
+    """FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK — HRT negative-route convergence per lane.
+
+    ``lane_labels`` maps each lane (str key) to a human mapping note (e.g.
+    "→ beth0 on rtptest1544") surfaced in check messages for debuggability.
+    ``only_hosts`` restricts evaluation to those GPU host(s) — for a link event
+    only the impacted host's lane changes, so the unimpacted remote host must be
+    excluded or it is a false FAIL.
+    """
     params: t.Dict[str, t.Any] = {
         "lanes": lanes or [0, 1, 2, 3],
         "expected_per_lane": expected_per_lane or {},
@@ -2145,6 +2254,10 @@ def create_fpf_hrt_remote_failure_convergence_check(
         "trigger_delay_sec": trigger_delay_sec,
         "use_live_collectors": use_live_collectors,
     }
+    if lane_labels:
+        params["lane_labels"] = lane_labels
+    if only_hosts:
+        params["only_hosts"] = only_hosts
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
@@ -2162,7 +2275,14 @@ def create_fpf_prod_hrt_prefix_stability_check(
     expected_unreachable: t.Optional[t.List[int]] = None,
     expected_plane_up: t.Optional[t.List[int]] = None,
     prefixes: t.Optional[t.List[str]] = None,
+    mode: t.Optional[str] = None,
+    impacted_planes_by_host: t.Optional[t.Dict[str, t.List[int]]] = None,
+    max_transition_sec: t.Optional[float] = None,
+    local_prefixes: t.Optional[t.List[str]] = None,
+    max_drain_sec: t.Optional[float] = None,
+    disruption_ts: t.Optional[float] = None,
     lookback_sec: int = 900,
+    settle_sec: t.Optional[float] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
@@ -2178,8 +2298,28 @@ def create_fpf_prod_hrt_prefix_stability_check(
     and are overridable for a different topology. Only the params that are
     explicitly provided are emitted; the rest fall back to the health check's
     own defaults.
+
+    ``settle_sec`` skips the first N seconds of the window before evaluating
+    stability — use it on the RESTORE/recovery phase so the per-prefix baseline
+    is taken after the link recovers (plane comes back), instead of capturing the
+    still-degraded state at window start and flagging the recovery as a
+    regression. Ignored in transition mode.
     """
     params: t.Dict[str, t.Any] = {"lookback_sec": lookback_sec}
+    if mode is not None:
+        params["mode"] = mode
+    if settle_sec is not None:
+        params["settle_sec"] = settle_sec
+    if impacted_planes_by_host is not None:
+        params["impacted_planes_by_host"] = impacted_planes_by_host
+    if max_transition_sec is not None:
+        params["max_transition_sec"] = max_transition_sec
+    if local_prefixes is not None:
+        params["local_prefixes"] = local_prefixes
+    if max_drain_sec is not None:
+        params["max_drain_sec"] = max_drain_sec
+    if disruption_ts is not None:
+        params["disruption_ts"] = disruption_ts
     if expected_reachable is not None:
         params["expected_reachable"] = expected_reachable
     if expected_drained is not None:
@@ -2196,6 +2336,48 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["window_end"] = window_end
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_PROD_HRT_PREFIX_STABILITY_CHECK,
+        check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
+def create_fpf_hrt_plane_status_check(
+    mode: str = "all_up",
+    impacted_planes: t.Optional[t.List[int]] = None,
+    expected_planes: t.Optional[t.List[int]] = None,
+    lookback_sec: int = 900,
+    settle_sec: t.Optional[float] = None,
+    window_start: t.Optional[float] = None,
+    window_end: t.Optional[float] = None,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """FPF_HRT_PLANE_STATUS_CHECK — per-device HRT plane state (hrtctl show plane-status).
+
+    Postcheck over the hrt_plane_status collector.
+
+    mode="all_up" (default): every plane must be UP across the window. Use for
+    non-drained scenarios (baseline/precheck, interface enable, link/device
+    undrain). ``settle_sec`` advances the window start past a restore-phase
+    recovery transient.
+
+    mode="drain": the ``impacted_planes`` must be DRAINED by window end while
+    every other plane stays UP. Use for link drain / device drain. The window
+    auto-anchors at the recorded disruption time; SKIPs if the disruption was
+    verified ineffective.
+    """
+    params: t.Dict[str, t.Any] = {"mode": mode, "lookback_sec": lookback_sec}
+    if impacted_planes is not None:
+        params["impacted_planes"] = impacted_planes
+    if expected_planes is not None:
+        params["expected_planes"] = expected_planes
+    if settle_sec is not None:
+        params["settle_sec"] = settle_sec
+    if window_start is not None:
+        params["window_start"] = window_start
+    if window_end is not None:
+        params["window_end"] = window_end
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_HRT_PLANE_STATUS_CHECK,
         check_params=Params(json_params=json.dumps(params)),
         check_id=check_id,
     )
@@ -2247,6 +2429,107 @@ def create_fpf_hrt_system_memory_check(
     )
 
 
+def create_fpf_hrt_driver_disconnect_check(
+    hosts: t.Optional[t.List[str]] = None,
+    entity_desc: t.Optional[str] = None,
+    key_desc: t.Optional[str] = None,
+    transform_desc: t.Optional[str] = None,
+    expected_value: t.Optional[float] = None,
+    lookback_sec: int = 900,
+    window_start: t.Optional[float] = None,
+    window_end: t.Optional[float] = None,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """FPF_HRT_DRIVER_DISCONNECT_CHECK — HRT driver stays connected on RTP hosts.
+
+    Postcheck: queries ODS for ``hrt.driver.created`` (transform min()) across
+    ``hosts`` for the test window and FAILs if any host's gauge ever drops below
+    ``expected_value`` (default 1.0), i.e. the HRT driver disconnected at least
+    once. Each host is judged independently and every disconnect timestamp is
+    surfaced. Only explicitly provided params are emitted; the rest fall back to
+    the health check's own defaults.
+    """
+    params: t.Dict[str, t.Any] = {
+        "lookback_sec": lookback_sec,
+    }
+    if hosts is not None:
+        params["hosts"] = hosts
+    if entity_desc is not None:
+        params["entity_desc"] = entity_desc
+    if key_desc is not None:
+        params["key_desc"] = key_desc
+    if transform_desc is not None:
+        params["transform_desc"] = transform_desc
+    if expected_value is not None:
+        params["expected_value"] = expected_value
+    if window_start is not None:
+        params["window_start"] = window_start
+    if window_end is not None:
+        params["window_end"] = window_end
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_HRT_DRIVER_DISCONNECT_CHECK,
+        check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
+def create_fpf_host_spray_check(
+    hosts: t.Optional[t.List[str]] = None,
+    entity_desc: t.Optional[str] = None,
+    key_desc: t.Optional[str] = None,
+    transform_desc: t.Optional[str] = None,
+    min_egress_gbps: t.Optional[float] = None,
+    max_spread_gbps: t.Optional[float] = None,
+    impacted_lanes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
+    impacted_max_gbps: t.Optional[float] = None,
+    lookback_sec: int = 900,
+    window_start: t.Optional[float] = None,
+    window_end: t.Optional[float] = None,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """FPF_HOST_SPRAY_CHECK — per-lane RDMA egress floor + spray fairness.
+
+    Postcheck: queries ODS per-lane NIC tx rate
+    (regex(system.beth[0123].tx-bytes-phy.rate), transform formula->Gbps,avg)
+    across ``hosts`` for the test window, builds a host -> {lane -> avg Gbps}
+    map, and asserts two signals:
+      Signal 1: every lane exceeds ``min_egress_gbps`` (default from
+        fpf_thresholds.ACTIVE: 75 Gbps temporary / 90 Gbps expected).
+      Signal 2: per-host lane spread (max-min) stays within ``max_spread_gbps``
+        (default 2 Gbps) — the spraying-fairness bound.
+    Only explicitly provided params are emitted; the rest fall back to the
+    health check's own defaults (which read fpf_thresholds.ACTIVE).
+    """
+    params: t.Dict[str, t.Any] = {
+        "lookback_sec": lookback_sec,
+    }
+    if hosts is not None:
+        params["hosts"] = hosts
+    if entity_desc is not None:
+        params["entity_desc"] = entity_desc
+    if key_desc is not None:
+        params["key_desc"] = key_desc
+    if transform_desc is not None:
+        params["transform_desc"] = transform_desc
+    if min_egress_gbps is not None:
+        params["min_egress_gbps"] = min_egress_gbps
+    if max_spread_gbps is not None:
+        params["max_spread_gbps"] = max_spread_gbps
+    if impacted_lanes_by_host is not None:
+        params["impacted_lanes_by_host"] = impacted_lanes_by_host
+    if impacted_max_gbps is not None:
+        params["impacted_max_gbps"] = impacted_max_gbps
+    if window_start is not None:
+        params["window_start"] = window_start
+    if window_end is not None:
+        params["window_end"] = window_end
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_HOST_SPRAY_CHECK,
+        check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
 def create_fpf_ods_counter_check(
     entity_desc: str,
     key_desc: str,
@@ -2254,6 +2537,10 @@ def create_fpf_ods_counter_check(
     reduce_desc: str = "",
     transform_desc: str = "table(daily)",
     counter_name: str = "ODS counter",
+    shorten_pass_url: bool = False,
+    aggregate: t.Optional[str] = None,
+    require: str = "all",
+    informational: bool = False,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF ODS counter check — validates ODS counters across custom device list.
@@ -2262,23 +2549,36 @@ def create_fpf_ods_counter_check(
     applies reduce + transform, then validates each entity's result against
     the threshold. Uses test_case_start_time from the collector registry
     as the query window start.
+
+    ``aggregate="max"`` + ``require`` change the semantics from "every sample on
+    every entity must satisfy ``validation_expr``" to "each entity's PEAK over
+    the window is judged, and the check passes if any (``require="any"``) or all
+    (``require="all"``) entity peaks satisfy it". Use ``aggregate="max",
+    require="any"`` for "assert a transient event happened on the impacted path"
+    checks — e.g. in_discard loss during a disable/drain, where the counter is 0
+    at most samples and only spikes on the impacted device.
     """
+    params: t.Dict[str, t.Any] = {
+        "entity_desc": entity_desc,
+        "key_desc": key_desc,
+        "validation_expr": validation_expr,
+        "reduce_desc": reduce_desc,
+        "transform_desc": transform_desc,
+        "counter_name": counter_name,
+        "shorten_pass_url": shorten_pass_url,
+        "use_test_case_start_time": True,
+        "sleep_timer": 0,
+        "min_ods_query_duration": 0,
+        # When True, a threshold breach is reported as an informational PASS
+        # (logged + ODS link kept) instead of a hard FAIL. Used for expected
+        # transient discards during a disruptive restart/coldboot.
+        "informational": informational,
+    }
+    if aggregate is not None:
+        params["aggregate"] = aggregate
+        params["require"] = require
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.GENERIC_ODS_CHECK,
-        check_params=Params(
-            json_params=json.dumps(
-                {
-                    "entity_desc": entity_desc,
-                    "key_desc": key_desc,
-                    "validation_expr": validation_expr,
-                    "reduce_desc": reduce_desc,
-                    "transform_desc": transform_desc,
-                    "counter_name": counter_name,
-                    "use_test_case_start_time": True,
-                    "sleep_timer": 0,
-                    "min_ods_query_duration": 0,
-                }
-            )
-        ),
+        check_params=Params(json_params=json.dumps(params)),
         check_id=check_id,
     )

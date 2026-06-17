@@ -1,5 +1,5 @@
 # pyre-unsafe
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 """Unit tests for TaacIxia.get_or_create_stat_view caching helper."""
 
 import threading

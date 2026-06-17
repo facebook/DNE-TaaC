@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """EB02-ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN — EBB B17 TestConfig.

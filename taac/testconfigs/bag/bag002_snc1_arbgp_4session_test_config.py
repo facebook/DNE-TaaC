@@ -1,5 +1,5 @@
 # pyre-unsafe
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """TAAC test config for ``bag002.snc1``: 4 eBGP sessions over ar-bgp.
 

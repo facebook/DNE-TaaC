@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 
@@ -14,11 +14,17 @@ from taac.libs.fpf.fpf_collector_registry import (
     DEFAULT_SIGNAL1_E2E_MAX_SEC,
     DEFAULT_SIGNAL2_LOCAL_MAX_SEC,
     DEFAULT_SIGNAL3_STABILITY_DURATION_SEC,
+    evaluate_restart_reconverge,
     evaluate_three_signals,
+    everpaste_details_suffix,
     get_collector,
+    get_disruption_time,
     get_test_case_start_time,
 )
 from taac.libs.fpf.fpf_stress_checks import _parse_ts
+from taac.libs.fpf.fpf_thresholds import (
+    ACTIVE as FPF_ACTIVE_THRESHOLDS,
+)
 from taac.health_check.health_check import types as hc_types
 
 JSONL_PATH = "/tmp/fpf_stress_bgp_rib.jsonl"
@@ -59,11 +65,13 @@ class FpfBgpRibConvergenceHealthCheck(
             )
 
         if use_live:
-            return self._evaluate_from_live_collector(lane_map, expected, check_params)
+            return await self._evaluate_from_live_collector(
+                lane_map, expected, check_params
+            )
 
         return self._evaluate_from_jsonl(lane_map, expected, check_params)
 
-    def _evaluate_from_live_collector(
+    async def _evaluate_from_live_collector(
         self,
         lane_map: t.Dict[int, str],
         expected: int,
@@ -76,12 +84,27 @@ class FpfBgpRibConvergenceHealthCheck(
                 message="No live BGP collector in registry",
             )
 
+        if check_params.get("mode") == "restart":
+            return await self._evaluate_restart_reconverge(
+                collector,
+                lane_map,
+                expected,
+                check_params,
+                default_sla_sec=FPF_ACTIVE_THRESHOLDS.bgp_restart_reconverge_sla_sec,
+            )
+
         window_end = check_params.get("window_end", time.time())
         tc_start = get_test_case_start_time()
         lookback_sec = check_params.get("lookback_sec", 900)
         window_start = check_params.get(
             "window_start", tc_start if tc_start else window_end - lookback_sec
         )
+        # settle_sec: skip the first N seconds (restore/recovery phase) so the
+        # GTSW RIB re-converge transient on undrain/re-enable isn't measured as
+        # post-convergence instability.
+        settle_sec = float(check_params.get("settle_sec", 0))
+        if settle_sec > 0:
+            window_start = min(window_start + settle_sec, window_end)
 
         self.logger.info(
             f"  [BGP RIB live] Evaluating window: "
@@ -142,13 +165,29 @@ class FpfBgpRibConvergenceHealthCheck(
 
         failures = [r for r in per_lane_results if not r.passed]
 
+        detail_lines = [
+            f"Lane {r.lane} {r.device}: [{'PASS' if r.passed else 'FAIL'}] {r.detail}"
+            for r in per_lane_results
+        ]
+        details = await everpaste_details_suffix(
+            "BGP RIB convergence — per-lane 3-signal detail",
+            detail_lines,
+            collectors=[collector],
+            window_start=window_start,
+            window_end=window_end,
+            result_status=("FAIL" if failures else "PASS"),
+            result_reason="; ".join(
+                f"Lane {r.lane} {r.device}: {r.detail}" for r in failures
+            )[:300],
+        )
+
         timeout_count = collector.timeout_count_in_window(window_start, window_end)
         if timeout_count > 0:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=(
                     f"Got null data — {timeout_count} poll timeout(s) in window "
-                    f"[{window_start:.0f}, {window_end:.0f}]"
+                    f"[{window_start:.0f}, {window_end:.0f}]{details}"
                 ),
             )
 
@@ -158,17 +197,85 @@ class FpfBgpRibConvergenceHealthCheck(
             )
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
-                message=fail_summary,
+                message=fail_summary + details,
             )
         pass_summary = " | ".join(
-            f"Lane {r.lane}: E2E={r.signal1_e2e_sec}s, "
+            f"Lane {r.lane} ({r.device}): E2E={r.signal1_e2e_sec}s, "
             f"GTSW-prop={r.signal2_local_sec}s, "
             f"stable={r.signal3_stability_duration_sec:.0f}s"
             for r in per_lane_results
         )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
-            message=f"All lanes passed 3-signal evaluation — {pass_summary}",
+            message=f"All lanes passed 3-signal evaluation — {pass_summary}{details}",
+        )
+
+    async def _evaluate_restart_reconverge(
+        self,
+        collector: t.Any,
+        lane_map: t.Dict[int, str],
+        expected: int,
+        check_params: t.Dict[str, t.Any],
+        default_sla_sec: float,
+    ) -> hc_types.HealthCheckResult:
+        """mode="restart": tolerate the null/unresponsive polls during a service
+        restart and assert each device's RIB returns to ``expected`` within the
+        reconverge SLA, measured from the recorded restart moment."""
+        window_end = check_params.get("window_end", time.time())
+        disruption_ts = check_params.get("disruption_ts")
+        if disruption_ts is None:
+            recorded = get_disruption_time()
+            disruption_ts = recorded if recorded > 0 else get_test_case_start_time()
+        reconverge_sla = float(check_params.get("reconverge_sla_sec", default_sla_sec))
+
+        self.logger.info(
+            f"  [BGP RIB restart] reconverge window {disruption_ts:.0f} to "
+            f"{window_end:.0f}; SLA {reconverge_sla:.0f}s from restart"
+        )
+        results = evaluate_restart_reconverge(
+            collector=collector,
+            lane_map=lane_map,
+            expected=expected,
+            disruption_ts=float(disruption_ts),
+            window_end=float(window_end),
+            reconverge_sla_sec=reconverge_sla,
+        )
+        for lane_id, device, passed, _sec, _null, detail in results:
+            self.logger.info(
+                f"  [BGP RIB restart] Lane {lane_id} {device}: "
+                f"[{'PASS' if passed else 'FAIL'}] {detail}"
+            )
+        failures = [r for r in results if not r[2]]
+        details = await everpaste_details_suffix(
+            "BGP RIB restart reconverge — per-device detail",
+            [
+                f"Lane {r[0]} {r[1]}: [{'PASS' if r[2] else 'FAIL'}] {r[5]}"
+                for r in results
+            ],
+            collectors=[collector],
+            window_start=float(disruption_ts),
+            window_end=float(window_end),
+            result_status=("FAIL" if failures else "PASS"),
+            result_reason="; ".join(f"Lane {r[0]} {r[1]}: {r[5]}" for r in failures)[
+                :300
+            ],
+        )
+        if not results:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=f"No restart reconverge data{details}",
+            )
+        if failures:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message="; ".join(f"Lane {r[0]} {r[1]}: {r[5]}" for r in failures)
+                + details,
+            )
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.PASS,
+            message="All devices reconverged after restart — "
+            + "; ".join(f"Lane {r[0]}: {r[5]}" for r in results)
+            + details,
         )
 
     def _evaluate_from_jsonl(

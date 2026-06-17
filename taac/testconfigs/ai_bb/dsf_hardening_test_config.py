@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """RDSW004 C085 N001 SNC1 DSF hardening TestConfig.
 
@@ -197,18 +198,18 @@ def test_config_for_dsf_hardening_in_conveyor(
             ],
             dut=True,
             mac_address=local_mac_address,
-            direct_ixia_connections=direct_ixia_connections
-            if direct_ixia_connections
-            else [],
+            direct_ixia_connections=(
+                direct_ixia_connections if direct_ixia_connections else []
+            ),
         ),
         taac_types.Endpoint(
             name=remote_device_name,
             ixia_ports=[ixia_remote_interface],
             dut=False,
             mac_address=remote_device_mac_address,
-            direct_ixia_connections=remote_direct_ixia_connections
-            if remote_direct_ixia_connections
-            else [],
+            direct_ixia_connections=(
+                remote_direct_ixia_connections if remote_direct_ixia_connections else []
+            ),
         ),
     ]
 
@@ -533,17 +534,17 @@ RDSW004_C085_N001_SNC1_HARDENING_NODE = test_config_for_dsf_hardening_in_conveyo
     direct_ixia_connections=[
         taac_types.DirectIxiaConnection(
             interface="eth1/11/1",  # Downlink interface
-            ixia_chassis_ip="2401:db00:116:303b::6f54",
+            ixia_chassis_ip="2401:db00:116:3006:7ec2:55ff:fee0:fd44",
             ixia_port="1/19",
         ),
         taac_types.DirectIxiaConnection(
             interface="eth1/15/1",  # Uplink interface
-            ixia_chassis_ip="2401:db00:116:303b::6f54",
+            ixia_chassis_ip="2401:db00:116:3006:7ec2:55ff:fee0:fd44",
             ixia_port="1/13",
         ),
         taac_types.DirectIxiaConnection(
             interface="eth1/25/1",  # Rogue interface
-            ixia_chassis_ip="2401:db00:116:303b::6f54",
+            ixia_chassis_ip="2401:db00:116:3006:7ec2:55ff:fee0:fd44",
             ixia_port="1/11",
         ),
     ],
@@ -553,7 +554,7 @@ RDSW004_C085_N001_SNC1_HARDENING_NODE = test_config_for_dsf_hardening_in_conveyo
     remote_direct_ixia_connections=[
         taac_types.DirectIxiaConnection(
             interface="eth1/15/1",
-            ixia_chassis_ip="2401:db00:116:303b::6f54",
+            ixia_chassis_ip="2401:db00:116:3006:7ec2:55ff:fee0:fd44",
             ixia_port="1/20",
         ),
     ],

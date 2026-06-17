@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 import asyncio
@@ -19,7 +19,7 @@ from taac.internal.ods_utils import (
 from taac.libs.fpf.fpf_collector_registry import (
     get_test_case_start_time,
 )
-from neteng.test_infra.dne.taac.utils.common import async_get_fburl, eval_jq
+from neteng.test_infra.dne.taac.utils.common import async_get_fburl_retry, eval_jq
 from pyre_extensions import JSON
 from taac.health_check.health_check import types as hc_types
 
@@ -93,6 +93,25 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             )
         is_multi_entity = "," in entity_desc
         counter_name = check_params.get("counter_name", key_desc)
+        # By default the (dominant) passing path keeps the raw ODS URL to avoid
+        # hammering the throttled fburl service, since this check is reused many
+        # times per device per iteration. Callers that run it sparingly (e.g.
+        # FPF postchecks) can opt into a short fburl on PASS too.
+        shorten_pass_url = check_params.get("shorten_pass_url", False)
+        # aggregate="max" evaluates each entity's PEAK over the window against
+        # validation_expr (instead of every sample). require="any" passes if at
+        # least one entity meets it; "all" (default) needs every entity. This is
+        # how "assert a transient event happened" checks (e.g. in_discard loss
+        # during a disruption) must work: the counter is 0 at most samples and
+        # only spikes on the impacted path, so per-sample / all-entity evaluation
+        # would never pass.
+        aggregate = check_params.get("aggregate")  # None | "max"
+        require = check_params.get("require", "all")  # "all" | "any"
+        # When informational, a threshold breach is surfaced as a PASS with an
+        # "[INFORMATIONAL]" message (values + ODS link still logged/registered)
+        # rather than failing the test — used for expected transient discards
+        # during a disruptive restart/coldboot.
+        informational = bool(check_params.get("informational", False))
         violations = []
         entity_max_map: t.Dict[str, t.Tuple[float, str]] = {}
 
@@ -119,30 +138,20 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             else:
                 entity_max_map[entity_name] = (0.0, "no data")
 
-            if validation_expr:
+            if validation_expr and not aggregate:
                 jq_expr = f". | .[] | to_entries | map(select(.value {validation_expr} | not)) | from_entries"
                 violation_data = eval_jq(jq_expr, ods_data_dict)  # pyre-ignore
                 if violation_data:
-                    for timestamp, value in violation_data.items():
-                        entity_label = entity_name if is_multi_entity else ""
-                        log_message = (
-                            f"Validation Error: {entity_label} {key_desc} at "
-                            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(timestamp)))} "
-                            f"failed validation check '{validation_expr}' with value: {value}"
-                        )
-                        self.logger.debug(log_message)
-                        violations.append(log_message)
+                    # Don't log per-timestamp/per-entity violation lines — they
+                    # spew hundreds of DEBUG lines for a single failing check.
+                    # The one-line collapsed summary below + the per-entity
+                    # fail_summary in the FAIL message carry the same info. Only
+                    # the count of violations matters here (PASS/FAIL decision).
+                    violations.extend(violation_data.items())
             elif custom_jq_expr:
                 violation_data = eval_jq(custom_jq_expr, ods_data_dict)  # pyre-ignore
                 if violation_data:
-                    entity_label = entity_name if is_multi_entity else ""
-                    log_message = (
-                        f"Custom Validation Error: {entity_label} Data "
-                        f"'{violation_data}' failed custom JQ expression "
-                        f"'{custom_jq_expr}'"
-                    )
-                    self.logger.debug(log_message)
-                    violations.append(log_message)
+                    violations.append(violation_data)
 
         ods_url_raw = await async_generate_ods_url(
             entity_desc=entity_desc,
@@ -152,23 +161,66 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             start_time=int(start_time),
             end_time=int(end_time),
         )
-        self.logger.info(f"  [{counter_name}] Per-entity max values:")
-        for entity, (max_val, max_ts) in sorted(entity_max_map.items()):
-            threshold_status = (
-                "OK"
-                if not validation_expr or eval(f"{max_val} {validation_expr}")
-                else "EXCEEDED"
+        # One-line collapsed summary (instead of the per-timestamp violation
+        # spew above, which stays at DEBUG): per-device max + how many met the
+        # threshold. Makes "why did this ODS check fail" readable at a glance.
+        met = sum(
+            1
+            for v, _ in entity_max_map.values()
+            if not validation_expr or eval(f"{v} {validation_expr}")
+        )
+        per_device = ", ".join(
+            f"{e.split(':')[0].split('.')[0]}={v:.0f}"
+            for e, (v, _) in sorted(entity_max_map.items())
+        )
+        self.logger.info(
+            f"  [{counter_name}] {met}/{len(entity_max_map)} entities met "
+            f"'{validation_expr or 'n/a'}'"
+            f"{f' (require={require})' if aggregate else ''}; "
+            f"per-device max: {per_device}"
+        )
+
+        # aggregate="max": decide pass/fail on the per-entity PEAK, under the
+        # require policy ("any" -> at least one entity meets the expr; "all" ->
+        # every entity must). This is the "did a transient event happen on the
+        # impacted path" semantic (e.g. in_discard loss during a disable/drain).
+        if aggregate == "max":
+            n = len(entity_max_map)
+            if require == "any":
+                aggregate_passed = met >= 1
+            else:
+                aggregate_passed = n > 0 and met == n
+            violations = [] if aggregate_passed else [("aggregate", require)]
+
+        # Resolve the display URL ONCE and reuse it for the log line, the FPF
+        # artifact, and the result message — never spew the long ODS URL. FPF
+        # callers (shorten_pass_url=True) always get an fburl. Other callers
+        # keep the raw URL on the (dominant) passing path to avoid fburl QPS,
+        # and only shorten on failure (handled below).
+        has_violations = bool(violations)
+        display_url = ods_url_raw
+        if shorten_pass_url or has_violations:
+            try:
+                display_url = await async_get_fburl_retry(ods_url_raw)
+            except Exception:
+                display_url = ods_url_raw
+
+        self.logger.info(f"  [{counter_name}] ODS: {display_url}")
+
+        # FPF callers register the ODS query link into the FPF artifact registry
+        # for the consolidated end-of-test summary.
+        if shorten_pass_url:
+            from taac.libs.fpf.fpf_collector_registry import (
+                register_artifact,
             )
-            self.logger.info(
-                f"    {entity}: max={max_val:.0f} at {max_ts} [{threshold_status}]"
-            )
-        self.logger.info(f"  [{counter_name}] ODS: {ods_url_raw}")
+
+            register_artifact("ods", str(counter_name), display_url)
 
         max_summary = ", ".join(
             f"{e}: {v:.0f}" for e, (v, _) in sorted(entity_max_map.items())
         )
 
-        if violations:
+        if has_violations:
             failed_entities = [
                 f"{e}: max={v:.0f} at {ts}"
                 for e, (v, ts) in sorted(entity_max_map.items())
@@ -177,24 +229,51 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             fail_summary = (
                 "; ".join(failed_entities) if failed_entities else max_summary
             )
-            # Only shorten through the throttled fburl tier on failure. This
-            # check is parameterized and reused many times per device per
-            # iteration, so shortening on the (dominant) passing path was
-            # avoidable fburl QPS.
-            try:
-                ods_url = await async_get_fburl(ods_url_raw)
-            except Exception:
-                ods_url = ods_url_raw
+            if aggregate == "max":
+                # "assert peak met the expr" failed: no (require=any) / not every
+                # (require=all) entity's peak satisfied it.
+                lead = (
+                    f"{counter_name}: no device peak met '{validation_expr}'"
+                    if require == "any"
+                    else f"{counter_name}: not all device peaks met '{validation_expr}'"
+                )
+                breach_status = (
+                    hc_types.HealthCheckStatus.PASS
+                    if informational
+                    else hc_types.HealthCheckStatus.FAIL
+                )
+                prefix = "[INFORMATIONAL] " if informational else ""
+                return hc_types.HealthCheckResult(
+                    status=breach_status,
+                    message=f"{prefix}{lead} — peaks: {max_summary} | ODS: {display_url}",
+                )
+            if informational:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.PASS,
+                    message=(
+                        f"[INFORMATIONAL] {counter_name} over threshold "
+                        f"(expected during disruption; not failing) — {fail_summary} "
+                        f"| ODS: {display_url}"
+                    ),
+                )
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=(
                     f"{counter_name} threshold exceeded — {fail_summary} | "
-                    f"ODS: {ods_url}"
+                    f"ODS: {display_url}"
+                ),
+            )
+        if aggregate == "max":
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=(
+                    f"{counter_name} peak met '{validation_expr}' "
+                    f"({require}) — peaks: {max_summary} | ODS: {display_url}"
                 ),
             )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
             message=(
-                f"{counter_name} within threshold — {max_summary} | ODS: {ods_url_raw}"
+                f"{counter_name} within threshold — {max_summary} | ODS: {display_url}"
             ),
         )

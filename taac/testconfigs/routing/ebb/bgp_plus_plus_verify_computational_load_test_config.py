@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """BGP_PLUS_PLUS_VERIFY_COMPUTATIONAL_LOAD_TEST_CONFIGS — EBB B17 TestConfig.

@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 """
 FBOSS DCTypeF 51T NPI CPU Queue Test Configuration

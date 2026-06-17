@@ -1,4 +1,4 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
 """EB02_ARISTA_CONSTANT_ATTRIBUTE_STORAGE_VARYING_COMBINATIONS_TEST — EBB B17 TestConfig.
