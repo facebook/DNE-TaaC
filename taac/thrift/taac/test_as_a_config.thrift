@@ -444,6 +444,9 @@ struct DirectIxiaConnection {
   2: string ixia_port;
   3: optional string ixia_chassis_ip;
   4: bool is_logical_port = true;
+  # OTG port location — interface name as seen by the traffic engine (e.g., "eth1").
+  # When set, the OTG backend uses this instead of chassis/slot/port discovery.
+  5: optional string port_location;
 }
 
 struct Endpoint {
@@ -605,6 +608,11 @@ struct IxiaRecovery {
   3: i32 cooldown_minutes = 30;
 }
 
+enum TrafficGeneratorBackend {
+  RESTPY = 0,
+  OTG = 1,
+}
+
 struct TestConfig {
   1: string name;
   2: string basset_pool;
@@ -655,6 +663,7 @@ struct TestConfig {
   36: optional IxiaConfigCache ixia_config_cache;
   // Opt-in soft recovery of `ixnetworkweb` on 5xx — see `IxiaRecovery`.
   37: optional IxiaRecovery ixia_recovery;
+  38: TrafficGeneratorBackend traffic_generator_backend = TrafficGeneratorBackend.RESTPY;
 }
 
 enum DeviceOsType {

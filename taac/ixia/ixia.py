@@ -679,7 +679,7 @@ class Ixia:
         # `ixia_config_cache=taac_types.IxiaConfigCache(enabled=False)`
         # until the cache layer learns to rehydrate this dict.
         self.vport_indices: t.Dict[str, VportIndex] = {}
-        self.traffic_items_start_time: float = 0.0
+        self._traffic_start_time: float = 0.0
         self.cfgr_client = ConfigeratorClient()
         self.ptp_configured: bool = False
         self.tag_name_to_device_group_name_list = defaultdict(list)
@@ -4596,10 +4596,14 @@ class Ixia:
         # started yet.
         self.ixnetwork.Traffic.Start()
         self.validate_traffic_flow_state(running=True)
-        self.traffic_items_start_time = time.time()
+        self._traffic_start_time = time.time()
         self.logger.debug(
             "[GLOBAL] Successfully started all the traffic items in the IXIA setup!"
         )
+
+    @external_api
+    def get_traffic_start_time(self) -> float:
+        return self._traffic_start_time
 
     @external_api
     @require_traffic_item

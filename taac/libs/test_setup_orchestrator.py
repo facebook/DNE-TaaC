@@ -10,8 +10,10 @@ from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* ro
     FbossPackage,
     TestTopology,
 )
+from taac.ixia.abstract_traffic_generator import AbstractTrafficGenerator
 from taac.ixia.taac_ixia import TaacIxia
 from taac.libs.oss_test_bed_chunker import OssTestBedChunker
+from taac.libs.otg_traffic_generator import OtgTrafficGenerator
 from taac.libs.traffic_generator import TrafficGenerator
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import (
@@ -106,10 +108,16 @@ class TestSetupOrchestrator:
         self._eos_image_id = eos_image_id or ""
         # Whether to clear old EOS images from flash before deployment
         self._clear_old_eos_images = clear_old_eos_images
+        self._traffic_generator_backend = (
+            "otg"
+            if getattr(test_config, "traffic_generator_backend", None)
+            == taac_types.TrafficGeneratorBackend.OTG
+            else "restpy"
+        )
 
         # The following are to be dynamically populated
         self.basset_butler: t.Any = None
-        self.ixia: t.Optional[TaacIxia] = None
+        self.ixia: t.Optional[AbstractTrafficGenerator] = None
         self.traffic_generator: t.Optional[TrafficGenerator] = None
         self.test_bed_chunker: t.Any = None
         self.test_topology: TestTopology = None  # pyre-ignore[8]
@@ -446,7 +454,8 @@ class TestSetupOrchestrator:
         ixia_recovery = (
             getattr(self.test_config, "ixia_recovery", None) or _DEFAULT_IXIA_RECOVERY
         )
-        self.traffic_generator = TrafficGenerator(
+        tgen_cls = OtgTrafficGenerator if self._traffic_generator_backend == "otg" else TrafficGenerator
+        self.traffic_generator = tgen_cls(
             endpoints,
             basset_pool=self.test_config.basset_pool,
             session_name=self.test_config.name,
@@ -488,8 +497,8 @@ class TestSetupOrchestrator:
         _log(
             f"\033[32m\033[1m[IXIA]\033[0m Setup complete in "
             f"\033[33m{_ixia_elapsed:.0f}s\033[0m — "
-            f"session ID: \033[33m{ixia.session_id}\033[0m, "
-            f"session name: \033[33m{ixia.session_name}\033[0m"
+            f"session ID: \033[33m{getattr(ixia, 'session_id', 'n/a')}\033[0m, "
+            f"session name: \033[33m{getattr(ixia, 'session_name', 'n/a')}\033[0m"
         )
         # pyre-fixme[16]: `t.Optional` has no attribute `ixia`
         return ixia

@@ -176,6 +176,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # env vars BEFORE any taac.* import. The OSS topology loader
     # @memoize_forever-caches its lookups on first read, so a late export
     # leaves stale data behind for the rest of the process.
+    if args.duts:
+        os.environ["TAAC_DUTS"] = ",".join(args.duts)
     if args.device_info_csv:
         os.environ["TAAC_DEVICE_INFO_PATH"] = os.path.abspath(args.device_info_csv)
     if args.circuit_info_csv:

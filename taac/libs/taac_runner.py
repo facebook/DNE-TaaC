@@ -51,6 +51,7 @@ from taac.health_checks.all_health_checks import (
     NAME_TO_HEALTH_CHECK,
     SNAPSHOT_HEALTH_CHECKS,
 )
+from taac.ixia.abstract_traffic_generator import AbstractTrafficGenerator
 from taac.ixia.taac_ixia import TaacIxia
 
 if not TAAC_OSS:
@@ -265,7 +266,7 @@ class TaacRunner:
         # Netcastle runner specific variables
         self.is_autotester_run = is_autotester_run
 
-        self.ixia: t.Optional[TaacIxia] = None
+        self.ixia: t.Optional[AbstractTrafficGenerator] = None
         self.topology = ...
         self.device_to_rsyslog_services = {}
         self.test_setup_orchestrator = TestSetupOrchestrator(
@@ -289,7 +290,6 @@ class TaacRunner:
         )
         self.test_case_uuid = ""
         self.custom_test_handlers = []
-        self.started_capture: bool = False
         # pyrefly: ignore [bad-assignment]
         self._current_playbook: taac_types.Playbook = ...
         # pyrefly: ignore [bad-assignment]
@@ -445,7 +445,7 @@ class TaacRunner:
                 *[handler.setUp() for handler in self.custom_test_handlers]
             )
             if self.ixia:
-                self.ixia.enable_traffic(enable=False)
+                self.ixia.stop_traffic()
 
             rsyslog_services_overrides = (
                 self.test_config.rsyslog_services_overrides or {}
@@ -1519,9 +1519,8 @@ class TaacRunner:
                     # failure is logged inside `ensure_ixia_alive` and
                     # swallowed; the per-RPC `@external_api` wrapper remains
                     # the last line of defense.
-                    if self.ixia is not None:
+                    if isinstance(self.ixia, TaacIxia):
                         self.ixia.ensure_ixia_alive(
-                            # pyrefly: ignore [missing-attribute]
                             playbook_name=playbook.name,
                             testconfig_name=self.test_config.name,
                         )
@@ -1631,37 +1630,26 @@ class TaacRunner:
         self.parameter_evaluator.set_cache_uuid(self.test_case_uuid)
         ixia = self.ixia
         if ixia:
-            ixia.test_case_uuid = self.test_case_uuid
             if playbook.backup_and_restore_ixia_config:
-                ixia.export_and_save_config()
+                ixia.export_and_save_config()  # type: ignore[attr-defined]
             if playbook.traffic_items_to_configure:
                 for (
                     traffic_item_name,
                     settings,
                 ) in playbook.traffic_items_to_configure.items():
-                    ixia.configure_traffic_items_on_the_fly(
+                    ixia.configure_traffic_items_on_the_fly(  # type: ignore[attr-defined]
                         traffic_item_name,
                         settings.line_rate,
                         settings.line_rate_type,
                         settings.frame_size_settings,
                         settings.qos_config,
                     )
-                    ixia.apply_traffic()
-            ixia.enable_traffic(
+                    ixia.apply_traffic()  # type: ignore[attr-defined]
+            traffic_regexes = (
                 playbook.traffic_items_to_start
                 or self.test_config.traffic_items_to_start
             )
-            # Regenerate and reapply all enabled traffic items so that
-            # configuration changes (DSCP, frame size, line rate) and
-            # enable/disable state are fully committed before traffic starts.
-            ixia.regenerate_traffic_items()
-            ixia.apply_traffic()
-            ixia.wait_for_view_assistants_ready()
-            if not self.started_capture:
-                ixia.start()
-                self.started_capture = True
-            else:
-                ixia.paused = False
+            ixia.begin_test_case(self.test_case_uuid, traffic_regexes)
             await asyncio.sleep(10)
         # Run custom test case set up logics
         for handler in self.custom_test_handlers:
@@ -1783,17 +1771,13 @@ class TaacRunner:
         ixia = self.ixia
         test_case_name = playbook.name
         if ixia:
-            ixia.paused = True
-            ixia.log_to_scuba_ixia_packet_loss(
-                self.test_case_uuid,
-            )
-            ixia.enable_traffic(
+            traffic_regexes = (
                 playbook.traffic_items_to_start
-                or self.test_config.traffic_items_to_start,
-                enable=False,
+                or self.test_config.traffic_items_to_start
             )
+            ixia.end_test_case(traffic_regexes)
             if playbook.backup_and_restore_ixia_config:
-                ixia.import_saved_config()
+                ixia.import_saved_config()  # type: ignore[attr-defined]
         if self.test_case_periodic_task_executor:
             await self.async_run_periodic_task_checks(
                 test_case_results,
@@ -2111,7 +2095,8 @@ class TaacRunner:
                 )
                 ixia = self.ixia
                 if ixia:
-                    ixia.capturing = False
+                    if hasattr(ixia, "capturing"):
+                        ixia.capturing = False  # type: ignore[attr-defined]
                     await self._async_collect_ixia_diagnostics_if_enabled(ixia)
                 await self.test_setup_orchestrator.async_tearDown()
                 for handler in self.custom_test_handlers:

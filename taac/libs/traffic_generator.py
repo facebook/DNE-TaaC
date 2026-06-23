@@ -21,6 +21,7 @@ from taac.constants import (
     LABS_WITH_INBAND_CONNECTIVITY,
 )
 from taac.driver.driver_constants import InterfaceEventState
+from taac.ixia.abstract_traffic_generator import AbstractTrafficGenerator
 from taac.ixia.taac_ixia import TaacIxia
 from taac.libs.ixia_config_cache_manager import (
     IxiaConfigCacheManager,
@@ -127,7 +128,7 @@ class TrafficGenerator:
         self.tear_down_session = tear_down_session
         self.cleanup_failed_setup = cleanup_failed_setup
         self.override_traffic_items = override_traffic_items
-        self.ixia: t.Optional[TaacIxia] = None
+        self.ixia: t.Optional[AbstractTrafficGenerator] = None # pyre-ignore[8]
         self.logger = logger or get_root_logger()
         self.session_name = session_name
         self.basic_traffic_item_configs = basic_traffic_item_configs or []
@@ -1004,7 +1005,7 @@ class TrafficGenerator:
                     *[
                         self.async_create_endpoint_ixia_port_configs(endpoint)
                         for endpoint in self.endpoints
-                        if endpoint.ixia_ports or endpoint.ixia_needed
+                        if endpoint.ixia_ports or endpoint.ixia_needed or endpoint.direct_ixia_connections
                     ]
                 )
             )

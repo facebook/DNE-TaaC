@@ -14,6 +14,7 @@ from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
 from ixnetwork_restpy.files import Files
+from taac.ixia.abstract_traffic_generator import AbstractTrafficGenerator
 from taac.ixia.ixia import Ixia
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
@@ -67,7 +68,7 @@ PTP_DEVICE_NUM = "Device#"
 PTP_OFFSET_NS = "Offset [ns]"
 
 
-class TaacIxia(Ixia, Thread):
+class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         Thread.__init__(self)
@@ -927,3 +928,22 @@ class TaacIxia(Ixia, Thread):
             except Exception as e:
                 self.logger.warning(f"ng.Stop() failed: {e}")
         self.logger.info(f"[toggle_dlb_pool_enabled] {pool_name} → enabled={enabled}")
+
+    def prepare_traffic(self) -> None:
+        self.regenerate_traffic_items()
+        self.apply_traffic()
+        self.wait_for_view_assistants_ready()
+
+    def begin_test_case(self, test_case_uuid, traffic_regexes=None) -> None:
+        self.test_case_uuid = test_case_uuid
+        self.enable_traffic(traffic_regexes)
+        self.prepare_traffic()
+        if not self.capturing:
+            self.start()
+        else:
+            self.paused = False
+
+    def end_test_case(self, traffic_regexes=None) -> None:
+        self.paused = True
+        self.log_to_scuba_ixia_packet_loss(none_throws(self.test_case_uuid))
+        self.enable_traffic(traffic_regexes, enable=False)

@@ -1,0 +1,23 @@
+# Sample ixia-c deployment with vlan subinterfaces
+# pointing to the host NIC.
+name: ixc-2port
+topology:
+  nodes:
+    ixia-c:
+      kind: keysight_ixia-c-one
+      image: ixia-c-one:local
+      ports:
+        - 8443:8443
+  links:
+    - type: macvlan
+      endpoint:
+        node: ixia-c
+        interface: eth1
+      host-interface: enp3s0.vlan1
+      mode: passthru
+    - type: macvlan
+      endpoint:
+        node: ixia-c
+        interface: eth2
+      host-interface: enp3s0.vlan2
+      mode: passthru

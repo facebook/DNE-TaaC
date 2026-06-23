@@ -36,3 +36,7 @@ asyncssh>=2.13.0
 # -> oss_driver_utils.create_dir_if_not_exists) when a device's
 # operating_system is FBOSS.
 paramiko>=2.12.0,<4
+
+# OTG/snappi traffic-generator client. Imported in taac/ixia/otg_traffic_gen.py
+# for the ixia-c (containerlab) backend.
+snappi>=1.0.0

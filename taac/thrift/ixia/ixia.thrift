@@ -227,6 +227,10 @@ struct PortConfig {
   4: i16 device_multiplier = 1;
   5: list<DeviceGroupConfig> device_group_configs;
   6: optional L1Config l1_config;
+  # OTG port location — overrides phy_port_config when set.
+  # For ixia-c: interface name (e.g. "veth-otg0")
+  # For Keysight hardware OTG: controller endpoint (e.g. "10.0.0.1:5551")
+  7: optional string port_location;
 }
 
 struct DeviceGroupConfig {

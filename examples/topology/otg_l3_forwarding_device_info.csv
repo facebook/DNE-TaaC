@@ -1,0 +1,5 @@
+# Device info for OTG L3 forwarding test.
+# Pass via: --device-info-csv examples/topology/otg_l3_forwarding_device_info.csv
+#
+# Format: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system,hardware
+device,,,,,FBOSS,

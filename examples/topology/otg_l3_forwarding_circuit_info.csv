@@ -1,0 +1,7 @@
+# Circuit info for OTG L3 forwarding test.
+# Pass via: --circuit-info-csv examples/topology/otg_l3_forwarding_circuit_info.csv
+#
+# Format: hostname,local_interface,local_platform,local_parent_interface,neighbor_hostname,neighbor_interface,neighbor_platform,neighbor_parent_interface,status,role
+# Columns 0-9: standard circuit info (parsed by circuit_info_loader).
+device,eth1/9/1,FBOSS,,ixia,eth1,ixia,,3,IXIA
+device,eth1/10/1,FBOSS,,ixia,eth2,ixia,,3,IXIA
