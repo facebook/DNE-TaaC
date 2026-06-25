@@ -21,9 +21,6 @@ from taac.health_checks.healthcheck_definitions import (
     create_system_cpu_load_average_check,
     create_unclean_exit_check,
 )
-from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.conveyor_constants import (
-    IXIA_BGP_MON_IC_PARENT_NETWORK,
-)
 from taac.utils.hardware_capacity_utils import (
     get_postcheck_thresholds,
     get_precheck_thresholds,
@@ -185,6 +182,15 @@ def create_standard_prechecks(
     Returns:
         List of standard precheck health checks
     """
+    # Lazy import to avoid a load-time circular import: importing the conveyor
+    # package eagerly pulls in ebb testconfigs that import back into
+    # playbook_definitions. Deferring to call-time breaks the cycle. This only
+    # surfaced under TAAC_OSS=1, where the internal-module load order that
+    # otherwise masks the cycle is absent.
+    from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.conveyor_constants import (
+        IXIA_BGP_MON_IC_PARENT_NETWORK,
+    )
+
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
 
@@ -379,6 +385,12 @@ def create_standard_postchecks(
     Returns:
         List of standard postcheck health checks
     """
+    # Lazy import to break a load-time circular import (see
+    # create_standard_prechecks); required for TAAC_OSS=1.
+    from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.conveyor_constants import (
+        IXIA_BGP_MON_IC_PARENT_NETWORK,
+    )
+
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
@@ -506,6 +518,12 @@ def create_standard_snapshot_checks(
     Returns:
         List of standard snapshot health checks
     """
+    # Lazy import to break a load-time circular import (see
+    # create_standard_prechecks); required for TAAC_OSS=1.
+    from taac.routing.ebb.ebb_bgp_plus_plus_test_config.ebb_bgp_plus_plus_conveyor.conveyor_constants import (
+        IXIA_BGP_MON_IC_PARENT_NETWORK,
+    )
+
     all_prefixes_to_ignore = list(parent_prefixes_to_ignore or [])
     if exclude_bgp_mon:
         all_prefixes_to_ignore.append(f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80")
