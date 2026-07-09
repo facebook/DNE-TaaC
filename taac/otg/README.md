@@ -178,6 +178,28 @@ The test is backend-agnostic. Any OTG-conformant endpoint works:
 See `examples/topology/otg_l3_forwarding_sample_containerlab.yml` for a
 sample ixia-c deployment using containerlab.
 
+### OTG versions and compatibility
+
+TAAC's OTG backend uses [snappi](https://github.com/open-traffic-generator/snappi),
+the reference Python client for the [Open Traffic Generator](https://otg.dev/)
+API. snappi talks to any conformant OTG endpoint — the backend is not
+tied to a specific vendor or implementation.
+
+Pin your `snappi` version to match the OTG API version your traffic
+generator exposes. For ixia-c deployments (Keysight's open-source OTG
+implementation), snappi and ixia-c release versions track together; see
+the [ixia-c compatibility matrix](https://ixia-c.dev/releases/).
+
+See also: [OTG implementations](https://otg.dev/implementations/),
+[snappi on PyPI](https://pypi.org/project/snappi/)
+
+### Migrating from IxNetwork to OTG on hardware chassis
+
+For teams running existing Keysight hardware under IxNetwork, see
+[MIGRATION.md](MIGRATION.md). The short answer: no chassis reconfiguration
+is required. There is no "OTG mode" to flip — the switch happens entirely
+at the port reservation level in software.
+
 ## Running Tests
 
 ```bash
