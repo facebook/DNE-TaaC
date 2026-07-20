@@ -8,6 +8,14 @@ Bag conveyor workflows on the 1274-peer EBB topology. Naming:
 See ../README.md §3.
 """
 
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_AS_NUMBERS,
+    EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
+    EBB_FULL_SCALE_WITH_BGPMON,
+    EBB_PARENT_NETWORKS,
+    EBB_PEER_GROUPS,
+)
+from taac.abstractions.topology import RoutingDeviceConfig
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_LOCAL_LINK,
@@ -1064,6 +1072,15 @@ def create_bgp_ebb_stage1_test_config(
     )
 
 
+def _create_ebb_longevity_playbooks(testbed: Testbed) -> list:
+    return [
+        create_bgp_ebb_longevity_playbook(
+            device_name=testbed.device_name,
+            duration=_BAG010_LONGEVITY_DURATION_SECONDS,
+        ),
+    ]
+
+
 def create_ebb_longevity_test_config(
     testbed: Testbed,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
@@ -1082,16 +1099,28 @@ def create_ebb_longevity_test_config(
         testbed, "LONGEVITY", enable_update_group
     )
 
-    return _build_ebb_full_scale_test_config(
+    bound = EBB_FULL_SCALE_WITH_BGPMON.bind_to_testbed(
         testbed=testbed,
+        port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
+        parent_networks=EBB_PARENT_NETWORKS,
+        peer_groups=EBB_PEER_GROUPS,
+        as_numbers=EBB_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            openr_enable=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
+            update_group_enable=enable_update_group,
+        ),
+    )
+    compiled = bound.compile()
+    return TestConfig(
         name=name,
-        profile=profile,
-        enable_update_group=enable_update_group,
-        drain=False,
-        playbooks=[
-            create_bgp_ebb_longevity_playbook(
-                device_name=testbed.device_name,
-                duration=_BAG010_LONGEVITY_DURATION_SECONDS,
-            ),
-        ],
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=_create_ebb_longevity_playbooks(testbed),
     )
