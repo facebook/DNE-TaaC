@@ -1200,6 +1200,7 @@ def get_common_setup_tasks(
     include_pre_ixia_setup: bool = True,
     include_bgpcpp_deployment: bool = True,
     include_control_plane: bool = True,
+    include_interface_ip_config: bool = True,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1220,6 +1221,8 @@ def get_common_setup_tasks(
             certificate, validation, and supporting-agent deployment.
         include_control_plane: When False, omit control-plane ACL, daemon,
             intern user-ID, and update-group verification tasks.
+        include_interface_ip_config: When False, omit full-scale interface IP
+            configuration tasks.
 
     Returns:
         List of setup Task objects.
@@ -1281,15 +1284,16 @@ def get_common_setup_tasks(
         )
 
     # 4. Full-scale IP configuration
-    setup_tasks.extend(
-        _get_full_scale_ip_config_tasks(
-            device_name=device_name,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-            include_bgp_mon=include_bgp_mon,
+    if include_interface_ip_config:
+        setup_tasks.extend(
+            _get_full_scale_ip_config_tasks(
+                device_name=device_name,
+                ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
+                include_bgp_mon=include_bgp_mon,
+            )
         )
-    )
 
     # 5. OpenR setup (conditional on profile)
     setup_tasks.extend(
