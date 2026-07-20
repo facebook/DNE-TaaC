@@ -1260,6 +1260,7 @@ def get_common_setup_tasks(
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     include_pre_ixia_setup: bool = True,
+    include_bgpcpp_deployment: bool = True,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1276,6 +1277,8 @@ def get_common_setup_tasks(
             ``ixia_interface_mimic_bgp_mon``.
         include_pre_ixia_setup: When False, omit the BgpTcpdump disable,
             IXIA-facing interface bring-up, and link-settle sleep prefix.
+        include_bgpcpp_deployment: When False, omit BGP++ configuration,
+            certificate, validation, and supporting-agent deployment.
 
     Returns:
         List of setup Task objects.
@@ -1314,16 +1317,17 @@ def get_common_setup_tasks(
         )
 
     # 2. BGP++ config deployment
-    setup_tasks.extend(
-        _get_bgpcpp_deployment_tasks(
-            device_name=device_name,
-            bgp_asn=bgp_asn,
-            bgpcpp_configerator_path=bgpcpp_configerator_path,
-            openr_configerator_path=openr_configerator_path,
-            enable_update_group=enable_update_group,
-            update_group_config=update_group_config,
+    if include_bgpcpp_deployment:
+        setup_tasks.extend(
+            _get_bgpcpp_deployment_tasks(
+                device_name=device_name,
+                bgp_asn=bgp_asn,
+                bgpcpp_configerator_path=bgpcpp_configerator_path,
+                openr_configerator_path=openr_configerator_path,
+                enable_update_group=enable_update_group,
+                update_group_config=update_group_config,
+            )
         )
-    )
 
     # 3. Control plane (ACLs + daemons)
     setup_tasks.extend(
