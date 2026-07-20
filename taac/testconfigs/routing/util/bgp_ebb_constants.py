@@ -15,6 +15,7 @@ Constants included:
 - IXIA network configurations (IP prefixes for BGP peers)
 """
 
+import base64
 import typing as t
 
 from taac.constants import BgpPlusPlusProfile
@@ -204,6 +205,80 @@ BGPCPP_DAEMONS = [
     "Openr",
     "Bgp",
 ]
+
+# Ordered phase-3 control-plane recipe. Keep the lists ordered because their
+# repr is embedded in the on-device script and daemon startup is order-sensitive.
+THRIFT_ACL_FILES = [
+    "/usr/facebook/thrift_acls/Bgpd_lab.json",
+    "/usr/facebook/thrift_acls/FibAgent.json",
+    "/usr/facebook/thrift_acls/FibAgent_lab.json",
+]
+
+INTERN_USER_IDS = [
+    "1179835461009564",
+    "1414546347",
+    "1531998838006730",
+]
+
+_ADD_INTERN_USER_IDS_SCRIPT = f"""\
+import json
+import os
+import sys
+
+UIDS = {repr(INTERN_USER_IDS)}
+FILES = {repr(THRIFT_ACL_FILES)}
+
+for f in FILES:
+    if not os.path.exists(f):
+        print(f"SKIP {{f}}: does not exist")
+        continue
+    try:
+        with open(f) as fh:
+            data = json.load(fh)
+        modified = False
+        for perm in data.get("permissions", []):
+            entries = perm.setdefault("entries", [])
+            existing_ids = set(
+                e.get("identity", {{}}).get("id_data") for e in entries
+            )
+            for uid in UIDS:
+                if uid not in existing_ids:
+                    entries.append({{"identity": {{"id_type": "USER", "id_data": uid}}}})
+                    modified = True
+        if modified:
+            with open(f, "w") as fh:
+                json.dump(data, fh, indent=4)
+            print(f"UPDATED {{f}}")
+        else:
+            print(f"OK {{f}}: all uids already present")
+    except Exception as e:
+        print(f"ERROR {{f}}: {{e}}", file=sys.stderr)
+        sys.exit(1)
+"""
+
+_ADD_INTERN_USER_IDS_SCRIPT_B64 = base64.b64encode(
+    _ADD_INTERN_USER_IDS_SCRIPT.encode("utf-8")
+).decode("utf-8")
+ADD_INTERN_USER_IDS_CMD = (
+    f"bash echo '{_ADD_INTERN_USER_IDS_SCRIPT_B64}' | base64 -d > "
+    "/tmp/add_uids.py && sudo python3 /tmp/add_uids.py"
+)
+
+POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
+
+UPDATE_GROUP_VERIFICATION_CMD = (
+    "bash sudo bash -c 'set +e; "
+    'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
+    'echo "$out"; '
+    'if echo "$out" | grep -qi DISABLED; then '
+    'echo "FAIL: BGP++ update_group is DISABLED -- patch did not take"; '
+    "exit 1; fi; "
+    'if echo "$out" | grep -qi "Update group: ENABLED"; then '
+    'echo "PASS: BGP++ update_group is ENABLED"; exit 0; fi; '
+    'echo "FAIL: BGP++ update_group state could not be confirmed -- '
+    'CLI may have failed or returned unexpected output"; '
+    "exit 1'"
+)
 
 
 # =============================================================================

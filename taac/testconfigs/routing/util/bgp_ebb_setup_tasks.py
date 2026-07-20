@@ -40,6 +40,7 @@ from taac.task_definitions import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     ACL_COMMANDS,
+    ADD_INTERN_USER_IDS_CMD,
     BGP_MON_PEER_COUNT,
     BGPCPP_DAEMONS,
     EBGP_PEER_COUNT_V4,
@@ -76,25 +77,14 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     OPENR_PORT_CHANNEL_IPV6,
     OPENR_PORT_CHANNEL_LINK_LOCAL,
     OPENR_PORT_CHANNEL_MEMBER,
+    POST_ACL_RESTART_DAEMONS,
     UPDATE_GROUP_CONFIG,
+    UPDATE_GROUP_VERIFICATION_CMD,
 )
 from pyre_extensions import none_throws
 from taac.test_as_a_config.types import Task
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
-
-# Thrift ACL files on device where intern userid should be added for auth
-THRIFT_ACL_FILES = [
-    "/usr/facebook/thrift_acls/Bgpd_lab.json",
-    "/usr/facebook/thrift_acls/FibAgent.json",
-    "/usr/facebook/thrift_acls/FibAgent_lab.json",
-]
-
-INTERN_USER_IDS = [
-    "1179835461009564",
-    "1414546347",
-    "1531998838006730",
-]
 
 
 # =============================================================================
@@ -118,50 +108,10 @@ def _get_add_intern_userid_tasks(
     Returns:
         List of Task objects to add intern userids to ACL files
     """
-    import base64
-
-    script = f"""\
-import json
-import os
-import sys
-
-UIDS = {repr(INTERN_USER_IDS)}
-FILES = {repr(THRIFT_ACL_FILES)}
-
-for f in FILES:
-    if not os.path.exists(f):
-        print(f"SKIP {{f}}: does not exist")
-        continue
-    try:
-        with open(f) as fh:
-            data = json.load(fh)
-        modified = False
-        for perm in data.get("permissions", []):
-            entries = perm.setdefault("entries", [])
-            existing_ids = set(
-                e.get("identity", {{}}).get("id_data") for e in entries
-            )
-            for uid in UIDS:
-                if uid not in existing_ids:
-                    entries.append({{"identity": {{"id_type": "USER", "id_data": uid}}}})
-                    modified = True
-        if modified:
-            with open(f, "w") as fh:
-                json.dump(data, fh, indent=4)
-            print(f"UPDATED {{f}}")
-        else:
-            print(f"OK {{f}}: all uids already present")
-    except Exception as e:
-        print(f"ERROR {{f}}: {{e}}", file=sys.stderr)
-        sys.exit(1)
-"""
-    encoded = base64.b64encode(script.encode("utf-8")).decode("utf-8")
     return [
         create_run_commands_on_shell_task(
             hostname=device_name,
-            cmds=[
-                f"bash echo '{encoded}' | base64 -d > /tmp/add_uids.py && sudo python3 /tmp/add_uids.py",
-            ],
+            cmds=[ADD_INTERN_USER_IDS_CMD],
             set_outer_hostname=True,
             ixia_needed=True,
         ),
@@ -505,7 +455,7 @@ def _get_control_plane_tasks(
     # in-memory ACL still reflects the pre-injection ``Bgpd_lab.json``.
     # Bgp is restarted LAST so it comes up after its FIB agents are ready (same
     # FibAgentBgp-before-Bgp invariant as BGPCPP_DAEMONS; see T274256815).
-    for daemon in ["FibAgent", "FibAgentBgp", "Bgp"]:
+    for daemon in POST_ACL_RESTART_DAEMONS:
         tasks.append(
             create_arista_daemon_control_task(
                 hostname=device_name,
@@ -540,19 +490,7 @@ def _get_control_plane_tasks(
         tasks.append(
             create_run_commands_on_shell_task(
                 hostname=device_name,
-                cmds=[
-                    "bash sudo bash -c 'set +e; "
-                    'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
-                    'echo "$out"; '
-                    'if echo "$out" | grep -qi DISABLED; then '
-                    'echo "FAIL: BGP++ update_group is DISABLED -- patch did not take"; '
-                    "exit 1; fi; "
-                    'if echo "$out" | grep -qi "Update group: ENABLED"; then '
-                    'echo "PASS: BGP++ update_group is ENABLED"; exit 0; fi; '
-                    'echo "FAIL: BGP++ update_group state could not be confirmed -- '
-                    'CLI may have failed or returned unexpected output"; '
-                    "exit 1'"
-                ],
+                cmds=[UPDATE_GROUP_VERIFICATION_CMD],
                 set_outer_hostname=True,
                 ixia_needed=True,
             )
@@ -1261,6 +1199,7 @@ def get_common_setup_tasks(
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     include_pre_ixia_setup: bool = True,
     include_bgpcpp_deployment: bool = True,
+    include_control_plane: bool = True,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1279,6 +1218,8 @@ def get_common_setup_tasks(
             IXIA-facing interface bring-up, and link-settle sleep prefix.
         include_bgpcpp_deployment: When False, omit BGP++ configuration,
             certificate, validation, and supporting-agent deployment.
+        include_control_plane: When False, omit control-plane ACL, daemon,
+            intern user-ID, and update-group verification tasks.
 
     Returns:
         List of setup Task objects.
@@ -1330,13 +1271,14 @@ def get_common_setup_tasks(
         )
 
     # 3. Control plane (ACLs + daemons)
-    setup_tasks.extend(
-        _get_control_plane_tasks(
-            device_name=device_name,
-            profile=profile,
-            enable_update_group=enable_update_group,
+    if include_control_plane:
+        setup_tasks.extend(
+            _get_control_plane_tasks(
+                device_name=device_name,
+                profile=profile,
+                enable_update_group=enable_update_group,
+            )
         )
-    )
 
     # 4. Full-scale IP configuration
     setup_tasks.extend(
