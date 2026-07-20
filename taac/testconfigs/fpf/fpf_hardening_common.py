@@ -125,8 +125,8 @@ def fpf_vf_injection_groups(count: int = VF_GROUP_PREFIX_COUNT) -> list[dict]:
 
 
 OBSERVER_GTSWS = [
-    "gtsw001.l1002.c087.mwg2",
-    "gtsw002.l1002.c087.mwg2",
+    "gtsw001.l1002.c087.mwg2",  # DUT (l1002) — disruptions target this
+    "gtsw001.l1001.c087.mwg2",  # observer — remote-pod (l1001) counterpart of the DUT
 ]
 
 # All 8 GTSWs in the l1002.c087.mwg2 pod a GPU host connects to (one lane each,
@@ -224,17 +224,20 @@ DRAIN_CONVERGENCE_SLA_SEC = 120
 
 
 def create_fpf_endpoints(stsws: list[str] | None = None) -> list[Endpoint]:
-    """Build the FPF endpoint list.
+    """Build the FPF endpoint list — ONLY the two observer GTSWs.
 
-    ``stsws`` overrides the STSW endpoint set (defaults to the legacy 2-STSW
-    ``TRIGGER_STSWS``). The 8-STSW inject-then-disrupt configs pass
-    ``stsws=ALL_STSWS`` so all 8 STSW planes are reserved as endpoints.
+    Endpoints are the DUT (``OBSERVER_GTSWS[0]`` = gtsw001.l1002) and its
+    remote-pod observer (``OBSERVER_GTSWS[1]`` = gtsw001.l1001). STSWs are
+    deliberately NOT endpoints, and no other GTSW is monitored: per-device
+    health checks fan out over endpoints, and we only monitor these two GTSWs.
+    The inject / STSW-bgpd-restart tasks drive STSWs directly by hostname
+    (``FbossSwitchInternal``), so they don't need STSW endpoints. ``stsws`` is
+    accepted for caller back-compat but no longer contributes endpoints.
     """
-    stsw_list = stsws if stsws is not None else TRIGGER_STSWS
+    _ = stsws  # back-compat: STSWs are driven by hostname in tasks, not endpoints
     return [
         Endpoint(name=OBSERVER_GTSWS[0], dut=True),
         Endpoint(name=OBSERVER_GTSWS[1]),
-        *[Endpoint(name=stsw) for stsw in stsw_list],
     ]
 
 

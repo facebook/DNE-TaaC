@@ -2759,6 +2759,7 @@ def create_fpf_prod_hrt_prefix_stability_check(
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     stability_mode: str = "strict",
+    recovery_last_n: t.Optional[int] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_PROD_HRT_PREFIX_STABILITY_CHECK — production HRT prefix reachability.
@@ -2810,6 +2811,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["window_end"] = window_end
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
+    if recovery_last_n is not None:
+        params["recovery_last_n"] = recovery_last_n
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_PROD_HRT_PREFIX_STABILITY_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3101,6 +3104,8 @@ def create_fpf_ods_counter_check(
     require: str = "all",
     informational: bool = False,
     check_id: t.Optional[str] = None,
+    use_test_case_start_time: bool = True,
+    min_ods_query_duration: int = 0,
 ) -> PointInTimeHealthCheck:
     """FPF ODS counter check — validates ODS counters across custom device list.
 
@@ -3125,9 +3130,9 @@ def create_fpf_ods_counter_check(
         "transform_desc": transform_desc,
         "counter_name": counter_name,
         "shorten_pass_url": shorten_pass_url,
-        "use_test_case_start_time": True,
+        "use_test_case_start_time": use_test_case_start_time,
         "sleep_timer": 0,
-        "min_ods_query_duration": 0,
+        "min_ods_query_duration": min_ods_query_duration,
         # When True, a threshold breach is reported as an informational PASS
         # (logged + ODS link kept) instead of a hard FAIL. Used for expected
         # transient discards during a disruptive restart/coldboot.

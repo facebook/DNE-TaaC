@@ -95,7 +95,15 @@ class FpfStartCollectorsTask(BaseTask):
 
         # BGP-RIB + FSDB-ribMap collectors observe ALL plane GTSWs (not just the
         # observer subset gtsw001/002) so every plane's switch is tracked.
+        # _all_plane_gtsws() expands only gtsws[0]'s pod suffix (e.g. .l1002),
+        # so any explicitly-listed observer in a DIFFERENT pod (e.g. the
+        # remote-pod observer gtsw001.l1001) must be unioned back in — otherwise
+        # the collector never polls it and its FSDB/BGP-RIB convergence check
+        # reads "no data collected" (FAIL) even though the switch is healthy.
         collector_gtsws = _all_plane_gtsws(gtsws)
+        for g in gtsws:
+            if g not in collector_gtsws:
+                collector_gtsws.append(g)
         logger.info(
             f"[FpfStartCollectors] Starting collectors: bgp/fsdb over "
             f"{len(collector_gtsws)} plane GTSWs, hrt over {len(hosts)} hosts"

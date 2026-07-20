@@ -85,6 +85,7 @@ def build_kill_disrupt_postchecks(
     expected_fsdb_total: int = 32,
     impacted_lane: int = 0,
     session_lookback_sec: int = 1000,
+    out_congestion_informational: bool = False,
 ) -> list:
     """Return the disrupt-window postcheck list for a service-kill test.
 
@@ -206,6 +207,7 @@ def build_kill_disrupt_postchecks(
                 validation_expr="<= 0",
                 reduce_desc=_ODS_REDUCE,
                 counter_name="out_congestion discards (must be 0)",
+                informational=out_congestion_informational,
                 check_id=f"{killed_service}_disrupt_ods_out_congestion",
             ),
         ]

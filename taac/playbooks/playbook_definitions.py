@@ -7917,9 +7917,7 @@ def create_longevity_no_prefix_no_session_flap_playbook() -> Playbook:
             DISABLE_PREFIX_FLAPS_STAGE,
             create_steps_stage(
                 steps=[
-                    create_longevity_step(
-                        duration=duration_no_prefix_session_flaps_s
-                    ),
+                    create_longevity_step(duration=duration_no_prefix_session_flaps_s),
                 ]
             ),
         ],
@@ -7955,8 +7953,7 @@ def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
     """BGP_DC longevity playbook: frequent best-path computation via LOCAL_PREF churn."""
     return Playbook(
         name="test_longevity_frequent_best_path_computation",
-        cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS
-        + REVERT_LOCAL_PREFERENCE_STEPS,
+        cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS + REVERT_LOCAL_PREFERENCE_STEPS,
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
             DISABLE_PREFIX_FLAPS_STAGE,
@@ -7965,7 +7962,9 @@ def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
     )
 
 
-def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() -> Playbook:
+def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() -> (
+    Playbook
+):
     """BGP_DC longevity playbook: cold-start with prefix + session oscillations."""
     return Playbook(
         name="test_longevity_cold_start_with_prefix_and_session_oscillations",
@@ -8038,8 +8037,6 @@ def get_longevity_playbooks(device_name: str, **kwargs):
         create_longevity_frequent_best_path_computation_playbook(),
         create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(),
     ]
-
-
 
 
 def transform_to_endurance_playbook(
@@ -10689,17 +10686,13 @@ def create_ecmp_only_groups_playbooks(
 
     def _make_base(name, overcommit):
         steps = [
-            create_longevity_step(
-                duration=60, description="Wait for BGP convergence"
-            ),
+            create_longevity_step(duration=60, description="Wait for BGP convergence"),
             create_ixia_api_step(
                 api_name="start_traffic",
                 args_dict={},
                 description="Start traffic after BGP convergence",
             ),
-            create_longevity_step(
-                duration=120, description="Steady-state measurement"
-            ),
+            create_longevity_step(duration=120, description="Steady-state measurement"),
         ]
         if overcommit:
             steps.append(_resource_accountant_check_step())
@@ -10942,17 +10935,13 @@ def create_ecmp_only_members_playbooks(
 
     def _make_base(name, overcommit):
         steps = [
-            create_longevity_step(
-                duration=60, description="Wait for BGP convergence"
-            ),
+            create_longevity_step(duration=60, description="Wait for BGP convergence"),
             create_ixia_api_step(
                 api_name="start_traffic",
                 args_dict={},
                 description="Start traffic after BGP convergence",
             ),
-            create_longevity_step(
-                duration=120, description="Steady-state measurement"
-            ),
+            create_longevity_step(duration=120, description="Steady-state measurement"),
         ]
         if overcommit:
             steps.append(_resource_accountant_check_step())
@@ -20634,6 +20623,8 @@ def _build_fpf_generic_checks(
     reconvergence_service: str = "bgpd",
     reconvergence_sla_sec: float = 60.0,
     reconvergence_hosts: list[str] | None = None,
+    out_congestion_last_minute_max: bool = False,
+    host_spray_transform_desc: str | None = None,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -20752,7 +20743,10 @@ def _build_fpf_generic_checks(
     # traffic to purged/blackholed lane-0 dests — reports the breach (values + ODS
     # link) without failing the test (per the user's bucket-#1 decision). Default
     # False keeps GR-within / non-disruptive callers hard + byte-identical.
-    ods_entity_desc = ",".join(ods_entities or (gtsws + trigger_stsws))
+    # ODS discard/congestion checks scoped to the observer GTSWs only — STSWs are
+    # deliberately not monitored (matches create_fpf_endpoints excluding STSWs from
+    # per-device checks). Callers can still pass explicit ods_entities to override.
+    ods_entity_desc = ",".join(ods_entities or gtsws)
     ods_reduce = r"groupby(entity, (\S+?\.\S+?)\..*, %1),sum"
     ods_postchecks = [
         create_fpf_ods_counter_check(
@@ -20793,6 +20787,10 @@ def _build_fpf_generic_checks(
             counter_name="out_congestion",
             shorten_pass_url=True,
             informational=ods_discard_informational,
+            aggregate="max" if out_congestion_last_minute_max else None,
+            require="all" if out_congestion_last_minute_max else "all",
+            use_test_case_start_time=not out_congestion_last_minute_max,
+            min_ods_query_duration=60 if out_congestion_last_minute_max else 0,
             check_id="ods_out_congestion",
         ),
     ]
@@ -20839,6 +20837,7 @@ def _build_fpf_generic_checks(
                     host_spray_excluded_lanes_by_host or spray_excluded_by_host or None
                 ),
                 label=host_spray_label or None,
+                transform_desc=host_spray_transform_desc,
                 check_id="fpf_host_spray",
             )
         )
@@ -21183,6 +21182,10 @@ def create_fpf_hardening_playbook_v2(
     remote_failure_last_sample: bool = False,
     convergence_blip_mode: str = "strict",
     ods_discard_informational: bool = False,
+    out_congestion_last_minute_max: bool = False,
+    host_spray_transform_desc: str | None = None,
+    remote_failure_last_n: bool = False,
+    recovery_last_n: int | None = None,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -21368,6 +21371,8 @@ def create_fpf_hardening_playbook_v2(
         reconvergence_service=reconvergence_service,
         reconvergence_sla_sec=reconvergence_sla_sec,
         reconvergence_hosts=reconvergence_hosts,
+        out_congestion_last_minute_max=out_congestion_last_minute_max,
+        host_spray_transform_desc=host_spray_transform_desc,
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -21487,11 +21492,15 @@ def create_fpf_hardening_playbook_v2(
     # count legitimately blips during the disruption and fully clears afterwards
     # (e.g. GR-beyond/coldboot clear in ~36-57s, last=0). The remote-failure
     # "stable" direction is selected by ``convergence_blip_mode`` (preferred) or
-    # the legacy ``remote_failure_last_sample`` flag:
+    # the legacy ``remote_failure_last_sample`` flag, or the new
+    # ``remote_failure_last_n`` flag (agent kill recovery mode):
     #   "last_sample"      -> stable_last_sample (MODE A: only last sample == 0)
     #   "skip_null_strict" -> stable_skip_null_strict (MODE B: every non-null == 0)
     #   "strict"/default   -> stable (every sample == 0)
-    if convergence_blip_mode == "last_sample":
+    #   remote_failure_last_n=True -> stable_last_n (last N non-null samples == 0)
+    if remote_failure_last_n:
+        _rf_direction = "stable_last_n"
+    elif convergence_blip_mode == "last_sample":
         _rf_direction = "stable_last_sample"
     elif convergence_blip_mode == "skip_null_strict":
         _rf_direction = "stable_skip_null_strict"
@@ -21570,6 +21579,7 @@ def create_fpf_hardening_playbook_v2(
                 # rather than flagging the recovery as a regression.
                 settle_sec=prod_prefix_settle_sec or None,
                 stability_mode=convergence_blip_mode,
+                recovery_last_n=recovery_last_n,
                 check_id="fpf_prod_hrt_prefix_stability",
             )
         )
@@ -22102,7 +22112,10 @@ def create_fpf_link_event_disrupt_playbook(
     # informational=True (breach -> PASS with [INFORMATIONAL]). The two
     # CONGESTION checks are always hard (a link event must not cause
     # congestion). This mirrors the same knob on the service-restart playbook.
-    ods_entity_desc = ",".join(ods_entities or (gtsws + trigger_stsws))
+    # ODS discard/congestion checks scoped to the observer GTSWs only — STSWs are
+    # deliberately not monitored (matches create_fpf_endpoints excluding STSWs from
+    # per-device checks). Callers can still pass explicit ods_entities to override.
+    ods_entity_desc = ",".join(ods_entities or gtsws)
     ods_reduce = r"groupby(entity, (\S+?\.\S+?)\..*, %1),sum"
     if ods_discard_informational:
         # Same four-check shape as _build_fpf_generic_checks but inline (the

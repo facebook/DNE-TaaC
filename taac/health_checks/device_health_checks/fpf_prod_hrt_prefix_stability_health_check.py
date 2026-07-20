@@ -221,6 +221,7 @@ def _evaluate_host(
     target_norms: t.Optional[t.Set[str]],
     fixed_expected: t.Optional[t.Dict[str, t.List[int]]],
     stability_mode: str = "strict",
+    recovery_last_n: t.Optional[int] = None,
 ) -> _HostResult:
     """Per-prefix, baseline-relative compliance + integrity for one host.
 
@@ -233,6 +234,10 @@ def _evaluate_host(
       "skip_null_strict" (MODE B) — null/missing samples are TOLERATED (not an
         integrity failure); every NON-NULL sample's plane-sets must equal the
         baseline, and the last non-null must too.
+
+    ``recovery_last_n`` (when set) enables recovery mode: S1 compliance passes if
+    the LAST N samples are all compliant (prefix reachable on its expected planes),
+    ignoring earlier non-compliance. S2 (integrity) is unchanged.
     """
     res = _HostResult(host)
     rows = collector.get_rows_in_window(window_start, window_end)
@@ -259,7 +264,7 @@ def _evaluate_host(
         # fixed expected set was supplied via check_params.
         baseline = fixed_expected or _baseline_of(samples[0][2])
         first_impact = _evaluate_prefix_series(
-            res, display, samples, baseline, stability_mode
+            res, display, samples, baseline, stability_mode, recovery_last_n
         )
         if first_impact is not None:
             first_impact["display"] = display
@@ -281,12 +286,50 @@ def _evaluate_prefix_series(
     samples: t.List[t.Any],
     baseline: t.Dict[str, t.List[int]],
     stability_mode: str,
+    recovery_last_n: t.Optional[int] = None,
 ) -> t.Optional[t.Dict[str, t.Any]]:
     """Evaluate one prefix's plane-set series under ``stability_mode``.
 
     Appends to ``res.null_issues`` / ``res.compliance_issues`` as needed and
     returns the first impact dict (or None) for the per-host report.
+
+    ``recovery_last_n`` (when set) enables recovery mode: compliance passes if the
+    LAST N samples are all compliant, ignoring earlier non-compliance.
     """
+    if recovery_last_n is not None:
+        # Recovery mode: evaluate only the last N samples for compliance.
+        # The expected (compliant) baseline for each prefix is its plane set
+        # at the end of the window (the "recovered" state).
+        tail = (
+            samples[-recovery_last_n:] if len(samples) >= recovery_last_n else samples
+        )
+        expected_tuple = _baseline_tuple(baseline)
+        all_compliant = all(
+            not _sample_null_fields(rb) and _rb_tuple(rb) == expected_tuple
+            for _ts, _ts_str, rb in tail
+        )
+        if all_compliant:
+            return None  # PASS
+        # FAIL: at least one of the last N samples is non-compliant.
+        bad_samples = [
+            (ts_str, rb)
+            for ts, ts_str, rb in tail
+            if _sample_null_fields(rb) or _rb_tuple(rb) != expected_tuple
+        ]
+        first_bad = bad_samples[0] if bad_samples else (None, None)
+        res.compliance_issues.append(
+            f"{display}: last {len(tail)} samples: {len(bad_samples)} not compliant "
+            f"(recovery_last_n={recovery_last_n})"
+        )
+        if first_bad[1]:
+            return {
+                "timestamp": first_bad[0],
+                "reachable": first_bad[1].reachable_planes,
+                "drained": first_bad[1].drained_planes,
+                "unreachable": first_bad[1].unreachable_planes,
+                "plane_up": first_bad[1].plane_up,
+            }
+        return None
     if stability_mode in (BLIP_MODE_LAST_SAMPLE, BLIP_MODE_SKIP_NULL_STRICT):
         # Drive the pass/fail verdict through the shared blip-handling helper:
         # each sample becomes a comparable plane-set tuple (or None for a null
@@ -733,6 +776,10 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         # "skip_null_strict" (MODE B — graceful within-window). Ignored by the
         # transition / local_drain / local_undrain modes.
         stability_mode = check_params.get("stability_mode", "strict")
+        # recovery_last_n: when set (mode="stability"), S1 compliance passes if the
+        # LAST N samples are all compliant (prefix reachable on its expected planes),
+        # ignoring earlier non-compliance. Recovery mode for fsdb kill.
+        recovery_last_n: t.Optional[int] = check_params.get("recovery_last_n")
         # settle_sec: skip the first settle_sec of the window before evaluating
         # stability. Used by the restore/recovery phase: the per-prefix baseline
         # is the first IN-WINDOW sample, so without this the baseline captures the
@@ -792,6 +839,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             target_norms=target_norms,
             fixed_expected=fixed_expected,
             stability_mode=stability_mode,
+            recovery_last_n=recovery_last_n,
             local_norms=local_norms,
             impacted_by_host=impacted_by_host,
             max_drain_sec=max_drain_sec,
@@ -846,6 +894,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         target_norms: t.Optional[t.Set[str]],
         fixed_expected: t.Optional[t.Dict[str, t.List[int]]],
         stability_mode: str,
+        recovery_last_n: t.Optional[int],
         local_norms: t.Set[str],
         impacted_by_host: t.Dict[str, t.List[int]],
         max_drain_sec: float,
@@ -890,6 +939,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     target_norms,
                     fixed_expected,
                     stability_mode=stability_mode,
+                    recovery_last_n=recovery_last_n,
                 )
             host_results.append(res)
             self.logger.info(

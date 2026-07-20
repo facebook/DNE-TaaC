@@ -97,12 +97,14 @@ def _parse_ts(ts_str: str) -> datetime:
 BLIP_MODE_STRICT: str = "strict"
 BLIP_MODE_LAST_SAMPLE: str = "last_sample"
 BLIP_MODE_SKIP_NULL_STRICT: str = "skip_null_strict"
+BLIP_MODE_LAST_N: str = "last_n"
 
 
 def evaluate_blip_series(
     samples: List[Any],
     expected: Any,
     mode: str = BLIP_MODE_STRICT,
+    last_n: int = 10,
 ) -> Tuple[bool, str]:
     """Evaluate a value-or-null sample series against ``expected`` under ``mode``.
 
@@ -160,6 +162,26 @@ def evaluate_blip_series(
             True,
             f"all {len(non_null)} non-null sample(s) == {expected} "
             f"({null_count} null tolerated)",
+        )
+
+    if mode == BLIP_MODE_LAST_N:
+        if not non_null:
+            return (
+                False,
+                f"no non-null samples in window ({null_count} null)",
+            )
+        tail = non_null[-last_n:] if len(non_null) >= last_n else non_null
+        bad = [v for v in tail if v != expected]
+        if bad:
+            return (
+                False,
+                f"last {len(tail)} non-null: {len(bad)}/{len(tail)} != expected "
+                f"{expected} (e.g. {bad[0]})",
+            )
+        return (
+            True,
+            f"last {len(tail)} non-null samples == {expected} (recovered; "
+            f"{len(non_null)}/{total} non-null total)",
         )
 
     # BLIP_MODE_STRICT (default): every sample must be non-null and == expected.
@@ -1375,6 +1397,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         lanes: List[int],
         last_sample_only: bool = False,
         skip_null_strict: bool = False,
+        last_n: int | None = None,
     ) -> List[PerLaneResult]:
         """Stable-state: assert count stays 0 for every row in the window.
 
@@ -1421,7 +1444,13 @@ class HrtRemoteFailureCollector(BaseCollector):
             # not be counted against drain stability. Within the post-disruption
             # window a device/link drain produces NO negative-route blip on the
             # impacted lane, so any nonzero is a real regression.
-            if last_sample_only:
+            if last_n is not None:
+                # LAST_N mode — recovery: the last N non-null samples must all be 0
+                # (recovered state); transients earlier in the window are tolerated.
+                passed, detail = evaluate_blip_series(
+                    samples, 0, BLIP_MODE_LAST_N, last_n=last_n
+                )
+            elif last_sample_only:
                 # MODE A — reconverged-by-end: only the last in-window sample must
                 # be 0; a bounded transient during the disruption is tolerated.
                 _passed, _ = evaluate_blip_series(samples, 0, BLIP_MODE_LAST_SAMPLE)
@@ -1495,6 +1524,8 @@ class HrtRemoteFailureCollector(BaseCollector):
                 return self.evaluate_per_lane_stable(lanes=lanes, last_sample_only=True)
             if direction == "stable_skip_null_strict":
                 return self.evaluate_per_lane_stable(lanes=lanes, skip_null_strict=True)
+            if direction == "stable_last_n":
+                return self.evaluate_per_lane_stable(lanes=lanes, last_n=10)
             if direction == "recovery":
                 return self.evaluate_per_lane_recovery(
                     trigger_time=trigger_time,
