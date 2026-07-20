@@ -4,11 +4,12 @@
 
 Implemented:
 - 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
+- 2.9.2 Simultaneous Disruptions Across All Groups
+- 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
 
-The remaining section-2.9 scenarios (2.9.1 best-path-change, 2.9.2 simultaneous
-disruptions, 2.9.3 NOTIFICATION isolation, 2.9.4 dual-stack isolation, 2.9.6
-staggered startup) land as their own factory functions here when implemented.
-Spec 2.9.5 is struck-through / excluded in the qualification plan.
+The remaining section-2.9 scenarios (2.9.1 best-path-change, 2.9.3 NOTIFICATION
+isolation, 2.9.6 staggered startup) land as their own factory functions here when
+implemented. Spec 2.9.5 is struck-through / excluded in the qualification plan.
 """
 
 import typing as t
@@ -32,7 +33,9 @@ from taac.steps.step_definitions import (
     create_openr_route_action_step,
     create_run_task_step,
     create_set_bgp_prefixes_local_preference_step,
+    create_snapshot_bgp_sent_route_counts_step,
     create_validation_step,
+    create_verify_bgp_sent_route_count_delta_step,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     BGP_STANDARD_POSTCHECKS,
@@ -1050,6 +1053,526 @@ def create_bgp_ug_simultaneous_disruptions_playbook(
 
     return Playbook(
         name="bgp_ug_simultaneous_disruptions",
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+# =============================================================================
+# 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
+# =============================================================================
+#
+# The spec verifies STRICT AFI isolation: an IPv4 route operation (add, withdraw,
+# attribute change) must not leak into the IPv6 update group, and vice versa --
+# because IPv4 and IPv6 peers are in SEPARATE update groups even on the same
+# peer-group. It advertises/withdraws v4 and v6 prefixes and checks (a) the v4 op
+# reaches every iBGP v4 peer, (b) the v6 op reaches every iBGP v6 peer, and
+# (c) each op leaves the OTHER AFI's per-peer distribution unchanged.
+#
+# Per-peer distribution IS observable here via the ``postpolicy_sent_prefix_count``
+# ("PS") gauge from getBgpSessions -- the same CLI "PS" column -- which is
+# populated and non-vacuous under Update Group (unlike getPostfilterAdvertised-
+# Networks / adj-RIB-out, which is vacuous under UG per T271301144). This runs
+# under WITH_OPEN_R so the iBGP next-hops resolve and the DUT actually advertises
+# (under WITHOUT_OPEN_R the routes are inactive and the DUT advertises ~0; see the
+# tracking-doc appendix "Route Advertisement Under Open/R"). The checks:
+#   1. STRUCTURAL AFI-separation -- the v4 and v6 peer-groups map to separate,
+#      AFI-pure update groups (``expected_afi_by_substring`` on the UG check).
+#      Isolation BY CONSTRUCTION: a v4 route physically cannot be distributed
+#      through the v6 group. Asserted at baseline and after each operation.
+#   2. PER-AFI DISTRIBUTION + ISOLATION -- snapshot the PS gauge across every
+#      iBGP peer of each AFI (selected by peer-ADDRESS subnet: the iBGP v4 plane
+#      /16s vs v6 plane /80s -- session.peer_group is not the AFI peer-group name
+#      here), do the op, then assert the OPERATED AFI's per-peer PS moved by the
+#      expected delta (advertise 500 -> +500; withdraw 200 -> -200) while the
+#      ISOLATED AFI's PS stayed flat (spec steps 2/3/6/9).
+#   3. NO cross-AFI disruption -- no crash and all sessions stay Established
+#      across the v4-only, v6-only, and simultaneous operations.
+#
+# All checks are STRICT: v4 distribution (+500/+100), v6 distribution (-200/-100),
+# and BOTH isolation directions (v6 flat during a v4 op, v4 flat during a v6 op)
+# fail the test if they break. HW-verified end-to-end on bag011 (2026-07-18): every
+# per-AFI distribution + isolation check passes on a converged session.
+#
+# COLD-START CAVEAT (v6): the eBGP v6 peers' next-hops resolve SLOWLY after a FRESH
+# IXIA build -- on a just-built session iBGP v6 PS can read 0 for a long window
+# (observed 0 at ~30 min post-build, resolved by the time the session was ~90 min
+# old), so the v6 distribution checks can transiently fail on a cold build until the
+# v6 next-hops converge. On a warm/reused session (the conveyor norm) v6 distributes
+# normally. The slow cold-start v6 next-hop resolution is itself under investigation
+# (Open/R vs bgpcpp connected-resolution timing; earlier "always-0 / bgpcpp defect"
+# in appendix Part B was this cold-start artifact, not a permanent defect). Give a
+# freshly-built session time to converge before running, or run on a warm session.
+#
+# "advertise 500 new" advertises GENUINELY-NEW prefixes ON TOP of the existing
+# routes: a dedicated SPARE eBGP v4 pool (distinct 120.100.x /24s, inline-
+# generated via RouteScale in the testconfig, carrying the accept communities +
+# the spec marker 65529:44444) is built inactive; the setup step withdraws it so
+# baseline is the untouched existing routes, then step 1/8 advertise index ranges
+# of the spare -- so iBGP v4 goes 749 -> 1249 (+500), a real addition. The v4
+# ``prefix_pool_regex`` the caller passes therefore targets the SPARE pool.
+
+
+def create_bgp_ug_dual_stack_isolation_playbook(
+    *,
+    device_name: str,
+    # --- Structural AFI-separation (baseline + re-asserted after each op) ---
+    afi_peer_group_substrings: t.List[str],
+    expected_group_count: int,
+    expected_member_counts: t.Dict[str, int],
+    expected_afi_by_substring: t.Dict[str, str],
+    # --- Per-AFI distribution (PS gauge, iBGP peers selected by peer-address
+    # subnet -- session.peer_group is not the AFI peer-group name on bag011, so
+    # we scope by the iBGP v4/v6 plane subnets, same as the session checks) ---
+    ibgp_v4_peer_parent_prefixes: t.List[str],
+    ibgp_v6_peer_parent_prefixes: t.List[str],
+    # Two separate spare v4 pools (advertised WHOLE -- a RouteScale-generated
+    # pool toggles Active per network-group, not per-index): SPARE_A for step 1,
+    # SPARE_B for step 8. Sized to advertise_v4_step1_count / _step8_count.
+    ebgp_v4_step1_pool_regex: str,
+    ebgp_v4_step8_pool_regex: str,
+    ebgp_v6_prefix_pool_regex: str,
+    # --- Checks ---
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    bgp_mon_ignore_prefixes: t.Optional[t.List[str]] = None,
+    # --- Route-operation sizing (index ranges into the eBGP pools) ---
+    advertise_v4_step1_count: int = 500,
+    advertise_v4_step8_count: int = 100,
+    withdraw_v6_step5_count: int = 200,
+    withdraw_v6_step8_count: int = 100,
+    # --- Per-peer delta gating ---
+    count_window: int = 10,
+    unchanged_window: int = 2,
+    peer_violation_tolerance: int = 3,
+    # --- Timing / sessions / gates ---
+    op_settle_s: int = 90,
+    session_retry_count: int = 10,
+    session_retry_delay_s: float = 30.0,
+    load_avg_baseline: float = 12.0,
+    vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.9.4 playbook (Dual-Stack
+    Isolation: IPv4 operations do not affect the IPv6 update group).
+
+    Intent (spec 2.9.4): prove strict AFI isolation -- IPv4 and IPv6 peers form
+    SEPARATE update groups, so a route operation on one AFI never perturbs the
+    other. Per-peer distribution is verified via the ``postpolicy_sent_prefix_count``
+    ("PS") gauge, snapshotting/verifying every iBGP peer of an AFI by peer-address
+    subnet (``ibgp_v4_peer_parent_prefixes`` / ``ibgp_v6_peer_parent_prefixes`` --
+    the per-session peer-group field is not the AFI peer-group name on bag011).
+    Requires WITH_OPEN_R so the iBGP next-hops resolve and the DUT advertises.
+
+    Stages (each op: snapshot both AFIs' PS -> do the op -> settle -> verify the
+    operated AFI's per-peer delta and the isolated AFI's flatness -> validate no
+    crash / sessions up / UG still AFI-split):
+      0. Setup + baseline -- withdraw BOTH spare v4 pools (SPARE_A/step 1,
+         SPARE_B/step 8) so they are inactive at baseline (their genuinely-new
+         prefixes are advertised WHOLE on top of the untouched existing routes in
+         step 1/8); assert BGP up, sessions Established, update groups AFI-split
+         (``expected_afi_by_substring`` + counts).
+      1. IPv4 advertise (spec step 1) -- advertise the whole SPARE_A pool (~N1
+         new prefixes); assert every iBGP v4 peer's PS grew ~N1 (distribution)
+         and every iBGP v6 peer's PS is unchanged (isolation).
+      2. IPv6 withdraw (spec step 5) -- withdraw eBGP v6 [0, M5) (imported pool,
+         index-sliced); assert every iBGP v4 peer's PS unchanged (isolation,
+         checked FIRST) then every iBGP v6 peer's PS dropped ~M5 (distribution).
+         The v6 distribution check is strict and passes on a warm/converged
+         session (the conveyor norm); on a FRESH build it can read 0 until the
+         eBGP v6 next-hops converge (a cold-start characteristic, not a permanent
+         defect -- see the COLD-START CAVEAT above). The v4 isolation is checked
+         FIRST so its PASS is recorded before a cold-start v6 abort, if any.
+      3. Simultaneous (spec step 8) -- advertise the whole SPARE_B pool (~N8) and
+         withdraw v6 [M5, M5+M8) together; assert v4 +~N8 then v6 -~M8 (same
+         warm-pass / cold-start-0 behavior as step 5's v6 check).
+      4. Restore -- withdraw both spare v4 pools + re-advertise the v6 ranges.
+
+    Per-peer deltas are gated with a signed window: an advertise/withdraw of K is
+    accepted in [K-``count_window``, K+``count_window``]; "unchanged" is
+    |delta| <= ``unchanged_window``; up to ``peer_violation_tolerance`` peers may
+    fall outside before the step fails (absorbs a few slow-converging peers at
+    ~496-peer scale). "advertise N new" advertises a dedicated SPARE v4 pool of
+    genuinely-new prefixes (inline-generated in the testconfig, carrying the
+    accept communities + the spec marker 65529:44444), inactive at baseline and
+    added on top of the existing routes -- so the delta is a true addition.
+    """
+
+    def _structure_check(check_id: str) -> PointInTimeHealthCheck:
+        """The AFI-split update-group structure: v4/v6 peer-groups map only to
+        same-AFI, AFI-pure update groups (the core dual-stack-isolation proof)."""
+        return create_bgp_update_group_check(
+            peer_group_substrings=afi_peer_group_substrings,
+            expected_group_count=expected_group_count,
+            expected_member_counts=expected_member_counts,
+            expected_afi_by_substring=expected_afi_by_substring,
+            expect_enabled=True,
+            check_id=check_id,
+        )
+
+    def _all_sessions_check(check_id: str) -> PointInTimeHealthCheck:
+        """All sessions Established (excl the never-emulated BGP-MON). The ops
+        only advertise/withdraw ROUTES (not flap sessions), so sessions must stay
+        up; a drop would mean a route op disrupted the sessions."""
+        return create_bgp_session_establish_check(
+            parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+            retry_count=session_retry_count,
+            retry_delay_seconds=session_retry_delay_s,
+            check_id=check_id,
+        )
+
+    def _validation(check_id_prefix: str, description: str) -> Step:
+        """No crash + AFI-split UG structure + all sessions up (re-asserted after
+        every operation: an op must not crash, merge/split groups, or drop
+        sessions)."""
+        return create_validation_step(
+            point_in_time_checks=[
+                *_no_crash_checks(),
+                _structure_check(f"{check_id_prefix}_structure"),
+                _all_sessions_check(f"{check_id_prefix}_sessions"),
+            ],
+            description=description,
+        )
+
+    def _snapshot_both(key: str, note: str) -> t.List[Step]:
+        """Snapshot the PS gauge across every iBGP v4 peer and every iBGP v6 peer
+        (selected by peer-address subnet) so the following op's per-AFI delta is
+        measured from a fresh baseline."""
+        return [
+            create_snapshot_bgp_sent_route_counts_step(
+                hostname=device_name,
+                snapshot_key=f"{key}_v4",
+                peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+                description=f"2.9.4 {note} -- snapshot iBGP v4 PS (by subnet)",
+            ),
+            create_snapshot_bgp_sent_route_counts_step(
+                hostname=device_name,
+                snapshot_key=f"{key}_v6",
+                peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+                description=f"2.9.4 {note} -- snapshot iBGP v6 PS (by subnet)",
+            ),
+        ]
+
+    def _verify(
+        *,
+        snapshot_key: str,
+        peer_parent_prefixes: t.List[str],
+        expected_delta: int,
+        description: str,
+        unchanged: bool = False,
+    ) -> Step:
+        """Verify a per-AFI PS delta. ``unchanged`` -> |delta| <= unchanged_window
+        (isolation); otherwise delta in [expected-count_window, expected+count_window]
+        (distribution -- signed, so a negative ``expected_delta`` is a withdraw)."""
+        if unchanged:
+            min_d, max_d = -unchanged_window, unchanged_window
+        else:
+            min_d, max_d = expected_delta - count_window, expected_delta + count_window
+        return create_verify_bgp_sent_route_count_delta_step(
+            hostname=device_name,
+            snapshot_key=snapshot_key,
+            peer_parent_prefixes=peer_parent_prefixes,
+            min_delta=min_d,
+            max_delta=max_d,
+            tolerance=peer_violation_tolerance,
+            description=description,
+        )
+
+    v6_total_withdraw_count = withdraw_v6_step5_count + withdraw_v6_step8_count
+
+    stages = [
+        # Stage 0: setup + baseline. Withdraw BOTH spare v4 pools so they are
+        # inactive at baseline; step 1/8 then advertise their genuinely-new
+        # prefixes ON TOP of the untouched existing routes. Then assert the
+        # starting state is AFI-split with all sessions up.
+        create_steps_stage(
+            steps=[
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_v4_step1_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.4 setup -- withdraw the step-1 spare v4 pool so it is "
+                        "inactive at baseline"
+                    ),
+                ),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_v4_step8_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.4 setup -- withdraw the step-8 spare v4 pool so it is "
+                        "inactive at baseline"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.4 setup -- settle after deactivating the spare v4 pools",
+                ),
+                _validation(
+                    "dual_stack_baseline",
+                    "2.9.4 baseline -- BGP up; update groups AFI-split (v4 and v6 "
+                    "peers in separate, AFI-pure update groups); spare v4 pools "
+                    "inactive",
+                ),
+            ],
+        ),
+        # Stage 1 (spec step 1): an IPv4 advertise reaches the v4 UG only.
+        create_steps_stage(
+            steps=[
+                *_snapshot_both("ds_s1", "step 1"),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=True,
+                    prefix_pool_regex=ebgp_v4_step1_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        f"2.9.4 step 1 -- advertise the step-1 spare v4 pool "
+                        f"(~{advertise_v4_step1_count} genuinely-new prefixes) "
+                        f"on top of the existing routes"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.4 step 1 -- settle after the v4 advertise",
+                ),
+                _verify(
+                    snapshot_key="ds_s1_v4",
+                    peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+                    expected_delta=advertise_v4_step1_count,
+                    description=(
+                        f"2.9.4 step 1 (distribution) -- every iBGP v4 peer's PS "
+                        f"grew by ~{advertise_v4_step1_count}: the v4 routes "
+                        f"reached the v4 update group"
+                    ),
+                ),
+                _verify(
+                    snapshot_key="ds_s1_v6",
+                    peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+                    expected_delta=0,
+                    unchanged=True,
+                    description=(
+                        "2.9.4 step 1 (isolation) -- every iBGP v6 peer's PS "
+                        "unchanged: the v4 op did not touch the v6 update group"
+                    ),
+                ),
+                _validation(
+                    "dual_stack_after_v4",
+                    "2.9.4 -- after IPv4 op: no crash; sessions Established; "
+                    "update groups still AFI-split",
+                ),
+            ],
+        ),
+        # Stage 2 (spec step 5): an IPv6 withdraw reaches the v6 UG only. The v6
+        # DISTRIBUTION check is strict and passes on a warm/converged session; on
+        # a cold build it can read 0 until the eBGP v6 next-hops converge (a
+        # cold-start characteristic, not a permanent defect -- see the module
+        # COLD-START CAVEAT). Isolation (v4 flat) is checked FIRST so its PASS is
+        # recorded before a cold-start v6 abort, if any.
+        create_steps_stage(
+            steps=[
+                *_snapshot_both("ds_s5", "step 5"),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_v6_prefix_pool_regex,
+                    prefix_start_index=0,
+                    prefix_end_index=withdraw_v6_step5_count,
+                    description=(
+                        f"2.9.4 step 5 -- withdraw {withdraw_v6_step5_count} eBGP "
+                        f"v6 prefixes [0, {withdraw_v6_step5_count})"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.4 step 5 -- settle after the v6 withdraw",
+                ),
+                _verify(
+                    snapshot_key="ds_s5_v4",
+                    peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+                    expected_delta=0,
+                    unchanged=True,
+                    description=(
+                        "2.9.4 step 5 (isolation) -- every iBGP v4 peer's PS "
+                        "unchanged: the v6 op did not touch the v4 update group"
+                    ),
+                ),
+                _verify(
+                    snapshot_key="ds_s5_v6",
+                    peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+                    expected_delta=-withdraw_v6_step5_count,
+                    description=(
+                        f"2.9.4 step 5 (distribution) -- every iBGP v6 peer's PS "
+                        f"dropped by ~{withdraw_v6_step5_count}: the v6 withdraw "
+                        f"reached the v6 update group (requires a converged "
+                        f"session -- see the cold-start note in the module doc)"
+                    ),
+                ),
+                _validation(
+                    "dual_stack_after_v6",
+                    "2.9.4 -- after IPv6 op: no crash; sessions Established; "
+                    "update groups still AFI-split",
+                ),
+            ],
+        ),
+        # Stage 3 (spec step 8): TRULY-SIMULTANEOUS v4-advertise + v6-withdraw.
+        # The two ops run in PARALLEL ConcurrentStep tracks (not issued
+        # back-to-back), so they are genuinely concurrent on the wire -- the
+        # spec's "simultaneously advertise 100 v4 AND withdraw 100 v6". A stage
+        # is either concurrent or sequential, so step 8 spans three stages:
+        # (3a) snapshot the per-AFI baseline BEFORE the ops; (3b) the concurrent
+        # advertise || withdraw; (3c) settle, then verify each AFI moved by its
+        # exact delta and nothing else (no cross-AFI interference) + no crash.
+        create_steps_stage(
+            steps=[*_snapshot_both("ds_s8", "step 8")],
+        ),
+        create_steps_stage(
+            concurrent=True,
+            concurrent_steps=[
+                ConcurrentStep(
+                    steps=[
+                        create_advertise_withdraw_prefixes_step(
+                            device_name=device_name,
+                            advertise=True,
+                            prefix_pool_regex=ebgp_v4_step8_pool_regex,
+                            prefix_start_index=0,
+                            description=(
+                                f"2.9.4 step 8 -- advertise the step-8 spare v4 "
+                                f"pool (~{advertise_v4_step8_count} more "
+                                f"genuinely-new prefixes), concurrent with the "
+                                f"v6 withdraw"
+                            ),
+                        )
+                    ]
+                ),
+                ConcurrentStep(
+                    steps=[
+                        create_advertise_withdraw_prefixes_step(
+                            device_name=device_name,
+                            advertise=False,
+                            prefix_pool_regex=ebgp_v6_prefix_pool_regex,
+                            prefix_start_index=withdraw_v6_step5_count,
+                            prefix_end_index=v6_total_withdraw_count,
+                            description=(
+                                f"2.9.4 step 8 -- concurrently withdraw "
+                                f"{withdraw_v6_step8_count} eBGP v6 prefixes "
+                                f"[{withdraw_v6_step5_count}, "
+                                f"{v6_total_withdraw_count})"
+                            ),
+                        )
+                    ]
+                ),
+            ],
+        ),
+        create_steps_stage(
+            steps=[
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description=(
+                        "2.9.4 step 8 -- settle after the simultaneous "
+                        "v4-advertise / v6-withdraw"
+                    ),
+                ),
+                _verify(
+                    snapshot_key="ds_s8_v4",
+                    peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+                    expected_delta=advertise_v4_step8_count,
+                    description=(
+                        f"2.9.4 step 8 (distribution) -- every iBGP v4 peer's PS "
+                        f"grew by ~{advertise_v4_step8_count} during the "
+                        f"simultaneous op (v4 unaffected by the concurrent v6 op)"
+                    ),
+                ),
+                _verify(
+                    snapshot_key="ds_s8_v6",
+                    peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+                    expected_delta=-withdraw_v6_step8_count,
+                    description=(
+                        f"2.9.4 step 8 (distribution) -- every iBGP v6 peer's PS "
+                        f"dropped by ~{withdraw_v6_step8_count} during the "
+                        f"simultaneous op (v6 unaffected by the concurrent v4 op)"
+                    ),
+                ),
+                _validation(
+                    "dual_stack_after_simul",
+                    "2.9.4 -- after simultaneous op: no crash; sessions "
+                    "Established; update groups still AFI-split",
+                ),
+            ],
+        ),
+        # Stage 4: restore to baseline. Baseline has the spare v4 pools inactive,
+        # so withdraw both again (undo the step-1/8 advertises); re-advertise the
+        # v6 ranges that steps 5/8 withdrew.
+        create_steps_stage(
+            steps=[
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_v4_step1_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.4 restore -- withdraw the step-1 spare v4 pool "
+                        "(return it to the inactive baseline)"
+                    ),
+                ),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_v4_step8_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.4 restore -- withdraw the step-8 spare v4 pool "
+                        "(return it to the inactive baseline)"
+                    ),
+                ),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=True,
+                    prefix_pool_regex=ebgp_v6_prefix_pool_regex,
+                    prefix_start_index=0,
+                    prefix_end_index=v6_total_withdraw_count,
+                    description=(
+                        "2.9.4 restore -- re-advertise all withdrawn eBGP v6 "
+                        "prefixes (return to baseline)"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.4 restore -- settle after restoring the pools",
+                ),
+            ],
+        ),
+    ]
+
+    # Always-appended bounds (UG enabled; load-average never crosses baseline; no
+    # Error+ EOS logs), whether the caller takes the default bundle or supplies
+    # its own list, so a caller-provided ``postchecks`` can never silently drop
+    # them.
+    base_postchecks = (
+        list(postchecks) if postchecks is not None else list(BGP_STANDARD_POSTCHECKS)
+    )
+    postchecks = base_postchecks + [
+        create_system_cpu_load_average_check(baseline=load_avg_baseline),
+        create_bgp_update_group_check(expect_enabled=True),
+        create_log_parsing_check(start_time_jq_var="test_case_start_time"),
+    ]
+    # Optional absolute VmHWM ceiling (consistent with the other UG tests; not a
+    # 2.9.4 pass-criterion). None -> skip.
+    if vmhwm_absolute_threshold_bytes is not None:
+        postchecks.append(
+            create_memory_utilization_check(
+                vmhwm_threshold=vmhwm_absolute_threshold_bytes
+            )
+        )
+    if snapshot_checks is None:
+        snapshot_checks = list(BGP_STANDARD_SNAPSHOT_CHECKS)
+
+    return Playbook(
+        name="bgp_ug_dual_stack_isolation",
         stages=stages,
         prechecks=prechecks,
         postchecks=postchecks,
