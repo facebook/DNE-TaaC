@@ -1259,6 +1259,7 @@ def get_common_setup_tasks(
     openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
+    include_pre_ixia_setup: bool = True,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1273,6 +1274,8 @@ def get_common_setup_tasks(
             skipped entirely. Callers on 2-port testbeds (or UG qualification
             tests that do not exercise BGP-MON) should pass False and omit
             ``ixia_interface_mimic_bgp_mon``.
+        include_pre_ixia_setup: When False, omit the BgpTcpdump disable,
+            IXIA-facing interface bring-up, and link-settle sleep prefix.
 
     Returns:
         List of setup Task objects.
@@ -1283,31 +1286,32 @@ def get_common_setup_tasks(
         )
     setup_tasks: t.List[Task] = []
 
-    # Disable BgpTcpdump daemon before any setup
-    # This daemon is not needed for conveyor testing and can interfere.
-    setup_tasks.append(
-        create_arista_daemon_control_task(
-            hostname=device_name,
-            daemon_name="BgpTcpdump",
-            action="disable",
+    if include_pre_ixia_setup:
+        # Disable BgpTcpdump daemon before any setup
+        # This daemon is not needed for conveyor testing and can interfere.
+        setup_tasks.append(
+            create_arista_daemon_control_task(
+                hostname=device_name,
+                daemon_name="BgpTcpdump",
+                action="disable",
+            )
         )
-    )
 
-    # 1. Pre-IXIA interface configuration (2 or 3 interfaces).
-    ixia_interfaces: t.List[t.Tuple[str, str]] = [
-        (ixia_interface_mimic_ebgp, "IXIA_MIMIC_EBGP"),
-        (ixia_interface_mimic_ibgp, "IXIA_MIMIC_IBGP"),
-    ]
-    if include_bgp_mon:
-        ixia_interfaces.append(
-            (none_throws(ixia_interface_mimic_bgp_mon), "IXIA_MIMIC_BGP_MON")
+        # 1. Pre-IXIA interface configuration (2 or 3 interfaces).
+        ixia_interfaces: t.List[t.Tuple[str, str]] = [
+            (ixia_interface_mimic_ebgp, "IXIA_MIMIC_EBGP"),
+            (ixia_interface_mimic_ibgp, "IXIA_MIMIC_IBGP"),
+        ]
+        if include_bgp_mon:
+            ixia_interfaces.append(
+                (none_throws(ixia_interface_mimic_bgp_mon), "IXIA_MIMIC_BGP_MON")
+            )
+        setup_tasks.extend(
+            _get_pre_ixia_interface_tasks(
+                device_name=device_name,
+                ixia_interfaces=ixia_interfaces,
+            )
         )
-    setup_tasks.extend(
-        _get_pre_ixia_interface_tasks(
-            device_name=device_name,
-            ixia_interfaces=ixia_interfaces,
-        )
-    )
 
     # 2. BGP++ config deployment
     setup_tasks.extend(
