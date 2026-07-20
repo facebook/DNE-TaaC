@@ -242,8 +242,10 @@ def create_custom_step(
 
 def create_snapshot_bgp_sent_route_counts_step(
     hostname: str,
-    peer_addrs: t.List[str],
     snapshot_key: str,
+    peer_addrs: t.Optional[t.List[str]] = None,
+    peer_group_filter: t.Optional[str] = None,
+    peer_parent_prefixes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Snapshot ``postpolicy_sent_prefix_count`` for a set of BGP peers on the
@@ -254,74 +256,141 @@ def create_snapshot_bgp_sent_route_counts_step(
     snapshot and verify, independent of whatever baseline RIB fanout the DUT
     is doing.
 
+    Peers are selected by ONE of: ``peer_parent_prefixes`` (subnets — every
+    session whose peer address falls inside one, AFI-specific; the reliable way
+    to scope to a whole AFI update group on bag011, where the per-session
+    peer-group field is not the AFI peer-group name), ``peer_group_filter`` (a
+    peer-group substring, for testbeds that expose it per session), or explicit
+    ``peer_addrs``. At least one must be supplied; if more than one is set they
+    are resolved by precedence (peer_parent_prefixes > peer_group_filter >
+    peer_addrs), so pass just the one you intend.
+
     Args:
         hostname: Device hostname (bgpcpp source of truth).
-        peer_addrs: Peer IPs to snapshot.
         snapshot_key: Unique key across the playbook; the matching verify step
             must use the same string.
+        peer_addrs: Peer IPs to snapshot.
+        peer_group_filter: Peer-group substring to snapshot every member of.
+        peer_parent_prefixes: Subnets; snapshot every peer whose address is in
+            one (e.g. the iBGP v4 plane /16s or v6 plane /80s).
         description: Optional custom description.
     """
-    if description is None:
-        description = (
-            f"Snapshot BGP sent-count for {len(peer_addrs)} peer(s) on "
-            f"{hostname} (key={snapshot_key})"
+    if (
+        peer_addrs is None
+        and peer_group_filter is None
+        and peer_parent_prefixes is None
+    ):
+        raise ValueError(
+            "create_snapshot_bgp_sent_route_counts_step: pass peer_addrs, "
+            "peer_group_filter, or peer_parent_prefixes"
         )
-    return create_custom_step(
-        params_dict={
-            "custom_step_name": "snapshot_bgp_sent_route_counts",
-            "hostname": hostname,
-            "peer_addrs": list(peer_addrs),
-            "snapshot_key": snapshot_key,
-        },
-        description=description,
-    )
+    if description is None:
+        _who = (
+            f"peers under {peer_parent_prefixes}"
+            if peer_parent_prefixes
+            else f"peer-group ~{peer_group_filter!r}"
+            if peer_group_filter
+            else f"{len(peer_addrs or [])} peer(s)"
+        )
+        description = (
+            f"Snapshot BGP sent-count for {_who} on {hostname} (key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "snapshot_bgp_sent_route_counts",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+    }
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
+    return create_custom_step(params_dict=params, description=description)
 
 
 def create_verify_bgp_sent_route_count_delta_step(
     hostname: str,
-    peer_addrs: t.List[str],
     snapshot_key: str,
     min_delta: int,
+    peer_addrs: t.Optional[t.List[str]] = None,
+    peer_group_filter: t.Optional[str] = None,
+    peer_parent_prefixes: t.Optional[t.List[str]] = None,
     max_delta: t.Optional[int] = None,
     tolerance: int = 0,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Verify each peer's ``postpolicy_sent_prefix_count`` grew by at least
-    ``min_delta`` (and optionally at most ``max_delta``) since the matching
-    ``create_snapshot_bgp_sent_route_counts_step`` step. Raises
+    """Verify each peer's ``postpolicy_sent_prefix_count`` moved by the expected
+    delta since the matching ``create_snapshot_bgp_sent_route_counts_step`` step:
+    at least ``min_delta`` and (optionally) at most ``max_delta``. Raises
     ``TestCaseFailure`` if more than ``tolerance`` peers violate. Paired with
     a snapshot step to close the spec-loyalty gap left by dropping absolute
     anchor counts on UG backpressure equality gates.
 
+    ``min_delta``/``max_delta`` bound the SIGNED delta, so this expresses
+    advertise (``min_delta=490, max_delta=510`` for +500), withdraw
+    (``min_delta=-210, max_delta=-190`` for a ~200 drop), and "unchanged"
+    (``min_delta=0, max_delta=0``) -- the three shapes the dual-stack-isolation
+    (2.9.4) per-AFI distribution + isolation checks need.
+
+    Peers are selected by ``peer_parent_prefixes`` (subnets),
+    ``peer_group_filter`` (peer-group substring), or ``peer_addrs`` -- and the
+    selector MUST match the one the paired snapshot used (the verify re-queries
+    with it; a mismatch fails loudly). At least one must be supplied; if more
+    than one is set they are resolved by precedence (peer_parent_prefixes >
+    peer_group_filter > peer_addrs).
+
     Args:
         hostname: Device hostname.
-        peer_addrs: Peer IPs to verify (should match or be a subset of the
-            peers passed to the snapshot).
         snapshot_key: Key from the matching snapshot step.
-        min_delta: Minimum per-peer count increase (inclusive).
-        max_delta: Optional maximum per-peer count increase.
+        min_delta: Minimum per-peer signed count change (inclusive).
+        peer_addrs: Peer IPs to verify.
+        peer_group_filter: Peer-group substring.
+        peer_parent_prefixes: Subnets; verify every peer whose address is in one.
+        max_delta: Optional maximum per-peer signed count change (inclusive).
         tolerance: Peers allowed to violate before the step fails
             (default 0 -- all must satisfy).
         description: Optional custom description.
     """
+    if (
+        peer_addrs is None
+        and peer_group_filter is None
+        and peer_parent_prefixes is None
+    ):
+        raise ValueError(
+            "create_verify_bgp_sent_route_count_delta_step: pass peer_addrs, "
+            "peer_group_filter, or peer_parent_prefixes"
+        )
     if description is None:
         _bound = (
             f"in [{min_delta}, {max_delta}]"
             if max_delta is not None
             else f">= {min_delta}"
         )
+        _who = (
+            f"peers under {peer_parent_prefixes}"
+            if peer_parent_prefixes
+            else f"peer-group ~{peer_group_filter!r}"
+            if peer_group_filter
+            else f"{len(peer_addrs or [])} peer(s)"
+        )
         description = (
-            f"Verify BGP sent-count delta {_bound} on {len(peer_addrs)} "
-            f"peer(s) on {hostname} (key={snapshot_key}, tol={tolerance})"
+            f"Verify BGP sent-count delta {_bound} on {_who} on {hostname} "
+            f"(key={snapshot_key}, tol={tolerance})"
         )
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "verify_bgp_sent_route_count_delta",
         "hostname": hostname,
-        "peer_addrs": list(peer_addrs),
         "snapshot_key": snapshot_key,
         "min_delta": min_delta,
         "tolerance": tolerance,
     }
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
     if max_delta is not None:
         params["max_delta"] = max_delta
     return create_custom_step(params_dict=params, description=description)
