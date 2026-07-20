@@ -116,6 +116,11 @@ def build_bag_conveyor_test_config(
     # is byte-identical to the previous behavior (non-optional thrift field
     # defaulting True), so existing bag goldens are unchanged.
     ebgp_graceful_restart: bool = True,
+    # Forwarded to create_ebb_scale_basic_port_configs: optional inline-generated
+    # spare IPv4 eBGP route pool(s) (RouteScale, no CSV). 2.9.4 dual-stack
+    # isolation uses this for genuinely-new IPv4 prefixes advertised at runtime.
+    # None -> byte-identical for other callers.
+    ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
 ) -> taac_types.TestConfig:
     """Shared bag conveyor topology TestConfig builder.
 
@@ -258,6 +263,7 @@ def build_bag_conveyor_test_config(
             include_bgp_mon=False,
             profile=profile,
             ebgp_graceful_restart=ebgp_graceful_restart,
+            ebgp_v4_extra_route_scales=ebgp_v4_extra_route_scales,
         ),
         playbooks=playbooks,
     )

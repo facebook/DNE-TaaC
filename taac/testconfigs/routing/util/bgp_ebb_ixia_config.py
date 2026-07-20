@@ -412,6 +412,14 @@ def create_ebb_scale_basic_port_configs(
     plane_drain_dg_v6_attribute_overrides: (
         dict[int, list[ixia_types.BgpAttributeConfig]] | None
     ) = None,
+    # Optional extra route-scale specs on the eBGP IPv4 device group. Each is an
+    # inline-GENERATED IPv4 prefix pool (via ``RouteScale`` -> create_bgp_prefixes,
+    # NO CSV) that coexists with the imported main pool (network_group_index 0).
+    # 2.9.4 dual-stack isolation uses this for a "spare" pool of genuinely-new
+    # IPv4 prefixes (distinct address range, inline accept communities) that it
+    # advertises at runtime. None -> no extra pools (byte-identical for other
+    # callers). Mirrors how tc4 (2.4 new-peer-join) generates new prefixes.
+    ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
 ) -> list[BasicPortConfig]:
     """
     Create basic port configurations for EBB scale testing with eBGP, iBGP, and BGP monitoring.
@@ -693,6 +701,10 @@ def create_ebb_scale_basic_port_configs(
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
                     )
                 ],
+                # Optional inline-generated spare IPv4 pool(s) advertised by these
+                # same eBGP peers (distinct address range + inline communities,
+                # no CSV). None -> field stays unset (byte-identical elsewhere).
+                route_scales=ebgp_v4_extra_route_scales,
             ),
         ),
     )

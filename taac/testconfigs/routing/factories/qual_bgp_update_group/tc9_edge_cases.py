@@ -2,21 +2,26 @@
 # pyre-unsafe
 """Spec 2.9 — Edge Cases and Adversarial Scenarios. UG qualification testconfig factory.
 
-Bundles the section-2.9 edge-case playbooks onto one shared EBB-scale
-conveyor topology (one IXIA setup, one catalog constant), selected at run
-time via ``--regex 'bgp_ug_<usecase>'``. Only 2.9.7 (empty group) is REAL
-today; the other sub-specs (2.9.1 / 2.9.2 / 2.9.3 / 2.9.4 / 2.9.6) land
-incrementally as their playbook factories in
+Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks onto one shared
+EBB-scale conveyor topology (one IXIA setup, one catalog constant), selected
+at run time via ``--regex 'bgp_ug_<usecase>'``. The bundle currently wires
+2.9.7 (empty group); the remaining WITHOUT_OPEN_R sub-specs (2.9.1 / 2.9.3 /
+2.9.6) land incrementally as their playbook factories in
 ``playbooks/routing/factories/qual_bgp_update_group/tc9_edge_cases.py`` are
-implemented, each added to the ``playbooks=[...]`` list below. Spec 2.9.5 is
-excluded (struck through in the plan).
+implemented, each added to the ``playbooks=[...]`` list below. 2.9.2
+(simultaneous disruptions) and 2.9.4 (dual-stack isolation) are each their
+OWN TestConfig below -- both need WITH_OPEN_R (2.9.4's per-AFI distribution
+checks read the PS gauge, which is only non-zero when Open/R resolves the
+iBGP next-hops so the DUT actually advertises). Spec 2.9.5 is excluded
+(struck through in the plan).
 
 Target testbed: BAG011_ASH6 (EBB conveyor node). Reuses the shared
 ``build_bag_conveyor_test_config`` builder from tc1 for the full-scale
-topology (140 eBGP + ~500 iBGP, ``WITHOUT_OPEN_R``, ``include_bgp_mon=False``
-— UG qualification never exercises BGP-MON or OpenR).
+topology (140 eBGP + ~500 iBGP, ``include_bgp_mon=False`` — UG qualification
+never exercises BGP-MON); the Open/R profile is chosen per-TestConfig.
 """
 
+from ixia.ixia import types as ixia_types
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_OPENR_START_IPV4S,
@@ -31,6 +36,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_memory_utilization_check,
 )
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
+    create_bgp_ug_dual_stack_isolation_playbook,
     create_bgp_ug_empty_group_playbook,
     create_bgp_ug_simultaneous_disruptions_playbook,
 )
@@ -58,7 +64,9 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
+    PEERGROUP_EBGP_V4,
     PEERGROUP_EBGP_V6,
+    PEERGROUP_IBGP_V4,
     PEERGROUP_IBGP_V6,
 )
 from taac.test_as_a_config import types as taac_types
@@ -152,6 +160,95 @@ _SIMUL_EBGP_FLAP_PEER_REGEX = r"BGP_PEER_IPV[46]_EBGP$"
 _SIMUL_VMHWM_GROWTH_THRESHOLD_BYTES = 500 * 1024 * 1024
 
 
+# --- 2.9.4 Dual-Stack Isolation ---
+# v6 side: WITHDRAW existing prefixes from the MAIN eBGP v6 import pool (spec
+# steps 5/8; imported pools support per-index Active, so index-slicing works).
+# v4 side: ADVERTISE genuinely-NEW prefixes from dedicated SPARE eBGP v4 pools,
+# inline-generated via ``RouteScale`` (no CSV). HW confirmed a RouteScale-
+# generated pool is toggled Active WHOLE-pool (per network-group, not per-index),
+# so we use TWO exactly-sized pools instead of index-slicing one: SPARE_A (500,
+# spec step 1) and SPARE_B (100, spec step 8). Both are made inactive at baseline
+# (setup withdraws them) then advertised WHOLE on top of the untouched existing
+# 750 -- a real addition (step 1: 749 -> 1249). ``$`` anchors each regex to its
+# pool (not the main ``PREFIX_POOL_IPV4_EBGP``, and not each other).
+_DUAL_STACK_EBGP_V4_STEP1_POOL_REGEX = r"PREFIX_POOL_IPV4_EBGP_SPARE_A$"
+_DUAL_STACK_EBGP_V4_STEP8_POOL_REGEX = r"PREFIX_POOL_IPV4_EBGP_SPARE_B$"
+_DUAL_STACK_EBGP_V6_POOL_REGEX = r"PREFIX_POOL_IPV6_EBGP$"
+
+# Two spare eBGP v4 pools of distinct /24s generated beyond the main pool's
+# 120.0-120.2 span but inside the DUT's 120/8 EB-PRIVATE-PREFIXES accept
+# aggregate (HW-confirmed: 120.100.x is accepted + re-advertised, delta was
+# exactly +count with no replication). Zero ``prefix_step`` = IXNetwork
+# increments by one /24 per prefix (the perf-scaling pattern). Each carries the
+# accept communities the main v4 routes carry (so the DUT re-advertises them to
+# iBGP v4) PLUS the spec 2.9.4 marker 65529:44444. SPARE_A = 500 (step 1):
+# 120.100.0.0 .. 120.101.243.0; SPARE_B = 100 (step 8): 120.104.0.0 .. 120.104.99.0
+# (disjoint from A). If a first HW run shows the range spans past 120/8 or the
+# delta differs, adjust the starts/counts here.
+_DUAL_STACK_SPARE_V4_STEP1_COUNT = 500
+_DUAL_STACK_SPARE_V4_STEP8_COUNT = 100
+_DUAL_STACK_SPARE_V4_COMMUNITIES = [
+    "65529:39744",  # EB-PRIVATE-PREFIXES accept community
+    "65060:10012",  # ADVERTISED-FROM-DC accept community
+    "65530:50320",  # anycast accept community
+    "65529:44444",  # spec 2.9.4 marker community
+]
+_DUAL_STACK_SPARE_V4_ROUTE_SCALES = [
+    taac_types.RouteScaleSpec(
+        network_group_index=1,
+        v4_route_scale=taac_types.RouteScale(
+            prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_A",
+            starting_prefixes="120.100.0.0",
+            prefix_step="0.0.0.0",
+            prefix_length=24,
+            prefix_count=_DUAL_STACK_SPARE_V4_STEP1_COUNT,
+            multiplier=1,
+            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+            bgp_communities=list(_DUAL_STACK_SPARE_V4_COMMUNITIES),
+        ),
+    ),
+    taac_types.RouteScaleSpec(
+        network_group_index=2,
+        v4_route_scale=taac_types.RouteScale(
+            prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_B",
+            starting_prefixes="120.104.0.0",
+            prefix_step="0.0.0.0",
+            prefix_length=24,
+            prefix_count=_DUAL_STACK_SPARE_V4_STEP8_COUNT,
+            multiplier=1,
+            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+            bgp_communities=list(_DUAL_STACK_SPARE_V4_COMMUNITIES),
+        ),
+    ),
+]
+# The four AFI-split peer-groups on the EBB-scale conveyor topology. IPv4 and IPv6
+# peers form SEPARATE update groups, so each peer-group maps to a single-AFI,
+# AFI-pure update group -- asserting that is the core dual-stack-isolation proof
+# (``expected_afi_by_substring``). ``expected_group_count`` is the same 4 the
+# empty-group precheck records; member counts are the hardware baseline (iBGP
+# 62x8 = 496 per AFI; eBGP 140 per AFI; 4 groups / 1272 members total). If the
+# topology differs, the baseline structure check fails loudly with the observed
+# counts -- then pin these from the dump.
+_DUAL_STACK_AFI_PEER_GROUPS = [
+    PEERGROUP_IBGP_V4,
+    PEERGROUP_IBGP_V6,
+    PEERGROUP_EBGP_V4,
+    PEERGROUP_EBGP_V6,
+]
+_DUAL_STACK_EXPECTED_AFI_BY_SUBSTRING = {
+    PEERGROUP_IBGP_V4: "ipv4",
+    PEERGROUP_IBGP_V6: "ipv6",
+    PEERGROUP_EBGP_V4: "ipv4",
+    PEERGROUP_EBGP_V6: "ipv6",
+}
+_DUAL_STACK_EXPECTED_MEMBER_COUNTS = {
+    PEERGROUP_IBGP_V4: 496,
+    PEERGROUP_IBGP_V6: 496,
+    PEERGROUP_EBGP_V4: 140,
+    PEERGROUP_EBGP_V6: 140,
+}
+
+
 def _edge_cases_prechecks(bgp_mon_ignore_prefixes):
     """Prechecks for the 2.9 edge-cases TestConfig.
 
@@ -190,10 +287,12 @@ def create_bgp_ug_edge_cases_test_config(
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification spec 2.9 (Edge Cases) TestConfig.
 
-    Bundles the section-2.9 edge-case playbooks on the shared EBB-scale bag
-    conveyor topology. ``enable_update_group=True`` is baked in (UG MUST be
-    on for these specs). Currently wires the 2.9.7 empty-group playbook; the
-    remaining sub-specs are added to ``playbooks`` as they are implemented.
+    Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks on the shared
+    EBB-scale bag conveyor topology. ``enable_update_group=True`` is baked in
+    (UG MUST be on for these specs). Wires the 2.9.7 empty-group playbook; the
+    remaining WITHOUT_OPEN_R sub-specs are added to ``playbooks`` as they are
+    implemented. (2.9.4 dual-stack isolation is its own WITH_OPEN_R TestConfig,
+    ``create_bgp_ug_dual_stack_isolation_test_config``.)
     """
     bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
     # Everything that is NOT an eBGP peer: all iBGP planes (v6 + v4) plus
@@ -237,6 +336,69 @@ def create_bgp_ug_edge_cases_test_config(
         playbooks=[empty_group_playbook],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=True,
+    )
+
+
+def create_bgp_ug_dual_stack_isolation_test_config(
+    testbed: Testbed,
+) -> taac_types.TestConfig:
+    """BGP++ Update Group qualification spec 2.9.4 (Dual-Stack Isolation)
+    TestConfig -- its OWN WITH_OPEN_R config on the bag conveyor topology.
+
+    Verifies STRICT AFI isolation: v4 and v6 peers form separate, AFI-pure
+    update groups (structural, via ``expected_afi_by_substring``), and a route
+    op on one AFI moves only that AFI's per-peer distribution (the ``PS`` gauge
+    on the iBGP peers, selected by peer-group) while the other AFI stays flat,
+    with no cross-AFI flap/crash. See ``create_bgp_ug_dual_stack_isolation_playbook``.
+
+    WITH_OPEN_R (not the WITHOUT_OPEN_R edge-cases bundle): the per-AFI
+    distribution checks read ``postpolicy_sent_prefix_count``, which is only
+    non-zero once Open/R resolves the iBGP next-hops so the DUT actually
+    advertises (WITHOUT_OPEN_R leaves the routes inactive and the DUT advertises
+    ~0). WITH_OPEN_R does not change the 4-update-group / session baseline -- it
+    only adds the Open/R daemon, Port-Channel, and injected baseline routes.
+
+    KNOWN SIGNAL: the IPv6 distribution checks (spec steps 5 and the v6 half of
+    step 8) FAIL on bag011 today -- a bgpcpp IPv6 connected-next-hop-resolution
+    defect keeps iBGP v6 PS at 0 (tracking-doc appendix Part B). That failure is
+    the intended surfacing of the defect, not a test bug; the v4 distribution and
+    all isolation checks pass, and the whole test passes once the defect is fixed.
+    """
+    bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+    dual_stack_isolation_playbook = create_bgp_ug_dual_stack_isolation_playbook(
+        device_name=testbed.device_name,
+        afi_peer_group_substrings=_DUAL_STACK_AFI_PEER_GROUPS,
+        expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
+        expected_member_counts=_DUAL_STACK_EXPECTED_MEMBER_COUNTS,
+        expected_afi_by_substring=_DUAL_STACK_EXPECTED_AFI_BY_SUBSTRING,
+        # Select the whole iBGP AFI update group by peer-group (no address
+        # enumeration): EB-EB-V4 / EB-EB-V6.
+        # Scope the per-AFI PS distribution checks to the iBGP peers by peer
+        # ADDRESS subnet (session.peer_group is not the AFI peer-group name on
+        # bag011 -- the update-group object has EB-EB-V4 but the session field
+        # does not). The v4 plane /16s and v6 plane /80s are AFI-specific.
+        ibgp_v4_peer_parent_prefixes=_IBGP_V4_PARENT_PREFIXES,
+        ibgp_v6_peer_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
+        ebgp_v4_step1_pool_regex=_DUAL_STACK_EBGP_V4_STEP1_POOL_REGEX,
+        ebgp_v4_step8_pool_regex=_DUAL_STACK_EBGP_V4_STEP8_POOL_REGEX,
+        ebgp_v6_prefix_pool_regex=_DUAL_STACK_EBGP_V6_POOL_REGEX,
+        prechecks=_edge_cases_prechecks(bgp_mon_ignore_prefixes),
+        bgp_mon_ignore_prefixes=bgp_mon_ignore_prefixes,
+        # Extra-safety absolute VmHWM ceiling (consistent with the other UG tests).
+        vmhwm_absolute_threshold_bytes=Gigabyte.GIG_10.value,
+    )
+
+    return build_bag_conveyor_test_config(
+        testbed,
+        name="BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST",
+        playbooks=[dual_stack_isolation_playbook],
+        # WITH_OPEN_R so the iBGP next-hops resolve and the DUT advertises --
+        # the precondition for the per-AFI PS distribution checks.
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+        enable_update_group=True,
+        # Build the spare inline-generated v4 pool (the genuinely-new prefixes
+        # the playbook advertises for spec step 1/8) on the eBGP v4 device group.
+        ebgp_v4_extra_route_scales=_DUAL_STACK_SPARE_V4_ROUTE_SCALES,
     )
 
 
@@ -337,6 +499,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
 
 
 __all__ = [
+    "create_bgp_ug_dual_stack_isolation_test_config",
     "create_bgp_ug_edge_cases_test_config",
     "create_bgp_ug_simultaneous_disruptions_test_config",
 ]

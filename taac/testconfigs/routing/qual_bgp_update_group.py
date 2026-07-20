@@ -33,6 +33,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc7_disruption_rec
     create_bgp_ug_disruption_recovery_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
+    create_bgp_ug_dual_stack_isolation_test_config,
     create_bgp_ug_edge_cases_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
 )
@@ -85,11 +86,21 @@ BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG = (
 )
 
 # ─── Spec 2.9 Edge Cases and Adversarial Scenarios ──────────────────────
-# Bundles the section-2.9 edge-case playbooks (2.9.7 empty group live today;
-# 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6 land incrementally). Select an individual
+# Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks (2.9.7 empty group
+# live today; 2.9.1/2.9.3/2.9.6 land incrementally). Select an individual
 # scenario at run time with ``--regex 'bgp_ug_<usecase>'``.
 BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG = create_bgp_ug_edge_cases_test_config(
     BAG011_ASH6
+)
+
+# Spec 2.9.4 Dual-Stack Isolation -- its OWN WITH_OPEN_R TestConfig (the per-AFI
+# distribution checks read the PS gauge, non-zero only once Open/R resolves the
+# iBGP next-hops so the DUT advertises), separate from the WITHOUT_OPEN_R
+# edge-cases bundle. Select via
+# ``--test-config BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST``. The IPv6
+# distribution checks fail on bag011 today by design (bgpcpp v6 next-hop defect).
+BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG = (
+    create_bgp_ug_dual_stack_isolation_test_config(BAG011_ASH6)
 )
 
 # Spec 2.9.2 Simultaneous Disruptions -- its OWN WITH_OPEN_R TestConfig (the
@@ -104,6 +115,7 @@ BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG = (
 
 
 __all__ = [
+    "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",

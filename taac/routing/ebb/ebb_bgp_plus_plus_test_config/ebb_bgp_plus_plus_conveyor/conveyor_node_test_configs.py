@@ -50,6 +50,7 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
 # manifest is byte-wise identical) now live in
 # testconfigs/routing/qual_bgp_update_group.py; import via that path.
 from taac.testconfigs.routing.qual_bgp_update_group import (
+    BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
     BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG,
     BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
@@ -129,4 +130,10 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # run. Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually
     # verified on the device).
     BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
+    # BGP++ UG 2.9.4 Dual-Stack Isolation on bag011.ash6 -- its own WITH_OPEN_R
+    # TestConfig (per-AFI PS-gauge distribution needs Open/R-resolved next-hops so
+    # the DUT advertises). The IPv6 distribution checks fail by design on bag011
+    # today (bgpcpp IPv6 next-hop-resolution defect). Ad-hoc; NOT wired into a
+    # conveyor stage (do NOT schedule until manually verified on the device).
+    BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
 ]
