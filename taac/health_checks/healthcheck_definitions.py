@@ -766,6 +766,7 @@ def create_bgp_update_group_check(
     expected_group_count: t.Optional[int] = None,
     expect_enabled: bool = True,
     expect_empty_peer_groups: t.Optional[t.List[str]] = None,
+    expected_afi_by_substring: t.Optional[t.Dict[str, str]] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """Create a point-in-time BGP++ Update Group check.
@@ -805,6 +806,13 @@ def create_bgp_update_group_check(
             verify an "empty group" edge case (e.g. UG spec 2.9.7) where the last
             peer left the group. FAILs if any matching update group still has an
             Established member.
+        expected_afi_by_substring: Optional substring -> ``"ipv4"`` | ``"ipv6"``;
+            assert every update group the peer-group maps to negotiates ONLY that
+            address family (from ``TUpdateGroupKey.afi_ipv4_negotiated`` /
+            ``afi_ipv6_negotiated``). Directly verifies dual-stack isolation (UG
+            spec 2.9.4): IPv4 and IPv6 peers must be in separate, AFI-pure update
+            groups, e.g. ``{"EB-EB-V4": "ipv4", "EB-EB-V6": "ipv6"}``. A group
+            negotiating BOTH AFIs (or the wrong one) is a leak and FAILs.
         check_id: Optional unique identifier for the check.
 
     Returns:
@@ -821,6 +829,8 @@ def create_bgp_update_group_check(
     # Included only when set so the default-call factory snapshot stays stable.
     if expect_empty_peer_groups:
         params["expect_empty_peer_groups"] = expect_empty_peer_groups
+    if expected_afi_by_substring:
+        params["expected_afi_by_substring"] = expected_afi_by_substring
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.BGP_UPDATE_GROUP_CHECK,
         check_params=Params(json_params=json.dumps(params)),

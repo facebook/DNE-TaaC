@@ -60,6 +60,14 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         peer-group, ``{"EB-FA-V6": ["A", "B"]}`` for one with two.
       - ``expected_group_count`` (optional int): if set, asserts the total
         number of update groups on the device equals this value.
+      - ``expected_afi_by_substring`` (dict[str, str], default {}): substring ->
+        ``"ipv4"`` | ``"ipv6"``; asserts every update group the peer-group maps
+        to negotiates ONLY that address family. Directly verifies dual-stack
+        isolation (UG spec 2.9.4): IPv4 and IPv6 peers must live in separate,
+        AFI-pure update groups (from ``TUpdateGroupKey.afi_ipv4_negotiated`` /
+        ``afi_ipv6_negotiated``), so a v4 route operation can never be
+        distributed through the v6 group. A group negotiating BOTH AFIs (or the
+        wrong one) is a leak and FAILs.
 
     All configured assertions are evaluated in a single run; every failure is
     collected and reported together (the check does NOT stop at the first
@@ -88,6 +96,7 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         expected_policy_names = check_params.get("expected_policy_names") or {}
         expected_group_count = check_params.get("expected_group_count")
         expect_empty_peer_groups = check_params.get("expect_empty_peer_groups") or []
+        expected_afi_by_substring = check_params.get("expected_afi_by_substring") or {}
 
         try:
             # pyrefly: ignore [missing-attribute]
@@ -138,11 +147,33 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         groups = resp.update_groups or []
         id_to_group = {group.group_id: group for group in groups}
 
+        def _group_afi(gid: int) -> str:
+            """Address family an update group negotiates, from its
+            ``TUpdateGroupKey``: ``"ipv4"``/``"ipv6"`` for an AFI-pure group,
+            ``"both"`` if it negotiated both (a dual-stack-isolation leak),
+            ``"none"`` if neither."""
+            gk = id_to_group[gid].group_key
+            if gk is None:
+                # A group with no key can't have negotiated an AFI; treat as
+                # "none" so the caller's AFI-purity assertion flags it rather
+                # than crashing on attribute access.
+                return "none"
+            v4 = bool(gk.afi_ipv4_negotiated)
+            v6 = bool(gk.afi_ipv6_negotiated)
+            if v4 and v6:
+                return "both"
+            if v4:
+                return "ipv4"
+            if v6:
+                return "ipv6"
+            return "none"
+
         substrings = (
             set(peer_group_substrings)
             | set(expected_member_counts)
             | set(expected_policy_names)
             | set(expect_empty_peer_groups)
+            | set(expected_afi_by_substring)
         )
         # A peer-group substring matches an update group if it appears in the
         # group's ``peer_group_name`` (authoritative) or in any of its peers'
@@ -173,6 +204,7 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             set(peer_group_substrings)
             | set(expected_member_counts)
             | set(expected_policy_names)
+            | set(expected_afi_by_substring)
         )
         for substring in sorted(substrings_needing_presence):
             gids = sub_to_groups.get(substring, set())
@@ -240,6 +272,27 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                     f"The empty-group condition did not take effect."
                 )
 
+        # (6) AFI purity / separation: each listed peer-group must map ONLY to
+        # update groups negotiating the expected address family (and not the
+        # other). This directly verifies dual-stack isolation (spec 2.9.4) -- v4
+        # and v6 peers live in SEPARATE, AFI-pure update groups, so a v4 route
+        # operation can never be distributed through the v6 group. A group that
+        # negotiated BOTH AFIs (or the wrong one) is a leak and FAILs.
+        for substring in sorted(expected_afi_by_substring):
+            expected_afi = str(expected_afi_by_substring[substring]).lower()
+            gids = sub_to_groups.get(substring, set())
+            if not gids:
+                continue  # already reported by the presence check above
+            for gid in sorted(gids):
+                actual_afi = _group_afi(gid)
+                if actual_afi != expected_afi:
+                    failures.append(
+                        f"Peer-group '{substring}' update group {gid} negotiates "
+                        f"AFI '{actual_afi}' on {hostname}; expected only "
+                        f"'{expected_afi}' (dual-stack isolation: IPv4 and IPv6 "
+                        f"peers must be in separate, AFI-pure update groups)."
+                    )
+
         # If any assertion failed, report them all together.
         if failures:
             numbered = "\n".join(f"  {i}. {f}" for i, f in enumerate(failures, 1))
@@ -267,6 +320,7 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                 "policies": sorted(
                     {id_to_group[gid].group_key.egress_policy_name for gid in group_ids}
                 ),
+                "afis": sorted({_group_afi(gid) for gid in group_ids}),
                 "group_states": sorted(
                     {id_to_group[gid].group_state for gid in group_ids}
                 ),
@@ -276,7 +330,7 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             message=(
                 f"Update group check PASSED on {hostname}: {len(groups)} groups, "
                 f"{total_established} established members; peer-group -> "
-                f"{{group_ids, established, member_count, policies, group_states}} "
-                f"{summary}."
+                f"{{group_ids, established, member_count, policies, afis, "
+                f"group_states}} {summary}."
             ),
         )

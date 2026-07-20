@@ -23,6 +23,9 @@ from taac.health_check.health_check import types as hc_types
 IBGP = "EB-EB-V6"
 EBGP = "EB-FA-V6"
 MON = "BGP-MON"
+# IPv4 counterparts, used by the dual-stack isolation (AFI) tests.
+IBGP_V4 = "EB-EB-V4"
+EBGP_V4 = "EB-FA-V4"
 
 
 def _make_peer(
@@ -46,6 +49,8 @@ def _make_group(
     member_count=None,
     peer_group_name="PG",
     group_state="READY",
+    afi_ipv4_negotiated=None,
+    afi_ipv6_negotiated=None,
 ):
     group = MagicMock()
     group.group_id = group_id
@@ -55,6 +60,12 @@ def _make_group(
     group.group_key = MagicMock()
     group.group_key.egress_policy_name = egress_policy_name
     group.group_key.peer_group_name = peer_group_name
+    # Only pin the AFI flags when a test cares (dual-stack isolation tests);
+    # otherwise leave the MagicMock defaults untouched.
+    if afi_ipv4_negotiated is not None:
+        group.group_key.afi_ipv4_negotiated = afi_ipv4_negotiated
+    if afi_ipv6_negotiated is not None:
+        group.group_key.afi_ipv6_negotiated = afi_ipv6_negotiated
     return group
 
 
@@ -106,6 +117,41 @@ def _default_groups():
             [_make_peer("2401:db00::5", MON, entry_count=10)],
             egress_policy_name="BGP-MON-EGRESS",
             peer_group_name=MON,
+        ),
+    ]
+
+
+def _dual_stack_groups():
+    """Four AFI-pure update groups: iBGP v6, iBGP v4, eBGP v6, eBGP v4 -- the
+    bag011 dual-stack shape where v4 and v6 peers form separate update groups."""
+    return [
+        _make_group(
+            1,
+            [_make_peer("2401:db00::1", IBGP)],
+            peer_group_name=IBGP,
+            afi_ipv4_negotiated=False,
+            afi_ipv6_negotiated=True,
+        ),
+        _make_group(
+            2,
+            [_make_peer("10.0.0.1", IBGP_V4)],
+            peer_group_name=IBGP_V4,
+            afi_ipv4_negotiated=True,
+            afi_ipv6_negotiated=False,
+        ),
+        _make_group(
+            3,
+            [_make_peer("2401:db00::3", EBGP)],
+            peer_group_name=EBGP,
+            afi_ipv4_negotiated=False,
+            afi_ipv6_negotiated=True,
+        ),
+        _make_group(
+            4,
+            [_make_peer("10.0.0.3", EBGP_V4)],
+            peer_group_name=EBGP_V4,
+            afi_ipv4_negotiated=True,
+            afi_ipv6_negotiated=False,
         ),
     ]
 
@@ -422,6 +468,82 @@ class TestBgpUpdateGroupHealthCheck(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    # --- AFI purity / dual-stack isolation (assertion 6) ---
+
+    async def test_afi_separation_pass(self):
+        """Each AFI-named peer-group maps only to a group of its own AFI -> PASS."""
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "expected_afi_by_substring": {
+                    IBGP: "ipv6",
+                    IBGP_V4: "ipv4",
+                    EBGP: "ipv6",
+                    EBGP_V4: "ipv4",
+                }
+            },
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_afi_wrong_family_returns_fail(self):
+        """A v4 peer-group asserted as ipv6 -> FAIL (leak)."""
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_afi_by_substring": {IBGP_V4: "ipv6"}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("dual-stack isolation", result.message)
+        self.assertIn(IBGP_V4, result.message)
+
+    async def test_afi_both_negotiated_is_leak_fail(self):
+        """A group negotiating BOTH AFIs violates isolation -> FAIL."""
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=IBGP,
+                afi_ipv4_negotiated=True,
+                afi_ipv6_negotiated=True,
+            )
+        ]
+        self._set_resp(groups)
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_afi_by_substring": {IBGP: "ipv6"}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("both", result.message)
+
+    async def test_afi_absent_group_reported_by_presence(self):
+        """A substring with an AFI expectation but no matching group -> FAIL."""
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_afi_by_substring": {"NO-SUCH-PG": "ipv4"}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("NO-SUCH-PG", result.message)
+
+    async def test_afi_surfaced_in_pass_summary(self):
+        """The PASS summary exposes the per-peer-group negotiated AFI."""
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "peer_group_substrings": [IBGP, IBGP_V4],
+                "expected_afi_by_substring": {IBGP: "ipv6", IBGP_V4: "ipv4"},
+            },
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("afis", result.message)
+
     # --- combined 2.1.1-style check ---
 
     async def test_full_initial_dump_pass(self):
@@ -531,6 +653,21 @@ class TestCreateBgpUpdateGroupCheck(unittest.TestCase):
         check = create_bgp_update_group_check(peer_group_substrings=[IBGP])
         payload = json.loads(check.check_params.json_params)
         self.assertNotIn("expect_empty_peer_groups", payload)
+
+    def test_factory_serializes_expected_afi_by_substring(self):
+        check = create_bgp_update_group_check(
+            expected_afi_by_substring={IBGP: "ipv6", IBGP_V4: "ipv4"}
+        )
+        payload = json.loads(check.check_params.json_params)
+        self.assertEqual(
+            payload["expected_afi_by_substring"], {IBGP: "ipv6", IBGP_V4: "ipv4"}
+        )
+
+    def test_factory_omits_afi_when_unset(self):
+        """Default/omitted -> key absent, so the factory snapshot stays stable."""
+        check = create_bgp_update_group_check(peer_group_substrings=[IBGP])
+        payload = json.loads(check.check_params.json_params)
+        self.assertNotIn("expected_afi_by_substring", payload)
 
 
 if __name__ == "__main__":
