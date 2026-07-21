@@ -11,6 +11,9 @@ Allows callers to use the package-level path:
 instead of the deeper module path.
 """
 
+from taac.testconfigs.ai_bb.cbag_bag001_test_config import (
+    CBAG_BAG001_TEST_CONFIGS,
+)
 from taac.testconfigs.ai_bb.cbag_bag_test_config import (
     CBAG_BAG_TEST_CONFIGS,
 )
@@ -51,6 +54,7 @@ from taac.testconfigs.ai_bb.wedge400_ecmp_resource_testing_config import (
 )
 
 __all__ = [
+    "CBAG_BAG001_TEST_CONFIGS",
     "CBAG_BAG_TEST_CONFIGS",
     "CPR_BC_TEST_CONFIGS",
     "CONTIGUOUS_PREFIX_ALL",
