@@ -53,8 +53,9 @@ class Testbed:
 
     # ─── Physical identity (always required) ──────────────────────────────
     device_name: str
-    ixia_chassis_ip: str
+    primary_ixia_chassis_ip: str
     ixia_ports: list[tuple[str, str]] = field(default_factory=list)   # (dut_iface, chassis_port), role-agnostic
+    secondary_ixia_chassis_ip: str | None = None
 
     # ─── DUT identity properties (optional, flat) ─────────────────────────
     mac_address: str | None = None
@@ -88,7 +89,7 @@ class Testbed:
 
 ### Design principles
 
-- **Physical identity fields stay flat + typed** (`device_name`, `ixia_chassis_ip`, `ixia_ports`, `mac_address`, `speed`, `router_id`, `dut_bgp_as`, configerator paths, lab auth). Every testbed sets what applies.
+- **Physical identity fields stay flat + typed** (`device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip`, `ixia_ports`, `mac_address`, `speed`, `router_id`, `dut_bgp_as`, configerator paths, lab auth). Every testbed sets what applies.
 - **Anything that varies by testbed-family** (BGP peer-group names, uplink/downlink AS, route maps, communities, IXIA subnet prefixes, FBOSS runtime knobs) goes into named dicts keyed by role. Each testbed instance populates the roles it exposes.
 - **Testbed answers "what is TRUE about this DUT for any testcase"** — NOT "what does testcase X need". Per-testcase deltas are factory kwargs.
 - **Factories declare the roles they need** via dict lookups (`testbed.peer_groups["uplink_v6"]`). A missing key → clear `KeyError` at setup — the factory was called with a testbed that doesn't support it.
@@ -204,7 +205,7 @@ def fadu_peer_groups() -> dict[str, str]: return {...}   # FA downlink unit
 | `as_numbers` | **Per-instance** (fsw003 might peer with different AS than fsw004) | Inline on Testbed instance |
 | `parent_networks` | **Per-instance** (IXIA subnets depend on physical wiring per DUT) | Inline on Testbed instance |
 | `ixia_ports` | **Per-instance** (port map per DUT) | Inline on Testbed instance |
-| `mac_address`, `device_name`, `ixia_chassis_ip` | **Per-instance** | Inline on Testbed instance |
+| `mac_address`, `device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip` | **Per-instance** | Inline on Testbed instance |
 | `fboss_attributes` | Mostly per-instance (DUT-specific baseline knobs) | Inline on Testbed instance |
 
 Rule of thumb: **naming conventions dictated by DUT role → per-role helper**. **Physical wiring / instance identity → inline on Testbed instance.**
@@ -234,16 +235,18 @@ Append an instance to `testbed.py`. Populate flat identity fields; populate the 
 ```python
 # --- Shared constants at top of testbed.py ---
 _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
-_ASH6_IXIA_CHASSIS = "2401:db00:2066:303b::3001"
+_BAG_ASH6_PRIMARY_IXIA_CHASSIS = "2401:db00:2066:3036::3003"
+_BAG_ASH6_SECONDARY_IXIA_CHASSIS = "2401:db00:2066:303b::3001"
 
 # --- EBB testbed ---
 BAG013_ASH6 = Testbed(
     device_name="bag013.ash6",
-    ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
+    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
     ixia_ports=[
-        ("Ethernet3/36/1", "8/2"),
-        ("Ethernet3/36/2", "8/3"),
-        ("Ethernet3/36/3", "8/4"),
+        ("Ethernet3/35/1", "1/61"),
+        ("Ethernet3/35/2", "1/62"),
+        ("Ethernet3/35/3", "1/63"),
     ],
     dut_bgp_as=65013,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
@@ -253,10 +256,12 @@ BAG013_ASH6 = Testbed(
 
 BAG012_ASH6 = Testbed(
     device_name="bag012.ash6",
-    ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
+    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
     ixia_ports=[
-        ("Ethernet3/36/1", "7/7"),
-        ("Ethernet3/36/2", "7/8"),
+        ("Ethernet3/35/1", "1/57"),
+        ("Ethernet3/35/2", "1/58"),
+        ("Ethernet3/35/3", "1/59"),
     ],
     dut_bgp_as=65012,
     router_id="10.163.28.11",
@@ -267,7 +272,7 @@ BAG012_ASH6 = Testbed(
 # --- DC/FBOSS testbed (FSW role) ---
 FSW003_QZD = Testbed(
     device_name="fsw003.p003.f01.qzd1",
-    ixia_chassis_ip="2401:db00:0116:303b::",
+    primary_ixia_chassis_ip="2401:db00:0116:303b::",
     ixia_ports=[
         ("eth7/16/1", "6/1"),   # position 0 (default uplink for DC factories)
         ("eth8/16/1", "6/2"),   # position 1 (default downlink)
@@ -297,7 +302,7 @@ FSW003_QZD = Testbed(
 # --- DC/FBOSS testbed (SSW role) — same factory portable to this DUT ---
 SSW004_S002_QZD = Testbed(
     device_name="ssw004.s002.f01.qzd1",
-    ixia_chassis_ip="...",
+    primary_ixia_chassis_ip="...",
     ixia_ports=[("<uplink_iface>", "<chassis_port>"), ("<downlink_iface>", "<chassis_port>")],
     mac_address="...",
     peer_groups=ssw_peer_groups(),        # ← different values, same role keys
@@ -310,7 +315,7 @@ SSW004_S002_QZD = Testbed(
 # --- DC/FBOSS testbed with baseline FBOSS attributes (patcher-applied at setup) ---
 GTSW001_L1001_ASH6 = Testbed(
     device_name="gtsw001.l1001.c085.ash6",
-    ixia_chassis_ip="2401:db00:2066:31fb::3019",
+    primary_ixia_chassis_ip="2401:db00:2066:31fb::3019",
     ixia_ports=[
         # ~28 IXIA ports across ixia19 + ixia20
         ...

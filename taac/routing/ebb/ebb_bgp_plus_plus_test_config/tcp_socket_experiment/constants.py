@@ -8,17 +8,17 @@ experiments between bag012.ash6 (BGP++) and bag013.ash6 (ar-bgp / EOS BGP).
 Topology:
     bag012.ash6 (EOS BGP++ / DUT)
         - Runs Meta's BGP++ (bgpcpp) — peers configured via /mnt/flash/bgpcpp_config
-        IXIA connections (ixia11.netcastle.ash6):
-            - 7/7 → <configurable interface>
-            - 7/8 → <configurable interface>
-            - 8/1 → <configurable interface>
+        IXIA connections (ixia03.netcastle.ash6):
+            - 1/57 → Ethernet3/35/1
+            - 1/58 → Ethernet3/35/2
+            - 1/59 → Ethernet3/35/3
 
     bag013.ash6 (ar-bgp / standard EOS BGP)
         - Runs native Arista EOS BGP — peers configured via CLI (router bgp / neighbor)
-        IXIA connections (ixia11.netcastle.ash6):
-            - 8/2 → Et3/36/1
-            - 8/3 → Et3/36/3
-            - 8/4 → Et3/36/5
+        IXIA connections (ixia03.netcastle.ash6):
+            - 1/61 → Ethernet3/35/1
+            - 1/62 → Ethernet3/35/2
+            - 1/63 → Ethernet3/35/3
 
     Inter-device links (LLDP verified):
         bag013:Et3/1/1 ↔ bag012:Ethernet3/1/1
@@ -49,32 +49,33 @@ BAG013_DEVICE_NAME = "bag013.ash6"  # ar-bgp (EOS BGP) device
 # =============================================================================
 # IXIA Chassis
 # =============================================================================
-IXIA_CHASSIS = "2401:db00:2066:303b::3001"  # ixia11.netcastle.ash6
+IXIA_PRIMARY_CHASSIS = "2401:db00:2066:3036::3003"  # ixia03.netcastle.ash6
+IXIA_SECONDARY_CHASSIS = "2401:db00:2066:303b::3001"  # ixia11.netcastle.ash6
 
 
 # =============================================================================
 # IXIA Port Mappings — bag012.ash6 (BGP++)
 # Update these interface names to match actual wiring on bag012
 # =============================================================================
-BAG012_IXIA_INTERFACE_1 = "Ethernet3/36/1"
-BAG012_IXIA_INTERFACE_2 = "Ethernet3/36/3"
-BAG012_IXIA_INTERFACE_3 = "Ethernet3/36/5"
+BAG012_IXIA_INTERFACE_1 = "Ethernet3/35/1"
+BAG012_IXIA_INTERFACE_2 = "Ethernet3/35/2"
+BAG012_IXIA_INTERFACE_3 = "Ethernet3/35/3"
 
-BAG012_IXIA_PORT_1 = "7/7"
-BAG012_IXIA_PORT_2 = "7/8"
-BAG012_IXIA_PORT_3 = "8/1"
+BAG012_IXIA_PORT_1 = "1/57"
+BAG012_IXIA_PORT_2 = "1/58"
+BAG012_IXIA_PORT_3 = "1/59"
 
 
 # =============================================================================
 # IXIA Port Mappings — bag013.ash6 (ar-bgp)
 # =============================================================================
-BAG013_IXIA_INTERFACE_1 = "Ethernet3/36/1"
-BAG013_IXIA_INTERFACE_2 = "Ethernet3/36/3"
-BAG013_IXIA_INTERFACE_3 = "Ethernet3/36/5"
+BAG013_IXIA_INTERFACE_1 = "Ethernet3/35/1"
+BAG013_IXIA_INTERFACE_2 = "Ethernet3/35/2"
+BAG013_IXIA_INTERFACE_3 = "Ethernet3/35/3"
 
-BAG013_IXIA_PORT_1 = "8/2"
-BAG013_IXIA_PORT_2 = "8/3"
-BAG013_IXIA_PORT_3 = "8/4"
+BAG013_IXIA_PORT_1 = "1/61"
+BAG013_IXIA_PORT_2 = "1/62"
+BAG013_IXIA_PORT_3 = "1/63"
 
 
 # =============================================================================

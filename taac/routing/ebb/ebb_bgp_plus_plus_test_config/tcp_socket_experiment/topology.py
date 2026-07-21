@@ -97,9 +97,10 @@ TOPOLOGY = r"""
 ║    bag013:Et3/1/1  ←→  bag012:Ethernet3/1/1                                   ║
 ║    bag013:Et3/2/1  ←→  bag012:Ethernet3/2/1                                   ║
 ║                                                                                ║
-║  IXIA Chassis: ixia11.netcastle.ash6                                           ║
-║    bag012 ports: 7/7, 7/8, 8/1                                                 ║
-║    bag013 ports: 8/2, 8/3, 8/4                                                 ║
+║  Primary IXIA: ixia03.netcastle.ash6                                           ║
+║  Secondary IXIA: ixia11.netcastle.ash6                                         ║
+║    bag012 ports: 1/57, 1/58, 1/59                                              ║
+║    bag013 ports: 1/61, 1/62, 1/63                                              ║
 ║                                                                                ║
 ║  IMPORTANT: "1 IXIA peer" = 1 V4 session + 1 V6 session = 2 BGP sessions      ║
 ║             "140 peers"   = 140 V4 + 140 V6 = 280 BGP sessions                ║
@@ -128,7 +129,7 @@ TOPOLOGY = r"""
   bag013 (ar-bgp) is a receiver only — does NOT originate routes.
 
   ┌─────────────────────────┐
-  │   ixia11.netcastle.ash6 │
+  │   ixia03.netcastle.ash6 │
   │                         │
   │  2 BGP sessions:        │
   │    1 V6 (15K prefixes)  │
@@ -171,7 +172,7 @@ TOPOLOGY = r"""
   bag012 (BGP++) redistributes to 140 V4 + 140 V6 IXIA eBGP peers (EB-FA).
 
   ┌─────────────────────────┐                      ┌─────────────────────────┐
-  │   ixia11.netcastle.ash6 │                      │   ixia11.netcastle.ash6 │
+  │   ixia03.netcastle.ash6 │                      │   ixia03.netcastle.ash6 │
   │   (route injection)     │                      │   (route receivers)     │
   │                         │                      │                         │
   │  2 BGP sessions:        │                      │  280 BGP sessions:      │
