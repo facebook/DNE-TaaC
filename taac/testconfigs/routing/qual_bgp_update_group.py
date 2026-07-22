@@ -41,6 +41,7 @@ from taac.testconfigs.routing.testbed import (
     BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,
+    BAG013_ASH6_IXIA11,
     EB03_LAB_ASH6,
 )
 
@@ -51,6 +52,19 @@ BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG = (
 )
 EB03_LAB_ASH6_BGP_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ug_distribution_correctness_test_config(EB03_LAB_ASH6)
+)
+# ixia11 variant of the bag013 2.1.1 config (Ethernet3/36 -> ixia11 8/5-7)
+# instead of the default ixia03 (Ethernet3/35). ``name_override`` gives it a
+# distinct TestConfig.name; without it the bag013 branch hardcodes
+# BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST and would collide.
+# Ad-hoc: select via
+# ``--test-config BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST``;
+# not on the dne_routing conveyor.
+BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG = (
+    create_bgp_ug_distribution_correctness_test_config(
+        BAG013_ASH6_IXIA11,
+        name_override="BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST",
+    )
 )
 
 # ─── Spec 2.2 Peer Lifecycle (SKELETON) ─────────────────────────────────
@@ -119,6 +133,7 @@ __all__ = [
     "BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
+    "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",

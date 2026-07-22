@@ -538,6 +538,7 @@ def _create_eb03_distribution_correctness_test_config(
 def _create_bag013_distribution_correctness_test_config(
     testbed: Testbed,
     profile: BgpPlusPlusProfile,
+    name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """bag013 branch of tc1 — wires ONLY the 2.1.1 playbook.
 
@@ -570,7 +571,7 @@ def _create_bag013_distribution_correctness_test_config(
     )
     return build_bag_conveyor_test_config(
         testbed,
-        name="BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST",
+        name=name_override or "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST",
         playbooks=[playbook],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=True,
@@ -580,6 +581,7 @@ def _create_bag013_distribution_correctness_test_config(
 def create_bgp_ug_distribution_correctness_test_config(
     testbed: Testbed,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
+    name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification 2.1.1 (Distribution Correctness /
     Initial Dump -- Identical Routes) TestConfig, dispatched on ``testbed``.
@@ -600,7 +602,9 @@ def create_bgp_ug_distribution_correctness_test_config(
     if testbed.device_name == "eb03.lab.ash6":
         return _create_eb03_distribution_correctness_test_config(testbed, profile)
     if testbed.device_name == "bag013.ash6":
-        return _create_bag013_distribution_correctness_test_config(testbed, profile)
+        return _create_bag013_distribution_correctness_test_config(
+            testbed, profile, name_override
+        )
     raise NotImplementedError(
         f"create_bgp_ug_distribution_correctness_test_config does not yet "
         f"handle testbed.device_name={testbed.device_name!r}; add a branch "

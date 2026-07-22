@@ -310,6 +310,29 @@ BAG012_ASH6 = Testbed(
     },
 )
 
+# bag012.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
+# the default primary (ixia03). Same physical DUT as BAG012_ASH6, but the
+# update-packing factory reads ``ixia_chassis_ip`` (== primary), so ixia11 is
+# selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip`` and the
+# Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports 8/1-3) in
+# ``ixia_ports``. Ad-hoc: resolvable via ``--test-config`` (see
+# adhoc_bgp_ebb_characteristic.py); NOT scheduled on a dne_routing conveyor node.
+BAG012_ASH6_IXIA11 = Testbed(
+    device_name="bag012.ash6",
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
+    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
+    ixia_ports=[
+        ("Ethernet3/36/1", "8/1"),  # eBGP
+        ("Ethernet3/36/2", "8/2"),  # iBGP
+        ("Ethernet3/36/3", "8/3"),  # BGP-MON
+    ],
+    dut_bgp_as=65012,
+    router_id="10.163.28.11",
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    peer_groups=ebb_peer_groups(),
+)
+
 BAG013_ASH6 = Testbed(
     device_name="bag013.ash6",
     usage=frozenset({"cicd", "qual"}),
@@ -330,6 +353,49 @@ BAG013_ASH6 = Testbed(
         # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag013.ash6
         # DUT. Kept in ``extras`` because they are OpenR-specific baseline
         # attributes and do not fit the generic Testbed fields.
+        "openr_port_channel_member": "Ethernet3/9/1",
+        "openr_port_channel_ipv4": "10.131.97.232/31",
+        "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
+        "openr_local_link": {
+            "ipv4": "10.131.97.232",
+            "ipv6": "fe80::eba:a7f:fcfc",
+            "ifName": "po100211",
+            "weight": 0,
+            "metric": 10,
+        },
+        "openr_other_link": {
+            "ipv4": "10.131.97.233",
+            "ipv6": "fe80::eba:a7f:fcfd",
+            "ifName": "po100211",
+            "weight": 0,
+            "metric": 10,
+        },
+    },
+)
+
+# bag013.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
+# the default primary (ixia03). Same physical DUT as BAG013_ASH6; the tc1
+# distribution-correctness builder reads ``ixia_chassis_ip`` (== primary), so
+# ixia11 is selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip``
+# and the Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports
+# 8/5-7) in ``ixia_ports``. Needs 3 ports: the tc1 bag013 branch uses
+# ixia_ports[2] (BGP-MON) as the pcap-capture handle. Ad-hoc: resolvable via
+# ``--test-config``; NOT scheduled on a dne_routing conveyor node.
+BAG013_ASH6_IXIA11 = Testbed(
+    device_name="bag013.ash6",
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
+    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
+    ixia_ports=[
+        ("Ethernet3/36/1", "8/5"),  # eBGP
+        ("Ethernet3/36/2", "8/6"),  # iBGP
+        ("Ethernet3/36/3", "8/7"),  # BGP-MON
+    ],
+    dut_bgp_as=65013,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
+    peer_groups=ebb_peer_groups(),
+    extras={
         "openr_port_channel_member": "Ethernet3/9/1",
         "openr_port_channel_ipv4": "10.131.97.232/31",
         "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
