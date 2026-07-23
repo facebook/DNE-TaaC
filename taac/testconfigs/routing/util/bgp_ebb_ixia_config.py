@@ -41,6 +41,18 @@ def _create_ibgp_plane_device_groups(
     # interface route -- no Open/R / IGP. Default False keeps PRESERVE_FROM_FILE
     # (the CSV-baked next-hop), so existing callers are byte-identical.
     ibgp_next_hop_self: bool = False,
+    # Optional inline-generated route pool(s) attached to THIS plane's iBGP v4 DC
+    # device group (in addition to the CSV import), mirroring the eBGP DG's
+    # ``route_scales``. 2.9.6 uses this on plane 1 for a genuinely-new v4 inject
+    # pool (distinct address range + accept communities) so runtime distribution
+    # to the eBGP peers is MEASURABLE (a net-new +N delta, not masked by prefixes
+    # already covered by another path). None -> field unset (byte-identical).
+    v4_dc_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # Same as ``v4_dc_extra_route_scales`` but for the v6 DC device group. 2.9.6
+    # uses this on plane 1 for a genuinely-new v6 inject pool (a unique sub-range of
+    # the v6 EB-PRIVATE aggregate + accept communities) so v6 runtime distribution to
+    # the eBGP peers is MEASURABLE. None -> field unset (byte-identical).
+    v6_dc_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
 ) -> list[DeviceGroupConfig]:
     """
     Create device group configurations for a single iBGP plane.
@@ -131,6 +143,9 @@ def _create_ibgp_plane_device_groups(
                         end_index=ibgp_v6_dc_route_end_index,
                     )
                 ],
+                # Optional inline pool(s) advertised by this plane's iBGP v6 DC
+                # peers alongside the CSV import (None -> unset, byte-identical).
+                route_scales=v6_dc_extra_route_scales,
             ),
         )
     )
@@ -264,6 +279,9 @@ def _create_ibgp_plane_device_groups(
                         end_index=ibgp_v4_dc_route_end_index,
                     )
                 ],
+                # Optional inline pool(s) advertised by this plane's iBGP v4 DC
+                # peers alongside the CSV import (None -> unset, byte-identical).
+                route_scales=v4_dc_extra_route_scales,
             ),
         )
     )
@@ -448,6 +466,18 @@ def create_ebb_scale_basic_port_configs(
     # installed with correct IGP metric" precondition without Open/R). Default
     # False keeps PRESERVE_FROM_FILE. Threaded into the per-plane helper.
     ibgp_next_hop_self: bool = False,
+    # BGP++ UG 2.9.6 strict runtime-distribution inject (opt-in). A genuinely-new
+    # inline v4 pool attached to PLANE 1's iBGP v4 DC device group -- distinct
+    # address range + accept communities -- so a runtime advertise produces a
+    # MEASURABLE +N at the eBGP peers (iBGP->eBGP re-advertisement), making the
+    # spec-2.9.6 criterion-3 distribution check strict. None -> byte-identical.
+    ibgp_v4_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # Same as ``ibgp_v4_dc_plane1_extra_route_scales`` but for PLANE 1's iBGP v6 DC
+    # device group -- a genuinely-new inline v6 pool (unique sub-range of the v6
+    # EB-PRIVATE aggregate + accept communities) so the spec-2.9.6 criterion-3 check
+    # covers the v6 eBGP peers too (runtime distribution to all 280). None ->
+    # byte-identical.
+    ibgp_v6_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
 ) -> list[BasicPortConfig]:
     """
     Create basic port configurations for EBB scale testing with eBGP, iBGP, and BGP monitoring.
@@ -834,6 +864,13 @@ def create_ebb_scale_basic_port_configs(
                 (plane_drain_dg_v6_attribute_overrides or {}).get(plane_num_int)
             ),
             ibgp_next_hop_self=ibgp_next_hop_self,
+            # Only plane 1 carries the 2.9.6 genuinely-new inject pools.
+            v4_dc_extra_route_scales=(
+                ibgp_v4_dc_plane1_extra_route_scales if plane_num_int == 1 else None
+            ),
+            v6_dc_extra_route_scales=(
+                ibgp_v6_dc_plane1_extra_route_scales if plane_num_int == 1 else None
+            ),
         )
 
         interface_device_groups[interface].extend(plane_device_groups)
