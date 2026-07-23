@@ -52,8 +52,6 @@ from taac.routing.ebb.ebb_bgp_plus_plus_test_config.tcp_socket_experiment.consta
     BGPCPP_BASE_CONFIG_CONFIGERATOR_PATH,
     BGPCPP_CONFIG_PATH,
     BGPCPP_DAEMONS,
-    BGPCPP_EGRESS_POLICY_EBGP,
-    BGPCPP_EGRESS_POLICY_IXIA,
     BGPCPP_PEERGROUP_EBGP_V4,
     BGPCPP_PEERGROUP_EBGP_V6,
     BGPCPP_PEERGROUP_IXIA_V4,
@@ -194,8 +192,6 @@ def create_case2_test_config(
     bgpcpp_peergroup_ebgp_v4: str = BGPCPP_PEERGROUP_EBGP_V4,
     bgpcpp_peergroup_ixia_v6: str = BGPCPP_PEERGROUP_IXIA_V6,
     bgpcpp_peergroup_ixia_v4: str = BGPCPP_PEERGROUP_IXIA_V4,
-    bgpcpp_egress_policy_ebgp: str = BGPCPP_EGRESS_POLICY_EBGP,
-    bgpcpp_egress_policy_ixia: str = BGPCPP_EGRESS_POLICY_IXIA,
     arbgp_peergroup_ebgp_v6: str = ARBGP_PEERGROUP_EBGP_V6,
     arbgp_peergroup_ebgp_v4: str = ARBGP_PEERGROUP_EBGP_V4,
     arbgp_peergroup_ixia_v6: str = ARBGP_PEERGROUP_IXIA_V6,
@@ -282,7 +278,6 @@ def create_case2_test_config(
         ipv4_start_offset=ipv4_start_offset,
         peer_group_v6=bgpcpp_peergroup_ixia_v6,
         peer_group_v4=bgpcpp_peergroup_ixia_v4,
-        egress_policy_name=bgpcpp_egress_policy_ixia,
         is_bgpcpp_side=True,
     )
 
@@ -295,7 +290,6 @@ def create_case2_test_config(
         peer_count=ixia_peer_count_to_bgpcpp,
         peer_group_v6=bgpcpp_peergroup_ebgp_v6,
         peer_group_v4=bgpcpp_peergroup_ebgp_v4,
-        egress_policy_name=bgpcpp_egress_policy_ebgp,
     )
 
     all_bgpcpp_peers = bgpcpp_ebgp_peers + bgpcpp_ixia_peers

@@ -47,8 +47,6 @@ from taac.routing.ebb.ebb_bgp_plus_plus_test_config.tcp_socket_experiment.consta
     BGPCPP_BASE_CONFIG_CONFIGERATOR_PATH,
     BGPCPP_CONFIG_PATH,
     BGPCPP_DAEMONS,
-    BGPCPP_EGRESS_POLICY_EBGP,
-    BGPCPP_EGRESS_POLICY_IXIA,
     BGPCPP_PEERGROUP_EBGP_V4,
     BGPCPP_PEERGROUP_EBGP_V6,
     BGPCPP_PEERGROUP_IXIA_V4,
@@ -98,7 +96,6 @@ def _generate_peer_entries_for_interconnect(
     ipv4_start_offset: int,
     peer_group_v6: str,
     peer_group_v4: str,
-    egress_policy_name: str = "",
     is_bgpcpp_side: bool = True,
 ) -> t.List[t.Dict[str, t.Any]]:
     """
@@ -153,7 +150,6 @@ def _generate_peer_entries_for_interconnect(
                     "description": f"EBGP_V6_PEER_{session_idx + 1}",
                     "peer_id": v6_peer,
                     "peer_group_name": peer_group_v6,
-                    "egress_policy_name": egress_policy_name,
                 }
             )
 
@@ -168,7 +164,6 @@ def _generate_peer_entries_for_interconnect(
                     "description": f"EBGP_V4_PEER_{session_idx + 1}",
                     "peer_id": f"{link_ipv4_base}.{v4_peer_last}",
                     "peer_group_name": peer_group_v4,
-                    "egress_policy_name": egress_policy_name,
                 }
             )
 
@@ -184,7 +179,6 @@ def _generate_ixia_peer_entries_for_bgpcpp(
     peer_count: int,
     peer_group_v6: str,
     peer_group_v4: str,
-    egress_policy_name: str = "",
 ) -> t.List[t.Dict[str, t.Any]]:
     """
     Generate BGP++ peer entries for IXIA-facing sessions.
@@ -202,7 +196,6 @@ def _generate_ixia_peer_entries_for_bgpcpp(
         peer_count: Number of IXIA peers
         peer_group_v6: Peer group for IPv6 IXIA sessions
         peer_group_v4: Peer group for IPv4 IXIA sessions
-        egress_policy_name: BGP++ egress policy name
     """
     peers = []
     v4_base = IPv4Address(f"{ixia_ipv4_base}.0")
@@ -223,7 +216,6 @@ def _generate_ixia_peer_entries_for_bgpcpp(
                 "description": f"IXIA_V6_PEER_{i + 1}",
                 "peer_id": v6_peer,
                 "peer_group_name": peer_group_v6,
-                "egress_policy_name": egress_policy_name,
             }
         )
 
@@ -237,7 +229,6 @@ def _generate_ixia_peer_entries_for_bgpcpp(
                 "description": f"IXIA_V4_PEER_{i + 1}",
                 "peer_id": v4_peer,
                 "peer_group_name": peer_group_v4,
-                "egress_policy_name": egress_policy_name,
             }
         )
 
@@ -343,8 +334,6 @@ def create_case1_test_config(
     bgpcpp_peergroup_ebgp_v4: str = BGPCPP_PEERGROUP_EBGP_V4,
     bgpcpp_peergroup_ixia_v6: str = BGPCPP_PEERGROUP_IXIA_V6,
     bgpcpp_peergroup_ixia_v4: str = BGPCPP_PEERGROUP_IXIA_V4,
-    bgpcpp_egress_policy_ebgp: str = BGPCPP_EGRESS_POLICY_EBGP,
-    bgpcpp_egress_policy_ixia: str = BGPCPP_EGRESS_POLICY_IXIA,
     arbgp_peergroup_ebgp_v6: str = ARBGP_PEERGROUP_EBGP_V6,
     arbgp_peergroup_ebgp_v4: str = ARBGP_PEERGROUP_EBGP_V4,
     communities: str = IXIA_IBGP_COMMUNITIES,
@@ -422,7 +411,6 @@ def create_case1_test_config(
         ipv4_start_offset=ipv4_start_offset,
         peer_group_v6=bgpcpp_peergroup_ebgp_v6,
         peer_group_v4=bgpcpp_peergroup_ebgp_v4,
-        egress_policy_name=bgpcpp_egress_policy_ebgp,
         is_bgpcpp_side=True,
     )
 
@@ -434,7 +422,6 @@ def create_case1_test_config(
         peer_count=1,
         peer_group_v6=bgpcpp_peergroup_ixia_v6,
         peer_group_v4=bgpcpp_peergroup_ixia_v4,
-        egress_policy_name=bgpcpp_egress_policy_ixia,
     )
 
     all_bgpcpp_peers = bgpcpp_ebgp_peers + bgpcpp_ixia_peers
