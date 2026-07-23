@@ -15,8 +15,9 @@ checks read the PS gauge, which is only non-zero when Open/R resolves the
 iBGP next-hops so the DUT actually advertises). Spec 2.9.5 is excluded
 (struck through in the plan).
 
-Target testbed: BAG011_ASH6 (EBB conveyor node). Reuses the shared
-``build_bag_conveyor_test_config`` builder from tc1 for the full-scale
+Target testbeds: BAG011_ASH6 for the edge-cases bundle (2.9.7) / 2.9.4 / 2.9.2,
+and BAG013_ASH6 for 2.9.6 staggered-startup (both EBB conveyor nodes). Reuses the
+shared ``build_bag_conveyor_test_config`` builder from tc1 for the full-scale
 topology (140 eBGP + ~500 iBGP, ``include_bgp_mon=False`` — UG qualification
 never exercises BGP-MON); the Open/R profile is chosen per-TestConfig.
 """
@@ -39,6 +40,7 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases impor
     create_bgp_ug_dual_stack_isolation_playbook,
     create_bgp_ug_empty_group_playbook,
     create_bgp_ug_simultaneous_disruptions_playbook,
+    create_bgp_ug_staggered_startup_playbook,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     build_bag_conveyor_test_config,
@@ -249,7 +251,126 @@ _DUAL_STACK_EXPECTED_MEMBER_COUNTS = {
 }
 
 
-def _edge_cases_prechecks(bgp_mon_ignore_prefixes):
+# --- 2.9.6 Staggered Peer Startup ---
+# 140 eBGP sessions PER AFI (one peer object per AFI). The spec's 50/100/130 waves
+# are SYMMETRIC per-AFI session-index ranges (1-based, inclusive) applied to the
+# combined v4+v6 eBGP regex: 25/AFI -> 50/AFI -> 65/AFI = 50 -> 100 -> 130 combined
+# (280 total). Cumulative eBGP UG members PER AFI after each wave: 25 -> 75 -> 140.
+_STAGGERED_WAVES = [(1, 25), (26, 75), (76, 140)]
+_STAGGERED_CUMULATIVE_MEMBERS_PER_AFI = [25, 75, 140]
+# eBGP peer-address parent prefixes for the STRICT per-peer distribution verifies
+# (criteria 1-2 uniform + criterion-3 delta; the same subnet-selection 2.9.4 uses
+# for iBGP). eBGP v6 = a /80; eBGP v4 = a /16 (the 140 /31 peers spill past the /24,
+# same reasoning as the iBGP v4 parents).
+_EBGP_V6_PARENT_PREFIXES = [f"{IXIA_EBGP_IC_PARENT_NETWORK_V6}::/80"]
+_EBGP_V4_PARENT_PREFIXES = [
+    f"{'.'.join(IXIA_EBGP_IC_PARENT_NETWORK_V4.split('.')[:2])}.0.0/16"
+]
+
+# --- Genuinely-new inject pools (measurable at the eBGP egress) -----------------
+# The between-wave "dump-growth" injects (spec step 5) and the final runtime inject
+# (spec step 6) need UNIQUE NLRI: the existing plane iBGP CSV pools share NLRI across
+# all four planes, so a plane-1 withdraw/re-advertise is a no-op at the DUT->eBGP
+# egress (the other planes keep the NLRI alive). So each measurable inject uses a
+# DEDICATED RouteScale pool with unique NLRI in the AFI's EB-PRIVATE accept aggregate
+# + the accept communities the real DC routes carry, so the DUT re-advertises it
+# iBGP->eBGP. HW-VALIDATED on bag013 2026-07-23: the v4 final pool landed a clean +50
+# at every eBGP v4 peer (a RouteScale route resolves its next-hop under next-hop-self).
+# RouteScale pools toggle Active WHOLE-pool (not per-index), so each inject step is
+# its own whole-pool toggle -> one pool per inject.
+#
+# EB-PRIVATE accept aggregates (from the fabric policy consts in
+# neteng/emulation/emulator/utils/fabric/consts.py): v4 = 120/8 (HW-confirmed
+# re-advertised in 2.9.4); v6 = 2401:db00:11:2000::/52 (TestPrefixes.EB_PRIVATE_PREFIX).
+# Accept communities are AFI-agnostic. v4 ranges are disjoint from 2.9.4's
+# 120.100/120.104 and 2.9.1's 120.130; v6 uses unique /64s inside the EB-PRIVATE /52.
+_STAGGERED_INJECT_PER_WAVE = 100  # spec step 5: 100 new routes per wave gap
+_STAGGERED_FINAL_INJECT_COUNT = 50  # spec step 6: 50 more after all peers up
+_STAGGERED_INJECT_COMMUNITIES = [
+    "65529:39744",  # EB-PRIVATE-PREFIXES accept (CommunityConsts.COMM_EB_PRIVATE_PREFIXES)
+    "65060:10012",  # ADVERTISED-FROM-DC (marks a DC-origin route for eBGP export)
+    "65530:50320",  # anycast accept community
+]
+# Final runtime inject (criterion 3 -- runtime distribution reaches ALL 280 peers):
+# a v4 pool AND a v6 pool, so the +N is measured on BOTH eBGP AFIs.
+_STAGGERED_RUNTIME_INJECT_POOL_REGEX = r"PREFIX_POOL_IBGP_IPV4_PLANE_1_INJECT$"
+_STAGGERED_RUNTIME_INJECT_V6_POOL_REGEX = r"PREFIX_POOL_IBGP_IPV6_PLANE_1_INJECT$"
+# Between-wave dump-growth injects (criterion 1 -- late-wave peers get the accumulated
+# dump): one dedicated v4 pool per wave gap, advertised whole after its wave, so a
+# late wave's initial dump measurably includes the earlier waves' injects.
+_STAGGERED_WAVE_INJECT_POOL_REGEXES = [
+    r"PREFIX_POOL_IBGP_IPV4_PLANE_1_WAVE1_INJECT$",
+    r"PREFIX_POOL_IBGP_IPV4_PLANE_1_WAVE2_INJECT$",
+]
+
+
+def _staggered_v4_inject_pool(
+    prefix_name: str, starting_prefix: str, count: int, network_group_index: int
+) -> taac_types.RouteScaleSpec:
+    """One inline v4 inject pool (unique /24s in 120/8 + accept communities)."""
+    return taac_types.RouteScaleSpec(
+        network_group_index=network_group_index,
+        v4_route_scale=taac_types.RouteScale(
+            prefix_name=prefix_name,
+            starting_prefixes=starting_prefix,
+            prefix_step="0.0.0.0",  # zero step -> IXNetwork increments one /24 per prefix
+            prefix_length=24,
+            prefix_count=count,
+            multiplier=1,
+            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+            bgp_communities=list(_STAGGERED_INJECT_COMMUNITIES),
+        ),
+    )
+
+
+# v4 inline pools on plane-1's iBGP v4 DC peer (distinct network_group_index each,
+# alongside the CSV import at index 0): final (120.150), wave1 (120.151), wave2
+# (120.152).
+_STAGGERED_V4_ROUTE_SCALES = [
+    _staggered_v4_inject_pool(
+        "PREFIX_POOL_IBGP_IPV4_PLANE_1_INJECT",
+        "120.150.0.0",
+        _STAGGERED_FINAL_INJECT_COUNT,
+        1,
+    ),
+    _staggered_v4_inject_pool(
+        "PREFIX_POOL_IBGP_IPV4_PLANE_1_WAVE1_INJECT",
+        "120.151.0.0",
+        _STAGGERED_INJECT_PER_WAVE,
+        2,
+    ),
+    _staggered_v4_inject_pool(
+        "PREFIX_POOL_IBGP_IPV4_PLANE_1_WAVE2_INJECT",
+        "120.152.0.0",
+        _STAGGERED_INJECT_PER_WAVE,
+        3,
+    ),
+]
+# v6 inline pool on plane-1's iBGP v6 DC peer: the final inject (unique /64s within
+# the v6 EB-PRIVATE /52), so criterion 3 covers the eBGP v6 peers too.
+_STAGGERED_V6_ROUTE_SCALES = [
+    taac_types.RouteScaleSpec(
+        network_group_index=1,
+        v6_route_scale=taac_types.RouteScale(
+            prefix_name="PREFIX_POOL_IBGP_IPV6_PLANE_1_INJECT",
+            starting_prefixes="2401:db00:11:2000::",
+            prefix_step="0:0:0:1::",  # one /64 per prefix, inside the EB-PRIVATE /52
+            prefix_length=64,
+            prefix_count=_STAGGERED_FINAL_INJECT_COUNT,
+            multiplier=1,
+            ip_address_family=ixia_types.IpAddressFamily.IPV6,
+            bgp_communities=list(_STAGGERED_INJECT_COMMUNITIES),
+        ),
+    ),
+]
+
+
+def _edge_cases_prechecks(
+    bgp_mon_ignore_prefixes,
+    establish_retry_count=None,
+    establish_retry_delay_seconds=None,
+    establish_retry_delay_multiplier=None,
+):
     """Prechecks for the 2.9 edge-cases TestConfig.
 
     Hand-rolled (rather than the exact-count ``create_standard_prechecks``)
@@ -258,10 +379,24 @@ def _edge_cases_prechecks(bgp_mon_ignore_prefixes):
     drop the BGP-MON parent prefix from the session count and assert
     "no non-established peers among the non-MON set" rather than an exact
     session total (which drifts per bag node).
+
+    ``establish_retry_*`` are opt-in and default to ``None`` (single-shot;
+    byte-identical golden for existing callers). When a caller passes them, the
+    session-establish precheck POLLS (re-fetching live data each attempt) rather
+    than snapshotting once. Useful whenever the full-scale ~1272-session topology
+    needs time to reach Established after setup and a single sample would be
+    premature -- for two distinct reasons: (a) the WITHOUT_OPEN_R next-hop-self
+    setups (e.g. 2.9.6, the first opt-in caller) restart the control-plane Bgp
+    daemon on a fresh bring-up; and (b) the WITH_OPEN_R edge-case setups whose tail
+    (Open/R route inject + the ``iptables`` EOS_BGP firewall re-open) finalizes BGP
+    reachability only ~20s before prechecks run.
     """
     return [
         create_bgp_session_establish_check(
             parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+            retry_count=establish_retry_count,
+            retry_delay_seconds=establish_retry_delay_seconds,
+            retry_delay_multiplier=establish_retry_delay_multiplier,
         ),
         create_drain_state_check(),
         create_memory_utilization_check(
@@ -498,8 +633,129 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
     )
 
 
+def create_bgp_ug_staggered_startup_test_config(
+    testbed: Testbed,
+) -> taac_types.TestConfig:
+    """BGP++ Update Group qualification spec 2.9.6 (Staggered Peer Startup)
+    TestConfig -- its OWN WITHOUT_OPEN_R config on the bag conveyor topology,
+    resolving next-hops via the next-hop-self infra (no Open/R daemon).
+
+    Brings the eBGP peers up in three staggered waves (50/100/130, realized as
+    symmetric 25/50/65-per-AFI session-index ranges applied to the combined v4+v6
+    eBGP regex) on top of the stable iBGP source, injecting new iBGP routes between
+    waves, and verifies the eBGP update group grows correctly as the late peers
+    join and attach (25 -> 75 -> 140 members/AFI), iBGP stays Established
+    throughout, and nothing crashes. Select via
+    ``--test-config BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST``. See
+    ``create_bgp_ug_staggered_startup_playbook``.
+
+    Per-peer route distribution (spec pass-criteria 1-3) is STRICT on BOTH AFIs:
+    criterion 1 (late waves get the accumulated dump) via a per-peer +N accumulation
+    delta -- the between-wave injects use DEDICATED genuinely-new v4 pools (one per
+    wave gap) so the count measurably grows, and the uniform check proves late waves
+    share it; criteria 1-2 (identical counts) via a per-peer PS-gauge uniform check on
+    v4 AND v6; criterion 3 (runtime +N reaches ALL 280) via a per-peer +N delta after
+    a runtime inject of a DEDICATED unique-NLRI pool per AFI (v4 in 120/8, v6 in the
+    2401:db00:11:2000::/52 EB-PRIVATE aggregate). The v6 uniform check keeps an escape
+    hatch to XFAIL for the cold-start next-hop slowness (off by default). The PS gauge
+    is used rather than ``getPostfilterAdvertisedNetworks`` (SET equality) because the
+    latter is vacuous under an Update Group (T271301144).
+
+    HW-VALIDATED on bag013 2026-07-23 (strict PASS of the v4 uniform + v4 criterion-3
+    core): 140 eBGP v4 peers uniform + non-zero @45750, 140 eBGP v6 peers @45716,
+    criterion-3 +50 v4 delta on all peers, waves 25->75->140/AFI, no crash, no stale.
+    The v6 criterion-3 inject + the between-wave accumulation deltas are new (this
+    revision) and pending their first HW run.
+
+    Uses WITHOUT_OPEN_R + the next-hop-self resolution infra (D113330327): IXIA
+    advertises each route with next-hop = the peer's own connected IP
+    (``ebgp_next_hop_self`` / ``ibgp_next_hop_self``) and the DUT resolves it from
+    interface state via the ``bgp_resolve_nexthops_from_interface_state`` bgpcpp
+    gflag (``resolve_nexthops_from_interface_state``) -- so the next-hops resolve and
+    the DUT advertises with NO Open/R daemon (dropping the cores / ~118s route-inject
+    / iptables settle-race the Open/R tail caused), HW-confirmed advertising the full
+    RIB to every eBGP peer. It does not change the 4-update-group / eBGP+iBGP session
+    baseline.
+    """
+    bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+    # Everything that is NOT an iBGP peer (both eBGP AFIs + BGP-MON): scopes the
+    # "iBGP stays Established" checks to iBGP while eBGP is only partially up during
+    # the waves. Same construction as 2.9.2's non_ibgp_parent_prefixes.
+    non_ibgp_parent_prefixes = (
+        _EBGP_V6_PARENT_PREFIXES + _EBGP_V4_PARENT_PREFIXES + bgp_mon_ignore_prefixes
+    )
+
+    staggered_startup_playbook = create_bgp_ug_staggered_startup_playbook(
+        device_name=testbed.device_name,
+        ebgp_peer_regex=_EBGP_PEER_REGEX,
+        ibgp_peer_regex=_IBGP_PEER_REGEX,
+        ibgp_v6_peer_group=PEERGROUP_IBGP_V6,
+        ebgp_v4_peer_group=PEERGROUP_EBGP_V4,
+        ebgp_v6_peer_group=PEERGROUP_EBGP_V6,
+        waves=_STAGGERED_WAVES,
+        cumulative_members_per_afi=_STAGGERED_CUMULATIVE_MEMBERS_PER_AFI,
+        non_ibgp_parent_prefixes=non_ibgp_parent_prefixes,
+        # Between-wave dump-growth injects: one DEDICATED unique-NLRI v4 pool per wave
+        # gap, advertised whole so a late wave's initial dump measurably includes the
+        # earlier waves' injects (criterion 1).
+        ibgp_wave_inject_pool_regexes=_STAGGERED_WAVE_INJECT_POOL_REGEXES,
+        inject_per_wave=_STAGGERED_INJECT_PER_WAVE,
+        final_inject_count=_STAGGERED_FINAL_INJECT_COUNT,
+        # Criterion-3 runtime inject: DEDICATED unique-NLRI pools (v4 + v6), advertised
+        # whole so the +N is measurable at each eBGP AFI egress (all 280 peers).
+        ibgp_runtime_inject_pool_regex=_STAGGERED_RUNTIME_INJECT_POOL_REGEX,
+        ibgp_v6_runtime_inject_pool_regex=_STAGGERED_RUNTIME_INJECT_V6_POOL_REGEX,
+        # STRICT per-peer distribution verify scopes (by peer-address subnet):
+        # criteria 1-2 (non-zero + uniform) for BOTH v4 and v6, and the criterion-3
+        # +N delta (v4 only -- the dedicated inject pool is v4). v6 is STRICT: it
+        # passed HW on bag013 2026-07-23 (@45716 uniform), so the XFAIL escape hatch
+        # is left OFF (default). Re-enable it here only if a fresh cold build regresses
+        # on v6 (eBGP IPv6 /127 next-hop cold-start, Appendix B).
+        ebgp_v4_peer_parent_prefixes=_EBGP_V4_PARENT_PREFIXES,
+        ebgp_v6_peer_parent_prefixes=_EBGP_V6_PARENT_PREFIXES,
+        # Opt into the session-establish precheck RETRY: the ~1272-session
+        # full-scale topology needs time to reach Established after the
+        # control-plane Bgp restart, so poll for ~3 min instead of one snapshot.
+        # (WITHOUT_OPEN_R drops the Open/R-inject + iptables settle-race that caused
+        # the earlier all-IDLE precheck failures, but the large session count on a
+        # fresh bring-up still warrants the retry.)
+        prechecks=_edge_cases_prechecks(
+            bgp_mon_ignore_prefixes,
+            establish_retry_count=12,
+            establish_retry_delay_seconds=15.0,
+            establish_retry_delay_multiplier=1.0,
+        ),
+        bgp_mon_ignore_prefixes=bgp_mon_ignore_prefixes,
+        # Extra-safety absolute VmHWM ceiling (consistent with the other UG tests).
+        vmhwm_absolute_threshold_bytes=Gigabyte.GIG_10.value,
+    )
+
+    return build_bag_conveyor_test_config(
+        testbed,
+        name="BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST",
+        playbooks=[staggered_startup_playbook],
+        # WITHOUT_OPEN_R + next-hop-self (D113330327): IXIA advertises next-hop =
+        # the peer's connected IP and the DUT resolves it from interface state via
+        # the bgpcpp gflag -- so the iBGP next-hops resolve and the DUT advertises
+        # with no Open/R daemon (the precondition for measuring per-peer
+        # distribution). First consumer of the infra; HW-unverified.
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        ebgp_next_hop_self=True,
+        ibgp_next_hop_self=True,
+        resolve_nexthops_from_interface_state=True,
+        enable_update_group=True,
+        # Dedicated unique-NLRI inject pools on plane-1's iBGP DC peers -- the
+        # genuinely-new sources for the measurable injects the shared-CSV planes cannot
+        # provide. v4: the two between-wave dump-growth pools + the final runtime pool.
+        # v6: the final runtime pool (so criterion 3 covers the eBGP v6 peers too).
+        ibgp_v4_dc_plane1_extra_route_scales=_STAGGERED_V4_ROUTE_SCALES,
+        ibgp_v6_dc_plane1_extra_route_scales=_STAGGERED_V6_ROUTE_SCALES,
+    )
+
+
 __all__ = [
     "create_bgp_ug_dual_stack_isolation_test_config",
     "create_bgp_ug_edge_cases_test_config",
     "create_bgp_ug_simultaneous_disruptions_test_config",
+    "create_bgp_ug_staggered_startup_test_config",
 ]

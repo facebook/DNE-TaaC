@@ -36,6 +36,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases imp
     create_bgp_ug_dual_stack_isolation_test_config,
     create_bgp_ug_edge_cases_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
+    create_bgp_ug_staggered_startup_test_config,
 )
 from taac.testconfigs.routing.testbed import (
     BAG011_ASH6,
@@ -124,6 +125,17 @@ BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG = (
     create_bgp_ug_simultaneous_disruptions_test_config(BAG011_ASH6)
 )
 
+# Spec 2.9.6 Staggered Peer Startup on bag013 -- its OWN WITHOUT_OPEN_R TestConfig
+# using the next-hop-self resolution infra (D113330327) so the iBGP next-hops
+# resolve and the DUT advertises with no Open/R daemon, separate from the
+# WITHOUT_OPEN_R edge-cases bundle. Select via
+# ``--test-config BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST``. Distribution is
+# STRICT per-peer (criteria 1-2 uniform on both AFIs via the eBGP PS gauge +
+# criterion-3 v4 +N delta; HW-validated on bag013 2026-07-23).
+BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG = (
+    create_bgp_ug_staggered_startup_test_config(BAG013_ASH6)
+)
+
 
 __all__ = [
     "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
@@ -132,6 +144,7 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
     "BGP_UG_BIT_ALLOC_GROUP_STAB_UNDER_FLAP_TEST_CONFIG",

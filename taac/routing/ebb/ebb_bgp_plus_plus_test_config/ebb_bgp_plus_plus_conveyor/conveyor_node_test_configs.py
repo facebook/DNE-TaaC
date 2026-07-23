@@ -57,6 +57,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     BGP_UG_BACKPRESSURE_TEST_CONFIG,
     BGP_UG_NEW_PEER_JOIN_TEST_CONFIG,
@@ -146,4 +147,12 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # today (bgpcpp IPv6 next-hop-resolution defect). Ad-hoc; NOT wired into a
     # conveyor stage (do NOT schedule until manually verified on the device).
     BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
+    # BGP++ UG 2.9.6 Staggered Peer Startup on bag013.ash6 -- its own WITHOUT_OPEN_R
+    # TestConfig using the next-hop-self resolution infra (D113330327) so the iBGP
+    # next-hops resolve and the DUT advertises with no Open/R daemon. Distribution is
+    # STRICT per-peer (criteria 1-2 uniform on both AFIs + criterion-3 v4 delta;
+    # HW-validated on bag013). Ad-hoc; NOT wired into a conveyor stage (do NOT
+    # schedule until manually verified on the device). Select with
+    # ``--regex 'bgp_ug_staggered_startup'``.
+    BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
 ]
