@@ -36,6 +36,11 @@ def _create_ibgp_plane_device_groups(
     # BGP TCP session on the chassis). See [[project-bgp-ug-backpressure-...]]
     # memory for the cascade diagnosis.
     drain_dg_v6_attribute_overrides: list[ixia_types.BgpAttributeConfig] | None = None,
+    # When True, advertise the iBGP DC routes with next-hop-self (the IXIA peer's
+    # own connected address) so the DUT resolves the iBGP PNHs via the connected
+    # interface route -- no Open/R / IGP. Default False keeps PRESERVE_FROM_FILE
+    # (the CSV-baked next-hop), so existing callers are byte-identical.
+    ibgp_next_hop_self: bool = False,
 ) -> list[DeviceGroupConfig]:
     """
     Create device group configurations for a single iBGP plane.
@@ -64,6 +69,14 @@ def _create_ibgp_plane_device_groups(
     """
     # Map plane number to route file suffix (p0, p1, p2, p3)
     route_file_suffix = f"p{plane_num - 1}"
+
+    # SAME_AS_LOCAL_IP makes IXIA advertise each iBGP DC route with next-hop =
+    # the peer's own connected stack IP, which the DUT resolves via the connected
+    # interface route (no Open/R). Leave unset (None) when disabled so existing
+    # callers stay byte-identical -- runtime defaults an unset value to MANUALLY.
+    _ibgp_set_next_hop = (
+        ixia_types.SetNextHopType.SAME_AS_LOCAL_IP if ibgp_next_hop_self else None
+    )
 
     device_groups = []
     idx = device_group_index_offset
@@ -112,6 +125,7 @@ def _create_ibgp_plane_device_groups(
                             )
                         ],
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                        set_next_hop_type=_ibgp_set_next_hop,
                         prefix_pool_name=f"PREFIX_POOL_IBGP_IPV6_PLANE_{plane_num}_REMOTE_EB",
                         start_index=0,
                         end_index=ibgp_v6_dc_route_end_index,
@@ -163,6 +177,7 @@ def _create_ibgp_plane_device_groups(
                             network_group_index=0,
                             bgp_attribute_configs=v6_drain_attr_configs,
                             bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                            set_next_hop_type=_ibgp_set_next_hop,
                             prefix_pool_name=f"PREFIX_POOL_IBGP_IPV6_PLANE_{plane_num}_REMOTE_EB_DRAIN",
                             start_index=ibgp_peer_scale_per_plane
                             - ibgp_peer_to_drain_per_plane,
@@ -243,6 +258,7 @@ def _create_ibgp_plane_device_groups(
                             )
                         ],
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                        set_next_hop_type=_ibgp_set_next_hop,
                         prefix_pool_name=f"PREFIX_POOL_IBGP_IPV4_PLANE_{plane_num}_REMOTE_EB",
                         start_index=0,
                         end_index=ibgp_v4_dc_route_end_index,
@@ -294,6 +310,7 @@ def _create_ibgp_plane_device_groups(
                                 )
                             ],
                             bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                            set_next_hop_type=_ibgp_set_next_hop,
                             prefix_pool_name=f"PREFIX_POOL_IBGP_IPV4_PLANE_{plane_num}_REMOTE_EB_DRAIN",
                             start_index=ibgp_peer_scale_per_plane
                             - ibgp_peer_to_drain_per_plane,
@@ -420,6 +437,17 @@ def create_ebb_scale_basic_port_configs(
     # advertises at runtime. None -> no extra pools (byte-identical for other
     # callers). Mirrors how tc4 (2.4 new-peer-join) generates new prefixes.
     ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # When True, advertise the eBGP routes with next-hop-self (the IXIA peer's own
+    # connected address) so the DUT resolves them via the connected interface route
+    # -- no Open/R / IGP. Pair with ``resolve_nexthops_from_interface_state=True``
+    # on the setup tasks (sets the bgpcpp gflag). Default False keeps
+    # PRESERVE_FROM_FILE, so existing callers are byte-identical.
+    ebgp_next_hop_self: bool = False,
+    # Same as ``ebgp_next_hop_self`` but for the iBGP DC routes -- makes the DUT
+    # resolve the iBGP PNHs via the connected interface (satisfies the "PNHs
+    # installed with correct IGP metric" precondition without Open/R). Default
+    # False keeps PRESERVE_FROM_FILE. Threaded into the per-plane helper.
+    ibgp_next_hop_self: bool = False,
 ) -> list[BasicPortConfig]:
     """
     Create basic port configurations for EBB scale testing with eBGP, iBGP, and BGP monitoring.
@@ -553,6 +581,13 @@ def create_ebb_scale_basic_port_configs(
     # eBGP port configuration (always the first port)
     ebgp_device_groups: list[DeviceGroupConfig] = []
 
+    # SAME_AS_LOCAL_IP makes IXIA advertise each eBGP route with next-hop = the
+    # peer's own connected stack IP, resolved by the DUT via the connected
+    # interface route (no Open/R). None when disabled -> byte-identical callers.
+    _ebgp_set_next_hop = (
+        ixia_types.SetNextHopType.SAME_AS_LOCAL_IP if ebgp_next_hop_self else None
+    )
+
     # IPv6 eBGP main group
     ebgp_v6_multiplier = (
         ebgp_peer_count_v6 - ebgp_peer_to_drain if drain else ebgp_peer_count_v6
@@ -597,6 +632,7 @@ def create_ebb_scale_basic_port_configs(
                             )
                         ],
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                        set_next_hop_type=_ebgp_set_next_hop,
                         start_index=0,
                         end_index=ebgp_v6_route_end_index,
                     )
@@ -646,6 +682,7 @@ def create_ebb_scale_basic_port_configs(
                                 )
                             ],
                             bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                            set_next_hop_type=_ebgp_set_next_hop,
                             start_index=ebgp_peer_count_v6 - ebgp_peer_to_drain,
                             end_index=ebgp_peer_count_v6,  # non-inclusive
                         )
@@ -699,6 +736,7 @@ def create_ebb_scale_basic_port_configs(
                             )
                         ],
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                        set_next_hop_type=_ebgp_set_next_hop,
                     )
                 ],
                 # Optional inline-generated spare IPv4 pool(s) advertised by these
@@ -751,6 +789,7 @@ def create_ebb_scale_basic_port_configs(
                                 )
                             ],
                             bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
+                            set_next_hop_type=_ebgp_set_next_hop,
                             start_index=ebgp_peer_count_v4 - ebgp_peer_to_drain,
                             end_index=ebgp_peer_count_v4,  # non-inclusive
                         )
@@ -794,6 +833,7 @@ def create_ebb_scale_basic_port_configs(
             drain_dg_v6_attribute_overrides=(
                 (plane_drain_dg_v6_attribute_overrides or {}).get(plane_num_int)
             ),
+            ibgp_next_hop_self=ibgp_next_hop_self,
         )
 
         interface_device_groups[interface].extend(plane_device_groups)

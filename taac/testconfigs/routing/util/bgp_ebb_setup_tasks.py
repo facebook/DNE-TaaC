@@ -30,6 +30,7 @@ from taac.constants import (
 from taac.task_definitions import (
     create_arista_create_file_from_config_task,
     create_arista_daemon_control_task,
+    create_configure_bgpcpp_startup_task,
     create_deploy_tls_certs_task,
     create_interface_ip_cleanup_task,
     create_interface_ip_configuration_task,
@@ -1201,6 +1202,16 @@ def get_common_setup_tasks(
     include_bgpcpp_deployment: bool = True,
     include_control_plane: bool = True,
     include_interface_ip_config: bool = True,
+    # When True, set the bgpcpp startup gflag
+    # ``bgp_resolve_nexthops_from_interface_state=true`` in run_bgpcpp.sh so the
+    # DUT resolves BGP next-hops from connected interface state instead of via
+    # Open/R / IGP. Pairs with ``ebgp_next_hop_self`` / ``ibgp_next_hop_self`` on
+    # the IXIA config (SAME_AS_LOCAL_IP): IXIA advertises next-hop = the peer's
+    # connected IP; this gflag lets the DUT install + re-advertise it under
+    # WITHOUT_OPEN_R. The flag task is inserted AFTER bgpcpp deployment and
+    # BEFORE the control-plane phase, so the control-plane Bgp restart picks it
+    # up. Default False -> no task appended -> byte-identical goldens.
+    resolve_nexthops_from_interface_state: bool = False,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1270,6 +1281,36 @@ def get_common_setup_tasks(
                 openr_configerator_path=openr_configerator_path,
                 enable_update_group=enable_update_group,
                 update_group_config=update_group_config,
+            )
+        )
+
+    # 2b. bgpcpp next-hop-resolution gflag (opt-in). Written over the managed
+    # device shell (netcastle reservation, no raw SSH) AFTER the config is on
+    # disk but BEFORE the control-plane phase -- the control-plane Bgp restart
+    # (POST_ACL_RESTART_DAEMONS) then reads run_bgpcpp.sh with the new flag, so
+    # no extra restart is needed. ixia_needed/set_outer_hostname match the
+    # sibling managed control-plane tasks for phasing parity.
+    #
+    # The flag is only meaningful when both prerequisites run: the bgpcpp
+    # deployment writes run_bgpcpp.sh (include_bgpcpp_deployment) and the
+    # control-plane phase restarts Bgp to read it (include_control_plane). Fail
+    # fast rather than write a flag that would be missing or never re-read.
+    if resolve_nexthops_from_interface_state and not (
+        include_bgpcpp_deployment and include_control_plane
+    ):
+        raise ValueError(
+            "resolve_nexthops_from_interface_state=True requires "
+            "include_bgpcpp_deployment=True (writes run_bgpcpp.sh) and "
+            "include_control_plane=True (the Bgp restart that reads the flag)"
+        )
+    if resolve_nexthops_from_interface_state:
+        setup_tasks.append(
+            create_configure_bgpcpp_startup_task(
+                hostname=device_name,
+                flags={"bgp_resolve_nexthops_from_interface_state": "true"},
+                use_managed_shell=True,
+                set_outer_hostname=True,
+                ixia_needed=True,
             )
         )
 

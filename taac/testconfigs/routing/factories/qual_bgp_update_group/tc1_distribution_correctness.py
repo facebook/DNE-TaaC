@@ -121,6 +121,18 @@ def build_bag_conveyor_test_config(
     # isolation uses this for genuinely-new IPv4 prefixes advertised at runtime.
     # None -> byte-identical for other callers.
     ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # Next-hop-self resolution knobs (opt-in). When set, IXIA advertises routes
+    # with next-hop = the peer's connected IP (SAME_AS_LOCAL_IP) and the DUT
+    # resolves them from interface state via the bgpcpp
+    # ``bgp_resolve_nexthops_from_interface_state`` gflag -- letting the DUT
+    # install + re-advertise routes under WITHOUT_OPEN_R (no Open/R daemon). The
+    # 2.9.1 best-path test enables all three so it can drive real eBGP->iBGP
+    # distribution without Open/R. All three must move together; setting the IXIA
+    # next-hop-self without the gflag (or vice versa) leaves the DUT unable to
+    # resolve. Default False on all -> byte-identical goldens for other callers.
+    ebgp_next_hop_self: bool = False,
+    ibgp_next_hop_self: bool = False,
+    resolve_nexthops_from_interface_state: bool = False,
 ) -> taac_types.TestConfig:
     """Shared bag conveyor topology TestConfig builder.
 
@@ -185,6 +197,7 @@ def build_bag_conveyor_test_config(
         profile=profile,
         include_bgp_mon=False,
         enable_update_group=enable_update_group,
+        resolve_nexthops_from_interface_state=resolve_nexthops_from_interface_state,
         **openr_kwargs,
     )
 
@@ -264,6 +277,8 @@ def build_bag_conveyor_test_config(
             profile=profile,
             ebgp_graceful_restart=ebgp_graceful_restart,
             ebgp_v4_extra_route_scales=ebgp_v4_extra_route_scales,
+            ebgp_next_hop_self=ebgp_next_hop_self,
+            ibgp_next_hop_self=ibgp_next_hop_self,
         ),
         playbooks=playbooks,
     )
