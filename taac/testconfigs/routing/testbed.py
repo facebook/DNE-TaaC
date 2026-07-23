@@ -182,12 +182,12 @@ BAG002_SNC1 = Testbed(
 BAG010_ASH6 = Testbed(
     device_name="bag010.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
+    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
     ixia_ports=[
-        ("Ethernet3/35/1", "1/49"),  # eBGP
-        ("Ethernet3/35/2", "1/50"),  # iBGP
-        ("Ethernet3/35/3", "1/51"),  # BGP-MON
+        ("Ethernet3/36/1", "7/1"),  # eBGP
+        ("Ethernet3/36/2", "7/2"),  # iBGP
+        ("Ethernet3/36/3", "7/3"),  # BGP-MON
     ],
     dut_bgp_as=65010,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
