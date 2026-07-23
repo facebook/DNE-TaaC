@@ -318,6 +318,9 @@ def create_verify_bgp_sent_route_count_delta_step(
     peer_parent_prefixes: t.Optional[t.List[str]] = None,
     max_delta: t.Optional[int] = None,
     tolerance: int = 0,
+    min_baseline: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Verify each peer's ``postpolicy_sent_prefix_count`` moved by the expected
@@ -350,6 +353,9 @@ def create_verify_bgp_sent_route_count_delta_step(
         max_delta: Optional maximum per-peer signed count change (inclusive).
         tolerance: Peers allowed to violate before the step fails
             (default 0 -- all must satisfy).
+        min_baseline: Skip peers whose snapshot-time (baseline) count is below
+            this -- e.g. peers not yet Established when the snapshot was taken
+            (default 0 -- check every peer).
         description: Optional custom description.
     """
     if (
@@ -393,6 +399,92 @@ def create_verify_bgp_sent_route_count_delta_step(
         params["peer_parent_prefixes"] = list(peer_parent_prefixes)
     if max_delta is not None:
         params["max_delta"] = max_delta
+    if min_baseline:
+        params["min_baseline"] = min_baseline
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_sent_route_counts_uniform_step(
+    hostname: str,
+    peer_addrs: t.Optional[t.List[str]] = None,
+    peer_group_filter: t.Optional[str] = None,
+    peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    min_count: int = 1,
+    max_spread: int = 0,
+    tolerance: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Verify every selected peer's ``postpolicy_sent_prefix_count`` is NON-ZERO
+    and UNIFORM (max-min spread <= ``max_spread``).
+
+    The UG-safe "all peers received the same route set / no peer is missing
+    routes" gate (spec 2.9.6 criteria 1-2, or any "route counts identical on all
+    peers" criterion). Reads the live PS gauge -- which works under Update Group --
+    NOT ``getPostfilterAdvertisedNetworks`` (vacuous under UG, T271301144), so it
+    cannot be fooled into a vacuous pass. Unlike the delta step this needs no prior
+    snapshot -- it queries the current counts and asserts uniformity directly.
+
+    Peers are selected by ``peer_parent_prefixes`` (subnets), ``peer_group_filter``
+    (peer-group substring), or ``peer_addrs`` (precedence in that order; at least
+    one required; a dynamic selector matching 0 sessions fails loudly).
+
+    Args:
+        hostname: Device hostname.
+        peer_addrs / peer_group_filter / peer_parent_prefixes: peer selection.
+        min_count: each peer's PS must be >= this -- a NON-ZERO floor that catches
+            a peer that received nothing (default 1).
+        max_spread: permitted (max - min) across peers; 0 = exactly equal.
+        tolerance: peers allowed to violate before the step fails (default 0).
+        expected_fail: mark XFAIL (logged loudly + non-fatal) for a documented
+            external uncertainty (e.g. the v6 cold-start next-hop-resolution
+            slowness); warns if it unexpectedly passes. Default False.
+        expected_fail_reason: reason surfaced in the XFAIL banner.
+        description: optional custom description.
+    """
+    if (
+        peer_addrs is None
+        and peer_group_filter is None
+        and peer_parent_prefixes is None
+    ):
+        raise ValueError(
+            "create_verify_bgp_sent_route_counts_uniform_step: pass peer_addrs, "
+            "peer_group_filter, or peer_parent_prefixes"
+        )
+    if description is None:
+        _who = (
+            f"peers under {peer_parent_prefixes}"
+            if peer_parent_prefixes
+            else f"peer-group ~{peer_group_filter!r}"
+            if peer_group_filter
+            else f"{len(peer_addrs or [])} peer(s)"
+        )
+        description = (
+            f"Verify BGP sent-count uniform (>= {min_count}, spread <= {max_spread}) "
+            f"on {_who} on {hostname} (tol={tolerance})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_sent_route_counts_uniform",
+        "hostname": hostname,
+        "min_count": min_count,
+        "max_spread": max_spread,
+        "tolerance": tolerance,
+    }
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
     return create_custom_step(params_dict=params, description=description)
 
 
