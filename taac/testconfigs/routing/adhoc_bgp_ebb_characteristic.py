@@ -18,7 +18,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 )
 from taac.testconfigs.routing.testbed import (
     BAG010_ASH6,
-    BAG012_ASH6_IXIA11,
+    BAG012_ASH6,
 )
 
 
@@ -38,15 +38,15 @@ BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 
 
 # ─── bag012.ash6 — Update Packing against ixia11 (Ethernet3/36) ───────────
-# Same test as BAG012_UPDATE_PACKING_TEST_CONFIG_UG but bound to the ixia11
-# testbed (Et3/36 -> ixia11 8/1-3) instead of the conveyor's ixia03 (Et3/35).
+# Same test as BAG012_UPDATE_PACKING_TEST_CONFIG_UG, with a distinct name for
+# existing ad-hoc callers. Both configs use BAG012_ASH6's canonical ixia11 wiring.
 # ``name_override`` gives it a distinct TestConfig.name; without it the factory
 # would derive ``BAG012_UPDATE_PACKING_TEST_CONFIG_UG`` from the shared
 # device_name and collide with the scheduled config. Ad-hoc: select via
 # ``--test-config BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG``; not on the
 # dne_routing conveyor.
 BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config(
-    BAG012_ASH6_IXIA11,
+    BAG012_ASH6,
     enable_update_group=True,
     name_override="BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
 )

@@ -107,12 +107,11 @@ class Testbed:
             )
 
 
-# ─── Shared private constants ─────────────────────────────────────────────
+# ─── Shared constants ─────────────────────────────────────────────────────
 
 _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
-_ASH6_IXIA_CHASSIS = "2401:db00:2066:303b::3001"
-_BAG_ASH6_PRIMARY_IXIA_CHASSIS = "2401:db00:2066:3036::3003"
-_BAG_ASH6_SECONDARY_IXIA_CHASSIS = _ASH6_IXIA_CHASSIS
+IXIA03_ASH6 = "2401:db00:2066:3036::3003"
+IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 
 
 # ─── Lab-wiring helpers (used by the ebXX.lab.ash6 + bgp.eb.test.ash6 boxes) ───
@@ -165,6 +164,8 @@ def _lab_oss_mock_device_data(
 
 
 # ─── BAG conveyor testbeds ────────────────────────────────────────────────
+# Each ASH6 BAG device has one canonical Testbed artifact. ``ixia_ports``
+# always describes the chassis selected by ``primary_ixia_chassis_ip``.
 
 BAG002_SNC1 = Testbed(
     device_name="bag002.snc1",
@@ -182,8 +183,8 @@ BAG002_SNC1 = Testbed(
 BAG010_ASH6 = Testbed(
     device_name="bag010.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
-    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
         ("Ethernet3/36/1", "7/1"),  # eBGP
         ("Ethernet3/36/2", "7/2"),  # iBGP
@@ -221,8 +222,8 @@ BAG010_ASH6 = Testbed(
 BAG011_ASH6 = Testbed(
     device_name="bag011.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA03_ASH6,
+    secondary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/35/1", "1/53"),  # eBGP
         ("Ethernet3/35/2", "1/54"),  # iBGP
@@ -267,12 +268,12 @@ BAG011_ASH6 = Testbed(
 BAG012_ASH6 = Testbed(
     device_name="bag012.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
-        ("Ethernet3/35/1", "1/57"),  # eBGP
-        ("Ethernet3/35/2", "1/58"),  # iBGP
-        ("Ethernet3/35/3", "1/59"),  # BGP-MON
+        ("Ethernet3/36/1", "8/1"),  # eBGP
+        ("Ethernet3/36/2", "8/2"),  # iBGP
+        ("Ethernet3/36/3", "8/3"),  # BGP-MON
     ],
     dut_bgp_as=65012,
     # bag012 is the only bag testbed that pins ``router_id`` explicitly
@@ -310,38 +311,15 @@ BAG012_ASH6 = Testbed(
     },
 )
 
-# bag012.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
-# the default primary (ixia03). Same physical DUT as BAG012_ASH6, but the
-# update-packing factory reads ``ixia_chassis_ip`` (== primary), so ixia11 is
-# selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip`` and the
-# Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports 8/1-3) in
-# ``ixia_ports``. Ad-hoc: resolvable via ``--test-config`` (see
-# adhoc_bgp_ebb_characteristic.py); NOT scheduled on a dne_routing conveyor node.
-BAG012_ASH6_IXIA11 = Testbed(
-    device_name="bag012.ash6",
-    usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
-    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
-    ixia_ports=[
-        ("Ethernet3/36/1", "8/1"),  # eBGP
-        ("Ethernet3/36/2", "8/2"),  # iBGP
-        ("Ethernet3/36/3", "8/3"),  # BGP-MON
-    ],
-    dut_bgp_as=65012,
-    router_id="10.163.28.11",
-    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
-    peer_groups=ebb_peer_groups(),
-)
-
 BAG013_ASH6 = Testbed(
     device_name="bag013.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
-        ("Ethernet3/35/1", "1/61"),  # eBGP
-        ("Ethernet3/35/2", "1/62"),  # iBGP
-        ("Ethernet3/35/3", "1/63"),  # BGP-MON
+        ("Ethernet3/36/1", "8/5"),  # eBGP
+        ("Ethernet3/36/2", "8/6"),  # iBGP
+        ("Ethernet3/36/3", "8/7"),  # BGP-MON
     ],
     dut_bgp_as=65013,
     # No ``router_id`` — device-default (same as bag010/bag011; see BAG012_ASH6 note).
@@ -372,50 +350,6 @@ BAG013_ASH6 = Testbed(
         },
     },
 )
-
-# bag013.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
-# the default primary (ixia03). Same physical DUT as BAG013_ASH6; the tc1
-# distribution-correctness builder reads ``ixia_chassis_ip`` (== primary), so
-# ixia11 is selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip``
-# and the Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports
-# 8/5-7) in ``ixia_ports``. Needs 3 ports: the tc1 bag013 branch uses
-# ixia_ports[2] (BGP-MON) as the pcap-capture handle. Ad-hoc: resolvable via
-# ``--test-config``; NOT scheduled on a dne_routing conveyor node.
-BAG013_ASH6_IXIA11 = Testbed(
-    device_name="bag013.ash6",
-    usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,  # ixia11 (303b::3001)
-    secondary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,  # ixia03 (3036::3003)
-    ixia_ports=[
-        ("Ethernet3/36/1", "8/5"),  # eBGP
-        ("Ethernet3/36/2", "8/6"),  # iBGP
-        ("Ethernet3/36/3", "8/7"),  # BGP-MON
-    ],
-    dut_bgp_as=65013,
-    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
-    openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
-    peer_groups=ebb_peer_groups(),
-    extras={
-        "openr_port_channel_member": "Ethernet3/9/1",
-        "openr_port_channel_ipv4": "10.131.97.232/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
-        "openr_local_link": {
-            "ipv4": "10.131.97.232",
-            "ipv6": "fe80::eba:a7f:fcfc",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.233",
-            "ipv6": "fe80::eba:a7f:fcfd",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
-)
-
 
 # ─── CTE UCMP testbeds ────────────────────────────────────────────────────
 # Wave 2C — CTE UCMP feature testconfigs (moved from testconfigs/routing/
@@ -454,7 +388,7 @@ CTE_UCMP_STAND_ALONE_TESTBED = Testbed(
 EB01_LAB_ASH6 = Testbed(
     usage=frozenset({"qual"}),
     device_name="eb01.lab.ash6",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "5/7"),  # eBGP
         ("Ethernet3/1/5", "5/8"),  # iBGP
@@ -487,7 +421,7 @@ EB01_LAB_ASH6 = Testbed(
 EB02_LAB_ASH6 = Testbed(
     usage=frozenset({"qual"}),
     device_name="eb02.lab.ash6",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "6/2"),  # eBGP
         ("Ethernet3/1/5", "6/3"),  # iBGP
@@ -520,7 +454,7 @@ EB02_LAB_ASH6 = Testbed(
 EB03_LAB_ASH6 = Testbed(
     usage=frozenset({"qual"}),
     device_name="eb03.lab.ash6",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "6/5"),  # eBGP
         ("Ethernet3/1/5", "6/6"),  # iBGP
@@ -553,7 +487,7 @@ EB03_LAB_ASH6 = Testbed(
 EB04_LAB_ASH6 = Testbed(
     usage=frozenset({"qual"}),
     device_name="eb04.lab.ash6",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/1", "6/7"),  # eBGP
         ("Ethernet3/1/3", "6/8"),  # iBGP
@@ -594,7 +528,7 @@ EB04_LAB_ASH6 = Testbed(
 EB_TEST_DEVICE = Testbed(
     usage=frozenset({"qual"}),
     device_name="bgp.eb.test.ash6",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/5", "5/3"),  # eBGP
         ("Ethernet3/1/3", "5/2"),  # iBGP
@@ -690,7 +624,7 @@ FA001_UU001_QZD1 = Testbed(
 FSW001_QZB = Testbed(
     usage=frozenset({"adhoc"}),
     device_name="fsw001.p003.f01.qzb1",
-    primary_ixia_chassis_ip=_ASH6_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("eth7/1/1", "1/7"),  # eBGP
         ("eth7/3/1", "1/8"),  # iBGP

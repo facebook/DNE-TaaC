@@ -41,7 +41,6 @@ from taac.testconfigs.routing.testbed import (
     BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,
-    BAG013_ASH6_IXIA11,
     EB03_LAB_ASH6,
 )
 
@@ -53,16 +52,14 @@ BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG = (
 EB03_LAB_ASH6_BGP_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ug_distribution_correctness_test_config(EB03_LAB_ASH6)
 )
-# ixia11 variant of the bag013 2.1.1 config (Ethernet3/36 -> ixia11 8/5-7)
-# instead of the default ixia03 (Ethernet3/35). ``name_override`` gives it a
-# distinct TestConfig.name; without it the bag013 branch hardcodes
-# BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST and would collide.
-# Ad-hoc: select via
+# Existing ixia11-named variant retained for ad-hoc callers. Both configs use
+# BAG013_ASH6's canonical ixia11 wiring; ``name_override`` prevents a name
+# collision with the standard config. Select via
 # ``--test-config BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST``;
 # not on the dne_routing conveyor.
 BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG = (
     create_bgp_ug_distribution_correctness_test_config(
-        BAG013_ASH6_IXIA11,
+        BAG013_ASH6,
         name_override="BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST",
     )
 )

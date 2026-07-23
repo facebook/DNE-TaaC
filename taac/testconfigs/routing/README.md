@@ -232,21 +232,25 @@ If the factory uses `peer_groups["fsw_ssw_v6"]`, it's coupled to FSW-family DUTs
 
 Append an instance to `testbed.py`. Populate flat identity fields; populate the named dicts with role keys your factories will look up. Leave anything that doesn't apply empty/None.
 
+Define one canonical `Testbed` artifact per physical DUT. Chassis-specific
+variants belong in the artifact's primary/secondary chassis fields, not in
+additional objects such as `BAG012_ASH6_IXIA11`.
+
 ```python
 # --- Shared constants at top of testbed.py ---
 _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
-_BAG_ASH6_PRIMARY_IXIA_CHASSIS = "2401:db00:2066:3036::3003"
-_BAG_ASH6_SECONDARY_IXIA_CHASSIS = "2401:db00:2066:303b::3001"
+IXIA03_ASH6 = "2401:db00:2066:3036::3003"
+IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 
 # --- EBB testbed ---
 BAG013_ASH6 = Testbed(
     device_name="bag013.ash6",
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
-        ("Ethernet3/35/1", "1/61"),
-        ("Ethernet3/35/2", "1/62"),
-        ("Ethernet3/35/3", "1/63"),
+        ("Ethernet3/36/1", "8/5"),
+        ("Ethernet3/36/2", "8/6"),
+        ("Ethernet3/36/3", "8/7"),
     ],
     dut_bgp_as=65013,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
@@ -256,12 +260,12 @@ BAG013_ASH6 = Testbed(
 
 BAG012_ASH6 = Testbed(
     device_name="bag012.ash6",
-    primary_ixia_chassis_ip=_BAG_ASH6_PRIMARY_IXIA_CHASSIS,
-    secondary_ixia_chassis_ip=_BAG_ASH6_SECONDARY_IXIA_CHASSIS,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
-        ("Ethernet3/35/1", "1/57"),
-        ("Ethernet3/35/2", "1/58"),
-        ("Ethernet3/35/3", "1/59"),
+        ("Ethernet3/36/1", "8/1"),
+        ("Ethernet3/36/2", "8/2"),
+        ("Ethernet3/36/3", "8/3"),
     ],
     dut_bgp_as=65012,
     router_id="10.163.28.11",
