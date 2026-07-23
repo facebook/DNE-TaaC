@@ -6,10 +6,11 @@ Implemented:
 - 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
 - 2.9.2 Simultaneous Disruptions Across All Groups
 - 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
+- 2.9.6 Staggered Peer Startup: Peers Coming Up at Different Times
 
 The remaining section-2.9 scenarios (2.9.1 best-path-change, 2.9.3 NOTIFICATION
-isolation, 2.9.6 staggered startup) land as their own factory functions here when
-implemented. Spec 2.9.5 is struck-through / excluded in the qualification plan.
+isolation) land as their own factory functions here when implemented. Spec 2.9.5
+is struck-through / excluded in the qualification plan.
 """
 
 import typing as t
@@ -34,8 +35,10 @@ from taac.steps.step_definitions import (
     create_run_task_step,
     create_set_bgp_prefixes_local_preference_step,
     create_snapshot_bgp_sent_route_counts_step,
+    create_start_stop_bgp_peers_step,
     create_validation_step,
     create_verify_bgp_sent_route_count_delta_step,
+    create_verify_bgp_sent_route_counts_uniform_step,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     BGP_STANDARD_POSTCHECKS,
@@ -1573,6 +1576,597 @@ def create_bgp_ug_dual_stack_isolation_playbook(
 
     return Playbook(
         name="bgp_ug_dual_stack_isolation",
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+# =============================================================================
+# 2.9.6 Staggered Peer Startup: Peers Coming Up at Different Times
+# =============================================================================
+#
+# The spec brings eBGP peers up in THREE staggered waves (50 -> +100 -> +130, with
+# 2-min gaps) on top of a stable iBGP route source, injects new iBGP routes between
+# waves, and verifies that late-joining peers still receive the full accumulated
+# initial dump, all eBGP peers converge to identical route sets, runtime
+# distribution reaches everyone, nothing crashes, and no routes go stale.
+#
+# TOPOLOGY REALIZATION (documented deviation): the EBB full-scale IXIA topology has
+# 140 eBGP sessions PER AFI in one peer object per AFI (BGP_PEER_IPV4_EBGP /
+# BGP_PEER_IPV6_EBGP), NOT 280 in
+# a single pool. The spec's 50/100/130 waves are realized as SYMMETRIC per-AFI
+# session-index ranges applied to the combined v4+v6 eBGP regex (``start_bgp_peers``
+# ``SessionIndices``, 1-based inclusive): 25/AFI -> 50/AFI -> 65/AFI = 50 -> 100 ->
+# 130 combined, 280 total. "Route counts identical across all eBGP peers" is
+# therefore a PER-AFI statement (v4 peers carry v4 routes, v6 peers v6 routes --
+# cross-AFI counts differ by construction).
+#
+# DISTRIBUTION IS STRICT (both AFIs): all three spec pass-criteria are DUT->eBGP
+# adj-RIB-out, read via the ``postpolicy_sent_prefix_count`` ("PS") gauge. With
+# next-hop-self resolution (WITHOUT_OPEN_R + the bgpcpp interface-state gflag,
+# D113330327) the iBGP next-hops resolve, the DUT installs + re-advertises, and the
+# DUT->eBGP PS is HW-observed. The PS-gauge path is used rather than
+# ``getPostfilterAdvertisedNetworks`` (SET equality) because the latter is vacuous
+# under an Update Group (T271301144). The playbook ASSERTS, per eBGP peer:
+#   * Criterion 1 (late waves get the accumulated dump): each between-wave inject
+#     uses a genuinely-new dedicated pool, so the eBGP v4 count grows measurably; a
+#     +total_wave_inject PS DELTA since the wave-1 baseline (``staggered_accum_baseline``)
+#     proves the injected-before-they-joined routes reached the peers, and the uniform
+#     check then proves the late waves share that grown total.
+#   * Criteria 1-2 (identical counts across all peers): a non-zero, UNIFORM PS at
+#     steady state (``verify_bgp_sent_route_counts_uniform``) -- v4 AND v6.
+#   * Criterion 3 (runtime distribution reaches ALL 280): a per-peer +N PS DELTA after
+#     a runtime inject of a genuinely-new dedicated pool -- one per AFI (v4 pool -> v4
+#     peers, v6 pool -> v6 peers), so both eBGP AFIs are covered.
+# All HW-validated on bag013 2026-07-23. The eBGP IPv6 next-hop (connected /127) can
+# resolve slowly on a fresh cold-start (~30-90 min -- Appendix B); if a future fresh
+# build regresses on the v6 uniform check, set ``v6_distribution_expected_fail`` to
+# XFAIL it. What also lands: the wave orchestration; the eBGP UG MEMBERSHIP growing
+# 25->75->140/AFI across the waves (structural proof that late peers join and attach);
+# iBGP stays Established throughout; no crash per wave; and no stale routes (postcheck).
+#
+# Genuinely-new dedicated pools are required because the existing plane iBGP CSV pools
+# share NLRI across all four planes -- a plane-1 withdraw/re-advertise is a no-op at
+# the eBGP egress. So each measurable inject (two between-wave v4 pools + one v4 + one
+# v6 final pool) has UNIQUE NLRI in its AFI's EB-PRIVATE accept aggregate.
+
+
+def create_bgp_ug_staggered_startup_playbook(
+    *,
+    device_name: str,
+    ebgp_peer_regex: str,
+    ibgp_peer_regex: str,
+    ibgp_v6_peer_group: str,
+    ebgp_v4_peer_group: str,
+    ebgp_v6_peer_group: str,
+    # Waves: (start_idx, end_idx) 1-based inclusive ``SessionIndices`` applied to
+    # BOTH AFI eBGP peers via the combined regex. ``cumulative_members_per_afi[i]``
+    # is the eBGP UG member count PER AFI expected once wave ``i`` has come up.
+    waves: t.List[t.Tuple[int, int]],
+    cumulative_members_per_afi: t.List[int],
+    # Scopes the "iBGP stays Established" checks to iBGP while eBGP is only partially
+    # up (the eBGP v4/v6 + BGP-MON parent networks to ignore).
+    non_ibgp_parent_prefixes: t.List[str],
+    # Between-wave dump-growth inject pools -- ONE dedicated, genuinely-new v4 pool
+    # per wave gap (len == len(waves) - 1), each with UNIQUE NLRI so its advertise is
+    # a MEASURABLE +N at the eBGP egress (spec step 5 / criterion 1: late waves get
+    # the accumulated dump). Advertised WHOLE after each wave (RouteScale pools toggle
+    # Active whole-pool, not per-index) and withdrawn at Stage 1 so each advertise is
+    # genuinely new.
+    ibgp_wave_inject_pool_regexes: t.List[str],
+    inject_per_wave: int = 100,
+    final_inject_count: int = 50,
+    # Dedicated criterion-3 runtime inject pools: genuinely-new pools with UNIQUE NLRI
+    # so the runtime +N is measurable at the eBGP egress. v4 + v6 (one each) so
+    # criterion 3 covers ALL eBGP peers (spec step 6 / criterion 3: "all 280 receive").
+    # Advertised WHOLE ([0, final_inject_count)). None -> skip that AFI's criterion 3.
+    ibgp_runtime_inject_pool_regex: t.Optional[str] = None,
+    ibgp_v6_runtime_inject_pool_regex: t.Optional[str] = None,
+    # eBGP peer selection (by peer-address subnet) for the STRICT distribution
+    # verifies: all eBGP peers non-zero + uniform (criteria 1-2) and the runtime
+    # +N delta (criterion 3). None -> skip that AFI. Both v4 and v6 are verified
+    # STRICTLY (HW-validated on bag013 2026-07-23).
+    ebgp_v4_peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    ebgp_v6_peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    # Per-peer count window (uniform spread + runtime +N delta) and how many peers
+    # may fall outside before the check fails (absorbs a few slow-converging peers
+    # at ~140-peer/AFI scale).
+    distribution_count_window: int = 10,
+    distribution_tolerance: int = 3,
+    # ESCAPE HATCH (default off -> v6 STRICT): the eBGP v6 next-hop (connected /127)
+    # can resolve slowly on a fresh cold build (Appendix B). If a future fresh build
+    # regresses on the v6 uniform check, set this True to XFAIL v6 instead of failing.
+    v6_distribution_expected_fail: bool = False,
+    v6_distribution_expected_fail_reason: t.Optional[str] = None,
+    # --- Checks ---
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    bgp_mon_ignore_prefixes: t.Optional[t.List[str]] = None,
+    # --- Timing / sessions / gates ---
+    wave_gap_s: int = 120,
+    settle_after_flap_s: int = 90,
+    ibgp_source_settle_s: int = 120,
+    inject_settle_s: int = 30,
+    session_retry_count: int = 10,
+    session_retry_delay_s: float = 30.0,
+    load_avg_baseline: float = 12.0,
+    vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.9.6 playbook (Staggered Peer
+    Startup -- peers coming up at different times).
+
+    Intent (spec 2.9.6): Update Group must handle eBGP peers coming up at staggered
+    intervals -- early peers receive routes immediately, and late-joining peers get
+    a full initial dump of everything accumulated before they came up; once all are
+    up every eBGP peer has an identical route set and runtime distribution reaches
+    all; no crash, no stale routes.
+
+    Flow:
+      0. Pre-condition 1 ("no established sessions at start"): stop ALL eBGP + iBGP
+         sessions, settle, assert 0 Established (excl the never-emulated BGP-MON).
+         (The framework precheck validates baseline health post-setup; this stage
+         is the literal "start from no sessions" pre-condition -- the same
+         start-from-a-known-state pattern as 2.9.7.)
+      1. Bring the iBGP peers UP first as the stable route source, then withdraw every
+         dedicated inject pool (a LIVE withdraw, so each between-wave / final inject
+         re-advertises genuinely-new routes); assert iBGP Established + iBGP update
+         group formed + no crash.
+      2. Bring eBGP up in staggered waves (``waves``). After each wave's
+         ``wave_gap_s`` gap, assert no crash; iBGP still Established (scoped by
+         ``non_ibgp_parent_prefixes`` since eBGP is only partially up); and the eBGP
+         update group grew to the expected cumulative member count PER AFI
+         (``cumulative_members_per_afi`` -- the structural proof that the late peers
+         joined and attached). Snapshot the eBGP v4 baseline at wave 1; between waves,
+         inject ``inject_per_wave`` genuinely-new iBGP routes from that gap's dedicated
+         pool so later waves receive a larger accumulated initial dump.
+      3. All peers up: assert every eBGP peer Established + attached (full per-AFI UG
+         membership); ASSERT criterion 1 (eBGP v4 count grew by the accumulated
+         between-wave injects since wave 1); ASSERT criteria 1-2 (every eBGP peer, both
+         AFIs, has a non-zero UNIFORM PS -- late-wave peers caught up, no peer missing
+         routes); inject ``final_inject_count`` genuinely-new routes per AFI and ASSERT
+         criterion 3 (every eBGP peer of that AFI grew by ~N -- all 280 covered); no
+         crash.
+
+    Distribution (spec pass-criteria 1-3) is STRICT on BOTH AFIs: criterion 1 via a
+    per-peer +N accumulation delta (the between-wave injects use dedicated genuinely-new
+    pools) plus the uniform check; criteria 1-2 via a per-peer PS-gauge uniform check
+    (v4 + v6); criterion 3 via a per-peer +N delta after a runtime inject of a
+    genuinely-new pool per AFI (v4 + v6 -> all 280 eBGP peers). All HW-validated on
+    bag013 2026-07-23. The v6 uniform check has an escape hatch
+    (``v6_distribution_expected_fail``) for the cold-start next-hop slowness (Appendix
+    B), off by default. Also landing: the wave orchestration + UG-membership growth +
+    iBGP-stays-up + no-crash + no-stale (postcheck). See the module comment above.
+    """
+    if not waves:
+        raise ValueError("2.9.6: waves must be a non-empty list of (start, end) ranges")
+    if len(cumulative_members_per_afi) != len(waves):
+        raise ValueError(
+            "2.9.6: cumulative_members_per_afi must have one entry per wave "
+            f"(got {len(cumulative_members_per_afi)} counts for {len(waves)} waves)"
+        )
+    num_gaps = len(waves) - 1
+    if len(ibgp_wave_inject_pool_regexes) != num_gaps:
+        raise ValueError(
+            "2.9.6: need one between-wave inject pool per wave gap "
+            f"(got {len(ibgp_wave_inject_pool_regexes)} pools for {num_gaps} gaps)"
+        )
+    # Total between-wave routes injected across all gaps (the accumulated dump growth
+    # a late-joining wave must receive -- criterion 1).
+    total_wave_inject = inject_per_wave * num_gaps
+
+    # Every dedicated genuinely-new inject pool, with its whole-pool size. All start
+    # Active (inline RouteScale) and are withdrawn at Stage 1 so each later advertise
+    # is a genuine +N: the per-wave dump-growth pools, plus the v4 + v6 final pools.
+    _dedicated_inject_pools: t.List[t.Tuple[str, int]] = [
+        (regex, inject_per_wave) for regex in ibgp_wave_inject_pool_regexes
+    ]
+    if ibgp_runtime_inject_pool_regex is not None:
+        _dedicated_inject_pools.append(
+            (ibgp_runtime_inject_pool_regex, final_inject_count)
+        )
+    if ibgp_v6_runtime_inject_pool_regex is not None:
+        _dedicated_inject_pools.append(
+            (ibgp_v6_runtime_inject_pool_regex, final_inject_count)
+        )
+
+    def _ibgp_up_check(check_id: str) -> PointInTimeHealthCheck:
+        """iBGP sessions stay Established while eBGP is (partially) down -- scoped
+        to iBGP by ignoring the eBGP + BGP-MON parents. Retries absorb full-scale
+        convergence timing."""
+        return create_bgp_session_establish_check(
+            parent_prefixes_to_ignore=non_ibgp_parent_prefixes,
+            retry_count=session_retry_count,
+            retry_delay_seconds=session_retry_delay_s,
+            check_id=check_id,
+        )
+
+    stages = [
+        # Stage 0 -- pre-condition 1: no established sessions at the start.
+        create_steps_stage(
+            steps=[
+                _flap_bgp_peers(
+                    peer_regex=ebgp_peer_regex,
+                    start=False,
+                    description="2.9.6 setup -- stop ALL eBGP sessions",
+                ),
+                _flap_bgp_peers(
+                    peer_regex=ibgp_peer_regex,
+                    start=False,
+                    description="2.9.6 setup -- stop ALL iBGP sessions",
+                ),
+                create_longevity_step(
+                    duration=settle_after_flap_s,
+                    description="2.9.6 setup -- settle after stopping all sessions",
+                ),
+                create_validation_step(
+                    point_in_time_checks=[
+                        *_no_crash_checks(),
+                        create_bgp_session_establish_check(
+                            expected_established_sessions=0,
+                            parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+                            check_id="staggered_precond_no_sessions",
+                        ),
+                    ],
+                    description=(
+                        "2.9.6 pre-condition 1 -- no established BGP sessions at "
+                        "the start of the test (all stopped)"
+                    ),
+                ),
+            ],
+        ),
+        # Stage 1 -- bring iBGP UP first as the stable route source.
+        create_steps_stage(
+            steps=[
+                _flap_bgp_peers(
+                    peer_regex=ibgp_peer_regex,
+                    start=True,
+                    description=(
+                        "2.9.6 -- bring iBGP peers UP first (stable route source "
+                        "for the staggered eBGP dump)"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=ibgp_source_settle_s,
+                    description="2.9.6 -- settle after bringing iBGP up",
+                ),
+                # Withdraw every dedicated inject pool now that iBGP is UP (a LIVE
+                # withdraw, the proven 2.9.4 pattern) so each wave/final advertise is a
+                # genuinely-new +N at the eBGP egress. Inline RouteScale pools start
+                # Active and toggle whole-pool, so withdraw each one whole. wave 0 comes
+                # up after this seeing the reduced baseline; each later inject then
+                # re-advertises a measurable +N (wave gaps +100 each, finals +50).
+                *[
+                    create_advertise_withdraw_prefixes_step(
+                        device_name=device_name,
+                        advertise=False,
+                        prefix_pool_regex=regex,
+                        prefix_start_index=0,
+                        prefix_end_index=count,
+                        description=(
+                            f"2.9.6 -- withdraw dedicated inject pool [0, {count}) "
+                            f"so its later advertise is a genuinely-new +N"
+                        ),
+                    )
+                    for regex, count in _dedicated_inject_pools
+                ],
+                create_longevity_step(
+                    duration=inject_settle_s,
+                    description="2.9.6 -- settle after withdrawing the inject range",
+                ),
+                create_validation_step(
+                    point_in_time_checks=[
+                        *_no_crash_checks(),
+                        _ibgp_up_check("staggered_ibgp_source_up"),
+                        create_bgp_update_group_check(
+                            expect_enabled=True,
+                            peer_group_substrings=[ibgp_v6_peer_group],
+                            check_id="staggered_ibgp_ug_formed",
+                        ),
+                    ],
+                    description=(
+                        "2.9.6 -- iBGP source up: iBGP sessions Established, iBGP "
+                        "update group formed, no crash"
+                    ),
+                ),
+            ],
+        ),
+    ]
+
+    # Stage 2 -- staggered eBGP waves. After each wave settles, assert the eBGP
+    # update group grew to the expected cumulative member count PER AFI (structural
+    # proof the late peers joined + attached), iBGP is still up, and nothing
+    # crashed. Between waves, inject new iBGP routes so later waves receive a larger
+    # accumulated initial dump.
+    for i, (start_idx, end_idx) in enumerate(waves):
+        cum = cumulative_members_per_afi[i]
+        wave_no = i + 1
+        wave_steps: t.List[Step] = [
+            create_start_stop_bgp_peers_step(
+                peer_regex=ebgp_peer_regex,
+                start=True,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                description=(
+                    f"2.9.6 wave {wave_no}/{len(waves)} -- bring up eBGP sessions "
+                    f"[{start_idx}, {end_idx}] per AFI"
+                ),
+            ),
+            create_longevity_step(
+                duration=wave_gap_s,
+                description=(
+                    f"2.9.6 wave {wave_no} -- {wave_gap_s}s gap for the new peers "
+                    f"to receive their initial dump"
+                ),
+            ),
+            create_validation_step(
+                point_in_time_checks=[
+                    *_no_crash_checks(),
+                    _ibgp_up_check(f"staggered_wave{wave_no}_ibgp_up"),
+                    create_bgp_update_group_check(
+                        expect_enabled=True,
+                        peer_group_substrings=[
+                            ebgp_v4_peer_group,
+                            ebgp_v6_peer_group,
+                            ibgp_v6_peer_group,
+                        ],
+                        expected_member_counts={
+                            ebgp_v4_peer_group: cum,
+                            ebgp_v6_peer_group: cum,
+                        },
+                        check_id=f"staggered_wave{wave_no}_ug_membership",
+                    ),
+                ],
+                description=(
+                    f"2.9.6 wave {wave_no} -- eBGP update group grew to {cum} "
+                    f"members/AFI (late peers joined + attached); iBGP up; no crash"
+                ),
+            ),
+        ]
+        # Snapshot the eBGP v4 baseline ONCE, when the first wave is up but before any
+        # between-wave inject -- the reference for the criterion-1 accumulation delta
+        # at all-up (the count must grow by total_wave_inject as the injects land, and
+        # the uniform check then proves late-wave peers share that grown total).
+        if i == 0 and ebgp_v4_peer_parent_prefixes is not None:
+            wave_steps.append(
+                create_snapshot_bgp_sent_route_counts_step(
+                    hostname=device_name,
+                    snapshot_key="staggered_accum_baseline",
+                    peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+                    description=(
+                        "2.9.6 criterion 1 -- snapshot eBGP v4 PS at wave 1 (baseline "
+                        "for the between-wave accumulation delta)"
+                    ),
+                )
+            )
+        # Inject the between-wave routes AFTER this wave (feeds the NEXT wave's larger
+        # dump) from this gap's DEDICATED unique-NLRI pool, advertised WHOLE so the +N
+        # is measurable at the eBGP egress. The last wave has no between-wave inject
+        # (the final runtime inject is separate, in Stage 3).
+        if i < num_gaps:
+            wave_steps.extend(
+                [
+                    create_advertise_withdraw_prefixes_step(
+                        device_name=device_name,
+                        advertise=True,
+                        prefix_pool_regex=ibgp_wave_inject_pool_regexes[i],
+                        prefix_start_index=0,
+                        prefix_end_index=inject_per_wave,
+                        description=(
+                            f"2.9.6 wave {wave_no} -- inject {inject_per_wave} "
+                            f"genuinely-new iBGP routes (dedicated pool, whole) before "
+                            f"the next wave: later peers get a larger accumulated dump"
+                        ),
+                    ),
+                    create_longevity_step(
+                        duration=inject_settle_s,
+                        description=(
+                            f"2.9.6 wave {wave_no} -- settle after injecting iBGP routes"
+                        ),
+                    ),
+                ]
+            )
+        stages.append(create_steps_stage(steps=wave_steps))
+
+    # Stage 3 -- all peers up: full membership + STRICT distribution verifies
+    # (accumulation delta + per-AFI uniform + per-AFI runtime +N) + no crash.
+    steady_state_steps: t.List[Step] = [
+        create_validation_step(
+            point_in_time_checks=[
+                *_no_crash_checks(),
+                create_bgp_session_establish_check(
+                    parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+                    retry_count=session_retry_count,
+                    retry_delay_seconds=session_retry_delay_s,
+                    check_id="staggered_all_up_sessions",
+                ),
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    peer_group_substrings=[
+                        ebgp_v4_peer_group,
+                        ebgp_v6_peer_group,
+                        ibgp_v6_peer_group,
+                    ],
+                    expected_member_counts={
+                        ebgp_v4_peer_group: cumulative_members_per_afi[-1],
+                        ebgp_v6_peer_group: cumulative_members_per_afi[-1],
+                    },
+                    check_id="staggered_all_up_ug_membership",
+                ),
+            ],
+            description=(
+                "2.9.6 -- all waves up: every eBGP peer Established + attached "
+                "(full eBGP UG membership per AFI); iBGP up; no crash"
+            ),
+        ),
+    ]
+    # --- Criterion 1 (late-wave peers receive the FULL accumulated dump, INCLUDING
+    # routes injected before they came up) -- MEASURABLE: the between-wave injects
+    # used genuinely-new dedicated pools, so the eBGP v4 count must have grown by
+    # ~total_wave_inject since the wave-1 baseline. The baseline is snapshotted at
+    # wave 1 when only the FIRST wave is up, so ``min_baseline=1`` restricts the delta
+    # to the wave-1 cohort (peers with a real baseline) -- the later waves were down
+    # then (baseline 0) and would otherwise show a spurious whole-RIB delta. Those
+    # late joiners are covered by the uniform check below (all peers identical), which
+    # together with this delta proves the late waves also received the accumulated
+    # dump, not merely a bare baseline.
+    if ebgp_v4_peer_parent_prefixes is not None and total_wave_inject > 0:
+        steady_state_steps.append(
+            create_verify_bgp_sent_route_count_delta_step(
+                hostname=device_name,
+                snapshot_key="staggered_accum_baseline",
+                peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+                min_delta=max(1, total_wave_inject - distribution_count_window),
+                max_delta=total_wave_inject + distribution_count_window,
+                tolerance=distribution_tolerance,
+                min_baseline=1,
+                description=(
+                    f"2.9.6 criterion 1 -- the wave-1 eBGP v4 peers' count grew by "
+                    f"~{total_wave_inject}: the between-wave injects reached the peers "
+                    f"(uniform check proves late waves share the accumulated dump)"
+                ),
+            )
+        )
+    # --- Criteria 1 & 2 (late-wave peers received the full initial dump; route
+    # counts identical on all eBGP peers) -- STRICT: every eBGP peer's PS is
+    # non-zero and UNIFORM (spread <= distribution_count_window). Asserted at steady
+    # state, after the staggered dump + between-wave injects settle, so a late peer
+    # missing routes would show a lower count. BOTH AFIs STRICT (v4 + v6, HW-validated
+    # bag013 2026-07-23); the v6 check keeps an escape hatch (default off) for the
+    # cold-start next-hop slowness (Appendix B).
+    if ebgp_v4_peer_parent_prefixes is not None:
+        steady_state_steps.append(
+            create_verify_bgp_sent_route_counts_uniform_step(
+                hostname=device_name,
+                peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+                min_count=1,
+                max_spread=distribution_count_window,
+                tolerance=distribution_tolerance,
+                description=(
+                    "2.9.6 criteria 1-2 -- every eBGP v4 peer has a NON-ZERO, "
+                    "UNIFORM route count (late-wave peers caught up; no peer "
+                    "missing routes)"
+                ),
+            )
+        )
+    if ebgp_v6_peer_parent_prefixes is not None:
+        steady_state_steps.append(
+            create_verify_bgp_sent_route_counts_uniform_step(
+                hostname=device_name,
+                peer_parent_prefixes=ebgp_v6_peer_parent_prefixes,
+                min_count=1,
+                max_spread=distribution_count_window,
+                tolerance=distribution_tolerance,
+                expected_fail=v6_distribution_expected_fail,
+                expected_fail_reason=v6_distribution_expected_fail_reason,
+                description=(
+                    "2.9.6 criteria 1-2 (v6) -- every eBGP v6 peer has a NON-ZERO, "
+                    "UNIFORM route count (STRICT; escape hatch off)"
+                ),
+            )
+        )
+    # --- Criterion 3 (runtime distribution reaches ALL 280 eBGP peers, spec step 6):
+    # after all peers are up, inject genuinely-new routes from a DEDICATED unique-NLRI
+    # pool per AFI (advertised WHOLE, accept communities -> re-advertised iBGP->eBGP)
+    # and assert EVERY eBGP peer of that AFI RECEIVED them -- its PS grew by AT LEAST
+    # ~final_inject_count. Both AFIs are covered (v4 pool -> v4 peers, v6 pool -> v6
+    # peers). NO upper cap on the delta: the criterion is "all peers receive the routes"
+    # (spec step 6), and the DUT may re-advertise a given AFI's EB-PRIVATE range with
+    # expansion -- HW-observed on bag013 2026-07-23: a 50-prefix v6 inject re-advertised
+    # as a UNIFORM +111 to all 140 v6 peers (v4 was exactly +50). The uniform delta =
+    # every peer received it; the exact multiple is a DUT v6 re-advertisement detail,
+    # not a distribution failure. ``min_delta`` is floored at 1 so it never degrades to
+    # "grew by >= 0". An AFI is skipped only if its peer scope or inject pool is None.
+    for afi_label, afi_parents, afi_pool in (
+        ("v4", ebgp_v4_peer_parent_prefixes, ibgp_runtime_inject_pool_regex),
+        ("v6", ebgp_v6_peer_parent_prefixes, ibgp_v6_runtime_inject_pool_regex),
+    ):
+        if afi_parents is None or afi_pool is None:
+            continue
+        snap_key = f"staggered_runtime_ebgp_{afi_label}"
+        steady_state_steps.append(
+            create_snapshot_bgp_sent_route_counts_step(
+                hostname=device_name,
+                snapshot_key=snap_key,
+                peer_parent_prefixes=afi_parents,
+                description=(
+                    f"2.9.6 criterion 3 ({afi_label}) -- snapshot eBGP {afi_label} PS "
+                    f"before the runtime inject"
+                ),
+            )
+        )
+        steady_state_steps.extend(
+            [
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=True,
+                    prefix_pool_regex=afi_pool,
+                    prefix_start_index=0,
+                    prefix_end_index=final_inject_count,
+                    description=(
+                        f"2.9.6 runtime ({afi_label}) -- inject {final_inject_count} "
+                        f"genuinely-new iBGP {afi_label} routes (dedicated pool, whole) "
+                        f"after all peers are up"
+                    ),
+                ),
+                create_longevity_step(
+                    duration=inject_settle_s,
+                    description=(
+                        f"2.9.6 runtime ({afi_label}) -- settle after the final inject"
+                    ),
+                ),
+            ]
+        )
+        steady_state_steps.append(
+            create_verify_bgp_sent_route_count_delta_step(
+                hostname=device_name,
+                snapshot_key=snap_key,
+                peer_parent_prefixes=afi_parents,
+                min_delta=max(1, final_inject_count - distribution_count_window),
+                # No max: see the block comment -- the criterion is "all peers receive
+                # the routes"; the DUT may re-advertise more (v6 EB-PRIVATE expands).
+                tolerance=distribution_tolerance,
+                description=(
+                    f"2.9.6 criterion 3 ({afi_label}) -- every eBGP {afi_label} peer's "
+                    f"PS grew by >= ~{final_inject_count}: the runtime inject reached "
+                    f"all peers"
+                ),
+            )
+        )
+    steady_state_steps.append(
+        create_validation_step(
+            point_in_time_checks=list(_no_crash_checks()),
+            description="2.9.6 runtime -- no crash after the final inject",
+        )
+    )
+    stages.append(create_steps_stage(steps=steady_state_steps))
+
+    # Always-appended bounds (UG enabled; load-average never crosses baseline),
+    # whether the caller takes the default ``BGP_STANDARD_POSTCHECKS`` bundle (which
+    # asserts no stale routes -- spec pass-criterion 5) or supplies its own list, so
+    # a caller-provided ``postchecks`` can never silently drop them.
+    base_postchecks = (
+        list(postchecks) if postchecks is not None else list(BGP_STANDARD_POSTCHECKS)
+    )
+    postchecks = base_postchecks + [
+        create_system_cpu_load_average_check(baseline=load_avg_baseline),
+        create_bgp_update_group_check(expect_enabled=True),
+    ]
+    # Optional absolute VmHWM ceiling (extra safety; consistent with the other UG
+    # tests -- not a 2.9.6 pass-criterion). None -> skip.
+    if vmhwm_absolute_threshold_bytes is not None:
+        postchecks.append(
+            create_memory_utilization_check(
+                vmhwm_threshold=vmhwm_absolute_threshold_bytes
+            )
+        )
+    if snapshot_checks is None:
+        snapshot_checks = list(BGP_STANDARD_SNAPSHOT_CHECKS)
+
+    return Playbook(
+        name="bgp_ug_staggered_startup",
         stages=stages,
         prechecks=prechecks,
         postchecks=postchecks,
