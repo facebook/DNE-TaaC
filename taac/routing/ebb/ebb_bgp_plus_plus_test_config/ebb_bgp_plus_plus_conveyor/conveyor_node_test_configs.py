@@ -21,7 +21,6 @@ module directly.
 # testconfigs/routing/adhoc_bgp_ebb_characteristic.py after D111520998 pruned
 # cicd_ebb_int_tc.py to the conveyor-scheduled configs only.
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
-    BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_CONFIG,
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
@@ -122,8 +121,7 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     # bag010.ash6 SC1 egress peer-scale sweep. Ad-hoc: resolvable via
-    # --test-config, not wired into a conveyor node.
-    BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_CONFIG,
+    # --test-config, not wired into a conveyor node. UG-only (all SC run UG).
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     # bag012.ash6 Update Packing bound to ixia11 (Et3/36) instead of the
     # conveyor's ixia03 (Et3/35). Ad-hoc: resolvable via --test-config, not

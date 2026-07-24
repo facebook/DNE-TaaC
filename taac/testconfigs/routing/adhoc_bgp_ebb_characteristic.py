@@ -25,11 +25,10 @@ from taac.testconfigs.routing.physical_inventory import (
 # ─── bag010.ash6 — SC1 Egress peer-scale (scale & characteristics case 1) ─
 # PhysicalInventory-driven characteristic factory (2-port, no BGP-MON); bag010 relies on
 # the device-default router-id (no pinned router_id on the physical_inventory). Ad-hoc:
-# resolvable via ``--test-config`` but not scheduled on a conveyor node. The
-# TestConfig.name is ``BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST`` (+ ``_UPDATE_GROUP``).
-BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_CONFIG = (
-    create_bgp_ebb_characteristic_performance_scaling_test_config(BAG010_ASH6)
-)
+# resolvable via ``--test-config`` but not scheduled on a conveyor node. All SC
+# tests run with update-group enabled, so only the ``_UPDATE_GROUP`` variant is
+# kept; the non-UG base config was removed as dead weight. The TestConfig.name
+# is ``BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP``.
 BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_performance_scaling_test_config(
         BAG010_ASH6, enable_update_group=True
@@ -53,7 +52,6 @@ BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test
 
 
 __all__ = [
-    "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_CONFIG",
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
 ]
