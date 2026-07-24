@@ -2,10 +2,10 @@
 # pyre-unsafe
 """Routing test DUT baseline definitions.
 
-Home of the ``Testbed`` dataclass + all Testbed instances used by
-routing testconfig factories under ``testconfigs/routing/``. Per-role
-config bundles (peer group names, route maps, communities) live in
-the sibling ``role_defaults.py``.
+Home of the ``PhysicalInventory`` dataclass and physical inventory instances
+used by routing testconfig factories under ``testconfigs/routing/``. Per-role
+config bundles (peer group names, route maps, communities) live in the sibling
+``role_defaults.py``.
 
 See ``README.md`` §2 for the framework rules.
 """
@@ -25,10 +25,10 @@ VALID_USAGES: frozenset[str] = frozenset({"cicd", "qual", "adhoc", "retired"})
 
 
 @dataclass(frozen=True)
-class Testbed:
-    """DUT baseline for a routing test. Fits all usecases (EBB / DC / FA verify / feature).
+class PhysicalInventory:
+    """DUT baseline for a routing test across EBB, DC, and feature cases.
 
-    Physical identity fields stay flat; anything varying by testbed-family
+    Physical identity fields stay flat; anything varying by inventory family
     (BGP peer-group names, communities, route maps, etc.) goes into
     role-keyed dicts. Factories look up what they need by role key.
     """
@@ -44,7 +44,7 @@ class Testbed:
     ixia_ports: list[tuple[str, str]] = field(default_factory=list)
     secondary_ixia_chassis_ip: str | None = None
 
-    # ─── Which catalog surfaces may bind this testbed ─────────────────────
+    # ─── Which catalog surfaces may bind this physical inventory ──────────
     # Members of ``VALID_USAGES``. A cicd_*.py catalog file may only bind
     # testbeds whose ``usage`` set includes ``"cicd"``; same for qual_ /
     # adhoc_. ``"retired"`` marks a testbed kept only for historical record.
@@ -66,18 +66,18 @@ class Testbed:
     lab_device_password_env_var: str | None = None
     # SSH user for lab boxes (``svc-netcastle_bot`` is not authorized on
     # ebXX.lab.ash6 / bgp.eb.test.ash6). None for production / conveyor
-    # testbeds, where Netcastle uses its own default SSH identity.
+    # inventories, where Netcastle uses its own default SSH identity.
     ssh_user: str | None = None
     # Precomputed ``TestConfig.host_driver_args`` payload for lab boxes.
-    # Populated at Testbed construction time from the shared lab-password
-    # env var (``TAAC_EBB_LAB_DEVICE_PASSWORD``, falling back to
-    # ``"dnepit"``). None for production / conveyor testbeds where
+    # Populated at PhysicalInventory construction time from the shared lab
+    # password env var (``TAAC_EBB_LAB_DEVICE_PASSWORD``, falling back to
+    # ``"dnepit"``). None for production / conveyor inventories where
     # ``netwhoami`` returns a valid record.
     host_driver_args: dict[str, str] | None = None
     # Precomputed ``TestConfig.oss_mock_device_data`` payload for lab
     # boxes; ``netwhoami`` returns ``#INVALID#`` for lab devices, so
     # ``get_common_setup_tasks`` needs a synthesized ``MockDeviceInfo``.
-    # None for production / conveyor testbeds.
+    # None for production / conveyor inventories.
     oss_mock_device_data: dict[str, taac_types.MockDeviceInfo] | None = None
 
     # ─── Named parameter maps — BGP topology ──────────────────────────────
@@ -107,7 +107,7 @@ class Testbed:
         bad = self.usage - VALID_USAGES
         if bad:
             raise ValueError(
-                f"Testbed {self.device_name}: usage contains invalid "
+                f"PhysicalInventory {self.device_name}: usage contains invalid "
                 f"values {sorted(bad)!r}; allowed: {sorted(VALID_USAGES)!r}"
             )
 
@@ -206,6 +206,10 @@ def _duplicates(values: list[str]) -> list[str]:
     return sorted(value for value in set(values) if values.count(value) > 1)
 
 
+# Temporary D18 compatibility alias; removed after all consumers migrate in D19.
+Testbed = PhysicalInventory
+
+
 # ─── Shared constants ─────────────────────────────────────────────────────
 
 _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
@@ -217,9 +221,9 @@ IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 # These produce the ``host_driver_args`` / ``oss_mock_device_data`` payloads that
 # the retired ``util/bgp_ebb_lab_wiring._lab_device_wiring`` helper used to
 # synthesize at factory-call time. Byte-identical outputs preserved: password
-# read via ``os.environ.get(env_var, "dnepit")`` (env-var lookup runs at Testbed
-# construction / module-import time; TAAC test processes do not mutate the
-# password env var after import).
+# read via ``os.environ.get(env_var, "dnepit")`` (env-var lookup runs at
+# PhysicalInventory construction/module-import time; TAAC test processes do
+# not mutate the password env var after import).
 
 
 def _lab_host_driver_args(
@@ -266,7 +270,7 @@ def _lab_oss_mock_device_data(
 # Each ASH6 BAG device has one canonical Testbed artifact. ``ixia_ports``
 # always describes the chassis selected by ``primary_ixia_chassis_ip``.
 
-BAG002_SNC1 = Testbed(
+BAG002_SNC1 = PhysicalInventory(
     device_name="bag002.snc1",
     usage=frozenset({"qual"}),
     primary_ixia_chassis_ip="ares1-my24520014",
@@ -279,7 +283,7 @@ BAG002_SNC1 = Testbed(
     peer_groups=ebb_peer_groups(),
 )
 
-BAG010_ASH6 = Testbed(
+BAG010_ASH6 = PhysicalInventory(
     device_name="bag010.ash6",
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -297,7 +301,7 @@ BAG010_ASH6 = Testbed(
         # OpenR link-config knobs consumed by
         # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag010.ash6
         # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic Testbed fields.
+        # attributes and do not fit the generic PhysicalInventory fields.
         "openr_port_channel_member": "Ethernet3/6/1",
         "openr_port_channel_ipv4": "10.131.97.238/31",
         "openr_port_channel_link_local": "fe80::eba:a7f:fd02/64",
@@ -318,7 +322,7 @@ BAG010_ASH6 = Testbed(
     },
 )
 
-BAG011_ASH6 = Testbed(
+BAG011_ASH6 = PhysicalInventory(
     device_name="bag011.ash6",
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA03_ASH6,
@@ -340,7 +344,7 @@ BAG011_ASH6 = Testbed(
         # OpenR link-config knobs consumed by
         # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag011.ash6
         # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic Testbed fields.
+        # attributes and do not fit the generic PhysicalInventory fields.
         "openr_port_channel_member": "Ethernet3/9/1",
         "openr_port_channel_ipv4": "10.131.97.236/31",
         "openr_port_channel_link_local": "fe80::eba:a7f:fd00/64",
@@ -364,7 +368,7 @@ BAG011_ASH6 = Testbed(
     },
 )
 
-BAG012_ASH6 = Testbed(
+BAG012_ASH6 = PhysicalInventory(
     device_name="bag012.ash6",
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -410,7 +414,7 @@ BAG012_ASH6 = Testbed(
     },
 )
 
-BAG013_ASH6 = Testbed(
+BAG013_ASH6 = PhysicalInventory(
     device_name="bag013.ash6",
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -429,7 +433,7 @@ BAG013_ASH6 = Testbed(
         # OpenR link-config knobs consumed by
         # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag013.ash6
         # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic Testbed fields.
+        # attributes and do not fit the generic PhysicalInventory fields.
         "openr_port_channel_member": "Ethernet3/9/1",
         "openr_port_channel_ipv4": "10.131.97.232/31",
         "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
@@ -453,11 +457,11 @@ BAG013_ASH6 = Testbed(
 # ─── CTE UCMP testbeds ────────────────────────────────────────────────────
 # Wave 2C — CTE UCMP feature testconfigs (moved from testconfigs/routing/
 # test_config_cte_ucmp{,_stand_alone}.py). The multi-node QZD topology
-# (4 endpoints, no shared chassis IP) does not fit the flat Testbed dataclass;
+# (4 endpoints, no shared chassis IP) does not fit the flat PhysicalInventory dataclass;
 # only the DUT identity is captured here and the spine + IXIA-port layout
 # stays as private module-level constants inside factories/cte_ucmp.py.
 
-CTE_UCMP_QZD_TESTBED = Testbed(
+CTE_UCMP_QZD_TESTBED = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fa001-du004.qzd1",
     # No shared IXIA chassis IP: the QZD test config uses per-endpoint
@@ -467,7 +471,7 @@ CTE_UCMP_QZD_TESTBED = Testbed(
     primary_ixia_chassis_ip="",
 )
 
-CTE_UCMP_STAND_ALONE_TESTBED = Testbed(
+CTE_UCMP_STAND_ALONE_TESTBED = PhysicalInventory(
     device_name="fsw003.p003.f01.qzd1",
     usage=frozenset({"adhoc"}),
     primary_ixia_chassis_ip="2401:db00:0116:303b:0000:0000:0000:0100",
@@ -484,7 +488,7 @@ CTE_UCMP_STAND_ALONE_TESTBED = Testbed(
 # (svc-netcastle_bot is not authorized). ``extras`` carries the shared lab
 # credentials plus MockDeviceInfo fields (netwhoami returns ``#INVALID#`` for
 # these devices, so ``get_common_setup_tasks`` needs a synthesized record).
-EB01_LAB_ASH6 = Testbed(
+EB01_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb01.lab.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -517,7 +521,7 @@ EB01_LAB_ASH6 = Testbed(
     },
 )
 
-EB02_LAB_ASH6 = Testbed(
+EB02_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb02.lab.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -550,7 +554,7 @@ EB02_LAB_ASH6 = Testbed(
     },
 )
 
-EB03_LAB_ASH6 = Testbed(
+EB03_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb03.lab.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -583,7 +587,7 @@ EB03_LAB_ASH6 = Testbed(
     },
 )
 
-EB04_LAB_ASH6 = Testbed(
+EB04_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb04.lab.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -624,7 +628,7 @@ EB04_LAB_ASH6 = Testbed(
 # the eb0x boxes above, but with an extra ``bgp_ip`` host-driver kwarg
 # (thrift-over-IPv6 to a non-loopback address). Only used by the queue-memory
 # monitor testconfig.
-EB_TEST_DEVICE = Testbed(
+EB_TEST_DEVICE = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="bgp.eb.test.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -675,7 +679,7 @@ EB_TEST_DEVICE = Testbed(
 # ``direct_ixia_connections`` (topology is discovered at runtime), so the
 # chassis + port map is intentionally left empty here — Wave 5B will surface
 # the discovered ports if/when the factory needs them.
-JSW002_M001_SNC1 = Testbed(
+JSW002_M001_SNC1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="jsw002.m001.snc1",
     primary_ixia_chassis_ip="",
@@ -700,7 +704,7 @@ JSW002_M001_SNC1 = Testbed(
 # EBB EB-EB/EB-FA scheme, so ``peer_groups`` is left empty here — a
 # future ``fa_uu_peer_groups()`` helper will populate it when Wave 5B
 # migrates the FA verify factory.
-FA001_UU001_QZD1 = Testbed(
+FA001_UU001_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fa001-uu001.qzd1",
     primary_ixia_chassis_ip="",
@@ -720,7 +724,7 @@ FA001_UU001_QZD1 = Testbed(
 # ``direct_ixia_connections``); the non-MON siblings do not declare direct
 # connections at all, so their ports are captured via ``extras`` for Wave 5B
 # to consume.
-FSW001_QZB = Testbed(
+FSW001_QZB = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw001.p003.f01.qzb1",
     primary_ixia_chassis_ip=IXIA11_ASH6,
@@ -734,11 +738,11 @@ FSW001_QZB = Testbed(
     peer_groups=ebb_peer_groups(),
 )
 
-FSW_QZB = Testbed(
+FSW_QZB = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw001.p003.f01.qzb1",
     # Legacy ``fsw_qzb_...`` testconfig declares no ``direct_ixia_connections``.
-    # Same physical DUT as ``FSW001_QZB`` above; a separate Testbed instance
+    # Same physical DUT as ``FSW001_QZB`` above; a separate PhysicalInventory instance
     # because it drives a different testconfig (no BGP-MON, different playbook
     # scope) and Wave 5B may layer distinct factory args on top.
     primary_ixia_chassis_ip="",
@@ -751,7 +755,7 @@ FSW_QZB = Testbed(
     },
 )
 
-QZD_FSW002 = Testbed(
+QZD_FSW002 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw002.p003.f01.qzb1",
     primary_ixia_chassis_ip="",
@@ -765,7 +769,7 @@ QZD_FSW002 = Testbed(
     },
 )
 
-QZD_LAB = Testbed(
+QZD_LAB = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     # Same DUT name as ``CTE_UCMP_STAND_ALONE_TESTBED`` — the CTE UCMP config
     # reserves this device for confed-peer stand-alone testing, while
@@ -799,7 +803,7 @@ QZD_LAB = Testbed(
 # Shared IXIA parent networks / hardening baselines. Every BGP-DC chronos
 # binding pins the same downlink/uplink/rogue IPv6+IPv4 parent prefixes and
 # NDP-stressor networks (verified across all 4 pre-migration bindings). Kept
-# as a module-level dict so each Testbed inherits the same values without
+# as a module-level dict so each PhysicalInventory inherits the same values without
 # repeating them.
 _BGP_DC_CHRONOS_SHARED_EXTRAS = {
     "ixia_downlink_ic_parent_network_v6": "2401:db00:e50d:11:8",
@@ -816,7 +820,7 @@ _BGP_DC_CHRONOS_SHARED_EXTRAS = {
     "ixia_downlink_good_ndp_network": "2401:db00:e50d:1101:8",
 }
 
-SSW_ELBERT_QZD1 = Testbed(
+SSW_ELBERT_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="ssw001.s002.f01.qzd1",
     primary_ixia_chassis_ip="",
@@ -856,7 +860,7 @@ SSW_ELBERT_QZD1 = Testbed(
     },
 )
 
-FSW_FUJI_QZD1 = Testbed(
+FSW_FUJI_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw002.p006.f01.qzd1",
     primary_ixia_chassis_ip="",
@@ -914,7 +918,7 @@ FSW_FUJI_QZD1 = Testbed(
 # traffic-carrying sibling factory that lives outside this Wave's scope).
 # No rogue-interface port and no rogue peer-group / route-map / community
 # entries because that factory does not exercise the rogue path.
-FSW_P001_QZD1 = Testbed(
+FSW_P001_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw001.p001.f01.qzd1",
     primary_ixia_chassis_ip="",
@@ -925,7 +929,7 @@ FSW_P001_QZD1 = Testbed(
     },
 )
 
-FSW_P006_QZD1 = Testbed(
+FSW_P006_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fsw001.p006.f01.qzd1",
     primary_ixia_chassis_ip="",
