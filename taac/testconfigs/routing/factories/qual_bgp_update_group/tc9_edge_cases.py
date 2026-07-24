@@ -15,9 +15,10 @@ checks read the PS gauge, which is only non-zero when Open/R resolves the
 iBGP next-hops so the DUT actually advertises). Spec 2.9.5 is excluded
 (struck through in the plan).
 
-Target testbeds: BAG011_ASH6 for the edge-cases bundle (2.9.7) / 2.9.4 / 2.9.2,
-and BAG013_ASH6 for 2.9.6 staggered-startup (both EBB conveyor nodes). Reuses the
-shared ``build_bag_conveyor_test_config`` builder from tc1 for the full-scale
+Target physical inventories: BAG011_ASH6 for the edge-cases bundle (2.9.7) /
+2.9.4 / 2.9.2, and BAG013_ASH6 for 2.9.6 staggered-startup (both EBB conveyor
+nodes). Reuses the shared ``build_bag_conveyor_test_config`` builder from tc1
+for the full-scale
 topology (140 eBGP + ~500 iBGP, ``include_bgp_mon=False`` — UG qualification
 never exercises BGP-MON); the Open/R profile is chosen per-TestConfig.
 """
@@ -45,7 +46,9 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases impor
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     build_bag_conveyor_test_config,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_BGP_MON_IC_PARENT_NETWORK,
     IXIA_EBGP_IC_PARENT_NETWORK_V4,
@@ -75,7 +78,7 @@ from taac.test_as_a_config import types as taac_types
 
 
 # =============================================================================
-# BGP UG edge cases (spec 2.9) — bag011 conveyor topology.
+# BGP UG edge cases (spec 2.9) — bag011 conveyor logical_topology.
 # =============================================================================
 
 # BGP-peer-name regexes that select every eBGP / iBGP peer built by
@@ -129,7 +132,7 @@ _IBGP_V4_PARENT_PREFIXES = [
 # re-advertise the prefixes while the eBGP group is empty).
 _IBGP_INJECT_POOL_REGEX = "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB"
 # Spec step 10 (dump-compare on recovery): compare two plane-1 iBGP peers in the
-# same update group. Mirrors tc1's 2.1.1 dump-compare on this same topology.
+# same update group. Mirrors tc1's 2.1.1 dump-compare on this same logical_topology.
 _IBGP_DUMP_PEER_REGEX = "BGP_PEER_IPV6_IBGP_PLANE_1_REMOTE_EB"
 _IBGP_DUMP_SESSION_INDICES = [1, 2]
 
@@ -223,7 +226,7 @@ _DUAL_STACK_SPARE_V4_ROUTE_SCALES = [
         ),
     ),
 ]
-# The four AFI-split peer-groups on the EBB-scale conveyor topology. IPv4 and IPv6
+# The four AFI-split peer-groups on the EBB-scale conveyor logical_topology. IPv4 and IPv6
 # peers form SEPARATE update groups, so each peer-group maps to a single-AFI,
 # AFI-pure update group -- asserting that is the core dual-stack-isolation proof
 # (``expected_afi_by_substring``). ``expected_group_count`` is the same 4 the
@@ -418,12 +421,12 @@ def _edge_cases_prechecks(
 
 
 def create_bgp_ug_edge_cases_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification spec 2.9 (Edge Cases) TestConfig.
 
     Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks on the shared
-    EBB-scale bag conveyor topology. ``enable_update_group=True`` is baked in
+    EBB-scale bag conveyor logical_topology. ``enable_update_group=True`` is baked in
     (UG MUST be on for these specs). Wires the 2.9.7 empty-group playbook; the
     remaining WITHOUT_OPEN_R sub-specs are added to ``playbooks`` as they are
     implemented. (2.9.4 dual-stack isolation is its own WITH_OPEN_R TestConfig,
@@ -438,7 +441,7 @@ def create_bgp_ug_edge_cases_test_config(
     )
 
     empty_group_playbook = create_bgp_ug_empty_group_playbook(
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         ebgp_peer_regex=_EBGP_PEER_REGEX,
         ibgp_peer_regex=_IBGP_PEER_REGEX,
         ibgp_v6_peer_group=PEERGROUP_IBGP_V6,
@@ -449,7 +452,7 @@ def create_bgp_ug_edge_cases_test_config(
         # Spec step 3 (inject iBGP routes while eBGP empty) + step 10 (recovery
         # dump-compare on two plane-1 iBGP peers; iBGP DUT iface = ixia_ports[1]).
         ibgp_inject_pool_regex=_IBGP_INJECT_POOL_REGEX,
-        ibgp_dump_capture_interface=testbed.ixia_ports[1][0],
+        ibgp_dump_capture_interface=physical_inventory.ixia_ports[1][0],
         ibgp_dump_peer_regex=_IBGP_DUMP_PEER_REGEX,
         ibgp_dump_session_indices=_IBGP_DUMP_SESSION_INDICES,
         # Assert the update-group count returns to baseline on recovery (spec:
@@ -466,7 +469,7 @@ def create_bgp_ug_edge_cases_test_config(
     )
 
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name="BAG011_ASH6_BGP_UG_EDGE_CASES_TEST",
         playbooks=[empty_group_playbook],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
@@ -475,10 +478,10 @@ def create_bgp_ug_edge_cases_test_config(
 
 
 def create_bgp_ug_dual_stack_isolation_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification spec 2.9.4 (Dual-Stack Isolation)
-    TestConfig -- its OWN WITH_OPEN_R config on the bag conveyor topology.
+    TestConfig -- its OWN WITH_OPEN_R config on the bag conveyor logical_topology.
 
     Verifies STRICT AFI isolation: v4 and v6 peers form separate, AFI-pure
     update groups (structural, via ``expected_afi_by_substring``), and a route
@@ -501,7 +504,7 @@ def create_bgp_ug_dual_stack_isolation_test_config(
     """
     bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
     dual_stack_isolation_playbook = create_bgp_ug_dual_stack_isolation_playbook(
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         afi_peer_group_substrings=_DUAL_STACK_AFI_PEER_GROUPS,
         expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
         expected_member_counts=_DUAL_STACK_EXPECTED_MEMBER_COUNTS,
@@ -524,7 +527,7 @@ def create_bgp_ug_dual_stack_isolation_test_config(
     )
 
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name="BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST",
         playbooks=[dual_stack_isolation_playbook],
         # WITH_OPEN_R so the iBGP next-hops resolve and the DUT advertises --
@@ -538,12 +541,12 @@ def create_bgp_ug_dual_stack_isolation_test_config(
 
 
 def create_bgp_ug_simultaneous_disruptions_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     smoke: bool = False,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification spec 2.9.2 (Simultaneous Disruptions
-    Across All Groups) TestConfig on the bag conveyor topology.
+    Across All Groups) TestConfig on the bag conveyor logical_topology.
 
     Runs the four concurrent disruption tracks (eBGP route churn with varying
     communities, random eBGP session flaps without graceful restart, IGP-metric
@@ -593,7 +596,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
         igp_frequency_s = 60
 
     playbook = create_bgp_ug_simultaneous_disruptions_playbook(
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         ebgp_route_pool_regex=_SIMUL_EBGP_ROUTE_POOL_REGEX,
         ibgp_attr_pool_regex=_SIMUL_IBGP_ATTR_POOL_REGEX,
         ebgp_flap_peer_regex=_SIMUL_EBGP_FLAP_PEER_REGEX,
@@ -602,8 +605,8 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
         # playbook's igp defaults), so pass the DEFAULT lists here too.
         openr_start_ipv4s=DEFAULT_OPENR_START_IPV4S,
         openr_start_ipv6s=DEFAULT_OPENR_START_IPV6S,
-        openr_local_link=testbed.extras["openr_local_link"],
-        openr_other_link=testbed.extras["openr_other_link"],
+        openr_local_link=physical_inventory.extras["openr_local_link"],
+        openr_other_link=physical_inventory.extras["openr_other_link"],
         non_ibgp_parent_prefixes=non_ibgp_parent_prefixes,
         vmhwm_growth_threshold_bytes=_SIMUL_VMHWM_GROWTH_THRESHOLD_BYTES,
         prechecks=_edge_cases_prechecks(bgp_mon_ignore_prefixes),
@@ -621,7 +624,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
     )
 
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name=name,
         playbooks=[playbook],
         # WITH_OPEN_R so the IGP-instability track has a running Open/R daemon +
@@ -634,7 +637,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
 
 
 def create_bgp_ug_staggered_startup_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification spec 2.9.6 (Staggered Peer Startup)
     TestConfig -- its OWN WITHOUT_OPEN_R config on the bag conveyor topology,
@@ -686,7 +689,7 @@ def create_bgp_ug_staggered_startup_test_config(
     )
 
     staggered_startup_playbook = create_bgp_ug_staggered_startup_playbook(
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         ebgp_peer_regex=_EBGP_PEER_REGEX,
         ibgp_peer_regex=_IBGP_PEER_REGEX,
         ibgp_v6_peer_group=PEERGROUP_IBGP_V6,
@@ -731,7 +734,7 @@ def create_bgp_ug_staggered_startup_test_config(
     )
 
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name="BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST",
         playbooks=[staggered_startup_playbook],
         # WITHOUT_OPEN_R + next-hop-self (D113330327): IXIA advertises next-hop =

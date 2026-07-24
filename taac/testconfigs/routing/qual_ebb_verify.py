@@ -17,7 +17,9 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_verify_computational_load_test_config,
     create_bgp_ebb_characteristic_verify_constant_attribute_storage_test_config,
 )
-from taac.testconfigs.routing.testbed import FA001_UU001_QZD1
+from taac.testconfigs.routing.physical_inventory import (
+    FA001_UU001_QZD1,
+)
 
 
 BGP_PLUS_PLUS_VERIFY_COMPUTATIONAL_LOAD_TEST_CONFIG = (

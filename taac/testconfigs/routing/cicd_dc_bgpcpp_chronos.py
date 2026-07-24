@@ -4,7 +4,7 @@
 
 Sole source of the four BGP-DC chronos_node bindings scheduled on the
 CICD conveyor. Each binding calls
-:func:`create_bgp_dc_chronos_node_test_config` with the target testbed +
+:func:`create_bgp_dc_chronos_node_test_config` with the target physical_inventory +
 per-binding overrides (playbook selection, framework-validation scale
 reductions). The internal ``TestConfig.name`` string on every binding is
 preserved verbatim from the pre-Wave-3B source so the golden manifest
@@ -19,7 +19,7 @@ from __future__ import annotations
 from taac.testconfigs.routing.factories.bgp_dc_chronos_node import (
     create_bgp_dc_chronos_node_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     FSW_FUJI_QZD1,
     SSW_ELBERT_QZD1,
 )

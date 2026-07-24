@@ -6,7 +6,7 @@ Wave 2C — moved verbatim from
 ``testconfigs/routing/test_config_cte_ucmp.py`` and
 ``testconfigs/routing/test_config_cte_ucmp_stand_alone.py``. Both bodies
 retain their private module-level constants; only DUT identity fields are
-sourced from ``testbed``. The ``name`` field is a required kwarg so the
+sourced from ``physical_inventory``. The ``name`` field is a required kwarg so the
 catalog binding preserves the legacy ``TestConfig.name`` verbatim and the
 golden manifest hash stays byte-identical.
 
@@ -45,7 +45,9 @@ from taac.task_definitions import (
     create_coop_unregister_patchers_task,
     create_wait_for_agent_convergence_task,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
     BasicPortConfig,
@@ -69,7 +71,7 @@ __all__ = [
 
 
 # =============================================================================
-# CTE UCMP QZD — Inter-DC VIP Traffic Balancing (multi-node topology)
+# CTE UCMP QZD — Inter-DC VIP Traffic Balancing (multi-node logical_topology)
 # =============================================================================
 #
 # fa001-du004.qzd1 (DUT) advertises VIP_V6_SOURCE and receives VIP
@@ -133,11 +135,13 @@ _QZD_DUT_IXIA_PORT = "eth6/16/1"
 _QZD_SPINE_IXIA_PORT = "eth8/16/1"
 
 
-def create_cte_ucmp_qzd_test_config(testbed: Testbed, *, name: str) -> TestConfig:
+def create_cte_ucmp_qzd_test_config(
+    physical_inventory: PhysicalInventory, *, name: str
+) -> TestConfig:
     """CTE UCMP QZD Lab TestConfig for Inter-DC VIP Traffic Balancing.
 
-    Multi-node topology:
-      - DUT (from ``testbed.device_name``, expected ``fa001-du004.qzd1``) —
+    Multi-node logical_topology:
+      - DUT (from ``physical_inventory.device_name``, expected ``fa001-du004.qzd1``) —
         advertises VIP_V6_SOURCE with UCMP policy under test.
       - 3 spine switches (hardcoded ``ssw004.s{002,003,004}.f01.qzd1``) —
         simulate 3 DCs advertising the same VIP prefix with AS_PATH prepending.
@@ -145,11 +149,11 @@ def create_cte_ucmp_qzd_test_config(testbed: Testbed, *, name: str) -> TestConfi
     See legacy ``test_config_cte_ucmp.py`` docstring for the full spec
     (Test Cases 1/3/4/6/7/8/9/10/12/13/14 + fallback-to-ECMP + extra-weights).
     """
-    assert testbed.device_name == "fa001-du004.qzd1", (
+    assert physical_inventory.device_name == "fa001-du004.qzd1", (
         f"create_cte_ucmp_qzd_test_config Wave 2C is hardcoded to "
-        f"fa001-du004.qzd1; got testbed.device_name={testbed.device_name!r}."
+        f"fa001-du004.qzd1; got physical_inventory.device_name={physical_inventory.device_name!r}."
     )
-    dut_name = testbed.device_name
+    dut_name = physical_inventory.device_name
 
     return TestConfig(
         name=name,
@@ -736,31 +740,31 @@ def _stand_alone_downlink_device_groups() -> list[taac_types.DeviceGroupConfig]:
 
 
 def create_cte_ucmp_stand_alone_test_config(
-    testbed: Testbed, *, name: str
+    physical_inventory: PhysicalInventory, *, name: str
 ) -> TestConfig:
     """CTE UCMP Stand-Alone TestConfig for thrift-API-driven UCMP weight changes.
 
-    Single-DUT topology on ``testbed.device_name`` (expected
+    Single-DUT topology on ``physical_inventory.device_name`` (expected
     ``fsw003.p003.f01.qzd1``):
-      - Uplink port (from ``testbed.ixia_ports[0]``): 1 eBGP peer traffic source.
-      - Downlink port (from ``testbed.ixia_ports[1]``): 12 confed peers across
+      - Uplink port (from ``physical_inventory.ixia_ports[0]``): 1 eBGP peer traffic source.
+      - Downlink port (from ``physical_inventory.ixia_ports[1]``): 12 confed peers across
         3 DCs, all advertising the same VIP prefix pool.
     """
-    assert testbed.device_name == "fsw003.p003.f01.qzd1", (
+    assert physical_inventory.device_name == "fsw003.p003.f01.qzd1", (
         f"create_cte_ucmp_stand_alone_test_config Wave 2C is hardcoded to "
-        f"fsw003.p003.f01.qzd1; got testbed.device_name={testbed.device_name!r}."
+        f"fsw003.p003.f01.qzd1; got physical_inventory.device_name={physical_inventory.device_name!r}."
     )
-    assert testbed.mac_address is not None, (
-        "Testbed must have mac_address set (used as DUT MAC in Endpoint)"
+    assert physical_inventory.mac_address is not None, (
+        "PhysicalInventory must have mac_address set (used as DUT MAC in Endpoint)"
     )
-    assert len(testbed.ixia_ports) >= 2, (
-        "Testbed must have >= 2 IXIA ports (uplink + downlink)"
+    assert len(physical_inventory.ixia_ports) >= 2, (
+        "PhysicalInventory must have >= 2 IXIA ports (uplink + downlink)"
     )
 
-    device_name = testbed.device_name
-    ixia_chassis_ip = testbed.ixia_chassis_ip
-    uplink_iface, uplink_chassis_port = testbed.ixia_ports[0]
-    downlink_iface, downlink_chassis_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
+    uplink_iface, uplink_chassis_port = physical_inventory.ixia_ports[0]
+    downlink_iface, downlink_chassis_port = physical_inventory.ixia_ports[1]
 
     direct_ixia_connections = [
         taac_types.DirectIxiaConnection(
@@ -786,7 +790,7 @@ def create_cte_ucmp_stand_alone_test_config(
                 name=device_name,
                 ixia_ports=[uplink_iface, downlink_iface],
                 dut=True,
-                mac_address=testbed.mac_address,
+                mac_address=physical_inventory.mac_address,
                 direct_ixia_connections=direct_ixia_connections,
             ),
         ],

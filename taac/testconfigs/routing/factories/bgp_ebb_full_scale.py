@@ -2,8 +2,8 @@
 # pyre-unsafe
 """BGPCPP-on-EBB full-scale workflow factories.
 
-Bag conveyor workflows on the 1274-peer EBB topology. Naming:
-``create_ebb_<workflow>_test_config(testbed: Testbed, ...) -> TestConfig``.
+Bag conveyor workflows on the 1274-peer EBB logical_topology. Naming:
+``create_ebb_<workflow>_test_config(physical_inventory: PhysicalInventory, ...) -> TestConfig``.
 
 See ../README.md §3.
 """
@@ -50,7 +50,9 @@ from taac.task_definitions import (
     create_openr_route_action_task,
     create_run_commands_on_shell_task,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     _derive_test_config_name,
     BGP_MON_PEER_COUNT,
@@ -99,7 +101,7 @@ from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConf
 
 
 def create_ebb_cold_start_and_daemon_restart_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
 ) -> TestConfig:
     """Create the BGP++ conveyor test configuration (daemon-restart + cold-start).
@@ -107,8 +109,8 @@ def create_ebb_cold_start_and_daemon_restart_test_config(
     Extracted verbatim from the legacy
     ``testconfigs/routing/ebb/bag002_snc1_test_config.create_bag002_snc1_conveyor_test_config``
     factory as part of the Wave 1 hierarchical migration. Only the DUT
-    identity + IXIA port map are parameterized on the ``testbed`` argument;
-    everything else (setup / teardown tasks, IXIA topology, playbook list)
+    identity + IXIA port map are parameterized on the ``physical_inventory`` argument;
+    everything else (setup / teardown tasks, IXIA logical_topology, playbook list)
     is byte-wise identical to the pre-migration factory so the golden
     manifest hash for ``BAG002_SNC1_BGP_CONVEYOR_TEST`` is preserved.
 
@@ -117,24 +119,26 @@ def create_ebb_cold_start_and_daemon_restart_test_config(
     - ``bgp_cold_start_test_playbook``
 
     Args:
-        testbed: Testbed instance for the DUT (currently BAG002_SNC1).
+        physical_inventory: PhysicalInventory instance for the DUT (currently BAG002_SNC1).
         profile: BGP++ profile — determines whether OpenR route injection
             is added to setup tasks.
 
     Returns:
         TestConfig configured for the BGP++ conveyor CI/CD pipeline.
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
+    )
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
     )
 
-    device_name = testbed.device_name
-    ixia_chassis_ip = testbed.ixia_chassis_ip
+    device_name = physical_inventory.device_name
+    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
 
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = testbed.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = testbed.ixia_ports[1]
-    ixia_interface_mimic_bgp_mon, ixia_port_bgp_mon = testbed.ixia_ports[2]
+    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
+    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
+    ixia_interface_mimic_bgp_mon, ixia_port_bgp_mon = physical_inventory.ixia_ports[2]
 
     # Build setup tasks based on profile
     # EXECUTION FLOW:
@@ -179,7 +183,7 @@ def create_ebb_cold_start_and_daemon_restart_test_config(
             # Copy BGP++ config files from configerator to device
             create_arista_create_file_from_config_task(
                 hostname=device_name,
-                configerator_path=testbed.bgpcpp_configerator_path,
+                configerator_path=physical_inventory.bgpcpp_configerator_path,
                 file_path="/mnt/flash/bgpcpp_config",
             ),
             create_arista_create_file_from_config_task(
@@ -406,7 +410,7 @@ _BAG010_LONGEVITY_DURATION_SECONDS = 14400  # 4h
 
 
 def _build_ebb_full_scale_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     name: str,
     playbooks: list,
     profile: BgpPlusPlusProfile,
@@ -425,27 +429,29 @@ def _build_ebb_full_scale_test_config(
     ``BAG010_ASH6_CONVEYOR_LONGEVITY_TEST_CONFIG`` (+ ``_UPDATE_GROUP``
     siblings) are preserved.
     """
-    device_name = testbed.device_name
-    ixia_chassis_ip = testbed.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = testbed.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = testbed.ixia_ports[1]
-    ixia_interface_mimic_bgp_mon, ixia_port_bgp_mon = testbed.ixia_ports[2]
+    device_name = physical_inventory.device_name
+    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
+    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
+    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
+    ixia_interface_mimic_bgp_mon, ixia_port_bgp_mon = physical_inventory.ixia_ports[2]
 
-    assert testbed.dut_bgp_as is not None, "testbed must have dut_bgp_as"
-    assert testbed.bgpcpp_configerator_path is not None, (
-        "testbed must have bgpcpp_configerator_path"
+    assert physical_inventory.dut_bgp_as is not None, (
+        "physical_inventory must have dut_bgp_as"
+    )
+    assert physical_inventory.bgpcpp_configerator_path is not None, (
+        "physical_inventory must have bgpcpp_configerator_path"
     )
 
-    extras = testbed.extras
+    extras = physical_inventory.extras
     setup_tasks = get_common_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=profile,
-        openr_configerator_path=testbed.openr_configerator_path,
+        openr_configerator_path=physical_inventory.openr_configerator_path,
         openr_port_channel_member=extras["openr_port_channel_member"],
         openr_port_channel_ipv4=extras["openr_port_channel_ipv4"],
         openr_port_channel_link_local=extras["openr_port_channel_link_local"],
@@ -538,7 +544,7 @@ def _build_ebb_full_scale_test_config(
 
 
 def _bag010_expected_established_session_count() -> int:
-    """Established-session baseline for bag010.ash6 full-scale topology.
+    """Established-session baseline for bag010.ash6 full-scale logical_topology.
 
     Total sessions across all peer types minus BGP MON. BGP MON peers
     (ASN 64001) legitimately stay IDLE intermittently on bag010 post-
@@ -559,7 +565,7 @@ def _bag010_expected_established_session_count() -> int:
 
 
 def create_ebb_instability_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
 ) -> TestConfig:
@@ -574,11 +580,11 @@ def create_ebb_instability_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
     session_count = _bag010_expected_established_session_count()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -604,7 +610,7 @@ def create_ebb_instability_test_config(
 
 
 def create_ebb_runtime_update_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
 ) -> TestConfig:
@@ -618,10 +624,10 @@ def create_ebb_runtime_update_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     session_count = _bag010_expected_established_session_count()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -646,7 +652,7 @@ def create_ebb_runtime_update_test_config(
 
 
 def create_ebb_drain_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
     name_override: str | None = None,
@@ -661,16 +667,16 @@ def create_ebb_drain_test_config(
     all peers established and pre/post-test session counts verify.
     """
     name = name_override or _derive_test_config_name(
-        testbed, "DRAIN", enable_update_group
+        physical_inventory, "DRAIN", enable_update_group
     )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    ixia_interface_mimic_bgp_mon = testbed.ixia_ports[2][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    ixia_interface_mimic_bgp_mon = physical_inventory.ixia_ports[2][0]
     session_count = _bag010_expected_established_session_count()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -701,7 +707,7 @@ def create_ebb_drain_test_config(
 
 
 def create_ebb_stage1_consolidated_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
     name_override: str | None = None,
@@ -716,15 +722,15 @@ def create_ebb_stage1_consolidated_test_config(
     cross-device balance).
     """
     name = name_override or _derive_test_config_name(
-        testbed, "STAGE1_CONSOLIDATED", enable_update_group
+        physical_inventory, "STAGE1_CONSOLIDATED", enable_update_group
     )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
     session_count = _bag010_expected_established_session_count()
     expected_peer_identity = build_expected_peer_identity()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -763,8 +769,8 @@ def create_ebb_stage1_consolidated_test_config(
                 device_name=device_name,
                 peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
                 peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-                local_link=testbed.extras["openr_local_link"],
-                other_link=testbed.extras["openr_other_link"],
+                local_link=physical_inventory.extras["openr_local_link"],
+                other_link=physical_inventory.extras["openr_other_link"],
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -783,7 +789,7 @@ _BAG011_NEXTHOP_GROUP_THRESHOLD = 100
 
 
 def _bag011_expected_established_session_count() -> int:
-    """Established-session baseline for bag011.ash6 full-scale topology.
+    """Established-session baseline for bag011.ash6 full-scale logical_topology.
 
     Total sessions across all peer types minus BGP MON. BGP MON peers
     (ASN 64001) legitimately stay IDLE intermittently on bag011 post-
@@ -805,7 +811,7 @@ def _bag011_expected_established_session_count() -> int:
 
 
 def create_bgp_ebb_restart_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
 ) -> TestConfig:
@@ -821,10 +827,10 @@ def create_bgp_ebb_restart_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     expected_peer_identity = build_expected_peer_identity()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -849,7 +855,7 @@ def create_bgp_ebb_restart_test_config(
 
 
 def create_bgp_ebb_oscillations_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
 ) -> TestConfig:
@@ -865,11 +871,11 @@ def create_bgp_ebb_oscillations_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     session_count = _bag011_expected_established_session_count()
     expected_peer_identity = build_expected_peer_identity()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -914,7 +920,7 @@ def create_bgp_ebb_oscillations_test_config(
 
 
 def create_bgp_ebb_stability_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
 ) -> TestConfig:
@@ -930,12 +936,12 @@ def create_bgp_ebb_stability_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_bgp_mon = testbed.ixia_ports[2][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_bgp_mon = physical_inventory.ixia_ports[2][0]
     session_count = _bag011_expected_established_session_count()
     expected_peer_identity = build_expected_peer_identity()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -945,8 +951,8 @@ def create_bgp_ebb_stability_test_config(
                 device_name=device_name,
                 peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
                 peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-                local_link=testbed.extras["openr_local_link"],
-                other_link=testbed.extras["openr_other_link"],
+                local_link=physical_inventory.extras["openr_local_link"],
+                other_link=physical_inventory.extras["openr_other_link"],
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -958,8 +964,8 @@ def create_bgp_ebb_stability_test_config(
                 tcp_dump_capture_interface=interface_name_to_short_format(
                     ixia_interface_mimic_bgp_mon
                 ),
-                local_link=testbed.extras["openr_local_link"],
-                other_link=testbed.extras["openr_other_link"],
+                local_link=physical_inventory.extras["openr_local_link"],
+                other_link=physical_inventory.extras["openr_other_link"],
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -973,7 +979,7 @@ def create_bgp_ebb_stability_test_config(
 
 
 def create_bgp_ebb_stage1_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
     name_override: str | None = None,
@@ -986,18 +992,18 @@ def create_bgp_ebb_stage1_test_config(
     oscillations, then IGP-instability + nexthop-group). The
     ``bgp_igp_instability_pnh_metric_oscillation`` playbook is moved to
     bag010 for cross-device wall-clock balance (both bag010 and bag011 share
-    the same full-scale topology).
+    the same full-scale logical_topology).
     """
     name = name_override or _derive_test_config_name(
-        testbed, "STAGE1_CONSOLIDATED", enable_update_group
+        physical_inventory, "STAGE1_CONSOLIDATED", enable_update_group
     )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_bgp_mon = testbed.ixia_ports[2][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_bgp_mon = physical_inventory.ixia_ports[2][0]
     session_count = _bag011_expected_established_session_count()
     expected_peer_identity = build_expected_peer_identity()
     return _build_ebb_full_scale_test_config(
-        testbed=testbed,
+        physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
@@ -1058,8 +1064,8 @@ def create_bgp_ebb_stage1_test_config(
                 tcp_dump_capture_interface=interface_name_to_short_format(
                     ixia_interface_mimic_bgp_mon
                 ),
-                local_link=testbed.extras["openr_local_link"],
-                other_link=testbed.extras["openr_other_link"],
+                local_link=physical_inventory.extras["openr_local_link"],
+                other_link=physical_inventory.extras["openr_other_link"],
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -1072,17 +1078,17 @@ def create_bgp_ebb_stage1_test_config(
     )
 
 
-def _create_ebb_longevity_playbooks(testbed: Testbed) -> list:
+def _create_ebb_longevity_playbooks(physical_inventory: PhysicalInventory) -> list:
     return [
         create_bgp_ebb_longevity_playbook(
-            device_name=testbed.device_name,
+            device_name=physical_inventory.device_name,
             duration=_BAG010_LONGEVITY_DURATION_SECONDS,
         ),
     ]
 
 
 def create_ebb_longevity_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = False,
     name_override: str | None = None,
@@ -1096,11 +1102,11 @@ def create_ebb_longevity_test_config(
     return to the full 8h soak.
     """
     name = name_override or _derive_test_config_name(
-        testbed, "LONGEVITY", enable_update_group
+        physical_inventory, "LONGEVITY", enable_update_group
     )
 
-    bound = EBB_FULL_SCALE_WITH_BGPMON.bind_to_testbed(
-        testbed=testbed,
+    bound = EBB_FULL_SCALE_WITH_BGPMON.bind_to_inventory(
+        physical_inventory=physical_inventory,
         port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
         parent_networks=EBB_PARENT_NETWORKS,
         peer_groups=EBB_PEER_GROUPS,
@@ -1122,5 +1128,5 @@ def create_ebb_longevity_test_config(
         setup_tasks=compiled.setup_tasks,
         teardown_tasks=compiled.teardown_tasks,
         basic_port_configs=compiled.basic_port_configs,
-        playbooks=_create_ebb_longevity_playbooks(testbed),
+        playbooks=_create_ebb_longevity_playbooks(physical_inventory),
     )

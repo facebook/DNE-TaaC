@@ -22,7 +22,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_separable_policy_test_config,
     create_bgp_ebb_characteristic_update_packing_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     EB02_LAB_ASH6,
     EB03_LAB_ASH6,
     EB04_LAB_ASH6,

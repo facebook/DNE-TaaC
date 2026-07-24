@@ -11,22 +11,26 @@ Sub-specs to implement:
 - 2.5.2 Scale Withdraw: 10+ Peers in Same Group, Withdraw Routes
 """
 
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, TestConfig
 
 
 def create_bgp_ug_multigroup_formation_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """Spec 2.5 — Multi-Group Formation Correctness. SKELETON qualification testconfig."""
     return TestConfig(
         name="BGP_UG_MULTIGROUP_FORMATION_TEST",
         endpoints=[
             Endpoint(
-                name=testbed.device_name,
+                name=physical_inventory.device_name,
                 dut=True,
-                ixia_ports=[testbed.ixia_ports[0][0]] if testbed.ixia_ports else [],
+                ixia_ports=[physical_inventory.ixia_ports[0][0]]
+                if physical_inventory.ixia_ports
+                else [],
             ),
         ],
         playbooks=[],

@@ -12,9 +12,9 @@ surfaces live here:
   of every catalog binding + external consumer (kodiak RBB, the deleted
   ``internal_test_configs.py`` inline list, etc.).
 
-* ``create_bgp_dc_chronos_node_test_config(testbed, *, name, **overrides)``
-  — the framework-shaped wrapper. Fills in per-testbed knobs from
-  ``Testbed.extras`` and the factory-wide chronos defaults, then delegates
+* ``create_bgp_dc_chronos_node_test_config(physical_inventory, *, name, **overrides)``
+  — the framework-shaped wrapper. Fills in per-inventory knobs from
+  ``PhysicalInventory.extras`` and the factory-wide chronos defaults, then delegates
   to ``build_bgp_dc_test_config`` so both paths emit identical output.
 
 The playbook-assembly + playbook-category-registry lives on this module too
@@ -45,7 +45,9 @@ from taac.task_definitions import (
     create_run_commands_on_shell_task,
     create_wait_for_agent_convergence_task,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_dc_tc_checks import (
     _apply_tc_checks_to_playbooks,
     _PERMIT_ALL_POLICY_TERM,
@@ -1117,9 +1119,9 @@ _CHRONOS_DEFAULTS = {
     "basset_pool": "dne.test",
 }
 
-# ``extras`` keys pulled from Testbed. Ordering doesn't matter; the mapping
-# just enumerates every knob the wrapper resolves from Testbed.extras.
-_TESTBED_EXTRA_KEYS = (
+# ``extras`` keys pulled from PhysicalInventory. Ordering doesn't matter; the mapping
+# just enumerates every knob the wrapper resolves from PhysicalInventory.extras.
+_PHYSICAL_INVENTORY_EXTRA_KEYS = (
     "ixia_downlink_interface",
     "ixia_uplink_interface",
     "ixia_rogue_interface",
@@ -1159,15 +1161,15 @@ _TESTBED_EXTRA_KEYS = (
 
 
 def create_bgp_dc_chronos_node_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     **overrides,
 ) -> TestConfig:
-    """Build a BGP-DC chronos_node TestConfig from a Testbed + per-binding overrides.
+    """Build a BGP-DC chronos_node TestConfig from a PhysicalInventory + per-binding overrides.
 
     Wave-3B wrapper around :func:`build_bgp_dc_test_config`. Pulls every
-    per-testbed knob from ``testbed.extras`` (see ``_TESTBED_EXTRA_KEYS``),
+    per-inventory knob from ``physical_inventory.extras`` (see ``_PHYSICAL_INVENTORY_EXTRA_KEYS``),
     layers the shared chronos scale defaults from ``_CHRONOS_DEFAULTS`` on
     top, then applies ``**overrides`` (playbook selections + any scale
     tweaks) last. The final dict is unpacked into the legacy 90-arg builder,
@@ -1175,12 +1177,12 @@ def create_bgp_dc_chronos_node_test_config(
     """
     kwargs: dict = {
         "test_config_name": name,
-        "device_name": testbed.device_name,
-        "local_mac_address": testbed.mac_address,
+        "device_name": physical_inventory.device_name,
+        "local_mac_address": physical_inventory.mac_address,
     }
-    for key in _TESTBED_EXTRA_KEYS:
-        if key in testbed.extras:
-            kwargs[key] = testbed.extras[key]
+    for key in _PHYSICAL_INVENTORY_EXTRA_KEYS:
+        if key in physical_inventory.extras:
+            kwargs[key] = physical_inventory.extras[key]
     for key, value in _CHRONOS_DEFAULTS.items():
         kwargs.setdefault(key, value)
     kwargs.update(overrides)

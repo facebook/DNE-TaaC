@@ -16,7 +16,7 @@ call ``test_config_for_bgp_plus_plus_ebb{,_with_bgp_mon}`` (FBOSS COOP
 patcher variants) rather than the Arista mimic factory used by 5E.2.
 
 The 3 lab-box siblings (eb01/eb03/eb04) live in
-``qual_bgp_ebb_full_scale.py`` since they target ``qual``-usage testbeds.
+``qual_bgp_ebb_full_scale.py`` since they target ``qual``-usage physical inventories.
 
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
@@ -28,7 +28,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale_fboss_mimic import (
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale_mimic import (
     create_bgp_ebb_full_scale_mimic_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     FSW001_QZB,
     FSW_QZB,
     JSW002_M001_SNC1,
@@ -44,7 +44,7 @@ from taac.test_as_a_config import types as taac_types
 # factory then defaults ``profile`` to ``BGP_PLUS_PLUS_WITHOUT_OPEN_R``).
 # ``JSW002_M001_SNC1`` intentionally has an empty ``ixia_chassis_ip`` +
 # no ``ixia_ports`` -- topology is discovered at runtime for this prod
-# testbed -- so the mimic interface names come from ``testbed.extras``.
+# physical_inventory -- so the mimic interface names come from ``physical_inventory.extras``.
 ARISTA_MIMIC_EBB_TEST_FULL_SCALE_TEST_CONFIG = (
     create_bgp_ebb_full_scale_mimic_test_config(
         JSW002_M001_SNC1,

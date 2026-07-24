@@ -46,9 +46,9 @@ class PhysicalInventory:
 
     # ─── Which catalog surfaces may bind this physical inventory ──────────
     # Members of ``VALID_USAGES``. A cicd_*.py catalog file may only bind
-    # testbeds whose ``usage`` set includes ``"cicd"``; same for qual_ /
-    # adhoc_. ``"retired"`` marks a testbed kept only for historical record.
-    # Enforced by tests/test_testbed_usage_matches_catalog.py.
+    # physical inventories whose ``usage`` set includes ``"cicd"``; same for qual_ /
+    # adhoc_. ``"retired"`` marks a physical_inventory kept only for historical record.
+    # Enforced by tests/test_physical_inventory_usage_matches_catalog.py.
     usage: frozenset[str] = field(default_factory=frozenset)
 
     # ─── DUT identity properties (optional, flat) ─────────────────────────
@@ -115,7 +115,7 @@ class PhysicalInventory:
         secondary_chassis_defined = self.secondary_ixia_chassis_ip is not None
         if secondary_ports_defined and not secondary_chassis_defined:
             raise ValueError(
-                f"Testbed {self.device_name}: secondary_ixia_ports requires "
+                f"PhysicalInventory {self.device_name}: secondary_ixia_ports requires "
                 "secondary_ixia_chassis_ip to be set"
             )
         if not secondary_ports_defined:
@@ -123,7 +123,7 @@ class PhysicalInventory:
 
         if not self.secondary_ixia_chassis_ip:
             raise ValueError(
-                f"Testbed {self.device_name}: secondary_ixia_chassis_ip must be nonempty"
+                f"PhysicalInventory {self.device_name}: secondary_ixia_chassis_ip must be nonempty"
             )
         _validate_ixia_port_mapping(self.device_name, "ixia_ports", self.ixia_ports)
         _validate_ixia_port_mapping(
@@ -133,7 +133,7 @@ class PhysicalInventory:
         )
         if len(self.ixia_ports) != len(self.secondary_ixia_ports):
             raise ValueError(
-                f"Testbed {self.device_name}: primary and secondary IXIA port "
+                f"PhysicalInventory {self.device_name}: primary and secondary IXIA port "
                 "mappings must have equivalent role indices; "
                 f"got {len(self.ixia_ports)} primary and "
                 f"{len(self.secondary_ixia_ports)} secondary ports"
@@ -148,10 +148,10 @@ class PhysicalInventory:
         # self-consistent even under a `replace()` that sets an empty string.
         return bool(self.secondary_ixia_chassis_ip) and bool(self.secondary_ixia_ports)
 
-    def for_secondary_ixia(self) -> Testbed:
+    def for_secondary_ixia(self) -> PhysicalInventory:
         if not self.has_secondary_ixia:
             raise ValueError(
-                f"Testbed {self.device_name}: no secondary IXIA mapping is defined"
+                f"PhysicalInventory {self.device_name}: no secondary IXIA mapping is defined"
             )
         return replace(
             self,
@@ -168,14 +168,16 @@ def _validate_ixia_port_mapping(
     ports: list[tuple[str, str]],
 ) -> None:
     if not ports:
-        raise ValueError(f"Testbed {device_name}: {field_name} must be nonempty")
+        raise ValueError(
+            f"PhysicalInventory {device_name}: {field_name} must be nonempty"
+        )
 
     dut_interfaces: list[str] = []
     chassis_ports: list[str] = []
     for index, entry in enumerate(ports):
         if not isinstance(entry, tuple) or len(entry) != 2:
             raise ValueError(
-                f"Testbed {device_name}: {field_name}[{index}] must be a "
+                f"PhysicalInventory {device_name}: {field_name}[{index}] must be a "
                 "(dut_interface, chassis_port) tuple"
             )
         dut_interface, chassis_port = entry
@@ -186,7 +188,7 @@ def _validate_ixia_port_mapping(
             or not chassis_port
         ):
             raise ValueError(
-                f"Testbed {device_name}: {field_name}[{index}] must contain "
+                f"PhysicalInventory {device_name}: {field_name}[{index}] must contain "
                 "nonempty string interface names"
             )
         dut_interfaces.append(dut_interface)
@@ -196,7 +198,7 @@ def _validate_ixia_port_mapping(
     duplicate_chassis_ports = _duplicates(chassis_ports)
     if duplicate_dut_interfaces or duplicate_chassis_ports:
         raise ValueError(
-            f"Testbed {device_name}: {field_name} contains duplicate mappings; "
+            f"PhysicalInventory {device_name}: {field_name} contains duplicate mappings; "
             f"DUT interfaces={duplicate_dut_interfaces!r}, "
             f"chassis ports={duplicate_chassis_ports!r}"
         )
@@ -204,10 +206,6 @@ def _validate_ixia_port_mapping(
 
 def _duplicates(values: list[str]) -> list[str]:
     return sorted(value for value in set(values) if values.count(value) > 1)
-
-
-# Temporary D18 compatibility alias; removed after all consumers migrate in D19.
-Testbed = PhysicalInventory
 
 
 # ─── Shared constants ─────────────────────────────────────────────────────
@@ -266,8 +264,8 @@ def _lab_oss_mock_device_data(
     return {device_name: taac_types.MockDeviceInfo(**mock_kwargs)}
 
 
-# ─── BAG conveyor testbeds ────────────────────────────────────────────────
-# Each ASH6 BAG device has one canonical Testbed artifact. ``ixia_ports``
+# ─── BAG conveyor physical inventories ────────────────────────────────────────────────
+# Each ASH6 BAG device has one canonical PhysicalInventory artifact. ``ixia_ports``
 # always describes the chassis selected by ``primary_ixia_chassis_ip``.
 
 BAG002_SNC1 = PhysicalInventory(
@@ -379,7 +377,7 @@ BAG012_ASH6 = PhysicalInventory(
         ("Ethernet3/36/3", "8/3"),  # BGP-MON
     ],
     dut_bgp_as=65012,
-    # bag012 is the only bag testbed that pins ``router_id`` explicitly
+    # bag012 is the only bag physical_inventory that pins ``router_id`` explicitly
     # (bag010/bag011/bag013 all rely on the device-default BGP router-id).
     # Preserved verbatim from the legacy bag012 config for golden-manifest identity.
     router_id="10.163.28.11",
@@ -412,6 +410,29 @@ BAG012_ASH6 = PhysicalInventory(
             "metric": 10,
         },
     },
+)
+
+# bag012.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
+# the default primary (ixia03). Same physical DUT as BAG012_ASH6, but the
+# update-packing factory reads ``ixia_chassis_ip`` (== primary), so ixia11 is
+# selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip`` and the
+# Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports 8/1-3) in
+# ``ixia_ports``. Ad-hoc: resolvable via ``--test-config`` (see
+# adhoc_bgp_ebb_characteristic.py); NOT scheduled on a dne_routing conveyor node.
+BAG012_ASH6_IXIA11 = PhysicalInventory(
+    device_name="bag012.ash6",
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
+    ixia_ports=[
+        ("Ethernet3/36/1", "8/1"),  # eBGP
+        ("Ethernet3/36/2", "8/2"),  # iBGP
+        ("Ethernet3/36/3", "8/3"),  # BGP-MON
+    ],
+    dut_bgp_as=65012,
+    router_id="10.163.28.11",
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    peer_groups=ebb_peer_groups(),
 )
 
 BAG013_ASH6 = PhysicalInventory(
@@ -454,14 +475,58 @@ BAG013_ASH6 = PhysicalInventory(
     },
 )
 
-# ─── CTE UCMP testbeds ────────────────────────────────────────────────────
+# bag013.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
+# the default primary (ixia03). Same physical DUT as BAG013_ASH6; the tc1
+# distribution-correctness builder reads ``ixia_chassis_ip`` (== primary), so
+# ixia11 is selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip``
+# and the Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports
+# 8/5-7) in ``ixia_ports``. Needs 3 ports: the tc1 bag013 branch uses
+# ixia_ports[2] (BGP-MON) as the pcap-capture handle. Ad-hoc: resolvable via
+# ``--test-config``; NOT scheduled on a dne_routing conveyor node.
+BAG013_ASH6_IXIA11 = PhysicalInventory(
+    device_name="bag013.ash6",
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
+    ixia_ports=[
+        ("Ethernet3/36/1", "8/5"),  # eBGP
+        ("Ethernet3/36/2", "8/6"),  # iBGP
+        ("Ethernet3/36/3", "8/7"),  # BGP-MON
+    ],
+    dut_bgp_as=65013,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
+    peer_groups=ebb_peer_groups(),
+    extras={
+        "openr_port_channel_member": "Ethernet3/9/1",
+        "openr_port_channel_ipv4": "10.131.97.232/31",
+        "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
+        "openr_local_link": {
+            "ipv4": "10.131.97.232",
+            "ipv6": "fe80::eba:a7f:fcfc",
+            "ifName": "po100211",
+            "weight": 0,
+            "metric": 10,
+        },
+        "openr_other_link": {
+            "ipv4": "10.131.97.233",
+            "ipv6": "fe80::eba:a7f:fcfd",
+            "ifName": "po100211",
+            "weight": 0,
+            "metric": 10,
+        },
+    },
+)
+
+
+# ─── CTE UCMP physical inventories ────────────────────────────────────────────────────
 # Wave 2C — CTE UCMP feature testconfigs (moved from testconfigs/routing/
 # test_config_cte_ucmp{,_stand_alone}.py). The multi-node QZD topology
 # (4 endpoints, no shared chassis IP) does not fit the flat PhysicalInventory dataclass;
 # only the DUT identity is captured here and the spine + IXIA-port layout
 # stays as private module-level constants inside factories/cte_ucmp.py.
 
-CTE_UCMP_QZD_TESTBED = PhysicalInventory(
+CTE_UCMP_QZD_PHYSICAL_INVENTORY = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="fa001-du004.qzd1",
     # No shared IXIA chassis IP: the QZD test config uses per-endpoint
@@ -471,7 +536,7 @@ CTE_UCMP_QZD_TESTBED = PhysicalInventory(
     primary_ixia_chassis_ip="",
 )
 
-CTE_UCMP_STAND_ALONE_TESTBED = PhysicalInventory(
+CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY = PhysicalInventory(
     device_name="fsw003.p003.f01.qzd1",
     usage=frozenset({"adhoc"}),
     primary_ixia_chassis_ip="2401:db00:0116:303b:0000:0000:0000:0100",
@@ -483,7 +548,7 @@ CTE_UCMP_STAND_ALONE_TESTBED = PhysicalInventory(
 )
 
 
-# ─── EB0x lab testbeds (Arista lab boxes in ASH6) ─────────────────────────
+# ─── EB0x lab physical inventories (Arista lab boxes in ASH6) ─────────────────────────
 # The ebXX.lab.ash6 devices are lab boxes with admin/password auth
 # (svc-netcastle_bot is not authorized). ``extras`` carries the shared lab
 # credentials plus MockDeviceInfo fields (netwhoami returns ``#INVALID#`` for
@@ -642,7 +707,7 @@ EB_TEST_DEVICE = PhysicalInventory(
     ssh_user="admin",
     # Extra host-driver JSON kwarg beyond the standard username/password
     # pair — routes the BGP++ thrift RPC to a specific IPv6 address on
-    # the dev testbed (device's regular loopback is not reachable from
+    # the dev physical_inventory (device's regular loopback is not reachable from
     # devservers).
     host_driver_args=_lab_host_driver_args(
         "bgp.eb.test.ash6",
@@ -697,7 +762,7 @@ JSW002_M001_SNC1 = PhysicalInventory(
 )
 
 
-# ─── FA verify testbed (FA001-UU001 in QZD1) ──────────────────────────────
+# ─── FA verify physical_inventory (FA001-UU001 in QZD1) ──────────────────────────────
 # ``fa001-uu001.qzd1`` is a Fabric-Aggregator uplink used by the BGP++
 # computational-load and constant-attribute-storage feature verify configs.
 # It uses FAUU-style peer-group names (PEERGROUP_FAUU_*) rather than the
@@ -717,8 +782,8 @@ FA001_UU001_QZD1 = PhysicalInventory(
 )
 
 
-# ─── FBOSS EBB single-node testbeds (FSW / QZD family) ────────────────────
-# Four sibling testbeds built from the same ``test_config_for_bgp_plus_plus_ebb``
+# ─── FBOSS EBB single-node physical inventories (FSW / QZD family) ────────────────────
+# Four sibling physical inventories built from the same ``test_config_for_bgp_plus_plus_ebb``
 # / ``..._with_bgp_mon`` factories, each pinning a different DUT. The QZD
 # testconfigs uniformly route to the ASH6 IXIA chassis (verbatim from legacy
 # ``direct_ixia_connections``); the non-MON siblings do not declare direct
@@ -771,10 +836,10 @@ QZD_FSW002 = PhysicalInventory(
 
 QZD_LAB = PhysicalInventory(
     usage=frozenset({"adhoc"}),
-    # Same DUT name as ``CTE_UCMP_STAND_ALONE_TESTBED`` — the CTE UCMP config
+    # Same DUT name as ``CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY`` — the CTE UCMP config
     # reserves this device for confed-peer stand-alone testing, while
     # ``QZD_LAB`` uses it as an EBB single-node full-scale DUT. Separate
-    # logical testbed because peer-groups / route-maps differ (uses
+    # logical inventory because peer-groups / route-maps differ (uses
     # PROPAGATE_FSW_SSW_* / PROPAGATE_FSW_RSW_* policy names in the legacy
     # source, distinct from EBB EB-FA-IN/OUT).
     device_name="fsw003.p003.f01.qzd1",
@@ -789,7 +854,7 @@ QZD_LAB = PhysicalInventory(
 )
 
 
-# ─── BGP-DC chronos_node testbeds (Wave 3B) ───────────────────────────────
+# ─── BGP-DC chronos_node physical inventories (Wave 3B) ───────────────────────────────
 # Consumed by ``factories/bgp_dc_chronos_node.py`` — single-DUT BGP++ DC
 # configs assembled through ``create_bgp_dc_chronos_node_test_config``. The
 # BGP-DC factory ignores ``ixia_ports`` (physical chassis-port mapping is
@@ -797,8 +862,8 @@ QZD_LAB = PhysicalInventory(
 # interface names for downlink / uplink / rogue live in ``extras`` where the
 # factory reads them. ``extras`` also carries the SSW-vs-FSW peer-group
 # names, route-map identifiers, IXIA parent-network prefixes, ASNs, confed
-# flags, and per-testbed IXIA BGP communities — every knob that varies by
-# testbed but not by binding.
+# flags, and per-inventory IXIA BGP communities — every knob that varies by
+# physical_inventory but not by binding.
 
 # Shared IXIA parent networks / hardening baselines. Every BGP-DC chronos
 # binding pins the same downlink/uplink/rogue IPv6+IPv4 parent prefixes and

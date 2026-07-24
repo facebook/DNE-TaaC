@@ -5,14 +5,14 @@
 Workload family covers the Arista BGP++ perf-scaling / transient-memory /
 route-churn / bounded-ECMP-set experiments historically wired through the
 ``test_config_performance_scaling_case{1,3,4,6,9}.py`` factories. Each
-new factory takes ``(testbed: Testbed, *, name: str, ...)`` and returns a
+new factory takes ``(physical_inventory: PhysicalInventory, *, name: str, ...)`` and returns a
 ``TestConfig`` whose serialized form is byte-wise identical to the legacy
 factory outputs (golden manifest hashes preserved verbatim).
 
 The factory bodies stay as close as possible to the legacy factory bodies;
 DUT identity fields (``device_name``, IXIA port names / chassis map, lab
 device host_driver_args, oss_mock_device_data) are derived from
-``testbed`` (via ``extras`` on the lab testbeds); the remaining workload
+``physical_inventory`` (via ``extras`` on the lab physical inventories); the remaining workload
 knobs (peer counts, prefix counts, community lists, etc.) stay as
 kwargs with defaults matching the legacy eb02.lab.ash6 wrappers.
 
@@ -63,7 +63,9 @@ from taac.task_definitions import (
     create_run_commands_on_shell_task,
     create_validate_bgpcpp_config_on_device_task,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     UPDATE_GROUP_CONFIG,
 )
@@ -97,7 +99,7 @@ _BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
 _EB_FA_TRANSITED_COMMUNITY = "65529:39744"
 
 
-# ─── testbed → DUT-wiring helpers hoisted to util/bgp_ebb_lab_wiring.py ───
+# ─── physical_inventory → DUT-wiring helpers hoisted to util/bgp_ebb_lab_wiring.py ───
 # to break a circular import with bgp_ebb_characteristic.py (see that file's
 # imports and util/bgp_ebb_lab_wiring.py docstring).
 
@@ -108,7 +110,7 @@ _EB_FA_TRANSITED_COMMUNITY = "65529:39744"
 
 
 def create_bgp_ebb_scaling_performance_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     egress_peer_counts: list[int],
@@ -134,8 +136,8 @@ def create_bgp_ebb_scaling_performance_test_config(
     Byte-wise identical to the legacy
     ``test_config_performance_scaling_case1.test_config_for_bgp_plus_plus_on_ebb_arista_performance_scaling``
     factory; the only structural change is that DUT identity + IXIA port
-    map (and, for lab testbeds, ``host_driver_args`` / ``oss_mock_device_data``)
-    are derived from ``testbed`` when the caller does not pass explicit
+    map (and, for lab physical inventories, ``host_driver_args`` / ``oss_mock_device_data``)
+    are derived from ``physical_inventory`` when the caller does not pass explicit
     overrides. bag012 conveyor callers pass ``setup_tasks`` +
     ``per_iteration_setup_steps_factory`` + explicit
     ``direct_ixia_connections`` and get the same TestConfig they had before.
@@ -143,18 +145,20 @@ def create_bgp_ebb_scaling_performance_test_config(
     See ../ebb/test_config_performance_scaling_case1.py header for the full
     playbook contract.
     """
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
     max_n = max(egress_peer_counts)
 
     resolved_host_driver_args = (
-        host_driver_args if host_driver_args is not None else testbed.host_driver_args
+        host_driver_args
+        if host_driver_args is not None
+        else physical_inventory.host_driver_args
     )
     resolved_oss_mock_device_data = (
         oss_mock_device_data
         if oss_mock_device_data is not None
-        else testbed.oss_mock_device_data
+        else physical_inventory.oss_mock_device_data
     )
     resolved_host_os_type_map = (
         host_os_type_map
@@ -164,7 +168,7 @@ def create_bgp_ebb_scaling_performance_test_config(
     resolved_direct_ixia_connections = (
         direct_ixia_connections
         if direct_ixia_connections is not None
-        else _direct_ixia_conns_two_port(testbed)
+        else _direct_ixia_conns_two_port(physical_inventory)
     )
 
     return TestConfig(
@@ -230,7 +234,7 @@ def create_bgp_ebb_scaling_performance_test_config(
 
 
 def create_bgp_ebb_scaling_transient_memory_route_scale_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_peer_count_v4: int = 140,
@@ -265,13 +269,13 @@ def create_bgp_ebb_scaling_transient_memory_route_scale_test_config(
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-    direct_ixia_connections = _direct_ixia_conns_two_port(testbed)
+    direct_ixia_connections = _direct_ixia_conns_two_port(physical_inventory)
 
     initial_ebgp_peer_count = 1
 
@@ -396,7 +400,7 @@ def create_bgp_ebb_scaling_transient_memory_route_scale_test_config(
 
 
 def create_bgp_ebb_scaling_transient_memory_peer_scale_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -427,13 +431,13 @@ def create_bgp_ebb_scaling_transient_memory_peer_scale_test_config(
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-    direct_ixia_connections = _direct_ixia_conns_two_port(testbed)
+    direct_ixia_connections = _direct_ixia_conns_two_port(physical_inventory)
 
     initial_peer_count = 1
 
@@ -529,7 +533,7 @@ def create_bgp_ebb_scaling_transient_memory_peer_scale_test_config(
 
 
 def create_bgp_ebb_scaling_route_churn_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_peer_count: int,
@@ -551,13 +555,13 @@ def create_bgp_ebb_scaling_route_churn_test_config(
     Byte-wise identical to the legacy
     ``test_config_performance_scaling_case6.test_config_for_bgp_plus_plus_on_ebb_arista_route_churn``.
     """
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-    direct_ixia_connections = _direct_ixia_conns_two_port(testbed)
+    direct_ixia_connections = _direct_ixia_conns_two_port(physical_inventory)
 
     total_bgp_peers = ibgp_peer_count + ebgp_peer_count
 
@@ -849,7 +853,7 @@ def create_bgp_ebb_scaling_route_churn_test_config(
 
 
 def create_bgp_ebb_scaling_route_churn_prefix_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_peer_count: int = 100,
@@ -877,13 +881,13 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
     if ssh_password is None:
         ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-    direct_ixia_connections = _direct_ixia_conns_two_port(testbed)
+    direct_ixia_connections = _direct_ixia_conns_two_port(physical_inventory)
 
     max_prefix_count = max(pc for pc, _ in prefix_configs)
 
@@ -1012,7 +1016,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
 
 
 def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_peer_count_v6: int = 128,
@@ -1050,11 +1054,11 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
     if ssh_password is None:
         ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     resolved_host_os_type_map = (
         host_os_type_map
         if host_os_type_map is not None
@@ -1063,7 +1067,7 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
     resolved_direct_ixia_connections = (
         direct_ixia_connections
         if direct_ixia_connections is not None
-        else _direct_ixia_conns_two_port(testbed)
+        else _direct_ixia_conns_two_port(physical_inventory)
     )
 
     if setup_tasks is None:

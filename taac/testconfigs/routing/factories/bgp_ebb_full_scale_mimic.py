@@ -2,7 +2,7 @@
 # pyre-unsafe
 """Wrapper factory for the ``ARISTA_MIMIC`` EBB full-scale TestConfig family.
 
-Thin ``(testbed, *, name, ...) -> TestConfig`` shim around the legacy
+Thin ``(physical_inventory, *, name, ...) -> TestConfig`` shim around the legacy
 ``test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon`` factory in
 ``ebb/arista_ebb_scale_test_config.py``. Wave 5E.2 migrates the 4
 wrappers previously living at
@@ -23,7 +23,9 @@ from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.ebb.arista_ebb_scale_test_config import (
     test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, TestConfig
 
@@ -97,7 +99,7 @@ _BGP_ROUTER_ID = "129.134.63.224"
 
 
 def create_bgp_ebb_full_scale_mimic_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ixia_interface_mimic_ebgp: str,
@@ -112,11 +114,11 @@ def create_bgp_ebb_full_scale_mimic_test_config(
     Byte-identical to the legacy
     ``arista_mimic_ebb_test_full_scale_test_config.py`` and its three
     ``eb0{1,3,4}_arista_mimic_ebb_test_full_scale_*_test_config.py``
-    siblings, depending on which ``testbed`` + kwargs are passed.
+    siblings, depending on which ``physical_inventory`` + kwargs are passed.
 
-    ``testbed.host_driver_args`` / ``testbed.oss_mock_device_data`` are
-    forwarded verbatim when populated (lab-box testbeds); production
-    testbeds leave both ``None`` (matching the legacy shared wrapper
+    ``physical_inventory.host_driver_args`` / ``physical_inventory.oss_mock_device_data`` are
+    forwarded verbatim when populated (lab-box physical inventories); production
+    physical inventories leave both ``None`` (matching the legacy shared wrapper
     which relied on the underlying factory's default omission).
 
     ``profile=None`` (the default) preserves the legacy shared-wrapper
@@ -124,10 +126,10 @@ def create_bgp_ebb_full_scale_mimic_test_config(
     (``BGP_PLUS_PLUS_WITHOUT_OPEN_R``); the eb0x wrappers all pass
     ``BGP_PLUS_PLUS_WITH_OPEN_R`` explicitly.
     """
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     host_os_type_map = (
         {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-        if testbed.oss_mock_device_data is not None
+        if physical_inventory.oss_mock_device_data is not None
         else None
     )
 
@@ -180,9 +182,9 @@ def create_bgp_ebb_full_scale_mimic_test_config(
         "ibgp_peer_scale_per_plane": _IBGP_PEER_SCALE_PER_PLANE,
         "local_as_4_byte": _LOCAL_AS_4_BYTE,
         "bgp_router_id": _BGP_ROUTER_ID,
-        "oss_mock_device_data": testbed.oss_mock_device_data,
+        "oss_mock_device_data": physical_inventory.oss_mock_device_data,
         "host_os_type_map": host_os_type_map,
-        "host_driver_args": testbed.host_driver_args,
+        "host_driver_args": physical_inventory.host_driver_args,
         "direct_ixia_connections": direct_ixia_connections,
     }
     if profile is not None:

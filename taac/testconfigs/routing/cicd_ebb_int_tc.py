@@ -19,9 +19,9 @@ dne_routing.conveyor_config.cconf``. Each definition carries an inline
 the definition site and grep-able across the repo.
 
 Constant naming follows README.md §5:
-``{TESTBED}_{FACTORY}_TEST_CONFIG[_UG|_TOPOLOGY_SMOKE|...]``. The TESTBED
+``{PHYSICAL_INVENTORY}_{FACTORY}_TEST_CONFIG[_UG|_TOPOLOGY_SMOKE|...]``. The PHYSICAL_INVENTORY
 segment drops any DC suffix (e.g. ``BAG010`` not ``BAG010_ASH6``) — the DC
-lives on the Testbed instance in ``testbed.py``, not in the catalog constant.
+lives on the PhysicalInventory instance in ``physical_inventory.py``, not in the catalog constant.
 
 To bring back a previously-removed config, add a one-line factory call
 following the same shape (factories in ``factories/bgp_ebb_{full_scale,
@@ -41,7 +41,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     create_ebb_longevity_test_config,
     create_ebb_stage1_consolidated_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     BAG010_ASH6,
     BAG011_ASH6,
     BAG012_ASH6,

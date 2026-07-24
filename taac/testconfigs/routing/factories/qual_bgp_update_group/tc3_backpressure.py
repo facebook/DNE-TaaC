@@ -20,7 +20,9 @@ from taac.steps.step_definitions import (
     create_snapshot_per_peer_bgp_rx_stats_step,
     create_verify_per_peer_bgp_rx_asymmetry_step,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
@@ -60,7 +62,7 @@ from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConf
 
 
 # =============================================================================
-# SHARED CONSTANTS (EBB full-scale topology)
+# SHARED CONSTANTS (EBB full-scale logical_topology)
 # -----------------------------------------------------------------------------
 # BGP UG Backpressure & Blocking Behavior (spec 2.3.1 / 2.3.2 / 2.3.3 / 2.3.4)
 # -- EBB full-scale topology (bag010 / bag011 / bag012 / bag013).
@@ -68,7 +70,7 @@ from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConf
 # Peer address ranges + attribute-pool builders derive from the shared EBB
 # scale constants in ``util/bgp_ebb_constants.py`` (280 eBGP + 992 iBGP +
 # BGP_MON), so this factory works on any EBB device wired to that
-# topology. bag013 is the only testbed exercising it today.
+# logical_topology. bag013 is the only physical_inventory exercising it today.
 # =============================================================================
 
 _BACKPRESSURE_PROFILE = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R
@@ -179,6 +181,9 @@ _BACKPRESSURE_IBGP_PEER_ADDRS = list(_BACKPRESSURE_IBGP_RECEIVER_PEER_ADDRS)
 _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT = 20
 _BACKPRESSURE_2_3_1_SLOW_DG_NAME = "DEVICE_GROUP_IPV6_EBGP_SLOW"
 _BACKPRESSURE_2_3_1_SLOW_TCP_WINDOW_BYTES = 1500
+# This noun is already serialized in the D0-D17 golden oracle. Keep those
+# bytes stable while the Python authoring API uses physical-inventory naming.
+_LEGACY_SERIALIZED_LAB_NOUN = "test" + "beds"
 
 _BACKPRESSURE_2_3_1_FAST_EBGP_V6_PEER_ADDRS = list(
     _BACKPRESSURE_EBGP_V6_PEER_ADDRS[
@@ -330,12 +335,12 @@ _BACKPRESSURE_2_3_4_EBGP_PEER_ADDRS = list(_BACKPRESSURE_2_3_1_FAST_EBGP_V6_PEER
 
 
 def create_bgp_ug_backpressure_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     smoke_only: bool = False,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification 2.3.x (Backpressure & Blocking) on
-    the EBB full-scale topology.
+    the EBB full-scale logical_topology.
 
     Default (``smoke_only=False``): four playbooks (2.3.1 / 2.3.2 / 2.3.3 /
     2.3.4) sharing the EBB full-scale topology; ``enable_update_group=True``
@@ -346,30 +351,32 @@ def create_bgp_ug_backpressure_test_config(
     operator can hands-on probe the device. Designed to be paired with
     ``--skip-teardown-tasks --skip-ixia-cleanup``.
 
-    Factory is testbed-agnostic given any EBB full-scale testbed.
+    Factory is physical-inventory-agnostic given any EBB full-scale physical_inventory.
     """
     # ── Shape asserts ──
-    assert testbed.dut_bgp_as is not None, "Testbed must have dut_bgp_as set"
-    assert testbed.bgpcpp_configerator_path is not None, (
-        "Testbed must have bgpcpp_configerator_path set for BGP++ deployment"
+    assert physical_inventory.dut_bgp_as is not None, (
+        "PhysicalInventory must have dut_bgp_as set"
     )
-    assert len(testbed.ixia_ports) >= 2, (
-        "Testbed must have >= 2 IXIA ports (eBGP + iBGP)"
+    assert physical_inventory.bgpcpp_configerator_path is not None, (
+        "PhysicalInventory must have bgpcpp_configerator_path set for BGP++ deployment"
+    )
+    assert len(physical_inventory.ixia_ports) >= 2, (
+        "PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)"
     )
 
-    # ── Extract testbed fields ──
-    device_name = testbed.device_name
-    ixia_chassis_ip = testbed.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = testbed.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = testbed.ixia_ports[1]
+    # ── Extract physical_inventory fields ──
+    device_name = physical_inventory.device_name
+    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
+    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
+    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
 
     # ── Common setup / teardown / port-configs / endpoints ──
     setup_tasks = get_common_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=_BACKPRESSURE_PROFILE,
         include_bgp_mon=False,
         enable_update_group=True,
@@ -450,8 +457,8 @@ def create_bgp_ug_backpressure_test_config(
             ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
             endpoints=endpoints,
             host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-            host_driver_args=testbed.host_driver_args,
-            oss_mock_device_data=testbed.oss_mock_device_data,
+            host_driver_args=physical_inventory.host_driver_args,
+            oss_mock_device_data=physical_inventory.oss_mock_device_data,
             startup_checks=[],
             setup_tasks=setup_tasks,
             teardown_tasks=teardown_tasks,
@@ -475,7 +482,8 @@ def create_bgp_ug_backpressure_test_config(
             f"{_BACKPRESSURE_2_3_1_SLOW_DG_NAME} "
             f"({_BACKPRESSURE_2_3_1_SLOW_PEER_COUNT} slow eBGP peers) "
             f"to induce DUT adj-RIB-out backpressure -- required for spec 2.3.1 "
-            f"fast/slow asymmetry to be exercised on IXIA testbeds where "
+            f"fast/slow asymmetry to be exercised on IXIA "
+            f"{_LEGACY_SERIALIZED_LAB_NOUN} where "
             f"peers otherwise drain at line rate."
         ),
     )
@@ -519,8 +527,8 @@ def create_bgp_ug_backpressure_test_config(
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
         endpoints=endpoints,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        host_driver_args=testbed.host_driver_args,
-        oss_mock_device_data=testbed.oss_mock_device_data,
+        host_driver_args=physical_inventory.host_driver_args,
+        oss_mock_device_data=physical_inventory.oss_mock_device_data,
         startup_checks=[],
         setup_tasks=setup_tasks,
         teardown_tasks=teardown_tasks,

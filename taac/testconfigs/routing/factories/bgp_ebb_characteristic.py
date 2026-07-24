@@ -4,7 +4,7 @@
 
 EBB-topology measurement tests (update-packing, constant-attribute storage,
 queue/memory monitoring, performance scaling, bounded ECMP). Naming:
-``create_ebb_<workflow>_test_config(testbed: Testbed, ...) -> TestConfig``.
+``create_ebb_<workflow>_test_config(physical_inventory: PhysicalInventory, ...) -> TestConfig``.
 
 Wave 5D.1 absorbs the ``test_config_constant_attribute_storage_on_eos``,
 ``test_config_constant_attribute_storage_varying_combinations_on_eos`` and
@@ -22,7 +22,7 @@ retired: ``test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy``
 (case 8), ``test_config_bgp_update_packing_validation`` (update-packing),
 ``test_config_to_verify_computational_load_of_bgp_plus_plus`` and
 ``test_config_to_verify_constant_attribute_storage`` (verify pair). The
-new testbed-driven factories (``create_bgp_ebb_characteristic_*``) call
+new physical-inventory-driven factories (``create_bgp_ebb_characteristic_*``) call
 these helpers by name. Playbook factories (``build_case8_playbook``,
 ``create_bgp_update_packing_validation_playbook``,
 ``create_test_computational_load_for_bgp_plus_plus_playbook``,
@@ -79,7 +79,9 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_bounded_ecmp_sets_test_config,
     create_bgp_ebb_scaling_performance_test_config,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     _derive_test_config_name,
     EBGP_PEER_COUNT_V6,
@@ -898,12 +900,12 @@ def test_config_bgp_queue_memory_monitoring_with_route_scale(
 
 
 # =============================================================================
-# Wave 5D.1 -- new testbed-driven factories for the routing catalog.
+# Wave 5D.1 -- new physical-inventory-driven factories for the routing catalog.
 # =============================================================================
 
 
 def create_bgp_ebb_characteristic_constant_attribute_storage_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -929,19 +931,19 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_test_config(
     Byte-identical to the legacy
     ``eb03_arista_high_diversity_test_config.py`` wrapper when invoked with
     ``EB03_LAB_ASH6`` and its wrapper defaults; DUT identity + IXIA port map
-    + host_driver_args + oss_mock_device_data are derived from ``testbed``
-    directly (populated on the lab Testbed instances as first-class fields).
+    + host_driver_args + oss_mock_device_data are derived from ``physical_inventory``
+    directly (populated on the lab PhysicalInventory instances as first-class fields).
     """
     if ebgp_peer_counts is None:
         ebgp_peer_counts = [8, 16, 32, 64, 128]
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     resolved_direct_ixia_connections = (
         direct_ixia_connections
@@ -949,7 +951,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_test_config(
         else [
             DirectIxiaConnection(
                 interface=ebgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ebgp_port,
             ),
         ]
@@ -983,7 +985,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_test_config(
 
 
 def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combinations_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -1028,12 +1030,12 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     resolved_direct_ixia_connections = (
         direct_ixia_connections
@@ -1041,21 +1043,21 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
         else [
             DirectIxiaConnection(
                 interface=ebgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ebgp_port,
             ),
             DirectIxiaConnection(
                 interface=ibgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ibgp_port,
             ),
         ]
     )
 
     lab_password_env = (
-        testbed.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+        physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
-    lab_admin_password_default = testbed.extras.get(
+    lab_admin_password_default = physical_inventory.extras.get(
         "lab_admin_password_default",
         "dnepit",  # pragma: allowlist secret
     )
@@ -1096,7 +1098,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
 
 
 def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ibgp_local_as: int = 64981,
@@ -1123,7 +1125,7 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
     Byte-identical to the legacy
     ``eb02_arista_bgp_queue_memory_monitor_ipv6_50ebgp_25ibgp_with_flapping_test_config.py``
     /  ``eb04_.../..._test_config.py`` / ``eb_test_device_.../..._test_config.py``
-    wrappers when invoked with the respective testbed + wrapper defaults.
+    wrappers when invoked with the respective physical_inventory + wrapper defaults.
 
     Note: legacy wrappers use different ``direct_ixia_connections`` orderings
     (EB02 + EB_TEST_DEVICE: EBGP-first; EB04: IBGP-first). Callers pass the
@@ -1132,20 +1134,21 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
     if ebgp_route_acceptance_communities is None:
         ebgp_route_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ebgp_iface, _ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, _ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, _ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, _ibgp_port = physical_inventory.ixia_ports[1]
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
 
     ssh_password: str | None = None
     if ssh_user is not None:
         lab_password_env = (
-            testbed.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+            physical_inventory.lab_device_password_env_var
+            or "TAAC_EBB_LAB_DEVICE_PASSWORD"
         )
-        lab_admin_password_default = testbed.extras.get(
+        lab_admin_password_default = physical_inventory.extras.get(
             "lab_admin_password_default",
             "dnepit",  # pragma: allowlist secret
         )
@@ -1208,32 +1211,34 @@ _BAG012_BOUNDED_ECMP_PEER_COUNT: int = 128
 _BAG012_BOUNDED_ECMP_PREFIX_COUNT: int = 5000
 
 
-def _two_port_direct_ixia_connections(testbed: Testbed) -> list[DirectIxiaConnection]:
-    """Two DirectIxiaConnection entries from ``testbed.ixia_ports[0]`` (eBGP)
+def _two_port_direct_ixia_connections(
+    physical_inventory: PhysicalInventory,
+) -> list[DirectIxiaConnection]:
+    """Two DirectIxiaConnection entries from ``physical_inventory.ixia_ports[0]`` (eBGP)
     and ``[1]`` (iBGP).
 
-    For the 2-port EBB characteristic tests (no BGP-MON connection). Testbeds
+    For the 2-port EBB characteristic tests (no BGP-MON connection). PhysicalInventory instances
     that also wire a third BGP-MON port (bag010/bag011/bag013) leave it unused
     here.
     """
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
     return [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
         DirectIxiaConnection(
             interface=ibgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ibgp_port,
         ),
     ]
 
 
 def create_bgp_ebb_update_packing_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
@@ -1252,24 +1257,30 @@ def create_bgp_ebb_update_packing_test_config(
     - EBGP → IBGP: 10 EBGP peers inject routes, 1 IBGP peer captures UPDATEs.
     - ``ebgp_route_acceptance_communities=["65529:39744"]``.
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
     )
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    assert testbed.router_id, "factory requires router_id on testbed"
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    assert physical_inventory.router_id, (
+        "factory requires router_id on physical_inventory"
+    )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
 
     name = name_override or _derive_test_config_name(
-        testbed, "UPDATE_PACKING", enable_update_group
+        physical_inventory, "UPDATE_PACKING", enable_update_group
     )
 
     setup_tasks = get_update_packing_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ebgp_peer_count=10,
@@ -1278,8 +1289,8 @@ def create_bgp_ebb_update_packing_test_config(
         ibgp_remote_as=IBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
     )
@@ -1313,13 +1324,13 @@ def create_bgp_ebb_update_packing_test_config(
         # Conveyor-specific configuration
         setup_tasks=setup_tasks,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
+        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         log_collection_timeout=600,
     )
 
 
 def create_bgp_ebb_constant_attribute_storage_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
@@ -1331,24 +1342,30 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
     attributes remains constant regardless of the number of unique
     attribute-set combinations.
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
     )
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    assert testbed.router_id, "factory requires router_id on testbed"
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    assert physical_inventory.router_id, (
+        "factory requires router_id on physical_inventory"
+    )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
 
     name = name_override or _derive_test_config_name(
-        testbed, "CONSTANT_ATTRIBUTE_STORAGE", enable_update_group
+        physical_inventory, "CONSTANT_ATTRIBUTE_STORAGE", enable_update_group
     )
 
     setup_tasks = get_update_packing_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ebgp_peer_count=8,
@@ -1357,8 +1374,8 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         ibgp_remote_as=IBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
     )
@@ -1395,7 +1412,7 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         # Custom setup tasks (no openR)
         setup_tasks=setup_tasks,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
+        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         # Constant acceptance community (required by device BGP policy)
         constant_acceptance_communities=["65529:39744"],
         max_communities_per_route_from_pool=5,
@@ -1410,7 +1427,7 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
 
 
 def create_bgp_ebb_queue_memory_monitor_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
@@ -1421,24 +1438,30 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
     factory. Monitors BGP++ fiber queue statistics and memory usage under
     route churn (140 EBGP peers flapping 15s up / 15s down; 63 IBGP peers).
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
     )
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    assert testbed.router_id, "factory requires router_id on testbed"
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    assert physical_inventory.router_id, (
+        "factory requires router_id on physical_inventory"
+    )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
 
     name = name_override or _derive_test_config_name(
-        testbed, "QUEUE_MEMORY_MONITOR", enable_update_group
+        physical_inventory, "QUEUE_MEMORY_MONITOR", enable_update_group
     )
 
     setup_tasks = get_update_packing_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ebgp_peer_count=EBGP_PEER_COUNT_V6,
@@ -1447,8 +1470,8 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
         ibgp_remote_as=IBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
     )
@@ -1486,16 +1509,16 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
         setup_tasks=setup_tasks,
         monitor_cpu_stress=True,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
+        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         log_collection_timeout=600,
     )
 
 
 def create_bgp_ebb_characteristic_performance_scaling_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
 ) -> taac_types.TestConfig:
-    """Performance-scaling egress IBGP peer-sweep test config (testbed-driven).
+    """Performance-scaling egress IBGP peer-sweep test config (physical-inventory-driven).
 
     Extracted verbatim from the legacy
     ``bag012_ash6_test_config.create_bag012_ash6_performance_scaling_test_config``
@@ -1505,35 +1528,39 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     measured. A final aggregator Stage produces one consolidated everpaste
     plot.
 
-    The internal ``TestConfig.name`` is derived from ``testbed.device_name`` as
+    The internal ``TestConfig.name`` is derived from ``physical_inventory.device_name`` as
     ``{DEVICE}_BGP_PERFORMANCE_SCALING_CONVEYOR_TEST`` (+ ``_UPDATE_GROUP``); for
     bag012 this reproduces the grandfathered name byte-for-byte, so its golden
     manifest hash is unchanged.
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
     )
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
     # router_id is optional: bag012 pins one explicitly; bag010/bag011/bag013
     # rely on the device-default router-id, which the setup helpers preserve
     # when router_id is None.
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
 
-    # Derived from the testbed device name. SC1 = the first "scale &
+    # Derived from the physical_inventory device name. SC1 = the first "scale &
     # characteristics" test (egress peer-scale). The legacy
     # `_BGP_PERFORMANCE_SCALING_CONVEYOR_TEST` suffix was dropped: CONVEYOR
     # overclaimed (this is an ad-hoc test, not conveyor-scheduled).
-    name = f"{testbed.device_name.upper().replace('.', '_')}_SC1_EGRESS_PEER_SCALE_TEST"
+    name = f"{physical_inventory.device_name.upper().replace('.', '_')}_SC1_EGRESS_PEER_SCALE_TEST"
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
     setup_tasks = get_update_packing_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ebgp_peer_count=1,
@@ -1547,8 +1574,8 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         # per-iteration factory call produces.
         ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
         ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
         # Align v4 peer local addresses to the device's v4 secondary-interface-IP
@@ -1611,7 +1638,7 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     )
     factory = build_per_iteration_factory_v4_capable(
         device_name=device_name,
-        router_id=testbed.router_id,
+        router_id=physical_inventory.router_id,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
         ebgp_v6_base=IXIA_EBGP_IC_PARENT_NETWORK_V6,
@@ -1628,12 +1655,12 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
     )
     return create_bgp_ebb_scaling_performance_test_config(
-        testbed,
+        physical_inventory,
         name=name,
         host_driver_args=None,
         oss_mock_device_data=None,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
+        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         egress_peer_counts=_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS,
         prefix_count=_PERFORMANCE_SCALING_PREFIX_COUNT,
         ebgp_peer_count=1,
@@ -1650,7 +1677,7 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
 
 
 def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """Bounded-ECMP-sets conveyor test config for bag012.ash6.
@@ -1666,20 +1693,26 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     ``v4_peer_start_offset=IXIA_IPV4_START_OFFSET`` aligns the generated v4
     peers with the device's v4 secondary IPs.
     """
-    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
-    assert testbed.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on testbed"
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
     )
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    assert testbed.router_id, "factory requires router_id on testbed"
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    assert physical_inventory.router_id, (
+        "factory requires router_id on physical_inventory"
+    )
 
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
 
     setup_tasks = get_update_packing_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ebgp_peer_count=_BAG012_BOUNDED_ECMP_PEER_COUNT,
@@ -1691,8 +1724,8 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         # Dual-stack: bounded ECMP runs v4 + v6 peers on both interfaces.
         ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
         ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         # Align v4 peers with the device v4 secondary IPs + IXIA .10 layout.
         v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
@@ -1701,10 +1734,10 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     )
 
     return create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
-        testbed,
+        physical_inventory,
         name=name_override
         or _derive_test_config_name(
-            testbed, "BOUNDED_ECMP_SETS", enable_update_group=True
+            physical_inventory, "BOUNDED_ECMP_SETS", enable_update_group=True
         ),
         ebgp_peer_count_v6=_BAG012_BOUNDED_ECMP_PEER_COUNT,
         ibgp_peer_count_v6=_BAG012_BOUNDED_ECMP_PEER_COUNT,
@@ -1717,7 +1750,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
         ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
         prefix_count=_BAG012_BOUNDED_ECMP_PREFIX_COUNT,
-        direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
+        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         # Standard device setup (configerator deploy + control plane + validator
         # + interface IPs + update_group), shared with the other bag012 conveyor
@@ -2987,12 +3020,12 @@ def test_config_to_verify_constant_attribute_storage(
 
 
 # =============================================================================
-# Wave 5D.2 -- new testbed-driven factories for the routing catalog.
+# Wave 5D.2 -- new physical-inventory-driven factories for the routing catalog.
 # =============================================================================
 
 
 def create_bgp_ebb_characteristic_separable_policy_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -3011,11 +3044,11 @@ def create_bgp_ebb_characteristic_separable_policy_test_config(
     ``eb02_arista_bgp_plus_plus_separable_policy_1_peer_test_config.py``
     wrapper when invoked with ``EB02_LAB_ASH6`` + ``ssh_user="admin"``.
     """
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     resolved_direct_ixia_connections = (
         direct_ixia_connections
@@ -3023,7 +3056,7 @@ def create_bgp_ebb_characteristic_separable_policy_test_config(
         else [
             DirectIxiaConnection(
                 interface=ebgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ebgp_port,
             ),
         ]
@@ -3032,9 +3065,10 @@ def create_bgp_ebb_characteristic_separable_policy_test_config(
     ssh_password: str | None = None
     if ssh_user is not None:
         lab_password_env = (
-            testbed.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+            physical_inventory.lab_device_password_env_var
+            or "TAAC_EBB_LAB_DEVICE_PASSWORD"
         )
-        lab_admin_password_default = testbed.extras.get(
+        lab_admin_password_default = physical_inventory.extras.get(
             "lab_admin_password_default",
             "dnepit",  # pragma: allowlist secret
         )
@@ -3061,7 +3095,7 @@ def create_bgp_ebb_characteristic_separable_policy_test_config(
 
 
 def create_bgp_ebb_characteristic_update_packing_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -3096,12 +3130,12 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
     if ebgp_route_acceptance_communities is None:
         ebgp_route_acceptance_communities = ["65529:39744"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     resolved_direct_ixia_connections = (
         direct_ixia_connections
@@ -3109,12 +3143,12 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
         else [
             DirectIxiaConnection(
                 interface=ebgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ebgp_port,
             ),
             DirectIxiaConnection(
                 interface=ibgp_iface,
-                ixia_chassis_ip=testbed.ixia_chassis_ip,
+                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                 ixia_port=ibgp_port,
             ),
         ]
@@ -3152,7 +3186,7 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
 
 
 def create_bgp_ebb_characteristic_verify_computational_load_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     peergroup_ibgp_v6: str = "PEERGROUP_FAUU_FADU_V6_NEW",
@@ -3181,9 +3215,9 @@ def create_bgp_ebb_characteristic_verify_computational_load_test_config(
     Byte-identical to the legacy
     ``bgp_plus_plus_verify_computational_load_test_config.py`` wrapper when
     invoked with ``FA001_UU001_QZD1`` and its wrapper defaults. DUT identity
-    + IXIA interface map come from ``testbed`` (interfaces come from
-    ``testbed.extras['dut_iface_*']`` since this FA testbed does not declare
-    ``ixia_ports``). iBGP remote AS is derived from ``testbed.dut_bgp_as``
+    + IXIA interface map come from ``physical_inventory`` (interfaces come from
+    ``physical_inventory.extras['dut_iface_*']`` since this FA physical_inventory does not declare
+    ``ixia_ports``). iBGP remote AS is derived from ``physical_inventory.dut_bgp_as``
     (iBGP is same-AS on FA-UU).
     """
     if ixia_ebgp_communities is None:
@@ -3195,10 +3229,12 @@ def create_bgp_ebb_characteristic_verify_computational_load_test_config(
     if prefix_counts is None:
         prefix_counts = [2000]
 
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.extras["dut_iface_ebgp"]
-    ixia_interface_mimic_ibgp = testbed.extras["dut_iface_ibgp"]
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.extras["dut_iface_ebgp"]
+    ixia_interface_mimic_ibgp = physical_inventory.extras["dut_iface_ibgp"]
 
     return test_config_to_verify_computational_load_of_bgp_plus_plus(
         test_config_name=name,
@@ -3209,7 +3245,7 @@ def create_bgp_ebb_characteristic_verify_computational_load_test_config(
         peergroup_ebgp_v4=peergroup_ebgp_v4,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ibgp_remote_as=testbed.dut_bgp_as,
+        ibgp_remote_as=physical_inventory.dut_bgp_as,
         ebgp_remote_as=ebgp_remote_as,
         ebgp_peer_scale=ebgp_peer_scale,
         unqiue_prefix_limit=unqiue_prefix_limit,
@@ -3230,7 +3266,7 @@ def create_bgp_ebb_characteristic_verify_computational_load_test_config(
 
 
 def create_bgp_ebb_characteristic_verify_constant_attribute_storage_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     peergroup_ibgp_v6: str = "PEERGROUP_FAUU_FADU_V6_NEW",
@@ -3269,10 +3305,12 @@ def create_bgp_ebb_characteristic_verify_constant_attribute_storage_test_config(
     if prefix_counts is None:
         prefix_counts = [10000]
 
-    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
-    device_name = testbed.device_name
-    ixia_interface_mimic_ebgp = testbed.extras["dut_iface_ebgp"]
-    ixia_interface_mimic_ibgp = testbed.extras["dut_iface_ibgp"]
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ebgp = physical_inventory.extras["dut_iface_ebgp"]
+    ixia_interface_mimic_ibgp = physical_inventory.extras["dut_iface_ibgp"]
 
     return test_config_to_verify_constant_attribute_storage(
         test_config_name=name,
@@ -3283,7 +3321,7 @@ def create_bgp_ebb_characteristic_verify_constant_attribute_storage_test_config(
         peergroup_ebgp_v4=peergroup_ebgp_v4,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ibgp_remote_as=testbed.dut_bgp_as,
+        ibgp_remote_as=physical_inventory.dut_bgp_as,
         ebgp_remote_as=ebgp_remote_as,
         ebgp_peer_counts=ebgp_peer_counts,
         unqiue_prefix_limit=unqiue_prefix_limit,

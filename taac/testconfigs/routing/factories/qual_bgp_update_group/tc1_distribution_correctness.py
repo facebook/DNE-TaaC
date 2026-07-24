@@ -5,7 +5,7 @@
 Merges the former bag013 initial-dump path (previously grandfathered as an
 empty-playbook TestConfig inside the sustained-link-flap TC) and the eb03
 initial-dump lab-box variant into a single spec-anchored factory that
-dispatches internally on ``testbed.device_name``.
+dispatches internally on ``physical_inventory.device_name``.
 
 Golden regen for ``BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG``
 is EXPECTED and legitimate: the former empty-playbook TestConfig is
@@ -38,7 +38,9 @@ from taac.steps.step_definitions import (
     create_longevity_step,
     create_validation_step,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,
     EBGP_PEER_COUNT_V4,
@@ -97,14 +99,14 @@ from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConf
 # TestConfigs (tc1 = 2.1.1 only, tc7 = 2.7.2 only); this helper accepts the
 # playbook list + TestConfig ``name`` field as parameters so each spec-section
 # factory can build its own TestConfig on the same underlying bag conveyor
-# topology. Every value is read from the passed ``testbed`` (device_name,
+# logical_topology. Every value is read from the passed ``physical_inventory`` (device_name,
 # dut_bgp_as, ixia_ports, bgpcpp path), so the builder is DUT-agnostic across
 # the bag010/011/012/013 EBB conveyor nodes; the tc9 edge-cases factory reuses
 # it for bag011.
 
 
 def build_bag_conveyor_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     playbooks: t.List[taac_types.Playbook],
@@ -151,43 +153,45 @@ def build_bag_conveyor_test_config(
     and defaults ``profile`` to ``WITHOUT_OPEN_R``.
 
     DUT-agnostic across the bag010/011/012/013 EBB conveyor nodes: every
-    value is read from ``testbed`` (device_name, dut_bgp_as, ixia_ports,
+    value is read from ``physical_inventory`` (device_name, dut_bgp_as, ixia_ports,
     bgpcpp_configerator_path), so cloning to a new bag node is a one-line
     catalog change. Renamed from ``build_bag013_conveyor_test_config``
     (formerly bag013-hardcoded) during the tc9 edge-cases work;
     behavior-preserving, so existing bag013 goldens stay byte-identical.
     """
-    assert testbed.device_name.startswith("bag"), (
+    assert physical_inventory.device_name.startswith("bag"), (
         f"bag conveyor topology builder targets bag* EBB conveyor nodes; "
-        f"got testbed.device_name={testbed.device_name!r}."
+        f"got physical_inventory.device_name={physical_inventory.device_name!r}."
     )
-    assert testbed.dut_bgp_as is not None, "Testbed must have dut_bgp_as set"
-    assert testbed.bgpcpp_configerator_path is not None, (
-        "Testbed must have bgpcpp_configerator_path set for BGP++ deployment"
+    assert physical_inventory.dut_bgp_as is not None, (
+        "PhysicalInventory must have dut_bgp_as set"
     )
-    assert len(testbed.ixia_ports) >= 2, (
-        "Testbed must have >= 2 IXIA ports (eBGP + iBGP)"
+    assert physical_inventory.bgpcpp_configerator_path is not None, (
+        "PhysicalInventory must have bgpcpp_configerator_path set for BGP++ deployment"
+    )
+    assert len(physical_inventory.ixia_ports) >= 2, (
+        "PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)"
     )
 
-    device_name = testbed.device_name
-    ixia_chassis_ip = testbed.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = testbed.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
+    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
+    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
 
     # Open/R setup is wired ONLY for the WITH_OPEN_R profile. get_common_setup_tasks
     # deploys the openr_config + injects baseline Open/R routes whenever an
     # openr_configerator_path is passed, so forwarding these unconditionally would
     # add Open/R tasks to the WITHOUT_OPEN_R configs and change their goldens. Under
     # WITHOUT_OPEN_R ``openr_kwargs`` stays empty -> byte-identical to before.
-    # bag011's testbed carries every openr_* field (testbed.py); this mirrors the
+    # bag011's physical_inventory carries every openr_* field (physical_inventory.py); this mirrors the
     # full-scale builder's wiring so a WITH_OPEN_R bag config (e.g. the 2.9.2
     # simultaneous-disruptions test, which needs Open/R for its IGP-instability
     # track) gets a functional Open/R daemon + port-channel + injected routes.
     openr_kwargs: t.Dict[str, t.Any] = {}
     if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R:
-        extras = testbed.extras
+        extras = physical_inventory.extras
         openr_kwargs = {
-            "openr_configerator_path": testbed.openr_configerator_path,
+            "openr_configerator_path": physical_inventory.openr_configerator_path,
             "openr_port_channel_member": extras["openr_port_channel_member"],
             "openr_port_channel_ipv4": extras["openr_port_channel_ipv4"],
             "openr_port_channel_link_local": extras["openr_port_channel_link_local"],
@@ -197,10 +201,10 @@ def build_bag_conveyor_test_config(
 
     setup_tasks = get_common_setup_tasks(
         device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=profile,
         include_bgp_mon=False,
         enable_update_group=enable_update_group,
@@ -298,7 +302,9 @@ def build_bag_conveyor_test_config(
 # =============================================================================
 
 
-def _create_eb03_2_1_1_initial_dump_identical_routes_playbook(testbed: Testbed):
+def _create_eb03_2_1_1_initial_dump_identical_routes_playbook(
+    physical_inventory: PhysicalInventory,
+):
     """eb03-specific BGP++ Update Group qualification 2.1.1 playbook.
 
     Byte-wise identical to the legacy
@@ -306,13 +312,13 @@ def _create_eb03_2_1_1_initial_dump_identical_routes_playbook(testbed: Testbed):
     Pinned expected_member_counts (EB-EB-V6=496, EB-FA-V6=140, BGP-MON=2) and
     policy_names are eb03-specific golden values from the live device.
     """
-    assert len(testbed.ixia_ports) >= 3, (
+    assert len(physical_inventory.ixia_ports) >= 3, (
         "eb03 2.1.1 playbook requires >= 3 IXIA ports; ixia_ports[2] is the "
         "BGP-MON DUT interface used by the pcap-capture step even though "
         "the containing test config skips BGP-MON in setup/teardown."
     )
-    ibgp_dut_iface, _ = testbed.ixia_ports[1]
-    bgp_mon_dut_iface, _ = testbed.ixia_ports[2]
+    ibgp_dut_iface, _ = physical_inventory.ixia_ports[1]
+    bgp_mon_dut_iface, _ = physical_inventory.ixia_ports[2]
 
     prechecks = [
         *BGP_STANDARD_PRECHECKS,
@@ -359,7 +365,7 @@ def _create_eb03_2_1_1_initial_dump_identical_routes_playbook(testbed: Testbed):
     pcap_compare_step = create_custom_step(
         params_dict={
             "custom_step_name": "test_bgp_update_group_dump_compare",
-            "hostname": testbed.device_name,
+            "hostname": physical_inventory.device_name,
             "ixia_capture_interface": ibgp_dut_iface,
             "ibgp_peer_regex": "BGP_PEER_IPV6_IBGP_PLANE_1_REMOTE_EB",
             "ibgp_peer_session_indices": [1, 2],
@@ -410,7 +416,7 @@ def _create_eb03_longevity_debugging_playbook():
 
 
 def _create_eb03_distribution_correctness_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile,
 ) -> taac_types.TestConfig:
     """eb03.lab.ash6 branch of tc1.
@@ -426,33 +432,35 @@ def _create_eb03_distribution_correctness_test_config(
       - ``oss_mock_device_data`` MockDeviceInfo (netwhoami returns #INVALID#)
       - Playbooks pin eb03-specific expected_member_counts / policy_names
     """
-    assert len(testbed.ixia_ports) >= 2, (
+    assert len(physical_inventory.ixia_ports) >= 2, (
         "eb03 UG initial-dump requires >= 2 IXIA ports (eBGP + iBGP)."
     )
-    assert testbed.dut_bgp_as is not None, "Testbed must have dut_bgp_as set"
-    assert testbed.bgpcpp_configerator_path is not None, (
-        "Testbed must have bgpcpp_configerator_path set"
+    assert physical_inventory.dut_bgp_as is not None, (
+        "PhysicalInventory must have dut_bgp_as set"
+    )
+    assert physical_inventory.bgpcpp_configerator_path is not None, (
+        "PhysicalInventory must have bgpcpp_configerator_path set"
     )
 
-    ebgp_dut_iface, ebgp_chassis_port = testbed.ixia_ports[0]
-    ibgp_dut_iface, ibgp_chassis_port = testbed.ixia_ports[1]
+    ebgp_dut_iface, ebgp_chassis_port = physical_inventory.ixia_ports[0]
+    ibgp_dut_iface, ibgp_chassis_port = physical_inventory.ixia_ports[1]
 
     lab_password_env = (
-        testbed.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+        physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
-    lab_admin_username = testbed.extras.get("lab_admin_username", "admin")
-    lab_admin_password_default = testbed.extras.get(
+    lab_admin_username = physical_inventory.extras.get("lab_admin_username", "admin")
+    lab_admin_password_default = physical_inventory.extras.get(
         "lab_admin_password_default",
         "dnepit",  # pragma: allowlist secret
     )
     lab_password = os.environ.get(lab_password_env, lab_admin_password_default)
 
     setup_tasks = get_common_setup_tasks(
-        device_name=testbed.device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        device_name=physical_inventory.device_name,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ebgp_dut_iface,
         ixia_interface_mimic_ibgp=ibgp_dut_iface,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         include_bgp_mon=False,
         enable_update_group=True,
@@ -464,7 +472,7 @@ def _create_eb03_distribution_correctness_test_config(
     teardown_tasks = get_teardown_tasks(
         ixia_interface_mimic_ebgp=ebgp_dut_iface,
         ixia_interface_mimic_ibgp=ibgp_dut_iface,
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
     )
 
     return TestConfig(
@@ -473,13 +481,13 @@ def _create_eb03_distribution_correctness_test_config(
         log_collection_timeout=600,
         basset_pool="dne.test",
         host_driver_args={
-            testbed.device_name: json.dumps(
+            physical_inventory.device_name: json.dumps(
                 {"username": lab_admin_username, "password": lab_password}
             ),
         },
         endpoints=[
             Endpoint(
-                name=testbed.device_name,
+                name=physical_inventory.device_name,
                 dut=True,
                 ixia_ports=[
                     ebgp_dut_iface,
@@ -488,40 +496,48 @@ def _create_eb03_distribution_correctness_test_config(
                 direct_ixia_connections=[
                     DirectIxiaConnection(
                         interface=ebgp_dut_iface,
-                        ixia_chassis_ip=testbed.ixia_chassis_ip,
+                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                         ixia_port=ebgp_chassis_port,
                     ),
                     DirectIxiaConnection(
                         interface=ibgp_dut_iface,
-                        ixia_chassis_ip=testbed.ixia_chassis_ip,
+                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                         ixia_port=ibgp_chassis_port,
                     ),
                 ],
             ),
         ],
-        host_os_type_map={testbed.device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
+        host_os_type_map={
+            physical_inventory.device_name: taac_types.DeviceOsType.ARISTA_FBOSS
+        },
         oss_mock_device_data={
-            testbed.device_name: taac_types.MockDeviceInfo(
-                name=testbed.device_name,
-                hardware=testbed.extras.get("mock_device_hardware", "ARISTA_7516"),
-                role=testbed.extras.get("mock_device_role", "EB"),
+            physical_inventory.device_name: taac_types.MockDeviceInfo(
+                name=physical_inventory.device_name,
+                hardware=physical_inventory.extras.get(
+                    "mock_device_hardware", "ARISTA_7516"
+                ),
+                role=physical_inventory.extras.get("mock_device_role", "EB"),
                 operating_system="EOS",
-                dc=testbed.extras.get("mock_device_dc", "ash6"),
-                region=testbed.extras.get("mock_device_region", "ash"),
-                asset_id=testbed.extras.get("mock_device_asset_id", 12345),
-                asic=testbed.extras.get("mock_device_asic", "JERICHO"),
+                dc=physical_inventory.extras.get("mock_device_dc", "ash6"),
+                region=physical_inventory.extras.get("mock_device_region", "ash"),
+                asset_id=physical_inventory.extras.get("mock_device_asset_id", 12345),
+                asic=physical_inventory.extras.get("mock_device_asic", "JERICHO"),
                 routing_protocol="BGP",
                 dc_type="ONE",
-                network_area=testbed.extras.get("mock_device_network_area", "BACKBONE"),
+                network_area=physical_inventory.extras.get(
+                    "mock_device_network_area", "BACKBONE"
+                ),
                 network_area_type="BACKBONE",
-                network_type=testbed.extras.get("mock_device_network_type", "EBB"),
+                network_type=physical_inventory.extras.get(
+                    "mock_device_network_type", "EBB"
+                ),
             ),
         },
         startup_checks=[],
         setup_tasks=setup_tasks,
         teardown_tasks=teardown_tasks,
         basic_port_configs=create_ebb_scale_basic_port_configs(
-            device_name=testbed.device_name,
+            device_name=physical_inventory.device_name,
             ixia_interface_mimic_ebgp=ebgp_dut_iface,
             ixia_interface_mimic_ibgp=ibgp_dut_iface,
             ebgp_peer_count_v6=EBGP_PEER_COUNT_V6,
@@ -553,14 +569,16 @@ def _create_eb03_distribution_correctness_test_config(
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         ),
         playbooks=[
-            _create_eb03_2_1_1_initial_dump_identical_routes_playbook(testbed),
+            _create_eb03_2_1_1_initial_dump_identical_routes_playbook(
+                physical_inventory
+            ),
             _create_eb03_longevity_debugging_playbook(),
         ],
     )
 
 
 def _create_bag013_distribution_correctness_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
@@ -570,19 +588,19 @@ def _create_bag013_distribution_correctness_test_config(
     ``create_bgp_ug_initial_dump_identical_routes_playbook`` still uses the
     BGP-MON DUT interface as a pcap-capture handle in its 2.1.1 pcap
     compare step. The interface is left addressed on the DUT (see the
-    testbed's third ixia port); only the BGP-MON IXIA session + IP config
+    physical_inventory's third ixia port); only the BGP-MON IXIA session + IP config
     are removed via ``include_bgp_mon=False`` inside
     ``build_bag_conveyor_test_config``. ``profile`` is accepted for
     signature parity with the outer factory but forced to ``WITHOUT_OPEN_R``.
     """
-    assert len(testbed.ixia_ports) >= 3, (
+    assert len(physical_inventory.ixia_ports) >= 3, (
         "bag013 tc1 branch requires >= 3 IXIA ports; ixia_ports[2] is the "
         "BGP-MON DUT interface used by the playbook's pcap-capture step "
         "even though the shared builder skips BGP-MON in setup/teardown."
     )
-    device_name = testbed.device_name
-    ixia_interface_mimic_ibgp, _ = testbed.ixia_ports[1]
-    ixia_interface_mimic_bgp_mon, _ = testbed.ixia_ports[2]
+    device_name = physical_inventory.device_name
+    ixia_interface_mimic_ibgp, _ = physical_inventory.ixia_ports[1]
+    ixia_interface_mimic_bgp_mon, _ = physical_inventory.ixia_ports[2]
 
     playbook = create_bgp_ug_initial_dump_identical_routes_playbook(
         device_name=device_name,
@@ -594,7 +612,7 @@ def _create_bag013_distribution_correctness_test_config(
         bgp_mon_peer_group=PEERGROUP_BGP_MON,
     )
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name=name_override or "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST",
         playbooks=[playbook],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
@@ -603,17 +621,17 @@ def _create_bag013_distribution_correctness_test_config(
 
 
 def create_bgp_ug_distribution_correctness_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification 2.1.1 (Distribution Correctness /
-    Initial Dump -- Identical Routes) TestConfig, dispatched on ``testbed``.
+    Initial Dump -- Identical Routes) TestConfig, dispatched on ``physical_inventory``.
 
     Wave 6 merges the previous eb03 lab-box factory
     (``create_bgp_ug_eb03_initial_dump_identical_routes_test_config``) and
     the bag013 conveyor factory (``create_bgp_ug_initial_dump_identical_routes_test_config``)
-    into one spec-anchored factory. Internal dispatch on ``testbed.device_name``
+    into one spec-anchored factory. Internal dispatch on ``physical_inventory.device_name``
     because the two topologies diverge structurally (eb03 is a lab box with
     admin/password auth + mock device info; bag013 is a production EBB with
     OpenR route injection + Port-Channel).
@@ -623,14 +641,16 @@ def create_bgp_ug_distribution_correctness_test_config(
     wires the 2.1.1 playbook so the catalog name matches the actual
     behavior. eb03 golden hash is byte-wise identical.
     """
-    if testbed.device_name == "eb03.lab.ash6":
-        return _create_eb03_distribution_correctness_test_config(testbed, profile)
-    if testbed.device_name == "bag013.ash6":
+    if physical_inventory.device_name == "eb03.lab.ash6":
+        return _create_eb03_distribution_correctness_test_config(
+            physical_inventory, profile
+        )
+    if physical_inventory.device_name == "bag013.ash6":
         return _create_bag013_distribution_correctness_test_config(
-            testbed, profile, name_override
+            physical_inventory, profile, name_override
         )
     raise NotImplementedError(
         f"create_bgp_ug_distribution_correctness_test_config does not yet "
-        f"handle testbed.device_name={testbed.device_name!r}; add a branch "
+        f"handle physical_inventory.device_name={physical_inventory.device_name!r}; add a branch "
         f"or generalize the topology builder."
     )

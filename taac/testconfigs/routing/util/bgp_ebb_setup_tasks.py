@@ -513,7 +513,7 @@ def _get_full_scale_ip_config_tasks(
     """
     Configure full-scale IP addresses for all IXIA interfaces.
 
-    Full-scale EBB topology:
+    Full-scale EBB logical_topology:
     - eBGP: 140 peers, dual-stack (IPv4 + IPv6)
     - iBGP: 8 planes (4 DC + 4 MP) × 63 peers each, dual-stack
     - BGP MON: 2 peers, IPv6 only (only when ``include_bgp_mon`` is True)
@@ -525,7 +525,7 @@ def _get_full_scale_ip_config_tasks(
         ixia_interface_mimic_bgp_mon: BGP MON IXIA interface. Required when
             ``include_bgp_mon`` is True; ignored otherwise.
         include_bgp_mon: When False, skip the BGP-MON IP block entirely.
-            Callers on 2-port testbeds or UG qualification tests that do not
+            Callers on 2-port physical inventories or UG qualification tests that do not
             exercise BGP-MON should pass False.
 
     Returns:
@@ -1223,7 +1223,7 @@ def get_common_setup_tasks(
 
     Args:
         include_bgp_mon: When False, the BGP-MON IXIA interface + IP config is
-            skipped entirely. Callers on 2-port testbeds (or UG qualification
+            skipped entirely. Callers on 2-port physical inventories (or UG qualification
             tests that do not exercise BGP-MON) should pass False and omit
             ``ixia_interface_mimic_bgp_mon``.
         include_pre_ixia_setup: When False, omit the BgpTcpdump disable,

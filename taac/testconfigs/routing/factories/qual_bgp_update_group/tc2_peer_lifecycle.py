@@ -12,22 +12,26 @@ Sub-specs to implement:
 - 2.2.3 Sustained Group Membership Churn: No Memory Leak
 """
 
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, TestConfig
 
 
 def create_bgp_ug_peer_lifecycle_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """Spec 2.2 — Peer Lifecycle Within Update Groups. SKELETON qualification testconfig."""
     return TestConfig(
         name="BGP_UG_PEER_LIFECYCLE_TEST",
         endpoints=[
             Endpoint(
-                name=testbed.device_name,
+                name=physical_inventory.device_name,
                 dut=True,
-                ixia_ports=[testbed.ixia_ports[0][0]] if testbed.ixia_ports else [],
+                ixia_ports=[physical_inventory.ixia_ports[0][0]]
+                if physical_inventory.ixia_ports
+                else [],
             ),
         ],
         playbooks=[],

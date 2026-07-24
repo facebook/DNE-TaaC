@@ -16,17 +16,17 @@ from taac.testconfigs.routing.factories.cte_ucmp import (
     create_cte_ucmp_qzd_test_config,
     create_cte_ucmp_stand_alone_test_config,
 )
-from taac.testconfigs.routing.testbed import (
-    CTE_UCMP_QZD_TESTBED,
-    CTE_UCMP_STAND_ALONE_TESTBED,
+from taac.testconfigs.routing.physical_inventory import (
+    CTE_UCMP_QZD_PHYSICAL_INVENTORY,
+    CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY,
 )
 
 
 CTE_UCMP_QZD_TEST = create_cte_ucmp_qzd_test_config(
-    CTE_UCMP_QZD_TESTBED, name="CTE_UCMP_QZD_TEST"
+    CTE_UCMP_QZD_PHYSICAL_INVENTORY, name="CTE_UCMP_QZD_TEST"
 )
 CTE_UCMP_STAND_ALONE = create_cte_ucmp_stand_alone_test_config(
-    CTE_UCMP_STAND_ALONE_TESTBED, name="CTE_UCMP_STAND_ALONE"
+    CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY, name="CTE_UCMP_STAND_ALONE"
 )
 
 

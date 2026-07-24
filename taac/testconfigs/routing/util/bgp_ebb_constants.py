@@ -433,23 +433,23 @@ ACL_COMMANDS = (
 # =============================================================================
 # TestConfig.name derivation
 # =============================================================================
-# Late-bound import to avoid a circular dep: this file is imported by testbed
-# consumers, and Testbed itself imports from this file.
+# Late-bound import to avoid a circular dep: this file is imported by physical_inventory
+# consumers, and PhysicalInventory itself imports from this file.
 def _derive_test_config_name(
-    testbed,  # noqa: ANN001  -- Testbed, avoiding import cycle
+    physical_inventory,  # noqa: ANN001  -- PhysicalInventory, avoiding import cycle
     workflow: str,
     enable_update_group: bool,
 ) -> str:
-    """Return the canonical TestConfig.name string for a testbed + workflow.
+    """Return the canonical TestConfig.name string for a physical_inventory + workflow.
 
-    Formula: ``{TESTBED_SHORT}_{workflow}_TEST_CONFIG[_UG]`` where
-    ``TESTBED_SHORT`` is the first dotted component of ``testbed.device_name``
+    Formula: ``{PHYSICAL_INVENTORY_SHORT}_{workflow}_TEST_CONFIG[_UG]`` where
+    ``PHYSICAL_INVENTORY_SHORT`` is the first dotted component of ``physical_inventory.device_name``
     upper-cased (e.g. ``bag010.ash6`` → ``BAG010``, ``eb03.lab.ash6`` → ``EB03``).
 
     Matches the constant-naming rule in ``testconfigs/routing/README.md`` §5.
     Callers may bypass this derivation by passing ``name_override`` to the
     factory when a bespoke ``.name`` is required.
     """
-    short_name = testbed.device_name.split(".")[0].upper()
+    short_name = physical_inventory.device_name.split(".")[0].upper()
     variant = "_UG" if enable_update_group else ""
     return f"{short_name}_{workflow}_TEST_CONFIG{variant}"

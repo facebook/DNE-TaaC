@@ -198,7 +198,7 @@ def create_bgp_ug_backpressure_fast_peers_not_held_back_playbook(
 
 - **Keyword-only** for factories with >3 arguments (`def create_X(*, foo, bar, ...)`). Positional args are error-prone at consumer-side.
 - **Individual kwargs**, not a spec-params dataclass. Defaults come from the spec.
-- **No DUT identity** as a factory arg. The consuming testconfig factory passes concrete values (device_name, ixia_interface) that it derives from its `Testbed` argument.
+- **No DUT identity** as a factory arg. The consuming testconfig factory passes concrete values (device_name, ixia_interface) that it derives from its `PhysicalInventory` argument.
 - **Return type annotation**: always `-> Playbook`. Never `list[Playbook]`, `Optional[Playbook]`, etc.
 
 ---
@@ -351,5 +351,5 @@ return ordinary flat TAAC `Playbook` objects.
 ### The invariants
 
 - One function = one playbook = one test case.
-- Playbook is DUT-agnostic and project-agnostic. Testbed binding + project taxonomy live at the testconfig layer.
+- Playbook is DUT-agnostic and project-agnostic. Physical-inventory binding + project taxonomy live at the testconfig layer.
 - File name = `<domain>_playbooks.py`. Factory name = `create_<domain>_<usecase>_playbook`. Playbook `name=` = `<domain>_<usecase>`.

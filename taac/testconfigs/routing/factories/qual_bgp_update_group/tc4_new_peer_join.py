@@ -35,7 +35,9 @@ from taac.steps.step_definitions import (
     create_longevity_step,
     create_start_stop_bgp_peers_step,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_REMOTE_AS,
     IBGP_REMOTE_AS,
@@ -330,7 +332,7 @@ def _ug_bgp_dg(
     starting_prefix: str = "",
     communities: t.Optional[t.List[str]] = None,
 ) -> taac_types.DeviceGroupConfig:
-    """Build one BGP DG (eBGP or iBGP) for the UG hardening topology."""
+    """Build one BGP DG (eBGP or iBGP) for the UG hardening logical_topology."""
     route_scales = []
     if advertised_route_count > 0:
         route_scales = [
@@ -637,42 +639,44 @@ def _pb_2_4_3(
 
 
 def _build_legacy_bgp_ug_new_peer_join_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification specs 2.4.1 + 2.4.2 + 2.4.3 TestConfig.
 
-    Three qualification playbooks sharing one 21-eBGP + 4-iBGP testbed.
+    Three qualification playbooks sharing one 21-eBGP + 4-iBGP physical_inventory.
     ``enable_update_group=True`` is baked in (UG MUST be on for these specs).
 
     Wave 1 constraint: hardcoded to bag012's topology + IXIA wiring
     (helpers use ``IXIA_EBGP_IC_PARENT_NETWORK_V6`` etc. from the shared
-    EBB conveyor constants module). ``testbed`` MUST be BAG012_ASH6. Wave 2
-    parameterizes the underlying helpers on ``testbed.ixia_ports`` +
-    ``testbed.dut_bgp_as`` so bag010/011/013 can host this qualification via
+    EBB conveyor constants module). ``physical_inventory`` MUST be BAG012_ASH6. Wave 2
+    parameterizes the underlying helpers on ``physical_inventory.ixia_ports`` +
+    ``physical_inventory.dut_bgp_as`` so bag010/011/013 can host this qualification via
     a one-line catalog change.
     """
-    assert testbed.device_name == "bag012.ash6", (
+    assert physical_inventory.device_name == "bag012.ash6", (
         f"create_bgp_ug_new_peer_join_test_config Wave 1 is hardcoded to "
-        f"bag012.ash6; got testbed.device_name={testbed.device_name!r}. "
-        f"Wave 2 will parameterize on testbed."
+        f"bag012.ash6; got physical_inventory.device_name={physical_inventory.device_name!r}. "
+        f"Wave 2 will parameterize on physical_inventory."
     )
-    assert testbed.dut_bgp_as is not None, "Testbed must have dut_bgp_as set"
-    assert testbed.router_id is not None, (
-        "Testbed must have router_id set (used as BGP router-id)"
+    assert physical_inventory.dut_bgp_as is not None, (
+        "PhysicalInventory must have dut_bgp_as set"
     )
-    assert testbed.bgpcpp_configerator_path is not None, (
-        "Testbed must have bgpcpp_configerator_path set for BGP++ deployment"
+    assert physical_inventory.router_id is not None, (
+        "PhysicalInventory must have router_id set (used as BGP router-id)"
     )
-    assert len(testbed.ixia_ports) >= 2, (
-        "Testbed must have >= 2 IXIA ports (eBGP + iBGP)"
+    assert physical_inventory.bgpcpp_configerator_path is not None, (
+        "PhysicalInventory must have bgpcpp_configerator_path set for BGP++ deployment"
+    )
+    assert len(physical_inventory.ixia_ports) >= 2, (
+        "PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)"
     )
 
-    ebgp_dut_iface, ebgp_chassis_port = testbed.ixia_ports[0]
-    ibgp_dut_iface, ibgp_chassis_port = testbed.ixia_ports[1]
+    ebgp_dut_iface, ebgp_chassis_port = physical_inventory.ixia_ports[0]
+    ibgp_dut_iface, ibgp_chassis_port = physical_inventory.ixia_ports[1]
 
     setup_tasks = get_update_packing_setup_tasks(
-        device_name=testbed.device_name,
-        bgp_asn=testbed.dut_bgp_as,
+        device_name=physical_inventory.device_name,
+        bgp_asn=physical_inventory.dut_bgp_as,
         ixia_interface_mimic_ebgp=ebgp_dut_iface,
         ixia_interface_mimic_ibgp=ibgp_dut_iface,
         ebgp_peer_count=_UG_TOTAL_EBGP_PEERS,
@@ -681,8 +685,8 @@ def _build_legacy_bgp_ug_new_peer_join_test_config(
         ibgp_remote_as=IBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=physical_inventory.router_id,
+        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=True,
     )
@@ -694,69 +698,75 @@ def _build_legacy_bgp_ug_new_peer_join_test_config(
         basset_pool="dne.test",
         endpoints=[
             taac_types.Endpoint(
-                name=testbed.device_name,
+                name=physical_inventory.device_name,
                 dut=True,
                 ixia_ports=[
-                    f"{testbed.ixia_chassis_ip}:{ebgp_chassis_port}",
-                    f"{testbed.ixia_chassis_ip}:{ibgp_chassis_port}",
+                    f"{physical_inventory.ixia_chassis_ip}:{ebgp_chassis_port}",
+                    f"{physical_inventory.ixia_chassis_ip}:{ibgp_chassis_port}",
                 ],
                 direct_ixia_connections=[
                     taac_types.DirectIxiaConnection(
                         interface=ebgp_dut_iface,
-                        ixia_chassis_ip=testbed.ixia_chassis_ip,
+                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                         ixia_port=ebgp_chassis_port,
                     ),
                     taac_types.DirectIxiaConnection(
                         interface=ibgp_dut_iface,
-                        ixia_chassis_ip=testbed.ixia_chassis_ip,
+                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
                         ixia_port=ibgp_chassis_port,
                     ),
                 ],
             ),
         ],
-        host_os_type_map={testbed.device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
+        host_os_type_map={
+            physical_inventory.device_name: taac_types.DeviceOsType.ARISTA_FBOSS
+        },
         startup_checks=[],
         setup_tasks=setup_tasks,
         teardown_tasks=[],
         basic_port_configs=[
             taac_types.BasicPortConfig(
-                endpoint=f"{testbed.device_name}:{ebgp_dut_iface}",
+                endpoint=f"{physical_inventory.device_name}:{ebgp_dut_iface}",
                 device_group_configs=_ebgp_dgs(),
             ),
             taac_types.BasicPortConfig(
-                endpoint=f"{testbed.device_name}:{ibgp_dut_iface}",
+                endpoint=f"{physical_inventory.device_name}:{ibgp_dut_iface}",
                 device_group_configs=_ibgp_dgs(),
             ),
         ],
         playbooks=[
-            _pb_2_4_1(testbed.device_name),
-            _pb_2_4_2(testbed.device_name),
-            _pb_2_4_3(testbed.device_name),
+            _pb_2_4_1(physical_inventory.device_name),
+            _pb_2_4_2(physical_inventory.device_name),
+            _pb_2_4_3(physical_inventory.device_name),
         ],
     )
 
 
-def create_bgp_ug_new_peer_join_test_config(testbed: Testbed) -> taac_types.TestConfig:
+def create_bgp_ug_new_peer_join_test_config(
+    physical_inventory: PhysicalInventory,
+) -> taac_types.TestConfig:
     """Build the BAG012 UG new-peer-join config from typed topology intent."""
-    if testbed.device_name != "bag012.ash6":
+    if physical_inventory.device_name != "bag012.ash6":
         raise ValueError(
             f"create_bgp_ug_new_peer_join_test_config Wave 1 is hardcoded to "
-            f"bag012.ash6; got testbed.device_name={testbed.device_name!r}. "
-            f"Wave 2 will parameterize on testbed."
+            f"bag012.ash6; got physical_inventory.device_name={physical_inventory.device_name!r}. "
+            f"Wave 2 will parameterize on physical_inventory."
         )
-    if testbed.dut_bgp_as is None:
-        raise ValueError("Testbed must have dut_bgp_as set")
-    if testbed.router_id is None:
-        raise ValueError("Testbed must have router_id set (used as BGP router-id)")
-    if testbed.bgpcpp_configerator_path is None:
+    if physical_inventory.dut_bgp_as is None:
+        raise ValueError("PhysicalInventory must have dut_bgp_as set")
+    if physical_inventory.router_id is None:
         raise ValueError(
-            "Testbed must have bgpcpp_configerator_path set for BGP++ deployment"
+            "PhysicalInventory must have router_id set (used as BGP router-id)"
         )
-    if len(testbed.ixia_ports) < 2:
-        raise ValueError("Testbed must have >= 2 IXIA ports (eBGP + iBGP)")
+    if physical_inventory.bgpcpp_configerator_path is None:
+        raise ValueError(
+            "PhysicalInventory must have bgpcpp_configerator_path set for BGP++ deployment"
+        )
+    if len(physical_inventory.ixia_ports) < 2:
+        raise ValueError("PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)")
 
-    bound = UG_NEW_PEER_JOIN.bind_to_testbed(
-        testbed=testbed,
+    bound = UG_NEW_PEER_JOIN.bind_to_inventory(
+        physical_inventory=physical_inventory,
         port_map=UG_NEW_PEER_JOIN_PORT_MAP,
         parent_networks=UG_NEW_PEER_JOIN_PARENT_NETWORKS,
         peer_groups=UG_NEW_PEER_JOIN_PEER_GROUPS,
@@ -777,9 +787,9 @@ def create_bgp_ug_new_peer_join_test_config(testbed: Testbed) -> taac_types.Test
         teardown_tasks=compiled.teardown_tasks,
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            _pb_2_4_1(testbed.device_name, selectors),
-            _pb_2_4_2(testbed.device_name, selectors),
-            _pb_2_4_3(testbed.device_name, selectors),
+            _pb_2_4_1(physical_inventory.device_name, selectors),
+            _pb_2_4_2(physical_inventory.device_name, selectors),
+            _pb_2_4_3(physical_inventory.device_name, selectors),
         ],
     )
 

@@ -29,7 +29,9 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_disruption_recov
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     build_bag_conveyor_test_config,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,
     IXIA_BGP_MON_IC_PARENT_NETWORK,
@@ -47,7 +49,7 @@ from taac.test_as_a_config import types as taac_types
 
 
 # =============================================================================
-# BGP UG sustained-link-flap (spec 2.7.2) — bag013 conveyor topology.
+# BGP UG sustained-link-flap (spec 2.7.2) — bag013 conveyor logical_topology.
 # =============================================================================
 
 # BGP++ Update Group qualification 2.7.2 -- Sustained Link Flap timing.
@@ -185,18 +187,18 @@ def _bag013_2_7_2_prechecks():
 
 
 def create_bgp_ug_disruption_recovery_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
 ) -> taac_types.TestConfig:
     """BGP++ Update Group qualification 2.7.2 (Sustained Link Flap) TestConfig
-    for the bag013 conveyor topology. Wires ONLY the 2.7.2 playbook (2.1.1
+    for the bag013 conveyor logical_topology. Wires ONLY the 2.7.2 playbook (2.1.1
     now lives in tc1).
 
     Post-Wave-6 split from the former
     ``create_bgp_ug_sustained_link_flap_test_config`` that wired
     [2.1.1, 2.7.2]. Golden regen expected.
     """
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     playbook = create_bgp_ug_sustained_link_flap_playbook(
         device_name=device_name,
         port_schedule=_BAG013_2_7_2_PORT_SCHEDULE,
@@ -204,7 +206,7 @@ def create_bgp_ug_disruption_recovery_test_config(
         prechecks=_bag013_2_7_2_prechecks(),
     )
     return build_bag_conveyor_test_config(
-        testbed,
+        physical_inventory,
         name="BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST",
         playbooks=[playbook],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,

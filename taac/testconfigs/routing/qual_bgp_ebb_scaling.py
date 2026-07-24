@@ -24,7 +24,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_transient_memory_peer_scale_test_config,
     create_bgp_ebb_scaling_transient_memory_route_scale_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     EB02_LAB_ASH6,
     EB03_LAB_ASH6,
 )

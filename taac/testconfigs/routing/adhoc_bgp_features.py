@@ -23,7 +23,9 @@ from taac.testconfigs.routing.factories.bgp_features import (
     create_bgp_feature_weight_test_config,
     create_bgp_feature_well_known_communities_test_config,
 )
-from taac.testconfigs.routing.testbed import EB03_LAB_ASH6
+from taac.testconfigs.routing.physical_inventory import (
+    EB03_LAB_ASH6,
+)
 
 
 ARISTA_BGP_FAST_RESET_FEATURE_TEST = create_bgp_feature_fast_reset_test_config(

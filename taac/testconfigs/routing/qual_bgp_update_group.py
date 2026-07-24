@@ -38,7 +38,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases imp
     create_bgp_ug_simultaneous_disruptions_test_config,
     create_bgp_ug_staggered_startup_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,

@@ -415,7 +415,7 @@ def create_ebb_scale_basic_port_configs(
     ixia_ibgp_ic_parent_network_v4_mp_plane3: str,
     ixia_ibgp_ic_parent_network_v4_mp_plane4: str,
     # BGP-MON args are gated on ``include_bgp_mon`` (default True). Set
-    # ``include_bgp_mon=False`` on 2-port testbeds or UG qualification tests
+    # ``include_bgp_mon=False`` on 2-port physical inventories or UG qualification tests
     # that do not exercise BGP-MON; the BGP-MON args may then be omitted.
     include_bgp_mon: bool = True,
     ixia_interface_mimic_bgp_mon: str | None = None,

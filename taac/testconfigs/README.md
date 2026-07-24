@@ -35,7 +35,8 @@ intent, validation, or byte-identical migration work. Do not use an abstraction
 as a new runtime or as a reason to change the serialized `TestConfig` shape.
 
 Factories that use topology abstractions should select a topology object, bind
-it to a physical `Testbed`, and call `bound.compile()`. Factories should not
+it to a `PhysicalInventory` with `bind_to_inventory()`, and call
+`bound.compile()`. Factories should not
 instantiate concrete compiler classes.
 
 ---

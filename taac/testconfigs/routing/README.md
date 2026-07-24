@@ -2,9 +2,9 @@
 
 **Scope**: `fbcode/neteng/test_infra/dne/taac/testconfigs/routing/`.
 
-**Applies to**: every new testconfig, testbed, and factory added under this directory going forward. Existing files that predate this guide are legacy — they migrate gradually per the routing migration plan; new work follows this guide from day one.
+**Applies to**: every new testconfig, physical_inventory, and factory added under this directory going forward. Existing files that predate this guide are legacy — they migrate gradually per the routing migration plan; new work follows this guide from day one.
 
-**Purpose**: establish a durable framework so any engineer (human or AI) writing a new testconfig knows exactly where each piece goes, what naming to use, and what patterns to avoid. Cloning a testconfig to a new testbed should be a one-line change; adding a new workflow should require exactly one factory function and one catalog binding.
+**Purpose**: establish a durable framework so any engineer (human or AI) writing a new testconfig knows exactly where each piece goes, what naming to use, and what patterns to avoid. Cloning a testconfig to a new physical_inventory should be a one-line change; adding a new workflow should require exactly one factory function and one catalog binding.
 
 ---
 
@@ -12,26 +12,26 @@
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│  testbed.py + role_defaults.py                         │
-│  Testbed identity — DUT hostname, IXIA + role config   │  ← physical + baseline binding
+│  physical_inventory.py + role_defaults.py                         │
+│  PhysicalInventory identity — DUT hostname, IXIA + role config   │  ← physical + baseline binding
 ├────────────────────────────────────────────────────────┤
 │  factories/*.py                                        │
-│  Workflow logic — parameterized by testbed             │  ← "what a test does"
+│  Workflow logic — parameterized by physical_inventory             │  ← "what a test does"
 ├────────────────────────────────────────────────────────┤
-│  cicd_*.py / qual_*.py / adhoc_*.py                    │  ← "which testbed × which workflow"
+│  cicd_*.py / qual_*.py / adhoc_*.py                    │  ← "which physical_inventory × which workflow"
 │  Catalog files — TestConfig bindings                   │
 └────────────────────────────────────────────────────────┘
 ```
 
-**The invariant**: every `TestConfig` constant is defined as `create_<workflow>_test_config(<TESTBED>, ...)`. Nothing else.
+**The invariant**: every `TestConfig` constant is defined as `create_<workflow>_test_config(<PHYSICAL_INVENTORY>, ...)`. Nothing else.
 
-- Testbed knows the DUT + IXIA + baseline config (via role helpers).
-- Factory knows the workflow. Factory reads standard role keys from the testbed; it does NOT know or branch on DUT role.
+- PhysicalInventory knows the DUT + IXIA + baseline config (via role helpers).
+- Factory knows the workflow. Factory reads standard role keys from the physical_inventory; it does NOT know or branch on DUT role.
 - Catalog composes them into named testconfigs.
 
 ---
 
-## 2. Testbed (`testbed.py`)
+## 2. PhysicalInventory (`physical_inventory.py`)
 
 ### What it is
 
@@ -39,16 +39,16 @@ The **DUT baseline** — everything about the device + IXIA wiring + baseline BG
 
 ### Where it lives
 
-Single file: `testconfigs/routing/testbed.py`. All Testbed instances live here.
+Single file: `testconfigs/routing/physical_inventory.py`. All PhysicalInventory instances live here.
 
-### The shape (generalized — fits EBB, DC/FBOSS, FA verify, feature testbeds)
+### The shape (generalized — fits EBB, DC/FBOSS, FA verify, feature physical inventories)
 
 ```python
 from dataclasses import dataclass, field
 from typing import Any
 
 @dataclass(frozen=True)
-class Testbed:
+class PhysicalInventory:
     """DUT baseline for a routing test. Fits all usecases (EBB, DC/FBOSS, FA verify, feature)."""
 
     # ─── Physical identity (always required) ──────────────────────────────
@@ -89,18 +89,18 @@ class Testbed:
 
 ### Design principles
 
-- **Physical identity fields stay flat + typed** (`device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip`, `ixia_ports`, `mac_address`, `speed`, `router_id`, `dut_bgp_as`, configerator paths, lab auth). Every testbed sets what applies.
-- **Anything that varies by testbed-family** (BGP peer-group names, uplink/downlink AS, route maps, communities, IXIA subnet prefixes, FBOSS runtime knobs) goes into named dicts keyed by role. Each testbed instance populates the roles it exposes.
-- **Testbed answers "what is TRUE about this DUT for any testcase"** — NOT "what does testcase X need". Per-testcase deltas are factory kwargs.
-- **Factories declare the roles they need** via dict lookups (`testbed.peer_groups["uplink_v6"]`). A missing key → clear `KeyError` at setup — the factory was called with a testbed that doesn't support it.
+- **Physical identity fields stay flat + typed** (`device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip`, `ixia_ports`, `mac_address`, `speed`, `router_id`, `dut_bgp_as`, configerator paths, lab auth). Every physical_inventory sets what applies.
+- **Anything that varies by physical-inventory family** (BGP peer-group names, uplink/downlink AS, route maps, communities, IXIA subnet prefixes, FBOSS runtime knobs) goes into named dicts keyed by role. Each physical_inventory instance populates the roles it exposes.
+- **PhysicalInventory answers "what is TRUE about this DUT for any testcase"** — NOT "what does testcase X need". Per-testcase deltas are factory kwargs.
+- **Factories declare the roles they need** via dict lookups (`physical_inventory.peer_groups["uplink_v6"]`). A missing key → clear `KeyError` at setup — the factory was called with a physical_inventory that doesn't support it.
 
 ### Port map — role-agnostic
 
-`ixia_ports` is a `list[tuple[str, str]]` where each entry is `(dut_iface, chassis_port)`. **The testbed does NOT assign roles** (eBGP / iBGP / BGP-MON / uplink / downlink). Role assignment lives in the factory (see §3), via `*_port_idx` kwargs.
+`ixia_ports` is a `list[tuple[str, str]]` where each entry is `(dut_iface, chassis_port)`. **The physical_inventory does NOT assign roles** (eBGP / iBGP / BGP-MON / uplink / downlink). Role assignment lives in the factory (see §3), via `*_port_idx` kwargs.
 
 Rationale: one DUT can be used across different testcases where the same physical port carries different BGP roles.
 
-### Naming Testbed instances
+### Naming PhysicalInventory instances
 
 `UPPER_SNAKE_CASE` with datacenter suffix. Format: `{DUT_ROLE}{NUM}_{DATACENTER}`.
 
@@ -110,11 +110,11 @@ Examples: `BAG002_SNC1`, `BAG010_ASH6`, `BAG013_ASH6`, `EB03_LAB_ASH6`, `FA001_U
 
 FBOSS DUTs come in several roles (XSW, SSW, FSW, RSW, FAUU, FADU). Each role has its own peer-group naming convention, route-map naming convention, and community intent. All instances of the same role share these values.
 
-**Convention**: factor per-role config into helper functions in a sibling file **`role_defaults.py`** next to `testbed.py`. Testbed instances call the helpers to populate their dicts.
+**Convention**: factor per-role config into helper functions in a sibling file **`role_defaults.py`** next to `physical_inventory.py`. PhysicalInventory instances call the helpers to populate their dicts.
 
 ```
 testconfigs/routing/
-├── testbed.py           ← Testbed instances
+├── physical_inventory.py           ← PhysicalInventory instances
 └── role_defaults.py     ← per-role helper functions (peer_groups, route_maps, communities)
 ```
 
@@ -123,10 +123,10 @@ Example `role_defaults.py`:
 ```python
 """Per-role DUT-config helpers.
 
-Testbed instances in testbed.py call these to populate their peer_groups,
+PhysicalInventory instances in physical_inventory.py call these to populate their peer_groups,
 route_maps, and communities dicts. Factory code does NOT branch on role —
 it just reads standard role keys (uplink_v6, downlink_v6, uplink_ingress,
-etc.) from the Testbed dicts.
+etc.) from the PhysicalInventory dicts.
 """
 
 # ─── EBB (Emerald Bay Bridge) role ───────────────────────────────────────
@@ -202,22 +202,22 @@ def fadu_peer_groups() -> dict[str, str]: return {...}   # FA downlink unit
 | `peer_groups` | Per-role (all FSWs use same peer-group names) | `<role>_peer_groups()` helper in `role_defaults.py` |
 | `route_maps` | Per-role (naming convention is role-driven) | `<role>_route_maps()` helper |
 | `communities` | Per-role (community intent is role-scoped) | `<role>_communities()` helper |
-| `as_numbers` | **Per-instance** (fsw003 might peer with different AS than fsw004) | Inline on Testbed instance |
-| `parent_networks` | **Per-instance** (IXIA subnets depend on physical wiring per DUT) | Inline on Testbed instance |
-| `ixia_ports` | **Per-instance** (port map per DUT) | Inline on Testbed instance |
-| `mac_address`, `device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip` | **Per-instance** | Inline on Testbed instance |
-| `fboss_attributes` | Mostly per-instance (DUT-specific baseline knobs) | Inline on Testbed instance |
+| `as_numbers` | **Per-instance** (fsw003 might peer with different AS than fsw004) | Inline on PhysicalInventory instance |
+| `parent_networks` | **Per-instance** (IXIA subnets depend on physical wiring per DUT) | Inline on PhysicalInventory instance |
+| `ixia_ports` | **Per-instance** (port map per DUT) | Inline on PhysicalInventory instance |
+| `mac_address`, `device_name`, `primary_ixia_chassis_ip`, `secondary_ixia_chassis_ip` | **Per-instance** | Inline on PhysicalInventory instance |
+| `fboss_attributes` | Mostly per-instance (DUT-specific baseline knobs) | Inline on PhysicalInventory instance |
 
-Rule of thumb: **naming conventions dictated by DUT role → per-role helper**. **Physical wiring / instance identity → inline on Testbed instance.**
+Rule of thumb: **naming conventions dictated by DUT role → per-role helper**. **Physical wiring / instance identity → inline on PhysicalInventory instance.**
 
 ### Role-key naming rule — semantic, not DUT-specific
 
-Testbed dict keys (`peer_groups`, `route_maps`, `communities`, `parent_networks`, `as_numbers`) MUST use semantic role names that any candidate DUT for a factory can supply. This is what makes a test portable across DUT roles.
+PhysicalInventory dict keys (`peer_groups`, `route_maps`, `communities`, `parent_networks`, `as_numbers`) MUST use semantic role names that any candidate DUT for a factory can supply. This is what makes a test portable across DUT roles.
 
 **Good role keys** (portable):
 - `uplink_v6` / `downlink_v6` / `uplink_v4` / `downlink_v4` — generic hierarchy direction (FSW, SSW, RSW all have "up" and "down")
 - `ingress` / `egress` — traffic direction from the test's perspective
-- `ibgp_v6` / `ebgp_v6` — BGP session type (EBB / peer-mesh testbeds)
+- `ibgp_v6` / `ebgp_v6` — BGP session type (EBB / peer-mesh physical inventories)
 
 **Bad role keys** (leak DUT identity):
 - ❌ `fsw_ssw_v6` — only makes sense on FSW; breaks when moved to SSW
@@ -228,22 +228,22 @@ If the factory uses `peer_groups["uplink_v6"]`, both FSW and SSW just supply the
 
 If the factory uses `peer_groups["fsw_ssw_v6"]`, it's coupled to FSW-family DUTs forever.
 
-### Adding a new testbed
+### Adding a new physical_inventory
 
-Append an instance to `testbed.py`. Populate flat identity fields; populate the named dicts with role keys your factories will look up. Leave anything that doesn't apply empty/None.
+Append an instance to `physical_inventory.py`. Populate flat identity fields; populate the named dicts with role keys your factories will look up. Leave anything that doesn't apply empty/None.
 
 Define one canonical `Testbed` artifact per physical DUT. Chassis-specific
 variants belong in the artifact's primary/secondary chassis fields, not in
 additional objects such as `BAG012_ASH6_IXIA11`.
 
 ```python
-# --- Shared constants at top of testbed.py ---
+# --- Shared constants at top of physical_inventory.py ---
 _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
 IXIA03_ASH6 = "2401:db00:2066:3036::3003"
 IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 
-# --- EBB testbed ---
-BAG013_ASH6 = Testbed(
+# --- EBB physical_inventory ---
+BAG013_ASH6 = PhysicalInventory(
     device_name="bag013.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -258,7 +258,7 @@ BAG013_ASH6 = Testbed(
     peer_groups=ebb_peer_groups(),
 )
 
-BAG012_ASH6 = Testbed(
+BAG012_ASH6 = PhysicalInventory(
     device_name="bag012.ash6",
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -273,8 +273,8 @@ BAG012_ASH6 = Testbed(
     peer_groups=ebb_peer_groups(),
 )
 
-# --- DC/FBOSS testbed (FSW role) ---
-FSW003_QZD = Testbed(
+# --- DC/FBOSS physical_inventory (FSW role) ---
+FSW003_QZD = PhysicalInventory(
     device_name="fsw003.p003.f01.qzd1",
     primary_ixia_chassis_ip="2401:db00:0116:303b::",
     ixia_ports=[
@@ -303,8 +303,8 @@ FSW003_QZD = Testbed(
     },
 )
 
-# --- DC/FBOSS testbed (SSW role) — same factory portable to this DUT ---
-SSW004_S002_QZD = Testbed(
+# --- DC/FBOSS physical_inventory (SSW role) — same factory portable to this DUT ---
+SSW004_S002_QZD = PhysicalInventory(
     device_name="ssw004.s002.f01.qzd1",
     primary_ixia_chassis_ip="...",
     ixia_ports=[("<uplink_iface>", "<chassis_port>"), ("<downlink_iface>", "<chassis_port>")],
@@ -316,8 +316,8 @@ SSW004_S002_QZD = Testbed(
     parent_networks={"uplink_v6": "...", "downlink_v6": "...", ...},
 )
 
-# --- DC/FBOSS testbed with baseline FBOSS attributes (patcher-applied at setup) ---
-GTSW001_L1001_ASH6 = Testbed(
+# --- DC/FBOSS physical_inventory with baseline FBOSS attributes (patcher-applied at setup) ---
+GTSW001_L1001_ASH6 = PhysicalInventory(
     device_name="gtsw001.l1001.c085.ash6",
     primary_ixia_chassis_ip="2401:db00:2066:31fb::3019",
     ixia_ports=[
@@ -340,24 +340,24 @@ GTSW001_L1001_ASH6 = Testbed(
 )
 ```
 
-Shared constants (paths, chassis IPs shared across multiple testbeds) go at the top of `testbed.py` as private module constants (`_UPPER_SNAKE_CASE`).
+Shared constants (paths, chassis IPs shared across multiple physical inventories) go at the top of `physical_inventory.py` as private module constants (`_UPPER_SNAKE_CASE`).
 
 ### Interface peer policies — same config, different mechanism per platform
 
-Interface peer policy (peer-group names, route maps, communities, subnet prefixes, AS numbers) is a **shared concept across EOS and FBOSS**. Both platforms have peer groups called `PEERGROUP_FSW_SSW_V6`, both apply route maps like `PROPAGATE_FSW_SSW_IN`, both use community lists to tag routes. The Testbed describes **what the DUT is configured with**, NOT how the config gets there.
+Interface peer policy (peer-group names, route maps, communities, subnet prefixes, AS numbers) is a **shared concept across EOS and FBOSS**. Both platforms have peer groups called `PEERGROUP_FSW_SSW_V6`, both apply route maps like `PROPAGATE_FSW_SSW_IN`, both use community lists to tag routes. The PhysicalInventory describes **what the DUT is configured with**, NOT how the config gets there.
 
-**The deployment mechanism differs by platform** (this is a factory concern, not a Testbed concern):
+**The deployment mechanism differs by platform** (this is a factory concern, not a PhysicalInventory concern):
 
-| Platform | Mechanism | Testbed field that points at it |
+| Platform | Mechanism | PhysicalInventory field that points at it |
 |---|---|---|
 | **EOS / Arista** | Configerator (declarative config, deployed at setup) | `bgpcpp_configerator_path`, `openr_configerator_path` |
 | **FBOSS** | Patchers (runtime API, invoked by setup tasks) | `fboss_agent_configerator_path` (baseline); factory setup tasks push patcher updates |
 
-Consequence: the same Testbed fields (`peer_groups`, `route_maps`, `communities`, `parent_networks`, `as_numbers`) are populated **the same way** whether the DUT is EOS or FBOSS. The FBOSS-vs-EOS distinction shows up only in:
-- Which configerator-path field is set (EOS uses `bgpcpp_configerator_path`; FBOSS uses `fboss_agent_configerator_path` — some testbeds may have both if they run both).
+Consequence: the same PhysicalInventory fields (`peer_groups`, `route_maps`, `communities`, `parent_networks`, `as_numbers`) are populated **the same way** whether the DUT is EOS or FBOSS. The FBOSS-vs-EOS distinction shows up only in:
+- Which configerator-path field is set (EOS uses `bgpcpp_configerator_path`; FBOSS uses `fboss_agent_configerator_path` — some physical inventories may have both if they run both).
 - What kind of setup tasks the factory chooses (configerator deploy for EOS; patcher push for FBOSS).
 
-**Anti-pattern**: don't duplicate `eos_peer_groups` and `fboss_peer_groups` in the Testbed. There's one `peer_groups` dict — it describes the peer-group names on the DUT, regardless of platform.
+**Anti-pattern**: don't duplicate `eos_peer_groups` and `fboss_peer_groups` in the PhysicalInventory. There's one `peer_groups` dict — it describes the peer-group names on the DUT, regardless of platform.
 
 ### What goes in `fboss_attributes` vs `peer_groups`/other dicts vs factory kwargs
 
@@ -365,28 +365,28 @@ Consequence: the same Testbed fields (`peer_groups`, `route_maps`, `communities`
 - **`fboss_attributes`** — FBOSS-specific runtime knobs that do NOT correspond to interface peer policy: DLB enable/disable, ECMP group/member limits, spine-module lists for TAAC framework use, drain-state defaults, feature flags. Patcher-configured on FBOSS; not applicable on EOS.
 - **Factory kwargs** — per-testcase deltas from the baseline. Examples: `override_ecmp_limit=64`, `drain_before_stage=True`, `enable_dlb_at_iteration=[True, False, True]`.
 
-Rule of thumb: if a knob varies **per testcase** → factory kwarg. If it's true **for every testcase on this DUT** → the appropriate Testbed dict (`peer_groups`, `fboss_attributes`, etc.). If it's part of the DUT's **interface peer policy** → `peer_groups` / `route_maps` / `communities` / `parent_networks` / `as_numbers` (regardless of platform).
+Rule of thumb: if a knob varies **per testcase** → factory kwarg. If it's true **for every testcase on this DUT** → the appropriate PhysicalInventory dict (`peer_groups`, `fboss_attributes`, etc.). If it's part of the DUT's **interface peer policy** → `peer_groups` / `route_maps` / `communities` / `parent_networks` / `as_numbers` (regardless of platform).
 
 ### Recommended: `_require()` helper for dict lookups
 
-Bare `testbed.peer_groups["uplink_v6"]` raises `KeyError` at runtime if the key is missing. Wrap in a helper for clearer errors:
+Bare `physical_inventory.peer_groups["uplink_v6"]` raises `KeyError` at runtime if the key is missing. Wrap in a helper for clearer errors:
 
 ```python
-def _require(testbed: Testbed, category: str, key: str):
-    """Look up a role key from a Testbed named-map; raise clear error if missing."""
-    d = getattr(testbed, category)
+def _require(physical_inventory: PhysicalInventory, category: str, key: str):
+    """Look up a role key from a PhysicalInventory named-map; raise clear error if missing."""
+    d = getattr(physical_inventory, category)
     if key not in d:
         raise ValueError(
-            f"Testbed {testbed.device_name} does not define {category}[{key!r}]. "
-            f"This factory requires it. Add it to the Testbed instance or use a different testbed."
+            f"PhysicalInventory {physical_inventory.device_name} does not define {category}[{key!r}]. "
+            f"This factory requires it. Add it to the PhysicalInventory instance or use a different physical_inventory."
         )
     return d[key]
 
 # In a factory:
-peergroup_uplink_v6 = _require(testbed, "peer_groups", "uplink_v6")
+peergroup_uplink_v6 = _require(physical_inventory, "peer_groups", "uplink_v6")
 ```
 
-Put `_require()` in `testbed.py` (private) or a `testbed_helpers.py`.
+Put `_require()` in `physical_inventory.py` (private) or a `physical_inventory_helpers.py`.
 
 ---
 
@@ -394,7 +394,7 @@ Put `_require()` in `testbed.py` (private) or a `testbed_helpers.py`.
 
 ### What it is
 
-A function that builds a `TestConfig` given a Testbed + kwargs. All the workflow logic (playbooks, prechecks, postchecks, snapshot checks, setup tasks, teardown tasks) lives here.
+A function that builds a `TestConfig` given a PhysicalInventory + kwargs. All the workflow logic (playbooks, prechecks, postchecks, snapshot checks, setup tasks, teardown tasks) lives here.
 
 ### Where it lives
 
@@ -414,8 +414,8 @@ A function that builds a `TestConfig` given a Testbed + kwargs. All the workflow
 
 ```python
 def create_<domain>_<workflow>_test_config(
-    testbed: Testbed,
-    # Role assignment (indexes into testbed.ixia_ports; defaults match typical EBB wiring)
+    physical_inventory: PhysicalInventory,
+    # Role assignment (indexes into physical_inventory.ixia_ports; defaults match typical EBB wiring)
     ebgp_port_idx: int = 0,
     ibgp_port_idx: int = 1,
     bgp_mon_port_idx: int = 2,
@@ -424,16 +424,16 @@ def create_<domain>_<workflow>_test_config(
     prefix_count: int = 10000,
     ...
 ) -> TestConfig:
-    assert testbed.ixia_ports, "factory requires IXIA port map"
-    assert testbed.bgpcpp_configerator_path, "factory requires bgpcpp configerator path"
+    assert physical_inventory.ixia_ports, "factory requires IXIA port map"
+    assert physical_inventory.bgpcpp_configerator_path, "factory requires bgpcpp configerator path"
 
-    ebgp_dut_iface, ebgp_chassis_port = testbed.ixia_ports[ebgp_port_idx]
-    ibgp_dut_iface, ibgp_chassis_port = testbed.ixia_ports[ibgp_port_idx]
-    # bgp_mon optional — only unpack if the testbed has a third port
+    ebgp_dut_iface, ebgp_chassis_port = physical_inventory.ixia_ports[ebgp_port_idx]
+    ibgp_dut_iface, ibgp_chassis_port = physical_inventory.ixia_ports[ibgp_port_idx]
+    # bgp_mon optional — only unpack if the physical_inventory has a third port
     ...
 
     return TestConfig(
-        name=f"{testbed.device_name}_<workflow>_TEST_CONFIG",
+        name=f"{physical_inventory.device_name}_<workflow>_TEST_CONFIG",
         endpoints=[...],
         playbooks=[...],
         ...
@@ -442,11 +442,11 @@ def create_<domain>_<workflow>_test_config(
 
 ### Rules for factory functions
 
-- **First arg**: `testbed: Testbed`.
-- **Role assignment**: `*_port_idx` kwargs with sensible defaults (0/1/2). The factory owns which port carries which role. Callers can override for oddly-wired testbeds.
+- **First arg**: `physical_inventory: PhysicalInventory`.
+- **Role assignment**: `*_port_idx` kwargs with sensible defaults (0/1/2). The factory owns which port carries which role. Callers can override for oddly-wired physical inventories.
 - **Workflow kwargs**: individual kwargs. Do NOT bundle into a spec-params dataclass argument.
 - **Spec constants** (e.g. `_2_3_1_PREFIX_COUNT = 10000`, `_STORM_PREFIX_POOL_REGEX = "..."`): module-level defaults inside the factory file. Factory reads them. Add kwargs incrementally when a caller needs to tune a specific one.
-- **Runtime asserts** on required Testbed fields. Testbed fields are Optional; a factory that needs `bgpcpp_configerator_path` must assert it's not None.
+- **Runtime asserts** on required PhysicalInventory fields. PhysicalInventory fields are Optional; a factory that needs `bgpcpp_configerator_path` must assert it's not None.
 - **Return** a fully-wired `TestConfig`: name, endpoints, playbooks, prechecks/postchecks/snapshot checks, setup/teardown tasks.
 - **Internal helpers stay private** (e.g., `_pb_2_3_1()`, `_snapshot_helper()`). One public factory function per workflow. Sub-playbook helpers do NOT leak.
 
@@ -457,12 +457,12 @@ Format: `create_<domain>_<workflow>_test_config`.
 - Always `create_` prefix.
 - Always `_test_config` suffix.
 - `<domain>` matches the file's name minus prefix. In `bgp_update_group.py`: `create_bgp_ug_backpressure_test_config`, `create_bgp_ug_new_peer_join_test_config`.
-- **Never encode DUT identity in the factory name.** Factory is DUT-agnostic. `create_bag010_ash6_instability_test_config` is WRONG. Correct: `create_ebb_instability_test_config(testbed=BAG010_ASH6)`.
+- **Never encode DUT identity in the factory name.** Factory is DUT-agnostic. `create_bag010_ash6_instability_test_config` is WRONG. Correct: `create_ebb_instability_test_config(physical_inventory=BAG010_ASH6)`.
 
 ### Adding a new workflow
 
 1. Pick the right `factories/<domain>.py` file (or create one if the workflow is genuinely new).
-2. Add a `def create_<domain>_<workflow>_test_config(testbed, ...)` function.
+2. Add a `def create_<domain>_<workflow>_test_config(physical_inventory, ...)` function.
 3. Update `factories/__init__.py` if a new file was created.
 4. Update BUCK.
 
@@ -472,7 +472,7 @@ Format: `create_<domain>_<workflow>_test_config`.
 
 ### What it is
 
-A file that binds factory functions + Testbed instances into named `TestConfig` constants. Every constant is a one-line factory call.
+A file that binds factory functions + PhysicalInventory instances into named `TestConfig` constants. Every constant is a one-line factory call.
 
 ### Strict three-way prefix taxonomy
 
@@ -526,7 +526,7 @@ The `_tc.py` suffix on CICD files is a convention holdover — kept for CICD fil
 
 See factories/bgp_update_group.py for factory definitions.
 """
-from .testbed import BAG012_ASH6, BAG013_ASH6, EB03_LAB_ASH6
+from .physical_inventory import BAG012_ASH6, BAG013_ASH6, EB03_LAB_ASH6
 from .factories.bgp_update_group import (
     create_bgp_ug_backpressure_test_config,
     create_bgp_ug_backpressure_topology_smoke_test_config,
@@ -559,7 +559,7 @@ EB03_LAB_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG = create_bgp_ug_i
 - Explicit `__all__` — hand-maintained. Small file, stable content, drift is acceptable.
 - File-header docstring names the file's taxonomy bucket + cross-refs the factories it consumes.
 
-### Cloning a testconfig to a new testbed = one line
+### Cloning a testconfig to a new physical_inventory = one line
 
 ```python
 # In cicd_ebb_int_tc.py or the appropriate catalog:
@@ -572,16 +572,16 @@ That's it. No copy-file, no hand-edit of port maps, no touching factory internal
 
 ## 5. TestConfig constant naming
 
-**Format**: `{TESTBED}_{FACTORY}_TEST_CONFIG[_VARIANT]`
+**Format**: `{PHYSICAL_INVENTORY}_{FACTORY}_TEST_CONFIG[_VARIANT]`
 
 Variant suffix goes **after** `_TEST_CONFIG`, not before it. The invariant is that every catalog constant ends in `_TEST_CONFIG` unless it has a variant tag, in which case it ends in `_TEST_CONFIG_<VARIANT>`.
 
 | Segment | Source | Required? |
 |---|---|---|
-| **TESTBED** | Bare testbed identifier, DC suffix dropped (`BAG010` not `BAG010_ASH6`, `EB02_LAB` not `EB02_LAB_ASH6`). The DC lives on the Testbed instance in `testbed.py`, not in the catalog constant. | Yes |
+| **PHYSICAL_INVENTORY** | Bare physical_inventory identifier, DC suffix dropped (`BAG010` not `BAG010_ASH6`, `EB02_LAB` not `EB02_LAB_ASH6`). The DC lives on the PhysicalInventory instance in `physical_inventory.py`, not in the catalog constant. | Yes |
 | **FACTORY** | Factory function's workflow part, stripped of `create_` prefix and `_test_config` suffix. Also strip generic infra prefixes (`bgp_`, `ebb_`, `bgp_ebb_`) so the constant reads as the workflow, not the factory-file taxonomy. Examples: `create_ebb_drain_test_config` → `DRAIN`; `create_bgp_ug_backpressure_test_config` → `BGP_UG_BACKPRESSURE`; `create_ebb_stage1_consolidated_test_config` → `STAGE1_CONSOLIDATED`. | Yes |
 | **Fixed suffix** | Always `_TEST_CONFIG` | Yes |
-| **VARIANT** | Optional short tag identifying a variant of the same factory-on-testbed pair. Prefer short forms: `_UG` (update group), `_SMOKE` (topology smoke), `_WITHOUT_OPEN_R`, `_200_IBGP_PEERS`. Multiple variants concatenate: `_UG_SMOKE`. | Only when applied |
+| **VARIANT** | Optional short tag identifying a variant of the same factory-on-physical_inventory pair. Prefer short forms: `_UG` (update group), `_SMOKE` (topology smoke), `_WITHOUT_OPEN_R`, `_200_IBGP_PEERS`. Multiple variants concatenate: `_UG_SMOKE`. | Only when applied |
 
 ### Examples
 
@@ -599,9 +599,9 @@ BAG013_BGP_UG_BACKPRESSURE_TEST_CONFIG_SMOKE
 EB02_LAB_BGP_PERF_SCALING_EGRESS_PEER_SWEEP_TEST_CONFIG_200_IBGP_PEERS
 ```
 
-### Relationship to Testbed instance names
+### Relationship to PhysicalInventory instance names
 
-Testbed instances in `testbed.py` **keep** their DC suffix (`BAG010_ASH6`, `EB02_LAB_ASH6`) — that identifies the physical DUT. The catalog CONSTANT drops it because the constant identifies a workflow-on-testbed *binding*, and one workflow per testbed is the norm; the DC is implicit in which Testbed instance the factory is called with. If a workflow ever exists on two DCs simultaneously (e.g., `BAG010_ASH6` and `BAG010_SNC1` both wired to the same factory), disambiguate at that point by adding the DC as a `_VARIANT` tag (`_ASH6`, `_SNC1`).
+PhysicalInventory instances in `physical_inventory.py` **keep** their DC suffix (`BAG010_ASH6`, `EB02_LAB_ASH6`) — that identifies the physical DUT. The catalog CONSTANT drops it because the constant identifies a workflow-on-physical_inventory *binding*, and one workflow per physical_inventory is the norm; the DC is implicit in which PhysicalInventory instance the factory is called with. If a workflow ever exists on two DCs simultaneously (e.g., `BAG010_ASH6` and `BAG010_SNC1` both wired to the same factory), disambiguate at that point by adding the DC as a `_VARIANT` tag (`_ASH6`, `_SNC1`).
 
 ### Relationship to `TestConfig.name`
 
@@ -609,11 +609,11 @@ The `.name` field inside the emitted Thrift struct is a separate identifier cons
 
 ### Grandfathering
 
-TestConfig constant names that predate this convention (e.g., `BGP_UG_BACKPRESSURE_TEST_CONFIG` — missing TESTBED prefix; `ARISTA_MIMIC_EBB_TEST_FULL_SCALE_TEST_CONFIG` — no clear TESTBED) keep their current names during hierarchical migration to avoid grep-and-fix churn on external refs (Netcastle, configerator, cross-testconfig imports).
+TestConfig constant names that predate this convention (e.g., `BGP_UG_BACKPRESSURE_TEST_CONFIG` — missing PHYSICAL_INVENTORY prefix; `ARISTA_MIMIC_EBB_TEST_FULL_SCALE_TEST_CONFIG` — no clear PHYSICAL_INVENTORY) keep their current names during hierarchical migration to avoid grep-and-fix churn on external refs (Netcastle, configerator, cross-testconfig imports).
 
 Renaming grandfathered names can happen in a follow-up diff after migration stabilizes.
 
-**New testconfigs added going forward MUST follow the full `{TESTBED}_{FACTORY}_TEST_CONFIG[_VARIANT]` convention.**
+**New testconfigs added going forward MUST follow the full `{PHYSICAL_INVENTORY}_{FACTORY}_TEST_CONFIG[_VARIANT]` convention.**
 
 ---
 
@@ -663,7 +663,7 @@ Each catalog file's explicit `__all__` makes the `import *` deterministic.
 ```
 testconfigs/routing/
 ├── __init__.py                        ← single re-export point
-├── testbed.py                         ← Testbed dataclass + all instances
+├── physical_inventory.py                         ← PhysicalInventory dataclass + all instances
 ├── role_defaults.py                   ← per-role helpers (peer_groups, route_maps, communities per DUT role)
 ├── factories/
 │   ├── __init__.py
@@ -697,9 +697,9 @@ Decision tree:
 - **Yes** → skip to Q2.
 - **No** → add factory function to appropriate `factories/*.py` (see §3), then Q2.
 
-**Q2**: Does the target Testbed already exist in `testbed.py`?
+**Q2**: Does the target PhysicalInventory already exist in `physical_inventory.py`?
 - **Yes** → skip to Q3.
-- **No** → add a `Testbed(...)` instance to `testbed.py` (see §2), then Q3.
+- **No** → add a `PhysicalInventory(...)` instance to `physical_inventory.py` (see §2), then Q3.
 
 **Q3**: Which lifecycle bucket does the testconfig belong to?
 - Active qualification → `qual_<project>.py`
@@ -718,8 +718,8 @@ Decision tree:
 
 ## 10. BUCK
 
-- One `python_library` per file: `testbed.py`, each `factories/*.py`, each catalog file, `__init__.py`.
-- Fine-grained deps: catalog library depends only on the factory files it consumes + `testbed.py`.
+- One `python_library` per file: `physical_inventory.py`, each `factories/*.py`, each catalog file, `__init__.py`.
+- Fine-grained deps: catalog library depends only on the factory files it consumes + `physical_inventory.py`.
 - Follow existing `neteng/test_infra/dne/taac` BUCK conventions.
 
 ---
@@ -736,24 +736,24 @@ Decision tree:
 
 ## 12. Anti-patterns (do NOT do)
 
-1. ❌ Hardcoding DUT hostname, IXIA chassis IP, or port map in a catalog OR factory file. That belongs in `testbed.py`.
-2. ❌ Per-DUT factory names like `create_bag010_ash6_instability_test_config`. Parameterize instead: `create_ebb_instability_test_config(testbed=BAG010_ASH6)`.
+1. ❌ Hardcoding DUT hostname, IXIA chassis IP, or port map in a catalog OR factory file. That belongs in `physical_inventory.py`.
+2. ❌ Per-DUT factory names like `create_bag010_ash6_instability_test_config`. Parameterize instead: `create_ebb_instability_test_config(physical_inventory=BAG010_ASH6)`.
 3. ❌ `TestConfig(...)` literal in a catalog file. Always call a factory.
 4. ❌ Direct catalog-file import from external code. Always go through `testconfigs.routing`.
 5. ❌ Silent renaming of a TestConfig constant during migration. Rename is a separate, isolated diff.
-6. ❌ Deep bucketing. If N testconfigs share a testbed + project, they go in ONE catalog file (e.g., all bag010/011/012/013 CICD → `cicd_ebb_int_tc.py`, not one file per bag).
-7. ❌ `enable_update_group` as a Testbed field. It's a workflow variant, belongs as factory kwarg.
+6. ❌ Deep bucketing. If N testconfigs share a physical_inventory + project, they go in ONE catalog file (e.g., all bag010/011/012/013 CICD → `cicd_ebb_int_tc.py`, not one file per bag).
+7. ❌ `enable_update_group` as a PhysicalInventory field. It's a workflow variant, belongs as factory kwarg.
 8. ❌ Spec-params dataclass argument to a factory. Use individual kwargs.
 9. ❌ `qual_<category>.py` where category is generic ("features", "scaling", "characteristic", "vendor"). Group by project, not category.
 10. ❌ Catalog file with no prefix. Every catalog file gets `cicd_`, `qual_`, or `adhoc_`.
-11. ❌ TestConfig constant without a TESTBED prefix (for new testconfigs). Reader can't tell which DUT.
+11. ❌ TestConfig constant without a PHYSICAL_INVENTORY prefix (for new testconfigs). Reader can't tell which DUT.
 12. ❌ TestConfig constant without a `_TEST_CONFIG` suffix. Inconsistent with the pattern.
 13. ❌ Embedding scale/variant in the middle of a TestConfig name (e.g., `BAG013_ASH6_1000_PEERS_INSTABILITY_TEST_CONFIG`). Put scale at the END, after factory.
-14. ❌ Role-branching in factory code (`if testbed.role == "fsw": ... elif "ssw": ...`). Factory reads standard role keys; testbed supplies them via `role_defaults.py` helpers. Adding a new DUT role must NEVER require factory changes.
-15. ❌ Hardcoded role-specific peer-group / route-map / community names in factory code (e.g., `"PEERGROUP_FSW_SSW_V6"`). Always `testbed.peer_groups["uplink_v6"]`.
-16. ❌ DUT-specific keys in Testbed role dicts (e.g., `peer_groups["fsw_ssw_v6"]`, `peer_groups["ebb_ibgp_v6"]`). Keys must be semantic and portable across DUT roles — `uplink_v6`, `downlink_v6`, `ibgp_v6`, `ebgp_v6`, etc.
-17. ❌ Duplicating per-role config across Testbed instances instead of using `role_defaults.py` helpers. If two FSW testbeds both hand-write `peer_groups={"uplink_v6": "PEERGROUP_FSW_SSW_V6", ...}`, factor into `fsw_peer_groups()`.
-18. ❌ Splitting `eos_peer_groups` vs `fboss_peer_groups` on Testbed. Interface peer policy is device-agnostic — one `peer_groups` dict.
+14. ❌ Role-branching in factory code (`if physical_inventory.role == "fsw": ... elif "ssw": ...`). Factory reads standard role keys; physical_inventory supplies them via `role_defaults.py` helpers. Adding a new DUT role must NEVER require factory changes.
+15. ❌ Hardcoded role-specific peer-group / route-map / community names in factory code (e.g., `"PEERGROUP_FSW_SSW_V6"`). Always `physical_inventory.peer_groups["uplink_v6"]`.
+16. ❌ DUT-specific keys in PhysicalInventory role dicts (e.g., `peer_groups["fsw_ssw_v6"]`, `peer_groups["ebb_ibgp_v6"]`). Keys must be semantic and portable across DUT roles — `uplink_v6`, `downlink_v6`, `ibgp_v6`, `ebgp_v6`, etc.
+17. ❌ Duplicating per-role config across PhysicalInventory instances instead of using `role_defaults.py` helpers. If two FSW physical inventories both hand-write `peer_groups={"uplink_v6": "PEERGROUP_FSW_SSW_V6", ...}`, factor into `fsw_peer_groups()`.
+18. ❌ Splitting `eos_peer_groups` vs `fboss_peer_groups` on PhysicalInventory. Interface peer policy is device-agnostic — one `peer_groups` dict.
 
 ---
 
@@ -783,9 +783,9 @@ path is optional; flat factory authoring remains valid.
 The intended factory shape is:
 
 ```python
-topology = EBB_FULL_SCALE_WITH_BGPMON
-bound = topology.bind_to_testbed(
-    testbed=testbed,
+logical_topology = EBB_FULL_SCALE_WITH_BGPMON
+bound = logical_topology.bind_to_inventory(
+    physical_inventory=physical_inventory,
     port_map={"uplink": 0, "ibgp": 1, "bgpmon": 2},
     parent_networks=parent_networks,
     peer_groups=peer_groups,
@@ -794,8 +794,8 @@ bound = topology.bind_to_testbed(
 compiled = bound.compile()
 ```
 
-Routing `Testbed` remains physical inventory: DUT name, ordered IXIA ports,
-IXIA chassis, `dut_bgp_as`, configerator paths, and lab defaults. Topology
+Routing `PhysicalInventory` remains physical inventory: DUT name, ordered IXIA ports,
+IXIA chassis, `dut_bgp_as`, configerator paths, and lab defaults. LogicalTopology
 intent belongs in topology objects and factory-level dictionaries.
 
 Factories should import topology instances from
@@ -814,17 +814,17 @@ is explicitly approved.
 
 ### Adding a testconfig — checklist
 
-- [ ] Testbed exists in `testbed.py`? If not, add it.
+- [ ] PhysicalInventory exists in `physical_inventory.py`? If not, add it.
 - [ ] Factory exists in `factories/*.py`? If not, add it.
 - [ ] Correct lifecycle bucket picked (`cicd_` / `qual_` / `adhoc_`)?
 - [ ] Correct project-based filename?
 - [ ] One-line factory call in the catalog file?
-- [ ] Constant name follows `{TESTBED}_{FACTORY}_{SCALE|VARIANT}_TEST_CONFIG`?
+- [ ] Constant name follows `{PHYSICAL_INVENTORY}_{FACTORY}_{SCALE|VARIANT}_TEST_CONFIG`?
 - [ ] Added to catalog's `__all__`?
 - [ ] Added to `testconfigs/routing/__init__.py` if new catalog file?
 - [ ] BUCK targets updated?
-- [ ] No hardcoded DUT/port/chassis values outside `testbed.py`?
+- [ ] No hardcoded DUT/port/chassis values outside `physical_inventory.py`?
 
 ### The invariant
 
-Every `TestConfig` = `create_<workflow>_test_config(<TESTBED>, ...)`.
+Every `TestConfig` = `create_<workflow>_test_config(<PHYSICAL_INVENTORY>, ...)`.

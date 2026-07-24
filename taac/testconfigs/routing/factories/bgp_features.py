@@ -10,12 +10,12 @@ extends with ``create_bgp_feature_enforce_first_as_test_config`` (from
 ``test_config_bgp_enforce_first_as_feature.py``) and
 ``create_bgp_feature_med_test_config`` (from
 ``test_config_bgp_med_feature.py``). Each factory takes
-``(testbed: Testbed, *, name: str, ...)`` and returns a ``TestConfig`` whose
+``(physical_inventory: PhysicalInventory, *, name: str, ...)`` and returns a ``TestConfig`` whose
 serialized form is byte-wise identical to the legacy factory outputs
 (golden manifest hashes preserved verbatim). DUT identity
 (``device_name``, IXIA port map, direct_ixia_connections, lab
 host_driver_args, oss_mock_device_data, host_os_type_map) is derived from
-``testbed``; the remaining workload knobs stay as kwargs with defaults
+``physical_inventory``; the remaining workload knobs stay as kwargs with defaults
 matching the legacy eb03.lab.ash6 wrappers.
 
 Playbook factories (``build_fast_reset_playbook``,
@@ -78,7 +78,9 @@ from taac.task_definitions import (
     create_run_commands_on_shell_task,
     create_set_peer_group_enforce_first_as_task,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
 
@@ -92,16 +94,18 @@ __all__ = [
 ]
 
 
-def _feature_ssh_password(testbed: Testbed) -> str:
-    """Return the lab SSH password for ``testbed``.
+def _feature_ssh_password(physical_inventory: PhysicalInventory) -> str:
+    """Return the lab SSH password for ``physical_inventory``.
 
-    Uses the testbed's declared password env-var (matches the
-    ``testbed.host_driver_args`` payload built at Testbed construction);
+    Uses the physical_inventory's declared password env-var (matches the
+    ``physical_inventory.host_driver_args`` payload built at PhysicalInventory construction);
     falls back to ``"dnepit"`` when the env var is unset -- byte-identical
     with the legacy wrappers whose ``_LAB_DEVICE_PASSWORD`` also fell back
     to ``"dnepit"``.
     """
-    env_var = testbed.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+    env_var = (
+        physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
+    )
     return os.environ.get(env_var, "dnepit")  # pragma: allowlist secret
 
 
@@ -111,7 +115,7 @@ def _feature_ssh_password(testbed: Testbed) -> str:
 
 
 def create_bgp_feature_fast_reset_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -135,7 +139,7 @@ def create_bgp_feature_fast_reset_test_config(
     ``test_config_bgp_fast_reset_feature.test_config_for_bgp_fast_reset_feature``
     factory invoked from the ``ARISTA_BGP_FAST_RESET_FEATURE_TEST`` wrapper on
     ``eb03.lab.ash6``. DUT identity + IXIA port map + lab host wiring are
-    derived from ``testbed``; the remaining workload knobs keep the wrapper's
+    derived from ``physical_inventory``; the remaining workload knobs keep the wrapper's
     default values.
     """
     if ixia_ebgp_ic_parent_networks_v6 is None:
@@ -149,19 +153,19 @@ def create_bgp_feature_fast_reset_test_config(
     if peer_groups is None:
         peer_groups = ["EB-FA-V6"]
 
-    device_name = testbed.device_name
+    device_name = physical_inventory.device_name
     # Legacy wrapper drives only one eBGP port (the eBGP slot on eb03).
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
     ixia_interfaces_ebgp = [ebgp_iface]
-    ssh_password = _feature_ssh_password(testbed)
+    ssh_password = _feature_ssh_password(physical_inventory)
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     direct_ixia_connections = [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
     ]
@@ -596,7 +600,7 @@ def create_bgp_feature_fast_reset_test_config(
 
 
 def create_bgp_feature_weight_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -632,25 +636,25 @@ def create_bgp_feature_weight_test_config(
     if test_address_families is None:
         test_address_families = ["ipv6", "ipv4"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
     ixia_interface_ebgp = ebgp_iface
     ixia_interface_ibgp = ibgp_iface
-    ssh_password = _feature_ssh_password(testbed)
+    ssh_password = _feature_ssh_password(physical_inventory)
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     direct_ixia_connections = [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
         DirectIxiaConnection(
             interface=ibgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ibgp_port,
         ),
     ]
@@ -1061,7 +1065,7 @@ def create_bgp_feature_weight_test_config(
 
 
 def create_bgp_feature_well_known_communities_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -1092,25 +1096,25 @@ def create_bgp_feature_well_known_communities_test_config(
     if test_address_families is None:
         test_address_families = ["ipv6"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
     ixia_interface_ebgp = ebgp_iface
     ixia_interface_ibgp = ibgp_iface
-    ssh_password = _feature_ssh_password(testbed)
+    ssh_password = _feature_ssh_password(physical_inventory)
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     direct_ixia_connections = [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
         DirectIxiaConnection(
             interface=ibgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ibgp_port,
         ),
     ]
@@ -1413,7 +1417,7 @@ def create_bgp_feature_well_known_communities_test_config(
 
 
 def create_bgp_feature_enforce_first_as_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -1440,7 +1444,7 @@ def create_bgp_feature_enforce_first_as_test_config(
     ``test_config_bgp_enforce_first_as_feature.test_config_for_bgp_enforce_first_as_feature``
     factory invoked from the ``ARISTA_BGP_ENFORCE_FIRST_AS_FEATURE_TEST``
     wrapper on ``eb03.lab.ash6``. DUT identity + IXIA port map + lab host
-    wiring are derived from ``testbed``; the remaining workload knobs keep
+    wiring are derived from ``physical_inventory``; the remaining workload knobs keep
     the wrapper's default values.
     """
     if ebgp_route_acceptance_communities is None:
@@ -1450,25 +1454,25 @@ def create_bgp_feature_enforce_first_as_test_config(
     if peer_groups is None:
         peer_groups = ["EB-FA-V6"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
     ixia_interface_ebgp = ebgp_iface
     ixia_interface_ibgp = ibgp_iface
-    ssh_password = _feature_ssh_password(testbed)
+    ssh_password = _feature_ssh_password(physical_inventory)
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     direct_ixia_connections = [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
         DirectIxiaConnection(
             interface=ibgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ibgp_port,
         ),
     ]
@@ -1933,7 +1937,7 @@ def create_bgp_feature_enforce_first_as_test_config(
 
 
 def create_bgp_feature_med_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ebgp_remote_as: int = 65334,
@@ -1960,7 +1964,7 @@ def create_bgp_feature_med_test_config(
     ``test_config_bgp_med_feature.test_config_for_bgp_med_feature`` factory
     invoked from the ``ARISTA_BGP_MED_FEATURE_TEST`` wrapper on
     ``eb03.lab.ash6``. DUT identity + IXIA port map + lab host wiring are
-    derived from ``testbed``; the remaining workload knobs keep the
+    derived from ``physical_inventory``; the remaining workload knobs keep the
     wrapper's default values (test_address_families = ["ipv6", "ipv4"]).
     """
     if ebgp_route_acceptance_communities is None:
@@ -1968,25 +1972,25 @@ def create_bgp_feature_med_test_config(
     if test_address_families is None:
         test_address_families = ["ipv6", "ipv4"]
 
-    device_name = testbed.device_name
-    ebgp_iface, ebgp_port = testbed.ixia_ports[0]
-    ibgp_iface, ibgp_port = testbed.ixia_ports[1]
+    device_name = physical_inventory.device_name
+    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
+    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
     ixia_interface_ebgp = ebgp_iface
     ixia_interface_ibgp = ibgp_iface
-    ssh_password = _feature_ssh_password(testbed)
+    ssh_password = _feature_ssh_password(physical_inventory)
 
-    host_driver_args = testbed.host_driver_args
-    oss_mock_device_data = testbed.oss_mock_device_data
+    host_driver_args = physical_inventory.host_driver_args
+    oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     direct_ixia_connections = [
         DirectIxiaConnection(
             interface=ebgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ebgp_port,
         ),
         DirectIxiaConnection(
             interface=ibgp_iface,
-            ixia_chassis_ip=testbed.ixia_chassis_ip,
+            ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
             ixia_port=ibgp_port,
         ),
     ]

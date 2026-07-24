@@ -10,7 +10,7 @@ into this catalog. Each ``TestConfig.name`` string is grandfathered from
 the legacy wrapper so the golden manifest hash is byte-wise identical.
 
 The shared/generic ``ARISTA_MIMIC_EBB_TEST_FULL_SCALE`` sibling targets
-the ``JSW002_M001_SNC1`` production testbed (usage=adhoc) and lives in
+the ``JSW002_M001_SNC1`` production physical_inventory (usage=adhoc) and lives in
 ``adhoc_bgp_ebb_full_scale.py``.
 
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
@@ -20,7 +20,7 @@ from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale_mimic import (
     create_bgp_ebb_full_scale_mimic_test_config,
 )
-from taac.testconfigs.routing.testbed import (
+from taac.testconfigs.routing.physical_inventory import (
     EB01_LAB_ASH6,
     EB03_LAB_ASH6,
     EB04_LAB_ASH6,

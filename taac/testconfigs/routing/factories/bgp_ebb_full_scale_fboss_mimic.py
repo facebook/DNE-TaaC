@@ -2,7 +2,7 @@
 # pyre-unsafe
 """Wrapper factories for the FBOSS EBB single-node full-scale TestConfig family.
 
-Thin ``(testbed, *, name, ...) -> TestConfig`` shims around the legacy
+Thin ``(physical_inventory, *, name, ...) -> TestConfig`` shims around the legacy
 ``test_config_for_bgp_plus_plus_ebb`` and
 ``test_config_for_bgp_plus_plus_ebb_with_bgp_mon`` factories in
 ``ebb/fboss_ebb_scale_test_config.py``. Wave 5E.4 migrates the 4
@@ -29,7 +29,9 @@ from taac.testconfigs.routing.ebb.fboss_ebb_scale_test_config import (
     test_config_for_bgp_plus_plus_ebb,
     test_config_for_bgp_plus_plus_ebb_with_bgp_mon,
 )
-from taac.testconfigs.routing.testbed import Testbed
+from taac.testconfigs.routing.physical_inventory import (
+    PhysicalInventory,
+)
 from taac.test_as_a_config.types import DirectIxiaConnection, TestConfig
 
 
@@ -99,7 +101,7 @@ _BGP_ROUTER_ID = "129.134.63.224"
 
 
 def create_bgp_ebb_full_scale_fboss_test_config(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ixia_interface_mimic_ebgp: str,
@@ -114,12 +116,12 @@ def create_bgp_ebb_full_scale_fboss_test_config(
     Byte-identical to the legacy
     ``fsw_qzb_single_node_topology_mimic_ebb_test_full_scale_test_config.py``
     and ``qzd_single_node_topology_mimic_ebb_test_full_scale_test_config.py``
-    depending on which ``testbed`` + policy names are passed. The QZD-lab
+    depending on which ``physical_inventory`` + policy names are passed. The QZD-lab
     variant overrides the 4 policy-name kwargs to ``PROPAGATE_FSW_{SSW,RSW}_*``.
     """
     return test_config_for_bgp_plus_plus_ebb(
         test_config_name=name,
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         peergroup_ibgp_v6=_PEERGROUP_IBGP_V6,
         peergroup_ebgp_v6=_PEERGROUP_EBGP_V6,
         peergroup_ibgp_v4=_PEERGROUP_IBGP_V4,
@@ -163,7 +165,7 @@ def create_bgp_ebb_full_scale_fboss_test_config(
 
 
 def create_bgp_ebb_full_scale_fboss_test_config_with_bgp_mon(
-    testbed: Testbed,
+    physical_inventory: PhysicalInventory,
     *,
     name: str,
     ixia_interface_mimic_ebgp: str,
@@ -176,11 +178,11 @@ def create_bgp_ebb_full_scale_fboss_test_config_with_bgp_mon(
     Byte-identical to the legacy
     ``fsw001_qzb_single_node_topology_mimic_ebb_test_full_scale_mon_test_config.py``
     and ``qzd_single_node_topology_mimic_ebb_test_full_scale_fsw002_test_config.py``
-    depending on which ``testbed`` + kwargs are passed.
+    depending on which ``physical_inventory`` + kwargs are passed.
     """
     return test_config_for_bgp_plus_plus_ebb_with_bgp_mon(
         test_config_name=name,
-        device_name=testbed.device_name,
+        device_name=physical_inventory.device_name,
         peergroup_ibgp_v6=_PEERGROUP_IBGP_V6,
         peergroup_ebgp_v6=_PEERGROUP_EBGP_V6,
         peergroup_ibgp_v4=_PEERGROUP_IBGP_V4,
