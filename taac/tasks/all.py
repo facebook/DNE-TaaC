@@ -371,6 +371,12 @@ class CoopUnregisterPatchersTask(BaseTask):
     NAME = "coop_unregister_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            self.logger.info(
+                "Skipping coop_unregister_patchers: coop patchers are not "
+                "available under TAAC_OSS=1."
+            )
+            return
         hostnames = params.get("hostnames") or [none_throws(params.get("hostname"))]
         regex = params.get("regex", r".*.")
         owner = params.get("owner", DNE_TEST_REGRESSION_NAME)
@@ -440,6 +446,12 @@ class CoopRegisterPatcherTask(BaseTask):
     NAME = "coop_register_patcher"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            self.logger.info(
+                "Skipping coop_register_patcher: coop patchers are not "
+                "available under TAAC_OSS=1."
+            )
+            return
         hostname = params["hostname"]
         config_names = params.get("config_names") or [params["config_name"]]
         patcher_name = params["patcher_name"]
@@ -463,6 +475,12 @@ class CoopApplyPatchersTask(BaseTask):
     NAME = "coop_apply_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            self.logger.info(
+                "Skipping coop_apply_patchers: coop patchers are not "
+                "available under TAAC_OSS=1."
+            )
+            return
         hostnames = params["hostnames"]
         config_names = params.get(
             "config_names",

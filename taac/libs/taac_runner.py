@@ -1692,20 +1692,26 @@ class TaacRunner:
         ixia = self.ixia
         if ixia:
             if playbook.backup_and_restore_ixia_config:
-                ixia.export_and_save_config()  # type: ignore[attr-defined]
+                if hasattr(ixia, "export_and_save_config"):
+                    ixia.export_and_save_config()  # type: ignore[attr-defined]
+                else:
+                    self.logger.warning(
+                        "backup_and_restore_ixia_config is set but the traffic "
+                        "generator backend does not support export_and_save_config "
+                        "— skipping config backup"
+                    )
             if playbook.traffic_items_to_configure:
                 for (
                     traffic_item_name,
                     settings,
                 ) in playbook.traffic_items_to_configure.items():
-                    ixia.configure_traffic_items_on_the_fly(  # type: ignore[attr-defined]
+                    ixia.configure_traffic_item(
                         traffic_item_name,
                         settings.line_rate,
                         settings.line_rate_type,
                         settings.frame_size_settings,
                         settings.qos_config,
                     )
-                    ixia.apply_traffic()  # type: ignore[attr-defined]
             traffic_regexes = (
                 playbook.traffic_items_to_start
                 or self.test_config.traffic_items_to_start
@@ -1843,7 +1849,14 @@ class TaacRunner:
                 list(traffic_regexes) if traffic_regexes is not None else None
             )
             if playbook.backup_and_restore_ixia_config:
-                ixia.import_saved_config()  # type: ignore[attr-defined]
+                if hasattr(ixia, "import_saved_config"):
+                    ixia.import_saved_config()  # type: ignore[attr-defined]
+                else:
+                    self.logger.warning(
+                        "backup_and_restore_ixia_config is set but the traffic "
+                        "generator backend does not support import_saved_config "
+                        "— skipping config restore"
+                    )
         if self.test_case_periodic_task_executor:
             await self.async_run_periodic_task_checks(
                 test_case_results,

@@ -134,6 +134,7 @@ class TestAbstractTrafficGeneratorABC(unittest.TestCase):
             "get_traffic_items",
             "restart_bgp_peers",
             "find_bgp_peers",
+            "configure_traffic_item",
             "tear_down",
         }
         actual = {
@@ -147,6 +148,192 @@ class TestAbstractTrafficGeneratorABC(unittest.TestCase):
         from taac.ixia.otg_traffic_gen import OtgTrafficGen
 
         self.assertTrue(issubclass(OtgTrafficGen, AbstractTrafficGenerator))
+
+    def test_taac_runner_ixia_calls_are_on_abc_or_guarded(self):
+        """Scan taac_runner.py for attribute accesses on the ixia variable.
+
+        Every attribute access on `self.ixia` or the local `ixia` alias must
+        either:
+          1. Be part of the AbstractTrafficGenerator ABC interface, OR
+          2. Appear in NON_ABC_ALLOWED and be guarded with hasattr/isinstance
+             in the source.
+
+        This test catches new unguarded restpy-only calls that would crash
+        the OTG backend at runtime.
+
+        ── Decision framework ──────────────────────────────────────────
+        When you need to call a method on `self.ixia` in taac_runner.py:
+
+        PREFER adding to the ABC when:
+          • The *intent* is backend-agnostic (e.g. "change a flow's rate"),
+            even if the mechanism differs between restpy and OTG.
+          • Both backends can provide a meaningful implementation — it
+            doesn't have to be identical, just semantically equivalent.
+
+        Use NON_ABC_ALLOWED + a guard when:
+          • The operation is inherently tied to one backend's architecture
+            (e.g. restpy's ResourceManager export/import, IxNetwork session
+            health checks).
+          • There is no useful OTG equivalent — not even a no-op — and
+            adding a stub would mislead future readers into thinking the
+            feature is supported.
+
+        DO NOT add a method to the ABC with `raise NotImplementedError`
+        on OtgTrafficGen just to make this test pass — that is caught by
+        test_no_notimplementederror_stubs_on_otg (below).
+        ────────────────────────────────────────────────────────────────
+        """
+        import ast
+        import inspect
+        import os
+
+        # -- Attributes that are NOT on the ABC but are used with guards ------
+        # Every entry here MUST have a corresponding hasattr() or isinstance()
+        # guard in taac_runner.py — this is enforced below.
+        #
+        # To add a new entry:
+        #   1. Add the hasattr/isinstance guard in taac_runner.py FIRST.
+        #   2. Add the name here with a comment explaining why it can't be
+        #      on the ABC (what makes it backend-specific?).
+        #   3. The test will verify the guard exists in the source.
+        NON_ABC_ALLOWED = {
+            # backup/restore — restpy ResourceManager serializes the entire
+            # IxNetwork session state as JSON. OTG has no session state to
+            # serialize (config is a snappi object held in memory).
+            "export_and_save_config",
+            "import_saved_config",
+            # background stat capture flag — present on both backends today
+            # but is an implementation detail, not an operational contract.
+            # Guarded with hasattr.
+            "capturing",
+            # restpy-only chassis liveness probe — checks IxNetwork REST API
+            # health via session object. OTG has no equivalent session concept.
+            # Guarded with isinstance(self.ixia, TaacIxia).
+            "ensure_ixia_alive",
+            # chassis IP — used for diagnostics collection (Manifold upload).
+            # OTG deployments don't have a chassis IP in the same sense.
+            "primary_chassis_ip",
+        }
+
+        abc_attrs = {
+            name for name, method in vars(AbstractTrafficGenerator).items()
+            if not name.startswith("_")
+        }
+
+        # Locate taac_runner.py relative to abstract_traffic_generator.py
+        abc_file = inspect.getfile(AbstractTrafficGenerator)
+        taac_runner_path = os.path.join(
+            os.path.dirname(os.path.dirname(abc_file)),
+            "libs", "taac_runner.py",
+        )
+        with open(taac_runner_path) as f:
+            source = f.read()
+        tree = ast.parse(source, filename=taac_runner_path)
+
+        # Collect all `ixia.X` and `self.ixia.X` attribute accesses
+        accessed = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute):
+                continue
+            # self.ixia.attr
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "self"
+                and node.value.attr == "ixia"
+            ):
+                accessed.add(node.attr)
+            # ixia.attr  (local alias: `ixia = self.ixia`)
+            elif (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "ixia"
+            ):
+                accessed.add(node.attr)
+
+        # 1) Every accessed attr must be on ABC or in the allowlist
+        unknown = accessed - abc_attrs - NON_ABC_ALLOWED
+        self.assertEqual(
+            unknown,
+            set(),
+            f"taac_runner.py accesses these attributes on `ixia` that are "
+            f"not in the AbstractTrafficGenerator ABC and not in the "
+            f"NON_ABC_ALLOWED list: {unknown}.\n\n"
+            f"  → To fix, read the 'Decision framework' in this test's "
+            f"docstring and choose the right path.",
+        )
+
+        # 2) Every NON_ABC_ALLOWED entry that is actually accessed must have
+        #    a guard (hasattr or isinstance) in the source
+        guarded_attrs = accessed & NON_ABC_ALLOWED
+        for attr in guarded_attrs:
+            has_hasattr_guard = f'hasattr(ixia, "{attr}")' in source
+            has_isinstance_guard = "isinstance(self.ixia, TaacIxia)" in source
+            self.assertTrue(
+                has_hasattr_guard or has_isinstance_guard,
+                f"'{attr}' is in NON_ABC_ALLOWED but taac_runner.py has no "
+                f"hasattr/isinstance guard for it. Add a guard before the "
+                f"call site:\n"
+                f'  if hasattr(ixia, "{attr}"):\n'
+                f"      ixia.{attr}(...)",
+            )
+
+    def test_no_notimplementederror_stubs_on_otg(self):
+        """Catch ABC methods that OtgTrafficGen 'implements' with NotImplementedError.
+
+        If an ABC method doesn't have a real OTG equivalent, it should NOT
+        be on the ABC — it should be in NON_ABC_ALLOWED with a guard.
+        Adding `raise NotImplementedError` is the wrong fix; it just defers
+        the crash from import-time to call-time and misleads readers into
+        thinking the operation is supported.
+        """
+        import dis
+        import inspect
+
+        try:
+            from taac.ixia.otg_traffic_gen import OtgTrafficGen
+        except ImportError:
+            self.skipTest("OtgTrafficGen not importable in this environment")
+
+        abc_methods = {
+            name for name, method in vars(AbstractTrafficGenerator).items()
+            if getattr(method, "__isabstractmethod__", False)
+        }
+
+        stubs = []
+        for method_name in abc_methods:
+            method = getattr(OtgTrafficGen, method_name, None)
+            if method is None:
+                continue
+            # Check if the method body is just `raise NotImplementedError`
+            # by inspecting the bytecode for RAISE_VARARGS with
+            # NotImplementedError loaded.
+            try:
+                source = inspect.getsource(method)
+                if "NotImplementedError" in source:
+                    # Verify it's actually raised, not just referenced
+                    instructions = list(dis.get_instructions(method))
+                    raises_nie = any(
+                        instr.opname == "RAISE_VARARGS"
+                        and i > 0
+                        and "NotImplementedError" in str(instructions[i - 1])
+                        for i, instr in enumerate(instructions)
+                    )
+                    if raises_nie:
+                        stubs.append(method_name)
+            except (OSError, TypeError):
+                continue
+
+        self.assertEqual(
+            stubs,
+            [],
+            f"OtgTrafficGen has NotImplementedError stubs for these ABC "
+            f"methods: {stubs}. This means the method was added to the ABC "
+            f"without a real OTG implementation.\n\n"
+            f"  → If there's no meaningful OTG equivalent, remove the method "
+            f"from the ABC. Use NON_ABC_ALLOWED + a hasattr/isinstance guard "
+            f"in taac_runner.py instead.\n"
+            f"  → If there IS an OTG equivalent, implement it properly.",
+        )
 
 
 # -- _enable_traffic: regex matching + disabled-set bookkeeping ---------------
@@ -1037,6 +1224,7 @@ class TestBackendDispatch(unittest.TestCase):
         test_config.endpoints = []
         test_config.traffic_generator_backend = backend_value
         test_config.name = "test"
+        test_config.secondary_ixia_profile = None
         with patch("taac.libs.test_setup_orchestrator.TAAC_OSS", True):
             from taac.libs.test_setup_orchestrator import (
                 TestSetupOrchestrator,

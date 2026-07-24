@@ -491,6 +491,57 @@ class OtgTrafficGen(AbstractTrafficGenerator):
         return [n for n in self._bgp_peer_names if re.search(pattern, n)]
 
     # ------------------------------------------------------------------
+    # Traffic reconfiguration
+    # ------------------------------------------------------------------
+
+    def configure_traffic_item(
+        self,
+        traffic_item_name: str,
+        line_rate: t.Optional[int] = None,
+        line_rate_type: t.Optional[ixia_types.RateType] = None,
+        frame_size_setting: t.Optional[ixia_types.FrameSize] = None,
+        qos_config: t.Optional[ixia_types.QoSConfig] = None,
+    ) -> None:
+        flow = None
+        for f in self.config.flows:
+            if f.name == traffic_item_name:
+                flow = f
+                break
+        if flow is None:
+            self.logger.debug(
+                f"[OTG] Flow {traffic_item_name} not found. Skipping..."
+            )
+            return
+
+        if line_rate is not None or line_rate_type is not None:
+            rate_type = line_rate_type or ixia_types.RateType.PERCENT_LINE_RATE
+            if rate_type == ixia_types.RateType.PERCENT_LINE_RATE:
+                if line_rate is not None:
+                    flow.rate.percentage = line_rate
+            elif rate_type == ixia_types.RateType.FRAMES_PER_SECOND:
+                if line_rate is not None:
+                    flow.rate.pps = line_rate
+
+        if frame_size_setting is not None:
+            if frame_size_setting.type == ixia_types.FrameSizeType.FIXED:
+                flow.size.fixed = frame_size_setting.fixed_size or 400
+            elif frame_size_setting.type == ixia_types.FrameSizeType.INCREMENT:
+                flow.size.increment.start = frame_size_setting.increment_from or 64
+                flow.size.increment.end = frame_size_setting.increment_to or 1500
+                flow.size.increment.step = frame_size_setting.increment_step or 100
+
+        if qos_config is not None:
+            self.logger.debug(
+                f"[OTG] QoS reconfiguration for {traffic_item_name} is not "
+                "yet supported — skipping QoS update"
+            )
+
+        self.logger.info(
+            f"[OTG] Reconfigured flow {traffic_item_name}, pushing config..."
+        )
+        self.api.set_config(self.config)
+
+    # ------------------------------------------------------------------
     # Traffic item queries — TaacRunner / health check API
     # ------------------------------------------------------------------
 

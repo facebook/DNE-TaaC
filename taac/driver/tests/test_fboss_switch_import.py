@@ -20,6 +20,6 @@ class FbossSwitchImportTest(unittest.TestCase):
 
     def test_import_fboss_switch(self) -> None:
         module = importlib.import_module(
-            "neteng.test_infra.dne.taac.driver.fboss_switch"
+            "taac.driver.fboss_switch"
         )
         self.assertTrue(hasattr(module, "FbossSwitch"))

@@ -2,6 +2,7 @@
 
 # pyre-unsafe
 import asyncio
+import os
 import typing as t
 
 from taac.custom_test_handlers.base_custom_test_handler import (
@@ -10,6 +11,8 @@ from taac.custom_test_handlers.base_custom_test_handler import (
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import ConsoleFileLogger
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 COOP_CONFIG_NAMES: t.Set[str] = {"agent", "bgpcpp", "bgpcpp_drain", "bgpcpp_softdrain"}
 
@@ -25,6 +28,8 @@ class PatcherCleanupHelper:
         self.logger = logger
 
     async def get_registered_patchers(self, hostname: str) -> dict:
+        if TAAC_OSS:
+            return {config: [] for config in COOP_CONFIG_NAMES}
         driver = await async_get_device_driver(hostname)
         patchers = await asyncio.gather(
             # pyre-fixme[16]: `AbstractSwitch` has no attribute

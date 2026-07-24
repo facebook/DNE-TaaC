@@ -4949,7 +4949,11 @@ class FbossSwitch(AbstractSwitch):
         """
         Reboots the entire system
         """
-        await self.async_run_cmd_on_shell("reboot")
+        try:
+            await self.async_run_cmd_on_shell("reboot")
+        except (OSError, EOFError, ConnectionError) as e:
+            # The reboot command kills the SSH connection — this is expected.
+            self.logger.debug(f"SSH disconnected after reboot (expected): {e}")
         self.logger.info("Successfully initiated full system reboot.")
 
     async def async_get_processes_top(self) -> Dict[str, Any]:

@@ -10,10 +10,33 @@ the concrete classes and are NOT part of this interface.
 Implementations:
   - TaacIxia (restpy): full ixnetwork-restpy wrapper, background StatViewAssistant
   - OtgTrafficGen (OTG/snappi): idiomatic OTG, declarative set_config, simple polling
+
+── Adding new methods ──────────────────────────────────────────────────
+Before adding a method here, ask:
+
+  "Can BOTH backends provide a meaningful implementation?"
+
+  YES → Add it here. The implementations don't need to be identical —
+        just semantically equivalent (e.g. configure_traffic_item mutates
+        ConfigElements+Apply on restpy, mutates flow+set_config on OTG).
+
+  NO  → Do NOT add it here. Instead, guard the call in taac_runner.py
+        with hasattr()/isinstance() and add the attr name to
+        NON_ABC_ALLOWED in test_otg_traffic_gen.py::
+          TestAbstractTrafficGeneratorABC::
+            test_taac_runner_ixia_calls_are_on_abc_or_guarded.
+
+  NEVER add a method here with `raise NotImplementedError` on
+  OtgTrafficGen — that just defers a crash from import-time to
+  call-time. A CI test enforces this.
+────────────────────────────────────────────────────────────────────────
 """
 
 import typing as t
 from abc import ABC, abstractmethod
+
+if t.TYPE_CHECKING:
+    from ixia.ixia import types as ixia_types
 
 
 class AbstractTrafficGenerator(ABC):
@@ -123,6 +146,29 @@ class AbstractTrafficGenerator(ABC):
         ignore_case: bool = False,
     ) -> t.List:
         """Return BGP peers matching regex, or all."""
+        ...
+
+    # -- Traffic reconfiguration --
+
+    @abstractmethod
+    def configure_traffic_item(
+        self,
+        traffic_item_name: str,
+        line_rate: t.Optional[int] = None,
+        line_rate_type: t.Optional["ixia_types.RateType"] = None,
+        frame_size_setting: t.Optional["ixia_types.FrameSize"] = None,
+        qos_config: t.Optional["ixia_types.QoSConfig"] = None,
+    ) -> None:
+        """
+        Reconfigure a traffic item/flow and commit the change.
+
+        Modify rate, frame size, and/or QoS on the named traffic item,
+        then apply the change so it takes effect immediately. Backends
+        handle the commit internally (restpy: Generate + Apply; OTG:
+        set_config).
+
+        No-op if the named traffic item does not exist.
+        """
         ...
 
     # -- Teardown --

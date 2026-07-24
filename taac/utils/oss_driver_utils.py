@@ -421,9 +421,10 @@ def is_host_ping_reachable(
     Returns True if host is reachable, False otherwise.
     """
     ping_logger = ping_logger or logger
-    cmd = ["ping", "-i", "0.5", "-c", "5", "-w", "10", hostname]
+    cmd = ["ping", "-i", "0.5", "-c", "5", "-w", "10"]
     if use_ipv6:
         cmd.append("-6")
+    cmd.append(hostname)
     ping_logger.debug(f"Running {' '.join(cmd)}")
     try:
         proc = subprocess.run(
@@ -442,6 +443,7 @@ def wait_for_ping_reachable(
     num_tries: int = 120,
     sleep_time: int = 5,
     max_duration: int = 600,
+    use_ipv6: bool = False,
 ) -> bool:
     """
     Wait until a host becomes ping-reachable.
@@ -453,6 +455,7 @@ def wait_for_ping_reachable(
         num_tries: maximum number of ping attempts
         sleep_time: seconds between attempts
         max_duration: maximum total wall-clock time in seconds
+        use_ipv6: force IPv6 ping (-6 flag)
 
     Returns:
         True if host became reachable
@@ -465,7 +468,7 @@ def wait_for_ping_reachable(
     attempts = 0
 
     while attempts < num_tries:
-        if is_host_ping_reachable(hostname):
+        if is_host_ping_reachable(hostname, use_ipv6=use_ipv6):
             logger.info(f"{hostname} is ping-reachable after {attempts + 1} attempts")
             return True
 

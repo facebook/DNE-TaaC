@@ -102,6 +102,7 @@ def gen_snake_test_config(
     ixia_ports: t.Optional[t.List[str]] = None,
     precheck_packet_loss_clear_stats: bool = False,
     packet_loss_sleep_time: int = 10,
+    use_ipv6_ping: bool = True,
 ) -> taac_types.TestConfig:
     """Build a single-DUT snake/loopback ``TestConfig``.
 
@@ -245,6 +246,7 @@ def gen_snake_test_config(
             common_prechecks=common_prechecks,
             common_postchecks=common_postchecks,
             manual_test_interfaces=manual_test_interfaces,
+            use_ipv6_ping=use_ipv6_ping,
         ),
         # Opt out of the two-tier IXIA topology cache (default-on per D107780401).
         # Snake tests do single-DUT loopback bring-up that exercises

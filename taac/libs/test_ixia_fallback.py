@@ -27,6 +27,14 @@ _test_configs = types.ModuleType(_TEST_CONFIGS_MODULE)
 _test_configs.get_test_config = lambda config: config
 sys.modules[_TEST_CONFIGS_MODULE] = _test_configs
 
+# Stub taac.internal.internal_utils so the internal teardown path can be
+# patched without the real (non-OSS) package present.
+_internal_pkg = types.ModuleType("taac.internal")
+_internal_utils = types.ModuleType("taac.internal.internal_utils")
+_internal_utils.async_release_devices_in_basset = None  # type: ignore[attr-defined]
+sys.modules.setdefault("taac.internal", _internal_pkg)
+sys.modules.setdefault("taac.internal.internal_utils", _internal_utils)
+
 from taac.libs.taac_runner import (
     _start_test_case_time_window,
     TaacRunner,
@@ -43,8 +51,8 @@ from taac.utils.oss_taac_constants import (
 from taac.test_as_a_config import types as taac_types
 
 
-_MODULE = "neteng.test_infra.dne.taac.libs.test_setup_orchestrator"
-_TRAFFIC_GENERATOR_MODULE = "neteng.test_infra.dne.taac.libs.traffic_generator"
+_MODULE = "taac.libs.test_setup_orchestrator"
+_TRAFFIC_GENERATOR_MODULE = "taac.libs.traffic_generator"
 
 
 def _endpoint(interface: str, ixia_port: str) -> taac_types.Endpoint:
@@ -453,7 +461,7 @@ class IxiaFallbackTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch(f"{_MODULE}.TAAC_OSS", False),
             patch(
-                "neteng.test_infra.dne.taac.internal.internal_utils."
+                "taac.internal.internal_utils."
                 "async_release_devices_in_basset",
                 new=release,
             ),
