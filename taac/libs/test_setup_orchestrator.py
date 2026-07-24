@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
-import json
 import os
 import time
 import typing as t
@@ -14,10 +13,19 @@ from taac.ixia.abstract_traffic_generator import (
     AbstractTrafficGenerator,
 )
 from taac.ixia.taac_ixia import TaacIxia
+from taac.libs.ixia_candidate import (
+    IxiaCandidate,
+    normalize_ixia_candidates,
+    select_ixia_candidates,
+)
 from taac.libs.oss_test_bed_chunker import OssTestBedChunker
 from taac.libs.otg_traffic_generator import OtgTrafficGenerator
 from taac.libs.traffic_generator import TrafficGenerator
 from taac.utils.driver_factory import async_get_device_driver
+from taac.utils.oss_taac_constants import (
+    IxiaCandidateSetupError,
+    IxiaFallbackExhaustedError,
+)
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
     convert_to_async,
@@ -86,6 +94,8 @@ class TestSetupOrchestrator:
         cleanup_failed_setup: bool = True,
         eos_image_id: t.Optional[str] = None,
         clear_old_eos_images: bool = False,
+        ixia_candidates: t.Optional[t.Sequence[IxiaCandidate]] = None,
+        ixia_profile: str = "auto",
     ) -> None:
         self.test_config = test_config
         self.logger = logger
@@ -110,6 +120,18 @@ class TestSetupOrchestrator:
         self._eos_image_id = eos_image_id or ""
         # Whether to clear old EOS images from flash before deployment
         self._clear_old_eos_images = clear_old_eos_images
+        normalized_candidates = (
+            tuple(ixia_candidates)
+            if ixia_candidates
+            else (normalize_ixia_candidates(test_config, ixia_api_server))
+        )
+        self.ixia_candidates = normalized_candidates
+        self._ixia_candidates_to_try = select_ixia_candidates(
+            normalized_candidates,
+            ixia_profile,
+            explicit_ixia_override=bool(ixia_api_server or ixia_session_id),
+        )
+        self.selected_ixia_candidate: t.Optional[IxiaCandidate] = None
         self._traffic_generator_backend = (
             "otg"
             if getattr(test_config, "traffic_generator_backend", None)
@@ -125,11 +147,19 @@ class TestSetupOrchestrator:
         self.test_topology: TestTopology = None  # pyre-ignore[8]
 
         self.devices_under_test: t.List[str] = [
-            endpoint.name for endpoint in self.test_config.endpoints if endpoint.dut
+            endpoint.name
+            for endpoint in self.ixia_candidates[0].endpoints
+            if endpoint.dut
         ]
 
+    @property
+    def ixia_candidates_to_try(self) -> t.Tuple[IxiaCandidate, ...]:
+        return self._ixia_candidates_to_try
+
     async def async_setUp(self) -> None:
-        test_device_names = [endpoint.name for endpoint in self.test_config.endpoints]
+        test_device_names = [
+            endpoint.name for endpoint in self.ixia_candidates[0].endpoints
+        ]
 
         if TAAC_OSS:
             await self._async_setUp_oss(test_device_names)
@@ -154,22 +184,10 @@ class TestSetupOrchestrator:
 
         # Step 2: IXIA setup
         if not self._skip_ixia_setup:
-            ixia_endpoints = [
-                endpoint
-                for endpoint in self.test_config.endpoints
-                if endpoint.ixia_needed
-                or endpoint.direct_ixia_connections
-                or endpoint.ixia_ports
-            ]
-            if ixia_endpoints:
-                self.ixia = await self.async_create_ixia_setup(
-                    ixia_endpoints,
-                    self._ixia_api_server,
-                    self._ixia_session_id,
-                    self._skip_ixia_cleanup,
-                )
+            await self.async_setup_ixia_candidates()
         else:
             self.logger.info("Skipping IXIA setup (user requested).")
+            self.selected_ixia_candidate = self._ixia_candidates_to_try[0]
 
         # Wait additional time for interfaces to stabilize after boot, but
         # only when there are real devices and the caller hasn't asked us to
@@ -317,65 +335,144 @@ class TestSetupOrchestrator:
 
         # Step 5: IXIA setup
         if not self._skip_ixia_setup:
-            ixia_endpoints = [
-                endpoint
-                for endpoint in self.test_config.endpoints
-                if endpoint.ixia_needed
-                or endpoint.direct_ixia_connections
-                or endpoint.ixia_ports
-            ]
-            if ixia_endpoints:
-                _log(
-                    f"\033[36m\033[1m[SETUP]\033[0m Phase 6: Creating IXIA setup "
-                    f"for \033[33m{len(ixia_endpoints)}\033[0m endpoint(s)..."
+            await self.async_setup_ixia_candidates()
+        else:
+            _log("\033[2m[SETUP] Phase 6: Skipping IXIA setup\033[0m")
+            self.selected_ixia_candidate = self._ixia_candidates_to_try[0]
+
+    @staticmethod
+    def _get_ixia_endpoints(
+        candidate: IxiaCandidate,
+    ) -> t.List[taac_types.Endpoint]:
+        return [
+            endpoint
+            for endpoint in candidate.endpoints
+            if endpoint.ixia_needed
+            or endpoint.direct_ixia_connections
+            or endpoint.ixia_ports
+        ]
+
+    async def async_setup_ixia_candidates(self) -> None:
+        failures: t.List[t.Tuple[str, BaseException]] = []
+        candidate_count = len(self._ixia_candidates_to_try)
+        for index, candidate in enumerate(self._ixia_candidates_to_try, 1):
+            ixia_endpoints = self._get_ixia_endpoints(candidate)
+            if not ixia_endpoints:
+                self.selected_ixia_candidate = candidate
+                self.logger.warning(
+                    f"[IXIA CANDIDATE] selected={candidate.name} ixia_endpoints=0"
                 )
+                return
+
+            attempt_start = time.time()
+            self.logger.warning(
+                f"[IXIA CANDIDATE] attempt={index}/{candidate_count} "
+                f"name={candidate.name} api_server="
+                f"{candidate.api_server_ip or 'auto-discover'}"
+            )
+            try:
                 self.ixia = await self.async_create_ixia_setup(
-                    ixia_endpoints,
-                    self._ixia_api_server,
+                    candidate,
                     self._ixia_session_id,
                     self._skip_ixia_cleanup,
                 )
-            else:
-                _log("\033[2m[SETUP] Phase 6: No IXIA endpoints configured\033[0m")
-        else:
-            _log("\033[2m[SETUP] Phase 6: Skipping IXIA setup\033[0m")
+            except IxiaCandidateSetupError as error:
+                failures.append((candidate.name, error))
+                self.logger.warning(
+                    f"[IXIA CANDIDATE] failed name={candidate.name} "
+                    f"failure={type(error).__name__} "
+                    f"elapsed_s={time.time() - attempt_start:.1f}"
+                )
+                if not self._cleanup_failed_setup or self._skip_ixia_cleanup:
+                    raise
+                await self.async_cleanup_failed_ixia_candidate(candidate)
+                if index == candidate_count:
+                    if candidate_count == 1:
+                        raise
+                    raise IxiaFallbackExhaustedError(failures) from error
+                self.logger.warning(
+                    f"[IXIA CANDIDATE] fallback_from={candidate.name} "
+                    f"fallback_to={self._ixia_candidates_to_try[index].name}"
+                )
+                continue
 
-    async def async_tearDown(self) -> None:
+            self.selected_ixia_candidate = candidate
+            self.logger.warning(
+                f"[IXIA CANDIDATE] selected={candidate.name} "
+                f"session_id={getattr(self.ixia, 'session_id', 'n/a')} "
+                f"elapsed_s={time.time() - attempt_start:.1f}"
+            )
+            return
+
+    async def async_cleanup_failed_ixia_candidate(
+        self, candidate: IxiaCandidate
+    ) -> None:
+        cleanup_start = time.time()
+        self.logger.warning(f"[IXIA CANDIDATE] cleanup_start name={candidate.name}")
+        try:
+            await self.async_teardown_ixia_setup(strict=True)
+        except Exception as error:
+            self.logger.warning(
+                f"[IXIA CANDIDATE] cleanup_failed name={candidate.name} "
+                f"failure={type(error).__name__} "
+                f"elapsed_s={time.time() - cleanup_start:.1f}"
+            )
+            raise
+        self.ixia = None
+        self.traffic_generator = None
+        self.logger.warning(
+            f"[IXIA CANDIDATE] cleanup_complete name={candidate.name} "
+            f"elapsed_s={time.time() - cleanup_start:.1f}"
+        )
+
+    async def async_tearDown(self, strict_ixia_cleanup: bool = False) -> None:
         if TAAC_OSS:
-            await self._async_tearDown_oss()
+            await self._async_tearDown_oss(strict_ixia_cleanup)
         else:
-            await self._async_tearDown_internal()
+            await self._async_tearDown_internal(strict_ixia_cleanup)
 
-    async def _async_tearDown_oss(self) -> None:
+    async def _async_tearDown_oss(self, strict_ixia_cleanup: bool) -> None:
         """
         OSS teardown path:
         1. IXIA teardown
 
         No Basset release or testbed restoration in OSS mode.
         """
-        await self.async_teardown_ixia_setup()
+        await self.async_teardown_ixia_setup(strict=strict_ixia_cleanup)
 
-    async def _async_tearDown_internal(self) -> None:
+    async def _async_tearDown_internal(self, strict_ixia_cleanup: bool) -> None:
         """
         Internal (Meta) teardown path:
         1. Restore test bed connectivity
         2. Release Basset reservation
         3. IXIA teardown
         """
-        # Step 1: Restore test bed connectivity
+        errors: t.List[Exception] = []
         if not self._skip_testbed_isolation:
-            await self.test_bed_chunker.async_restore_test_bed_connectivity()
+            try:
+                await self.test_bed_chunker.async_restore_test_bed_connectivity()
+            except Exception as error:
+                errors.append(error)
 
-        # Step 2: Release Basset reservation
         if not self._skip_basset_reservation and self.basset_butler:
             from taac.internal.internal_utils import (
                 async_release_devices_in_basset,
             )
 
-            await async_release_devices_in_basset(self.basset_butler, self.logger)
+            try:
+                await async_release_devices_in_basset(self.basset_butler, self.logger)
+            except Exception as error:
+                errors.append(error)
 
-        # Step 3: IXIA teardown
-        await self.async_teardown_ixia_setup()
+        try:
+            await self.async_teardown_ixia_setup(strict=strict_ixia_cleanup)
+        except Exception as error:
+            errors.append(error)
+
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Multiple TAAC resources failed to clean up", errors)
 
     async def async_wait_for_interfaces_to_stabilize(self) -> None:
         coroutines = []
@@ -390,8 +487,7 @@ class TestSetupOrchestrator:
 
     async def async_create_ixia_setup(
         self,
-        endpoints: t.List[taac_types.Endpoint],
-        ixia_api_server: t.Optional[str] = None,
+        candidate: IxiaCandidate,
         ixia_session_id: t.Optional[int] = None,
         skip_ixia_cleanup: bool = False,
     ) -> TaacIxia:
@@ -404,7 +500,8 @@ class TestSetupOrchestrator:
         _log = self.logger.warning
 
         # Log endpoint details
-        for ep in endpoints:
+        ixia_endpoints = self._get_ixia_endpoints(candidate)
+        for ep in ixia_endpoints:
             ixia_ports = []
             if ep.direct_ixia_connections:
                 ixia_ports = [c.interface for c in ep.direct_ixia_connections]
@@ -414,7 +511,7 @@ class TestSetupOrchestrator:
             )
 
         # Log basic port configs
-        basic_port_configs = self.test_config.basic_port_configs
+        basic_port_configs = candidate.basic_port_configs
         if basic_port_configs:
             for bpc in basic_port_configs:
                 n_dg = len(bpc.device_group_configs) if bpc.device_group_configs else 0
@@ -431,8 +528,8 @@ class TestSetupOrchestrator:
             else "session_id=\033[33mnew\033[0m"
         )
         chassis_info = (
-            f"chassis=\033[33m{ixia_api_server}\033[0m"
-            if ixia_api_server
+            f"chassis=\033[33m{candidate.api_server_ip}\033[0m"
+            if candidate.api_server_ip
             else "chassis=\033[33mauto-discover\033[0m"
         )
         _log(f"\033[36m[IXIA]\033[0m {session_info} | {chassis_info}")
@@ -462,22 +559,22 @@ class TestSetupOrchestrator:
             else TrafficGenerator
         )
         self.traffic_generator = tgen_cls(
-            endpoints,
+            ixia_endpoints,
             basset_pool=self.test_config.basset_pool,
             session_name=self.test_config.name,
             logger=self.logger,
             cleanup_config=True if not ixia_session_id else False,
             tear_down_session=not skip_ixia_cleanup,
-            primary_chassis_ip=ixia_api_server,
+            primary_chassis_ip=candidate.api_server_ip,
             session_id=ixia_session_id,
-            user_defined_traffic_items=self.test_config.user_defined_traffic_items,
-            basic_traffic_item_configs=self.test_config.basic_traffic_item_configs,
-            basic_port_configs=self.test_config.basic_port_configs,
-            default_basic_port_config=self.test_config.default_basic_port_config,
+            user_defined_traffic_items=candidate.user_defined_traffic_items,
+            basic_traffic_item_configs=candidate.basic_traffic_item_configs,
+            basic_port_configs=candidate.basic_port_configs,
+            default_basic_port_config=candidate.default_basic_port_config,
             override_traffic_items=self._override_ixia_traffic_items,
             cleanup_failed_setup=self._cleanup_failed_setup,
-            snake_configs=self.test_config.snake_configs,
-            ptp_configs=self.test_config.ptp_configs,
+            snake_configs=candidate.snake_configs,
+            ptp_configs=candidate.ptp_configs,
             skip_advertised_prefixes_check=self.test_config.skip_advertised_prefixes_check,
             skip_ixia_protocol_verification=self.test_config.skip_ixia_protocol_verification,
             ixia_protocol_verification_timeout=self.test_config.ixia_protocol_verification_timeout,
@@ -487,7 +584,10 @@ class TestSetupOrchestrator:
             # auto-invalidates when an engineer edits a setup task during
             # testconfig development. See
             # `ixia_config_cache_manager.py:_CACHE_VERSION` history.
-            setup_tasks=self.test_config.setup_tasks,
+            setup_tasks=candidate.setup_tasks,
+            cache_candidate_name=(
+                candidate.name if candidate is not self.ixia_candidates[0] else None
+            ),
         )
 
         _log(
@@ -511,12 +611,15 @@ class TestSetupOrchestrator:
 
     async def async_teardown_ixia_setup(
         self,
+        strict: bool = False,
     ) -> None:
-        if (
-            self.traffic_generator
-            and not self._skip_ixia_cleanup
-            and self._cleanup_failed_setup
-        ):
+        # Intentional behavior change: normal teardown no longer gates on
+        # `self._cleanup_failed_setup`. `cleanup_failed_setup` governs cleanup
+        # of a FAILED candidate's partial session during fallback; it must not
+        # also suppress the normal end-of-run teardown, or a run with
+        # cleanup_failed_setup=False would leak the selected session. Covered by
+        # `test_normal_teardown_is_not_disabled_with_failed_setup_cleanup`.
+        if self.traffic_generator and not self._skip_ixia_cleanup:
             log_subsection(
                 "TEARING DOWN IXIA SETUP",
                 logger=self.logger,
@@ -529,6 +632,8 @@ class TestSetupOrchestrator:
                     "Following error occurred while attempting to teardown the "
                     f"IXIA setup: {ex}"
                 )
+                if strict:
+                    raise
 
     async def _deploy_eos_image(self) -> None:
         """Deploy EOS image to all DUT devices using the DeployEosImageTask."""
@@ -551,15 +656,14 @@ class TestSetupOrchestrator:
         detect them (e.g. direct Ixia connections).
         """
         ixia_intfs: t.Dict[str, t.Set[str]] = {}
-        for endpoint in self.test_config.endpoints:
-            hostname = endpoint.name
-            if endpoint.direct_ixia_connections:
-                ixia_intfs.setdefault(hostname, set()).update(
-                    conn.interface for conn in endpoint.direct_ixia_connections
-                )
-        basic_port_configs = self.test_config.basic_port_configs
-        if basic_port_configs:
-            for bpc in basic_port_configs:
+        for candidate in self.ixia_candidates:
+            for endpoint in candidate.endpoints:
+                hostname = endpoint.name
+                if endpoint.direct_ixia_connections:
+                    ixia_intfs.setdefault(hostname, set()).update(
+                        conn.interface for conn in endpoint.direct_ixia_connections
+                    )
+            for bpc in candidate.basic_port_configs:
                 if bpc.endpoint and ":" in bpc.endpoint:
                     hostname, intf = bpc.endpoint.split(":", 1)
                     ixia_intfs.setdefault(hostname, set()).add(intf)

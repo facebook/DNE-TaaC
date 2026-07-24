@@ -54,6 +54,11 @@ from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
 )
 from taac.utils.common import timeit
+from taac.utils.oss_taac_constants import (
+    IxiaCandidateSetupError,
+    IxiaPortUnavailableError,
+    IxiaSessionUnavailableError,
+)
 from taac.utils.oss_taac_lib_utils import (
     await_sync,
     memoize_forever,
@@ -664,6 +669,7 @@ class Ixia:
         # We can detect if chassis is UHD if chassis_ip is set to "localuhd"
         self.is_uhd_chassis = self.primary_chassis_ip == "localuhd"
         self.cleanup_failed_setup = cleanup_failed_setup
+        self._teardown_complete = False
         self.skip_advertised_prefixes_check = skip_advertised_prefixes_check
         self.skip_ixia_protocol_verification = skip_ixia_protocol_verification
         self.ixia_protocol_verification_timeout = ixia_protocol_verification_timeout
@@ -822,7 +828,7 @@ class Ixia:
             )
         except Exception as exc:
             if not self._should_attempt_recovery(exc):
-                raise
+                self._raise_session_unavailable(exc)
             self._ixia_recovery_attempts_remaining -= 1
             self.logger.warning(
                 f"{_YELLOW}[IXIA]{_RESET} SessionAssistant failed with 5xx — "
@@ -830,23 +836,26 @@ class Ixia:
             )
             recovered = self._attempt_inband_recovery()
             if not recovered:
-                raise
+                self._raise_session_unavailable(exc)
             self.logger.info(
                 f"{_GREEN}[IXIA]{_RESET} Recovery succeeded — retrying SessionAssistant"
             )
-            self.session = SessionAssistant(
-                # pyrefly: ignore [bad-argument-type]
-                IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
-                RestPort=None,
-                UserName=self.username,
-                Password=self.password,
-                SessionName=self.session_name,
-                SessionId=self.session_id,
-                ApiKey=self.ApiKey,
-                ClearConfig=(
-                    self.cleanup_config if not self.is_existing_session else False
-                ),
-            )
+            try:
+                self.session = SessionAssistant(
+                    # pyrefly: ignore [bad-argument-type]
+                    IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
+                    RestPort=None,
+                    UserName=self.username,
+                    Password=self.password,
+                    SessionName=self.session_name,
+                    SessionId=self.session_id,
+                    ApiKey=self.ApiKey,
+                    ClearConfig=(
+                        self.cleanup_config if not self.is_existing_session else False
+                    ),
+                )
+            except Exception as retry_exc:
+                self._raise_session_unavailable(retry_exc)
 
         # Re-populating the Session ID and Name if a new one was created
         # as the user left them to default input as None
@@ -864,6 +873,29 @@ class Ixia:
         )
 
         self.ixnetwork = self.session.Ixnetwork
+
+    @staticmethod
+    def _raise_session_unavailable(exc: Exception) -> t.NoReturn:
+        # Anchor numeric tokens with word boundaries and word-boundary the
+        # keyword tokens so substrings like `"created 401 records"` or
+        # `"credential store updated"` don't spuriously mask a fallback-eligible
+        # 5xx as an auth failure.
+        message = str(exc).lower()
+        auth_patterns = (
+            r"\b401\b",
+            r"\b403\b",
+            r"\bapi[ _-]?key\b",
+            r"\bauthentication\b",
+            r"\bauthorization\b",
+            r"\bcredential(s|)\b",
+            r"\bforbidden\b",
+            r"\bunauthorized\b",
+        )
+        if any(re.search(pattern, message) for pattern in auth_patterns):
+            raise exc
+        raise IxiaSessionUnavailableError(
+            f"Unable to create IXIA session: {type(exc).__name__}: {exc}"
+        ) from exc
 
     _RECOVERY_TRIGGER_TOKENS: t.Tuple[str, ...] = ("502", "503", "504")
 
@@ -1167,7 +1199,9 @@ class Ixia:
                 self.logger.error(
                     f"{_MAGENTA}[IXIA]{_RESET}   Failed to query vport states: {log_ex}"
                 )
-            raise connect_ex
+            raise IxiaPortUnavailableError(
+                f"Unable to assign IXIA physical ports: {connect_ex}"
+            ) from connect_ex
         elapsed_time = time.time() - start_time
         self.logger.info(
             f"{_GREEN}{_BOLD}[IXIA]{_RESET} All ports reserved in "
@@ -4762,6 +4796,8 @@ class Ixia:
     def tear_down(self) -> None:
         """API used to tear down any existing session"""
 
+        if self._teardown_complete:
+            return
         if self.session:
             if self.teardown_session:
                 self.logger.debug(
@@ -4770,18 +4806,24 @@ class Ixia:
                     " as requested by the user..."
                 )
                 self.session.Session.remove()
+                # Only mark complete once a real teardown happened. When
+                # teardown_session is False the session is intentionally
+                # preserved, so a later call (e.g. after the flag is flipped)
+                # must still be able to act.
+                self._teardown_complete = True
                 self.logger.info(
                     "[GLOBAL] Successfully tore down the session(s) "
                     "as requested by the user!"
                 )
-                return
-
-            self.logger.info(
-                f"[GLOBAL] Not tearing down the Session ID {self.session_id} as "
-                "requested by the user!"
-            )
+            else:
+                self.logger.info(
+                    f"[GLOBAL] Not tearing down the Session ID {self.session_id} as "
+                    "requested by the user!"
+                )
 
         else:
+            # No session to remove — the guard's invariant is already satisfied.
+            self._teardown_complete = True
             self.logger.warning(
                 "No session object found and hence the tear down is a NO-OP"
             )
@@ -5394,12 +5436,26 @@ class Ixia:
 
         try:
             self._create_basic_setup()
+        except IxiaCandidateSetupError:
+            if self.cleanup_failed_setup and not self.is_existing_session:
+                try:
+                    self.tear_down()
+                except Exception as cleanup_ex:
+                    self.logger.exception(
+                        f"Failed to clean up partial IXIA setup: {cleanup_ex}"
+                    )
+            raise
         except Exception as ex:
             if self.cleanup_failed_setup and not self.is_existing_session:
-                self.tear_down()
+                try:
+                    self.tear_down()
+                except Exception as cleanup_ex:
+                    self.logger.exception(
+                        f"Failed to clean up partial IXIA setup: {cleanup_ex}"
+                    )
             raise IxiaSetupError(
                 f"IXIA setup configuration failed with the following error: {ex}"
-            )
+            ) from ex
 
     def find_network_groups(
         self, regex: t.Optional[str] = None, ignore_case: bool = False

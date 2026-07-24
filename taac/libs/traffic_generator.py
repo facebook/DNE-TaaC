@@ -38,8 +38,9 @@ from taac.utils.ixia_utils import (
     get_next_available_ipv6_address,
 )
 from taac.utils.oss_taac_constants import (
-    EmptyOutputError,
     InsufficientInputError,
+    IxiaCandidateSetupError,
+    IxiaChassisUnavailableError,
     IxiaTestSetupError,
     TAAC_OSS,
 )
@@ -118,6 +119,7 @@ class TrafficGenerator:
         ixia_config_cache: t.Optional[taac_types.IxiaConfigCache] = None,
         ixia_recovery: t.Optional[taac_types.IxiaRecovery] = None,
         setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
+        cache_candidate_name: t.Optional[str] = None,
         *args,
         **kwargs,
     ) -> None:
@@ -159,6 +161,27 @@ class TrafficGenerator:
         # See `ixia_config_cache_manager.py:_CACHE_VERSION` for the v1→v2→v3
         # history that motivated this.
         self.setup_tasks = setup_tasks
+        self.cache_candidate_name = cache_candidate_name
+        # The `""` fallback here cannot cause a cross-chassis cache-key
+        # collision: `compute_declarative_hash` only folds
+        # `direct_endpoint_mappings` in when `candidate_name` is set, and in
+        # the dual-candidate path `cache_candidate_name` is the resolved
+        # chassis identity — so distinct candidates always hash distinctly. In
+        # the single-chassis auto-discover path `candidate_name` is None and
+        # these mappings are not hashed at all.
+        self.direct_endpoint_mappings = tuple(
+            sorted(
+                (
+                    endpoint.name,
+                    connection.interface,
+                    connection.ixia_chassis_ip or primary_chassis_ip or "",
+                    connection.ixia_port,
+                    connection.is_logical_port,
+                )
+                for endpoint in endpoints
+                for connection in endpoint.direct_ixia_connections or ()
+            )
+        )
         # snake testing
         self.snake_configs = snake_configs or []
         self.is_standalone = bool(self.snake_configs)
@@ -168,9 +191,11 @@ class TrafficGenerator:
 
     def teardown_ixia_setup(self) -> None:
         if not self.ixia:
-            raise EmptyOutputError(
-                "Missing IXIA instance while attempting to teardown the setup"
-            )
+            # Legitimate in the fallback flow (a candidate whose setup failed
+            # before `self.ixia` was assigned), but log so the no-op stays
+            # visible in case a caller reached here through an unrelated bug.
+            self.logger.warning("teardown_ixia_setup: self.ixia is unset, no-op")
+            return
         is_existing_session = bool(self.session_id)
         if not is_existing_session:
             self.ixia.tear_down()
@@ -295,6 +320,8 @@ class TrafficGenerator:
                         built_ixia_config,
                         basic_port_configs=self.basic_port_configs,
                         setup_tasks=self.setup_tasks,
+                        candidate_name=self.cache_candidate_name,
+                        direct_endpoint_mappings=self.direct_endpoint_mappings,
                     )
                     self.logger.info(
                         f"\033[36m[IXIA]\033[0m cache enabled — key: "
@@ -363,10 +390,12 @@ class TrafficGenerator:
                                 f"{save_exc!r}). Next run will pay cold cost again."
                             )
 
+        except IxiaCandidateSetupError:
+            raise
         except Exception as ex:
             raise IxiaTestSetupError(
                 f"Following error occurred while attempting to setup IXIA {ex}"
-            )
+            ) from ex
 
     def create_direct_ixia_connection_assets(
         self, endpoint: taac_types.Endpoint
@@ -1163,9 +1192,14 @@ class TrafficGenerator:
             if string_is_ip(self.primary_chassis_ip):
                 return self.primary_chassis_ip  # pyre-ignore
             else:
-                # pyre-fixme[6]: For 1st argument expected `str` but got
-                #  `Optional[str]`.
-                return await async_get_ip_from_hostname(self.primary_chassis_ip)
+                try:
+                    # pyre-fixme[6]: For 1st argument expected `str` but got
+                    #  `Optional[str]`.
+                    return await async_get_ip_from_hostname(self.primary_chassis_ip)
+                except Exception as error:
+                    raise IxiaChassisUnavailableError(
+                        f"Unable to resolve IXIA chassis {self.primary_chassis_ip!r}"
+                    ) from error
         else:
             ixia_chassis_ips = set()
             for endpoint in self.endpoints:
@@ -1179,8 +1213,9 @@ class TrafficGenerator:
             if len(ixia_chassis_ips) == 1:
                 self.primary_chassis_ip = ixia_chassis_ips.pop()
                 return self.primary_chassis_ip
-            raise ValueError(
-                f"Multiple or no IXIA chassis IPs found: {ixia_chassis_ips}. Please specify the primary IXIA chassis IP"
+            raise IxiaChassisUnavailableError(
+                "Multiple or no IXIA chassis IPs found: "
+                f"{ixia_chassis_ips}. Please specify the primary IXIA chassis IP"
             )
 
     def get_reference_value(

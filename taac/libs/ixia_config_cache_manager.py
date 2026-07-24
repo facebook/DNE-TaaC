@@ -43,6 +43,7 @@ to live for one `LoadConfig` call.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import tempfile
 import time
@@ -123,6 +124,10 @@ def _hash_thrift_struct(h: "hashlib._Hash", struct: t.Any) -> None:
 def compute_declarative_hash(
     basic_port_configs: t.Optional[t.Sequence[taac_types.BasicPortConfig]] = None,
     setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
+    candidate_name: t.Optional[str] = None,
+    direct_endpoint_mappings: t.Optional[
+        t.Sequence[t.Tuple[str, str, str, str, bool]]
+    ] = None,
 ) -> str:
     """Canonical 12-char sha256 prefix of the declarative inputs that drive
     IXIA topology construction.
@@ -159,6 +164,16 @@ def compute_declarative_hash(
         _hash_thrift_struct(h, bpc)
     for task in setup_tasks or []:
         _hash_thrift_struct(h, task)
+    if candidate_name is not None:
+        h.update(candidate_name.encode())
+        h.update(b"\0")
+        h.update(
+            json.dumps(
+                list(direct_endpoint_mappings or ()),
+                separators=(",", ":"),
+            ).encode()
+        )
+        h.update(b"\0")
     return h.hexdigest()[:12]
 
 
@@ -169,6 +184,10 @@ def compute_cache_key(
     *,
     basic_port_configs: t.Optional[t.Sequence[taac_types.BasicPortConfig]] = None,
     setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
+    candidate_name: t.Optional[str] = None,
+    direct_endpoint_mappings: t.Optional[
+        t.Sequence[t.Tuple[str, str, str, str, bool]]
+    ] = None,
 ) -> str:
     """v3 cache key for `(test_config_name, chassis_id, declarative_hash)`.
 
@@ -184,6 +203,8 @@ def compute_cache_key(
     declarative_hash = compute_declarative_hash(
         basic_port_configs=basic_port_configs,
         setup_tasks=setup_tasks,
+        candidate_name=candidate_name,
+        direct_endpoint_mappings=direct_endpoint_mappings,
     )
     return (
         f"{_sanitize(test_config_name)}__"
@@ -222,6 +243,10 @@ class IxiaConfigCacheManager:
         *,
         basic_port_configs: t.Optional[t.Sequence[taac_types.BasicPortConfig]] = None,
         setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
+        candidate_name: t.Optional[str] = None,
+        direct_endpoint_mappings: t.Optional[
+            t.Sequence[t.Tuple[str, str, str, str, bool]]
+        ] = None,
     ) -> str:
         """Compute v3 cache key including chassis identity (from self._ixia).
 
@@ -241,6 +266,8 @@ class IxiaConfigCacheManager:
             ixia_config,
             basic_port_configs=basic_port_configs,
             setup_tasks=setup_tasks,
+            candidate_name=candidate_name,
+            direct_endpoint_mappings=direct_endpoint_mappings,
         )
 
     def chassis_path(self, key: str) -> str:

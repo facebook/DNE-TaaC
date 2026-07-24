@@ -71,6 +71,10 @@ else:
         pass
 
 
+from taac.libs.ixia_candidate import (
+    IxiaCandidate,
+    normalize_ixia_candidates,
+)
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.libs.periodic_task_executor import PeriodicTaskExecutor
 from taac.libs.test_setup_orchestrator import (
@@ -224,6 +228,8 @@ class TaacRunner:
         # Opt-in: pull Keysight chassis diagnostics archive at Ixia teardown
         # and upload to Manifold. Best-effort — failures never break teardown.
         collect_ixia_diagnostics: bool = False,
+        ixia_profile: str = "auto",
+        setup_only: bool = False,
     ) -> None:
         self.test_config = (
             get_test_config(test_config)
@@ -265,11 +271,19 @@ class TaacRunner:
         self.skip_prechecks = skip_prechecks
         self.skip_fboss_rsyslog = skip_fboss_rsyslog
         self.collect_ixia_diagnostics = collect_ixia_diagnostics
+        self.setup_only = setup_only
+        self._setup_only_logged = False
 
         # Netcastle runner specific variables
         self.is_autotester_run = is_autotester_run
 
         self.ixia: t.Optional[AbstractTrafficGenerator] = None
+        self.ixia_candidates = normalize_ixia_candidates(
+            self.test_config,
+            primary_api_server_ip=ixia_api_server,
+            skip_ptp_setup=skip_ptp_setup,
+        )
+        self.selected_ixia_candidate: t.Optional[IxiaCandidate] = None
         self.topology = ...
         self.device_to_rsyslog_services = {}
         self.test_setup_orchestrator = TestSetupOrchestrator(
@@ -290,6 +304,8 @@ class TaacRunner:
             cleanup_failed_setup=cleanup_failed_setup,
             eos_image_id=eos_image_id,
             clear_old_eos_images=clear_old_eos_images,
+            ixia_candidates=self.ixia_candidates,
+            ixia_profile=ixia_profile,
         )
         self.test_case_uuid = ""
         self.custom_test_handlers = []
@@ -368,7 +384,7 @@ class TaacRunner:
         return " | ".join(desc_parts)
 
     @async_retryable(retries=2, sleep_time=60, exceptions=(Exception,))
-    async def run_tasks(self, tasks: t.List[taac_types.Task]) -> None:
+    async def run_tasks(self, tasks: t.Sequence[taac_types.Task]) -> None:
         total = len(tasks)
         for idx, task in enumerate(tasks, 1):
             task_desc = task.description or task.task_name
@@ -389,6 +405,13 @@ class TaacRunner:
                 f"[Task {idx}/{total}] Completed: {task_desc} ({elapsed:.1f}s)"
             )
 
+    async def _async_prepare_ixia_candidate(self, candidate: IxiaCandidate) -> None:
+        if self.skip_all_tasks or self.skip_setup_tasks:
+            return
+        await self.run_tasks(
+            [task for task in candidate.setup_tasks if not task.ixia_needed]
+        )
+
     def populate_jq_vars(self) -> None:
         # pyrefly: ignore [missing-attribute]
         for device in self.topology.devices:
@@ -402,7 +425,7 @@ class TaacRunner:
         log_section("TEST CONFIG SETUP", logger=self.logger)
         setup_start = time.time()
         skip_setup_tasks = self.skip_all_tasks or self.skip_setup_tasks
-        setup_tasks = self.test_config.setup_tasks or []
+        first_candidate = self.test_setup_orchestrator.ixia_candidates_to_try[0]
 
         self._add_oss_mock_device_data()
         self._add_host_to_device_os_type_data()
@@ -411,17 +434,17 @@ class TaacRunner:
         log_section("PRE-IXIA SETUP TASKS", logger=self.logger)
         with self.test_summary.tracked_section("Pre-IXIA setup tasks"):
             with suppress_console_logs(self.logger):
-                await self.run_tasks(
-                    [task for task in setup_tasks if not task.ixia_needed]
-                    if not skip_setup_tasks
-                    else []
-                )
+                await self._async_prepare_ixia_candidate(first_candidate)
 
         log_section("IXIA & TOPOLOGY SETUP", logger=self.logger)
         with self.test_summary.tracked_section("Test orchestrator setup"):
             with suppress_console_logs(self.logger):
                 await self.test_setup_orchestrator.async_setUp()
                 self.ixia = self.test_setup_orchestrator.ixia
+                self.selected_ixia_candidate = (
+                    self.test_setup_orchestrator.selected_ixia_candidate
+                    or self.ixia_candidates[0]
+                )
                 # pyrefly: ignore [bad-assignment]
                 self.topology = self.test_setup_orchestrator.test_topology
                 self.populate_jq_vars()
@@ -430,7 +453,13 @@ class TaacRunner:
         with self.test_summary.tracked_section("Post-IXIA setup tasks"):
             with suppress_console_logs(self.logger):
                 await self.run_tasks(
-                    [task for task in setup_tasks if task.ixia_needed]
+                    [
+                        task
+                        for task in none_throws(
+                            self.selected_ixia_candidate
+                        ).setup_tasks
+                        if task.ixia_needed
+                    ]
                     if not skip_setup_tasks
                     else []
                 )
@@ -1480,6 +1509,14 @@ class TaacRunner:
         When --npi-modules and --npi-status are provided, playbooks are
         auto-resolved from the NPI catalog instead.
         """
+        if self.setup_only:
+            if not self._setup_only_logged:
+                self.logger.warning(
+                    "Setup-only mode: setup completed; skipping all playbooks"
+                )
+                self._setup_only_logged = True
+            return
+
         # NPI module-based playbook selection
         if self.npi_name and self.npi_modules and self.npi_status:
             npi_playbooks = await self._resolve_npi_playbooks()
@@ -2121,18 +2158,34 @@ class TaacRunner:
                         ixia.capturing = False  # type: ignore[attr-defined]
                     if isinstance(ixia, TaacIxia):
                         await self._async_collect_ixia_diagnostics_if_enabled(ixia)
-                await self.test_setup_orchestrator.async_tearDown()
-                for handler in self.custom_test_handlers:
-                    await handler._async_test_tearDown()
                 await self.run_tasks(
                     # pyrefly: ignore [bad-argument-type]
-                    self.test_config.teardown_tasks or []
+                    (
+                        self.selected_ixia_candidate.teardown_tasks
+                        if self.selected_ixia_candidate is not None
+                        else self.ixia_candidates[0].teardown_tasks
+                    )
                     if not (self.skip_all_tasks or self.skip_teardown_tasks)
                     else []
                 )
+                for handler in self.custom_test_handlers:
+                    await handler._async_test_tearDown()
         except Exception as e:
             _teardown_error = e
         finally:
+            try:
+                with suppress_console_logs(self.logger):
+                    await self.test_setup_orchestrator.async_tearDown(
+                        strict_ixia_cleanup=self.setup_only
+                    )
+            except Exception as cleanup_error:
+                if _teardown_error:
+                    _teardown_error = ExceptionGroup(
+                        "TAAC teardown tasks and resource cleanup both failed",
+                        [_teardown_error, cleanup_error],
+                    )
+                else:
+                    _teardown_error = cleanup_error
             log_phase_end(
                 "TEST CONFIG TEARDOWN",
                 duration_secs=time.time() - teardown_start,
