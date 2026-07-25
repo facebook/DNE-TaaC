@@ -35,6 +35,13 @@ See ../README.md §3.
 import os
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.topologies.bounded_ecmp import (
+    BOUNDED_ECMP,
+    BOUNDED_ECMP_AS_NUMBERS,
+    BOUNDED_ECMP_PARENT_NETWORKS,
+    BOUNDED_ECMP_PEER_GROUPS,
+    BOUNDED_ECMP_PORT_MAP,
+)
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE,
     EGRESS_PEER_SCALE_AS_NUMBERS,
@@ -64,6 +71,7 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.playbooks.playbook_definitions import (
     build_case2_playbook,
     build_case8_playbook,
+    create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook,
     create_bgp_queue_memory_monitoring_playbook,
     create_bgp_update_packing_validation_playbook,
     create_test_computational_load_for_bgp_plus_plus_playbook,
@@ -94,7 +102,6 @@ from taac.task_definitions import (
     create_wait_for_agent_convergence_task,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
-    create_bgp_ebb_scaling_bounded_ecmp_sets_test_config,
     create_bgp_ebb_scaling_performance_test_config,
 )
 from taac.testconfigs.routing.physical_inventory import (
@@ -1209,11 +1216,6 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
 # simplified rewrite of D104072489: per stage n peers per AF, total = 2n + 2
 # EBGP. Each Stage rewrites /mnt/flash/bgpcpp_config to the matching number of
 # peer entries so BGP++ EOR completes from 100% of configured peers.
-# bag012.ash6 nexthop group threshold parameters for bounded ECMP.
-_BAG012_BOUNDED_ECMP_PEER_COUNT: int = 128
-_BAG012_BOUNDED_ECMP_PREFIX_COUNT: int = 5000
-
-
 def _two_port_direct_ixia_connections(
     physical_inventory: PhysicalInventory,
 ) -> list[DirectIxiaConnection]:
@@ -1613,18 +1615,11 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     physical_inventory: PhysicalInventory,
     name_override: str | None = None,
 ) -> taac_types.TestConfig:
-    """Bounded-ECMP-sets conveyor test config for bag012.ash6.
+    """Build the scheduled BAG012 bounded-ECMP config from DICE intent.
 
-    Extracted verbatim from the legacy
-    ``bag012_ash6_test_config.create_bag012_ash6_bounded_ecmp_sets_test_config``
-    factory. Verifies BGP++ ECMP-set bounding at production peer scale (128
-    EBGP + 128 IBGP per AFI) with update_group enabled. The DUT setup uses
-    the standard ``get_update_packing_setup_tasks`` helper (same path as the
-    other bag012 characteristic tests) so the configerator ``bgpcpp_config``
-    is deployed cleanly instead of patching the image's leftover config in
-    place. Bounded ECMP brings up IPv4 sessions too, so
-    ``v4_peer_start_offset=IXIA_IPV4_START_OFFSET`` aligns the generated v4
-    peers with the device's v4 secondary IPs.
+    The topology owns four public routing groups and eight inspectable IXIA
+    children. The compiler retains the standard update-packing setup recipe,
+    including update-group enablement and the rollover-safe IPv4 peer offset.
     """
     assert physical_inventory.ixia_ports, (
         "factory requires IXIA port map on physical_inventory"
@@ -1640,56 +1635,37 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     )
 
     device_name = physical_inventory.device_name
-    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
-
-    setup_tasks = get_update_packing_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ebgp_peer_count=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ibgp_peer_count=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        # Dual-stack: bounded ECMP runs v4 + v6 peers on both interfaces.
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        router_id=physical_inventory.router_id,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        # Align v4 peers with the device v4 secondary IPs + IXIA .10 layout.
-        v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
-        # DUT runs with BGP++ update_group enabled.
-        enable_update_group=True,
+    bound = BOUNDED_ECMP.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=BOUNDED_ECMP_PORT_MAP,
+        parent_networks=BOUNDED_ECMP_PARENT_NETWORKS,
+        peer_groups=BOUNDED_ECMP_PEER_GROUPS,
+        as_numbers=BOUNDED_ECMP_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(update_group_enable=True),
     )
+    compiled = bound.compile()
 
-    return create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
-        physical_inventory,
+    return TestConfig(
         name=name_override
         or _derive_test_config_name(
             physical_inventory, "BOUNDED_ECMP_SETS", enable_update_group=True
         ),
-        ebgp_peer_count_v6=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ibgp_peer_count_v6=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ebgp_peer_count_v4=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ibgp_peer_count_v4=_BAG012_BOUNDED_ECMP_PEER_COUNT,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        prefix_count=_BAG012_BOUNDED_ECMP_PREFIX_COUNT,
-        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        # Standard device setup (configerator deploy + control plane + validator
-        # + interface IPs + update_group), shared with the other bag012 conveyor
-        # nodes. Passing setup_tasks skips case9's in-shell fallback.
-        setup_tasks=setup_tasks,
+        skip_ixia_protocol_verification=True,
         log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_driver_args=physical_inventory.host_driver_args,
+        oss_mock_device_data=physical_inventory.oss_mock_device_data,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=[
+            create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook(
+                device_name=device_name,
+            )
+        ],
     )
 
 
