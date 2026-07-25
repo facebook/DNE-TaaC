@@ -1,5 +1,6 @@
 # pyre-unsafe
 
+import ipaddress
 from collections import defaultdict
 
 from ixia.ixia import types as ixia_types
@@ -478,6 +479,29 @@ def create_ebb_scale_basic_port_configs(
     # covers the v6 eBGP peers too (runtime distribution to all 280). None ->
     # byte-identical.
     ibgp_v6_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # BGP++ UG 2.9.1 best-path competition (opt-in). When > 0, carve TWO dedicated
+    # eBGP v4 "competing set" device groups (Set A + Set B) of this many peers each
+    # out of the top of the eBGP v4 address range (drain-style ``start_index``
+    # offset), and reduce the main v4 baseline DG's peer count by 2x that so the
+    # total stays ``ebgp_peer_count_v4`` -- the two sets REUSE existing peer
+    # addresses + DUT interface IPs (no new addressing). Each set advertises ONLY
+    # the inline test pool passed in ``ebgp_v4_bestpath_route_scales_a`` / ``_b``
+    # (same NLRI, distinct pool names; Set A long AS-PATH / Set B short via
+    # ``RouteScale.as_path_prepend_numbers``) so the DUT holds two competing eBGP
+    # paths per test prefix. Both sets share the eBGP egress policy (EB-FA-OUT) so
+    # the eBGP update-group membership is unchanged. Requires ``drain=False``.
+    # 0 -> no split (byte-identical for every other caller).
+    ebgp_v4_bestpath_set_peer_count: int = 0,
+    ebgp_v4_bestpath_route_scales_a: list[taac_types.RouteScaleSpec] | None = None,
+    ebgp_v4_bestpath_route_scales_b: list[taac_types.RouteScaleSpec] | None = None,
+    # BGP++ UG 2.9.1 best-path competition, IPv6 leg (opt-in). Identical to the
+    # ``ebgp_v4_bestpath_*`` knobs above but carves the two competing "set" device
+    # groups out of the eBGP v6 budget (v6 addressing, IpV6Unicast, v6 inline test
+    # pool). 0 -> no v6 split (byte-identical for every other caller). Lets 2.9.1
+    # exercise the best-path change on both AFIs (v6 forms its own update groups).
+    ebgp_v6_bestpath_set_peer_count: int = 0,
+    ebgp_v6_bestpath_route_scales_a: list[taac_types.RouteScaleSpec] | None = None,
+    ebgp_v6_bestpath_route_scales_b: list[taac_types.RouteScaleSpec] | None = None,
 ) -> list[BasicPortConfig]:
     """
     Create basic port configurations for EBB scale testing with eBGP, iBGP, and BGP monitoring.
@@ -622,6 +646,22 @@ def create_ebb_scale_basic_port_configs(
     ebgp_v6_multiplier = (
         ebgp_peer_count_v6 - ebgp_peer_to_drain if drain else ebgp_peer_count_v6
     )
+    # Best-path competition (v6): carve 2x set_peer_count peers off the top of the
+    # eBGP v6 budget for the dedicated Set A / Set B DGs; reduce the main v6 DG (and
+    # its CSV import range) by 2x so the total stays ``ebgp_peer_count_v6``.
+    _bestpath_split_v6 = ebgp_v6_bestpath_set_peer_count > 0
+    if _bestpath_split_v6:
+        assert not drain, (
+            "eBGP v6 best-path competition split is not supported with drain=True"
+        )
+        assert (
+            ebgp_v6_bestpath_route_scales_a is not None
+            and ebgp_v6_bestpath_route_scales_b is not None
+        ), "best-path competition split requires both Set A and Set B route scales"
+        assert ebgp_v6_multiplier > 2 * ebgp_v6_bestpath_set_peer_count, (
+            "eBGP v6 peer count too small to carve two best-path competition sets"
+        )
+        ebgp_v6_multiplier -= 2 * ebgp_v6_bestpath_set_peer_count
     ebgp_v6_route_end_index = ebgp_v6_multiplier
     ebgp_device_groups.append(
         DeviceGroupConfig(
@@ -726,6 +766,21 @@ def create_ebb_scale_basic_port_configs(
     ebgp_v4_multiplier = (
         ebgp_peer_count_v4 - ebgp_peer_to_drain if drain else ebgp_peer_count_v4
     )
+    # Best-path competition: carve 2x set_peer_count peers off the top of the eBGP
+    # v4 budget for the dedicated Set A / Set B DGs (appended after the main DG).
+    _bestpath_split = ebgp_v4_bestpath_set_peer_count > 0
+    if _bestpath_split:
+        assert not drain, (
+            "eBGP v4 best-path competition split is not supported with drain=True"
+        )
+        assert (
+            ebgp_v4_bestpath_route_scales_a is not None
+            and ebgp_v4_bestpath_route_scales_b is not None
+        ), "best-path competition split requires both Set A and Set B route scales"
+        assert ebgp_v4_multiplier > 2 * ebgp_v4_bestpath_set_peer_count, (
+            "eBGP v4 peer count too small to carve two best-path competition sets"
+        )
+        ebgp_v4_multiplier -= 2 * ebgp_v4_bestpath_set_peer_count
     ebgp_device_groups.append(
         DeviceGroupConfig(
             device_group_name="DEVICE_GROUP_IPV4_EBGP",
@@ -828,6 +883,108 @@ def create_ebb_scale_basic_port_configs(
                 ),
             ),
         )
+
+    # IPv4 eBGP best-path competition sets (only when the split is enabled). Two
+    # dedicated DGs (Set A + Set B) advertise ONLY the inline test pool -- same
+    # NLRI, distinct pool names, Set A long AS-PATH / Set B short (via each pool's
+    # ``RouteScale.as_path_prepend_numbers``) -- so the DUT holds two competing
+    # eBGP paths per test prefix and prefers Set B. They sit at the top of the
+    # eBGP v4 address range (indices just past the reduced main DG), reusing the
+    # existing peer addresses + DUT interface IPs. No CSV baseline import.
+    if _bestpath_split:
+        _spc = ebgp_v4_bestpath_set_peer_count
+        # The IXIA data stack IS offset by ``start_index`` (driver create_ipv4), which
+        # is why a carved-off peer's interface pings, but the BGP peer's remote/DUT IP
+        # is derived from the *base* gateway_starting_ip and is NOT offset
+        # (traffic_generator._create_bgp_peer_config -> ixia.create_bgp_peer DutIp).
+        # So a DG with start_index > 0 would dial the base DUT range (colliding with the
+        # main DG) and its session would never establish. Pin the already-offset local +
+        # remote peer IPs explicitly so ``bgp_config.*_peer_starting_ip`` wins the
+        # ``X or <base>`` fallback and DutIp targets the correct DUT interface.
+        _bp_increment = "0.0.0.2"
+        _bp_increment_int = int(ipaddress.IPv4Address(_bp_increment))
+        _bp_base_local = ipaddress.IPv4Address(f"{ixia_ebgp_ic_parent_network_v4}.11")
+        _bp_base_remote = ipaddress.IPv4Address(f"{ixia_ebgp_ic_parent_network_v4}.10")
+        for _set_label, _set_start, _set_scales in (
+            ("A", ebgp_v4_multiplier, ebgp_v4_bestpath_route_scales_a),
+            ("B", ebgp_v4_multiplier + _spc, ebgp_v4_bestpath_route_scales_b),
+        ):
+            _bp_offset = _set_start * _bp_increment_int
+            ebgp_device_groups.append(
+                DeviceGroupConfig(
+                    device_group_name=f"DEVICE_GROUP_IPV4_EBGP_BESTPATH_{_set_label}",
+                    device_group_index=len(ebgp_device_groups),
+                    multiplier=_spc,
+                    v4_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{ixia_ebgp_ic_parent_network_v4}.11",
+                        increment_ip=_bp_increment,
+                        gateway_starting_ip=f"{ixia_ebgp_ic_parent_network_v4}.10",
+                        gateway_increment_ip=_bp_increment,
+                        mask=31,
+                        start_index=_set_start,
+                    ),
+                    v4_bgp_config=BgpConfig(
+                        bgp_peer_name=f"BGP_PEER_IPV4_EBGP_BESTPATH_{_set_label}",
+                        local_as_4_bytes=ebgp_remote_as,
+                        enable_4_byte_local_as=True,
+                        enable_graceful_restart=ebgp_graceful_restart,
+                        bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
+                        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+                        # Offset to match the start_index-shifted data stack (see above),
+                        # otherwise DutIp would target the base (main-DG) DUT range.
+                        local_peer_starting_ip=str(_bp_base_local + _bp_offset),
+                        remote_peer_starting_ip=str(_bp_base_remote + _bp_offset),
+                        route_scales=_set_scales,
+                    ),
+                ),
+            )
+
+    # IPv6 eBGP best-path competition sets (only when the v6 split is enabled) --
+    # the exact mirror of the IPv4 sets above, on the eBGP v6 addressing. Same
+    # Fix-B pin: the IXIA data stack IS offset by ``start_index`` but the BGP peer's
+    # DutIp is derived from the *base* gateway and is NOT offset, so pin the
+    # already-offset local + remote peer IPs (v6) so ``bgp_config.*_peer_starting_ip``
+    # wins the fallback and DutIp targets the correct DUT interface. No ``mask`` set
+    # (matches the v6 main group). Appended last -> ``device_group_index`` stays
+    # unique via ``len(ebgp_device_groups)``.
+    if _bestpath_split_v6:
+        _spc6 = ebgp_v6_bestpath_set_peer_count
+        _bp6_increment = "0:0:0:0::2"
+        _bp6_increment_int = int(ipaddress.IPv6Address(_bp6_increment))
+        _bp6_base_local = ipaddress.IPv6Address(f"{ixia_ebgp_ic_parent_network_v6}::11")
+        _bp6_base_remote = ipaddress.IPv6Address(
+            f"{ixia_ebgp_ic_parent_network_v6}::10"
+        )
+        for _set_label, _set_start, _set_scales in (
+            ("A", ebgp_v6_multiplier, ebgp_v6_bestpath_route_scales_a),
+            ("B", ebgp_v6_multiplier + _spc6, ebgp_v6_bestpath_route_scales_b),
+        ):
+            _bp6_offset = _set_start * _bp6_increment_int
+            ebgp_device_groups.append(
+                DeviceGroupConfig(
+                    device_group_name=f"DEVICE_GROUP_IPV6_EBGP_BESTPATH_{_set_label}",
+                    device_group_index=len(ebgp_device_groups),
+                    multiplier=_spc6,
+                    v6_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{ixia_ebgp_ic_parent_network_v6}::11",
+                        increment_ip=_bp6_increment,
+                        gateway_starting_ip=f"{ixia_ebgp_ic_parent_network_v6}::10",
+                        gateway_increment_ip=_bp6_increment,
+                        start_index=_set_start,
+                    ),
+                    v6_bgp_config=BgpConfig(
+                        bgp_peer_name=f"BGP_PEER_IPV6_EBGP_BESTPATH_{_set_label}",
+                        local_as_4_bytes=ebgp_remote_as,
+                        enable_4_byte_local_as=True,
+                        enable_graceful_restart=ebgp_graceful_restart,
+                        bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
+                        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+                        local_peer_starting_ip=str(_bp6_base_local + _bp6_offset),
+                        remote_peer_starting_ip=str(_bp6_base_remote + _bp6_offset),
+                        route_scales=_set_scales,
+                    ),
+                ),
+            )
 
     basic_configs: list[BasicPortConfig] = [
         BasicPortConfig(

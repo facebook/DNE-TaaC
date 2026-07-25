@@ -142,6 +142,20 @@ def build_bag_conveyor_test_config(
     # Same, on plane-1's iBGP v6 DC peers (2.9.6 strict v6 runtime-distribution
     # inject, so criterion-3 covers all 280 eBGP peers). None -> byte-identical.
     ibgp_v6_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    # Forwarded to create_ebb_scale_basic_port_configs: BGP++ UG 2.9.1 best-path
+    # competition. When > 0, carve two dedicated eBGP v4 "competing set" DGs
+    # (Set A long AS-PATH / Set B short) advertising a shared inline test pool.
+    # None/0 -> byte-identical for other callers.
+    ebgp_v4_bestpath_set_peer_count: int = 0,
+    ebgp_v4_bestpath_route_scales_a: list[taac_types.RouteScaleSpec] | None = None,
+    ebgp_v4_bestpath_route_scales_b: list[taac_types.RouteScaleSpec] | None = None,
+    # Forwarded to create_ebb_scale_basic_port_configs: 2.9.1 best-path competition
+    # IPv6 leg -- carve two dedicated eBGP v6 "competing set" DGs (Set A long
+    # AS-PATH / Set B short) advertising a shared inline v6 test pool. None/0 ->
+    # byte-identical for other callers.
+    ebgp_v6_bestpath_set_peer_count: int = 0,
+    ebgp_v6_bestpath_route_scales_a: list[taac_types.RouteScaleSpec] | None = None,
+    ebgp_v6_bestpath_route_scales_b: list[taac_types.RouteScaleSpec] | None = None,
 ) -> taac_types.TestConfig:
     """Shared bag conveyor topology TestConfig builder.
 
@@ -292,6 +306,12 @@ def build_bag_conveyor_test_config(
             ibgp_next_hop_self=ibgp_next_hop_self,
             ibgp_v4_dc_plane1_extra_route_scales=ibgp_v4_dc_plane1_extra_route_scales,
             ibgp_v6_dc_plane1_extra_route_scales=ibgp_v6_dc_plane1_extra_route_scales,
+            ebgp_v4_bestpath_set_peer_count=ebgp_v4_bestpath_set_peer_count,
+            ebgp_v4_bestpath_route_scales_a=ebgp_v4_bestpath_route_scales_a,
+            ebgp_v4_bestpath_route_scales_b=ebgp_v4_bestpath_route_scales_b,
+            ebgp_v6_bestpath_set_peer_count=ebgp_v6_bestpath_set_peer_count,
+            ebgp_v6_bestpath_route_scales_a=ebgp_v6_bestpath_route_scales_a,
+            ebgp_v6_bestpath_route_scales_b=ebgp_v6_bestpath_route_scales_b,
         ),
         playbooks=playbooks,
     )
