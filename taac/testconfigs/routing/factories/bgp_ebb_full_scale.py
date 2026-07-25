@@ -15,7 +15,10 @@ from taac.abstractions.topologies.ebb_full_scale import (
     EBB_PARENT_NETWORKS,
     EBB_PEER_GROUPS,
 )
-from taac.abstractions.topology import RoutingDeviceConfig
+from taac.abstractions.topology import (
+    OpenRMode,
+    RoutingDeviceConfig,
+)
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_LOCAL_LINK,
@@ -1104,9 +1107,14 @@ def create_ebb_longevity_test_config(
     name = name_override or _derive_test_config_name(
         physical_inventory, "LONGEVITY", enable_update_group
     )
+    openr_mode = (
+        OpenRMode.STANDALONE
+        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+        else OpenRMode.NONE
+    )
 
     bound = ebb_full_scale_topology(
-        openr_enabled=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
+        openr_mode=openr_mode,
     ).bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
@@ -1114,7 +1122,7 @@ def create_ebb_longevity_test_config(
         peer_groups=EBB_PEER_GROUPS,
         as_numbers=EBB_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
-            openr_enable=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
+            openr_mode=openr_mode,
             update_group_enable=enable_update_group,
         ),
     )
