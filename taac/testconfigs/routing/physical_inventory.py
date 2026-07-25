@@ -219,78 +219,6 @@ _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
 IXIA03_ASH6 = "2401:db00:2066:3036::3003"
 IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 
-_BAG010_OPENR_LINK = OpenRStandaloneLink(
-    port_channel_id=100310,
-    owner=OpenRStandaloneEndpoint(
-        hostname="bag010.ash6",
-        member_interface="Ethernet3/1/1",
-        ipv4_cidr="10.217.10.10/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3100/127",
-        link_local_cidr="fe80::100:310:0/64",
-    ),
-    helper=OpenRStandaloneEndpoint(
-        hostname="bag011.ash6",
-        member_interface="Ethernet3/1/1",
-        ipv4_cidr="10.217.10.11/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3101/127",
-        link_local_cidr="fe80::100:310:1/64",
-    ),
-)
-
-_BAG011_OPENR_LINK = OpenRStandaloneLink(
-    port_channel_id=100311,
-    owner=OpenRStandaloneEndpoint(
-        hostname="bag011.ash6",
-        member_interface="Ethernet3/2/1",
-        ipv4_cidr="10.217.11.11/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3111/127",
-        link_local_cidr="fe80::100:311:1/64",
-    ),
-    helper=OpenRStandaloneEndpoint(
-        hostname="bag010.ash6",
-        member_interface="Ethernet3/2/1",
-        ipv4_cidr="10.217.11.10/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3110/127",
-        link_local_cidr="fe80::100:311:0/64",
-    ),
-)
-
-_BAG012_OPENR_LINK = OpenRStandaloneLink(
-    port_channel_id=100312,
-    owner=OpenRStandaloneEndpoint(
-        hostname="bag012.ash6",
-        member_interface="Ethernet3/1/1",
-        ipv4_cidr="10.217.12.12/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3120/127",
-        link_local_cidr="fe80::100:312:0/64",
-    ),
-    helper=OpenRStandaloneEndpoint(
-        hostname="bag013.ash6",
-        member_interface="Ethernet3/1/1",
-        ipv4_cidr="10.217.12.13/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3121/127",
-        link_local_cidr="fe80::100:312:1/64",
-    ),
-)
-
-_BAG013_OPENR_LINK = OpenRStandaloneLink(
-    port_channel_id=100313,
-    owner=OpenRStandaloneEndpoint(
-        hostname="bag013.ash6",
-        member_interface="Ethernet3/2/1",
-        ipv4_cidr="10.217.13.13/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3131/127",
-        link_local_cidr="fe80::100:313:1/64",
-    ),
-    helper=OpenRStandaloneEndpoint(
-        hostname="bag012.ash6",
-        member_interface="Ethernet3/2/1",
-        ipv4_cidr="10.217.13.12/31",
-        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3130/127",
-        link_local_cidr="fe80::100:313:0/64",
-    ),
-)
-
 
 # ─── Lab-wiring helpers (used by the ebXX.lab.ash6 + bgp.eb.test.ash6 boxes) ───
 # These produce the ``host_driver_args`` / ``oss_mock_device_data`` payloads that
@@ -358,6 +286,24 @@ BAG002_SNC1 = PhysicalInventory(
     peer_groups=ebb_peer_groups(),
 )
 
+_BAG010_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100310,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag010.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.10.10/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3100/127",
+        link_local_cidr="fe80::100:310:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag011.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.10.11/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3101/127",
+        link_local_cidr="fe80::100:310:1/64",
+    ),
+)
+
 BAG010_ASH6 = PhysicalInventory(
     device_name="bag010.ash6",
     usage=frozenset({"cicd", "qual"}),
@@ -373,6 +319,24 @@ BAG010_ASH6 = PhysicalInventory(
     openr_configerator_path="taac/ebb_ci_cd_configs/bag010_ash6_openr_config",
     openr_standalone_link=_BAG010_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
+)
+
+_BAG011_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100311,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag011.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.11.11/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3111/127",
+        link_local_cidr="fe80::100:311:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag010.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.11.10/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3110/127",
+        link_local_cidr="fe80::100:311:0/64",
+    ),
 )
 
 BAG011_ASH6 = PhysicalInventory(
@@ -401,6 +365,24 @@ BAG011_ASH6 = PhysicalInventory(
     peer_groups=ebb_peer_groups(),
 )
 
+_BAG012_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100312,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag012.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.12.12/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3120/127",
+        link_local_cidr="fe80::100:312:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag013.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.12.13/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3121/127",
+        link_local_cidr="fe80::100:312:1/64",
+    ),
+)
+
 BAG012_ASH6 = PhysicalInventory(
     device_name="bag012.ash6",
     usage=frozenset({"cicd", "qual"}),
@@ -410,6 +392,11 @@ BAG012_ASH6 = PhysicalInventory(
         ("Ethernet3/36/1", "8/1"),  # eBGP
         ("Ethernet3/36/2", "8/2"),  # iBGP
         ("Ethernet3/36/3", "8/3"),  # BGP-MON
+    ],
+    secondary_ixia_ports=[
+        ("Ethernet3/35/1", "1/57"),  # eBGP
+        ("Ethernet3/35/2", "1/58"),  # iBGP
+        ("Ethernet3/35/3", "1/59"),  # BGP-MON
     ],
     dut_bgp_as=65012,
     # bag012 is the only bag physical_inventory that pins ``router_id`` explicitly
@@ -422,29 +409,22 @@ BAG012_ASH6 = PhysicalInventory(
     peer_groups=ebb_peer_groups(),
 )
 
-# bag012.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
-# the default primary (ixia03). Same physical DUT as BAG012_ASH6, but the
-# update-packing factory reads ``ixia_chassis_ip`` (== primary), so ixia11 is
-# selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip`` and the
-# Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports 8/1-3) in
-# ``ixia_ports``. Ad-hoc: resolvable via ``--test-config`` (see
-# adhoc_bgp_ebb_characteristic.py); NOT scheduled on a dne_routing conveyor node.
-BAG012_ASH6_IXIA11 = PhysicalInventory(
-    device_name="bag012.ash6",
-    usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=IXIA11_ASH6,
-    secondary_ixia_chassis_ip=IXIA03_ASH6,
-    ixia_ports=[
-        ("Ethernet3/36/1", "8/1"),  # eBGP
-        ("Ethernet3/36/2", "8/2"),  # iBGP
-        ("Ethernet3/36/3", "8/3"),  # BGP-MON
-    ],
-    dut_bgp_as=65012,
-    router_id="10.163.28.11",
-    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
-    openr_configerator_path="taac/ebb_ci_cd_configs/bag012_ash6_openr_config",
-    openr_standalone_link=_BAG012_OPENR_LINK,
-    peer_groups=ebb_peer_groups(),
+_BAG013_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100313,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag013.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.13.13/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3131/127",
+        link_local_cidr="fe80::100:313:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag012.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.13.12/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3130/127",
+        link_local_cidr="fe80::100:313:0/64",
+    ),
 )
 
 BAG013_ASH6 = PhysicalInventory(
@@ -457,33 +437,13 @@ BAG013_ASH6 = PhysicalInventory(
         ("Ethernet3/36/2", "8/6"),  # iBGP
         ("Ethernet3/36/3", "8/7"),  # BGP-MON
     ],
-    dut_bgp_as=65013,
-    # No ``router_id`` — device-default (same as bag010/bag011; see BAG012_ASH6 note).
-    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
-    openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
-    openr_standalone_link=_BAG013_OPENR_LINK,
-    peer_groups=ebb_peer_groups(),
-)
-
-# bag013.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
-# the default primary (ixia03). Same physical DUT as BAG013_ASH6; the tc1
-# distribution-correctness builder reads ``ixia_chassis_ip`` (== primary), so
-# ixia11 is selected by putting the ixia11 chassis in ``primary_ixia_chassis_ip``
-# and the Ethernet3/36 subinterfaces (LLDP-confirmed cabled to ixia11 ports
-# 8/5-7) in ``ixia_ports``. Needs 3 ports: the tc1 bag013 branch uses
-# ixia_ports[2] (BGP-MON) as the pcap-capture handle. Ad-hoc: resolvable via
-# ``--test-config``; NOT scheduled on a dne_routing conveyor node.
-BAG013_ASH6_IXIA11 = PhysicalInventory(
-    device_name="bag013.ash6",
-    usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=IXIA11_ASH6,
-    secondary_ixia_chassis_ip=IXIA03_ASH6,
-    ixia_ports=[
-        ("Ethernet3/36/1", "8/5"),  # eBGP
-        ("Ethernet3/36/2", "8/6"),  # iBGP
-        ("Ethernet3/36/3", "8/7"),  # BGP-MON
+    secondary_ixia_ports=[
+        ("Ethernet3/35/1", "1/61"),  # eBGP
+        ("Ethernet3/35/2", "1/62"),  # iBGP
+        ("Ethernet3/35/3", "1/63"),  # BGP-MON
     ],
     dut_bgp_as=65013,
+    # No ``router_id`` — device-default (same as bag010/bag011; see BAG012_ASH6 note).
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
     openr_standalone_link=_BAG013_OPENR_LINK,
