@@ -87,12 +87,26 @@ else:
         )
 
 
+def high_cpu_span_seconds(high_cpu_elapsed_times: t.Sequence[float]) -> float:
+    """Elapsed span from the first to the last above-threshold CPU sample.
+
+    Approximates the sustained-high-CPU duration as the time between the first
+    and last high-CPU sample (0.0 for fewer than two such samples). Used instead
+    of peak CPU, which is a single-sample transient during BGP++ convergence.
+    Assumes ``high_cpu_elapsed_times`` is in chronological (sample) order.
+    """
+    if len(high_cpu_elapsed_times) < 2:
+        return 0.0
+    return high_cpu_elapsed_times[-1] - high_cpu_elapsed_times[0]
+
+
 async def async_collect_peak_cpu_memory(
     hostname: str,
     process_name: str,
     duration_seconds: int,
     interval_seconds: int = 30,
     steady_mem: bool = False,
+    high_cpu_threshold_percent: float = 50.0,
 ) -> t.Dict[str, float]:
     """
     Collect CPU and memory samples for a process and return peak values.
@@ -126,16 +140,23 @@ async def async_collect_peak_cpu_memory(
     max_cpu = 0.0
     max_memory_mb = 0.0
     sample_count = 0
-    start_time = time.time()
+    # Monotonic clock: all elapsed-duration math below (loop bound, sustained-CPU
+    # timestamps, inter-sample sleep) must be immune to wall-clock/NTP steps.
+    start_time = time.monotonic()
     memory_record = []
     steady_memory = 0.0
+    # Peak CPU is a single-sample transient (BGP++ momentarily spikes to ~100%
+    # during convergence, then idles). The meaningful signal is how LONG CPU
+    # stays elevated -- collect the elapsed timestamp of every above-threshold
+    # sample; count + first->last span are derived after the loop.
+    high_cpu_elapsed_times: t.List[float] = []
 
     LOGGER.info(
         f"Starting CPU/memory monitoring for {process_name} on {hostname} "
         f"(duration={duration_seconds}s, interval={interval_seconds}s)"
     )
 
-    while (time.time() - start_time) < duration_seconds:
+    while (time.monotonic() - start_time) < duration_seconds:
         sample_count += 1
 
         try:
@@ -161,6 +182,9 @@ async def async_collect_peak_cpu_memory(
                     max_cpu = max(max_cpu, cpu_pct)
                     max_memory_mb = max(max_memory_mb, memory_mb)
 
+                    if cpu_pct > high_cpu_threshold_percent:
+                        high_cpu_elapsed_times.append(time.monotonic() - start_time)
+
                     LOGGER.info(
                         f"Sample {sample_count}: {process_name} - "
                         f"CPU={cpu_pct:.2f}%, Memory={memory_mb:.2f}MB"
@@ -173,14 +197,22 @@ async def async_collect_peak_cpu_memory(
             )
 
         # Sleep until next sample
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
         if elapsed < duration_seconds:
             sleep_time = min(interval_seconds, duration_seconds - elapsed)
             await asyncio.sleep(sleep_time)
 
+    high_cpu_sample_count = len(high_cpu_elapsed_times)
+    high_cpu_duration_seconds = high_cpu_span_seconds(high_cpu_elapsed_times)
+
     LOGGER.info(
         f"Monitoring completed for {process_name} on {hostname} - "
         f"Peak CPU: {max_cpu:.2f}%, Peak Memory: {max_memory_mb:.2f}MB"
+    )
+    LOGGER.info(
+        f"Sustained high CPU (>{high_cpu_threshold_percent:.0f}%): "
+        f"{high_cpu_sample_count} sample(s) spanning ~{high_cpu_duration_seconds:.0f}s "
+        "(first->last) -- peak is a transient, this span is the signal"
     )
     if steady_mem:
         last_20_percent_mem = len(memory_record) - int(0.2 * len(memory_record))
@@ -193,6 +225,8 @@ async def async_collect_peak_cpu_memory(
         "peak_cpu_percent": max_cpu,
         "peak_memory_mb": max_memory_mb,
         "steady_memory_mb": steady_memory,
+        "high_cpu_sample_count": float(high_cpu_sample_count),
+        "high_cpu_duration_seconds": high_cpu_duration_seconds,
     }
 
 
