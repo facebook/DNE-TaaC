@@ -35,6 +35,14 @@ See ../README.md §3.
 import os
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.topologies.ipv6_update_packing import (
+    IPV6_UPDATE_PACKING,
+    IPV6_UPDATE_PACKING_AS_NUMBERS,
+    IPV6_UPDATE_PACKING_PARENT_NETWORKS,
+    IPV6_UPDATE_PACKING_PEER_GROUPS,
+    IPV6_UPDATE_PACKING_PORT_MAP,
+)
+from taac.abstractions.topology import RoutingDeviceConfig
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
@@ -1278,22 +1286,17 @@ def create_bgp_ebb_update_packing_test_config(
         physical_inventory, "UPDATE_PACKING", enable_update_group
     )
 
-    setup_tasks = get_update_packing_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ebgp_peer_count=10,
-        ibgp_peer_count=1,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=physical_inventory.router_id,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        enable_update_group=enable_update_group,
+    bound = IPV6_UPDATE_PACKING.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=IPV6_UPDATE_PACKING_PORT_MAP,
+        parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS,
+        peer_groups=IPV6_UPDATE_PACKING_PEER_GROUPS,
+        as_numbers=IPV6_UPDATE_PACKING_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            update_group_enable=enable_update_group,
+        ),
     )
+    compiled = bound.compile()
 
     return test_config_bgp_update_packing_validation(
         test_config_name=name,
@@ -1322,9 +1325,11 @@ def create_bgp_ebb_update_packing_test_config(
         min_packed_size=4000,
         restart_bgp_for_complete_view=True,
         # Conveyor-specific configuration
-        setup_tasks=setup_tasks,
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        host_os_type_map=compiled.host_os_type_map,
+        endpoints=compiled.endpoints,
+        basic_port_configs=compiled.basic_port_configs,
         log_collection_timeout=600,
     )
 
@@ -2019,6 +2024,8 @@ def test_config_bgp_update_packing_validation(
     min_packed_size: int = 4000,
     restart_bgp_for_complete_view: bool = True,
     direct_ixia_connections: list | None = None,
+    endpoints: list[Endpoint] | None = None,
+    basic_port_configs: list[BasicPortConfig] | None = None,
     log_collection_timeout: int | None = None,
     oss_mock_device_data=None,
     host_os_type_map=None,
@@ -2251,35 +2258,43 @@ def test_config_bgp_update_packing_validation(
         skip_ixia_protocol_verification=True,
         log_collection_timeout=log_collection_timeout,
         basset_pool="dne.test",
-        endpoints=[
-            Endpoint(
-                name=device_name,
-                dut=True,
-                ixia_ports=[
-                    ixia_interface_mimic_ibgp,
-                    ixia_interface_mimic_ebgp,
-                ],
-                direct_ixia_connections=direct_ixia_connections
-                if direct_ixia_connections
-                else [],
-            ),
-        ],
+        endpoints=(
+            endpoints
+            if endpoints is not None
+            else [
+                Endpoint(
+                    name=device_name,
+                    dut=True,
+                    ixia_ports=[
+                        ixia_interface_mimic_ibgp,
+                        ixia_interface_mimic_ebgp,
+                    ],
+                    direct_ixia_connections=direct_ixia_connections
+                    if direct_ixia_connections
+                    else [],
+                ),
+            ]
+        ),
         host_driver_args=host_driver_args,
         oss_mock_device_data=oss_mock_device_data,
         host_os_type_map=host_os_type_map,
         startup_checks=[],
         setup_tasks=setup_tasks if setup_tasks else [],
         teardown_tasks=teardown_tasks if teardown_tasks else [],
-        basic_port_configs=[
-            BasicPortConfig(
-                endpoint=f"{device_name}:{ixia_interface_mimic_ibgp}",
-                device_group_configs=ibgp_device_groups,
-            ),
-            BasicPortConfig(
-                endpoint=f"{device_name}:{ixia_interface_mimic_ebgp}",
-                device_group_configs=ebgp_device_groups,
-            ),
-        ],
+        basic_port_configs=(
+            basic_port_configs
+            if basic_port_configs is not None
+            else [
+                BasicPortConfig(
+                    endpoint=f"{device_name}:{ixia_interface_mimic_ibgp}",
+                    device_group_configs=ibgp_device_groups,
+                ),
+                BasicPortConfig(
+                    endpoint=f"{device_name}:{ixia_interface_mimic_ebgp}",
+                    device_group_configs=ebgp_device_groups,
+                ),
+            ]
+        ),
         playbooks=[
             create_bgp_update_packing_validation_playbook(
                 device_name=device_name,
