@@ -33,6 +33,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc7_disruption_rec
     create_bgp_ug_disruption_recovery_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
+    create_bgp_ug_best_path_change_test_config,
     create_bgp_ug_dual_stack_isolation_test_config,
     create_bgp_ug_edge_cases_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
@@ -136,13 +137,25 @@ BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG = (
     create_bgp_ug_staggered_startup_test_config(BAG013_ASH6)
 )
 
+# Spec 2.9.1 Best-Path Change During Active Distribution on bag013 -- its OWN
+# WITHOUT_OPEN_R TestConfig using the next-hop-self resolution infra (D113330327).
+# Two eBGP competing sets (carved off the eBGP v4 peer budget) advertise the same
+# 500 v4 prefixes with different AS-PATH lengths (AS-PATH is the DNE-approved
+# discriminator; LOCAL_PREF is non-transitive over eBGP + EB-FA-IN sets no LP).
+# Select via ``--test-config BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST``.
+# Converge-to-Set-B distribution is measure-first (the playbook probes the iBGP v4
+# PS gauge; the adversarial no-crash/stability substance lands unconditionally).
+BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG = (
+    create_bgp_ug_best_path_change_test_config(BAG013_ASH6)
+)
+
 
 __all__ = [
     "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
-    "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",

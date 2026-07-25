@@ -38,6 +38,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_memory_utilization_check,
 )
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
+    create_bgp_ug_best_path_change_playbook,
     create_bgp_ug_dual_stack_isolation_playbook,
     create_bgp_ug_empty_group_playbook,
     create_bgp_ug_simultaneous_disruptions_playbook,
@@ -50,6 +51,7 @@ from taac.testconfigs.routing.physical_inventory import (
     PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    EBGP_REMOTE_AS,
     IXIA_BGP_MON_IC_PARENT_NETWORK,
     IXIA_EBGP_IC_PARENT_NETWORK_V4,
     IXIA_EBGP_IC_PARENT_NETWORK_V6,
@@ -226,6 +228,108 @@ _DUAL_STACK_SPARE_V4_ROUTE_SCALES = [
         ),
     ),
 ]
+# ─── Spec 2.9.1 Best-Path Change During Active Distribution ─────────────────
+# Two eBGP "competing sets" (carved off the eBGP v4 peer budget by the topology
+# split in bgp_ebb_ixia_config.py) advertise the SAME 500 v4 prefixes. Set A
+# prepends its AS 3x (long AS-PATH -> less preferred); Set B does not prepend
+# (short -> preferred). AS-PATH LENGTH is the DNE-approved discriminator
+# (LOCAL_PREF is non-transitive over eBGP + EB-FA-IN sets no LP -- on-device dump
+# P2421451582). Advertising/withdrawing Set B flips the best path B<->A.
+_BESTPATH_SET_PEER_COUNT = 10  # eBGP peers per competing set (Set A + Set B)
+_BESTPATH_PREFIX_COUNT = 500
+_BESTPATH_POOL_A_REGEX = r"PREFIX_POOL_IPV4_EBGP_BESTPATH_A$"
+_BESTPATH_POOL_B_REGEX = r"PREFIX_POOL_IPV4_EBGP_BESTPATH_B$"
+# Same 500 /24 NLRI for both sets, in the 120/8 EB-PRIVATE accept aggregate
+# (disjoint from 2.9.4's 120.100/120.104), carrying the accept communities the DUT
+# re-advertises to iBGP v4 (HW-confirmed on 120/8 in 2.9.4) + a filter marker. Kept
+# OFF the anycast-VIP combo so EB-FA-IN's own AS_PATH_PREPEND terms do not
+# re-prepend and skew the length we set.
+_BESTPATH_STARTING_PREFIX = "120.130.0.0"
+_BESTPATH_COMMUNITIES = [
+    "65529:39744",  # EB-PRIVATE-PREFIXES accept community
+    "65060:10012",  # ADVERTISED-FROM-DC accept community
+    "65530:50320",  # anycast accept community
+    "65529:44444",  # marker (filtering only)
+]
+# Set A prepends its own AS 3x (received AS-PATH length ~4 vs Set B's ~1 -> B wins).
+_BESTPATH_SET_A_AS_PREPEND = [[EBGP_REMOTE_AS, EBGP_REMOTE_AS, EBGP_REMOTE_AS]]
+# STRICT criterion-1 (DUT-side best-path convergence): the 500 competing /24s are
+# contiguous blocks from 120.130.0.0 (500 * /24 = 128000 addrs < a /15's 131072), so
+# they all fall within this /15. The DUT Loc-RIB check scopes to it to exclude the
+# ~93k background fabric routes (none of which are in 120/8). Set A prepends
+# EBGP_REMOTE_AS this many extra times vs Set B, so the winner's best-path
+# EBGP_REMOTE_AS count == baseline - delta.
+_BESTPATH_TEST_PREFIX_PARENTS = ["120.130.0.0/15"]
+_BESTPATH_AS_PATH_DELTA = len(_BESTPATH_SET_A_AS_PREPEND[0])
+
+
+def _bestpath_route_scales(
+    pool_name: str, as_path_prepend: list[list[int]] | None
+) -> list[taac_types.RouteScaleSpec]:
+    """One inline v4 pool of the 500 competing prefixes for a best-path set.
+    ``as_path_prepend=None`` -> short AS-PATH (Set B, preferred); a prepend segment
+    -> long AS-PATH (Set A, less preferred). Same NLRI for both sets (distinct pool
+    names) so the DUT holds two competing paths per prefix."""
+    return [
+        taac_types.RouteScaleSpec(
+            network_group_index=1,
+            v4_route_scale=taac_types.RouteScale(
+                prefix_name=pool_name,
+                starting_prefixes=_BESTPATH_STARTING_PREFIX,
+                prefix_step="0.0.0.0",
+                prefix_length=24,
+                prefix_count=_BESTPATH_PREFIX_COUNT,
+                multiplier=1,
+                ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                bgp_communities=list(_BESTPATH_COMMUNITIES),
+                as_path_prepend_numbers=as_path_prepend,
+            ),
+        ),
+    ]
+
+
+# ─── Spec 2.9.1 IPv6 leg ────────────────────────────────────────────────────
+# Same best-path competition on the eBGP v6 budget so 2.9.1 exercises the change
+# on BOTH AFIs (v6 forms its own update groups). WITHOUT_OPEN_R + next-hop-self
+# resolves v6 next-hops deterministically, so v6 runs STRICT from the start (no
+# cold-start XFAIL needed). Same accept communities (AFI-agnostic) + same AS-PATH
+# discriminator (Set A prepends EBGP_REMOTE_AS 3x). Test pool = 500 unique /64s in
+# the v6 EB-PRIVATE accept aggregate 2401:db00:11:2000::/52 (fabric const
+# TestPrefixes.EB_PRIVATE_PREFIX), in a sub-range disjoint from 2.9.6's v6 pools.
+_BESTPATH_POOL_A_REGEX_V6 = r"PREFIX_POOL_IPV6_EBGP_BESTPATH_A$"
+_BESTPATH_POOL_B_REGEX_V6 = r"PREFIX_POOL_IPV6_EBGP_BESTPATH_B$"
+_BESTPATH_STARTING_PREFIX_V6 = "2401:db00:11:2800::"
+_BESTPATH_PREFIX_STEP_V6 = "0:0:0:1::"  # one /64 per prefix, inside the EB-PRIVATE /52
+_BESTPATH_PREFIX_LENGTH_V6 = 64
+# 500 /64s from ::2800 span 4th-group 0x2800..0x29f3, all inside this /54 (0x2800..
+# 0x2bff = 1024 /64s); tight enough to exclude the EB-PRIVATE /52 aggregate route and
+# any background v6 routes.
+_BESTPATH_TEST_PREFIX_PARENTS_V6 = ["2401:db00:11:2800::/54"]
+
+
+def _bestpath_route_scales_v6(
+    pool_name: str, as_path_prepend: list[list[int]] | None
+) -> list[taac_types.RouteScaleSpec]:
+    """IPv6 mirror of ``_bestpath_route_scales`` -- one inline v6 pool of the 500
+    competing /64s for a best-path set (Set A long AS-PATH / Set B short)."""
+    return [
+        taac_types.RouteScaleSpec(
+            network_group_index=1,
+            v6_route_scale=taac_types.RouteScale(
+                prefix_name=pool_name,
+                starting_prefixes=_BESTPATH_STARTING_PREFIX_V6,
+                prefix_step=_BESTPATH_PREFIX_STEP_V6,
+                prefix_length=_BESTPATH_PREFIX_LENGTH_V6,
+                prefix_count=_BESTPATH_PREFIX_COUNT,
+                multiplier=1,
+                ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                bgp_communities=list(_BESTPATH_COMMUNITIES),
+                as_path_prepend_numbers=as_path_prepend,
+            ),
+        ),
+    ]
+
+
 # The four AFI-split peer-groups on the EBB-scale conveyor logical_topology. IPv4 and IPv6
 # peers form SEPARATE update groups, so each peer-group maps to a single-AFI,
 # AFI-pure update group -- asserting that is the core dual-stack-isolation proof
@@ -756,7 +860,110 @@ def create_bgp_ug_staggered_startup_test_config(
     )
 
 
+def create_bgp_ug_best_path_change_test_config(
+    testbed: PhysicalInventory,
+) -> taac_types.TestConfig:
+    """BGP++ Update Group qualification spec 2.9.1 (Best-Path Change During Active
+    Distribution) TestConfig -- its OWN WITHOUT_OPEN_R config on the bag conveyor
+    topology, using the next-hop-self resolution infra (D113330327).
+
+    Two eBGP "competing sets" (carved off the eBGP v4 peer budget by the topology
+    split) advertise the SAME 500 v4 prefixes -- Set A long AS-PATH, Set B short
+    (preferred). DUAL-AFI: the same competition also runs on the eBGP v6 sets (500 v6
+    /64s in the EB-PRIVATE aggregate), so the best-path change is exercised on both
+    v4 and v6 (each forms its own update groups); v6 runs strict from the start since
+    next-hop-self resolves v6 next-hops deterministically under WITHOUT_OPEN_R. The
+    playbook advertises Set A, then re-advertises the same prefixes
+    from Set B (best-path change A->B), then rapidly alternates the winner every 10s
+    for 5 min, asserting no crash / no session disruption / update group intact / no
+    stale routes throughout. AS-PATH length is the DNE-approved discriminator
+    (LOCAL_PREF is non-transitive over eBGP and bag013's EB-FA-IN sets no LP --
+    on-device dump P2421451582). Select via
+    ``--test-config BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST``. See
+    ``create_bgp_ug_best_path_change_playbook``.
+
+    WITHOUT_OPEN_R + next-hop-self so the DUT resolves next-hops and advertises the
+    test prefixes with no Open/R daemon. STRICT criterion-1 is asserted DUT-side: the
+    playbook baselines Set A's best-path AS-PATH (Set A alone) and then asserts, via
+    the DUT Loc-RIB best path, that every test prefix converged to Set B after the
+    flip and after the final settle (none stuck on Set A). This verifies the DUT
+    best-path SELECTION (Loc-RIB); under Update Group the DUT distributes that one
+    best path to all group members by construction (per-peer adj-RIB-out is not
+    independently read -- deferred, T271301144). The iBGP v4 PS
+    gauge is also probed (measure-first) as a next-hop-self / no-route-loss
+    diagnostic (a count cannot see a best-path flip). HW-UNVERIFIED (IXIA down): this
+    run also exercises the next-hop-self path (incl. whether the inline test pool's
+    next-hop resolves under next-hop-self).
+    """
+    bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+    best_path_change_playbook = create_bgp_ug_best_path_change_playbook(
+        device_name=testbed.device_name,
+        ebgp_bestpath_a_pool_regex=_BESTPATH_POOL_A_REGEX,
+        ebgp_bestpath_b_pool_regex=_BESTPATH_POOL_B_REGEX,
+        ibgp_v4_peer_parent_prefixes=_IBGP_V4_PARENT_PREFIXES,
+        test_prefix_count=_BESTPATH_PREFIX_COUNT,
+        # STRICT criterion-1: assert (via the DUT Loc-RIB best path, self-calibrated
+        # against Set A's baseline) that every test prefix converged to Set B (short
+        # AS-PATH), none stuck on Set A. discriminator = the competing sets' eBGP AS;
+        # delta = Set A's extra prepends; scoped to the test /15 so the ~93k
+        # background routes are excluded.
+        test_prefix_parents=_BESTPATH_TEST_PREFIX_PARENTS,
+        discriminator_asn=EBGP_REMOTE_AS,
+        best_path_as_path_delta=_BESTPATH_AS_PATH_DELTA,
+        # IPv6 leg: same best-path competition on the eBGP v6 sets + v6 strict
+        # convergence (scoped to the v6 test /54) + v6 PS probe. Runs STRICT from the
+        # start -- next-hop-self resolves v6 next-hops deterministically under
+        # WITHOUT_OPEN_R, so there is no cold-start distribution delay. Same
+        # discriminator ASN (65334) + delta (3) as v4 (shared).
+        ebgp_bestpath_a_pool_regex_v6=_BESTPATH_POOL_A_REGEX_V6,
+        ebgp_bestpath_b_pool_regex_v6=_BESTPATH_POOL_B_REGEX_V6,
+        ibgp_v6_peer_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
+        test_prefix_parents_v6=_BESTPATH_TEST_PREFIX_PARENTS_V6,
+        # Retry the establish precheck: the ~1272-session full-scale topology needs
+        # time to reach Established after the control-plane Bgp restart (as 2.9.6).
+        prechecks=_edge_cases_prechecks(
+            bgp_mon_ignore_prefixes,
+            establish_retry_count=12,
+            establish_retry_delay_seconds=15.0,
+            establish_retry_delay_multiplier=1.0,
+        ),
+        bgp_mon_ignore_prefixes=bgp_mon_ignore_prefixes,
+        vmhwm_absolute_threshold_bytes=Gigabyte.GIG_10.value,
+    )
+    return build_bag_conveyor_test_config(
+        testbed,
+        name="BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST",
+        playbooks=[best_path_change_playbook],
+        # WITHOUT_OPEN_R + next-hop-self (D113330327): resolve next-hops from
+        # interface state so the DUT advertises the test prefixes (no Open/R).
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        enable_update_group=True,
+        ebgp_next_hop_self=True,
+        ibgp_next_hop_self=True,
+        resolve_nexthops_from_interface_state=True,
+        # Two competing eBGP v4 sets (10 peers each, carved off the eBGP v4 budget)
+        # advertising the same 500 NLRI -- Set A long AS-PATH, Set B short.
+        ebgp_v4_bestpath_set_peer_count=_BESTPATH_SET_PEER_COUNT,
+        ebgp_v4_bestpath_route_scales_a=_bestpath_route_scales(
+            "PREFIX_POOL_IPV4_EBGP_BESTPATH_A", _BESTPATH_SET_A_AS_PREPEND
+        ),
+        ebgp_v4_bestpath_route_scales_b=_bestpath_route_scales(
+            "PREFIX_POOL_IPV4_EBGP_BESTPATH_B", None
+        ),
+        # Two competing eBGP v6 sets (mirror of v4) so 2.9.1 exercises the best-path
+        # change on both AFIs. Same peer count + AS-PATH prepend; v6 inline test pool.
+        ebgp_v6_bestpath_set_peer_count=_BESTPATH_SET_PEER_COUNT,
+        ebgp_v6_bestpath_route_scales_a=_bestpath_route_scales_v6(
+            "PREFIX_POOL_IPV6_EBGP_BESTPATH_A", _BESTPATH_SET_A_AS_PREPEND
+        ),
+        ebgp_v6_bestpath_route_scales_b=_bestpath_route_scales_v6(
+            "PREFIX_POOL_IPV6_EBGP_BESTPATH_B", None
+        ),
+    )
+
+
 __all__ = [
+    "create_bgp_ug_best_path_change_test_config",
     "create_bgp_ug_dual_stack_isolation_test_config",
     "create_bgp_ug_edge_cases_test_config",
     "create_bgp_ug_simultaneous_disruptions_test_config",

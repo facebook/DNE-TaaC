@@ -54,7 +54,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG,
     BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
-    BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
@@ -115,10 +115,6 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # plus the 2.1.1 initial-dump-identical-routes playbook (full parity
     # with eb03.lab.ash6).
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
-    # bag013.ash6 2.1.1 initial-dump bound to ixia11 (Et3/36) instead of the
-    # conveyor's ixia03 (Et3/35). Ad-hoc: resolvable via --test-config, not
-    # scheduled on a conveyor node.
-    BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     # bag010.ash6 SC1 egress peer-scale sweep. Ad-hoc: resolvable via
     # --test-config, not wired into a conveyor node. UG-only (all SC run UG).
@@ -153,4 +149,12 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # schedule until manually verified on the device). Select with
     # ``--regex 'bgp_ug_staggered_startup'``.
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
+    # BGP++ UG 2.9.1 Best-Path Change During Active Distribution on bag013.ash6 --
+    # its own WITHOUT_OPEN_R TestConfig using the next-hop-self resolution infra
+    # (D113330327). Two eBGP competing sets advertise the same 500 v4 prefixes with
+    # different AS-PATH lengths (the DNE-approved discriminator); converge-to-Set-B
+    # is measure-first, the adversarial no-crash/stability substance lands. Ad-hoc;
+    # NOT wired into a conveyor stage (do NOT schedule until manually verified on the
+    # device). Select with ``--regex 'bgp_ug_best_path_change'``.
+    BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
 ]
