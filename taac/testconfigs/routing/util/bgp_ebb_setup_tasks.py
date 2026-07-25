@@ -74,14 +74,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
     IXIA_IPV4_START_OFFSET,
     IXIA_IPV6_START_OFFSET,
-    OPENR_LOCAL_LINK,
-    OPENR_OTHER_LINK,
-    OPENR_PORT_CHANNEL,
-    OPENR_PORT_CHANNEL_ID,
-    OPENR_PORT_CHANNEL_IPV4,
-    OPENR_PORT_CHANNEL_IPV6,
-    OPENR_PORT_CHANNEL_LINK_LOCAL,
-    OPENR_PORT_CHANNEL_MEMBER,
     POST_ACL_RESTART_DAEMONS,
     UPDATE_GROUP_CONFIG,
     UPDATE_GROUP_VERIFICATION_CMD,
@@ -695,11 +687,6 @@ def get_openr_standalone_setup_tasks(
 def _get_openr_setup_tasks(
     device_name: str,
     profile: BgpPlusPlusProfile,
-    openr_port_channel_member: t.Optional[str] = None,
-    openr_port_channel_ipv4: t.Optional[str] = None,
-    openr_port_channel_link_local: t.Optional[str] = None,
-    openr_local_link: t.Optional[t.Dict[str, t.Any]] = None,
-    openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
     openr_standalone_link: OpenRStandaloneLink | None = None,
 ) -> t.List[Task]:
     """
@@ -710,86 +697,18 @@ def _get_openr_setup_tasks(
     Args:
         device_name: Device hostname
         profile: BGP++ profile
-        openr_port_channel_member: Port-Channel member interface override
-            (defaults to OPENR_PORT_CHANNEL_MEMBER constant)
-        openr_port_channel_ipv4: Port-Channel IPv4 address override
-            (defaults to OPENR_PORT_CHANNEL_IPV4 constant)
-        openr_port_channel_link_local: Port-Channel link-local address override
-            (defaults to OPENR_PORT_CHANNEL_LINK_LOCAL constant)
-        openr_local_link: Local link config dict override
-            (defaults to OPENR_LOCAL_LINK constant)
-        openr_other_link: Other link config dict override
-            (defaults to OPENR_OTHER_LINK constant)
+        openr_standalone_link: Owned OpenR link and its reserved helper endpoint
 
     Returns:
         List of Task objects for OpenR setup (empty if not needed)
     """
-    tasks: t.List[Task] = []
-
     if profile != BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R:
-        return tasks
-    if openr_standalone_link is not None:
-        if openr_standalone_link.owner.hostname != device_name:
-            raise ValueError("OpenR link owner must match the setup device")
-        return get_openr_standalone_setup_tasks(openr_standalone_link)
-
-    pc_member = openr_port_channel_member or OPENR_PORT_CHANNEL_MEMBER
-    pc_ipv4 = openr_port_channel_ipv4 or OPENR_PORT_CHANNEL_IPV4
-    pc_link_local = openr_port_channel_link_local or OPENR_PORT_CHANNEL_LINK_LOCAL
-    local_link = openr_local_link or OPENR_LOCAL_LINK
-    other_link = openr_other_link or OPENR_OTHER_LINK
-
-    # Configure Port-Channel and member interface for OpenR nexthop
-    tasks.append(
-        create_run_commands_on_shell_task(
-            hostname=device_name,
-            cmds=[
-                "configure\n"
-                f"default interface {pc_member}\n"
-                "!\n"
-                f"interface {OPENR_PORT_CHANNEL}\n"
-                "description po100211.bag013\n"
-                "load-interval 5\n"
-                "mtu 9192\n"
-                "no switchport\n"
-                f"ip address {pc_ipv4}\n"
-                f"ipv6 address {OPENR_PORT_CHANNEL_IPV6}\n"
-                f"ipv6 address {pc_link_local} link-local\n"
-                "ipv6 nd ra disabled\n"
-                "!\n"
-                f"interface {pc_member}\n"
-                "no shutdown\n"
-                "mtu 9000\n"
-                "speed 400g-8\n"
-                "no switchport\n"
-                "ipv6 enable\n"
-                "ipv6 address auto-config\n"
-                "ipv6 nd ra rx accept default-route\n"
-                f"channel-group {OPENR_PORT_CHANNEL_ID} mode active\n"
-                "end",
-            ],
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
-
-    # Inject OpenR routes
-    tasks.append(
-        create_openr_route_action_task(
-            device_name=device_name,
-            action=OpenRRouteAction.INJECT.value,
-            start_ipv4s=DEFAULT_OPENR_START_IPV4S,
-            start_ipv6s=DEFAULT_OPENR_START_IPV6S,
-            local_link=local_link,
-            other_link=other_link,
-            count=63,
-            step=2,
-            ixia_needed=True,
-            set_outer_hostname=True,
-        ),
-    )
-
-    return tasks
+        return []
+    if openr_standalone_link is None:
+        raise ValueError("OpenR profile requires openr_standalone_link")
+    if openr_standalone_link.owner.hostname != device_name:
+        raise ValueError("OpenR link owner must match the setup device")
+    return get_openr_standalone_setup_tasks(openr_standalone_link)
 
 
 # =============================================================================
@@ -1262,11 +1181,6 @@ def get_common_setup_tasks(
     ixia_interface_mimic_bgp_mon: t.Optional[str] = None,
     include_bgp_mon: bool = True,
     openr_configerator_path: t.Optional[str] = None,
-    openr_port_channel_member: t.Optional[str] = None,
-    openr_port_channel_ipv4: t.Optional[str] = None,
-    openr_port_channel_link_local: t.Optional[str] = None,
-    openr_local_link: t.Optional[t.Dict[str, t.Any]] = None,
-    openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
     openr_standalone_link: OpenRStandaloneLink | None = None,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
@@ -1384,11 +1298,6 @@ def get_common_setup_tasks(
         _get_openr_setup_tasks(
             device_name=device_name,
             profile=profile,
-            openr_port_channel_member=openr_port_channel_member,
-            openr_port_channel_ipv4=openr_port_channel_ipv4,
-            openr_port_channel_link_local=openr_port_channel_link_local,
-            openr_local_link=openr_local_link,
-            openr_other_link=openr_other_link,
             openr_standalone_link=openr_standalone_link,
         )
     )

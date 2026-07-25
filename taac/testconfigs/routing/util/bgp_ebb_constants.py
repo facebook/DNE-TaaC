@@ -146,34 +146,6 @@ IXIA_IPV6_START_OFFSET = 16
 
 
 # =============================================================================
-# Port-Channel Configuration (for OpenR nexthop)
-# =============================================================================
-OPENR_PORT_CHANNEL = "Port-Channel100211"
-OPENR_PORT_CHANNEL_ID = 100211
-OPENR_PORT_CHANNEL_MEMBER = "Ethernet3/9/1"
-OPENR_PORT_CHANNEL_IPV4 = "10.131.97.236/31"
-OPENR_PORT_CHANNEL_IPV6 = "2620:0:1cff:dead:bef1:100:13:3a0/127"
-OPENR_PORT_CHANNEL_LINK_LOCAL = "fe80::eba:a7f:fd00/64"
-
-# OpenR nexthop configuration derived from Port-Channel 100211
-OPENR_LOCAL_LINK = {
-    "ipv4": "10.131.97.236",
-    "ipv6": "fe80::eba:a7f:fd00",
-    "ifName": "po100211",
-    "weight": 0,
-    "metric": 10,
-}
-
-OPENR_OTHER_LINK = {
-    "ipv4": "10.131.97.237",
-    "ipv6": "fe80::eba:a7f:fd01",
-    "ifName": "po100211",
-    "weight": 0,
-    "metric": 10,
-}
-
-
-# =============================================================================
 # BGP++ Daemon Names (for arista_daemon_control tasks)
 #
 # ORDER MATTERS -- this list is the sequential (re)start order, and it follows

@@ -17,6 +17,10 @@ import os
 import typing as t
 from dataclasses import dataclass, field, replace
 
+from taac.abstractions.topology import (
+    OpenRStandaloneEndpoint,
+    OpenRStandaloneLink,
+)
 from taac.testconfigs.routing.role_defaults import ebb_peer_groups
 from taac.test_as_a_config import types as taac_types
 
@@ -60,6 +64,7 @@ class PhysicalInventory:
     # ─── Configerator paths for full-config deployment ────────────────────
     bgpcpp_configerator_path: str | None = None
     openr_configerator_path: str | None = None
+    openr_standalone_link: OpenRStandaloneLink | None = None
     fboss_agent_configerator_path: str | None = None
 
     # ─── Lab auth ─────────────────────────────────────────────────────────
@@ -214,6 +219,78 @@ _EBB_BGPCPP_PATH = "taac/ebb_ci_cd_configs/ebb_full_scale_bgpcpp_config"
 IXIA03_ASH6 = "2401:db00:2066:3036::3003"
 IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 
+_BAG010_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100310,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag010.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.10.10/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3100/127",
+        link_local_cidr="fe80::100:310:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag011.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.10.11/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3101/127",
+        link_local_cidr="fe80::100:310:1/64",
+    ),
+)
+
+_BAG011_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100311,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag011.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.11.11/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3111/127",
+        link_local_cidr="fe80::100:311:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag010.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.11.10/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3110/127",
+        link_local_cidr="fe80::100:311:0/64",
+    ),
+)
+
+_BAG012_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100312,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag012.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.12.12/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3120/127",
+        link_local_cidr="fe80::100:312:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag013.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.12.13/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3121/127",
+        link_local_cidr="fe80::100:312:1/64",
+    ),
+)
+
+_BAG013_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100313,
+    owner=OpenRStandaloneEndpoint(
+        hostname="bag013.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.13.13/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3131/127",
+        link_local_cidr="fe80::100:313:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="bag012.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.13.12/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3130/127",
+        link_local_cidr="fe80::100:313:0/64",
+    ),
+)
+
 
 # ─── Lab-wiring helpers (used by the ebXX.lab.ash6 + bgp.eb.test.ash6 boxes) ───
 # These produce the ``host_driver_args`` / ``oss_mock_device_data`` payloads that
@@ -294,30 +371,8 @@ BAG010_ASH6 = PhysicalInventory(
     dut_bgp_as=65010,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag010_ash6_openr_config",
+    openr_standalone_link=_BAG010_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
-    extras={
-        # OpenR link-config knobs consumed by
-        # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag010.ash6
-        # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic PhysicalInventory fields.
-        "openr_port_channel_member": "Ethernet3/6/1",
-        "openr_port_channel_ipv4": "10.131.97.238/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fd02/64",
-        "openr_local_link": {
-            "ipv4": "10.131.97.238",
-            "ipv6": "fe80::eba:a7f:fd02",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.239",
-            "ipv6": "fe80::eba:a7f:fd03",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
 )
 
 BAG011_ASH6 = PhysicalInventory(
@@ -337,33 +392,8 @@ BAG011_ASH6 = PhysicalInventory(
     dut_bgp_as=65011,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag011_ash6_openr_config",
+    openr_standalone_link=_BAG011_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
-    extras={
-        # OpenR link-config knobs consumed by
-        # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag011.ash6
-        # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic PhysicalInventory fields.
-        "openr_port_channel_member": "Ethernet3/9/1",
-        "openr_port_channel_ipv4": "10.131.97.236/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fd00/64",
-        # bag011 uses the shared ``OPENR_LOCAL_LINK`` / ``OPENR_OTHER_LINK``
-        # constants from ``conveyor_constants.py`` verbatim (unlike bag010
-        # which has DUT-specific overrides).
-        "openr_local_link": {
-            "ipv4": "10.131.97.236",
-            "ipv6": "fe80::eba:a7f:fd00",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.237",
-            "ipv6": "fe80::eba:a7f:fd01",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
 )
 
 BAG012_ASH6 = PhysicalInventory(
@@ -383,33 +413,8 @@ BAG012_ASH6 = PhysicalInventory(
     router_id="10.163.28.11",
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag012_ash6_openr_config",
+    openr_standalone_link=_BAG012_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
-    extras={
-        # OpenR link-config knobs consumed by
-        # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag012.ash6
-        # DUT — same shape as bag010/bag011/bag013. Not yet exercised by any
-        # BAG012 catalog binding (all 6 current bindings run
-        # ``factories/bgp_ebb_characteristic.py`` factories that skip OpenR
-        # setup); dormant capability unlocked when a full-scale factory is
-        # added for BAG012 (Wave 7A/7B/7C).
-        "openr_port_channel_member": "Ethernet3/9/1",
-        "openr_port_channel_ipv4": "10.131.97.234/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fcfe/64",
-        "openr_local_link": {
-            "ipv4": "10.131.97.234",
-            "ipv6": "fe80::eba:a7f:fcfe",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.235",
-            "ipv6": "fe80::eba:a7f:fcff",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
 )
 
 # bag012.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
@@ -432,6 +437,8 @@ BAG012_ASH6_IXIA11 = PhysicalInventory(
     dut_bgp_as=65012,
     router_id="10.163.28.11",
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/bag012_ash6_openr_config",
+    openr_standalone_link=_BAG012_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
 )
 
@@ -449,30 +456,8 @@ BAG013_ASH6 = PhysicalInventory(
     # No ``router_id`` — device-default (same as bag010/bag011; see BAG012_ASH6 note).
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
+    openr_standalone_link=_BAG013_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
-    extras={
-        # OpenR link-config knobs consumed by
-        # ``conveyor_common_tasks.get_common_setup_tasks`` for the bag013.ash6
-        # DUT. Kept in ``extras`` because they are OpenR-specific baseline
-        # attributes and do not fit the generic PhysicalInventory fields.
-        "openr_port_channel_member": "Ethernet3/9/1",
-        "openr_port_channel_ipv4": "10.131.97.232/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
-        "openr_local_link": {
-            "ipv4": "10.131.97.232",
-            "ipv6": "fe80::eba:a7f:fcfc",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.233",
-            "ipv6": "fe80::eba:a7f:fcfd",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
 )
 
 # bag013.ash6 wired to the SECONDARY ash6 BAG Ixia chassis (ixia11) instead of
@@ -496,26 +481,8 @@ BAG013_ASH6_IXIA11 = PhysicalInventory(
     dut_bgp_as=65013,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
+    openr_standalone_link=_BAG013_OPENR_LINK,
     peer_groups=ebb_peer_groups(),
-    extras={
-        "openr_port_channel_member": "Ethernet3/9/1",
-        "openr_port_channel_ipv4": "10.131.97.232/31",
-        "openr_port_channel_link_local": "fe80::eba:a7f:fcfc/64",
-        "openr_local_link": {
-            "ipv4": "10.131.97.232",
-            "ipv6": "fe80::eba:a7f:fcfc",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-        "openr_other_link": {
-            "ipv4": "10.131.97.233",
-            "ipv6": "fe80::eba:a7f:fcfd",
-            "ifName": "po100211",
-            "weight": 0,
-            "metric": 10,
-        },
-    },
 )
 
 

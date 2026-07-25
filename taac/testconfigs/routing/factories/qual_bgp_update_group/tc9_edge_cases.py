@@ -755,6 +755,8 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
         monitor_interval_s = 120
         igp_frequency_s = 60
 
+    openr_link = physical_inventory.openr_standalone_link
+    assert openr_link is not None, "OpenR playbook requires a standalone link"
     playbook = create_bgp_ug_simultaneous_disruptions_playbook(
         device_name=physical_inventory.device_name,
         ebgp_route_pool_regex=_SIMUL_EBGP_ROUTE_POOL_REGEX,
@@ -765,8 +767,8 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
         # playbook's igp defaults), so pass the DEFAULT lists here too.
         openr_start_ipv4s=DEFAULT_OPENR_START_IPV4S,
         openr_start_ipv6s=DEFAULT_OPENR_START_IPV6S,
-        openr_local_link=physical_inventory.extras["openr_local_link"],
-        openr_other_link=physical_inventory.extras["openr_other_link"],
+        openr_local_link=openr_link.kv_link(openr_link.owner),
+        openr_other_link=openr_link.kv_link(openr_link.helper),
         non_ibgp_parent_prefixes=non_ibgp_parent_prefixes,
         vmhwm_growth_threshold_bytes=_SIMUL_VMHWM_GROWTH_THRESHOLD_BYTES,
         prechecks=_edge_cases_prechecks(bgp_mon_ignore_prefixes),

@@ -95,8 +95,6 @@ from taac.testconfigs.routing.util.bgp_ebb_ixia_config import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_expected_peer_identity,
-    get_common_setup_tasks,
-    get_teardown_tasks,
 )
 from taac.utils.arista_utils import interface_name_to_short_format
 from taac.test_as_a_config import types as taac_types
@@ -412,136 +410,32 @@ def create_ebb_cold_start_and_daemon_restart_test_config(
 _BAG010_LONGEVITY_DURATION_SECONDS = 14400  # 4h
 
 
+def _openr_owner_kv_link(physical_inventory: PhysicalInventory) -> dict:
+    link = physical_inventory.openr_standalone_link
+    if link is None:
+        raise ValueError("OpenR playbook requires a standalone link")
+    return link.kv_link(link.owner)
+
+
+def _openr_helper_kv_link(physical_inventory: PhysicalInventory) -> dict:
+    link = physical_inventory.openr_standalone_link
+    if link is None:
+        raise ValueError("OpenR playbook requires a standalone link")
+    return link.kv_link(link.helper)
+
+
 def _build_ebb_full_scale_test_config(
     physical_inventory: PhysicalInventory,
     name: str,
     playbooks: list,
     profile: BgpPlusPlusProfile,
     enable_update_group: bool,
-    drain: bool,
 ) -> TestConfig:
-    """Assemble a byte-wise-identical bag010.ash6 conveyor TestConfig.
-
-    Reproduces the legacy ``bag010_ash6_test_config._build_test_config``
-    helper: builds ``get_common_setup_tasks`` + ``get_teardown_tasks``
-    from ``conveyor_common_tasks``, wires the EBB-scale IXIA topology
-    via ``create_ebb_scale_basic_port_configs``, and returns the
-    ``TestConfig`` verbatim so the golden manifest hashes for
-    ``BAG010_ASH6_BGP_DRAIN_CONVEYOR_TEST`` /
-    ``BAG010_ASH6_BGP_RUNTIME_UPDATE_CONVEYOR_TEST`` /
-    ``BAG010_ASH6_CONVEYOR_LONGEVITY_TEST_CONFIG`` (+ ``_UPDATE_GROUP``
-    siblings) are preserved.
-    """
-    device_name = physical_inventory.device_name
-    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
-    ixia_interface_mimic_bgp_mon, ixia_port_bgp_mon = physical_inventory.ixia_ports[2]
-
-    assert physical_inventory.dut_bgp_as is not None, (
-        "physical_inventory must have dut_bgp_as"
-    )
-    assert physical_inventory.bgpcpp_configerator_path is not None, (
-        "physical_inventory must have bgpcpp_configerator_path"
-    )
-
-    extras = physical_inventory.extras
-    setup_tasks = get_common_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=profile,
-        openr_configerator_path=physical_inventory.openr_configerator_path,
-        openr_port_channel_member=extras["openr_port_channel_member"],
-        openr_port_channel_ipv4=extras["openr_port_channel_ipv4"],
-        openr_port_channel_link_local=extras["openr_port_channel_link_local"],
-        openr_local_link=extras["openr_local_link"],
-        openr_other_link=extras["openr_other_link"],
-        enable_update_group=enable_update_group,
-    )
-    teardown_tasks = get_teardown_tasks(
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-        device_name=device_name,
-    )
-
-    return TestConfig(
+    return _build_compiled_ebb_full_scale_test_config(
+        physical_inventory=physical_inventory,
         name=name,
-        skip_ixia_protocol_verification=True,
-        log_collection_timeout=600,
-        basset_pool="dne.test",
-        endpoints=[
-            Endpoint(
-                name=device_name,
-                dut=True,
-                ixia_ports=[
-                    ixia_interface_mimic_ebgp,
-                    ixia_interface_mimic_ibgp,
-                    ixia_interface_mimic_bgp_mon,
-                ],
-                direct_ixia_connections=[
-                    DirectIxiaConnection(
-                        interface=ixia_interface_mimic_ebgp,
-                        ixia_chassis_ip=ixia_chassis_ip,
-                        ixia_port=ixia_port_ebgp,
-                    ),
-                    DirectIxiaConnection(
-                        interface=ixia_interface_mimic_ibgp,
-                        ixia_chassis_ip=ixia_chassis_ip,
-                        ixia_port=ixia_port_ibgp,
-                    ),
-                    DirectIxiaConnection(
-                        interface=ixia_interface_mimic_bgp_mon,
-                        ixia_chassis_ip=ixia_chassis_ip,
-                        ixia_port=ixia_port_bgp_mon,
-                    ),
-                ],
-            ),
-        ],
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        startup_checks=[],
-        setup_tasks=setup_tasks,
-        teardown_tasks=teardown_tasks,
-        basic_port_configs=create_ebb_scale_basic_port_configs(
-            device_name=device_name,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-            ebgp_peer_count_v6=EBGP_PEER_COUNT_V6,
-            ebgp_peer_count_v4=EBGP_PEER_COUNT_V4,
-            ebgp_peer_to_drain=EBGP_PEER_TO_DRAIN,
-            ibgp_peer_scale_per_plane=IBGP_PEER_SCALE_PER_PLANE,
-            ibgp_peer_to_drain_per_plane=IBGP_PEER_TO_DRAIN_PER_PLANE,
-            drain=drain,
-            bgp_mon_peer_count=BGP_MON_PEER_COUNT,
-            ebgp_remote_as=EBGP_REMOTE_AS,
-            ibgp_remote_as=IBGP_REMOTE_AS,
-            bgp_mon_remote_as=BGP_MON_REMOTE_AS,
-            ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-            ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-            ixia_ibgp_ic_parent_network_v6_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v6_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
-            ixia_bgp_mon_ic_parent_network=IXIA_BGP_MON_IC_PARENT_NETWORK,
-            profile=profile,
-        ),
+        profile=profile,
+        enable_update_group=enable_update_group,
         playbooks=playbooks,
     )
 
@@ -636,7 +530,6 @@ def create_ebb_instability_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_instability_attribute_churn_playbook(
                 device_name=device_name,
@@ -679,7 +572,6 @@ def create_ebb_runtime_update_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_route_registry_runtime_update_playbook(
                 device_name=device_name,
@@ -781,7 +673,6 @@ def create_ebb_stage1_consolidated_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_instability_attribute_churn_playbook(
                 device_name=device_name,
@@ -816,8 +707,8 @@ def create_ebb_stage1_consolidated_test_config(
                 device_name=device_name,
                 peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
                 peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-                local_link=physical_inventory.extras["openr_local_link"],
-                other_link=physical_inventory.extras["openr_other_link"],
+                local_link=_openr_owner_kv_link(physical_inventory),
+                other_link=_openr_helper_kv_link(physical_inventory),
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -881,7 +772,6 @@ def create_bgp_ebb_restart_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_daemon_restart_playbook(
                 device_name=device_name,
@@ -926,7 +816,6 @@ def create_bgp_ebb_oscillations_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_ebgp_session_oscillations_playbook(
                 device_name=device_name,
@@ -992,14 +881,13 @@ def create_bgp_ebb_stability_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
                 device_name=device_name,
                 peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
                 peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-                local_link=physical_inventory.extras["openr_local_link"],
-                other_link=physical_inventory.extras["openr_other_link"],
+                local_link=_openr_owner_kv_link(physical_inventory),
+                other_link=_openr_helper_kv_link(physical_inventory),
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -1011,8 +899,8 @@ def create_bgp_ebb_stability_test_config(
                 tcp_dump_capture_interface=interface_name_to_short_format(
                     ixia_interface_mimic_bgp_mon
                 ),
-                local_link=physical_inventory.extras["openr_local_link"],
-                other_link=physical_inventory.extras["openr_other_link"],
+                local_link=_openr_owner_kv_link(physical_inventory),
+                other_link=_openr_helper_kv_link(physical_inventory),
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
@@ -1054,7 +942,6 @@ def create_bgp_ebb_stage1_test_config(
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_daemon_restart_playbook(
                 device_name=device_name,
@@ -1111,8 +998,8 @@ def create_bgp_ebb_stage1_test_config(
                 tcp_dump_capture_interface=interface_name_to_short_format(
                     ixia_interface_mimic_bgp_mon
                 ),
-                local_link=physical_inventory.extras["openr_local_link"],
-                other_link=physical_inventory.extras["openr_other_link"],
+                local_link=_openr_owner_kv_link(physical_inventory),
+                other_link=_openr_helper_kv_link(physical_inventory),
                 expected_established_sessions=session_count,
                 profile=profile,
                 expected_peer_identity=expected_peer_identity,
