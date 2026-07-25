@@ -378,9 +378,14 @@ BAG010_ASH6 = PhysicalInventory(
 BAG011_ASH6 = PhysicalInventory(
     device_name="bag011.ash6",
     usage=frozenset({"cicd", "qual"}),
-    primary_ixia_chassis_ip=IXIA03_ASH6,
-    secondary_ixia_chassis_ip=IXIA11_ASH6,
+    primary_ixia_chassis_ip=IXIA11_ASH6,
+    secondary_ixia_chassis_ip=IXIA03_ASH6,
     ixia_ports=[
+        ("Ethernet3/36/1", "7/5"),  # eBGP
+        ("Ethernet3/36/2", "7/6"),  # iBGP
+        ("Ethernet3/36/3", "7/7"),  # BGP-MON
+    ],
+    secondary_ixia_ports=[
         ("Ethernet3/35/1", "1/53"),  # eBGP
         ("Ethernet3/35/2", "1/54"),  # iBGP
         ("Ethernet3/35/3", "1/55"),  # BGP-MON
