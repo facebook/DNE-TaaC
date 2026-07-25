@@ -93,6 +93,8 @@ from taac.steps.step_definitions import (
     create_sc_8_steps,
 )
 from taac.task_definitions import (
+    create_arista_daemon_control_task,
+    create_bgp_clear_route_filter_task,
     create_configure_bgpcpp_startup_task,
     create_coop_apply_patchers_task,
     create_coop_register_patcher_task,
@@ -340,6 +342,438 @@ def test_config_constant_attribute_storage_on_eos(
                 ],
             ),
         ],
+    )
+
+
+# =============================================================================
+# SC2 -- Constant Storage with Unique Attributes. SC1 sweeps the egress (iBGP)
+# PEER dimension; SC2 fixes BOTH peer counts and sweeps the INGRESS ROUTE
+# dimension -- a different axis. As routes scale at a fixed bounded attribute
+# pool, the DEDUPLICATOR SIZE (unique attribute count) must stay ~constant (not
+# scale with routes) -- that is the constant-attribute-storage proof. Kept fully
+# separate from the single-axis ``test_config_constant_attribute_storage_on_eos``
+# above so the legacy path can be deprecated by deletion without touching this
+# SC2 keeper.
+# =============================================================================
+
+# eBGP = 2 (1 v4 + 1 v6), the ingress route source, FIXED. Even so the step's
+# per-AFI ``count//2`` split is exact (1 peer/AFI).
+_CONSTANT_ATTR_EBGP_PEER_COUNT: int = 2
+# iBGP = 500 egress fan-out, FIXED (SC1-proven scale).
+_CONSTANT_ATTR_IBGP_PEER_COUNT: int = 500
+# The only swept axis: ingress routes per eBGP peer. The min (10K) exceeds the
+# unique-attribute pool size, so every attribute-set is reused (paths >> unique
+# attrs) and the deduplicator size stays flat if dedup works.
+_CONSTANT_ATTR_ROUTE_SWEEP: list[int] = [10000, 20000, 30000, 40000, 50000]
+# EB_FA_TRANSITED -- satisfies the EB-FA-IN ingress allowlist so eBGP-learned
+# scale prefixes are accepted (and re-advertised out the egress peers).
+_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES: list[str] = ["65529:39744"]
+
+# Interface-state nexthop-resolution gflag. This test runs WITHOUT_OPEN_R, so
+# recursive/loopback nexthops never resolve via the (dead) Open/R FIB stream;
+# the eBGP nexthop is directly connected and must resolve through NetlinkWrapper
+# instead. NetlinkWrapper only populates the nexthopCache from interface
+# link-state + prefix match when bgp_resolve_nexthops_from_interface_state is
+# set; with the default (legacy, ARP/ND-based) path the connected nexthop stayed
+# unresolved, so no path was ever selected and convergence completed vacuously.
+# Enabling the gflag in run_bgpcpp.sh makes egress routes actually resolve and
+# get selected.
+_NEXTHOP_IFACE_STATE_FLAG: str = "bgp_resolve_nexthops_from_interface_state"
+
+
+def test_config_constant_attribute_storage_route_sweep_on_eos(
+    test_config_name: str,
+    device_name: str,
+    ixia_interface_mimic_ebgp: str,
+    ixia_interface_mimic_ibgp: str,
+    ebgp_remote_as: int,
+    ibgp_local_as: int,
+    ixia_ebgp_ic_parent_network_v6: str,
+    ixia_ebgp_ic_parent_network_v4: str,
+    ixia_ibgp_ic_parent_network_v6: str,
+    ixia_ibgp_ic_parent_network_v4: str,
+    ebgp_peer_count: int,
+    ibgp_peer_count: int,
+    route_sweep: list[int],
+    dut_bgp_as: int,
+    bgpcpp_configerator_path: str,
+    router_id: str | None = None,
+    enable_update_group: bool = False,
+    constant_total_paths: int = 400000,
+    as_path_pool_size: int = 100,
+    community_pool_size: int = 50,
+    extended_community_pool_size: int = 50,
+    as_path_length: int = 4,
+    constant_acceptance_communities: list[str] | None = None,
+    max_communities_per_route_from_pool: int | None = None,
+    randomize_attributes: bool = False,
+    random_seed: int = 42,
+    test_route_withdrawal: bool = False,
+    withdrawal_wait_minutes: int = 3,
+    dump_attribute_assignments: bool = True,
+    soak_time_minutes: int = 10,
+    direct_ixia_connections: list | None = None,
+    log_collection_timeout: int | None = None,
+    oss_mock_device_data=None,
+    host_os_type_map=None,
+    host_driver_args=None,
+    transient_ratio_tolerance: float = 2.0,
+    dedup_gate_mode: str = "permissive",
+    transient_gate_mode: str = "permissive",
+) -> taac_types.TestConfig:
+    """BGP++ constant-attribute-storage route-scale sweep on Arista EOS.
+
+    Fixed topology -- ``ebgp_peer_count`` eBGP (ingress source) + ``ibgp_peer_count``
+    iBGP (egress fan-out) -- with the ingress route count as the only swept axis
+    (``route_sweep``). Every route draws an attribute-set from a fixed bounded
+    pool, so as routes scale the DEDUPLICATOR SIZE (unique attribute count) must
+    stay ~constant iff attributes are shared (stored once) rather than re-created
+    per route; RSS is observational (it grows with prefix/path count). Under
+    update-group, holding egress *paths* constant would NOT hold memory constant
+    (adj-rib-out is per-group ~= prefixes), so the deduplicator is the signal.
+
+    The device is provisioned with the SC1-mirrored setup layer: the test's own
+    eBGP+iBGP bgpcpp peer list is written and the interface secondary IPs laid
+    via ``get_update_packing_setup_tasks`` (at each fixed axis' per-AFI count),
+    then interface-state nexthop resolution is enabled and the Centralized Route
+    Filter cleared so the injected scale prefixes are accepted and resolved. The
+    device peers are derived from the same AS/network params that build the IXIA
+    side below, so the two halves cannot drift.
+    """
+    initial_ebgp_peer_count = 1
+
+    as_path_pool = generate_as_path_pool(
+        count=as_path_pool_size,
+        base_as=65000,
+        as_path_length=as_path_length,
+    )
+
+    community_pool = generate_community_pool(
+        count=community_pool_size,
+        base_community=65000,
+    )
+
+    extended_community_pool = generate_extended_community_pool(
+        count=extended_community_pool_size,
+        base_rt=65000,
+    )
+
+    ixia_ports = [ixia_interface_mimic_ebgp, ixia_interface_mimic_ibgp]
+
+    # get_update_packing_setup_tasks writes peers per AFI (dual-stack doubles),
+    # and the route-scale-sweep step presents ``count // 2`` peers per AFI, so
+    # the device is provisioned at each fixed axis' per-AFI count.
+    ebgp_peer_count_per_afi = ebgp_peer_count // 2
+    ibgp_peer_count_per_afi = ibgp_peer_count // 2
+    setup_tasks = get_update_packing_setup_tasks(
+        device_name=device_name,
+        bgp_asn=dut_bgp_as,
+        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+        ebgp_peer_count=ebgp_peer_count_per_afi,
+        ibgp_peer_count=ibgp_peer_count_per_afi,
+        ebgp_remote_as=ebgp_remote_as,
+        # The device iBGP peer's remote-as must equal the IXIA iBGP peer's own
+        # (local) AS for the session to establish; both are ``ibgp_local_as``.
+        ibgp_remote_as=ibgp_local_as,
+        ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
+        ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
+        router_id=router_id,
+        bgpcpp_configerator_path=bgpcpp_configerator_path,
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
+        ixia_ibgp_ic_parent_network_v4=ixia_ibgp_ic_parent_network_v4,
+        enable_update_group=enable_update_group,
+        # Dual-stack: align the generated v4 peers with the device's v4
+        # secondary IPs (offset 10) rather than the default 16.
+        v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
+    )
+    # Enable interface-state nexthop resolution (WITHOUT_OPEN_R) and clear the
+    # baked-in route registry so the injected scale prefixes resolve and are
+    # accepted rather than denied.
+    setup_tasks.append(
+        create_configure_bgpcpp_startup_task(
+            hostname=device_name,
+            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
+            use_managed_shell=True,
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
+    )
+    setup_tasks.append(
+        create_bgp_clear_route_filter_task(
+            hostname=device_name,
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
+    )
+    # The route-scale-sweep step measures without ever restarting Bgp, so bounce
+    # it here so the nexthop flag and the CRF-free state take effect before the
+    # sweep begins. (SC1 relies on its per-stage Bgp restart for this.)
+    setup_tasks.append(
+        create_arista_daemon_control_task(
+            hostname=device_name,
+            daemon_name="Bgp",
+            action="disable",
+            ixia_needed=True,
+        )
+    )
+    setup_tasks.append(
+        create_arista_daemon_control_task(
+            hostname=device_name,
+            daemon_name="Bgp",
+            action="enable",
+            ixia_needed=True,
+        )
+    )
+
+    return TestConfig(
+        name=test_config_name,
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=log_collection_timeout,
+        basset_pool="dne.test",
+        endpoints=[
+            Endpoint(
+                name=device_name,
+                dut=True,
+                ixia_ports=ixia_ports,
+                direct_ixia_connections=direct_ixia_connections
+                if direct_ixia_connections
+                else [],
+            ),
+        ],
+        host_driver_args=host_driver_args,
+        oss_mock_device_data=oss_mock_device_data,
+        host_os_type_map=host_os_type_map,
+        startup_checks=[],
+        setup_tasks=setup_tasks,
+        teardown_tasks=[],
+        basic_port_configs=[
+            BasicPortConfig(
+                endpoint=f"{device_name}:{ixia_interface_mimic_ebgp}",
+                device_group_configs=[
+                    DeviceGroupConfig(
+                        device_group_name="DEVICE_GROUP_IPV6_EBGP",
+                        device_group_index=0,
+                        multiplier=initial_ebgp_peer_count,
+                        v6_addresses_config=IpAddressesConfig(
+                            starting_ip=f"{ixia_ebgp_ic_parent_network_v6}::11",
+                            increment_ip="0:0:0:0::2",
+                            gateway_starting_ip=f"{ixia_ebgp_ic_parent_network_v6}::10",
+                            gateway_increment_ip="0:0:0:0::2",
+                            start_index=0,
+                        ),
+                        v6_bgp_config=BgpConfig(
+                            bgp_peer_name="BGP_PEER_IPV6_EBGP",
+                            local_as_4_bytes=ebgp_remote_as,
+                            enable_4_byte_local_as=True,
+                            bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+                            route_scales=[
+                                RouteScaleSpec(
+                                    v6_route_scale=RouteScale(
+                                        prefix_name="PREFIX_POOL_IPV6_EBGP",
+                                        starting_prefixes="2001:db8:1000::",
+                                        prefix_step="0:0:1::",
+                                        prefix_length=64,
+                                        multiplier=1,
+                                        prefix_count=1,
+                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                                        bgp_communities=[],
+                                    ),
+                                    multiplier=1,
+                                    network_group_index=0,
+                                )
+                            ],
+                        ),
+                    ),
+                    DeviceGroupConfig(
+                        device_group_name="DEVICE_GROUP_IPV4_EBGP",
+                        device_group_index=1,
+                        multiplier=initial_ebgp_peer_count,
+                        v4_addresses_config=IpAddressesConfig(
+                            starting_ip=f"{ixia_ebgp_ic_parent_network_v4}.11",
+                            increment_ip="0.0.0.2",
+                            gateway_starting_ip=f"{ixia_ebgp_ic_parent_network_v4}.10",
+                            gateway_increment_ip="0.0.0.2",
+                            mask=31,
+                            start_index=0,
+                        ),
+                        v4_bgp_config=BgpConfig(
+                            bgp_peer_name="BGP_PEER_IPV4_EBGP",
+                            local_as_4_bytes=ebgp_remote_as,
+                            enable_4_byte_local_as=True,
+                            bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+                            route_scales=[
+                                RouteScaleSpec(
+                                    v4_route_scale=RouteScale(
+                                        prefix_name="PREFIX_POOL_IPV4_EBGP",
+                                        starting_prefixes="10.100.0.0",
+                                        prefix_step="0.0.1.0",
+                                        prefix_length=24,
+                                        multiplier=1,
+                                        prefix_count=1,
+                                        ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                                        bgp_communities=[],
+                                    ),
+                                    multiplier=1,
+                                    network_group_index=0,
+                                )
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+            BasicPortConfig(
+                endpoint=f"{device_name}:{ixia_interface_mimic_ibgp}",
+                device_group_configs=[
+                    DeviceGroupConfig(
+                        device_group_name="DEVICE_GROUP_IPV6_IBGP",
+                        device_group_index=0,
+                        multiplier=1,
+                        v6_addresses_config=IpAddressesConfig(
+                            starting_ip=f"{ixia_ibgp_ic_parent_network_v6}::11",
+                            increment_ip="0:0:0:0::2",
+                            gateway_starting_ip=f"{ixia_ibgp_ic_parent_network_v6}::10",
+                            gateway_increment_ip="0:0:0:0::2",
+                            start_index=0,
+                        ),
+                        v6_bgp_config=BgpConfig(
+                            bgp_peer_name="BGP_PEER_IPV6_IBGP",
+                            local_as_4_bytes=ibgp_local_as,
+                            enable_4_byte_local_as=True,
+                            bgp_peer_type=ixia_types.BgpPeerType.IBGP,
+                        ),
+                    ),
+                    DeviceGroupConfig(
+                        device_group_name="DEVICE_GROUP_IPV4_IBGP",
+                        device_group_index=1,
+                        multiplier=1,
+                        v4_addresses_config=IpAddressesConfig(
+                            starting_ip=f"{ixia_ibgp_ic_parent_network_v4}.11",
+                            increment_ip="0.0.0.2",
+                            gateway_starting_ip=f"{ixia_ibgp_ic_parent_network_v4}.10",
+                            gateway_increment_ip="0.0.0.2",
+                            mask=31,
+                            start_index=0,
+                        ),
+                        v4_bgp_config=BgpConfig(
+                            bgp_peer_name="BGP_PEER_IPV4_IBGP",
+                            local_as_4_bytes=ibgp_local_as,
+                            enable_4_byte_local_as=True,
+                            bgp_peer_type=ixia_types.BgpPeerType.IBGP,
+                        ),
+                    ),
+                ],
+            ),
+        ],
+        playbooks=[
+            build_case2_playbook(
+                name="bgp_plus_plus_constant_attribute_storage_test",
+                description="Test BGP++ constant attribute storage with varying EBGP peers and prefix counts",
+                stages=[
+                    create_steps_stage(
+                        steps=[
+                            create_custom_step(
+                                params_dict={
+                                    "custom_step_name": "test_constant_attribute_storage_eos_bgp_plus_plus",
+                                    "test_config_name": test_config_name,
+                                    "hostname": device_name,
+                                    "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
+                                    "ebgp_peer_count": ebgp_peer_count,
+                                    "ibgp_peer_count": ibgp_peer_count,
+                                    "route_sweep": route_sweep,
+                                    "transient_ratio_tolerance": transient_ratio_tolerance,
+                                    "dedup_gate_mode": dedup_gate_mode,
+                                    "transient_gate_mode": transient_gate_mode,
+                                    "constant_total_paths": constant_total_paths,
+                                    "soak_time_minutes": soak_time_minutes,
+                                    "attribute_pool_as_paths": as_path_pool,
+                                    "attribute_pool_communities": community_pool,
+                                    "attribute_pool_extended_communities": extended_community_pool,
+                                    "attach_communities_for_ebgp_prefixes": constant_acceptance_communities,
+                                    "max_communities_per_route_from_pool": max_communities_per_route_from_pool,
+                                    "randomize_attributes": randomize_attributes,
+                                    "random_seed": random_seed,
+                                    "test_route_withdrawal": test_route_withdrawal,
+                                    "withdrawal_wait_minutes": withdrawal_wait_minutes,
+                                    "dump_attribute_assignments": dump_attribute_assignments,
+                                    "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
+                                }
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
+    testbed: PhysicalInventory,
+    enable_update_group: bool = False,
+) -> taac_types.TestConfig:
+    """SC3 transient-memory route-scale test config (testbed-driven).
+
+    The SC3 "scale & characteristics" test = the (former SC2) route-scale sweep
+    WITH egress. Fixed topology (eBGP=2 ingress source, iBGP=500 egress fan-out,
+    RESOLVABLE nexthops, routes advertised) and sweeps the INGRESS ROUTE count
+    (``_CONSTANT_ATTR_ROUTE_SWEEP``, 10K->50K). PRIMARY signal = TRANSIENT memory
+    = peak (high-watermark during the convergence burst) - stable (steady-state
+    after soak); it must stay ~flat as routes scale, because bgpd bounds the
+    transient working set via bounded update queues (backpressure). The
+    DEDUPLICATOR-SIZE check rides along as a bonus (the char-2 signal). Both
+    gates expose a blocking|permissive mode flag (default permissive until
+    calibrated on a real run, then flip to blocking).
+
+    Mirrors the SC1 perf-scaling factory: the DUT is provisioned via
+    ``get_update_packing_setup_tasks`` and the name derives from
+    ``testbed.device_name`` as ``{DEVICE}_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST``
+    (+ ``_UPDATE_GROUP``).
+
+    All SC tests run with update-group enabled, so ``enable_update_group=True``
+    is the variant that is actually run; the non-UG form does not work and is
+    not registered.
+    """
+    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
+    assert testbed.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on testbed"
+    )
+    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
+    # router_id is optional: bag010 relies on the device-default router-id, which
+    # the setup helpers preserve when router_id is None.
+
+    name = (
+        f"{testbed.device_name.upper().replace('.', '_')}"
+        "_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST"
+    )
+    if enable_update_group:
+        name += "_UPDATE_GROUP"
+
+    return test_config_constant_attribute_storage_route_sweep_on_eos(
+        test_config_name=name,
+        device_name=testbed.device_name,
+        ixia_interface_mimic_ebgp=testbed.ixia_ports[0][0],
+        ixia_interface_mimic_ibgp=testbed.ixia_ports[1][0],
+        ebgp_remote_as=EBGP_REMOTE_AS,
+        ibgp_local_as=IBGP_REMOTE_AS,
+        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
+        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+        # Fixed topology: eBGP=2 ingress source, iBGP=500 egress fan-out.
+        ebgp_peer_count=_CONSTANT_ATTR_EBGP_PEER_COUNT,
+        ibgp_peer_count=_CONSTANT_ATTR_IBGP_PEER_COUNT,
+        # The only swept axis: ingress route count. iBGP + attribute pool are
+        # held constant so the deduplicator size is the signal, not egress paths.
+        route_sweep=_CONSTANT_ATTR_ROUTE_SWEEP,
+        dut_bgp_as=testbed.dut_bgp_as,
+        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        router_id=testbed.router_id,
+        enable_update_group=enable_update_group,
+        constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,
+        as_path_pool_size=100,
+        community_pool_size=50,
+        as_path_length=4,
     )
 
 

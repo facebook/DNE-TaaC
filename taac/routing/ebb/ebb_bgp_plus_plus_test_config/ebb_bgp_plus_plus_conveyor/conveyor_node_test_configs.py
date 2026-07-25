@@ -16,12 +16,13 @@ free; consumers that need the aggregated list import it from this
 module directly.
 """
 
-# bag010 SC1 egress peer-scale — ad-hoc scale-&-characteristics sweep,
-# runnable via --test-config but not scheduled on a conveyor node. Re-homed to
-# testconfigs/routing/adhoc_bgp_ebb_characteristic.py after D111520998 pruned
-# cicd_ebb_int_tc.py to the conveyor-scheduled configs only.
+# bag010 SC1 egress peer-scale + SC2 constant attribute storage — ad-hoc
+# scale-&-characteristics sweeps, runnable via --test-config but not scheduled
+# on a conveyor node. Re-homed to testconfigs/routing/adhoc_bgp_ebb_characteristic.py
+# after D111520998 pruned cicd_ebb_int_tc.py to the conveyor-scheduled configs only.
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
 
@@ -123,6 +124,12 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # conveyor's ixia03 (Et3/35). Ad-hoc: resolvable via --test-config, not
     # scheduled on a conveyor node.
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
+    # bag010.ash6 SC3 transient memory (char-3) — the former SC2 route-scale
+    # sweep WITH egress (eBGP=2 ingress + iBGP=500 egress, resolvable/advertised),
+    # sweeps the ingress route count (10K→50K) and gates on the transient
+    # (peak-minus-stable) memory (dedup rides along), update-group enabled.
+    # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
+    BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag011.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6
