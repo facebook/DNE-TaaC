@@ -87,6 +87,15 @@ else:
         )
 
 
+def _mean(values: t.Sequence[float]) -> float:
+    """Arithmetic mean of ``values`` (0.0 for an empty sequence).
+
+    Used for the full-window steady/stable metric so a caller averages every
+    sample instead of trusting a single (flaky) snapshot.
+    """
+    return sum(values) / len(values) if values else 0.0
+
+
 def high_cpu_span_seconds(high_cpu_elapsed_times: t.Sequence[float]) -> float:
     """Elapsed span from the first to the last above-threshold CPU sample.
 
@@ -124,6 +133,9 @@ async def async_collect_peak_cpu_memory(
         Dict containing:
         - peak_cpu_percent: Peak CPU usage percentage
         - peak_memory_mb: Peak memory usage in megabytes
+        - avg_cpu_percent: Full-window mean CPU% across all samples
+        - avg_memory_mb: Full-window mean memory (MB) across all samples --
+          the robust steady/stable value (vs a single flaky snapshot)
 
     Example:
         >>> peak_stats = await async_collect_peak_cpu_memory(
@@ -143,7 +155,8 @@ async def async_collect_peak_cpu_memory(
     # Monotonic clock: all elapsed-duration math below (loop bound, sustained-CPU
     # timestamps, inter-sample sleep) must be immune to wall-clock/NTP steps.
     start_time = time.monotonic()
-    memory_record = []
+    memory_record: t.List[float] = []
+    cpu_record: t.List[float] = []
     steady_memory = 0.0
     # Peak CPU is a single-sample transient (BGP++ momentarily spikes to ~100%
     # during convergence, then idles). The meaningful signal is how LONG CPU
@@ -175,8 +188,11 @@ async def async_collect_peak_cpu_memory(
                     # _parse_memory_value returns KB, convert to MB
                     memory_kb = _parse_memory_value(resident_mem_str)
                     memory_mb = memory_kb / 1024.0
-                    if steady_mem:
-                        memory_record.append(memory_mb)
+                    # Record every sample so callers can take a full-window mean
+                    # (the robust steady/stable value) instead of a single flaky
+                    # end-of-soak snapshot.
+                    cpu_record.append(cpu_pct)
+                    memory_record.append(memory_mb)
 
                     # Track peaks
                     max_cpu = max(max_cpu, cpu_pct)
@@ -214,6 +230,13 @@ async def async_collect_peak_cpu_memory(
         f"{high_cpu_sample_count} sample(s) spanning ~{high_cpu_duration_seconds:.0f}s "
         "(first->last) -- peak is a transient, this span is the signal"
     )
+    # Full-window means across all samples -- the robust steady/stable value a
+    # caller should gate on. Memory is sticky, so its mean over the soak is the
+    # true steady state (a single end-of-soak snapshot is flaky). Computed for
+    # every call, independent of steady_mem.
+    avg_cpu_percent = _mean(cpu_record)
+    avg_memory_mb = _mean(memory_record)
+
     if steady_mem:
         last_20_percent_mem = len(memory_record) - int(0.2 * len(memory_record))
         steady_memory = sum(memory_record[last_20_percent_mem:]) / (
@@ -221,9 +244,16 @@ async def async_collect_peak_cpu_memory(
         )
         LOGGER.info(f"Steady State Memory: {steady_memory:.2f}MB")
 
+    LOGGER.info(
+        f"Full-window mean over {len(memory_record)} sample(s): "
+        f"CPU={avg_cpu_percent:.2f}%, Memory={avg_memory_mb:.2f}MB"
+    )
+
     return {
         "peak_cpu_percent": max_cpu,
         "peak_memory_mb": max_memory_mb,
+        "avg_cpu_percent": avg_cpu_percent,
+        "avg_memory_mb": avg_memory_mb,
         "steady_memory_mb": steady_memory,
         "high_cpu_sample_count": float(high_cpu_sample_count),
         "high_cpu_duration_seconds": high_cpu_duration_seconds,
