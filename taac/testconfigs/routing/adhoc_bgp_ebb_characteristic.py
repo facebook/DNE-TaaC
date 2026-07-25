@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP++ EBB characteristic ad-hoc testconfigs (SC1 egress peer-scale + SC3 transient-memory route-scale).
+"""BGP++ EBB characteristic ad-hoc testconfigs (SC1 egress peer-scale + SC2 constant-storage ingress + SC3 transient-memory route-scale).
 
 Re-homed here after D111520998 consolidated ``cicd_ebb_int_tc.py`` down to the
 8 conveyor-scheduled configs. The bag010 egress peer-scale (perf-scaling case1)
@@ -13,6 +13,7 @@ External consumers import from this member module directly; see README.md §7.
 """
 
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_update_packing_test_config,
@@ -52,6 +53,23 @@ BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test
 )
 
 
+# ─── bag010.ash6 — SC2 Constant Attribute Storage (INGRESS-ONLY, char-2) ─
+# Testbed-driven factory: the BAG012 varying-combinations engine made
+# ingress-only + non-vacuous. 8 eBGP peers advertise 800K paths; routes are
+# accepted into the RIB (route_registry cleared + acceptance community) but the
+# nexthop is left unresolvable -> received+accepted, never advertised (NO iBGP
+# egress). Sweeps the unique attribute COMBINATIONS (100K→800K) at fixed 800K
+# paths; steady memory must stay ~constant. Acceptance gate (RECEIVED count) is
+# blocking; the memory-variance gate is permissive. Ad-hoc: resolvable via
+# --test-config. The TestConfig.name is
+# ``BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP``.
+BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (
+    create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+        BAG010_ASH6, enable_update_group=True
+    )
+)
+
+
 # ─── bag010.ash6 — SC3 Transient Memory (route-scale sweep, WITH egress) ─
 # Testbed-driven factory (the former SC2 route-scale sweep + egress). Fixes both
 # peer counts (eBGP=2 ingress, iBGP=500 egress, RESOLVABLE, advertised) and
@@ -72,6 +90,7 @@ BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 
 __all__ = [
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
+    "BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
 ]

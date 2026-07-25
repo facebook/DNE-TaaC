@@ -22,6 +22,7 @@ module directly.
 # after D111520998 pruned cicd_ebb_int_tc.py to the conveyor-scheduled configs only.
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
@@ -124,6 +125,13 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # conveyor's ixia03 (Et3/35). Ad-hoc: resolvable via --test-config, not
     # scheduled on a conveyor node.
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
+    # bag010.ash6 SC2 constant attribute storage (char-2, INGRESS-ONLY) — the
+    # BAG012 varying-combinations engine made ingress-only + non-vacuous: 8 eBGP
+    # advertise 800K paths, accepted into RIB (route_registry cleared) but nexthop
+    # unresolvable (no egress); sweeps unique attribute combinations (100K→800K)
+    # and gates memory constancy + a received-count acceptance gate. Ad-hoc;
+    # runnable via --test-config, not yet wired into a conveyor node.
+    BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
     # bag010.ash6 SC3 transient memory (char-3) — the former SC2 route-scale
     # sweep WITH egress (eBGP=2 ingress + iBGP=500 egress, resolvable/advertised),
     # sweeps the ingress route count (10K→50K) and gates on the transient

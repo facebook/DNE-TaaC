@@ -380,6 +380,16 @@ _CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES: list[str] = ["65529:39744"]
 # get selected.
 _NEXTHOP_IFACE_STATE_FLAG: str = "bgp_resolve_nexthops_from_interface_state"
 
+# ─── SC2 (char-2 Constant Storage, INGRESS-ONLY) ───────────────────────────
+# eBGP ingress peer count (IPv6-only), FIXED. No iBGP egress at all.
+_INGRESS_ATTR_EBGP_PEER_COUNT: int = 8
+# Total received paths, FIXED: 100K prefixes/peer x 8 peers = 800K paths.
+_INGRESS_ATTR_TOTAL_PATHS: int = 800_000
+# The ONLY swept axis: number of unique attribute COMBINATIONS spread across the
+# fixed 800K paths. Attribute-storage memory must track the individual attribute
+# pools, NOT this combination count.
+_INGRESS_ATTR_COMBINATION_SWEEP: list[int] = [100_000, 200_000, 400_000, 800_000]
+
 
 def test_config_constant_attribute_storage_route_sweep_on_eos(
     test_config_name: str,
@@ -802,6 +812,9 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
     test_route_withdrawal: bool = False,
     withdrawal_wait_minutes: int = 3,
     dump_attribute_assignments: bool = False,
+    verify_received_prefixes: bool = False,
+    acceptance_gate_mode: str = "blocking",
+    memory_variance_gate_mode: str = "permissive",
     soak_time_minutes: int = 10,
     direct_ixia_connections: list | None = None,
     log_collection_timeout: int | None = None,
@@ -1039,6 +1052,9 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
                                     "test_route_withdrawal": test_route_withdrawal,
                                     "withdrawal_wait_minutes": withdrawal_wait_minutes,
                                     "dump_attribute_assignments": dump_attribute_assignments,
+                                    "verify_received_prefixes": verify_received_prefixes,
+                                    "acceptance_gate_mode": acceptance_gate_mode,
+                                    "memory_variance_gate_mode": memory_variance_gate_mode,
                                     **(
                                         {
                                             "ebgp_remote_as": ebgp_remote_as,
@@ -1859,6 +1875,113 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
         peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
         peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+        log_collection_timeout=600,
+    )
+
+
+def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+    testbed: PhysicalInventory,
+    enable_update_group: bool = False,
+) -> taac_types.TestConfig:
+    """SC2 constant-attribute-storage INGRESS-ONLY test config (testbed-driven).
+
+    The SC2 "scale & characteristics" test (char-2). Reuses the BAG012
+    varying-combinations engine but made INGRESS-ONLY and non-vacuous on bag010:
+    8 eBGP peers advertise 100K prefixes each (800K paths); routes are ACCEPTED
+    into the RIB (route_registry cleared + acceptance community) but the nexthop
+    is left UNRESOLVABLE (the interface-state nexthop gflag is deliberately NOT
+    enabled) so they are received+accepted but never best-path/advertised. NO
+    iBGP egress is configured. The swept axis is the number of unique attribute
+    COMBINATIONS (100K->800K) at fixed 800K paths; steady memory must stay
+    ~constant (attribute storage depends on the individual attribute pools, not
+    the combination count).
+
+    Gates: an acceptance gate (RECEIVED = TRibSummary.total_prefixes >=
+    prefixes/peer -- the anti-vacuousness guard, default blocking) and the
+    memory-variance gate (default permissive until calibrated). The nexthop is
+    unresolvable, so the acceptance gate deliberately counts RECEIVED, not
+    selected.
+
+    All SC tests run with update-group enabled; only the ``_UPDATE_GROUP``
+    variant is registered.
+    """
+    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
+    assert testbed.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on testbed"
+    )
+    assert testbed.dut_bgp_as is not None, "factory requires dut_bgp_as on testbed"
+
+    device_name = testbed.device_name
+    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
+    # get_update_packing_setup_tasks requires an iBGP interface arg; with
+    # ibgp_peer_count=0 it lays zero iBGP peers (eBGP-only device config).
+    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+
+    name = (
+        f"{device_name.upper().replace('.', '_')}"
+        "_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST"
+    )
+    if enable_update_group:
+        name += "_UPDATE_GROUP"
+
+    # Ingress-only device setup: eBGP peers only (ibgp_peer_count=0), IPv6-only.
+    setup_tasks = get_update_packing_setup_tasks(
+        device_name=device_name,
+        bgp_asn=testbed.dut_bgp_as,
+        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+        ebgp_peer_count=_INGRESS_ATTR_EBGP_PEER_COUNT,
+        ibgp_peer_count=0,
+        ebgp_remote_as=EBGP_REMOTE_AS,
+        ibgp_remote_as=IBGP_REMOTE_AS,
+        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        router_id=testbed.router_id,
+        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        enable_update_group=enable_update_group,
+    )
+    # Clear the route_registry / CRF so the injected scale prefixes are ACCEPTED
+    # into the RIB. Deliberately DO NOT enable the interface-state nexthop gflag
+    # -> nexthops stay unresolvable -> routes received+accepted but never
+    # best-path/advertised (ingress-only). The varying-combinations step restarts
+    # Bgp up front, so the CRF-free state takes effect without an extra bounce.
+    setup_tasks.append(
+        create_bgp_clear_route_filter_task(
+            device_name, set_outer_hostname=True, ixia_needed=True
+        )
+    )
+
+    return test_config_constant_attribute_storage_varying_combinations_on_eos(
+        test_config_name=name,
+        device_name=device_name,
+        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+        ebgp_remote_as=EBGP_REMOTE_AS,
+        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
+        # INGRESS-ONLY: no iBGP egress device group / peers.
+        ixia_interface_mimic_ibgp=None,
+        ibgp_local_as=None,
+        ixia_ibgp_ic_parent_network_v6=None,
+        ixia_ibgp_ic_parent_network_v4=None,
+        constant_ebgp_peer_count=_INGRESS_ATTR_EBGP_PEER_COUNT,
+        constant_ibgp_peer_count=0,
+        constant_total_paths=_INGRESS_ATTR_TOTAL_PATHS,
+        unique_combination_counts=_INGRESS_ATTR_COMBINATION_SWEEP,
+        soak_time_minutes=2,
+        dump_attribute_assignments=True,
+        test_address_families=["ipv6"],
+        setup_tasks=setup_tasks,
+        constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,
+        max_communities_per_route_from_pool=5,
+        random_seed=42,
+        peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
+        peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
+        # Acceptance gate (anti-vacuousness): routes must REACH the RIB. Nexthops
+        # are unresolvable, so this counts RECEIVED (total_prefixes), not selected.
+        verify_received_prefixes=True,
+        acceptance_gate_mode="blocking",
+        memory_variance_gate_mode="permissive",
         log_collection_timeout=600,
     )
 
