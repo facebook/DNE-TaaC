@@ -731,6 +731,39 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         )
 
     @staticmethod
+    def _validate_formulaic_route_attributes(
+        key: t.Tuple[str, str, str],
+        route_attributes: t.Optional[t.Dict[str, t.Any]],
+    ) -> None:
+        if route_attributes is None:
+            return
+        try:
+            TaacIxia._formulaic_route_attribute_distribution(
+                route_attributes.get("distribution")
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"unsupported route attribute distribution for {key!r}: "
+                f"{route_attributes.get('distribution')!r}"
+            ) from error
+        for field_name in ("community_rows", "extended_community_rows"):
+            rows = route_attributes.get(field_name, [])
+            if any(not row for row in rows):
+                raise ValueError(f"empty {field_name} row for {key!r}")
+            if rows and len({len(row) for row in rows}) != 1:
+                raise ValueError(f"inconsistent {field_name} widths for {key!r}")
+
+    @staticmethod
+    def _formulaic_route_attribute_distribution(
+        distribution: t.Any,
+    ) -> ixia_types.DistribitionType:
+        if distribution == "round_robin":
+            return ixia_types.DistribitionType.ROUND_ROBIN
+        if distribution == "randomize":
+            return ixia_types.DistribitionType.RANDOMIZE
+        raise ValueError(f"unsupported route attribute distribution {distribution!r}")
+
+    @staticmethod
     def _formulaic_next_hop_values(
         mutation: t.Dict[str, t.Any],
     ) -> t.List[str]:
@@ -834,11 +867,15 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                     raise ValueError(
                         f"missing route attribute {attribute!r} for {key!r}"
                     )
+            self._validate_formulaic_route_attributes(
+                key,
+                mutation.get("route_attributes"),
+            )
             prepared.append((mutation, shell, prefix_values, next_hop_values))
         return prepared
 
-    @staticmethod
     def _apply_formulaic_bgp_route(
+        self,
         mutation: t.Dict[str, t.Any],
         shell: t.Tuple[t.Any, t.Any, t.Any, t.Any],
         prefix_values: t.Optional[t.List[str]],
@@ -867,6 +904,27 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             route.EnableMultiExitDiscriminator.Single(attributes["med"] is not None)
         if attributes["med"] is not None and hasattr(route, "MultiExitDiscriminator"):
             route.MultiExitDiscriminator.Single(attributes["med"])
+        route_attributes = mutation.get("route_attributes")
+        if route_attributes is not None:
+            distribution_type = self._formulaic_route_attribute_distribution(
+                route_attributes.get("distribution")
+            )
+            configs = []
+            for field_name, attribute in (
+                ("community_rows", ixia_types.BgpAttribute.COMMUNITIES),
+                ("extended_community_rows", ixia_types.BgpAttribute.EXT_COMMUNITIES),
+            ):
+                rows = route_attributes.get(field_name, [])
+                if rows:
+                    configs.append(
+                        ixia_types.BgpAttributeConfig(
+                            attribute=attribute,
+                            value_lists=rows,
+                            distribution_type=distribution_type,
+                        )
+                    )
+            if configs:
+                self.configure_bgp_attributes(route, configs)
 
     def _restart_formulaic_bgp_routes(
         self,

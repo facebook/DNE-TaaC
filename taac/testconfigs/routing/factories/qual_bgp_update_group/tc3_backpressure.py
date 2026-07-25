@@ -6,7 +6,13 @@ Combines the default UG-backpressure spec run and a topology-smoke variant into
 one factory switched by ``smoke_only=False`` (default) / ``True``.
 """
 
-from ixia.ixia import types as ixia_types
+from taac.abstractions.topologies.ug_backpressure import (
+    UG_BACKPRESSURE,
+    UG_BACKPRESSURE_AS_NUMBERS,
+    UG_BACKPRESSURE_PARENT_NETWORKS,
+    UG_BACKPRESSURE_PEER_GROUPS,
+    UG_BACKPRESSURE_PORT_MAP,
+)
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc3_backpressure import (
     create_bgp_ug_backpressure_all_peers_block_down_recover_playbook,
@@ -27,38 +33,13 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
     EBGP_PEER_TO_DRAIN,
-    EBGP_REMOTE_AS,
     IBGP_PEER_SCALE_PER_PLANE,
-    IBGP_PEER_TO_DRAIN_PER_PLANE,
-    IBGP_REMOTE_AS,
-    IXIA_EBGP_IC_PARENT_NETWORK_V4,
     IXIA_EBGP_IC_PARENT_NETWORK_V6,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
-    IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
-)
-from taac.testconfigs.routing.util.bgp_ebb_ixia_config import (
-    create_ebb_scale_basic_port_configs,
-)
-from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
-    get_common_setup_tasks,
-    get_teardown_tasks,
 )
 from taac.test_as_a_config import types as taac_types
-from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
+from taac.test_as_a_config.types import TestConfig
 
 
 # =============================================================================
@@ -124,26 +105,6 @@ def _backpressure_heavy_as_path_255() -> list:
     return [64512 + (i % 1023) for i in range(255)]
 
 
-def _backpressure_storm_dg_v6_attribute_overrides() -> list:
-    """Inline BgpAttributeConfig overrides for the iBGP plane-1 V6 drain DG --
-    pre-attaches 32 community + 16 ext-community combos at IXIA-build time so
-    trigger sequences do not need runtime ``configure_*_pool`` (which cascades
-    chassis-wide via unconditional ``stop_protocols()``).
-    """
-    return [
-        ixia_types.BgpAttributeConfig(
-            attribute=ixia_types.BgpAttribute.COMMUNITIES,
-            value_lists=_backpressure_heavy_communities_32(),
-            distribution_type=ixia_types.DistribitionType.ROUND_ROBIN,
-        ),
-        ixia_types.BgpAttributeConfig(
-            attribute=ixia_types.BgpAttribute.EXT_COMMUNITIES,
-            value_lists=_backpressure_heavy_extended_communities_16(),
-            distribution_type=ixia_types.DistribitionType.ROUND_ROBIN,
-        ),
-    ]
-
-
 # =============================================================================
 # SHARED PEER-ADDRESS DERIVATIONS (from full-scale peer-index math)
 # =============================================================================
@@ -197,104 +158,6 @@ _BACKPRESSURE_2_3_1_SLOW_EBGP_V6_PEER_ADDRS = list(
         - _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT : EBGP_PEER_COUNT_V6 - EBGP_PEER_TO_DRAIN
     ]
 )
-
-
-def _backpressure_split_ebgp_v6_for_slow_peers(
-    port_configs: list,
-    slow_peer_count: int,
-    slow_dg_name: str,
-) -> list:
-    """Post-process the port_configs returned by
-    ``create_ebb_scale_basic_port_configs`` to carve the LAST
-    ``slow_peer_count`` peers of ``DEVICE_GROUP_IPV6_EBGP`` into a new
-    ``DEVICE_GROUP_IPV6_EBGP_SLOW`` DG. Both DGs point at the SAME DUT
-    peer-group so they land in the same UG on DUT. A post-IXIA-setup step
-    (see the 2.3.1 playbook setup_steps) reduces the slow DG's TCP WindowSize
-    to induce natural DUT adj-RIB-out backpressure on ONLY those peers.
-    """
-    if slow_peer_count <= 0:
-        return port_configs
-
-    # thrift-python structs are immutable -- use ``__replace__`` (frozen
-    # dataclasses-style) to rebuild each affected object.
-    out_ports = []
-    for port_cfg in port_configs:
-        dgs = list(getattr(port_cfg, "device_group_configs", None) or [])
-        new_dgs = []
-        matched = False
-        for dg in dgs:
-            if (
-                matched
-                or getattr(dg, "device_group_name", None) != "DEVICE_GROUP_IPV6_EBGP"
-            ):
-                new_dgs.append(dg)
-                continue
-            total = int(dg.multiplier)
-            if slow_peer_count >= total:
-                new_dgs.append(dg)
-                continue
-            fast_count = total - slow_peer_count
-            # Rebuild fast DG (shrunk).
-            fast_bgp = dg.v6_bgp_config
-            if fast_bgp and fast_bgp.import_bgp_routes_params_list:
-                fast_params = fast_bgp.import_bgp_routes_params_list[0].__replace__(
-                    end_index=fast_count,
-                )
-                fast_bgp = fast_bgp.__replace__(
-                    import_bgp_routes_params_list=[fast_params],
-                )
-            new_dgs.append(
-                dg.__replace__(multiplier=fast_count, v6_bgp_config=fast_bgp),
-            )
-            # Build slow DG variant.
-            slow_addrs = (
-                dg.v6_addresses_config.__replace__(start_index=fast_count)
-                if dg.v6_addresses_config
-                else None
-            )
-            slow_bgp = None
-            if dg.v6_bgp_config:
-                slow_params_list = []
-                if dg.v6_bgp_config.import_bgp_routes_params_list:
-                    slow_params_list = [
-                        dg.v6_bgp_config.import_bgp_routes_params_list[0].__replace__(
-                            prefix_pool_name="PREFIX_POOL_IPV6_EBGP_SLOW",
-                            start_index=fast_count,
-                            end_index=total,
-                        ),
-                    ]
-                _parent = IXIA_EBGP_IC_PARENT_NETWORK_V6
-                if 0x11 + 2 * (fast_count + slow_peer_count) > 0xFFFF:
-                    raise ValueError(
-                        f"eBGP fast+slow peer count "
-                        f"({fast_count + slow_peer_count}) would emit an "
-                        f"address outside the {_parent}::/112 range this "
-                        f"config assumes; extend the addressing scheme first."
-                    )
-                _local_start = f"{_parent}::{0x11 + 2 * fast_count:x}"
-                _remote_start = f"{_parent}::{0x10 + 2 * fast_count:x}"
-                slow_bgp = dg.v6_bgp_config.__replace__(
-                    bgp_peer_name="BGP_PEER_IPV6_EBGP_SLOW",
-                    import_bgp_routes_params_list=slow_params_list,
-                    local_peer_starting_ip=_local_start,
-                    remote_peer_starting_ip=_remote_start,
-                )
-            new_dgs.append(
-                dg.__replace__(
-                    device_group_name=slow_dg_name,
-                    device_group_index=max(
-                        (int(getattr(d, "device_group_index", 0)) for d in dgs),
-                        default=0,
-                    )
-                    + 1,
-                    multiplier=slow_peer_count,
-                    v6_addresses_config=slow_addrs,
-                    v6_bgp_config=slow_bgp,
-                ),
-            )
-            matched = True
-        out_ports.append(port_cfg.__replace__(device_group_configs=new_dgs))
-    return out_ports
 
 
 # =============================================================================
@@ -368,87 +231,18 @@ def create_bgp_ug_backpressure_test_config(
 
     # ── Extract physical_inventory fields ──
     device_name = physical_inventory.device_name
-    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
+    ixia_interface_mimic_ebgp, _ = physical_inventory.ixia_ports[0]
+    ixia_interface_mimic_ibgp, _ = physical_inventory.ixia_ports[1]
 
     # ── Common setup / teardown / port-configs / endpoints ──
-    setup_tasks = get_common_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=_BACKPRESSURE_PROFILE,
-        include_bgp_mon=False,
-        enable_update_group=True,
+    bound = UG_BACKPRESSURE.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=UG_BACKPRESSURE_PORT_MAP,
+        parent_networks=UG_BACKPRESSURE_PARENT_NETWORKS,
+        peer_groups=UG_BACKPRESSURE_PEER_GROUPS,
+        as_numbers=UG_BACKPRESSURE_AS_NUMBERS,
     )
-    teardown_tasks = get_teardown_tasks(
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-    )
-    basic_port_configs = _backpressure_split_ebgp_v6_for_slow_peers(
-        create_ebb_scale_basic_port_configs(
-            device_name=device_name,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            ebgp_peer_count_v6=EBGP_PEER_COUNT_V6,
-            ebgp_peer_count_v4=EBGP_PEER_COUNT_V4,
-            ebgp_peer_to_drain=EBGP_PEER_TO_DRAIN,
-            ibgp_peer_scale_per_plane=IBGP_PEER_SCALE_PER_PLANE,
-            ibgp_peer_to_drain_per_plane=IBGP_PEER_TO_DRAIN_PER_PLANE,
-            ebgp_remote_as=EBGP_REMOTE_AS,
-            ibgp_remote_as=IBGP_REMOTE_AS,
-            ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-            ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-            ixia_ibgp_ic_parent_network_v6_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v6_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
-            include_bgp_mon=False,
-            profile=_BACKPRESSURE_PROFILE,
-            drain=True,
-            plane_drain_dg_v6_attribute_overrides={
-                1: _backpressure_storm_dg_v6_attribute_overrides(),
-            },
-        ),
-        slow_peer_count=_BACKPRESSURE_2_3_1_SLOW_PEER_COUNT,
-        slow_dg_name=_BACKPRESSURE_2_3_1_SLOW_DG_NAME,
-    )
-    endpoints = [
-        Endpoint(
-            name=device_name,
-            dut=True,
-            ixia_ports=[
-                ixia_interface_mimic_ebgp,
-                ixia_interface_mimic_ibgp,
-            ],
-            direct_ixia_connections=[
-                DirectIxiaConnection(
-                    interface=ixia_interface_mimic_ebgp,
-                    ixia_chassis_ip=ixia_chassis_ip,
-                    ixia_port=ixia_port_ebgp,
-                ),
-                DirectIxiaConnection(
-                    interface=ixia_interface_mimic_ibgp,
-                    ixia_chassis_ip=ixia_chassis_ip,
-                    ixia_port=ixia_port_ibgp,
-                ),
-            ],
-        ),
-    ]
+    compiled = bound.compile()
 
     # ── Smoke variant returns early ──
     if smoke_only:
@@ -458,14 +252,14 @@ def create_bgp_ug_backpressure_test_config(
             log_collection_timeout=600,
             basset_pool="dne.test",
             ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
-            endpoints=endpoints,
-            host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
+            endpoints=compiled.endpoints,
+            host_os_type_map=compiled.host_os_type_map,
             host_driver_args=physical_inventory.host_driver_args,
             oss_mock_device_data=physical_inventory.oss_mock_device_data,
             startup_checks=[],
-            setup_tasks=setup_tasks,
-            teardown_tasks=teardown_tasks,
-            basic_port_configs=basic_port_configs,
+            setup_tasks=compiled.setup_tasks,
+            teardown_tasks=compiled.teardown_tasks,
+            basic_port_configs=compiled.basic_port_configs,
             playbooks=[
                 create_bgp_ug_backpressure_topology_smoke_playbook(
                     expected_established_sessions=_BACKPRESSURE_EXPECTED_ESTABLISHED_SESSIONS,
@@ -528,14 +322,14 @@ def create_bgp_ug_backpressure_test_config(
         log_collection_timeout=600,
         basset_pool="dne.test",
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
-        endpoints=endpoints,
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
         host_driver_args=physical_inventory.host_driver_args,
         oss_mock_device_data=physical_inventory.oss_mock_device_data,
         startup_checks=[],
-        setup_tasks=setup_tasks,
-        teardown_tasks=teardown_tasks,
-        basic_port_configs=basic_port_configs,
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
         playbooks=[
             # ── 2.3.1 ──
             create_bgp_ug_backpressure_fast_peers_not_held_back_playbook(
