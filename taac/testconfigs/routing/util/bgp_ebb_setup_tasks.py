@@ -21,6 +21,10 @@ import ipaddress
 import json
 import typing as t
 
+from taac.abstractions.topology import (
+    OpenRStandaloneEndpoint,
+    OpenRStandaloneLink,
+)
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_OPENR_START_IPV4S,
@@ -626,6 +630,68 @@ def _get_full_scale_ip_config_tasks(
 # =============================================================================
 # Helper 5: OpenR setup tasks
 # =============================================================================
+def _openr_port_channel_command(
+    link: OpenRStandaloneLink,
+    endpoint: OpenRStandaloneEndpoint,
+    peer: OpenRStandaloneEndpoint,
+) -> str:
+    return (
+        "configure\n"
+        f"default interface {endpoint.member_interface}\n"
+        "!\n"
+        f"interface {link.interface_name}\n"
+        f"description OPENR_STANDALONE_TO_{peer.hostname}\n"
+        "load-interval 5\n"
+        "mtu 9192\n"
+        "no switchport\n"
+        f"ip address {endpoint.ipv4_cidr}\n"
+        f"ipv6 address {endpoint.ipv6_cidr}\n"
+        f"ipv6 address {endpoint.link_local_cidr} link-local\n"
+        "ipv6 nd ra disabled\n"
+        "!\n"
+        f"interface {endpoint.member_interface}\n"
+        "no shutdown\n"
+        "mtu 9000\n"
+        f"speed {link.speed}\n"
+        "no switchport\n"
+        "ipv6 enable\n"
+        "ipv6 address auto-config\n"
+        "ipv6 nd ra rx accept default-route\n"
+        f"channel-group {link.port_channel_id} mode active\n"
+        "end"
+    )
+
+
+def get_openr_standalone_setup_tasks(
+    link: OpenRStandaloneLink,
+) -> t.List[Task]:
+    return [
+        create_run_commands_on_shell_task(
+            hostname=endpoint.hostname,
+            cmds=[_openr_port_channel_command(link, endpoint, peer)],
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
+        for endpoint, peer in (
+            (link.helper, link.owner),
+            (link.owner, link.helper),
+        )
+    ] + [
+        create_openr_route_action_task(
+            device_name=link.owner.hostname,
+            action=OpenRRouteAction.INJECT.value,
+            start_ipv4s=DEFAULT_OPENR_START_IPV4S,
+            start_ipv6s=DEFAULT_OPENR_START_IPV6S,
+            local_link=link.kv_link(link.owner),
+            other_link=link.kv_link(link.helper),
+            count=63,
+            step=2,
+            ixia_needed=True,
+            set_outer_hostname=True,
+        )
+    ]
+
+
 def _get_openr_setup_tasks(
     device_name: str,
     profile: BgpPlusPlusProfile,
@@ -634,6 +700,7 @@ def _get_openr_setup_tasks(
     openr_port_channel_link_local: t.Optional[str] = None,
     openr_local_link: t.Optional[t.Dict[str, t.Any]] = None,
     openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
+    openr_standalone_link: OpenRStandaloneLink | None = None,
 ) -> t.List[Task]:
     """
     Configure OpenR Port-Channel and inject routes if profile requires it.
@@ -661,6 +728,10 @@ def _get_openr_setup_tasks(
 
     if profile != BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R:
         return tasks
+    if openr_standalone_link is not None:
+        if openr_standalone_link.owner.hostname != device_name:
+            raise ValueError("OpenR link owner must match the setup device")
+        return get_openr_standalone_setup_tasks(openr_standalone_link)
 
     pc_member = openr_port_channel_member or OPENR_PORT_CHANNEL_MEMBER
     pc_ipv4 = openr_port_channel_ipv4 or OPENR_PORT_CHANNEL_IPV4
@@ -1196,6 +1267,7 @@ def get_common_setup_tasks(
     openr_port_channel_link_local: t.Optional[str] = None,
     openr_local_link: t.Optional[t.Dict[str, t.Any]] = None,
     openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
+    openr_standalone_link: OpenRStandaloneLink | None = None,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     # When True, set the bgpcpp startup gflag
@@ -1317,6 +1389,7 @@ def get_common_setup_tasks(
             openr_port_channel_link_local=openr_port_channel_link_local,
             openr_local_link=openr_local_link,
             openr_other_link=openr_other_link,
+            openr_standalone_link=openr_standalone_link,
         )
     )
 
