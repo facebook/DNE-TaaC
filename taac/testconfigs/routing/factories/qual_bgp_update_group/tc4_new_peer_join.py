@@ -242,17 +242,18 @@ def _required_ixia_tag(group: BoundDeviceGroup) -> str:
 def _required_route_intent(
     group: BoundDeviceGroup,
 ) -> tuple[int, tuple[str, ...]]:
-    if len(group.spec.prefix_pools) != 1:
+    if len(group.prefix_advertisements) != 1:
         raise ValueError(
-            f"UG new-peer-join sender {group.name!r} requires one prefix pool"
+            f"UG new-peer-join sender {group.name!r} requires one prefix advertisement"
         )
-    prefix_pool = group.spec.prefix_pools[0]
-    policy = prefix_pool.policy
+    advertisement = group.prefix_advertisements[0]
+    policy = advertisement.spec.policy
     if not isinstance(policy, BgpPolicy):
         raise ValueError(
-            f"UG new-peer-join prefix pool {prefix_pool.name!r} requires a BGP policy"
+            f"UG new-peer-join advertisement {advertisement.spec.name!r} "
+            "requires a BGP policy"
         )
-    return prefix_pool.route_count, policy.communities
+    return advertisement.spec.allocation.prefixes_per_peer, policy.communities
 
 
 def _selectors_from_bound(bound: BoundTopology) -> _UgNewPeerJoinSelectors:

@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
+import ipaddress
 import os
 import threading
 import time
@@ -622,25 +623,306 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             raise e
 
     # ------------------------------------------------------------------
-    # DLB hardening helpers — used by INVOKE_IXIA_API_STEP from the DLB
-    # hardening + longevity testconfigs. Mirror the logic in
-    # `testconfigs/npi/dlb_csvs/ixia_csv_inject.py` (the standalone
-    # binary used for live debug) but reuse the per-test IxNetwork
-    # session that TaacIxia already owns instead of opening a new one.
-    #
-    # Geometry recipe (verified live on session 220 / gtsw001 2026-06-25):
-    #   pool.NumberOfAddresses = 1
-    #   NG.Multiplier          = N*W  (total rows in CSV)
-    #   NetworkAddress.ValueList = row-major repeated [p0*W, p1*W, ...]
-    #   Ipv6NextHop.ValueList    = CSV's NH column (N*W entries)
-    #   EnableAddPath = True; MvNextHopCount = W; AddPathId = 1..N*W
-    #   EnableFlapping = False  (defensive — stale UI flap = shrinking PR)
-    #
-    # Mutation sequence (BOTH stops required — DG-stop alone leaves NG
-    # "started" and NG.Multiplier mutation errors):
-    #   dg.Stop() -> ng.Stop() -> mutate -> ng.Start() -> dg.Start()
+    # Formulaic EBB route helpers. This is deliberately narrower than the DLB
+    # mutation path below: it owns sparse prefixes, external next hops, and
+    # baseline attributes only.
     # ------------------------------------------------------------------
 
+    def _find_formulaic_bgp_route_shell(
+        self,
+        device_group_name: str,
+        prefix_pool_name: str,
+        afi: str,
+    ):
+        device_groups = [
+            device_group
+            for topology in self.ixnetwork.Topology.find()
+            for device_group in topology.DeviceGroup.find()
+            if device_group.Name == device_group_name
+        ]
+        if len(device_groups) != 1:
+            raise RuntimeError(
+                f"expected one device group {device_group_name!r}; "
+                f"found {len(device_groups)}"
+            )
+        device_group = device_groups[0]
+        pool_attr = "Ipv4PrefixPools" if afi == "v4" else "Ipv6PrefixPools"
+        route_attr = "BgpIPRouteProperty" if afi == "v4" else "BgpV6IPRouteProperty"
+        matches = []
+        for network_group in device_group.NetworkGroup.find():
+            for prefix_pool in getattr(network_group, pool_attr).find():
+                if prefix_pool.Name == prefix_pool_name:
+                    matches.append((network_group, prefix_pool))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one {afi} prefix pool {prefix_pool_name!r} under "
+                f"{device_group_name!r}; found {len(matches)}"
+            )
+        network_group, prefix_pool = matches[0]
+        route_properties = list(getattr(prefix_pool, route_attr).find())
+        if len(route_properties) != 1:
+            raise RuntimeError(
+                f"expected one route property for {prefix_pool_name!r}; "
+                f"found {len(route_properties)}"
+            )
+        return device_group, network_group, prefix_pool, route_properties[0]
+
+    @staticmethod
+    def _formulaic_prefix_values(prefix: t.Dict[str, t.Any]) -> t.List[str]:
+        start = ipaddress.ip_address(prefix["start"])
+        step = prefix["step"]
+        count = prefix["count"]
+        excluded = set(prefix["excluded_indices"])
+        values = []
+        for candidate in range(count + len(excluded)):
+            if candidate not in excluded:
+                values.append(str(type(start)(int(start) + candidate * step)))
+        if len(values) != count:
+            raise ValueError(
+                "formulaic prefix exclusions did not yield the requested count"
+            )
+        return values
+
+    @staticmethod
+    def _required_next_hop_address_count(
+        distribution: str,
+        prefix_distribution: str,
+        peer_count: int,
+        prefixes_per_peer: int,
+    ) -> int:
+        if prefix_distribution not in {"shared", "disjoint"}:
+            raise ValueError(f"unsupported prefix distribution {prefix_distribution!r}")
+        if distribution == "shared":
+            return 1
+        if distribution == "per_peer":
+            return peer_count
+        if distribution == "per_prefix":
+            return (
+                prefixes_per_peer
+                if prefix_distribution == "shared"
+                else peer_count * prefixes_per_peer
+            )
+        if distribution == "per_peer_prefix":
+            return peer_count * prefixes_per_peer
+        raise ValueError(f"unsupported next-hop distribution {distribution!r}")
+
+    @staticmethod
+    def _next_hop_address_index(
+        distribution: str,
+        prefix_distribution: str,
+        peer_index: int,
+        prefix_index: int,
+        prefixes_per_peer: int,
+    ) -> int:
+        if distribution == "shared":
+            return 0
+        if distribution == "per_peer":
+            return peer_index
+        if distribution == "per_prefix":
+            return (
+                prefix_index
+                if prefix_distribution == "shared"
+                else peer_index * prefixes_per_peer + prefix_index
+            )
+        if distribution == "per_peer_prefix":
+            return peer_index * prefixes_per_peer + prefix_index
+        raise AssertionError(
+            f"validated next-hop distribution changed: {distribution!r}"
+        )
+
+    @staticmethod
+    def _formulaic_next_hop_values(
+        mutation: t.Dict[str, t.Any],
+    ) -> t.List[str]:
+        next_hop = mutation["next_hop"]
+        peer_count = mutation["peer_count"]
+        prefixes_per_peer = mutation["prefixes_per_peer"]
+        prefix_distribution = mutation["prefix"]["distribution"]
+        distribution = next_hop["distribution"]
+        required_address_count = TaacIxia._required_next_hop_address_count(
+            distribution,
+            prefix_distribution,
+            peer_count,
+            prefixes_per_peer,
+        )
+        if next_hop["kind"] == "formulaic":
+            first = ipaddress.ip_address(next_hop["start"])
+            step = next_hop["step"]
+
+            def address_at(index: int) -> str:
+                return str(type(first)(int(first) + index * step))
+
+        elif next_hop["kind"] == "explicit":
+            addresses = next_hop["addresses"]
+            if len(addresses) != required_address_count:
+                raise ValueError(
+                    "explicit next-hop cardinality mismatch: expected "
+                    f"{required_address_count}, got {len(addresses)}"
+                )
+
+            def address_at(index: int) -> str:
+                return addresses[index]
+
+        else:
+            raise ValueError(f"unsupported next-hop kind {next_hop['kind']!r}")
+
+        values = []
+        for peer_index in range(peer_count):
+            for prefix_index in range(prefixes_per_peer):
+                index = TaacIxia._next_hop_address_index(
+                    distribution,
+                    prefix_distribution,
+                    peer_index,
+                    prefix_index,
+                    prefixes_per_peer,
+                )
+                values.append(address_at(index))
+        return values
+
+    def _prepare_formulaic_bgp_routes(
+        self,
+        mutations: t.List[t.Dict[str, t.Any]],
+    ) -> t.List[t.Tuple[t.Any, t.Any, t.Any, t.Any]]:
+        prepared = []
+        seen = set()
+        for mutation in mutations:
+            key = (
+                mutation["device_group_name"],
+                mutation["prefix_pool_name"],
+                mutation["afi"],
+            )
+            if key in seen:
+                raise ValueError(f"duplicate formulaic BGP route target {key!r}")
+            seen.add(key)
+            shell = self._find_formulaic_bgp_route_shell(*key)
+            device_group, _network_group, prefix_pool, _route_property = shell
+            if device_group.Multiplier != mutation["peer_count"]:
+                raise ValueError(
+                    f"peer count mismatch for {key!r}: expected "
+                    f"{mutation['peer_count']}, got {device_group.Multiplier}"
+                )
+            if prefix_pool.NumberOfAddresses != mutation["prefixes_per_peer"]:
+                raise ValueError(
+                    f"prefix count mismatch for {key!r}: expected "
+                    f"{mutation['prefixes_per_peer']}, got "
+                    f"{prefix_pool.NumberOfAddresses}"
+                )
+            prefix = mutation["prefix"]
+            prefix_values = None
+            if prefix["excluded_indices"]:
+                prefix_values = self._formulaic_prefix_values(prefix)
+                expected_prefix_count = (
+                    mutation["prefixes_per_peer"]
+                    if prefix["distribution"] == "shared"
+                    else mutation["peer_count"] * mutation["prefixes_per_peer"]
+                )
+                if len(prefix_values) != expected_prefix_count:
+                    raise ValueError(
+                        f"prefix inventory mismatch for {key!r}: expected "
+                        f"{expected_prefix_count}, got {len(prefix_values)}"
+                    )
+                if prefix["distribution"] == "shared":
+                    prefix_values *= mutation["peer_count"]
+            next_hop_values = (
+                self._formulaic_next_hop_values(mutation)
+                if mutation["next_hop"] is not None
+                else None
+            )
+            attributes = mutation["attributes"]
+            for attribute in ("med", "local_pref", "origin"):
+                if attribute not in attributes:
+                    raise ValueError(
+                        f"missing route attribute {attribute!r} for {key!r}"
+                    )
+            prepared.append((mutation, shell, prefix_values, next_hop_values))
+        return prepared
+
+    @staticmethod
+    def _apply_formulaic_bgp_route(
+        mutation: t.Dict[str, t.Any],
+        shell: t.Tuple[t.Any, t.Any, t.Any, t.Any],
+        prefix_values: t.Optional[t.List[str]],
+        next_hop_values: t.Optional[t.List[str]],
+    ) -> None:
+        _device_group, _network_group, pool, route = shell
+        if prefix_values is not None:
+            pool.NetworkAddress.ValueList(prefix_values)
+        if next_hop_values is not None:
+            route.NextHopType.Single(
+                ixia_types.SET_NEXT_HOP_TYPE_MAP[ixia_types.SetNextHopType.MANUALLY]
+            )
+            route.NextHopIPType.Single("ipv4" if mutation["afi"] == "v4" else "ipv6")
+            next_hop_field = (
+                route.Ipv4NextHop if mutation["afi"] == "v4" else route.Ipv6NextHop
+            )
+            next_hop_field.ValueList(next_hop_values)
+        attributes = mutation["attributes"]
+        if hasattr(route, "EnableLocalPreference"):
+            route.EnableLocalPreference.Single(True)
+        if hasattr(route, "LocalPreference"):
+            route.LocalPreference.Single(attributes["local_pref"])
+        if hasattr(route, "Origin"):
+            route.Origin.Single(attributes["origin"])
+        if hasattr(route, "EnableMultiExitDiscriminator"):
+            route.EnableMultiExitDiscriminator.Single(attributes["med"] is not None)
+        if attributes["med"] is not None and hasattr(route, "MultiExitDiscriminator"):
+            route.MultiExitDiscriminator.Single(attributes["med"])
+
+    def _restart_formulaic_bgp_routes(
+        self,
+        stopped: t.List[t.Tuple[str, t.Any]],
+        *,
+        best_effort: bool,
+    ) -> None:
+        while stopped:
+            component_name, component = stopped[-1]
+            try:
+                component.Start()
+            except Exception:
+                if not best_effort:
+                    raise
+                self.logger.exception(
+                    "failed to restore formulaic BGP route %s", component_name
+                )
+            stopped.pop()
+
+    def configure_formulaic_bgp_routes(
+        self,
+        mutations: t.List[t.Dict[str, t.Any]],
+    ) -> None:
+        """Apply compact sparse-prefix and external-next-hop route intent."""
+        prepared = self._prepare_formulaic_bgp_routes(mutations)
+        if not prepared:
+            return
+
+        stopped = []
+        try:
+            for (
+                _mutation,
+                (device_group, network_group, _pool, _route),
+                _prefix_values,
+                _next_hop_values,
+            ) in prepared:
+                device_group.Stop()
+                stopped.append(("device group", device_group))
+                network_group.Stop()
+                stopped.append(("network group", network_group))
+
+            for mutation, shell, prefix_values, next_hop_values in prepared:
+                self._apply_formulaic_bgp_route(
+                    mutation,
+                    shell,
+                    prefix_values,
+                    next_hop_values,
+                )
+
+            self.apply_changes()
+            self._restart_formulaic_bgp_routes(stopped, best_effort=False)
+        except Exception:
+            self._restart_formulaic_bgp_routes(stopped, best_effort=True)
+            raise
+
+    # DLB hardening helpers used by its existing CSV injection workflows.
     def _find_dlb_ng_dg(self, pool_name: str):
         """Locate the named NetworkGroup, its parent DeviceGroup, its
         single Ipv6PrefixPool, and its BgpV6IPRouteProperty in the

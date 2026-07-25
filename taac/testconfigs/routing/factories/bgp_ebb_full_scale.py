@@ -11,7 +11,7 @@ See ../README.md §3.
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
     EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
-    EBB_FULL_SCALE_WITH_BGPMON,
+    ebb_full_scale_topology,
     EBB_PARENT_NETWORKS,
     EBB_PEER_GROUPS,
 )
@@ -1105,7 +1105,9 @@ def create_ebb_longevity_test_config(
         physical_inventory, "LONGEVITY", enable_update_group
     )
 
-    bound = EBB_FULL_SCALE_WITH_BGPMON.bind_to_inventory(
+    bound = ebb_full_scale_topology(
+        openr_enabled=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
+    ).bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
         parent_networks=EBB_PARENT_NETWORKS,
