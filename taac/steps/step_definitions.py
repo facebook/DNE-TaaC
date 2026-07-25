@@ -309,6 +309,124 @@ def create_snapshot_bgp_sent_route_counts_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def create_snapshot_bgp_dut_best_path_as_path_step(
+    hostname: str,
+    snapshot_key: str,
+    test_prefix_parents: t.List[str],
+    discriminator_asn: int,
+    expected_prefix_count: int,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Baseline the DUT's selected best-path AS-PATH for the 2.9.1 test prefixes
+    while ONLY the loser set is advertised, so the paired
+    ``create_verify_bgp_dut_best_path_as_path_converged_step`` can assert
+    convergence to the winner without hard-coding absolute AS-PATH values.
+
+    Records, per test prefix, the count of ``discriminator_asn`` in the DUT
+    Loc-RIB best path (uniform at baseline). Reads the RIB (Loc-RIB / best-path
+    selection), which is correct under Update Group -- unlike adj-RIB-out
+    (T271301144) -- and needs no BGP flap.
+
+    Args:
+        hostname: DUT hostname (bgpcpp source of truth).
+        snapshot_key: Unique key; the matching verify step must reuse it.
+        test_prefix_parents: CIDRs the test prefixes fall under (e.g. the /15
+            covering the 500 competing /24s).
+        discriminator_asn: ASN whose occurrence-count distinguishes the sets (the
+            loser prepends it N more times than the winner).
+        expected_prefix_count: number of test prefixes expected in the RIB.
+        description: Optional custom description.
+    """
+    if not test_prefix_parents:
+        raise ValueError(
+            "create_snapshot_bgp_dut_best_path_as_path_step: test_prefix_parents "
+            "must be non-empty"
+        )
+    if description is None:
+        description = (
+            f"Baseline DUT best-path AS{discriminator_asn} count for "
+            f"{expected_prefix_count} test prefixes on {hostname} "
+            f"(key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "snapshot_bgp_dut_best_path_as_path",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "test_prefix_parents": list(test_prefix_parents),
+        "discriminator_asn": int(discriminator_asn),
+        "expected_prefix_count": int(expected_prefix_count),
+    }
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_dut_best_path_as_path_converged_step(
+    hostname: str,
+    snapshot_key: str,
+    test_prefix_parents: t.List[str],
+    discriminator_asn: int,
+    expected_prefix_count: int,
+    expected_as_path_delta: int = 3,
+    tolerance: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Strict criterion-1 for 2.9.1: assert the DUT converged EVERY test prefix's
+    best path to the winner set (best-path AS-PATH ``discriminator_asn`` count ==
+    baseline - ``expected_as_path_delta``). Any prefix still at the baseline count
+    is reported as stuck on the loser (best-path change did not complete /
+    split-brain). Raises ``TestCaseFailure`` if more than ``tolerance`` prefixes
+    violate, or if the baseline snapshot is missing / test prefixes are absent
+    (never vacuous).
+
+    SCOPE: this verifies the DUT best-path SELECTION converged to the winner for
+    every prefix (read from Loc-RIB). Under Update Group the DUT distributes that
+    one best path to all group members by construction; it does NOT independently
+    read each peer, so a per-peer split-brain (DUT selects the winner but fails to
+    re-advertise it to a member) is out of scope pending the deferred per-peer
+    reader (T271301144).
+
+    Requires the paired ``create_snapshot_bgp_dut_best_path_as_path_step`` to have
+    run earlier under the same ``snapshot_key``.
+
+    Args:
+        hostname: DUT hostname (bgpcpp source of truth).
+        snapshot_key: must match the paired snapshot step.
+        test_prefix_parents: CIDRs the test prefixes fall under.
+        discriminator_asn: ASN whose occurrence-count distinguishes the sets.
+        expected_prefix_count: number of test prefixes expected in the RIB.
+        expected_as_path_delta: extra ``discriminator_asn`` prepends the loser
+            carries vs the winner (2.9.1 Set A prepends it 3 more times).
+        tolerance: prefixes allowed to violate before failing.
+        expected_fail / expected_fail_reason: XFAIL handling.
+        description: Optional custom description.
+    """
+    if not test_prefix_parents:
+        raise ValueError(
+            "create_verify_bgp_dut_best_path_as_path_converged_step: "
+            "test_prefix_parents must be non-empty"
+        )
+    if description is None:
+        description = (
+            f"Verify DUT converged {expected_prefix_count} test prefixes to the "
+            f"winning best path on {hostname} (key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_dut_best_path_as_path_converged",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "test_prefix_parents": list(test_prefix_parents),
+        "discriminator_asn": int(discriminator_asn),
+        "expected_prefix_count": int(expected_prefix_count),
+        "expected_as_path_delta": int(expected_as_path_delta),
+        "tolerance": int(tolerance),
+        "expected_fail": expected_fail,
+    }
+    if expected_fail_reason is not None:
+        params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_verify_bgp_sent_route_count_delta_step(
     hostname: str,
     snapshot_key: str,
