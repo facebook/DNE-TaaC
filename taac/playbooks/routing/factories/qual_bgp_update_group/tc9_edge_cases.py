@@ -3,14 +3,15 @@
 """Spec 2.9 — Edge Cases and Adversarial Scenarios. UG qualification playbook factories.
 
 Implemented:
-- 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
+- 2.9.1 Best-Path Change During Active Distribution
 - 2.9.2 Simultaneous Disruptions Across All Groups
 - 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
 - 2.9.6 Staggered Peer Startup: Peers Coming Up at Different Times
+- 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
 
-The remaining section-2.9 scenarios (2.9.1 best-path-change, 2.9.3 NOTIFICATION
-isolation) land as their own factory functions here when implemented. Spec 2.9.5
-is struck-through / excluded in the qualification plan.
+The remaining section-2.9 scenario (2.9.3 NOTIFICATION isolation) lands as its own
+factory function here when implemented. Spec 2.9.5 is struck-through / excluded in
+the qualification plan.
 """
 
 import typing as t
@@ -34,9 +35,11 @@ from taac.steps.step_definitions import (
     create_openr_route_action_step,
     create_run_task_step,
     create_set_bgp_prefixes_local_preference_step,
+    create_snapshot_bgp_dut_best_path_as_path_step,
     create_snapshot_bgp_sent_route_counts_step,
     create_start_stop_bgp_peers_step,
     create_validation_step,
+    create_verify_bgp_dut_best_path_as_path_converged_step,
     create_verify_bgp_sent_route_count_delta_step,
     create_verify_bgp_sent_route_counts_uniform_step,
 )
@@ -2167,6 +2170,532 @@ def create_bgp_ug_staggered_startup_playbook(
 
     return Playbook(
         name="bgp_ug_staggered_startup",
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+def create_bgp_ug_best_path_change_playbook(
+    *,
+    device_name: str,
+    # The two competing eBGP v4 pools (same NLRI, distinct names): Set A long
+    # AS-PATH (less preferred), Set B short AS-PATH (preferred). Advertising Set B
+    # flips the best-path A->B; withdrawing it flips back -- both Active toggles.
+    ebgp_bestpath_a_pool_regex: str,
+    ebgp_bestpath_b_pool_regex: str,
+    # iBGP v4 peers (by peer-address subnet) for the measure-first PS probe. The
+    # per-session peer-group field is not the AFI peer-group name on the full-scale
+    # topology, so scope by subnet (same as 2.9.4 / 2.9.6). The v6 leg has its own
+    # ``ibgp_v6_peer_parent_prefixes`` (see the IPv6 section below).
+    ibgp_v4_peer_parent_prefixes: t.List[str],
+    test_prefix_count: int = 500,
+    # --- Strict criterion-1 (DUT-side best-path convergence) ---
+    # When both ``test_prefix_parents`` and ``discriminator_asn`` are supplied, the
+    # playbook ADDITIONALLY asserts (strictly) that the DUT converged every test
+    # prefix's SELECTED best path to Set B. It baselines Set A's best-path AS-PATH
+    # in stage 1 (Set A alone), then after the flip (step 4) and the final settle
+    # (step 8) asserts each best path dropped by exactly ``best_path_as_path_delta``
+    # occurrences of ``discriminator_asn`` (Set A -> Set B) with none stuck on Set
+    # A. Reads the DUT Loc-RIB best path (correct under UG, no flap); combined with
+    # the update-group membership check it establishes every group member received
+    # Set B. Left unset => measure-first PS probe only (the pre-existing behavior).
+    test_prefix_parents: t.Optional[t.List[str]] = None,
+    discriminator_asn: t.Optional[int] = None,
+    best_path_as_path_delta: int = 3,
+    strict_convergence_expected_fail: bool = False,
+    strict_convergence_expected_fail_reason: t.Optional[str] = None,
+    # --- IPv6 leg (opt-in) ---
+    # When the v6 pool regexes are supplied, the playbook ALSO drives the eBGP v6
+    # competing sets at every stage (advertise / withdraw / oscillate) and, when
+    # ``test_prefix_parents_v6`` + ``discriminator_asn`` are set, runs the same STRICT
+    # best-path convergence assertion for v6 (its own baseline snapshot key). v6 forms
+    # its own update groups, so this exercises the best-path change on both AFIs. The
+    # discriminator ASN + delta are shared with v4 (the eBGP peers are the same AS on
+    # both AFIs). Left unset -> v4-only (byte-identical to the pre-v6 behavior).
+    ebgp_bestpath_a_pool_regex_v6: t.Optional[str] = None,
+    ebgp_bestpath_b_pool_regex_v6: t.Optional[str] = None,
+    ibgp_v6_peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    test_prefix_parents_v6: t.Optional[t.List[str]] = None,
+    # --- Checks ---
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    bgp_mon_ignore_prefixes: t.Optional[t.List[str]] = None,
+    # --- Timing / oscillation ---
+    op_settle_s: int = 90,
+    converge_settle_s: int = 60,
+    # Spec step 6: alternate the winning path every ~10s for 5 min. 30 flips x 10s
+    # = 5 min; the even count ends on "advertise Set B" so the test settles on the
+    # preferred (B) path (spec step 7 "ending on LOCAL_PREF 200").
+    oscillation_flip_count: int = 30,
+    oscillation_interval_s: int = 10,
+    session_retry_count: int = 10,
+    session_retry_delay_s: float = 30.0,
+    load_avg_baseline: float = 12.0,
+    vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.9.1 playbook (Best-Path Change
+    During Active Distribution).
+
+    Intent (spec 2.9.1): while the DUT is still distributing one path for a set of
+    prefixes to a large update group, the best path changes -- verify every group
+    member converges to the same final best path (no split-brain, no stale routes)
+    and that rapid best-path oscillation neither crashes BGP++ nor corrupts
+    update-group state.
+
+    DISCRIMINATOR (DNE-approved deviation from the spec's LOCAL_PREF): LOCAL_PREF is
+    non-transitive over eBGP and bag013's EB-FA-IN sets no LP (on-device policy dump
+    P2421451582), so the best path is driven by AS-PATH LENGTH instead. Two eBGP
+    "competing sets" advertise the SAME ``test_prefix_count`` v4 prefixes -- Set A
+    with a long AS-PATH (less preferred), Set B short (preferred; both built at
+    config time via each pool's ``RouteScale.as_path_prepend_numbers``). Advertising
+    Set B flips the best path A->B; withdrawing it flips back -- both are IXIA Active
+    toggles (``create_advertise_withdraw_prefixes_step``), so no session flaps.
+
+    DUAL-AFI: when the ``*_v6`` knobs are supplied, the same competition + strict
+    convergence runs on the eBGP v6 sets in lock-step at every stage (v6 forms its
+    own update groups), so 2.9.1 exercises the best-path change on both v4 and v6.
+    v6 runs strict from the start -- next-hop-self resolves v6 next-hops
+    deterministically under WITHOUT_OPEN_R, so there is no cold-start distribution
+    delay. Left unset -> v4-only.
+
+    STRICT CRITERION-1 (spec steps 4/5/8, pass-criteria 1/3) -- DUT-side best-path
+    convergence: when ``test_prefix_parents`` + ``discriminator_asn`` are supplied,
+    the playbook baselines Set A's best-path AS-PATH while only Set A is up (stage 1)
+    and, after the flip and after the final settle, asserts the DUT's SELECTED best
+    path for EVERY test prefix converged to Set B (baseline ``discriminator_asn``
+    count minus ``best_path_as_path_delta``), with none stuck on Set A. This reads
+    the DUT Loc-RIB (best-path selection), which is populated and correct under
+    Update Group -- unlike adj-RIB-out (T271301144) -- and needs no BGP flap. This
+    verifies the best-path DECISION converged to Set B for every prefix. Under
+    Update Group the DUT distributes that one best path to all group members by
+    construction, and the playbook separately confirms the UG is enabled
+    (``BGP_UPDATE_GROUP_CHECK``) and every session Established
+    (``BGP_SESSION_ESTABLISH_CHECK``). It does NOT independently read each peer's
+    adj-RIB-out, so a per-peer split-brain -- DUT selects Set B but fails to
+    re-advertise it to some member -- is OUT OF SCOPE here; a true per-peer
+    IXIA-side learned-route reader is the deferred enhancement (T271301144).
+
+    The iBGP-v4 PS gauge is ALSO probed (snapshot -> log, measure-first) around each
+    phase as a diagnostic: it reveals whether the DUT advertises the test prefixes
+    at all (the next-hop-self precondition) and that the count stays
+    ~``test_prefix_count`` across the flips (no route loss). The PS gauge is a COUNT
+    and cannot itself see a best-path flip (the prefix count is unchanged when only
+    the path changes) -- which is exactly why the DUT best-path RIB check above is
+    needed for criterion-1.
+
+    What lands UNCONDITIONALLY (the adversarial substance -- spec pass-criteria
+    2/4/5): rapid best-path oscillation does not crash BGP++, does not disrupt
+    sessions, keeps the update group intact, and produces no stale routes /
+    Emergency-Critical-Error logs (the always-appended postchecks).
+    """
+    # The oscillation ends on "advertise Set B" (the winner) only if the flip count
+    # is EVEN -- the loop starts from "Set B advertised" (Stage 2), so flip 0 withdraws
+    # B and an even count lands the last flip back on advertise-B. An odd count would
+    # leave Set A winning and make the Stage-4 "converged on Set B" assertion fail.
+    # Enforce the invariant instead of relying on the caller.
+    if oscillation_flip_count % 2 != 0:
+        raise ValueError(
+            f"oscillation_flip_count must be EVEN so the oscillation ends on Set B "
+            f"(spec steps 7-8); got {oscillation_flip_count}."
+        )
+
+    def _validation(check_id_prefix: str, description: str) -> Step:
+        """No crash + all sessions Established + update group intact -- re-asserted
+        after every best-path change (a flip must not crash, drop sessions, or
+        merge/tear the update group)."""
+        return create_validation_step(
+            point_in_time_checks=[
+                *_no_crash_checks(),
+                create_bgp_session_establish_check(
+                    parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+                    retry_count=session_retry_count,
+                    retry_delay_seconds=session_retry_delay_s,
+                    check_id=f"{check_id_prefix}_sessions",
+                ),
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    check_id=f"{check_id_prefix}_ug",
+                ),
+            ],
+            description=description,
+        )
+
+    def _probe(key: str, note: str) -> Step:
+        """Measure-first: snapshot the iBGP v4 PS gauge (logs the non-zero peer
+        count + a sample). Does NOT assert -- it reveals whether the DUT advertises
+        the test prefixes and whether the count holds across the flips."""
+        return create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key=key,
+            peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+            description=f"2.9.1 {note} -- probe iBGP v4 PS (measure-first)",
+        )
+
+    # Strict criterion-1 (DUT-side): baseline Set A's best-path AS-PATH while only
+    # Set A is up (stage 1), then assert convergence to Set B after the flip and
+    # after the final settle. Gated on the caller supplying both the test-prefix
+    # scope and the discriminator ASN.
+    strict_convergence = (
+        test_prefix_parents is not None and discriminator_asn is not None
+    )
+    _bp_snapshot_key = "dut_best_path_baseline"
+
+    def _snapshot_best_path() -> Step:
+        return create_snapshot_bgp_dut_best_path_as_path_step(
+            hostname=device_name,
+            snapshot_key=_bp_snapshot_key,
+            test_prefix_parents=test_prefix_parents or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            description=(
+                "2.9.1 baseline -- record the DUT best-path AS-PATH while only Set A "
+                "(loser, long AS-PATH) is advertised"
+            ),
+        )
+
+    def _verify_converged(step_note: str) -> Step:
+        return create_verify_bgp_dut_best_path_as_path_converged_step(
+            hostname=device_name,
+            snapshot_key=_bp_snapshot_key,
+            test_prefix_parents=test_prefix_parents or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            expected_as_path_delta=best_path_as_path_delta,
+            expected_fail=strict_convergence_expected_fail,
+            expected_fail_reason=strict_convergence_expected_fail_reason,
+            description=(
+                f"2.9.1 {step_note} -- STRICT: DUT converged every test prefix's "
+                f"best path to Set B (none stuck on Set A)"
+            ),
+        )
+
+    # IPv6 leg: same competition + strict convergence on the eBGP v6 sets, gated on
+    # the caller supplying the v6 pool regexes. Its own baseline snapshot key so it
+    # never collides with the v4 baseline.
+    _v6 = (
+        ebgp_bestpath_a_pool_regex_v6 is not None
+        and ebgp_bestpath_b_pool_regex_v6 is not None
+    )
+    strict_convergence_v6 = (
+        _v6 and test_prefix_parents_v6 is not None and discriminator_asn is not None
+    )
+    _v6_probe = _v6 and bool(ibgp_v6_peer_parent_prefixes)
+    _bp_snapshot_key_v6 = "dut_best_path_baseline_v6"
+
+    def _toggle_v6(pool_regex: t.Optional[str], advertise: bool, note: str) -> Step:
+        # Only reached when ``_v6`` is True, i.e. both v6 pool regexes are set.
+        assert pool_regex is not None
+        return create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=advertise,
+            prefix_pool_regex=pool_regex,
+            prefix_start_index=0,
+            description=f"2.9.1 (v6) {note}",
+        )
+
+    def _probe_v6(key: str, note: str) -> Step:
+        return create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key=key,
+            peer_parent_prefixes=ibgp_v6_peer_parent_prefixes or [],
+            description=f"2.9.1 (v6) {note} -- probe iBGP v6 PS (measure-first)",
+        )
+
+    def _snapshot_best_path_v6() -> Step:
+        return create_snapshot_bgp_dut_best_path_as_path_step(
+            hostname=device_name,
+            snapshot_key=_bp_snapshot_key_v6,
+            test_prefix_parents=test_prefix_parents_v6 or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            description=(
+                "2.9.1 (v6) baseline -- record the DUT best-path AS-PATH while only "
+                "Set A (loser, long AS-PATH) is advertised"
+            ),
+        )
+
+    def _verify_converged_v6(step_note: str) -> Step:
+        return create_verify_bgp_dut_best_path_as_path_converged_step(
+            hostname=device_name,
+            snapshot_key=_bp_snapshot_key_v6,
+            test_prefix_parents=test_prefix_parents_v6 or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            expected_as_path_delta=best_path_as_path_delta,
+            expected_fail=strict_convergence_expected_fail,
+            expected_fail_reason=strict_convergence_expected_fail_reason,
+            description=(
+                f"2.9.1 (v6) {step_note} -- STRICT: DUT converged every test prefix's "
+                f"best path to Set B (none stuck on Set A)"
+            ),
+        )
+
+    stages = [
+        # Stage 0: setup + baseline. Both competing pools carry genuinely-new
+        # prefixes advertised ON TOP of the existing routes, so deactivate both at
+        # baseline (like 2.9.4's spare pools) -- step 1/2 then advertise them.
+        create_steps_stage(
+            steps=[
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_bestpath_a_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.1 setup -- withdraw the Set A (long AS-PATH) pool so it "
+                        "is inactive at baseline"
+                    ),
+                ),
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=False,
+                    prefix_pool_regex=ebgp_bestpath_b_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        "2.9.1 setup -- withdraw the Set B (short AS-PATH) pool so it "
+                        "is inactive at baseline"
+                    ),
+                ),
+                *(
+                    [
+                        _toggle_v6(
+                            ebgp_bestpath_a_pool_regex_v6,
+                            False,
+                            "setup -- withdraw v6 Set A pool (inactive at baseline)",
+                        ),
+                        _toggle_v6(
+                            ebgp_bestpath_b_pool_regex_v6,
+                            False,
+                            "setup -- withdraw v6 Set B pool (inactive at baseline)",
+                        ),
+                    ]
+                    if _v6
+                    else []
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.1 setup -- settle after deactivating both competing pools",
+                ),
+                _validation(
+                    "bestpath_baseline",
+                    "2.9.1 baseline -- BGP up, sessions Established, update group "
+                    "enabled; both competing pools inactive",
+                ),
+                _probe("bp_baseline", "baseline"),
+            ],
+        ),
+        # Stage 1 (spec step 1): advertise the 500 prefixes from the FIRST eBGP set
+        # (Set A, long AS-PATH) and let the DUT distribute them.
+        create_steps_stage(
+            steps=[
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=True,
+                    prefix_pool_regex=ebgp_bestpath_a_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        f"2.9.1 step 1 -- advertise {test_prefix_count} prefixes from "
+                        f"the first eBGP set (Set A, long AS-PATH)"
+                    ),
+                ),
+                *(
+                    [
+                        _toggle_v6(
+                            ebgp_bestpath_a_pool_regex_v6,
+                            True,
+                            f"step 1 -- advertise {test_prefix_count} v6 prefixes from "
+                            f"the first eBGP set (Set A, long AS-PATH)",
+                        )
+                    ]
+                    if _v6
+                    else []
+                ),
+                create_longevity_step(
+                    duration=op_settle_s,
+                    description="2.9.1 step 1 -- wait for all peers to receive Set A",
+                ),
+                _probe("bp_after_a", "after Set A advertise"),
+                *(
+                    [_probe_v6("bp_after_a_v6", "after Set A advertise")]
+                    if _v6_probe
+                    else []
+                ),
+                # STRICT baseline: with only Set A up, record its (uniform)
+                # best-path AS-PATH so the post-flip verify can prove convergence
+                # to Set B without hard-coding absolute AS-PATH values.
+                *([_snapshot_best_path()] if strict_convergence else []),
+                *([_snapshot_best_path_v6()] if strict_convergence_v6 else []),
+                _validation(
+                    "bestpath_after_a",
+                    "2.9.1 step 1 -- Set A distributing; no crash; sessions up; UG intact",
+                ),
+            ],
+        ),
+        # Stage 2 (spec steps 2-4): immediately re-advertise the SAME prefixes from a
+        # DIFFERENT eBGP set (Set B, short AS-PATH) while Set A may still be
+        # distributing -> best-path change A->B. Converge, then re-assert stability.
+        create_steps_stage(
+            steps=[
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=True,
+                    prefix_pool_regex=ebgp_bestpath_b_pool_regex,
+                    prefix_start_index=0,
+                    description=(
+                        f"2.9.1 step 2 -- immediately re-advertise the same "
+                        f"{test_prefix_count} prefixes from a DIFFERENT eBGP set "
+                        f"(Set B, short AS-PATH, higher preference) -> best-path change"
+                    ),
+                ),
+                *(
+                    [
+                        _toggle_v6(
+                            ebgp_bestpath_b_pool_regex_v6,
+                            True,
+                            f"step 2 -- re-advertise the same {test_prefix_count} v6 "
+                            f"prefixes from a DIFFERENT eBGP set (Set B, short AS-PATH) "
+                            f"-> best-path change",
+                        )
+                    ]
+                    if _v6
+                    else []
+                ),
+                create_longevity_step(
+                    duration=converge_settle_s,
+                    description="2.9.1 step 3 -- wait for convergence after the best-path change",
+                ),
+                _probe("bp_after_flip", "after best-path flip to Set B"),
+                *(
+                    [_probe_v6("bp_after_flip_v6", "after best-path flip to Set B")]
+                    if _v6_probe
+                    else []
+                ),
+                # STRICT (spec step 4/5): every test prefix's DUT best path is now
+                # Set B (baseline count - delta), none stuck on Set A.
+                *([_verify_converged("step 4")] if strict_convergence else []),
+                *([_verify_converged_v6("step 4")] if strict_convergence_v6 else []),
+                _validation(
+                    "bestpath_after_flip",
+                    "2.9.1 step 4 -- after the best-path change: no split-brain crash; "
+                    "sessions Established; update group intact",
+                ),
+            ],
+        ),
+    ]
+
+    # Stage 3 (spec step 6): rapid best-path oscillation -- alternate the winning set
+    # every ``oscillation_interval_s`` for ~5 min by toggling Set B (Active toggle,
+    # no session flap): B advertised -> best-path B; B withdrawn -> best-path A.
+    # Start state is "Set B advertised" (Stage 2), so flip 0 withdraws; an even
+    # ``oscillation_flip_count`` ends on "advertise Set B" (settles on Set B).
+    oscillation_steps: t.List[Step] = []
+    for i in range(oscillation_flip_count):
+        advertise_b = i % 2 == 1
+        oscillation_steps.append(
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=advertise_b,
+                prefix_pool_regex=ebgp_bestpath_b_pool_regex,
+                prefix_start_index=0,
+                description=(
+                    f"2.9.1 step 6 -- flip {i + 1}/{oscillation_flip_count}: "
+                    f"{'advertise' if advertise_b else 'withdraw'} Set B "
+                    f"(best-path -> {'B' if advertise_b else 'A'})"
+                ),
+            )
+        )
+        if _v6:
+            oscillation_steps.append(
+                _toggle_v6(
+                    ebgp_bestpath_b_pool_regex_v6,
+                    advertise_b,
+                    f"step 6 -- flip {i + 1}/{oscillation_flip_count}: "
+                    f"{'advertise' if advertise_b else 'withdraw'} v6 Set B "
+                    f"(best-path -> {'B' if advertise_b else 'A'})",
+                )
+            )
+        oscillation_steps.append(
+            create_longevity_step(
+                duration=oscillation_interval_s,
+                description=f"2.9.1 step 6 -- {oscillation_interval_s}s before the next flip",
+            )
+        )
+    oscillation_steps.append(
+        create_validation_step(
+            point_in_time_checks=list(_no_crash_checks()),
+            description=(
+                f"2.9.1 step 6 -- no crash after {oscillation_flip_count} rapid "
+                f"best-path flips over ~{oscillation_flip_count * oscillation_interval_s // 60} min"
+            ),
+        )
+    )
+    stages.append(create_steps_stage(steps=oscillation_steps))
+
+    # Stage 4 (spec steps 7-8): the oscillation stopped on "advertise Set B"; settle
+    # and verify convergence on the preferred (B) path -- measure-first.
+    stages.append(
+        create_steps_stage(
+            steps=[
+                create_longevity_step(
+                    duration=converge_settle_s,
+                    description=(
+                        "2.9.1 step 7 -- wait for full convergence after the rapid "
+                        "alternation stops (ending on Set B)"
+                    ),
+                ),
+                _probe("bp_final", "final (converged on Set B)"),
+                *(
+                    [_probe_v6("bp_final_v6", "final (converged on Set B)")]
+                    if _v6_probe
+                    else []
+                ),
+                # STRICT (spec step 8): after the rapid oscillation ends on Set B,
+                # every test prefix's DUT best path is Set B -- no peer stuck on the
+                # old (Set A) path after the churn.
+                *([_verify_converged("step 8 final")] if strict_convergence else []),
+                *(
+                    [_verify_converged_v6("step 8 final")]
+                    if strict_convergence_v6
+                    else []
+                ),
+                _validation(
+                    "bestpath_final",
+                    "2.9.1 step 8 -- converged on Set B: no crash; all sessions "
+                    "Established; update group intact (no peer stuck / no stale routes)",
+                ),
+            ],
+        )
+    )
+
+    # Always-appended bounds so they can never be dropped whether the caller takes
+    # the default BGP_STANDARD_POSTCHECKS bundle (which asserts no stale routes --
+    # spec pass-criterion 3 -- but NOT device-log severity) or supplies its own
+    # list: UG enabled, load-average within baseline, and a system-log severity
+    # scan (spec pass-criterion 5: no Emergency/Critical/Error logs over the test
+    # window; the bare/agent-less LOG_PARSING_CHECK routes to the EOS
+    # "show logging emergencies/critical/errors" path).
+    base_postchecks = (
+        list(postchecks) if postchecks is not None else list(BGP_STANDARD_POSTCHECKS)
+    )
+    postchecks = base_postchecks + [
+        create_system_cpu_load_average_check(baseline=load_avg_baseline),
+        create_bgp_update_group_check(expect_enabled=True),
+        create_log_parsing_check(start_time_jq_var="test_case_start_time"),
+    ]
+    if vmhwm_absolute_threshold_bytes is not None:
+        postchecks.append(
+            create_memory_utilization_check(
+                vmhwm_threshold=vmhwm_absolute_threshold_bytes
+            )
+        )
+    if snapshot_checks is None:
+        snapshot_checks = list(BGP_STANDARD_SNAPSHOT_CHECKS)
+
+    return Playbook(
+        name="bgp_ug_best_path_change",
         stages=stages,
         prechecks=prechecks,
         postchecks=postchecks,
