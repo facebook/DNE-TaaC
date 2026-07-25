@@ -84,6 +84,43 @@ class InterfaceIpConfigurationTask(BaseTask):
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
+    def _generate_secondary_addresses(
+        self,
+        family: str,
+        base_network: t.Optional[str],
+        peer_count: int,
+        start_offset: int,
+    ) -> t.List[str]:
+        """
+        Generate secondary addresses for a single address family ("ipv4"/"ipv6").
+
+        peer_count may legitimately be 0 (e.g. ingress-only setups with no iBGP
+        egress), which yields an empty list; the caller still clears the
+        interface so no addresses are applied.
+        """
+        if not base_network:
+            raise ValueError(
+                f"{family}_base_network required when address_families includes {family}"
+            )
+
+        display = "IPv4" if family == "ipv4" else "IPv6"
+        self.logger.info(f"  Generating {peer_count} {display} addresses...")
+        self.logger.info(f"    Base network: {base_network}")
+
+        if family == "ipv4":
+            addresses = arista_utils.generate_ipv4_secondary_addresses(
+                base_network, peer_count, start_offset
+            )
+        else:
+            addresses = arista_utils.generate_ipv6_secondary_addresses(
+                base_network, peer_count, start_offset
+            )
+
+        if addresses:
+            self.logger.info(f" Generated: {addresses[0]} ... {addresses[-1]}")
+
+        return addresses
+
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
         Configure secondary IP addresses on an interface.
@@ -156,36 +193,21 @@ class InterfaceIpConfigurationTask(BaseTask):
             self.logger.info(f"  Address families: {address_families}")
             self.logger.info(f"  Clear existing IPs: {clear_existing}")
 
-            # Generate IP addresses
+            # Generate IP addresses. peer_count may legitimately be 0 (e.g.
+            # ingress-only setups with no iBGP egress), which yields an empty
+            # address list; the interface is still cleared below when
+            # clear_existing is set, so no addresses are applied.
             ipv4_addresses = None
             ipv6_addresses = None
 
             if "ipv4" in address_families:
-                if not ipv4_base_network:
-                    raise ValueError(
-                        "ipv4_base_network required when address_families includes ipv4"
-                    )
-                self.logger.info(f"  Generating {peer_count} IPv4 addresses...")
-                self.logger.info(f"    Base network: {ipv4_base_network}")
-                ipv4_addresses = arista_utils.generate_ipv4_secondary_addresses(
-                    ipv4_base_network, peer_count, ipv4_start_offset
-                )
-                self.logger.info(
-                    f" Generated: {ipv4_addresses[0]} ... {ipv4_addresses[-1]}"
+                ipv4_addresses = self._generate_secondary_addresses(
+                    "ipv4", ipv4_base_network, peer_count, ipv4_start_offset
                 )
 
             if "ipv6" in address_families:
-                if not ipv6_base_network:
-                    raise ValueError(
-                        "ipv6_base_network required when address_families includes ipv6"
-                    )
-                self.logger.info(f"  Generating {peer_count} IPv6 addresses...")
-                self.logger.info(f"    Base network: {ipv6_base_network}")
-                ipv6_addresses = arista_utils.generate_ipv6_secondary_addresses(
-                    ipv6_base_network, peer_count, ipv6_start_offset
-                )
-                self.logger.info(
-                    f" Generated: {ipv6_addresses[0]} ... {ipv6_addresses[-1]}"
+                ipv6_addresses = self._generate_secondary_addresses(
+                    "ipv6", ipv6_base_network, peer_count, ipv6_start_offset
                 )
 
             # Apply configuration
