@@ -3730,6 +3730,12 @@ class Ixia:
             # sent. Match the ip_address_family here so v6 route ranges get an
             # v6 next-hop (same pattern used by the import-CSV path below).
             route_prop_obj.NextHopIPType.Single(ip_address_family.name.lower())
+            if bgp_prefix_config.set_next_hop_type is not None:
+                route_prop_obj.NextHopType.Single(
+                    ixia_types.SET_NEXT_HOP_TYPE_MAP[
+                        bgp_prefix_config.set_next_hop_type
+                    ]
+                )
 
             if bgp_prefix_config.prefix_flap_config:
                 route_prop_obj.EnableFlapping.Single(value=True)

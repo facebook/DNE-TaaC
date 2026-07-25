@@ -35,6 +35,15 @@ See ../README.md §3.
 import os
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.topologies.egress_peer_scale import (
+    EGRESS_PEER_SCALE,
+    EGRESS_PEER_SCALE_AS_NUMBERS,
+    EGRESS_PEER_SCALE_PARENT_NETWORKS,
+    EGRESS_PEER_SCALE_PEER_GROUPS,
+    EGRESS_PEER_SCALE_PORT_MAP,
+    EGRESS_PEER_SCALE_PREFIX_COUNT,
+    EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
+)
 from taac.abstractions.topologies.ipv6_update_packing import (
     IPV6_UPDATE_PACKING,
     IPV6_UPDATE_PACKING_AS_NUMBERS,
@@ -42,7 +51,10 @@ from taac.abstractions.topologies.ipv6_update_packing import (
     IPV6_UPDATE_PACKING_PEER_GROUPS,
     IPV6_UPDATE_PACKING_PORT_MAP,
 )
-from taac.abstractions.topology import RoutingDeviceConfig
+from taac.abstractions.topology import (
+    OpenRMode,
+    RoutingDeviceConfig,
+)
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
@@ -72,12 +84,10 @@ from taac.steps.step_definitions import (
     create_sc_8_steps,
 )
 from taac.task_definitions import (
-    create_bgp_clear_route_filter_task,
     create_configure_bgpcpp_startup_task,
     create_coop_apply_patchers_task,
     create_coop_register_patcher_task,
     create_coop_unregister_patchers_task,
-    create_interface_ip_configuration_task,
     create_replace_bgp_peers_task,
     create_run_commands_on_shell_task,
     create_scp_file_template_task,
@@ -101,7 +111,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
     IXIA_IPV4_START_OFFSET,
-    IXIA_IPV6_START_OFFSET,
     PEERGROUP_EBGP_V4,
     PEERGROUP_EBGP_V6,
     PEERGROUP_IBGP_V4,
@@ -1200,20 +1209,6 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
 # simplified rewrite of D104072489: per stage n peers per AF, total = 2n + 2
 # EBGP. Each Stage rewrites /mnt/flash/bgpcpp_config to the matching number of
 # peer entries so BGP++ EOR completes from 100% of configured peers.
-_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS: list = [100, 200, 300, 400, 500]
-_PERFORMANCE_SCALING_PREFIX_COUNT: int = 50000
-
-# Interface-state nexthop-resolution gflag. This test runs WITHOUT_OPEN_R, so
-# recursive/loopback nexthops never resolve via the (dead) Open/R FIB stream;
-# the eBGP nexthop is directly connected and must resolve through NetlinkWrapper
-# instead. NetlinkWrapper only populates the nexthopCache from interface
-# link-state + prefix match when bgp_resolve_nexthops_from_interface_state is
-# set; with the default (legacy, ARP/ND-based) path the connected nexthop stayed
-# unresolved, so no path was ever selected and convergence completed vacuously.
-# Enabling the gflag in run_bgpcpp.sh makes egress routes actually resolve and
-# get selected.
-_NEXTHOP_IFACE_STATE_FLAG: str = "bgp_resolve_nexthops_from_interface_state"
-
 # bag012.ash6 nexthop group threshold parameters for bounded ECMP.
 _BAG012_BOUNDED_ECMP_PEER_COUNT: int = 128
 _BAG012_BOUNDED_ECMP_PREFIX_COUNT: int = 5000
@@ -1552,9 +1547,6 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     # when router_id is None.
 
     device_name = physical_inventory.device_name
-    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
-
     # Derived from the physical_inventory device name. SC1 = the first "scale &
     # characteristics" test (egress peer-scale). The legacy
     # `_BGP_PERFORMANCE_SCALING_CONVEYOR_TEST` suffix was dropped: CONVEYOR
@@ -1563,84 +1555,18 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    setup_tasks = get_update_packing_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ebgp_peer_count=1,
-        ibgp_peer_count=_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS[0],
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        # v4 enables dual-stack IBGP/EBGP at startup so the initial
-        # /mnt/flash/bgpcpp_config matches the v6+v4 layout that each
-        # per-iteration factory call produces.
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        router_id=physical_inventory.router_id,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        enable_update_group=enable_update_group,
-        # Align v4 peer local addresses to the device's v4 secondary-interface-IP
-        # offset (IXIA_IPV4_START_OFFSET=10). Without this the v4 peers default to
-        # offset 16 while the interface IPs sit at 10, so the eBGP v4 peer and the
-        # tail iBGP v4 peers have no local source IP and stay IDLE. (v6 already
-        # aligns: both interface IPs and peers use offset 16.)
-        v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
+    bound = EGRESS_PEER_SCALE.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=EGRESS_PEER_SCALE_PORT_MAP,
+        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS,
+        peer_groups=EGRESS_PEER_SCALE_PEER_GROUPS,
+        as_numbers=EGRESS_PEER_SCALE_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=OpenRMode.NONE,
+            update_group_enable=enable_update_group,
+        ),
     )
-    # The per-iteration rescale rewrites only the bgpcpp peer list, never the
-    # interface secondary IPs. get_update_packing_setup_tasks lays the iBGP
-    # interface's source IPs for just the first sweep stage
-    # (_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS[0]), so every peer beyond that
-    # stage has no local source address and stays IDLE (bag010 came up
-    # established=202 at every stage, IDLE=total-202; P2415335739). Re-lay the
-    # iBGP interface once at the full sweep max (clear_existing supersedes the
-    # helper's smaller set); each stage then sources from the first n of these.
-    # eBGP is constant at 1 peer/AFI, so its interface is already covered.
-    setup_tasks.append(
-        create_interface_ip_configuration_task(
-            interface=ixia_interface_mimic_ibgp,
-            peer_count=max(_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS),
-            ipv4_base_network=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-            ipv6_base_network=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-            address_families=["ipv6", "ipv4"],
-            clear_existing=True,
-            ipv4_start_offset=IXIA_IPV4_START_OFFSET,
-            ipv6_start_offset=IXIA_IPV6_START_OFFSET,
-            hostname=device_name,
-            ixia_needed=True,
-        )
-    )
-    # Enable the interface-state nexthop-resolution gflag in run_bgpcpp.sh so
-    # directly-connected egress nexthops resolve via NetlinkWrapper under
-    # WITHOUT_OPEN_R (see _NEXTHOP_IFACE_STATE_FLAG above). use_managed_shell
-    # routes the standardized startup task over the managed device driver the
-    # perf-scaling sweep runs under (it passes no SSH credentials); the
-    # per-stage Bgp restart then picks up the new flag.
-    setup_tasks.append(
-        create_configure_bgpcpp_startup_task(
-            hostname=device_name,
-            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
-            use_managed_shell=True,
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
-    # This test injects arbitrary scale prefixes that are not in the device's
-    # baked-in route registry, so the Centralized Route Filter (CRF) denies all
-    # but the ~registered handful ("Denied by Route Filter Policy"). Clear the
-    # route filter so no inbound prefix is blocked; the clear deletes the
-    # persisted rp_state_file, so the daemon stays CRF-free across the per-stage
-    # Bgp restarts.
-    setup_tasks.append(
-        create_bgp_clear_route_filter_task(
-            hostname=device_name,
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
+    compiled = bound.compile()
     factory = build_per_iteration_factory_v4_capable(
         device_name=device_name,
         router_id=physical_inventory.router_id,
@@ -1664,10 +1590,11 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         name=name,
         host_driver_args=None,
         oss_mock_device_data=None,
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
-        egress_peer_counts=_PERFORMANCE_SCALING_EGRESS_PEER_COUNTS,
-        prefix_count=_PERFORMANCE_SCALING_PREFIX_COUNT,
+        host_os_type_map=compiled.host_os_type_map,
+        endpoints=compiled.endpoints,
+        basic_port_configs=compiled.basic_port_configs,
+        egress_peer_counts=list(EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS),
+        prefix_count=EGRESS_PEER_SCALE_PREFIX_COUNT,
         ebgp_peer_count=1,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
@@ -1676,7 +1603,8 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
         ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
         log_collection_timeout=600,
-        setup_tasks=setup_tasks,
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
         per_iteration_setup_steps_factory=factory,
     )
 

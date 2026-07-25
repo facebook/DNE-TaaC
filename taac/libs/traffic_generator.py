@@ -1075,6 +1075,7 @@ class TrafficGenerator:
                     network_group_index=route_scale_spec.network_group_index,
                     multiplier=route_scale.multiplier,
                     prefix_pool_name=route_scale.prefix_name,
+                    set_next_hop_type=route_scale.set_next_hop_type,
                 )
             )
         if route_scale_spec.v6_route_scale:
@@ -1097,6 +1098,7 @@ class TrafficGenerator:
                     network_group_index=route_scale_spec.network_group_index,
                     multiplier=route_scale.multiplier,
                     prefix_pool_name=route_scale.prefix_name,
+                    set_next_hop_type=route_scale.set_next_hop_type,
                 )
             )
         return bgp_prefix_configs

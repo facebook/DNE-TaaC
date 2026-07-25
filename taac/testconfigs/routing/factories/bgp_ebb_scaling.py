@@ -83,7 +83,12 @@ from taac.testconfigs.routing.util.bgpcpp_peers_modification import (
     _generate_bgpcpp_peers_modification_tasks,
 )
 from taac.test_as_a_config import types as taac_types
-from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
+from taac.test_as_a_config.types import (
+    BasicPortConfig,
+    DirectIxiaConnection,
+    Endpoint,
+    TestConfig,
+)
 
 
 # bgpcpp on-device paths (Arista EOS) -- kept in lock-step with the legacy
@@ -130,17 +135,15 @@ def create_bgp_ebb_scaling_performance_test_config(
     host_driver_args: dict[str, str] | None = None,
     oss_mock_device_data: dict[str, taac_types.MockDeviceInfo] | None = None,
     host_os_type_map: dict[str, taac_types.DeviceOsType] | None = None,
+    endpoints: list[Endpoint] | None = None,
+    basic_port_configs: list[BasicPortConfig] | None = None,
 ) -> TestConfig:
     """BGP++ egress-peer sweep TestConfig -- Arista perf-scaling case 1.
 
-    Byte-wise identical to the legacy
-    ``test_config_performance_scaling_case1.test_config_for_bgp_plus_plus_on_ebb_arista_performance_scaling``
-    factory; the only structural change is that DUT identity + IXIA port
-    map (and, for lab physical inventories, ``host_driver_args`` / ``oss_mock_device_data``)
-    are derived from ``physical_inventory`` when the caller does not pass explicit
-    overrides. bag012 conveyor callers pass ``setup_tasks`` +
-    ``per_iteration_setup_steps_factory`` + explicit
-    ``direct_ixia_connections`` and get the same TestConfig they had before.
+    DUT identity and default IXIA artifacts come from ``physical_inventory``.
+    Migrated callers may supply topology-compiled endpoints and port configs;
+    ``None`` selects inventory-derived defaults, while explicit empty lists are
+    preserved. This factory retains ownership of the peer-sweep playbook.
 
     See ../ebb/test_config_performance_scaling_case1.py header for the full
     playbook contract.
@@ -176,24 +179,30 @@ def create_bgp_ebb_scaling_performance_test_config(
         skip_ixia_protocol_verification=True,
         log_collection_timeout=log_collection_timeout,
         basset_pool="dne.test",
-        endpoints=[
-            Endpoint(
-                name=device_name,
-                dut=True,
-                ixia_ports=[
-                    ixia_interface_mimic_ebgp,
-                    ixia_interface_mimic_ibgp,
-                ],
-                direct_ixia_connections=resolved_direct_ixia_connections,
-            ),
-        ],
+        endpoints=(
+            endpoints
+            if endpoints is not None
+            else [
+                Endpoint(
+                    name=device_name,
+                    dut=True,
+                    ixia_ports=[
+                        ixia_interface_mimic_ebgp,
+                        ixia_interface_mimic_ibgp,
+                    ],
+                    direct_ixia_connections=resolved_direct_ixia_connections,
+                ),
+            ]
+        ),
         host_driver_args=resolved_host_driver_args,
         oss_mock_device_data=resolved_oss_mock_device_data,
         host_os_type_map=resolved_host_os_type_map,
         startup_checks=[],
         setup_tasks=setup_tasks if setup_tasks is not None else [],
         teardown_tasks=teardown_tasks if teardown_tasks is not None else [],
-        basic_port_configs=create_ebb_performance_scale_basic_port_configs(
+        basic_port_configs=basic_port_configs
+        if basic_port_configs is not None
+        else create_ebb_performance_scale_basic_port_configs(
             device_name=device_name,
             ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
@@ -211,9 +220,6 @@ def create_bgp_ebb_scaling_performance_test_config(
             # address and the DUT resolves them without Open/R/IGP (perf-scaling
             # only; other callers keep the default PRESERVE_FROM_FILE).
             ebgp_next_hop_self=True,
-            # Tag every eBGP route with only EB_FA_TRANSITED so they pass the
-            # DUT's EB-FA-IN inbound allowlist (otherwise the diverse-CSV routes
-            # are denied by RULE_EB_FA_IN_980) and render cleanly.
             ebgp_fixed_communities=[_EB_FA_TRANSITED_COMMUNITY],
         ),
         playbooks=[

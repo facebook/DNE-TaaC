@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from ixia.ixia import types as ixia_types
 from taac.ixia.ixia import Ixia
 
 
@@ -90,6 +91,44 @@ class TestBuildAsPathPositionValues(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0], [])
         self.assertEqual(result[1], [])
+
+
+class TestGeneratedRouteNextHop(unittest.TestCase):
+    def test_create_bgp_prefixes_programs_requested_next_hop_type(self) -> None:
+        ixia = _create_ixia_instance()
+        route_property = MagicMock()
+        prefix_pool = MagicMock()
+        prefix_pool.BgpIPRouteProperty.find.return_value = route_property
+        network_group = MagicMock()
+        network_group.Ipv4PrefixPools.add.return_value = prefix_pool
+        device_group = MagicMock()
+        device_group.NetworkGroup.find.return_value = []
+        device_group.NetworkGroup.add.return_value = network_group
+        device_group_index = MagicMock()
+        device_group_index.network_group_indices = {}
+        ixia.configure_prefix_length = MagicMock()
+        ixia.get_bgp_ip_route_property = MagicMock(return_value=route_property)
+
+        ixia.create_bgp_prefixes(
+            port_identifier="dut:Ethernet1",
+            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+            bgp_prefix_configs=[
+                ixia_types.BgpPrefixConfig(
+                    prefix_name="PREFIX_POOL_IPV4_EBGP",
+                    starting_ip="120.0.0.0",
+                    increment_ip="0.0.1.0",
+                    prefix_length=24,
+                    count=50_000,
+                    network_group_index=0,
+                    multiplier=1,
+                    set_next_hop_type=ixia_types.SetNextHopType.SAME_AS_LOCAL_IP,
+                )
+            ],
+            device_group_obj=device_group,
+            device_group_index=device_group_index,
+        )
+
+        route_property.NextHopType.Single.assert_called_once_with("sameaslocalip")
 
 
 class TestDeviceGroupRegexFiltering(unittest.TestCase):
