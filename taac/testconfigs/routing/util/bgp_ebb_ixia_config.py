@@ -767,6 +767,7 @@ def create_ebb_scale_basic_port_configs(
                         ],
                         bgp_next_hop_modification_type=ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
                         set_next_hop_type=_ebgp_set_next_hop,
+                        end_index=ebgp_v4_multiplier if drain else None,
                     )
                 ],
                 # Optional inline-generated spare IPv4 pool(s) advertised by these

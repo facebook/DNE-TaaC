@@ -187,12 +187,14 @@ _LEGACY_SERIALIZED_LAB_NOUN = "test" + "beds"
 
 _BACKPRESSURE_2_3_1_FAST_EBGP_V6_PEER_ADDRS = list(
     _BACKPRESSURE_EBGP_V6_PEER_ADDRS[
-        : EBGP_PEER_COUNT_V6 - _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT
+        : EBGP_PEER_COUNT_V6 - EBGP_PEER_TO_DRAIN - _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT
     ]
 )
 _BACKPRESSURE_2_3_1_SLOW_EBGP_V6_PEER_ADDRS = list(
     _BACKPRESSURE_EBGP_V6_PEER_ADDRS[
-        EBGP_PEER_COUNT_V6 - _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT :
+        EBGP_PEER_COUNT_V6
+        - EBGP_PEER_TO_DRAIN
+        - _BACKPRESSURE_2_3_1_SLOW_PEER_COUNT : EBGP_PEER_COUNT_V6 - EBGP_PEER_TO_DRAIN
     ]
 )
 
@@ -417,6 +419,7 @@ def create_bgp_ug_backpressure_test_config(
             ixia_ibgp_ic_parent_network_v4_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
             include_bgp_mon=False,
             profile=_BACKPRESSURE_PROFILE,
+            drain=True,
             plane_drain_dg_v6_attribute_overrides={
                 1: _backpressure_storm_dg_v6_attribute_overrides(),
             },
