@@ -1198,10 +1198,6 @@ def get_common_setup_tasks(
     openr_other_link: t.Optional[t.Dict[str, t.Any]] = None,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
-    include_pre_ixia_setup: bool = True,
-    include_bgpcpp_deployment: bool = True,
-    include_control_plane: bool = True,
-    include_interface_ip_config: bool = True,
     # When True, set the bgpcpp startup gflag
     # ``bgp_resolve_nexthops_from_interface_state=true`` in run_bgpcpp.sh so the
     # DUT resolves BGP next-hops from connected interface state instead of via
@@ -1226,15 +1222,6 @@ def get_common_setup_tasks(
             skipped entirely. Callers on 2-port physical inventories (or UG qualification
             tests that do not exercise BGP-MON) should pass False and omit
             ``ixia_interface_mimic_bgp_mon``.
-        include_pre_ixia_setup: When False, omit the BgpTcpdump disable,
-            IXIA-facing interface bring-up, and link-settle sleep prefix.
-        include_bgpcpp_deployment: When False, omit BGP++ configuration,
-            certificate, validation, and supporting-agent deployment.
-        include_control_plane: When False, omit control-plane ACL, daemon,
-            intern user-ID, and update-group verification tasks.
-        include_interface_ip_config: When False, omit full-scale interface IP
-            configuration tasks.
-
     Returns:
         List of setup Task objects.
     """
@@ -1244,45 +1231,43 @@ def get_common_setup_tasks(
         )
     setup_tasks: t.List[Task] = []
 
-    if include_pre_ixia_setup:
-        # Disable BgpTcpdump daemon before any setup
-        # This daemon is not needed for conveyor testing and can interfere.
-        setup_tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name="BgpTcpdump",
-                action="disable",
-            )
+    # Disable BgpTcpdump daemon before any setup
+    # This daemon is not needed for conveyor testing and can interfere.
+    setup_tasks.append(
+        create_arista_daemon_control_task(
+            hostname=device_name,
+            daemon_name="BgpTcpdump",
+            action="disable",
         )
+    )
 
-        # 1. Pre-IXIA interface configuration (2 or 3 interfaces).
-        ixia_interfaces: t.List[t.Tuple[str, str]] = [
-            (ixia_interface_mimic_ebgp, "IXIA_MIMIC_EBGP"),
-            (ixia_interface_mimic_ibgp, "IXIA_MIMIC_IBGP"),
-        ]
-        if include_bgp_mon:
-            ixia_interfaces.append(
-                (none_throws(ixia_interface_mimic_bgp_mon), "IXIA_MIMIC_BGP_MON")
-            )
-        setup_tasks.extend(
-            _get_pre_ixia_interface_tasks(
-                device_name=device_name,
-                ixia_interfaces=ixia_interfaces,
-            )
+    # 1. Pre-IXIA interface configuration (2 or 3 interfaces).
+    ixia_interfaces: t.List[t.Tuple[str, str]] = [
+        (ixia_interface_mimic_ebgp, "IXIA_MIMIC_EBGP"),
+        (ixia_interface_mimic_ibgp, "IXIA_MIMIC_IBGP"),
+    ]
+    if include_bgp_mon:
+        ixia_interfaces.append(
+            (none_throws(ixia_interface_mimic_bgp_mon), "IXIA_MIMIC_BGP_MON")
         )
+    setup_tasks.extend(
+        _get_pre_ixia_interface_tasks(
+            device_name=device_name,
+            ixia_interfaces=ixia_interfaces,
+        )
+    )
 
     # 2. BGP++ config deployment
-    if include_bgpcpp_deployment:
-        setup_tasks.extend(
-            _get_bgpcpp_deployment_tasks(
-                device_name=device_name,
-                bgp_asn=bgp_asn,
-                bgpcpp_configerator_path=bgpcpp_configerator_path,
-                openr_configerator_path=openr_configerator_path,
-                enable_update_group=enable_update_group,
-                update_group_config=update_group_config,
-            )
+    setup_tasks.extend(
+        _get_bgpcpp_deployment_tasks(
+            device_name=device_name,
+            bgp_asn=bgp_asn,
+            bgpcpp_configerator_path=bgpcpp_configerator_path,
+            openr_configerator_path=openr_configerator_path,
+            enable_update_group=enable_update_group,
+            update_group_config=update_group_config,
         )
+    )
 
     # 2b. bgpcpp next-hop-resolution gflag (opt-in). Written over the managed
     # device shell (netcastle reservation, no raw SSH) AFTER the config is on
@@ -1291,18 +1276,6 @@ def get_common_setup_tasks(
     # no extra restart is needed. ixia_needed/set_outer_hostname match the
     # sibling managed control-plane tasks for phasing parity.
     #
-    # The flag is only meaningful when both prerequisites run: the bgpcpp
-    # deployment writes run_bgpcpp.sh (include_bgpcpp_deployment) and the
-    # control-plane phase restarts Bgp to read it (include_control_plane). Fail
-    # fast rather than write a flag that would be missing or never re-read.
-    if resolve_nexthops_from_interface_state and not (
-        include_bgpcpp_deployment and include_control_plane
-    ):
-        raise ValueError(
-            "resolve_nexthops_from_interface_state=True requires "
-            "include_bgpcpp_deployment=True (writes run_bgpcpp.sh) and "
-            "include_control_plane=True (the Bgp restart that reads the flag)"
-        )
     if resolve_nexthops_from_interface_state:
         setup_tasks.append(
             create_configure_bgpcpp_startup_task(
@@ -1315,26 +1288,24 @@ def get_common_setup_tasks(
         )
 
     # 3. Control plane (ACLs + daemons)
-    if include_control_plane:
-        setup_tasks.extend(
-            _get_control_plane_tasks(
-                device_name=device_name,
-                profile=profile,
-                enable_update_group=enable_update_group,
-            )
+    setup_tasks.extend(
+        _get_control_plane_tasks(
+            device_name=device_name,
+            profile=profile,
+            enable_update_group=enable_update_group,
         )
+    )
 
     # 4. Full-scale IP configuration
-    if include_interface_ip_config:
-        setup_tasks.extend(
-            _get_full_scale_ip_config_tasks(
-                device_name=device_name,
-                ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-                ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
-                include_bgp_mon=include_bgp_mon,
-            )
+    setup_tasks.extend(
+        _get_full_scale_ip_config_tasks(
+            device_name=device_name,
+            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+            ixia_interface_mimic_bgp_mon=ixia_interface_mimic_bgp_mon,
+            include_bgp_mon=include_bgp_mon,
         )
+    )
 
     # 5. OpenR setup (conditional on profile)
     setup_tasks.extend(

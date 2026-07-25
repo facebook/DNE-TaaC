@@ -567,6 +567,51 @@ def _bag010_expected_established_session_count() -> int:
     return total_session_count - BGP_MON_PEER_COUNT
 
 
+def _build_compiled_ebb_full_scale_test_config(
+    *,
+    physical_inventory: PhysicalInventory,
+    name: str,
+    profile: BgpPlusPlusProfile,
+    enable_update_group: bool,
+    playbooks: list,
+) -> TestConfig:
+    openr_mode = (
+        OpenRMode.STANDALONE
+        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+        else OpenRMode.NONE
+    )
+    compiled = (
+        ebb_full_scale_topology(
+            openr_mode=openr_mode,
+        )
+        .bind_to_inventory(
+            physical_inventory=physical_inventory,
+            port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
+            parent_networks=EBB_PARENT_NETWORKS,
+            peer_groups=EBB_PEER_GROUPS,
+            as_numbers=EBB_AS_NUMBERS,
+            device_config_override=RoutingDeviceConfig(
+                openr_mode=openr_mode,
+                update_group_enable=enable_update_group,
+            ),
+        )
+        .compile()
+    )
+    return TestConfig(
+        name=name,
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=playbooks,
+    )
+
+
 def create_ebb_instability_test_config(
     physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
@@ -678,12 +723,11 @@ def create_ebb_drain_test_config(
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
     ixia_interface_mimic_bgp_mon = physical_inventory.ixia_ports[2][0]
     session_count = _bag010_expected_established_session_count()
-    return _build_ebb_full_scale_test_config(
+    return _build_compiled_ebb_full_scale_test_config(
         physical_inventory=physical_inventory,
         name=name,
         profile=profile,
         enable_update_group=enable_update_group,
-        drain=False,
         playbooks=[
             create_bgp_ebb_fauu_drain_undrain_playbook(
                 device_name=device_name,

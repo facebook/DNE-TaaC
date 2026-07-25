@@ -774,11 +774,11 @@ This guide governs `testconfigs/routing/` only. Not covered here:
 
 ---
 
-## 15. Optional TAAC Abstractions
+## 15. DICE Topology Authoring
 
-Routing factories may use TAAC Abstractions when a typed topology model makes a
-factory easier to validate and migrate without changing bytes. The abstraction
-path is optional; flat factory authoring remains valid.
+Routing factories use DICE when a checked topology already models their peer,
+prefix, next-hop, and routing-device intent. Flat authoring remains valid for
+simple consumers and explicit non-goals outside the DICE contract.
 
 The intended factory shape is:
 
@@ -803,10 +803,16 @@ Factories should import topology instances from
 instantiate concrete compiler classes or choose EOS/FBOSS by selecting a
 different topology object.
 
-Phase 1 keeps playbooks factory-owned and does not migrate production factories
-or replace setup/teardown helpers. Any future factory migration must prove
-old/new JSON parity and keep the golden manifest unchanged unless a rebaseline
-is explicitly approved.
+Playbooks remain factory-owned. A migration selects an existing topology,
+binds it to `PhysicalInventory`, compiles flat artifacts, and keeps only direct
+authored, resolved, compiled, and workflow-effect assertions. Exact legacy JSON
+is not the contract; reviewed semantic parity is. The golden manifest remains a
+diagnostic drift check.
+
+The seven Phase 1.3 topology instances and the 23 classified catalog exports
+are enforced by `tests:test_phase13_catalog_adoption`. Only the three named
+graphless update-group skeletons may remain deferred. Catalog registrations use
+the canonical catalog objects rather than reconstructing equivalent configs.
 
 ---
 

@@ -21,7 +21,17 @@ See ../README.md §3.
 
 import os
 import typing as t
+from dataclasses import replace
 
+from taac.abstractions.topologies.bounded_ecmp import (
+    BOUNDED_ECMP,
+    BOUNDED_ECMP_PEER_GROUPS,
+    BOUNDED_ECMP_PORT_MAP,
+)
+from taac.abstractions.topology import (
+    OpenRMode,
+    RoutingDeviceConfig,
+)
 from taac.constants import Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_convergence_check,
@@ -39,7 +49,6 @@ from taac.playbooks.playbook_definitions import (
     PerIterationSetupStepsFactory,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.ixia_configs_for_tests import (
-    create_ebb_bounded_ecmp_sets_port_configs,
     create_ebb_performance_scale_basic_port_configs,
     create_ebb_route_churn_test_basic_port_configs,
     create_ebb_transient_memory_route_peer_scale_basic_port_configs,
@@ -1046,7 +1055,6 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     setup_tasks: list | None = None,
     log_collection_timeout: int | None = None,
-    direct_ixia_connections: list[DirectIxiaConnection] | None = None,
     host_os_type_map: dict[str, taac_types.DeviceOsType] | None = None,
 ) -> TestConfig:
     """BGP++ bounded-ECMP-sets TestConfig -- Arista perf-scaling case 9.
@@ -1070,12 +1078,6 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
         if host_os_type_map is not None
         else {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
     )
-    resolved_direct_ixia_connections = (
-        direct_ixia_connections
-        if direct_ixia_connections is not None
-        else _direct_ixia_conns_two_port(physical_inventory)
-    )
-
     if setup_tasks is None:
         setup_tasks = [
             create_interface_ip_configuration_task(
@@ -1208,41 +1210,57 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
             )
         )
 
+    if (
+        ebgp_peer_count_v6,
+        ibgp_peer_count_v6,
+        ebgp_peer_count_v4,
+        ibgp_peer_count_v4,
+        prefix_count,
+    ) != (128, 128, 128, 128, 5_000):
+        raise ValueError(
+            "DICE bounded-ECMP qualification uses its checked 128/5000 shape"
+        )
+    topology = replace(
+        BOUNDED_ECMP,
+        endpoints=tuple(
+            replace(endpoint, setup_mode="skip") if endpoint.role == "dut" else endpoint
+            for endpoint in BOUNDED_ECMP.endpoints
+        ),
+    )
+    compiled = topology.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=BOUNDED_ECMP_PORT_MAP,
+        parent_networks={
+            "ebgp_v6": ixia_ebgp_ic_parent_network_v6,
+            "ebgp_v4": ixia_ebgp_ic_parent_network_v4,
+            "ibgp_v6": ixia_ibgp_ic_parent_network_v6,
+            "ibgp_v4": ixia_ibgp_ic_parent_network_v4,
+        },
+        peer_groups=BOUNDED_ECMP_PEER_GROUPS,
+        as_numbers={"ebgp": ebgp_remote_as, "ibgp": ibgp_remote_as},
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=OpenRMode.NONE,
+            update_group_enable=enable_update_group,
+            update_group_config=(
+                tuple((update_group_config or UPDATE_GROUP_CONFIG).items())
+                if enable_update_group
+                else ()
+            ),
+        ),
+    ).compile()
     return TestConfig(
         name=name,
         skip_ixia_protocol_verification=True,
         log_collection_timeout=log_collection_timeout,
         basset_pool="dne.test",
-        endpoints=[
-            Endpoint(
-                name=device_name,
-                dut=True,
-                ixia_ports=[ixia_interface_mimic_ebgp],
-                direct_ixia_connections=resolved_direct_ixia_connections,
-            ),
-        ],
+        endpoints=compiled.endpoints,
         host_driver_args=host_driver_args,
         oss_mock_device_data=oss_mock_device_data,
         host_os_type_map=resolved_host_os_type_map,
         startup_checks=[],
         setup_tasks=setup_tasks,
         teardown_tasks=[],
-        basic_port_configs=create_ebb_bounded_ecmp_sets_port_configs(
-            device_name=device_name,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            ebgp_peer_count_v6=ebgp_peer_count_v6,
-            ebgp_peer_count_v4=ebgp_peer_count_v4,
-            ibgp_peer_count_v6=ibgp_peer_count_v6,
-            ibgp_peer_count_v4=ibgp_peer_count_v4,
-            ebgp_remote_as=ebgp_remote_as,
-            ibgp_remote_as=ibgp_remote_as,
-            prefix_count=prefix_count,
-            ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
-            ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
-            ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
-            ixia_ibgp_ic_parent_network_v4=ixia_ibgp_ic_parent_network_v4,
-        ),
+        basic_port_configs=compiled.basic_port_configs,
         playbooks=[
             create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook(
                 device_name=device_name,

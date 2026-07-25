@@ -24,6 +24,17 @@ never exercises BGP-MON); the Open/R profile is chosen per-TestConfig.
 """
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.topology import (
+    BgpPolicy,
+    FormulaicPrefixSource,
+    NextHopIntent,
+    NextHopMode,
+    PeerPrefixDistribution,
+    PrefixAdvertisement,
+    PrefixAllocation,
+    PrefixMembership,
+    PrefixSet,
+)
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_OPENR_START_IPV4S,
@@ -200,34 +211,74 @@ _DUAL_STACK_SPARE_V4_COMMUNITIES = [
     "65530:50320",  # anycast accept community
     "65529:44444",  # spec 2.9.4 marker community
 ]
-_DUAL_STACK_SPARE_V4_ROUTE_SCALES = [
-    taac_types.RouteScaleSpec(
+
+
+def _extra_formulaic_advertisement(
+    *,
+    prefix_name: str,
+    afi: str,
+    start_prefix: str,
+    parent_network: str,
+    prefix_step: int,
+    prefix_length: int,
+    prefix_count: int,
+    network_group_index: int,
+    communities: list[str],
+) -> tuple[PrefixSet, PrefixAdvertisement]:
+    intent_name = prefix_name.lower()
+    prefix_set = PrefixSet(
+        name=intent_name,
+        afi=afi,
+        source=FormulaicPrefixSource(
+            start_prefix=start_prefix,
+            prefix_step=prefix_step,
+            prefix_length=prefix_length,
+            count=prefix_count,
+            parent_network=parent_network,
+        ),
+    )
+    return prefix_set, PrefixAdvertisement(
+        name=f"{intent_name}_advertisement",
+        prefix_set=prefix_set.name,
+        allocation=PrefixAllocation(
+            prefixes_per_peer=prefix_count,
+            peer_distribution=PeerPrefixDistribution.SHARED,
+            network_group_index=network_group_index,
+        ),
+        membership=PrefixMembership(start_index=0, prefix_count=prefix_count),
+        next_hop=NextHopIntent(mode=NextHopMode.SELF),
+        policy=BgpPolicy(
+            name=f"{intent_name}_policy",
+            communities=tuple(communities),
+        ),
+        legacy_ixia_name=prefix_name,
+    )
+
+
+_DUAL_STACK_SPARE_V4_INTENTS = (
+    _extra_formulaic_advertisement(
+        prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_A",
+        afi="v4",
+        start_prefix="120.100.0.0",
+        parent_network="120.0.0.0/8",
+        prefix_step=1 << 8,
+        prefix_length=24,
+        prefix_count=_DUAL_STACK_SPARE_V4_STEP1_COUNT,
         network_group_index=1,
-        v4_route_scale=taac_types.RouteScale(
-            prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_A",
-            starting_prefixes="120.100.0.0",
-            prefix_step="0.0.0.0",
-            prefix_length=24,
-            prefix_count=_DUAL_STACK_SPARE_V4_STEP1_COUNT,
-            multiplier=1,
-            ip_address_family=ixia_types.IpAddressFamily.IPV4,
-            bgp_communities=list(_DUAL_STACK_SPARE_V4_COMMUNITIES),
-        ),
+        communities=_DUAL_STACK_SPARE_V4_COMMUNITIES,
     ),
-    taac_types.RouteScaleSpec(
+    _extra_formulaic_advertisement(
+        prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_B",
+        afi="v4",
+        start_prefix="120.104.0.0",
+        parent_network="120.0.0.0/8",
+        prefix_step=1 << 8,
+        prefix_length=24,
+        prefix_count=_DUAL_STACK_SPARE_V4_STEP8_COUNT,
         network_group_index=2,
-        v4_route_scale=taac_types.RouteScale(
-            prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_B",
-            starting_prefixes="120.104.0.0",
-            prefix_step="0.0.0.0",
-            prefix_length=24,
-            prefix_count=_DUAL_STACK_SPARE_V4_STEP8_COUNT,
-            multiplier=1,
-            ip_address_family=ixia_types.IpAddressFamily.IPV4,
-            bgp_communities=list(_DUAL_STACK_SPARE_V4_COMMUNITIES),
-        ),
+        communities=_DUAL_STACK_SPARE_V4_COMMUNITIES,
     ),
-]
+)
 # ─── Spec 2.9.1 Best-Path Change During Active Distribution ─────────────────
 # Two eBGP "competing sets" (carved off the eBGP v4 peer budget by the topology
 # split in bgp_ebb_ixia_config.py) advertise the SAME 500 v4 prefixes. Set A
@@ -415,27 +466,25 @@ _STAGGERED_WAVE_INJECT_POOL_REGEXES = [
 
 def _staggered_v4_inject_pool(
     prefix_name: str, starting_prefix: str, count: int, network_group_index: int
-) -> taac_types.RouteScaleSpec:
+) -> tuple[PrefixSet, PrefixAdvertisement]:
     """One inline v4 inject pool (unique /24s in 120/8 + accept communities)."""
-    return taac_types.RouteScaleSpec(
+    return _extra_formulaic_advertisement(
+        prefix_name=prefix_name,
+        afi="v4",
+        start_prefix=starting_prefix,
+        parent_network="120.0.0.0/8",
+        prefix_step=1 << 8,
+        prefix_length=24,
+        prefix_count=count,
         network_group_index=network_group_index,
-        v4_route_scale=taac_types.RouteScale(
-            prefix_name=prefix_name,
-            starting_prefixes=starting_prefix,
-            prefix_step="0.0.0.0",  # zero step -> IXNetwork increments one /24 per prefix
-            prefix_length=24,
-            prefix_count=count,
-            multiplier=1,
-            ip_address_family=ixia_types.IpAddressFamily.IPV4,
-            bgp_communities=list(_STAGGERED_INJECT_COMMUNITIES),
-        ),
+        communities=_STAGGERED_INJECT_COMMUNITIES,
     )
 
 
 # v4 inline pools on plane-1's iBGP v4 DC peer (distinct network_group_index each,
 # alongside the CSV import at index 0): final (120.150), wave1 (120.151), wave2
 # (120.152).
-_STAGGERED_V4_ROUTE_SCALES = [
+_STAGGERED_V4_INTENTS = (
     _staggered_v4_inject_pool(
         "PREFIX_POOL_IBGP_IPV4_PLANE_1_INJECT",
         "120.150.0.0",
@@ -454,24 +503,22 @@ _STAGGERED_V4_ROUTE_SCALES = [
         _STAGGERED_INJECT_PER_WAVE,
         3,
     ),
-]
+)
 # v6 inline pool on plane-1's iBGP v6 DC peer: the final inject (unique /64s within
 # the v6 EB-PRIVATE /52), so criterion 3 covers the eBGP v6 peers too.
-_STAGGERED_V6_ROUTE_SCALES = [
-    taac_types.RouteScaleSpec(
+_STAGGERED_V6_INTENTS = (
+    _extra_formulaic_advertisement(
+        prefix_name="PREFIX_POOL_IBGP_IPV6_PLANE_1_INJECT",
+        afi="v6",
+        start_prefix="2401:db00:11:2000::",
+        parent_network="2401:db00:11:2000::/52",
+        prefix_step=1 << 64,
+        prefix_length=64,
+        prefix_count=_STAGGERED_FINAL_INJECT_COUNT,
         network_group_index=1,
-        v6_route_scale=taac_types.RouteScale(
-            prefix_name="PREFIX_POOL_IBGP_IPV6_PLANE_1_INJECT",
-            starting_prefixes="2401:db00:11:2000::",
-            prefix_step="0:0:0:1::",  # one /64 per prefix, inside the EB-PRIVATE /52
-            prefix_length=64,
-            prefix_count=_STAGGERED_FINAL_INJECT_COUNT,
-            multiplier=1,
-            ip_address_family=ixia_types.IpAddressFamily.IPV6,
-            bgp_communities=list(_STAGGERED_INJECT_COMMUNITIES),
-        ),
+        communities=_STAGGERED_INJECT_COMMUNITIES,
     ),
-]
+)
 
 
 def _edge_cases_prechecks(
@@ -642,7 +689,14 @@ def create_bgp_ug_dual_stack_isolation_test_config(
         enable_update_group=True,
         # Build the spare inline-generated v4 pool (the genuinely-new prefixes
         # the playbook advertises for spec step 1/8) on the eBGP v4 device group.
-        ebgp_v4_extra_route_scales=_DUAL_STACK_SPARE_V4_ROUTE_SCALES,
+        extra_prefix_sets=tuple(
+            prefix_set for prefix_set, _ in _DUAL_STACK_SPARE_V4_INTENTS
+        ),
+        extra_prefix_advertisements={
+            "dg_ebgp_v4": tuple(
+                advertisement for _, advertisement in _DUAL_STACK_SPARE_V4_INTENTS
+            )
+        },
     )
 
 
@@ -857,8 +911,18 @@ def create_bgp_ug_staggered_startup_test_config(
         # genuinely-new sources for the measurable injects the shared-CSV planes cannot
         # provide. v4: the two between-wave dump-growth pools + the final runtime pool.
         # v6: the final runtime pool (so criterion 3 covers the eBGP v6 peers too).
-        ibgp_v4_dc_plane1_extra_route_scales=_STAGGERED_V4_ROUTE_SCALES,
-        ibgp_v6_dc_plane1_extra_route_scales=_STAGGERED_V6_ROUTE_SCALES,
+        extra_prefix_sets=tuple(
+            prefix_set
+            for prefix_set, _ in (*_STAGGERED_V4_INTENTS, *_STAGGERED_V6_INTENTS)
+        ),
+        extra_prefix_advertisements={
+            "dg_ibgp_v4_dc_p1": tuple(
+                advertisement for _, advertisement in _STAGGERED_V4_INTENTS
+            ),
+            "dg_ibgp_v6_dc_p1": tuple(
+                advertisement for _, advertisement in _STAGGERED_V6_INTENTS
+            ),
+        },
     )
 
 

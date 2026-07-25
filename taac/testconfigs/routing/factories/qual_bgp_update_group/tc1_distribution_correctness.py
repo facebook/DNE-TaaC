@@ -21,6 +21,19 @@ import json
 import os
 import typing as t
 
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_AS_NUMBERS,
+    EBB_FULL_SCALE_PORT_MAP,
+    ebb_full_scale_topology,
+    EBB_PARENT_NETWORKS,
+    EBB_PEER_GROUPS,
+)
+from taac.abstractions.topology import (
+    OpenRMode,
+    PrefixAdvertisement,
+    PrefixSet,
+    RoutingDeviceConfig,
+)
 from taac.constants import BgpPlusPlusProfile
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_graceful_restart_check,
@@ -81,12 +94,8 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.testconfigs.routing.util.bgp_ebb_ixia_config import (
     create_ebb_scale_basic_port_configs,
 )
-from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
-    get_common_setup_tasks,
-    get_teardown_tasks,
-)
 from taac.test_as_a_config import types as taac_types
-from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
+from taac.test_as_a_config.types import TestConfig
 
 
 # =============================================================================
@@ -122,7 +131,9 @@ def build_bag_conveyor_test_config(
     # spare IPv4 eBGP route pool(s) (RouteScale, no CSV). 2.9.4 dual-stack
     # isolation uses this for genuinely-new IPv4 prefixes advertised at runtime.
     # None -> byte-identical for other callers.
-    ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
+    extra_prefix_sets: tuple[PrefixSet, ...] = (),
+    extra_prefix_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]]
+    | None = None,
     # Next-hop-self resolution knobs (opt-in). When set, IXIA advertises routes
     # with next-hop = the peer's connected IP (SAME_AS_LOCAL_IP) and the DUT
     # resolves them from interface state via the bgpcpp
@@ -138,10 +149,6 @@ def build_bag_conveyor_test_config(
     # Forwarded to create_ebb_scale_basic_port_configs: a genuinely-new inline v4
     # pool on plane-1's iBGP v4 DC peers (2.9.6 strict runtime-distribution inject).
     # None -> byte-identical for other callers.
-    ibgp_v4_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
-    # Same, on plane-1's iBGP v6 DC peers (2.9.6 strict v6 runtime-distribution
-    # inject, so criterion-3 covers all 280 eBGP peers). None -> byte-identical.
-    ibgp_v6_dc_plane1_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
     # Forwarded to create_ebb_scale_basic_port_configs: BGP++ UG 2.9.1 best-path
     # competition. When > 0, carve two dedicated eBGP v4 "competing set" DGs
     # (Set A long AS-PATH / Set B short) advertising a shared inline test pool.
@@ -187,92 +194,48 @@ def build_bag_conveyor_test_config(
         "PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)"
     )
 
-    device_name = physical_inventory.device_name
-    ixia_chassis_ip = physical_inventory.ixia_chassis_ip
-    ixia_interface_mimic_ebgp, ixia_port_ebgp = physical_inventory.ixia_ports[0]
-    ixia_interface_mimic_ibgp, ixia_port_ibgp = physical_inventory.ixia_ports[1]
+    if ebgp_next_hop_self != ibgp_next_hop_self:
+        raise ValueError("eBGP and iBGP next-hop-self intent must move together")
+    next_hop_self = ebgp_next_hop_self
+    if next_hop_self != resolve_nexthops_from_interface_state:
+        raise ValueError("next-hop-self requires interface-state next-hop resolution")
 
-    # Open/R setup is wired ONLY for the WITH_OPEN_R profile. get_common_setup_tasks
-    # deploys the openr_config + injects baseline Open/R routes whenever an
-    # openr_configerator_path is passed, so forwarding these unconditionally would
-    # add Open/R tasks to the WITHOUT_OPEN_R configs and change their goldens. Under
-    # WITHOUT_OPEN_R ``openr_kwargs`` stays empty -> byte-identical to before.
-    # bag011's physical_inventory carries every openr_* field (physical_inventory.py); this mirrors the
-    # full-scale builder's wiring so a WITH_OPEN_R bag config (e.g. the 2.9.2
-    # simultaneous-disruptions test, which needs Open/R for its IGP-instability
-    # track) gets a functional Open/R daemon + port-channel + injected routes.
-    openr_kwargs: t.Dict[str, t.Any] = {}
-    if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R:
-        extras = physical_inventory.extras
-        openr_kwargs = {
-            "openr_configerator_path": physical_inventory.openr_configerator_path,
-            "openr_port_channel_member": extras["openr_port_channel_member"],
-            "openr_port_channel_ipv4": extras["openr_port_channel_ipv4"],
-            "openr_port_channel_link_local": extras["openr_port_channel_link_local"],
-            "openr_local_link": extras["openr_local_link"],
-            "openr_other_link": extras["openr_other_link"],
-        }
-
-    setup_tasks = get_common_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=profile,
-        include_bgp_mon=False,
-        enable_update_group=enable_update_group,
-        resolve_nexthops_from_interface_state=resolve_nexthops_from_interface_state,
-        **openr_kwargs,
+    openr_mode = (
+        OpenRMode.STANDALONE
+        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+        else OpenRMode.NONE
     )
-
-    # Pass device_name so the interface-cleanup teardown tasks target the DUT.
-    # Without it the tasks get hostname=None and teardown fails resolving the
-    # device OS type ("Cannot determine device OS type for None") -- the reserved-
-    # device context isn't available under --skip-basset-reservation, so teardown
-    # relies on the task hostname to look up host_os_type_map (populated at setup).
-    # Matches the full-scale builder (bgp_ebb_full_scale.py) which already does this.
-    teardown_tasks = get_teardown_tasks(
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        device_name=device_name,
-    )
-
-    return taac_types.TestConfig(
-        name=name,
-        skip_ixia_protocol_verification=True,
-        log_collection_timeout=600,
-        basset_pool="dne.test",
-        endpoints=[
-            taac_types.Endpoint(
-                name=device_name,
-                dut=True,
-                ixia_ports=[
-                    ixia_interface_mimic_ebgp,
-                    ixia_interface_mimic_ibgp,
-                ],
-                direct_ixia_connections=[
-                    taac_types.DirectIxiaConnection(
-                        interface=ixia_interface_mimic_ebgp,
-                        ixia_chassis_ip=ixia_chassis_ip,
-                        ixia_port=ixia_port_ebgp,
-                    ),
-                    taac_types.DirectIxiaConnection(
-                        interface=ixia_interface_mimic_ibgp,
-                        ixia_chassis_ip=ixia_chassis_ip,
-                        ixia_port=ixia_port_ibgp,
-                    ),
-                ],
+    bound = ebb_full_scale_topology(
+        openr_mode=openr_mode,
+        include_bgpmon=False,
+        ebgp_graceful_restart=ebgp_graceful_restart,
+        next_hop_self=next_hop_self,
+        resolve_nexthops_from_interface_state=(resolve_nexthops_from_interface_state),
+        extra_prefix_sets=extra_prefix_sets,
+        extra_advertisements=extra_prefix_advertisements,
+    ).bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=EBB_FULL_SCALE_PORT_MAP,
+        parent_networks=EBB_PARENT_NETWORKS,
+        peer_groups=EBB_PEER_GROUPS,
+        as_numbers=EBB_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=openr_mode,
+            update_group_enable=enable_update_group,
+            resolve_nexthops_from_interface_state=(
+                resolve_nexthops_from_interface_state
             ),
-        ],
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        startup_checks=[],
-        setup_tasks=setup_tasks,
-        teardown_tasks=teardown_tasks,
-        basic_port_configs=create_ebb_scale_basic_port_configs(
-            device_name=device_name,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+        ),
+    )
+    compiled = bound.compile()
+    basic_port_configs = compiled.basic_port_configs
+    if ebgp_v4_bestpath_set_peer_count or ebgp_v6_bestpath_set_peer_count:
+        # The best-path test was added after the DICE migration. Its four
+        # competing peer sets are not yet expressible by the shared topology.
+        basic_port_configs = create_ebb_scale_basic_port_configs(
+            device_name=physical_inventory.device_name,
+            ixia_interface_mimic_ebgp=physical_inventory.ixia_ports[0][0],
+            ixia_interface_mimic_ibgp=physical_inventory.ixia_ports[1][0],
             ebgp_peer_count_v6=EBGP_PEER_COUNT_V6,
             ebgp_peer_count_v4=EBGP_PEER_COUNT_V4,
             ebgp_peer_to_drain=EBGP_PEER_TO_DRAIN,
@@ -301,18 +264,26 @@ def build_bag_conveyor_test_config(
             include_bgp_mon=False,
             profile=profile,
             ebgp_graceful_restart=ebgp_graceful_restart,
-            ebgp_v4_extra_route_scales=ebgp_v4_extra_route_scales,
             ebgp_next_hop_self=ebgp_next_hop_self,
             ibgp_next_hop_self=ibgp_next_hop_self,
-            ibgp_v4_dc_plane1_extra_route_scales=ibgp_v4_dc_plane1_extra_route_scales,
-            ibgp_v6_dc_plane1_extra_route_scales=ibgp_v6_dc_plane1_extra_route_scales,
             ebgp_v4_bestpath_set_peer_count=ebgp_v4_bestpath_set_peer_count,
             ebgp_v4_bestpath_route_scales_a=ebgp_v4_bestpath_route_scales_a,
             ebgp_v4_bestpath_route_scales_b=ebgp_v4_bestpath_route_scales_b,
             ebgp_v6_bestpath_set_peer_count=ebgp_v6_bestpath_set_peer_count,
             ebgp_v6_bestpath_route_scales_a=ebgp_v6_bestpath_route_scales_a,
             ebgp_v6_bestpath_route_scales_b=ebgp_v6_bestpath_route_scales_b,
-        ),
+        )
+    return taac_types.TestConfig(
+        name=name,
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=basic_port_configs,
         playbooks=playbooks,
     )
 
@@ -462,9 +433,6 @@ def _create_eb03_distribution_correctness_test_config(
         "PhysicalInventory must have bgpcpp_configerator_path set"
     )
 
-    ebgp_dut_iface, ebgp_chassis_port = physical_inventory.ixia_ports[0]
-    ibgp_dut_iface, ibgp_chassis_port = physical_inventory.ixia_ports[1]
-
     lab_password_env = (
         physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
@@ -474,25 +442,23 @@ def _create_eb03_distribution_correctness_test_config(
         "dnepit",  # pragma: allowlist secret
     )
     lab_password = os.environ.get(lab_password_env, lab_admin_password_default)
-
-    setup_tasks = get_common_setup_tasks(
-        device_name=physical_inventory.device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ebgp_dut_iface,
-        ixia_interface_mimic_ibgp=ibgp_dut_iface,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        include_bgp_mon=False,
-        enable_update_group=True,
-    )
-
-    # Pass device_name so teardown tasks target the DUT (else hostname=None ->
-    # "Cannot determine device OS type for None" at teardown). See the shared
-    # builder above for the full rationale.
-    teardown_tasks = get_teardown_tasks(
-        ixia_interface_mimic_ebgp=ebgp_dut_iface,
-        ixia_interface_mimic_ibgp=ibgp_dut_iface,
-        device_name=physical_inventory.device_name,
+    compiled = (
+        ebb_full_scale_topology(
+            openr_mode=OpenRMode.NONE,
+            include_bgpmon=False,
+        )
+        .bind_to_inventory(
+            physical_inventory=physical_inventory,
+            port_map=EBB_FULL_SCALE_PORT_MAP,
+            parent_networks=EBB_PARENT_NETWORKS,
+            peer_groups=EBB_PEER_GROUPS,
+            as_numbers=EBB_AS_NUMBERS,
+            device_config_override=RoutingDeviceConfig(
+                openr_mode=OpenRMode.NONE,
+                update_group_enable=True,
+            ),
+        )
+        .compile()
     )
 
     return TestConfig(
@@ -505,31 +471,8 @@ def _create_eb03_distribution_correctness_test_config(
                 {"username": lab_admin_username, "password": lab_password}
             ),
         },
-        endpoints=[
-            Endpoint(
-                name=physical_inventory.device_name,
-                dut=True,
-                ixia_ports=[
-                    ebgp_dut_iface,
-                    ibgp_dut_iface,
-                ],
-                direct_ixia_connections=[
-                    DirectIxiaConnection(
-                        interface=ebgp_dut_iface,
-                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
-                        ixia_port=ebgp_chassis_port,
-                    ),
-                    DirectIxiaConnection(
-                        interface=ibgp_dut_iface,
-                        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
-                        ixia_port=ibgp_chassis_port,
-                    ),
-                ],
-            ),
-        ],
-        host_os_type_map={
-            physical_inventory.device_name: taac_types.DeviceOsType.ARISTA_FBOSS
-        },
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
         oss_mock_device_data={
             physical_inventory.device_name: taac_types.MockDeviceInfo(
                 name=physical_inventory.device_name,
@@ -554,40 +497,9 @@ def _create_eb03_distribution_correctness_test_config(
             ),
         },
         startup_checks=[],
-        setup_tasks=setup_tasks,
-        teardown_tasks=teardown_tasks,
-        basic_port_configs=create_ebb_scale_basic_port_configs(
-            device_name=physical_inventory.device_name,
-            ixia_interface_mimic_ebgp=ebgp_dut_iface,
-            ixia_interface_mimic_ibgp=ibgp_dut_iface,
-            ebgp_peer_count_v6=EBGP_PEER_COUNT_V6,
-            ebgp_peer_count_v4=EBGP_PEER_COUNT_V4,
-            ebgp_peer_to_drain=EBGP_PEER_TO_DRAIN,
-            ibgp_peer_scale_per_plane=IBGP_PEER_SCALE_PER_PLANE,
-            ibgp_peer_to_drain_per_plane=IBGP_PEER_TO_DRAIN_PER_PLANE,
-            ebgp_remote_as=EBGP_REMOTE_AS,
-            ibgp_remote_as=IBGP_REMOTE_AS,
-            ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-            ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-            ixia_ibgp_ic_parent_network_v6_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v6_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v6_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v6_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v6_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_dc_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_dc_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_dc_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_dc_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
-            ixia_ibgp_ic_parent_network_v4_mp_plane1=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
-            ixia_ibgp_ic_parent_network_v4_mp_plane2=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
-            ixia_ibgp_ic_parent_network_v4_mp_plane3=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
-            ixia_ibgp_ic_parent_network_v4_mp_plane4=IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
-            include_bgp_mon=False,
-            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        ),
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
         playbooks=[
             _create_eb03_2_1_1_initial_dump_identical_routes_playbook(
                 physical_inventory

@@ -33,6 +33,7 @@ See ../README.md §3.
 """
 
 import os
+from dataclasses import replace
 
 from ixia.ixia import types as ixia_types
 from taac.abstractions.topologies.bounded_ecmp import (
@@ -3036,71 +3037,76 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
     min_packed_size: int = 3500,
     restart_bgp_for_complete_view: bool = True,
     log_collection_timeout: int | None = None,
-    direct_ixia_connections: list[DirectIxiaConnection] | None = None,
 ) -> taac_types.TestConfig:
-    """BGP++ UPDATE-packing-validation TestConfig (legacy update_packing factory).
-
-    Byte-identical to the legacy
-    ``eb02_arista_bgp_update_packing_validation_test_config.py``
-    wrapper when invoked with ``EB02_LAB_ASH6`` and its wrapper defaults.
-    """
+    """Build the EB02 UPDATE-packing validation config from DICE intent."""
     if test_address_families is None:
         test_address_families = ["ipv6"]
     if ebgp_route_acceptance_communities is None:
         ebgp_route_acceptance_communities = ["65529:39744"]
 
     device_name = physical_inventory.device_name
-    ebgp_iface, ebgp_port = physical_inventory.ixia_ports[0]
-    ibgp_iface, ibgp_port = physical_inventory.ixia_ports[1]
+    ebgp_iface, _ = physical_inventory.ixia_ports[0]
+    ibgp_iface, _ = physical_inventory.ixia_ports[1]
 
     host_driver_args = physical_inventory.host_driver_args
     oss_mock_device_data = physical_inventory.oss_mock_device_data
     host_os_type_map = {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
-    resolved_direct_ixia_connections = (
-        direct_ixia_connections
-        if direct_ixia_connections is not None
-        else [
-            DirectIxiaConnection(
-                interface=ebgp_iface,
-                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
-                ixia_port=ebgp_port,
-            ),
-            DirectIxiaConnection(
-                interface=ibgp_iface,
-                ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
-                ixia_port=ibgp_port,
-            ),
-        ]
+    topology = replace(
+        IPV6_UPDATE_PACKING,
+        endpoints=tuple(
+            replace(endpoint, setup_mode="skip") if endpoint.role == "dut" else endpoint
+            for endpoint in IPV6_UPDATE_PACKING.endpoints
+        ),
     )
-
-    return test_config_bgp_update_packing_validation(
-        test_config_name=name,
-        device_name=device_name,
-        ixia_interface_mimic_ebgp=ebgp_iface,
-        ebgp_remote_as=ebgp_remote_as,
-        ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
-        ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
-        ixia_interface_mimic_ibgp=ibgp_iface,
-        ibgp_local_as=ibgp_local_as,
-        ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
-        ixia_ibgp_ic_parent_network_v4=ixia_ibgp_ic_parent_network_v4,
-        ebgp_peer_count=ebgp_peer_count,
-        prefixes_per_peer=prefixes_per_peer,
-        ibgp_peer_count=ibgp_peer_count,
-        test_address_families=test_address_families,
-        as_path_pool_size=as_path_pool_size,
-        community_pool_size=community_pool_size,
+    compiled = topology.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=IPV6_UPDATE_PACKING_PORT_MAP,
+        parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS,
+        peer_groups=IPV6_UPDATE_PACKING_PEER_GROUPS,
+        as_numbers=IPV6_UPDATE_PACKING_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(openr_mode=OpenRMode.NONE),
+    ).compile()
+    as_path_pool = generate_as_path_pool(
+        count=as_path_pool_size,
+        base_as=45000,
         as_path_length=as_path_length,
-        communities_per_route=communities_per_route,
-        ebgp_route_acceptance_communities=ebgp_route_acceptance_communities,
-        capture_duration_seconds=capture_duration_seconds,
-        min_packed_size=min_packed_size,
-        restart_bgp_for_complete_view=restart_bgp_for_complete_view,
+    )
+    community_pool = generate_community_pool(
+        count=community_pool_size,
+        base_community=45100,
+    )
+    return TestConfig(
+        name=name,
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=log_collection_timeout,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
         host_driver_args=host_driver_args,
         oss_mock_device_data=oss_mock_device_data,
         host_os_type_map=host_os_type_map,
-        direct_ixia_connections=resolved_direct_ixia_connections,
-        log_collection_timeout=log_collection_timeout,
+        startup_checks=[],
+        setup_tasks=[],
+        teardown_tasks=[],
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=[
+            create_bgp_update_packing_validation_playbook(
+                device_name=device_name,
+                ixia_interface_mimic_ibgp=ibgp_iface,
+                ibgp_peer_count=ibgp_peer_count,
+                prefixes_per_peer=prefixes_per_peer,
+                ixia_interface_mimic_ebgp=ebgp_iface,
+                ebgp_peer_count=ebgp_peer_count,
+                test_address_families=test_address_families,
+                as_path_pool=as_path_pool,
+                community_pool=community_pool,
+                communities_per_route=communities_per_route,
+                ibgp_route_acceptance_communities=None,
+                ebgp_route_acceptance_communities=(ebgp_route_acceptance_communities),
+                capture_duration_seconds=capture_duration_seconds,
+                min_packed_size=min_packed_size,
+                restart_bgp_for_complete_view=restart_bgp_for_complete_view,
+            )
+        ],
     )
 
 
