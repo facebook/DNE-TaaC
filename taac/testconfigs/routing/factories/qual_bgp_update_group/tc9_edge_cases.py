@@ -245,6 +245,7 @@ _BESTPATH_POOL_B_REGEX = r"PREFIX_POOL_IPV4_EBGP_BESTPATH_B$"
 # OFF the anycast-VIP combo so EB-FA-IN's own AS_PATH_PREPEND terms do not
 # re-prepend and skew the length we set.
 _BESTPATH_STARTING_PREFIX = "120.130.0.0"
+_BESTPATH_PREFIX_LENGTH = 24
 _BESTPATH_COMMUNITIES = [
     "65529:39744",  # EB-PRIVATE-PREFIXES accept community
     "65060:10012",  # ADVERTISED-FROM-DC accept community
@@ -277,7 +278,7 @@ def _bestpath_route_scales(
                 prefix_name=pool_name,
                 starting_prefixes=_BESTPATH_STARTING_PREFIX,
                 prefix_step="0.0.0.0",
-                prefix_length=24,
+                prefix_length=_BESTPATH_PREFIX_LENGTH,
                 prefix_count=_BESTPATH_PREFIX_COUNT,
                 multiplier=1,
                 ip_address_family=ixia_types.IpAddressFamily.IPV4,
@@ -302,8 +303,9 @@ _BESTPATH_STARTING_PREFIX_V6 = "2401:db00:11:2800::"
 _BESTPATH_PREFIX_STEP_V6 = "0:0:0:1::"  # one /64 per prefix, inside the EB-PRIVATE /52
 _BESTPATH_PREFIX_LENGTH_V6 = 64
 # 500 /64s from ::2800 span 4th-group 0x2800..0x29f3, all inside this /54 (0x2800..
-# 0x2bff = 1024 /64s); tight enough to exclude the EB-PRIVATE /52 aggregate route and
-# any background v6 routes.
+# 0x2bff = 1024 /64s). The /54 has slack, so the checks ALSO filter to exactly /64
+# (test_prefix_length_v6) to drop any aggregate/summary route the /54 over-matches --
+# the first HW run saw 509 vs 500 in the /54, closed by the /64 filter.
 _BESTPATH_TEST_PREFIX_PARENTS_V6 = ["2401:db00:11:2800::/54"]
 
 
@@ -910,6 +912,9 @@ def create_bgp_ug_best_path_change_test_config(
         test_prefix_parents=_BESTPATH_TEST_PREFIX_PARENTS,
         discriminator_asn=EBGP_REMOTE_AS,
         best_path_as_path_delta=_BESTPATH_AS_PATH_DELTA,
+        # The 500 competing v4 prefixes are all /24; match only /24s under the /15 so
+        # any aggregate/summary route in that range is excluded (count == injected set).
+        test_prefix_length=_BESTPATH_PREFIX_LENGTH,
         # IPv6 leg: same best-path competition on the eBGP v6 sets + v6 strict
         # convergence (scoped to the v6 test /54) + v6 PS probe. Runs STRICT from the
         # start -- next-hop-self resolves v6 next-hops deterministically under
@@ -919,6 +924,32 @@ def create_bgp_ug_best_path_change_test_config(
         ebgp_bestpath_b_pool_regex_v6=_BESTPATH_POOL_B_REGEX_V6,
         ibgp_v6_peer_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
         test_prefix_parents_v6=_BESTPATH_TEST_PREFIX_PARENTS_V6,
+        # The 500 competing v6 prefixes are all /64; match only /64s under the /54 so
+        # the handful of non-/64 aggregates the /54 over-matched (the HW run saw 509 vs
+        # 500) are excluded.
+        test_prefix_length_v6=_BESTPATH_PREFIX_LENGTH_V6,
+        # Per-peer distribution check (the "better" gate): read each iBGP peer's
+        # advertised adj-RIB-out (getPostfilterAdvertisedNetworks) and assert every peer
+        # got Set B. v4 is STRICT: HW confirmed all 496 iBGP peers were advertised all
+        # 500 test prefixes (advertised_total 1249 = 749 baseline + 500 test), Set B,
+        # AS-PATH delta intact. v6 stays XFAIL due to a THRIFT-API blind spot, NOT a
+        # device problem: getPostfilterAdvertisedNetworks under-reports v6 (returns 9 of
+        # 509 test prefixes; advertised_total 758 vs the CLI's 1258), while the device
+        # CLI ("advertised post-policy") confirms the DUT advertises all 509 v6 test
+        # prefixes to every peer -- matching its Loc-RIB. So v6 per-peer distribution is
+        # actually healthy; it just isn't measurable via this thrift API yet. v6
+        # distribution is still covered by the v6 device-side (Loc-RIB) strict check +
+        # the sent-route-count (PS) checks. See the [peer-advertised]
+        # advertised_total/in_parent/matched diagnostics in the run logs.
+        per_peer_check=True,
+        per_peer_expected_fail_v4=False,
+        per_peer_expected_fail_v6=True,
+        per_peer_expected_fail_reason=(
+            "v6 thrift getPostfilterAdvertisedNetworks under-reports advertised routes "
+            "(returns 9 of 509; CLI confirms the DUT advertises all 509) -- API blind "
+            "spot, not a device gap; tracked in T281417842, pending a thrift fix / "
+            "alternate reader"
+        ),
         # Retry the establish precheck: the ~1272-session full-scale topology needs
         # time to reach Established after the control-plane Bgp restart (as 2.9.6).
         prechecks=_edge_cases_prechecks(

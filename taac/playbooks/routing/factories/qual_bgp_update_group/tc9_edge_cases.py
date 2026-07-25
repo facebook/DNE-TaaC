@@ -36,10 +36,12 @@ from taac.steps.step_definitions import (
     create_run_task_step,
     create_set_bgp_prefixes_local_preference_step,
     create_snapshot_bgp_dut_best_path_as_path_step,
+    create_snapshot_bgp_peer_advertised_as_path_step,
     create_snapshot_bgp_sent_route_counts_step,
     create_start_stop_bgp_peers_step,
     create_validation_step,
     create_verify_bgp_dut_best_path_as_path_converged_step,
+    create_verify_bgp_peer_advertised_as_path_converged_step,
     create_verify_bgp_sent_route_count_delta_step,
     create_verify_bgp_sent_route_counts_uniform_step,
 )
@@ -2204,6 +2206,10 @@ def create_bgp_ug_best_path_change_playbook(
     test_prefix_parents: t.Optional[t.List[str]] = None,
     discriminator_asn: t.Optional[int] = None,
     best_path_as_path_delta: int = 3,
+    # Restrict best-path/per-peer matching to prefixes of exactly this mask length
+    # (the v4 test prefixes are all /24). Excludes any aggregate/summary route that
+    # falls inside ``test_prefix_parents`` so the matched count == the injected set.
+    test_prefix_length: t.Optional[int] = None,
     strict_convergence_expected_fail: bool = False,
     strict_convergence_expected_fail_reason: t.Optional[str] = None,
     # --- IPv6 leg (opt-in) ---
@@ -2218,6 +2224,24 @@ def create_bgp_ug_best_path_change_playbook(
     ebgp_bestpath_b_pool_regex_v6: t.Optional[str] = None,
     ibgp_v6_peer_parent_prefixes: t.Optional[t.List[str]] = None,
     test_prefix_parents_v6: t.Optional[t.List[str]] = None,
+    # v6 analogue of ``test_prefix_length`` (the v6 test prefixes are all /64).
+    test_prefix_length_v6: t.Optional[int] = None,
+    # --- Per-peer distribution check (opt-in; the "better" / true per-peer gate) ---
+    # When True, ALSO read each in-scope iBGP peer's post-policy adj-RIB-out
+    # (getPostfilterAdvertisedNetworks, readable under UG since D109395098) and assert
+    # every peer was advertised the winner for every test prefix -- catching a per-peer
+    # split-brain the DUT-side Loc-RIB check cannot see. Runs for whichever AFIs have
+    # their strict params set (reuses ibgp_v4/v6_peer_parent_prefixes + the same
+    # discriminator/delta). Defaults to XFAIL (measure-first) while the
+    # advertised-path AS-PATH delta is confirmed on HW, then flip to strict.
+    per_peer_check: bool = False,
+    # Per-AFI XFAIL knobs: the per-peer check can be strict on one AFI while
+    # measure-first on the other (v4 distribution is confirmed on HW, so v4 goes
+    # strict; v6 fans out more slowly, so it stays XFAIL until it demonstrably
+    # completes distribution).
+    per_peer_expected_fail_v4: bool = True,
+    per_peer_expected_fail_v6: bool = True,
+    per_peer_expected_fail_reason: t.Optional[str] = None,
     # --- Checks ---
     prechecks: t.List[PointInTimeHealthCheck],
     postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
@@ -2350,6 +2374,7 @@ def create_bgp_ug_best_path_change_playbook(
             test_prefix_parents=test_prefix_parents or [],
             discriminator_asn=discriminator_asn or 0,
             expected_prefix_count=test_prefix_count,
+            test_prefix_length=test_prefix_length,
             description=(
                 "2.9.1 baseline -- record the DUT best-path AS-PATH while only Set A "
                 "(loser, long AS-PATH) is advertised"
@@ -2366,6 +2391,7 @@ def create_bgp_ug_best_path_change_playbook(
             expected_as_path_delta=best_path_as_path_delta,
             expected_fail=strict_convergence_expected_fail,
             expected_fail_reason=strict_convergence_expected_fail_reason,
+            test_prefix_length=test_prefix_length,
             description=(
                 f"2.9.1 {step_note} -- STRICT: DUT converged every test prefix's "
                 f"best path to Set B (none stuck on Set A)"
@@ -2411,6 +2437,7 @@ def create_bgp_ug_best_path_change_playbook(
             test_prefix_parents=test_prefix_parents_v6 or [],
             discriminator_asn=discriminator_asn or 0,
             expected_prefix_count=test_prefix_count,
+            test_prefix_length=test_prefix_length_v6,
             description=(
                 "2.9.1 (v6) baseline -- record the DUT best-path AS-PATH while only "
                 "Set A (loser, long AS-PATH) is advertised"
@@ -2427,10 +2454,62 @@ def create_bgp_ug_best_path_change_playbook(
             expected_as_path_delta=best_path_as_path_delta,
             expected_fail=strict_convergence_expected_fail,
             expected_fail_reason=strict_convergence_expected_fail_reason,
+            test_prefix_length=test_prefix_length_v6,
             description=(
                 f"2.9.1 (v6) {step_note} -- STRICT: DUT converged every test prefix's "
                 f"best path to Set B (none stuck on Set A)"
             ),
+        )
+
+    # Per-peer distribution check (the "better" gate): read each iBGP peer's advertised
+    # adj-RIB-out and assert it got the winner. Runs per AFI that has its strict params
+    # set. Its own snapshot keys, distinct from the DUT-side ones.
+    per_peer_v4 = per_peer_check and strict_convergence
+    per_peer_v6 = (
+        per_peer_check and strict_convergence_v6 and bool(ibgp_v6_peer_parent_prefixes)
+    )
+
+    def _pp_snapshot(
+        key: str,
+        peer_parents: t.List[str],
+        test_parents: t.Optional[t.List[str]],
+        note: str,
+        xfail: bool,
+        tpl: t.Optional[int],
+    ) -> Step:
+        return create_snapshot_bgp_peer_advertised_as_path_step(
+            hostname=device_name,
+            snapshot_key=key,
+            peer_parent_prefixes=peer_parents,
+            test_prefix_parents=test_parents or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            expected_fail=xfail,
+            expected_fail_reason=per_peer_expected_fail_reason,
+            test_prefix_length=tpl,
+            description=f"2.9.1 {note} -- per-peer baseline (advertised adj-RIB-out)",
+        )
+
+    def _pp_verify(
+        key: str,
+        peer_parents: t.List[str],
+        test_parents: t.Optional[t.List[str]],
+        note: str,
+        xfail: bool,
+        tpl: t.Optional[int],
+    ) -> Step:
+        return create_verify_bgp_peer_advertised_as_path_converged_step(
+            hostname=device_name,
+            snapshot_key=key,
+            peer_parent_prefixes=peer_parents,
+            test_prefix_parents=test_parents or [],
+            discriminator_asn=discriminator_asn or 0,
+            expected_prefix_count=test_prefix_count,
+            expected_as_path_delta=best_path_as_path_delta,
+            expected_fail=xfail,
+            expected_fail_reason=per_peer_expected_fail_reason,
+            test_prefix_length=tpl,
+            description=f"2.9.1 {note} -- per-peer verify (every peer got the winner)",
         )
 
     stages = [
@@ -2528,6 +2607,35 @@ def create_bgp_ug_best_path_change_playbook(
                 # to Set B without hard-coding absolute AS-PATH values.
                 *([_snapshot_best_path()] if strict_convergence else []),
                 *([_snapshot_best_path_v6()] if strict_convergence_v6 else []),
+                # Per-peer baseline (advertised adj-RIB-out) while only Set A is up.
+                *(
+                    [
+                        _pp_snapshot(
+                            "pp_v4",
+                            ibgp_v4_peer_parent_prefixes,
+                            test_prefix_parents,
+                            "step 1 v4",
+                            per_peer_expected_fail_v4,
+                            test_prefix_length,
+                        )
+                    ]
+                    if per_peer_v4
+                    else []
+                ),
+                *(
+                    [
+                        _pp_snapshot(
+                            "pp_v6",
+                            ibgp_v6_peer_parent_prefixes or [],
+                            test_prefix_parents_v6,
+                            "step 1 v6",
+                            per_peer_expected_fail_v6,
+                            test_prefix_length_v6,
+                        )
+                    ]
+                    if per_peer_v6
+                    else []
+                ),
                 _validation(
                     "bestpath_after_a",
                     "2.9.1 step 1 -- Set A distributing; no crash; sessions up; UG intact",
@@ -2577,6 +2685,35 @@ def create_bgp_ug_best_path_change_playbook(
                 # Set B (baseline count - delta), none stuck on Set A.
                 *([_verify_converged("step 4")] if strict_convergence else []),
                 *([_verify_converged_v6("step 4")] if strict_convergence_v6 else []),
+                # Per-peer: every iBGP peer was actually advertised Set B.
+                *(
+                    [
+                        _pp_verify(
+                            "pp_v4",
+                            ibgp_v4_peer_parent_prefixes,
+                            test_prefix_parents,
+                            "step 4 v4",
+                            per_peer_expected_fail_v4,
+                            test_prefix_length,
+                        )
+                    ]
+                    if per_peer_v4
+                    else []
+                ),
+                *(
+                    [
+                        _pp_verify(
+                            "pp_v6",
+                            ibgp_v6_peer_parent_prefixes or [],
+                            test_prefix_parents_v6,
+                            "step 4 v6",
+                            per_peer_expected_fail_v6,
+                            test_prefix_length_v6,
+                        )
+                    ]
+                    if per_peer_v6
+                    else []
+                ),
                 _validation(
                     "bestpath_after_flip",
                     "2.9.1 step 4 -- after the best-path change: no split-brain crash; "
@@ -2659,6 +2796,35 @@ def create_bgp_ug_best_path_change_playbook(
                 *(
                     [_verify_converged_v6("step 8 final")]
                     if strict_convergence_v6
+                    else []
+                ),
+                # Per-peer: every iBGP peer still advertised Set B after the churn.
+                *(
+                    [
+                        _pp_verify(
+                            "pp_v4",
+                            ibgp_v4_peer_parent_prefixes,
+                            test_prefix_parents,
+                            "step 8 final v4",
+                            per_peer_expected_fail_v4,
+                            test_prefix_length,
+                        )
+                    ]
+                    if per_peer_v4
+                    else []
+                ),
+                *(
+                    [
+                        _pp_verify(
+                            "pp_v6",
+                            ibgp_v6_peer_parent_prefixes or [],
+                            test_prefix_parents_v6,
+                            "step 8 final v6",
+                            per_peer_expected_fail_v6,
+                            test_prefix_length_v6,
+                        )
+                    ]
+                    if per_peer_v6
                     else []
                 ),
                 _validation(

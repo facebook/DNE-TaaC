@@ -315,6 +315,7 @@ def create_snapshot_bgp_dut_best_path_as_path_step(
     test_prefix_parents: t.List[str],
     discriminator_asn: int,
     expected_prefix_count: int,
+    test_prefix_length: t.Optional[int] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Baseline the DUT's selected best-path AS-PATH for the 2.9.1 test prefixes
@@ -356,6 +357,8 @@ def create_snapshot_bgp_dut_best_path_as_path_step(
         "discriminator_asn": int(discriminator_asn),
         "expected_prefix_count": int(expected_prefix_count),
     }
+    if test_prefix_length is not None:
+        params["test_prefix_length"] = int(test_prefix_length)
     return create_custom_step(params_dict=params, description=description)
 
 
@@ -369,6 +372,7 @@ def create_verify_bgp_dut_best_path_as_path_converged_step(
     tolerance: int = 0,
     expected_fail: bool = False,
     expected_fail_reason: t.Optional[str] = None,
+    test_prefix_length: t.Optional[int] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Strict criterion-1 for 2.9.1: assert the DUT converged EVERY test prefix's
@@ -424,6 +428,107 @@ def create_verify_bgp_dut_best_path_as_path_converged_step(
     }
     if expected_fail_reason is not None:
         params["expected_fail_reason"] = expected_fail_reason
+    if test_prefix_length is not None:
+        params["test_prefix_length"] = int(test_prefix_length)
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_snapshot_bgp_peer_advertised_as_path_step(
+    hostname: str,
+    snapshot_key: str,
+    peer_parent_prefixes: t.List[str],
+    test_prefix_parents: t.List[str],
+    discriminator_asn: int,
+    expected_prefix_count: int,
+    max_concurrency: int = 20,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    test_prefix_length: t.Optional[int] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Per-peer baseline: while only the loser set is up, record the (uniform) count of
+    ``discriminator_asn`` in the AS-PATH the DUT ADVERTISED to each in-scope iBGP peer
+    (``getPostfilterAdvertisedNetworks``, readable under UG since D109395098) for the
+    test prefixes. Paired with
+    ``create_verify_bgp_peer_advertised_as_path_converged_step``. This is the true
+    per-peer distribution baseline (vs the DUT's single best-path selection). With
+    ``expected_fail`` it logs + skips storing on any problem (XFAIL / measure-first)."""
+    if not peer_parent_prefixes or not test_prefix_parents:
+        raise ValueError(
+            "create_snapshot_bgp_peer_advertised_as_path_step: peer_parent_prefixes "
+            "and test_prefix_parents must be non-empty"
+        )
+    if description is None:
+        description = (
+            f"Baseline per-peer advertised AS{discriminator_asn} count for "
+            f"{expected_prefix_count} test prefixes on {hostname} (key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "snapshot_bgp_peer_advertised_as_path",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "peer_parent_prefixes": list(peer_parent_prefixes),
+        "test_prefix_parents": list(test_prefix_parents),
+        "discriminator_asn": int(discriminator_asn),
+        "expected_prefix_count": int(expected_prefix_count),
+        "max_concurrency": int(max_concurrency),
+        "expected_fail": expected_fail,
+    }
+    if expected_fail_reason is not None:
+        params["expected_fail_reason"] = expected_fail_reason
+    if test_prefix_length is not None:
+        params["test_prefix_length"] = int(test_prefix_length)
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_peer_advertised_as_path_converged_step(
+    hostname: str,
+    snapshot_key: str,
+    peer_parent_prefixes: t.List[str],
+    test_prefix_parents: t.List[str],
+    discriminator_asn: int,
+    expected_prefix_count: int,
+    expected_as_path_delta: int = 3,
+    max_concurrency: int = 20,
+    tolerance: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    test_prefix_length: t.Optional[int] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Strict per-peer criterion-1: assert EVERY in-scope iBGP peer was advertised the
+    winner set for EVERY test prefix (advertised-AS-PATH ``discriminator_asn`` count ==
+    baseline - ``expected_as_path_delta``), catching a per-peer split-brain the
+    DUT-side Loc-RIB check cannot see. Reads ``getPostfilterAdvertisedNetworks`` per
+    peer (all peers, async-batched). Requires the paired snapshot; honors
+    ``expected_fail`` (XFAIL) for the measure-first first run; never vacuous."""
+    if not peer_parent_prefixes or not test_prefix_parents:
+        raise ValueError(
+            "create_verify_bgp_peer_advertised_as_path_converged_step: "
+            "peer_parent_prefixes and test_prefix_parents must be non-empty"
+        )
+    if description is None:
+        description = (
+            f"Verify all in-scope iBGP peers were advertised the winning path for "
+            f"{expected_prefix_count} test prefixes on {hostname} (key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_peer_advertised_as_path_converged",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "peer_parent_prefixes": list(peer_parent_prefixes),
+        "test_prefix_parents": list(test_prefix_parents),
+        "discriminator_asn": int(discriminator_asn),
+        "expected_prefix_count": int(expected_prefix_count),
+        "expected_as_path_delta": int(expected_as_path_delta),
+        "max_concurrency": int(max_concurrency),
+        "tolerance": int(tolerance),
+        "expected_fail": expected_fail,
+    }
+    if expected_fail_reason is not None:
+        params["expected_fail_reason"] = expected_fail_reason
+    if test_prefix_length is not None:
+        params["test_prefix_length"] = int(test_prefix_length)
     return create_custom_step(params_dict=params, description=description)
 
 
