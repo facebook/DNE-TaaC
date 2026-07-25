@@ -448,23 +448,32 @@ def create_<domain>_<workflow>_test_config(
 - **Spec constants** (e.g. `_2_3_1_PREFIX_COUNT = 10000`, `_STORM_PREFIX_POOL_REGEX = "..."`): module-level defaults inside the factory file. Factory reads them. Add kwargs incrementally when a caller needs to tune a specific one.
 - **Runtime asserts** on required PhysicalInventory fields. PhysicalInventory fields are Optional; a factory that needs `bgpcpp_configerator_path` must assert it's not None.
 - **Return** a fully-wired `TestConfig`: name, endpoints, playbooks, prechecks/postchecks/snapshot checks, setup/teardown tasks.
-- **Internal helpers stay private** (e.g., `_pb_2_3_1()`, `_snapshot_helper()`). One public factory function per workflow. Sub-playbook helpers do NOT leak.
+- **Internal helpers stay private** (e.g., `_pb_2_3_1()`, `_snapshot_helper()`).
+- **One public `TestConfig` factory per topology.** A topology's factory builds
+  its canonical ordered playbook suite and accepts `playbooks_selected` for
+  bindings that run a subset. Do not add another factory for a different
+  workflow on the same topology.
 
 ### Factory function naming
 
-Format: `create_<domain>_<workflow>_test_config`.
+Format: `create_<domain>_<topology>_test_config`.
 
 - Always `create_` prefix.
 - Always `_test_config` suffix.
-- `<domain>` matches the file's name minus prefix. In `bgp_update_group.py`: `create_bgp_ug_backpressure_test_config`, `create_bgp_ug_new_peer_join_test_config`.
-- **Never encode DUT identity in the factory name.** Factory is DUT-agnostic. `create_bag010_ash6_instability_test_config` is WRONG. Correct: `create_ebb_instability_test_config(physical_inventory=BAG010_ASH6)`.
+- `<domain>_<topology>` matches the topology owned by the file. For example,
+  `bgp_ebb_full_scale.py` exposes `create_bgp_ebb_full_scale_test_config`.
+- **Never encode DUT identity or a selected playbook group in the factory
+  name.** The factory is DUT-agnostic and topology-scoped.
 
-### Adding a new workflow
+### Adding a new topology or playbook
 
-1. Pick the right `factories/<domain>.py` file (or create one if the workflow is genuinely new).
-2. Add a `def create_<domain>_<workflow>_test_config(physical_inventory, ...)` function.
-3. Update `factories/__init__.py` if a new file was created.
-4. Update BUCK.
+1. For a new topology, create its factory file and single public
+   `create_<domain>_<topology>_test_config(...)` function.
+2. For another playbook on an existing topology, add it to that factory's
+   canonical ordered suite instead of adding a factory function.
+3. Select the required playbook names from the catalog binding with
+   `playbooks_selected`.
+4. Update `factories/__init__.py` and BUCK only when adding a factory file.
 
 ---
 
@@ -472,7 +481,8 @@ Format: `create_<domain>_<workflow>_test_config`.
 
 ### What it is
 
-A file that binds factory functions + PhysicalInventory instances into named `TestConfig` constants. Every constant is a one-line factory call.
+A file that binds topology factories + PhysicalInventory instances into named
+`TestConfig` constants. A binding may select an ordered playbook subset.
 
 ### Strict three-way prefix taxonomy
 
@@ -579,7 +589,7 @@ Variant suffix goes **after** `_TEST_CONFIG`, not before it. The invariant is th
 | Segment | Source | Required? |
 |---|---|---|
 | **PHYSICAL_INVENTORY** | Bare physical_inventory identifier, DC suffix dropped (`BAG010` not `BAG010_ASH6`, `EB02_LAB` not `EB02_LAB_ASH6`). The DC lives on the PhysicalInventory instance in `physical_inventory.py`, not in the catalog constant. | Yes |
-| **FACTORY** | Factory function's workflow part, stripped of `create_` prefix and `_test_config` suffix. Also strip generic infra prefixes (`bgp_`, `ebb_`, `bgp_ebb_`) so the constant reads as the workflow, not the factory-file taxonomy. Examples: `create_ebb_drain_test_config` → `DRAIN`; `create_bgp_ug_backpressure_test_config` → `BGP_UG_BACKPRESSURE`; `create_ebb_stage1_consolidated_test_config` → `STAGE1_CONSOLIDATED`. | Yes |
+| **FACTORY** | The catalog binding's selected playbook suite or purpose. A topology factory may produce several bindings, so this segment distinguishes selections such as `STAGE1_CONSOLIDATED`, `DRAIN`, or `LONGEVITY`. | Yes |
 | **Fixed suffix** | Always `_TEST_CONFIG` | Yes |
 | **VARIANT** | Optional short tag identifying a variant of the same factory-on-physical_inventory pair. Prefer short forms: `_UG` (update group), `_SMOKE` (topology smoke), `_WITHOUT_OPEN_R`, `_200_IBGP_PEERS`. Multiple variants concatenate: `_UG_SMOKE`. | Only when applied |
 
@@ -737,7 +747,7 @@ Decision tree:
 ## 12. Anti-patterns (do NOT do)
 
 1. ❌ Hardcoding DUT hostname, IXIA chassis IP, or port map in a catalog OR factory file. That belongs in `physical_inventory.py`.
-2. ❌ Per-DUT factory names like `create_bag010_ash6_instability_test_config`. Parameterize instead: `create_ebb_instability_test_config(physical_inventory=BAG010_ASH6)`.
+2. ❌ Per-DUT or per-playbook-group factory names like `create_bag010_ash6_instability_test_config`. Bind the DUT and select playbooks when calling the topology factory.
 3. ❌ `TestConfig(...)` literal in a catalog file. Always call a factory.
 4. ❌ Direct catalog-file import from external code. Always go through `testconfigs.routing`.
 5. ❌ Silent renaming of a TestConfig constant during migration. Rename is a separate, isolated diff.
