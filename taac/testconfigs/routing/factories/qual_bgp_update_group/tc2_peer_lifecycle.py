@@ -12,9 +12,7 @@ Sub-specs to implement:
 - 2.2.3 Sustained Group Membership Churn: No Memory Leak
 """
 
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
-)
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, TestConfig
 

@@ -25,12 +25,10 @@ the 4 policy names + the mimic interface names + optional
 overridable knobs.
 """
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.testconfigs.routing.ebb.fboss_ebb_scale_test_config import (
     test_config_for_bgp_plus_plus_ebb,
     test_config_for_bgp_plus_plus_ebb_with_bgp_mon,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.test_as_a_config.types import DirectIxiaConnection, TestConfig
 

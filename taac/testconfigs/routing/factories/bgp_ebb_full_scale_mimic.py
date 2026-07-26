@@ -19,12 +19,10 @@ sibling ``util/bgp_ebb_constants.py`` module has drifted defaults
 so reusing those constants would break the golden manifest hash.
 """
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.ebb.arista_ebb_scale_test_config import (
     test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, TestConfig

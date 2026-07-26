@@ -21,19 +21,19 @@ The 3 lab-box siblings (eb01/eb03/eb04) live in
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
+from taac.abstractions.physical_inventory import (
+    FSW001_QZB,
+    FSW_QZB,
+    JSW002_M001_SNC1,
+    QZD_FSW002,
+    QZD_LAB,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale_fboss_mimic import (
     create_bgp_ebb_full_scale_fboss_test_config,
     create_bgp_ebb_full_scale_fboss_test_config_with_bgp_mon,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale_mimic import (
     create_bgp_ebb_full_scale_mimic_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    FSW001_QZB,
-    FSW_QZB,
-    JSW002_M001_SNC1,
-    QZD_FSW002,
-    QZD_LAB,
 )
 from taac.test_as_a_config import types as taac_types
 

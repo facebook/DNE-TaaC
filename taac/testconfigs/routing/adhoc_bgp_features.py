@@ -16,15 +16,13 @@ below preserves the legacy ``TestConfig.name`` verbatim via the factory
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
+from taac.abstractions.physical_inventory import EB03_LAB_ASH6
 from taac.testconfigs.routing.factories.bgp_features import (
     create_bgp_feature_enforce_first_as_test_config,
     create_bgp_feature_fast_reset_test_config,
     create_bgp_feature_med_test_config,
     create_bgp_feature_weight_test_config,
     create_bgp_feature_well_known_communities_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    EB03_LAB_ASH6,
 )
 
 

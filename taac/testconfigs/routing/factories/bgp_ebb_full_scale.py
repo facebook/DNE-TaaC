@@ -2,6 +2,7 @@
 # pyre-unsafe
 """Factory for the 1274-peer EBB full-scale topology."""
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
     EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
@@ -31,9 +32,6 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
     create_bgp_ebb_plane_drain_undrain_playbook,
     create_bgp_ebb_route_registry_runtime_update_playbook,
     create_bgp_ebb_route_storm_playbook,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     BGP_MON_PEER_COUNT,

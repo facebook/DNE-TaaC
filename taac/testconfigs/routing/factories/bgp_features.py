@@ -29,6 +29,7 @@ See ../README.md §3.
 
 import os
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_rib_fib_consistency_check,
     create_bgp_session_establish_check,
@@ -77,9 +78,6 @@ from taac.task_definitions import (
     create_restore_bgp_peers_task,
     create_run_commands_on_shell_task,
     create_set_peer_group_enforce_first_as_task,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig

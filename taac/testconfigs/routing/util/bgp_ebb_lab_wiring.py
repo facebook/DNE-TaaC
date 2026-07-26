@@ -11,9 +11,7 @@ helper because it derives from ``physical_inventory.ixia_ports`` (a runtime layo
 that does not fit cleanly on the frozen dataclass).
 """
 
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
-)
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.test_as_a_config.types import DirectIxiaConnection
 
 

@@ -36,6 +36,7 @@ import os
 from dataclasses import replace
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
     BOUNDED_ECMP_AS_NUMBERS,
@@ -106,9 +107,6 @@ from taac.task_definitions import (
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     _derive_test_config_name,

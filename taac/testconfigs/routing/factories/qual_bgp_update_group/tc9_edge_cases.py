@@ -24,6 +24,7 @@ never exercises BGP-MON); the Open/R profile is chosen per-TestConfig.
 """
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topology import (
     BgpPolicy,
     FormulaicPrefixSource,
@@ -57,9 +58,6 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases impor
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     build_bag_conveyor_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_REMOTE_AS,

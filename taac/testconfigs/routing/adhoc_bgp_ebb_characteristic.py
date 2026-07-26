@@ -12,15 +12,15 @@ source of truth).
 External consumers import from this member module directly; see README.md §7.
 """
 
+from taac.abstractions.physical_inventory import (
+    BAG010_ASH6,
+    BAG012_ASH6,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_update_packing_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    BAG010_ASH6,
-    BAG012_ASH6,
 )
 
 

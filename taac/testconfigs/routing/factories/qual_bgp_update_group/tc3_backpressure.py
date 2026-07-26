@@ -6,6 +6,7 @@ Combines the default UG-backpressure spec run and a topology-smoke variant into
 one factory switched by ``smoke_only=False`` (default) / ``True``.
 """
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ug_backpressure import (
     UG_BACKPRESSURE,
     UG_BACKPRESSURE_AS_NUMBERS,
@@ -25,9 +26,6 @@ from taac.steps.step_definitions import (
     create_configure_bgp_peer_tcp_window_size_step,
     create_snapshot_per_peer_bgp_rx_stats_step,
     create_verify_per_peer_bgp_rx_asymmetry_step,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,

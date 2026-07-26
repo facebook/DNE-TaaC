@@ -8,6 +8,7 @@ for the three sub-spec playbook factories (2.4.1 / 2.4.2 / 2.4.3).
 
 from dataclasses import dataclass
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ug_new_peer_join import (
     UG_NEW_PEER_JOIN,
     UG_NEW_PEER_JOIN_AS_NUMBERS,
@@ -30,9 +31,6 @@ from taac.steps.step_definitions import (
     create_ixia_api_step,
     create_longevity_step,
     create_start_stop_bgp_peers_step,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.test_as_a_config import types as taac_types
 

@@ -15,18 +15,18 @@ the legacy wrapper so the golden manifest hash is byte-wise identical.
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
+from taac.abstractions.physical_inventory import (
+    EB02_LAB_ASH6,
+    EB03_LAB_ASH6,
+    EB04_LAB_ASH6,
+    EB_TEST_DEVICE,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_constant_attribute_storage_test_config,
     create_bgp_ebb_characteristic_constant_attribute_storage_varying_combinations_test_config,
     create_bgp_ebb_characteristic_queue_memory_monitor_test_config,
     create_bgp_ebb_characteristic_separable_policy_test_config,
     create_bgp_ebb_characteristic_update_packing_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    EB02_LAB_ASH6,
-    EB03_LAB_ASH6,
-    EB04_LAB_ASH6,
-    EB_TEST_DEVICE,
 )
 from taac.test_as_a_config import types as taac_types
 

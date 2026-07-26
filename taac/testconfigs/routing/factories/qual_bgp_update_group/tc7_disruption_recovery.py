@@ -15,6 +15,7 @@ Shares the ``build_bag_conveyor_test_config`` helper from tc1 for the
 bag013 conveyor topology (setup / teardown / port config).
 """
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
@@ -28,9 +29,6 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_disruption_recov
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     build_bag_conveyor_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,

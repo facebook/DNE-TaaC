@@ -11,6 +11,12 @@ Grandfathered Python constant names (referenced from cconf and elsewhere)
 retained verbatim alongside the newer spec-anchored names.
 """
 
+from taac.abstractions.physical_inventory import (
+    BAG011_ASH6,
+    BAG012_ASH6,
+    BAG013_ASH6,
+    EB03_LAB_ASH6,
+)
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     create_bgp_ug_distribution_correctness_test_config,
 )
@@ -38,12 +44,6 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases imp
     create_bgp_ug_edge_cases_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
     create_bgp_ug_staggered_startup_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    BAG011_ASH6,
-    BAG012_ASH6,
-    BAG013_ASH6,
-    EB03_LAB_ASH6,
 )
 
 

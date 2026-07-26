@@ -16,12 +16,12 @@ re-export the module-level constants defined here.
 
 from __future__ import annotations
 
-from taac.testconfigs.routing.factories.bgp_dc_chronos_node import (
-    create_bgp_dc_chronos_node_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
+from taac.abstractions.physical_inventory import (
     FSW_FUJI_QZD1,
     SSW_ELBERT_QZD1,
+)
+from taac.testconfigs.routing.factories.bgp_dc_chronos_node import (
+    create_bgp_dc_chronos_node_test_config,
 )
 
 

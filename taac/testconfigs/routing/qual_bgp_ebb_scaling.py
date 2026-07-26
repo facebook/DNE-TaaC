@@ -14,6 +14,10 @@ External consumers import via ``testconfigs.routing`` root; see README.md §7.
 import json
 import os
 
+from taac.abstractions.physical_inventory import (
+    EB02_LAB_ASH6,
+    EB03_LAB_ASH6,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     test_config_constant_attribute_storage_on_eos,
 )
@@ -23,10 +27,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_route_churn_prefix_test_config,
     create_bgp_ebb_scaling_transient_memory_peer_scale_test_config,
     create_bgp_ebb_scaling_transient_memory_route_scale_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    EB02_LAB_ASH6,
-    EB03_LAB_ASH6,
 )
 from taac.test_as_a_config import types as taac_types
 

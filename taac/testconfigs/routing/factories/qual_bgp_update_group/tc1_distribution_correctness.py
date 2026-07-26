@@ -21,6 +21,7 @@ import json
 import os
 import typing as t
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
     EBB_FULL_SCALE_PORT_MAP,
@@ -50,9 +51,6 @@ from taac.steps.step_definitions import (
     create_custom_step,
     create_longevity_step,
     create_validation_step,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,

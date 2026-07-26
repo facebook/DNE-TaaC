@@ -23,6 +23,7 @@ import os
 import typing as t
 from dataclasses import replace
 
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
     BOUNDED_ECMP_PEER_GROUPS,
@@ -71,9 +72,6 @@ from taac.task_definitions import (
     create_replace_bgp_peers_task,
     create_run_commands_on_shell_task,
     create_validate_bgpcpp_config_on_device_task,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     UPDATE_GROUP_CONFIG,

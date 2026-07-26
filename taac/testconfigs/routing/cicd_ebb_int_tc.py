@@ -28,6 +28,11 @@ appropriate topology and playbook selection plus the inline ``CONVEYOR:``
 marker identifying which conveyor node consumes it.
 """
 
+from taac.abstractions.physical_inventory import (
+    BAG010_ASH6,
+    BAG011_ASH6,
+    BAG012_ASH6,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config,
     create_bgp_ebb_constant_attribute_storage_test_config,
@@ -36,11 +41,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     create_bgp_ebb_full_scale_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    BAG010_ASH6,
-    BAG011_ASH6,
-    BAG012_ASH6,
 )
 
 

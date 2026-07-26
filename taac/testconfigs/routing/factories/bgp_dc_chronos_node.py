@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.health_checks.healthcheck_definitions import (
     create_core_dumps_snapshot_check,
 )
@@ -44,9 +45,6 @@ from taac.task_definitions import (
     create_coop_unregister_patchers_task,
     create_run_commands_on_shell_task,
     create_wait_for_agent_convergence_task,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.testconfigs.routing.util.bgp_dc_tc_checks import (
     _apply_tc_checks_to_playbooks,

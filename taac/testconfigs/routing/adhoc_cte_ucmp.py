@@ -12,13 +12,13 @@ byte-wise identical.
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
+from taac.abstractions.physical_inventory import (
+    CTE_UCMP_QZD_PHYSICAL_INVENTORY,
+    CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY,
+)
 from taac.testconfigs.routing.factories.cte_ucmp import (
     create_cte_ucmp_qzd_test_config,
     create_cte_ucmp_stand_alone_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    CTE_UCMP_QZD_PHYSICAL_INVENTORY,
-    CTE_UCMP_STAND_ALONE_PHYSICAL_INVENTORY,
 )
 
 

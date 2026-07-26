@@ -16,14 +16,14 @@ the ``JSW002_M001_SNC1`` production physical_inventory (usage=adhoc) and lives i
 External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
-from taac.constants import BgpPlusPlusProfile
-from taac.testconfigs.routing.factories.bgp_ebb_full_scale_mimic import (
-    create_bgp_ebb_full_scale_mimic_test_config,
-)
-from taac.testconfigs.routing.physical_inventory import (
+from taac.abstractions.physical_inventory import (
     EB01_LAB_ASH6,
     EB03_LAB_ASH6,
     EB04_LAB_ASH6,
+)
+from taac.constants import BgpPlusPlusProfile
+from taac.testconfigs.routing.factories.bgp_ebb_full_scale_mimic import (
+    create_bgp_ebb_full_scale_mimic_test_config,
 )
 from taac.test_as_a_config import types as taac_types
 

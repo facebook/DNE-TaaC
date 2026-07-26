@@ -16,6 +16,7 @@ See ../README.md §3 for the factory contract.
 import json
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.health_checks.healthcheck_definitions import (
     create_core_dumps_snapshot_check,
     create_lldp_check,
@@ -44,9 +45,6 @@ from taac.task_definitions import (
     create_coop_register_patcher_task,
     create_coop_unregister_patchers_task,
     create_wait_for_agent_convergence_task,
-)
-from taac.testconfigs.routing.physical_inventory import (
-    PhysicalInventory,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
