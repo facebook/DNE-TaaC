@@ -1955,6 +1955,10 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     return test_config_constant_attribute_storage_varying_combinations_on_eos(
         test_config_name=name,
         device_name=device_name,
+        # Bind the DUT to the BGP++-aware AristaFbossSwitch driver (thrift), so
+        # health checks (e.g. BGP_SESSION_ESTABLISH_CHECK) query BGP++ instead of
+        # falling back to native ar-bgp CLI. Mirrors SC1/SC4 and every sibling.
+        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
