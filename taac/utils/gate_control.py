@@ -139,3 +139,97 @@ def apply_registered_gate(
     gate was registered with, so per-run overrides keep working during migration.
     """
     _DEFAULT_REGISTRY.apply(logger, name, breached, message, mode)
+
+
+def registered_gates() -> t.Dict[str, str]:
+    """Snapshot of the process-wide registry: gate name -> registered mode."""
+    return _DEFAULT_REGISTRY.registered_gates()
+
+
+def format_registered_gates(registry: t.Optional[GateRegistry] = None) -> str:
+    """A human-readable block listing every registered gate and its mode.
+
+    Lets a test surface -- at a glance -- exactly which checks BLOCK vs OBSERVE,
+    instead of hunting through per-gate log lines.
+    """
+    gates = (registry or _DEFAULT_REGISTRY).registered_gates()
+    if not gates:
+        return "Registered gates: (none)"
+
+    width = max(len(name) for name in gates)
+    lines = ["Registered gates (name -> enforcement mode):"]
+    for name in sorted(gates):
+        lines.append(f"  {name.ljust(width)}  {gates[name]}")
+    return "\n".join(lines)
+
+
+def log_registered_gates(
+    logger: t.Any, registry: t.Optional[GateRegistry] = None
+) -> None:
+    """Log the registered-gate summary as a single INFO block."""
+    logger.info(format_registered_gates(registry))
+
+
+def apply_flatness_gate(
+    logger: t.Any,
+    gate_name: str,
+    values: t.Sequence[float],
+    ratio_tolerance: float,
+    mode: t.Optional[str] = None,
+    metric_label: str = "Value",
+    sweep_label: str = "sweep",
+    unit: str = "",
+    detail: str = "",
+) -> None:
+    """Enforce a "stays ~flat across a sweep" gate: ``max/min <= ratio_tolerance``.
+
+    A generic reusable check for any per-step metric swept across a test (e.g.
+    transient (peak - stable) memory across a peer/route sweep, or a
+    deduplicator-size series). The caller passes the PRECOMPUTED ``values`` list
+    (so this is agnostic to how each step names its metric), plus its registered
+    ``gate_name`` and an optional per-run ``mode`` override.
+
+    Fewer than 2 values (nothing to compare) or a non-positive min (sampling
+    noise, e.g. peak ~= stable) is treated as inconclusive and SKIPS the gate
+    rather than false-failing. Logs the series, the min/max range + ratio, and a
+    PASS/skip line so the check is self-describing.
+    """
+    if len(values) < 2:
+        return
+
+    effective_mode = mode if mode is not None else get_gate_mode(gate_name)
+    vmin = min(values)
+    vmax = max(values)
+    unit_sfx = f" {unit}" if unit else ""
+    logger.info(
+        f"  {metric_label} across the {sweep_label}: "
+        f"{[round(v, 1) for v in values]}{unit_sfx}"
+    )
+
+    if vmin <= 0:
+        logger.info(
+            f"  Min {vmin:.1f}{unit_sfx} <= 0 (sampling noise); "
+            f"skipping {gate_name} this run"
+        )
+        return
+
+    ratio = vmax / vmin
+    logger.info(
+        f"  Range: {vmin:.1f} - {vmax:.1f}{unit_sfx} (ratio {ratio:.2f}x, "
+        f"tolerance <= {ratio_tolerance}x, mode={effective_mode})"
+    )
+    apply_registered_gate(
+        logger,
+        gate_name,
+        breached=ratio > ratio_tolerance,
+        message=(
+            f"{metric_label} grew {ratio:.2f}x across the {sweep_label} "
+            f"({vmin:.1f} -> {vmax:.1f}{unit_sfx}); {detail}".strip()
+        ),
+        mode=mode,
+    )
+    if ratio <= ratio_tolerance:
+        logger.info(
+            f"  PASS: {metric_label.lower()} ~flat ({ratio:.2f}x) "
+            f"across the {sweep_label}"
+        )
