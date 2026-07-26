@@ -28,30 +28,30 @@ from taac.utils.gate_control import (
 
 # ─── Gate name constants (import these; never hardcode a gate name string) ───
 # SC1 -- performance-scaling (egress iBGP peer-scale) sweep test:
-GATE_SC1_TRANSIENT = "sc1_transient"
+GATE_SC1_MEMORY_TRANSIENT = "sc1_memory_transient"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
-GATE_SC2_ACCEPTANCE = "sc2_acceptance"
+GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
 # SC3 -- transient-memory route-scale sweep test:
-GATE_SC3_DEDUP = "sc3_dedup"
-GATE_SC3_TRANSIENT = "sc3_transient"
+GATE_SC3_MEMORY_DEDUP = "sc3_memory_dedup"
+GATE_SC3_MEMORY_TRANSIENT = "sc3_memory_transient"
 
 # The central control point: gate name -> default enforcement mode. Flip a gate
 # globally by editing its mode here; override for a single run via the call site.
 GATE_DEFAULT_MODES: dict[str, str] = {
     # Transient (peak - stable) memory flatness across the egress-peer sweep --
     # observe until calibrated.
-    GATE_SC1_TRANSIENT: GATE_MODE_PERMISSIVE,
+    GATE_SC1_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
     # Anti-vacuousness: routes must reach the RIB -- hard from the start.
-    GATE_SC2_ACCEPTANCE: GATE_MODE_BLOCKING,
+    GATE_SC2_ROUTES_ACCEPTANCE: GATE_MODE_BLOCKING,
     # Stable memory must grow sub-linearly (<= √k, k = path scale) across the
     # combination sweep -- calibrated on bag010 (fit p~=0.36, gated at 0.5),
     # blocking.
     GATE_SC2_MEMORY_GROWTH: GATE_MODE_BLOCKING,
     # Deduplicator-size constancy across the route sweep -- observe.
-    GATE_SC3_DEDUP: GATE_MODE_PERMISSIVE,
+    GATE_SC3_MEMORY_DEDUP: GATE_MODE_PERMISSIVE,
     # Transient (peak - stable) memory flatness across the route sweep -- observe.
-    GATE_SC3_TRANSIENT: GATE_MODE_PERMISSIVE,
+    GATE_SC3_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
 }
 
 
