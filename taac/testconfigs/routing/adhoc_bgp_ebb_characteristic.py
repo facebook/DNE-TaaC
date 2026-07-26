@@ -60,7 +60,7 @@ BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test
 # nexthop is left unresolvable -> received+accepted, never advertised (NO iBGP
 # egress). Sweeps the unique attribute COMBINATIONS (100K→800K) at fixed 800K
 # paths; steady memory must stay ~constant. Acceptance gate (RECEIVED count) is
-# blocking; the memory-variance gate is permissive. Ad-hoc: resolvable via
+# blocking; the memory-growth gate (stable memory <= k^0.5) is blocking. Ad-hoc: resolvable via
 # --test-config. The TestConfig.name is
 # ``BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP``.
 BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (

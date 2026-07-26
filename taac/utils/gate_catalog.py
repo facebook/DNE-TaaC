@@ -31,7 +31,7 @@ from taac.utils.gate_control import (
 GATE_SC1_TRANSIENT = "sc1_transient"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ACCEPTANCE = "sc2_acceptance"
-GATE_SC2_MEMORY_VARIANCE = "sc2_memory_variance"
+GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
 # SC3 -- transient-memory route-scale sweep test:
 GATE_SC3_DEDUP = "sc3_dedup"
 GATE_SC3_TRANSIENT = "sc3_transient"
@@ -44,8 +44,10 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     GATE_SC1_TRANSIENT: GATE_MODE_PERMISSIVE,
     # Anti-vacuousness: routes must reach the RIB -- hard from the start.
     GATE_SC2_ACCEPTANCE: GATE_MODE_BLOCKING,
-    # Memory constancy across the combination sweep -- observe until calibrated.
-    GATE_SC2_MEMORY_VARIANCE: GATE_MODE_PERMISSIVE,
+    # Stable memory must grow sub-linearly (<= √k, k = path scale) across the
+    # combination sweep -- calibrated on bag010 (fit p~=0.36, gated at 0.5),
+    # blocking.
+    GATE_SC2_MEMORY_GROWTH: GATE_MODE_BLOCKING,
     # Deduplicator-size constancy across the route sweep -- observe.
     GATE_SC3_DEDUP: GATE_MODE_PERMISSIVE,
     # Transient (peak - stable) memory flatness across the route sweep -- observe.

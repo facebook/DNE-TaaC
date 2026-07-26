@@ -812,7 +812,7 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
     dump_attribute_assignments: bool = False,
     verify_received_prefixes: bool = False,
     acceptance_gate_mode: str = "blocking",
-    memory_variance_gate_mode: str = "permissive",
+    memory_growth_gate_mode: str = "permissive",
     soak_time_minutes: int = 10,
     direct_ixia_connections: list | None = None,
     log_collection_timeout: int | None = None,
@@ -1052,7 +1052,7 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
                                     "dump_attribute_assignments": dump_attribute_assignments,
                                     "verify_received_prefixes": verify_received_prefixes,
                                     "acceptance_gate_mode": acceptance_gate_mode,
-                                    "memory_variance_gate_mode": memory_variance_gate_mode,
+                                    "memory_growth_gate_mode": memory_growth_gate_mode,
                                     **(
                                         {
                                             "ebgp_remote_as": ebgp_remote_as,
@@ -1896,7 +1896,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
 
     Gates: an acceptance gate (RECEIVED = TRibSummary.total_prefixes >=
     prefixes/peer -- the anti-vacuousness guard, default blocking) and the
-    memory-variance gate (default permissive until calibrated). The nexthop is
+    memory-growth gate (stable memory <= k^0.5, blocking). The nexthop is
     unresolvable, so the acceptance gate deliberately counts RECEIVED, not
     selected.
 
@@ -1983,7 +1983,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         # are unresolvable, so this counts RECEIVED (total_prefixes), not selected.
         verify_received_prefixes=True,
         acceptance_gate_mode="blocking",
-        memory_variance_gate_mode="permissive",
+        memory_growth_gate_mode="blocking",
         log_collection_timeout=600,
     )
 
