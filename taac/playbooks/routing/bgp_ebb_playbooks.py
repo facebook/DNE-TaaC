@@ -18,6 +18,9 @@ from taac.constants import (
     Gigabyte,
     OpenRRouteAction,
 )
+from taac.health_checks.healthcheck_definitions import (
+    create_bgp_session_snapshot_check,
+)
 from taac.stages.stage_definitions import (
     create_attribute_churn_stage,
     create_bgp_igp_instability_unresolvable_pnhs_stage,
@@ -39,6 +42,7 @@ from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
     create_bgp_instability_setup_steps,
     create_bgp_restart_setup_steps,
+    create_custom_step,
     create_longevity_step,
     create_openr_route_action_step,
     create_route_registry_prefix_list_setup_steps,
@@ -66,7 +70,9 @@ from taac.test_as_a_config.types import Playbook
 
 
 __all__ = [
+    "create_bgp_ebb_bounded_ecmp_sets_playbook",
     "create_bgp_ebb_cold_start_playbook",
+    "create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook",
     "create_bgp_ebb_daemon_restart_playbook",
     "create_bgp_ebb_ebgp_route_oscillations_playbook",
     "create_bgp_ebb_ebgp_session_oscillations_playbook",
@@ -80,8 +86,10 @@ __all__ = [
     "create_bgp_ebb_multipath_group_oscillation_playbook",
     "create_bgp_ebb_nexthop_group_count_threshold_playbook",
     "create_bgp_ebb_plane_drain_undrain_playbook",
+    "create_bgp_ebb_queue_memory_monitoring_playbook",
     "create_bgp_ebb_route_registry_runtime_update_playbook",
     "create_bgp_ebb_route_storm_playbook",
+    "create_bgp_ebb_update_packing_validation_playbook",
 ]
 
 
@@ -1492,6 +1500,255 @@ def create_bgp_ebb_nexthop_group_count_threshold_playbook(
                     create_longevity_step(
                         duration=soak_duration,
                         description=f"Soak after final prefix changes for {soak_duration} seconds",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def create_bgp_ebb_update_packing_validation_playbook(
+    *,
+    device_name: str,
+    ixia_interface_mimic_ibgp: str,
+    ibgp_peer_count: int,
+    prefixes_per_peer: int,
+    ixia_interface_mimic_ebgp: str,
+    ebgp_peer_count: int,
+    test_address_families: list[str],
+    as_path_pool,
+    community_pool,
+    communities_per_route: int,
+    ibgp_route_acceptance_communities: list[str] | None,
+    ebgp_route_acceptance_communities: list[str] | None,
+    capture_duration_seconds: int,
+    min_packed_size: int,
+    restart_bgp_for_complete_view: bool,
+) -> Playbook:
+    """Build the BGP++ UPDATE-message packing validation Playbook."""
+    return Playbook(
+        name="bgp_update_packing_validation_playbook",
+        description="Validate BGP++ UPDATE message packing efficiency",
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "test_bgp_update_packing_eos_bgp_plus_plus",
+                            "hostname": device_name,
+                            "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
+                            "ibgp_peer_count": ibgp_peer_count,
+                            "prefixes_per_peer": prefixes_per_peer,
+                            "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
+                            "ebgp_peer_count": ebgp_peer_count,
+                            "test_address_families": test_address_families,
+                            "as_path_pool": as_path_pool,
+                            "community_pool": community_pool,
+                            "communities_per_route": communities_per_route,
+                            "ibgp_route_acceptance_communities": (
+                                ibgp_route_acceptance_communities
+                                if ibgp_route_acceptance_communities
+                                else []
+                            ),
+                            "ebgp_route_acceptance_communities": (
+                                ebgp_route_acceptance_communities
+                                if ebgp_route_acceptance_communities
+                                else []
+                            ),
+                            "capture_duration_seconds": capture_duration_seconds,
+                            "min_packed_size": min_packed_size,
+                            "restart_bgp_for_complete_view": restart_bgp_for_complete_view,
+                        },
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
+    *,
+    device_name: str,
+    ixia_interface_mimic_ebgp: str,
+    constant_ebgp_peer_count: int,
+    constant_ibgp_peer_count: int,
+    ixia_interface_mimic_ibgp: str | None,
+    constant_total_paths: int,
+    unique_combination_counts: list[int],
+    test_address_families: list[str],
+    soak_time_minutes: int,
+    base_as_path_pool_size: int,
+    base_community_pool_size: int,
+    base_extended_community_pool_size: int,
+    constant_acceptance_communities: list[str] | None,
+    max_communities_per_route_from_pool: int | None,
+    random_seed: int,
+    test_route_withdrawal: bool,
+    withdrawal_wait_minutes: int,
+    dump_attribute_assignments: bool,
+    verify_received_prefixes: bool,
+    acceptance_gate_mode: str,
+    memory_growth_gate_mode: str,
+    include_legacy_setup_params: bool,
+    ebgp_remote_as: int,
+    ibgp_local_as: int | None,
+    ixia_ebgp_ic_parent_network_v6: str,
+    ixia_ebgp_ic_parent_network_v4: str,
+    ixia_ibgp_ic_parent_network_v6: str | None,
+    ixia_ibgp_ic_parent_network_v4: str | None,
+    peergroup_ebgp_v6: str | None,
+    peergroup_ebgp_v4: str | None,
+    peergroup_ibgp_v6: str | None,
+    peergroup_ibgp_v4: str | None,
+    ssh_password: str,
+) -> Playbook:
+    """Build the constant-attribute-storage varying-combinations Playbook."""
+    return Playbook(
+        name="bgp_plus_plus_constant_attribute_storage_varying_combinations_test",
+        description="Test BGP++ constant attribute storage with varying unique combination counts",
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "test_constant_attribute_storage_varying_combinations_eos_bgp_plus_plus",
+                            "hostname": device_name,
+                            "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
+                            "constant_ebgp_peer_count": constant_ebgp_peer_count,
+                            "constant_ibgp_peer_count": constant_ibgp_peer_count,
+                            "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
+                            "constant_total_paths": constant_total_paths,
+                            "unique_combination_counts": unique_combination_counts,
+                            "test_address_families": test_address_families,
+                            "soak_time_minutes": soak_time_minutes,
+                            "base_as_path_pool_size": base_as_path_pool_size,
+                            "base_community_pool_size": base_community_pool_size,
+                            "base_extended_community_pool_size": base_extended_community_pool_size,
+                            "as_path_length": 5,
+                            "communities_per_route": 5,
+                            "extended_communities_per_route": 1,
+                            "attach_communities_for_ebgp_prefixes": constant_acceptance_communities,
+                            "max_communities_per_route_from_pool": max_communities_per_route_from_pool,
+                            "random_seed": random_seed,
+                            "test_route_withdrawal": test_route_withdrawal,
+                            "withdrawal_wait_minutes": withdrawal_wait_minutes,
+                            "dump_attribute_assignments": dump_attribute_assignments,
+                            "verify_received_prefixes": verify_received_prefixes,
+                            "acceptance_gate_mode": acceptance_gate_mode,
+                            "memory_growth_gate_mode": memory_growth_gate_mode,
+                            **(
+                                {
+                                    "ebgp_remote_as": ebgp_remote_as,
+                                    "ibgp_remote_as": ibgp_local_as,
+                                    "ixia_ebgp_ic_parent_network_v6": ixia_ebgp_ic_parent_network_v6,
+                                    "ixia_ebgp_ic_parent_network_v4": ixia_ebgp_ic_parent_network_v4,
+                                    "ixia_ibgp_ic_parent_network_v6": ixia_ibgp_ic_parent_network_v6,
+                                    "ixia_ibgp_ic_parent_network_v4": ixia_ibgp_ic_parent_network_v4,
+                                    "peergroup_ebgp_v6": peergroup_ebgp_v6,
+                                    "peergroup_ebgp_v4": peergroup_ebgp_v4,
+                                    "peergroup_ibgp_v6": peergroup_ibgp_v6,
+                                    "peergroup_ibgp_v4": peergroup_ibgp_v4,
+                                    "ssh_password": ssh_password,
+                                }
+                                if include_legacy_setup_params
+                                else {}
+                            ),
+                        }
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def create_bgp_ebb_queue_memory_monitoring_playbook(
+    *,
+    device_name: str,
+    monitoring_duration_minutes: int,
+    monitoring_interval_seconds: int,
+    ebgp_as_paths,
+    ebgp_peer_count: int,
+    ixia_interface_mimic_ebgp: str,
+    monitor_cpu_stress: bool,
+) -> Playbook:
+    """Build the BGP++ queue/memory monitoring Playbook."""
+    return Playbook(
+        name="bgp_queue_memory_monitoring_playbook",
+        description="Monitor BGP++ queue and memory under route churn",
+        snapshot_checks=[
+            # CORE_DUMPS_CHECK is intentionally omitted because it catches
+            # unrelated crashes such as OpenR. The custom step's PID monitor
+            # detects BGP++ crashes directly.
+            #
+            # IXIA flaps routes, not BGP sessions, so skip only the session
+            # flap check while retaining the uptime check.
+            create_bgp_session_snapshot_check(
+                skip_flap_check=True,
+                skip_uptime_check=False,
+            ),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "test_bgp_queue_memory_monitor_eos_bgp_plus_plus",
+                            "hostname": device_name,
+                            "duration_minutes": monitoring_duration_minutes,
+                            "interval_seconds": monitoring_interval_seconds,
+                            "focused_queues": ["AdjRibIn"],
+                            "as_path_pool": ebgp_as_paths,
+                            "ebgp_peer_count": ebgp_peer_count,
+                            "ixia_interface_ebgp": ixia_interface_mimic_ebgp,
+                            "monitor_cpu_stress": monitor_cpu_stress,
+                        },
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def create_bgp_ebb_bounded_ecmp_sets_playbook(
+    *,
+    device_name: str,
+) -> Playbook:
+    """Build the BGP++ bounded-ECMP-sets Playbook."""
+    profile_checks = get_profile_checks(
+        CheckProfile.PERF_SCALING_BOUNDED_ECMP, ProfileContext()
+    )
+    return Playbook(
+        name="bgp_plus_plus_arista_bounded_ecmp_sets_test",
+        description="Test BGP++ performance with bounded ECMP sets",
+        snapshot_checks=profile_checks.snapshot_checks,
+        periodic_tasks=create_standard_periodic_tasks(
+            device_name=device_name,
+            memory_threshold=Gigabyte.GIG_5.value,
+            cpu_util_terminate_on_error=False,
+            memory_terminate_on_error=False,
+        )
+        + [
+            create_nexthop_group_poll_periodic_task(
+                device_name=device_name,
+                threshold=50,
+            ),
+        ],
+        postchecks=profile_checks.postchecks,
+        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+        stages=[
+            create_route_oscillations_stage(
+                device_name=device_name,
+                prefix_pool_regex=".*EBGP.*",
+                prefix_start_index=0,
+                prefix_end_index=5000,
+                test_duration_seconds=1200,
+                spread=True,
+            ),
+            create_steps_stage(
+                steps=[
+                    create_longevity_step(
+                        duration=300,
+                        description="Soak after final prefix changes for 300 seconds",
                     ),
                 ],
             ),

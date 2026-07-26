@@ -43,11 +43,13 @@ from taac.health_checks.healthcheck_definitions import (
 )
 from taac.playbooks.playbook_definitions import (
     build_case6_playbook,
-    create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook,
     create_bgp_plus_plus_transient_memory_peer_scale_playbook,
     create_bgp_plus_plus_transient_memory_route_scale_playbook,
     create_performance_scaling_egress_peer_sweep_playbook,
     PerIterationSetupStepsFactory,
+)
+from taac.playbooks.routing.bgp_ebb_playbooks import (
+    create_bgp_ebb_bounded_ecmp_sets_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.ixia_configs_for_tests import (
     create_ebb_performance_scale_basic_port_configs,
@@ -1260,7 +1262,7 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
         teardown_tasks=[],
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook(
+            create_bgp_ebb_bounded_ecmp_sets_playbook(
                 device_name=device_name,
             ),
         ],

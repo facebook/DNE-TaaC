@@ -39,14 +39,8 @@ from taac.playbooks.dlb_platform_constants import (
     ECMP_RESOURCE_PROFILES,
     EcmpAsic,
 )
-from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
-    CheckProfile,
-    get_profile_checks,
-    ProfileContext,
-)
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_convergence_check,
-    create_bgp_peer_route_set_equality_check,
     create_bgp_peer_route_snapshot_check,
     create_bgp_rib_fib_consistency_check,
     create_bgp_session_establish_check,
@@ -103,20 +97,12 @@ from taac.testconfigs.routing.util.bgp_dc_stages import (
     DISABLE_SESSION_FLAPS_STAGE,
     FREQUENT_BEST_PATH_COMPUTATION_STAGE,
 )
-from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
-    BGP_STANDARD_POSTCHECKS,
-    BGP_STANDARD_SNAPSHOT_CHECKS,
-    create_standard_postchecks,
-)
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.stages.stage_definitions import (
-    create_fauu_drain_undrain_stage,
     create_longevity_stage,
-    create_multipath_group_oscillation_stage,
     create_periodic_service_restart_stage,
-    create_plane_drain_undrain_stage,
     create_port_channel_concurrent_cross_flap_stage,
     create_port_channel_concurrent_flap_stage,
     create_port_channel_cross_flap_stage,
@@ -125,16 +111,12 @@ from taac.stages.stage_definitions import (
     create_port_channel_initial_setup_stage_with_permanent_disable,
     create_port_channel_permanent_teardown_stage,
     create_port_channel_teardown_stage,
-    create_route_oscillations_stage,
-    create_longevity_churn_stage,
-    create_route_registry_runtime_update_stage,
     create_steps_stage,
 )
 from taac.steps.step_definitions import (
     COLD_START_PREFIX_OSCILLATIONS,
     CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
-    create_bgp_instability_setup_steps,
     create_custom_step,
     create_drain_undrain_step,
     create_ecmp_member_static_route_step,
@@ -143,17 +125,14 @@ from taac.steps.step_definitions import (
     create_ixia_device_group_toggle_step,
     create_longevity_step,
     create_mass_bgp_peer_toggle_step,
-    create_openr_route_action_step,
     create_performance_scaling_convergence_step,
     create_performance_scaling_egress_sweep_aggregator_step,
     create_register_patcher_step,
-    create_route_registry_prefix_list_setup_steps,
     create_run_ssh_command_step,
     create_run_task_step,
     create_service_convergence_step,
     create_service_interruption_step,
     create_service_restart_steps,
-    create_set_route_filter_step,
     create_start_traffic_step,
     create_stop_traffic_step,
     create_system_reboot_step,
@@ -170,10 +149,7 @@ from taac.steps.step_definitions import (
     TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY,
     wait_time_after_disable_churn_s,
 )
-from taac.task_definitions import (
-    create_nexthop_group_poll_periodic_task,
-    create_thrift_stress_periodic_task,
-)
+from taac.task_definitions import create_thrift_stress_periodic_task
 from taac.tasks.thrift_stress_payloads import (
     fboss_with_qsfp_flaps,
     ThriftStressCall,
@@ -2320,101 +2296,6 @@ def create_performance_scaling_egress_peer_sweep_playbook(
     )
 
 
-def create_bgp_update_packing_validation_playbook(
-    device_name: str,
-    ixia_interface_mimic_ibgp: str,
-    ibgp_peer_count: int,
-    prefixes_per_peer: int,
-    ixia_interface_mimic_ebgp: str,
-    ebgp_peer_count: int,
-    test_address_families: list[str],
-    as_path_pool,
-    community_pool,
-    communities_per_route: int,
-    ibgp_route_acceptance_communities: list[str] | None,
-    ebgp_route_acceptance_communities: list[str] | None,
-    capture_duration_seconds: int,
-    min_packed_size: int,
-    restart_bgp_for_complete_view: bool,
-) -> Playbook:
-    """Build the BGP++ UPDATE message packing validation Playbook.
-
-    Runs the `test_bgp_update_packing_eos_bgp_plus_plus` custom step,
-    which captures BGP UPDATE packets via tshark and validates that the
-    EOS BGP++ implementation packs prefixes per UPDATE message at or
-    above the configured minimum efficiency threshold. Used by the EOS
-    BGP++ UPDATE-packing validation TestConfig.
-
-    Args:
-        device_name: DUT hostname (EOS BGP++).
-        ixia_interface_mimic_ibgp: IXIA logical interface mimicking IBGP
-            peers.
-        ibgp_peer_count: Number of IBGP peers to mimic.
-        prefixes_per_peer: Prefixes advertised per peer.
-        ixia_interface_mimic_ebgp: IXIA logical interface mimicking EBGP
-            peers.
-        ebgp_peer_count: Number of EBGP peers to mimic.
-        test_address_families: AF list (e.g. `["ipv6", "ipv4"]`).
-        as_path_pool: AS path pool spec used for per-prefix AS path
-            generation.
-        community_pool: Community pool spec used for per-prefix community
-            generation.
-        communities_per_route: Communities attached per advertised route.
-        ibgp_route_acceptance_communities: Communities the IBGP ingress
-            policy requires for route acceptance (or None to skip).
-        ebgp_route_acceptance_communities: Communities the EBGP ingress
-            policy requires for route acceptance (or None to skip).
-        capture_duration_seconds: tshark capture window in seconds.
-        min_packed_size: Minimum acceptable number of prefixes packed per
-            UPDATE message.
-        restart_bgp_for_complete_view: If True, restart BGP++ during the
-            test to force a full advertisement cycle (cleaner capture at
-            the cost of test time).
-
-    Returns:
-        A `Playbook` named `bgp_update_packing_validation_playbook` with
-        a single custom-step stage.
-    """
-    return Playbook(
-        name="bgp_update_packing_validation_playbook",
-        description="Validate BGP++ UPDATE message packing efficiency",
-        stages=[
-            create_steps_stage(
-                steps=[
-                    create_custom_step(
-                        params_dict={
-                            "custom_step_name": "test_bgp_update_packing_eos_bgp_plus_plus",
-                            "hostname": device_name,
-                            "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
-                            "ibgp_peer_count": ibgp_peer_count,
-                            "prefixes_per_peer": prefixes_per_peer,
-                            "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
-                            "ebgp_peer_count": ebgp_peer_count,
-                            "test_address_families": test_address_families,
-                            "as_path_pool": as_path_pool,
-                            "community_pool": community_pool,
-                            "communities_per_route": communities_per_route,
-                            "ibgp_route_acceptance_communities": (
-                                ibgp_route_acceptance_communities
-                                if ibgp_route_acceptance_communities
-                                else []
-                            ),
-                            "ebgp_route_acceptance_communities": (
-                                ebgp_route_acceptance_communities
-                                if ebgp_route_acceptance_communities
-                                else []
-                            ),
-                            "capture_duration_seconds": capture_duration_seconds,
-                            "min_packed_size": min_packed_size,
-                            "restart_bgp_for_complete_view": restart_bgp_for_complete_view,
-                        },
-                    ),
-                ],
-            )
-        ],
-    )
-
-
 def create_test_constant_attribute_storage_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
@@ -2620,143 +2501,6 @@ def create_test_computational_load_for_bgp_plus_plus_playbook(
                     ),
                 ],
             )
-        ],
-    )
-
-
-def create_bgp_queue_memory_monitoring_playbook(
-    device_name: str,
-    monitoring_duration_minutes: int,
-    monitoring_interval_seconds: int,
-    ebgp_as_paths,
-    ebgp_peer_count: int,
-    ixia_interface_mimic_ebgp: str,
-    monitor_cpu_stress: bool,
-) -> Playbook:
-    """Build the BGP++ queue/memory monitoring Playbook.
-
-    Runs the `test_bgp_queue_memory_monitor_eos_bgp_plus_plus` custom
-    step for `monitoring_duration_minutes`, sampling every
-    `monitoring_interval_seconds` while IXIA continuously churns routes
-    on the EBGP plane. Snapshot check asserts BGP sessions stay up
-    (flap-check skipped because routes — not sessions — are flapping by
-    design). PID-based crash detection lives in the custom step itself,
-    so CORE_DUMPS_CHECK is intentionally omitted to avoid false fails
-    from unrelated daemons. Used by `test_config_queue_memory_monitor`.
-
-    Args:
-        device_name: DUT hostname (EOS BGP++).
-        monitoring_duration_minutes: Total monitor duration in minutes.
-        monitoring_interval_seconds: Sampling interval in seconds.
-        ebgp_as_paths: AS-path pool spec used by route churn.
-        ebgp_peer_count: Number of EBGP peers to mimic on the IXIA side.
-        ixia_interface_mimic_ebgp: IXIA logical interface mimicking the
-            EBGP peers.
-        monitor_cpu_stress: If True, additionally drive CPU-stress
-            monitoring inside the custom step.
-
-    Returns:
-        A `Playbook` named `bgp_queue_memory_monitoring_playbook` with
-        one custom-step stage and a BGP-session snapshot check.
-    """
-    return Playbook(
-        name="bgp_queue_memory_monitoring_playbook",
-        description="Monitor BGP++ queue and memory under route churn",
-        snapshot_checks=[
-            # NOTE: CORE_DUMPS_CHECK removed — it catches unrelated
-            # crashes (e.g. OpenR) that fail the test even though this
-            # test only exercises BGP++. BGP++ crashes are detected by
-            # the PID monitoring in the custom step instead.
-            #
-            # BGP session health check - detect unexpected session flaps
-            # IMPORTANT: We skip flap check because IXIA is intentionally flapping ROUTES,
-            # not BGP sessions. This health check ensures BGP sessions themselves stay stable.
-            create_bgp_session_snapshot_check(
-                skip_flap_check=True,
-                skip_uptime_check=False,
-            ),
-        ],
-        stages=[
-            create_steps_stage(
-                steps=[
-                    create_custom_step(
-                        params_dict={
-                            "custom_step_name": "test_bgp_queue_memory_monitor_eos_bgp_plus_plus",
-                            "hostname": device_name,
-                            "duration_minutes": monitoring_duration_minutes,
-                            "interval_seconds": monitoring_interval_seconds,
-                            "focused_queues": [
-                                "AdjRibIn",
-                            ],
-                            "as_path_pool": ebgp_as_paths,
-                            "ebgp_peer_count": ebgp_peer_count,
-                            "ixia_interface_ebgp": ixia_interface_mimic_ebgp,
-                            "monitor_cpu_stress": monitor_cpu_stress,
-                        },
-                    ),
-                ],
-            )
-        ],
-    )
-
-
-def create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook(
-    device_name: str,
-) -> Playbook:
-    """Build the BGP++ bounded-ECMP-sets Playbook (performance scaling case9).
-
-    20-minute route-oscillations stage that spreads 5000 EBGP prefixes
-    across the DUT followed by a 300s soak, with a nexthop-group
-    periodic poll (threshold=50) on top of the standard BGP++ periodic
-    tasks. Postchecks assert BGP session establishment, RIB/FIB
-    consistency, and BGP convergence within 600 seconds. Used by EOS
-    BGP++ performance-scaling Case 9 to characterize bounded-ECMP-set
-    behavior under churn.
-
-    Args:
-        device_name: DUT hostname (EOS BGP++).
-
-    Returns:
-        A `Playbook` named `bgp_plus_plus_arista_bounded_ecmp_sets_test`.
-    """
-    profile_checks = get_profile_checks(
-        CheckProfile.PERF_SCALING_BOUNDED_ECMP, ProfileContext()
-    )
-    return Playbook(
-        name="bgp_plus_plus_arista_bounded_ecmp_sets_test",
-        description="Test BGP++ performance with bounded ECMP sets",
-        snapshot_checks=profile_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=Gigabyte.GIG_5.value,
-            cpu_util_terminate_on_error=False,
-            memory_terminate_on_error=False,
-        )
-        + [
-            create_nexthop_group_poll_periodic_task(
-                device_name=device_name,
-                threshold=50,
-            ),
-        ],
-        postchecks=profile_checks.postchecks,
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
-        stages=[
-            create_route_oscillations_stage(
-                device_name=device_name,
-                prefix_pool_regex=".*EBGP.*",
-                prefix_start_index=0,
-                prefix_end_index=5000,
-                test_duration_seconds=1200,
-                spread=True,
-            ),
-            create_steps_stage(
-                steps=[
-                    create_longevity_step(
-                        duration=300,
-                        description="Soak after final prefix changes for 300 seconds",
-                    ),
-                ],
-            ),
         ],
     )
 

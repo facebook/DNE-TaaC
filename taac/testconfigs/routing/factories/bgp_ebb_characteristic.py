@@ -13,21 +13,19 @@ Wave 5D.1 absorbs the ``test_config_constant_attribute_storage_on_eos``,
 and ``test_config_queue_memory_monitor.py``) into this module so that the
 Wave 5D catalog (``qual_bgp_ebb_characteristic.py``) can call them via the
 new ``create_bgp_ebb_characteristic_*`` factories. The playbook factories
-(``build_case2_playbook``, ``create_bgp_queue_memory_monitoring_playbook``)
-stay in ``playbook_definitions.py`` verbatim so the playbook snapshot
-manifest ``__module__`` filter still picks them up.
+for these catalog entries live in ``playbooks/routing/bgp_ebb_playbooks.py``;
+the generic ``build_case2_playbook`` trampoline remains in
+``playbook_definitions.py`` for two unrelated legacy callers.
 
 Wave 5D.2 absorbs 4 more helpers verbatim so their thin wrappers can be
 retired: ``test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy``
 (case 8), ``test_config_bgp_update_packing_validation`` (update-packing),
 ``test_config_to_verify_computational_load_of_bgp_plus_plus`` and
 ``test_config_to_verify_constant_attribute_storage`` (verify pair). The
-new physical-inventory-driven factories (``create_bgp_ebb_characteristic_*``) call
-these helpers by name. Playbook factories (``build_case8_playbook``,
-``create_bgp_update_packing_validation_playbook``,
-``create_test_computational_load_for_bgp_plus_plus_playbook``,
-``create_test_constant_attribute_storage_playbook``) stay in
-``playbook_definitions.py``.
+new physical-inventory-driven factories (``create_bgp_ebb_characteristic_*``)
+call these helpers by name. The update-packing catalog playbook is centralized
+in ``playbooks/routing/bgp_ebb_playbooks.py``; the remaining legacy playbook
+factories stay in ``playbook_definitions.py``.
 
 See ../README.md §3.
 """
@@ -73,11 +71,14 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.playbooks.playbook_definitions import (
     build_case2_playbook,
     build_case8_playbook,
-    create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook,
-    create_bgp_queue_memory_monitoring_playbook,
-    create_bgp_update_packing_validation_playbook,
     create_test_computational_load_for_bgp_plus_plus_playbook,
     create_test_constant_attribute_storage_playbook,
+)
+from taac.playbooks.routing.bgp_ebb_playbooks import (
+    create_bgp_ebb_bounded_ecmp_sets_playbook,
+    create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook,
+    create_bgp_ebb_queue_memory_monitoring_playbook,
+    create_bgp_ebb_update_packing_validation_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.attribute_pool_generator import (
     generate_as_path_pool,
@@ -1020,61 +1021,40 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
             ),
         ],
         playbooks=[
-            build_case2_playbook(
-                name="bgp_plus_plus_constant_attribute_storage_varying_combinations_test",
-                description="Test BGP++ constant attribute storage with varying unique combination counts",
-                stages=[
-                    create_steps_stage(
-                        steps=[
-                            create_custom_step(
-                                params_dict={
-                                    "custom_step_name": "test_constant_attribute_storage_varying_combinations_eos_bgp_plus_plus",
-                                    "hostname": device_name,
-                                    "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
-                                    "constant_ebgp_peer_count": constant_ebgp_peer_count,
-                                    "constant_ibgp_peer_count": constant_ibgp_peer_count,
-                                    "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
-                                    "constant_total_paths": constant_total_paths,
-                                    "unique_combination_counts": unique_combination_counts,
-                                    "test_address_families": test_address_families,
-                                    "soak_time_minutes": soak_time_minutes,
-                                    "base_as_path_pool_size": base_as_path_pool_size,
-                                    "base_community_pool_size": base_community_pool_size,
-                                    "base_extended_community_pool_size": base_extended_community_pool_size,
-                                    "as_path_length": 5,
-                                    "communities_per_route": 5,
-                                    "extended_communities_per_route": 1,
-                                    "attach_communities_for_ebgp_prefixes": constant_acceptance_communities,
-                                    "max_communities_per_route_from_pool": max_communities_per_route_from_pool,
-                                    "random_seed": random_seed,
-                                    "test_route_withdrawal": test_route_withdrawal,
-                                    "withdrawal_wait_minutes": withdrawal_wait_minutes,
-                                    "dump_attribute_assignments": dump_attribute_assignments,
-                                    "verify_received_prefixes": verify_received_prefixes,
-                                    "acceptance_gate_mode": acceptance_gate_mode,
-                                    "memory_growth_gate_mode": memory_growth_gate_mode,
-                                    **(
-                                        {
-                                            "ebgp_remote_as": ebgp_remote_as,
-                                            "ibgp_remote_as": ibgp_local_as,
-                                            "ixia_ebgp_ic_parent_network_v6": ixia_ebgp_ic_parent_network_v6,
-                                            "ixia_ebgp_ic_parent_network_v4": ixia_ebgp_ic_parent_network_v4,
-                                            "ixia_ibgp_ic_parent_network_v6": ixia_ibgp_ic_parent_network_v6,
-                                            "ixia_ibgp_ic_parent_network_v4": ixia_ibgp_ic_parent_network_v4,
-                                            "peergroup_ebgp_v6": peergroup_ebgp_v6,
-                                            "peergroup_ebgp_v4": peergroup_ebgp_v4,
-                                            "peergroup_ibgp_v6": peergroup_ibgp_v6,
-                                            "peergroup_ibgp_v4": peergroup_ibgp_v4,
-                                            "ssh_password": ssh_password,
-                                        }
-                                        if setup_tasks is None
-                                        else {}
-                                    ),
-                                }
-                            ),
-                        ],
-                    )
-                ],
+            create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
+                device_name=device_name,
+                ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+                constant_ebgp_peer_count=constant_ebgp_peer_count,
+                constant_ibgp_peer_count=constant_ibgp_peer_count,
+                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                constant_total_paths=constant_total_paths,
+                unique_combination_counts=unique_combination_counts,
+                test_address_families=test_address_families,
+                soak_time_minutes=soak_time_minutes,
+                base_as_path_pool_size=base_as_path_pool_size,
+                base_community_pool_size=base_community_pool_size,
+                base_extended_community_pool_size=base_extended_community_pool_size,
+                constant_acceptance_communities=constant_acceptance_communities,
+                max_communities_per_route_from_pool=max_communities_per_route_from_pool,
+                random_seed=random_seed,
+                test_route_withdrawal=test_route_withdrawal,
+                withdrawal_wait_minutes=withdrawal_wait_minutes,
+                dump_attribute_assignments=dump_attribute_assignments,
+                verify_received_prefixes=verify_received_prefixes,
+                acceptance_gate_mode=acceptance_gate_mode,
+                memory_growth_gate_mode=memory_growth_gate_mode,
+                include_legacy_setup_params=setup_tasks is None,
+                ebgp_remote_as=ebgp_remote_as,
+                ibgp_local_as=ibgp_local_as,
+                ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
+                ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
+                ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
+                ixia_ibgp_ic_parent_network_v4=ixia_ibgp_ic_parent_network_v4,
+                peergroup_ebgp_v6=peergroup_ebgp_v6,
+                peergroup_ebgp_v4=peergroup_ebgp_v4,
+                peergroup_ibgp_v6=peergroup_ibgp_v6,
+                peergroup_ibgp_v4=peergroup_ibgp_v4,
+                ssh_password=ssh_password,
             ),
         ],
     )
@@ -1359,7 +1339,7 @@ def test_config_bgp_queue_memory_monitoring_with_route_scale(
             ),
         ],
         playbooks=[
-            create_bgp_queue_memory_monitoring_playbook(
+            create_bgp_ebb_queue_memory_monitoring_playbook(
                 device_name=device_name,
                 monitoring_duration_minutes=monitoring_duration_minutes,
                 monitoring_interval_seconds=monitoring_interval_seconds,
@@ -2222,7 +2202,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         teardown_tasks=compiled.teardown_tasks,
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_plus_plus_arista_bounded_ecmp_sets_playbook(
+            create_bgp_ebb_bounded_ecmp_sets_playbook(
                 device_name=device_name,
             )
         ],
@@ -2760,7 +2740,7 @@ def test_config_bgp_update_packing_validation(
             ]
         ),
         playbooks=[
-            create_bgp_update_packing_validation_playbook(
+            create_bgp_ebb_update_packing_validation_playbook(
                 device_name=device_name,
                 ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
                 ibgp_peer_count=ibgp_peer_count,
@@ -3648,7 +3628,7 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
         teardown_tasks=[],
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_update_packing_validation_playbook(
+            create_bgp_ebb_update_packing_validation_playbook(
                 device_name=device_name,
                 ixia_interface_mimic_ibgp=ibgp_iface,
                 ibgp_peer_count=ibgp_peer_count,
