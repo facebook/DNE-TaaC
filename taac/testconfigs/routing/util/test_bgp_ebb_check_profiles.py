@@ -6,7 +6,6 @@ import unittest
 
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_route_count_verification_check,
-    create_bgp_tcpdump_check,
     create_core_dumps_snapshot_check,
 )
 from taac.health_checks.retry_policy import DEFAULT_RETRY_SPEC
@@ -369,9 +368,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
         )
 
     def test_igp_instability_pnh_metric_matches_factory(self):
-        """IGP_INSTABILITY reproduces the pnh-metric-oscillation playbook, whose
-        tcpdump previously came from create_standard_postchecks' built-in
-        message-types path (KEEPALIVE expected, NOTIFICATION/OPEN unexpected)."""
+        """PNH metric oscillation relies on session snapshots and postchecks."""
         ctx = ProfileContext(
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",
@@ -380,8 +377,6 @@ class CheckProfileRegistryTest(unittest.TestCase):
             check_ibgp_pnh=False,
             expected_peer_identity={"2401:db00::a": "2401:db00::b"},
             exclude_bgp_mon=True,
-            tcpdump_expected_message_types=["KEEPALIVE"],
-            tcpdump_unexpected_message_types=["NOTIFICATION", "OPEN"],
         )
         checks = get_profile_checks(CheckProfile.IGP_INSTABILITY, ctx)
 
@@ -396,14 +391,10 @@ class CheckProfileRegistryTest(unittest.TestCase):
                 exclude_bgp_mon=True,
             ),
         )
-        # The explicit tcpdump append must be byte-identical to the prior
-        # built-in message-types path.
         self.assertEqual(
             checks.postchecks,
             create_standard_postchecks(
                 check_bgp_convergence=False,
-                expected_message_types=["KEEPALIVE"],
-                unexpected_message_types=["NOTIFICATION", "OPEN"],
                 exclude_bgp_mon=True,
             ),
         )
@@ -416,8 +407,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
         )
 
     def test_igp_instability_unresolvable_pnhs_matches_factory(self):
-        """IGP_INSTABILITY reproduces the unresolvable-PNHs playbook (hand-appended
-        UPDATE tcpdump with a 1740s last-mod window)."""
+        """Unresolvable-PNHs validates BGP++ UPDATE sends in its stage."""
         ctx = ProfileContext(
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",
@@ -426,9 +416,6 @@ class CheckProfileRegistryTest(unittest.TestCase):
             check_ibgp_pnh=False,
             expected_peer_identity={"2401:db00::a": "2401:db00::b"},
             exclude_bgp_mon=True,
-            tcpdump_expected_message_types=["UPDATE"],
-            tcpdump_unexpected_message_types=[],
-            tcpdump_expected_last_mod_time=1740,
         )
         checks = get_profile_checks(CheckProfile.IGP_INSTABILITY, ctx)
 
@@ -437,15 +424,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             create_standard_postchecks(
                 check_bgp_convergence=False,
                 exclude_bgp_mon=True,
-            )
-            + [
-                create_bgp_tcpdump_check(
-                    expected_message_types=["UPDATE"],
-                    unexpected_message_types=[],
-                    cleanup_capture_file=False,
-                    expected_last_mod_time=1740,
-                ),
-            ],
+            ),
         )
 
     def test_soak_no_precheck_nexthop_matches_factory(self):

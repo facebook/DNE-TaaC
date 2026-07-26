@@ -302,11 +302,26 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
 
 def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
     """IGP instability (PNH-metric oscillation / unresolvable PNHs): standard
-    prechecks, postchecks with convergence OFF plus a BGP tcpdump check appended
-    last (message-types + optional last-mod window from the context), and a
-    standard snapshot. The tcpdump's ``cleanup_capture_file`` stays at the factory
-    default (False), which both call sites use.
+    prechecks, postchecks with convergence OFF, an optional BGP tcpdump check,
+    and a standard snapshot. The PNH playbooks use direct BGP++ counter
+    validation plus session snapshots instead of requesting tcpdump here.
     """
+    postchecks = create_standard_postchecks(
+        postcheck_thresholds=ctx.postcheck_thresholds,
+        check_bgp_convergence=False,
+        exclude_bgp_mon=ctx.exclude_bgp_mon,
+    )
+    if (
+        ctx.tcpdump_expected_message_types is not None
+        or ctx.tcpdump_unexpected_message_types is not None
+    ):
+        postchecks.append(
+            create_bgp_tcpdump_check(
+                expected_message_types=ctx.tcpdump_expected_message_types,
+                unexpected_message_types=ctx.tcpdump_unexpected_message_types,
+                expected_last_mod_time=ctx.tcpdump_expected_last_mod_time,
+            )
+        )
     return ProfileChecks(
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
@@ -317,18 +332,7 @@ def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
-        postchecks=create_standard_postchecks(
-            postcheck_thresholds=ctx.postcheck_thresholds,
-            check_bgp_convergence=False,
-            exclude_bgp_mon=ctx.exclude_bgp_mon,
-        )
-        + [
-            create_bgp_tcpdump_check(
-                expected_message_types=ctx.tcpdump_expected_message_types,
-                unexpected_message_types=ctx.tcpdump_unexpected_message_types,
-                expected_last_mod_time=ctx.tcpdump_expected_last_mod_time,
-            ),
-        ],
+        postchecks=postchecks,
         snapshot_checks=create_standard_snapshot_checks(
             expected_peer_identity=ctx.expected_peer_identity,
             exclude_bgp_mon=ctx.exclude_bgp_mon,

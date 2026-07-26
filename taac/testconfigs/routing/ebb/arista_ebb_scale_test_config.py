@@ -9,8 +9,6 @@ multipath group oscillations, FAUU drain/undrain, cold start, and BGP restart
 stages. Used to longevity-test EBB BGP++ at production peer/route scale.
 """
 
-import json
-
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_LOCAL_LINK,
@@ -65,7 +63,6 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_longevity_periodic_tasks,
     create_standard_periodic_tasks,
 )
-from taac.utils.arista_utils import interface_name_to_short_format
 from taac.utils.hardware_capacity_utils import (
     get_postcheck_thresholds,
     get_precheck_thresholds,
@@ -627,9 +624,6 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                         device_name=device_name,
                         start_ipv4s=[DEFAULT_OPENR_START_IPV4S[0]],
                         start_ipv6s=[DEFAULT_OPENR_START_IPV6S[0]],
-                        tcp_dump_capture_interface=interface_name_to_short_format(
-                            ixia_interface_mimic_bgp_mon
-                        ),
                     )
                 ],
             ),

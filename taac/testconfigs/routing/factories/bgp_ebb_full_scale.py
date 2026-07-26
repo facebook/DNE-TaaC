@@ -45,7 +45,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_expected_peer_identity,
 )
-from taac.utils.arista_utils import interface_name_to_short_format
 from taac.test_as_a_config.types import TestConfig
 
 
@@ -209,9 +208,6 @@ def _get_bgp_ebb_full_scale_playbooks(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-            tcp_dump_capture_interface=interface_name_to_short_format(
-                ixia_interface_mimic_bgp_mon
-            ),
             local_link=local_link,
             other_link=other_link,
             expected_established_sessions=session_count,

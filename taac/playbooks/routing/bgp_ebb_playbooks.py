@@ -43,7 +43,8 @@ from taac.steps.step_definitions import (
     create_openr_route_action_step,
     create_route_registry_prefix_list_setup_steps,
     create_set_route_filter_step,
-    create_tcpdump_step,
+    create_snapshot_bgp_withdraw_sent_counter_step,
+    create_verify_bgp_withdraw_send_quiet_step,
 )
 from taac.task_definitions import (
     create_nexthop_group_poll_periodic_task,
@@ -494,8 +495,8 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     This playbook tests BGP behavior during IGP metric oscillations by:
     1. Setting up BGP instability prerequisites
     2. Running standard prechecks
-    3. Starting tcpdump capture, performing Open/R metric oscillations, stopping capture
-    4. Running standard postchecks (verifying only KEEPALIVE messages, no NOTIFICATION/OPEN)
+    3. Performing Open/R metric oscillations while tracking BGP withdrawals
+    4. Verifying no withdrawals, then running session-stability postchecks
 
     Args:
         device_name: Name of the device under test
@@ -544,8 +545,6 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             exclude_bgp_mon=exclude_bgp_mon,
-            tcpdump_expected_message_types=["KEEPALIVE"],
-            tcpdump_unexpected_message_types=["NOTIFICATION", "OPEN"],
         ),
     )
     return Playbook(
@@ -563,10 +562,9 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
         stages=[
             create_steps_stage(
                 steps=[
-                    create_tcpdump_step(
-                        device_name=device_name,
-                        mode="start_capture",
-                        message_type="Keepalive|Open|Notification",
+                    create_snapshot_bgp_withdraw_sent_counter_step(
+                        hostname=device_name,
+                        snapshot_key="igp_pnh_metric_oscillation",
                     ),
                     create_openr_route_action_step(
                         device_name=device_name,
@@ -581,11 +579,9 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
                         frequency=frequency,
                         description="Perform metric oscillation using Open/R configuration",
                     ),
-                    create_tcpdump_step(
-                        device_name=device_name,
-                        mode="stop_capture",
-                        capture_file_path="/tmp/bgp_capture.txt",
-                        description="Stop tcpdump capture and keep file",
+                    create_verify_bgp_withdraw_send_quiet_step(
+                        hostname=device_name,
+                        snapshot_key="igp_pnh_metric_oscillation",
                     ),
                 ],
             )
@@ -1176,7 +1172,6 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
-    tcp_dump_capture_interface: str,
     local_link: t.Dict[str, t.Any],
     other_link: t.Dict[str, t.Any],
     expected_established_sessions: int = 0,
@@ -1193,6 +1188,7 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     exclude_bgp_mon: bool = True,
+    tcp_dump_capture_interface: t.Optional[str] = None,
 ) -> Playbook:
     """
     Create a BGP IGP instability unresolvable PNHs test playbook.
@@ -1201,14 +1197,24 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
     1. Setting up BGP instability prerequisites
     2. Running standard prechecks
     3. Executing the unresolvable PNHs stage (deleting Open/R routes)
-    4. Running standard postchecks with tcpdump verification for UPDATE messages
+    4. Validating BGP++ UPDATE sends, no withdrawals, and sustained stability
     5. Cleanup: re-injecting deleted routes to restore original state
+
+    ``tcp_dump_capture_interface`` is retained as an ignored compatibility
+    parameter while callers migrate to the counter-based validation.
     """
     if start_ipv4s is None:
         start_ipv4s = [DEFAULT_OPENR_START_IPV4S[0]]
 
     if start_ipv6s is None:
         start_ipv6s = [DEFAULT_OPENR_START_IPV6S[0]]
+
+    cleanup_start_ipv4s = list(
+        dict.fromkeys([*DEFAULT_OPENR_START_IPV4S, *start_ipv4s])
+    )
+    cleanup_start_ipv6s = list(
+        dict.fromkeys([*DEFAULT_OPENR_START_IPV6S, *start_ipv6s])
+    )
 
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
@@ -1228,9 +1234,6 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             exclude_bgp_mon=exclude_bgp_mon,
-            tcpdump_expected_message_types=["UPDATE"],
-            tcpdump_unexpected_message_types=[],
-            tcpdump_expected_last_mod_time=1740,  # 29 minutes
         ),
     )
     return Playbook(
@@ -1250,14 +1253,13 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
                 device_name=device_name,
                 start_ipv4s=start_ipv4s,
                 start_ipv6s=start_ipv6s,
-                tcp_dump_capture_interface=tcp_dump_capture_interface,
             )
         ],
         cleanup_steps=[
             create_openr_route_action_step(
                 device_name=device_name,
-                start_ipv4s=start_ipv4s,
-                start_ipv6s=start_ipv6s,
+                start_ipv4s=cleanup_start_ipv4s,
+                start_ipv6s=cleanup_start_ipv6s,
                 local_link=local_link,
                 other_link=other_link,
                 action=OpenRRouteAction.INJECT.value,

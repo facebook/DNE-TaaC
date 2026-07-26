@@ -1,12 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
+import asyncio
 import ipaddress
 import time
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, call, MagicMock, Mock, patch
 
 from facebook.network.Address.thrift_types import BinaryAddress
 from neteng.fboss.ctrl.thrift_types import NdpEntryThrift
@@ -15,7 +16,10 @@ from taac.constants import (
     TestDevice,
     TestTopology,
 )
-from taac.internal.steps.custom_step import CustomStep
+from taac.internal.steps.custom_step import (
+    BgpCounterFetchTimeout,
+    CustomStep,
+)
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.test_as_a_config.thrift_types import CustomStepInput, Step, TestConfig
 
@@ -79,6 +83,339 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
 
         # Verify that test_ndp_clear was called with the correct parameters
         mock_test_ndp_clear.assert_called_once_with(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_success_and_quiet(self, helper_cls):
+        key = "unit-success"
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": key,
+            "timeout_seconds": 60,
+            "poll_interval_seconds": 5,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(
+            side_effect=[10, 10, 11, 12, 12]
+        )
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[100, 100, 105, 105, 110, 110, 160],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(params)
+            await self.custom_step.wait_for_bgp_update_sent(params)
+            await self.custom_step.verify_bgp_update_send_quiet(params)
+
+        snapshot = CustomStep._convergence_data_storage[
+            self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        ]
+        self.assertEqual(snapshot["converged_counter"], 12)
+        self.assertEqual(snapshot["first_update_elapsed_seconds"], 10)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_times_out(self, helper_cls):
+        key = "unit-timeout"
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": key,
+            "timeout_seconds": 60,
+            "poll_interval_seconds": 10,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 10, 10])
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 0, 10, 10, 60],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(params)
+            with self.assertRaisesRegex(TestCaseFailure, "within 60s"):
+                await self.custom_step.wait_for_bgp_update_sent(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_rejects_first_update_after_deadline(
+        self, helper_cls
+    ):
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": "unit-late-first-update",
+            "timeout_seconds": 60,
+            "poll_interval_seconds": 10,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 10, 11])
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 0, 10, 10, 61],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(params)
+            with self.assertRaisesRegex(TestCaseFailure, "within 60s"):
+                await self.custom_step.wait_for_bgp_update_sent(params)
+
+    async def test_bgp_update_send_window_bounds_last_counter_read(self):
+        key = "unit-bounded-last-read"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 55, 60],
+            ),
+            patch.object(
+                self.custom_step,
+                "_read_bgp_counter",
+                new_callable=AsyncMock,
+                return_value=10,
+            ) as read_counter,
+        ):
+            with self.assertRaisesRegex(TestCaseFailure, "within 60s"):
+                await self.custom_step.wait_for_bgp_update_sent(
+                    {
+                        "hostname": "bag011.ash6",
+                        "snapshot_key": key,
+                        "timeout_seconds": 60,
+                        "poll_interval_seconds": 10,
+                    }
+                )
+
+        self.assertEqual(read_counter.await_args.kwargs["timeout_seconds"], 5)
+
+    async def test_bgp_update_send_window_translates_terminal_fetch_timeout(self):
+        key = "unit-terminal-fetch-timeout"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 55],
+            ),
+            patch.object(
+                self.custom_step,
+                "_read_bgp_counter",
+                new_callable=AsyncMock,
+                side_effect=BgpCounterFetchTimeout("terminal timeout"),
+            ),
+        ):
+            with self.assertRaisesRegex(TestCaseFailure, "within 60s"):
+                await self.custom_step.wait_for_bgp_update_sent(
+                    {
+                        "hostname": "bag011.ash6",
+                        "snapshot_key": key,
+                        "timeout_seconds": 60,
+                        "poll_interval_seconds": 10,
+                    }
+                )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_rejects_counter_reset(self, helper_cls):
+        key = "unit-reset"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {
+            "baseline": 10,
+            "started_at": 0,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(return_value=9)
+
+        with self.assertRaisesRegex(TestCaseFailure, "counter reset"):
+            await self.custom_step.wait_for_bgp_update_sent(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                }
+            )
+
+    async def test_bgp_update_send_window_requires_snapshot(self):
+        with self.assertRaisesRegex(TestCaseFailure, "was not recorded"):
+            await self.custom_step.wait_for_bgp_update_sent(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": "unit-missing",
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_counter_fetch_failure_is_actionable(self, helper_cls):
+        helper_cls.return_value.async_get_counter = AsyncMock(
+            side_effect=RuntimeError("thrift unavailable")
+        )
+
+        with self.assertRaisesRegex(
+            TestCaseFailure,
+            "counter fetch failed.*thrift unavailable",
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": "unit-fetch-failure",
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_counter_client_initialization_failure_is_actionable(
+        self, helper_cls
+    ):
+        helper_cls.side_effect = RuntimeError("credentials unavailable")
+
+        with self.assertRaisesRegex(
+            TestCaseFailure,
+            "client initialization failed.*credentials unavailable",
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": "unit-client-init-failure",
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_counter_fetch_timeout_is_actionable(self, helper_cls):
+        async def never_returns(_counter_name):
+            await asyncio.Future()
+
+        helper_cls.return_value.async_get_counter = never_returns
+        with self.assertRaisesRegex(TestCaseFailure, "timed out after 0.01s"):
+            await self.custom_step._read_bgp_counter(
+                helper_cls.return_value,
+                "bag011.ash6",
+                "peer.messagesSent.update.count",
+                timeout_seconds=0.01,
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_quiet_rejects_late_update(self, helper_cls):
+        key = "unit-late-update"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {
+            "baseline": 10,
+            "converged_counter": 12,
+            "started_at": 0,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(return_value=13)
+
+        with self.assertRaisesRegex(TestCaseFailure, "continued during"):
+            await self.custom_step.verify_bgp_update_send_quiet(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_quiet_rejects_counter_reset(self, helper_cls):
+        key = "unit-update-soak-reset"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {
+            "baseline": 10,
+            "converged_counter": 12,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(return_value=11)
+
+        with self.assertRaisesRegex(TestCaseFailure, "counter reset during"):
+            await self.custom_step.verify_bgp_update_send_quiet(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_withdraw_send_window_stays_quiet(self, helper_cls):
+        key = "unit-withdraw-quiet"
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": key,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[7, 7])
+
+        await self.custom_step.snapshot_bgp_withdraw_sent_counter(params)
+        await self.custom_step.verify_bgp_withdraw_send_quiet(params)
+
+        helper_cls.return_value.async_get_counter.assert_has_awaits(
+            [
+                call("peer.messagesSent.update.withdraw.count"),
+                call("peer.messagesSent.update.withdraw.count"),
+            ]
+        )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_withdraw_send_window_rejects_withdrawal(self, helper_cls):
+        key = "unit-withdraw-delta"
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": key,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[7, 8])
+
+        await self.custom_step.snapshot_bgp_withdraw_sent_counter(params)
+        with self.assertRaisesRegex(TestCaseFailure, "sent withdrawals"):
+            await self.custom_step.verify_bgp_withdraw_send_quiet(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_withdraw_send_window_rejects_counter_reset(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": "unit-withdraw-reset",
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[7, 6])
+
+        await self.custom_step.snapshot_bgp_withdraw_sent_counter(params)
+        with self.assertRaisesRegex(TestCaseFailure, "counter reset"):
+            await self.custom_step.verify_bgp_withdraw_send_quiet(params)
+
+    async def test_bgp_withdraw_send_window_requires_snapshot(self):
+        with self.assertRaisesRegex(TestCaseFailure, "was not recorded"):
+            await self.custom_step.verify_bgp_withdraw_send_quiet(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": "unit-withdraw-missing",
+                }
+            )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_counter_snapshots_are_isolated_by_hostname(self, helper_cls):
+        helper_cls.return_value.async_get_counter = AsyncMock(return_value=7)
+        key = "unit-host-isolation"
+        await self.custom_step.snapshot_bgp_withdraw_sent_counter(
+            {
+                "hostname": "bag011.ash6",
+                "snapshot_key": key,
+            }
+        )
+
+        with self.assertRaisesRegex(TestCaseFailure, "was not recorded"):
+            await self.custom_step.verify_bgp_withdraw_send_quiet(
+                {
+                    "hostname": "bag012.ash6",
+                    "snapshot_key": key,
+                }
+            )
+
+    def test_bgp_counter_snapshots_are_isolated_by_test_run(self):
+        key = "unit-run-isolation"
+        first_storage_key = self.custom_step._bgp_update_send_window_key(
+            key, "bag011.ash6"
+        )
+
+        self.custom_step.test_case_start_time += 1
+        second_storage_key = self.custom_step._bgp_update_send_window_key(
+            key, "bag011.ash6"
+        )
+
+        self.assertNotEqual(first_storage_key, second_storage_key)
 
     @patch("asyncio.sleep")
     async def test_ndp_clear_success(self, _):

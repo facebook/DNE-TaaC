@@ -738,6 +738,93 @@ def create_snapshot_ixia_bgp_rx_stats_step(
     )
 
 
+def create_snapshot_bgp_update_sent_counter_step(
+    hostname: str,
+    snapshot_key: str,
+) -> Step:
+    """Snapshot BGP++'s cumulative sent-UPDATE counter before a trigger."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "snapshot_bgp_update_sent_counter",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+        },
+        description=(
+            f"Snapshot BGP++ sent-UPDATE counter on {hostname} (key={snapshot_key})"
+        ),
+    )
+
+
+def create_wait_for_bgp_update_sent_step(
+    hostname: str,
+    snapshot_key: str,
+    timeout_seconds: int = 60,
+    poll_interval_seconds: int = 5,
+) -> Step:
+    """Require BGP++ to send an UPDATE within a bounded trigger window."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "wait_for_bgp_update_sent",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+        description=(
+            f"Require BGP++ to send an UPDATE on {hostname} within {timeout_seconds}s"
+        ),
+    )
+
+
+def create_verify_bgp_update_send_quiet_step(
+    hostname: str,
+    snapshot_key: str,
+) -> Step:
+    """Verify BGP++ sent no UPDATEs after the trigger window."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "verify_bgp_update_send_quiet",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+        },
+        description=(
+            f"Verify sustained BGP UPDATE stability on {hostname} (key={snapshot_key})"
+        ),
+    )
+
+
+def create_snapshot_bgp_withdraw_sent_counter_step(
+    hostname: str,
+    snapshot_key: str,
+) -> Step:
+    """Snapshot BGP++'s cumulative sent-withdrawal counter."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "snapshot_bgp_withdraw_sent_counter",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+        },
+        description=(
+            f"Snapshot BGP++ sent-withdrawal counter on {hostname} (key={snapshot_key})"
+        ),
+    )
+
+
+def create_verify_bgp_withdraw_send_quiet_step(
+    hostname: str,
+    snapshot_key: str,
+) -> Step:
+    """Verify BGP++ sent no withdrawals during metric oscillation."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "verify_bgp_withdraw_send_quiet",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+        },
+        description=f"Verify BGP++ sent no withdrawals on {hostname}",
+    )
+
+
 def create_verify_ixia_bgp_rx_stats_delta_step(
     hostname: str,
     interface: str,

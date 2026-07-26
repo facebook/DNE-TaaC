@@ -78,18 +78,22 @@ from taac.steps.step_definitions import (
     create_set_bgp_prefixes_local_preference_step,
     create_set_peer_groups_policy_step,
     create_set_route_filter_step,
+    create_snapshot_bgp_update_sent_counter_step,
+    create_snapshot_bgp_withdraw_sent_counter_step,
     create_start_stop_bgp_peers_step,
     create_start_traffic_step,
     create_stop_traffic_step,
     create_system_reboot_step,
-    create_tcpdump_step,
     create_thread_cpu_monitoring_step,
     create_toggle_device_group_step,
     create_update_prefix_count_step,
     create_validation_step,
+    create_verify_bgp_update_send_quiet_step,
+    create_verify_bgp_withdraw_send_quiet_step,
     create_verify_port_operational_state_step,
     create_verify_port_speed_step_v2,
     create_verify_received_routes_step,
+    create_wait_for_bgp_update_sent_step,
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
@@ -1208,6 +1212,8 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
     count: int = 63,
     step: int = 2,
     delete_count: int = 20,
+    update_timeout_seconds: int = 60,
+    stability_duration_seconds: int = 1800,
 ) -> Stage:
     """
     Create a test stage to verify BGP convergence behavior when IGP routes become unavailable.
@@ -1218,18 +1224,23 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
     BGP converges properly and remains stable without continuous route updates.
 
     The test sequence:
-    1. Delete Open/R routes sequentially to create unresolvable BGP next-hops
-    2. Start tcpdump to capture BGP updates on monitoring interface
-    3. Soak for 30 minutes to ensure sustained convergence
-    4. Stop final tcpdump capture
+    1. Snapshot BGP++'s cumulative sent-UPDATE and withdrawal counters
+    2. Delete Open/R routes sequentially to create unresolvable BGP next-hops
+    3. Require an UPDATE within the bounded convergence window
+    4. Soak for 30 minutes to ensure sustained convergence
+    5. Verify that no further UPDATEs occurred during the soak and that no
+       withdrawals occurred during the trigger or soak
 
     Args:
         device_name: Name of the device under test
         start_ipv4s: List of starting IPv4 addresses for Open/R route deletion
         start_ipv6s: List of starting IPv6 addresses for Open/R route deletion
+        tcp_dump_capture_interface: Deprecated compatibility parameter; ignored
         count: Number of routes created from start ips
         step: Step size for routes
         delete_count: Number of routes to delete (default: 20)
+        update_timeout_seconds: Maximum time to observe the first UPDATE
+        stability_duration_seconds: Quiet period after the convergence window
 
     Returns:
         Stage object for BGP IGP instability test with unresolvable PNHs
@@ -1241,19 +1252,19 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
             start_ipv6s=["2001:db8::"],
         )
     """
-    steps = []
-
-    # Step 1: Start tcpdump capture on BGP MON interface
-    steps.append(
-        create_tcpdump_step(
-            device_name=device_name,
-            mode="start_capture",
-            message_type="Update",
-            interface=tcp_dump_capture_interface,
+    snapshot_key = "igp_unresolvable_pnhs"
+    withdraw_snapshot_key = "igp_unresolvable_pnhs_withdrawals"
+    steps = [
+        create_snapshot_bgp_withdraw_sent_counter_step(
+            hostname=device_name,
+            snapshot_key=withdraw_snapshot_key,
         ),
-    )
+        create_snapshot_bgp_update_sent_counter_step(
+            hostname=device_name,
+            snapshot_key=snapshot_key,
+        ),
+    ]
 
-    # Step 2: Delete 20 routes, on Plane 1 Sequentially for IPV4/6
     steps.append(
         create_openr_route_action_step(
             device_name=device_name,
@@ -1263,24 +1274,32 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
             other_link=DEFAULT_OTHER_LINK,
             action=OpenRRouteAction.DELETE.value,
             count=count,
-            step=2,
+            step=step,
             sequential=True,
             delete_count=delete_count,
             description="Perform Open/R Route deletion using default Open/R configuration",
         ),
     )
-
-    # Step 3: Wait 30 minutes
     steps.append(
-        create_longevity_step(duration=1800),
+        create_wait_for_bgp_update_sent_step(
+            hostname=device_name,
+            snapshot_key=snapshot_key,
+            timeout_seconds=update_timeout_seconds,
+        )
     )
-
-    # Step 4: Stop tcpdump capture
     steps.append(
-        create_tcpdump_step(
-            device_name=device_name,
-            mode="stop_capture",
-            description="Stop tcpdump capture",
+        create_longevity_step(duration=stability_duration_seconds),
+    )
+    steps.append(
+        create_verify_bgp_update_send_quiet_step(
+            hostname=device_name,
+            snapshot_key=snapshot_key,
+        ),
+    )
+    steps.append(
+        create_verify_bgp_withdraw_send_quiet_step(
+            hostname=device_name,
+            snapshot_key=withdraw_snapshot_key,
         ),
     )
     return Stage(steps=steps)
