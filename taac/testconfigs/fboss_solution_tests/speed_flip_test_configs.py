@@ -352,7 +352,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_12T_TEST_PORTS_DOWN_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             )
         ],
     ).build_test_config(),
@@ -404,7 +404,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_12T_TEST_PORTS_UP_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             )
         ],
     ).build_test_config(),
@@ -475,7 +475,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_DOWN_100G_TO_200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 400G Playbook
             SpeedFlipPlaybook(
@@ -509,7 +509,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_DOWN_100G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 400G Playbook
             SpeedFlipPlaybook(
@@ -557,7 +557,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_DOWN_200G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
         ],
     ).build_test_config(),
@@ -623,7 +623,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_UP_100G_TO_200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 400G Playbook
             SpeedFlipPlaybook(
@@ -657,7 +657,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_UP_100G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 400G Playbook
             SpeedFlipPlaybook(
@@ -705,7 +705,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_25T_TEST_PORTS_UP_200G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
         ],
     ).build_test_config(),
@@ -793,7 +793,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 400G Playbook
             SpeedFlipPlaybook(
@@ -835,7 +835,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x100G to 200G/400G Playbook (/5 ports to 400G)
             SpeedFlipPlaybook(
@@ -895,7 +895,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_200G/400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x100G to 400G/200G Playbook (/1 ports to 400G)
             SpeedFlipPlaybook(
@@ -955,7 +955,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_400G/200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 800G Playbook
             SpeedFlipPlaybook(
@@ -998,7 +998,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 400G Playbook
             SpeedFlipPlaybook(
@@ -1040,7 +1040,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_200G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x200G to 200G/400G Playbook (/1 port to 200G)
             SpeedFlipPlaybook(
@@ -1082,7 +1082,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_200G_TO_200G/400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x200G to 400G/200G Playbook
             SpeedFlipPlaybook(
@@ -1124,7 +1124,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_200G_TO_400G/200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 800G Playbook
             SpeedFlipPlaybook(
@@ -1167,7 +1167,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_200G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G/400G to 800G Playbook (/1 port to 200G first)
             SpeedFlipPlaybook(
@@ -1210,7 +1210,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_200G/400G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 400G/200G to 800G Playbook (/1 port to 200G first)
             SpeedFlipPlaybook(
@@ -1253,7 +1253,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_400G/200G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 400G to 800G Playbook
             SpeedFlipPlaybook(
@@ -1287,7 +1287,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_400G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
         ],
     ).build_test_config(),
@@ -1351,7 +1351,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_100G_TO_200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 400G Playbook
             SpeedFlipPlaybook(
@@ -1393,7 +1393,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_100G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x100G to 200G/400G Playbook (/5 ports to 400G)
             SpeedFlipPlaybook(
@@ -1453,7 +1453,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_100G_TO_200G/400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x100G to 400G/200G Playbook (/1 ports to 400G)
             SpeedFlipPlaybook(
@@ -1513,7 +1513,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_100G_TO_400G/200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 100G to 800G Playbook
             SpeedFlipPlaybook(
@@ -1556,7 +1556,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_100G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 400G Playbook
             SpeedFlipPlaybook(
@@ -1598,7 +1598,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_200G_TO_400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x200G to 200G/400G Playbook (/1 port to 200G)
             SpeedFlipPlaybook(
@@ -1640,7 +1640,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_200G_TO_200G/400G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 2x200G to 400G/200G Playbook
             SpeedFlipPlaybook(
@@ -1682,7 +1682,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_200G_TO_400G/200G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G to 800G Playbook
             SpeedFlipPlaybook(
@@ -1725,7 +1725,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_200G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 200G/400G to 800G Playbook (/1 port to 200G first)
             SpeedFlipPlaybook(
@@ -1768,7 +1768,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_200G/400G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 400G/200G to 800G Playbook (/1 port to 200G first)
             SpeedFlipPlaybook(
@@ -1811,7 +1811,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_400G/200G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
             # 400G to 800G Playbook
             SpeedFlipPlaybook(
@@ -1845,7 +1845,7 @@ SPEED_FLIP_TEST_CONFIGS = [
                     },
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_UP_400G_TO_800G_PLAYBOOK",
-                number_of_iterations=1,
+                number_of_iterations=10,
             ),
         ],
     ).build_test_config(),
