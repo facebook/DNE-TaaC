@@ -1,0 +1,703 @@
+schema_version: 1
+
+suite:
+  id: bgp_ebb
+  title: BGP++ EBB CI/CD Catalog
+  owner: routing_qual
+  summary: >-
+    Daily regression catalog for the 20 currently executable BGP++ EBB
+    playbooks. Qualification and CI/CD have different purposes: this suite
+    continuously detects revision regressions while maintaining representative
+    coverage of Gate2 requirements G2-10 through G2-25. The planned 25-case
+    target will add five catalog entries only when their executable playbooks
+    land.
+  playbook_module: neteng.test_infra.dne.taac.playbooks.routing.bgp_ebb_playbooks
+  required_requirements:
+    - G2-10
+    - G2-11
+    - G2-12
+    - G2-13
+    - G2-14
+    - G2-15
+    - G2-16
+    - G2-17
+    - G2-18
+    - G2-19
+    - G2-20
+    - G2-21
+    - G2-22
+    - G2-23
+    - G2-24
+    - G2-25
+
+sources:
+  - id: gate2
+    title: Gate2 qualification requirements
+    url: https://docs.google.com/document/d/1lQy3aeTXRlXxtjxB1BotD84pqchghrWTb-T4FKRW-j4/edit?tab=t.bz5szmb672zh
+  - id: gate1
+    title: Gate1 qualification plan
+    url: https://docs.google.com/document/d/1vKjERKNSTg_kls1u4JAh84Sk1TJYu5kGX9iaxvpUiiM/edit?tab=t.0#heading=h.p9ark5ckrw4s
+
+coverage_notes:
+  - requirement: G2-12
+    title: G2-12 daily proxy status
+    summary: >-
+      CICD-15 is a provisional daily stability proxy, not equivalent to the
+      48-hour qualification workload.
+    asserted:
+      - Four hours of repeated community churn followed by quiesced health checks.
+      - Session recovery, crash freedom, snapshots, and CPU and memory trends.
+    exercised:
+      - Full-scale peer and route state remains active throughout the soak.
+    gaps:
+      - Qualification-length 48-hour duration.
+      - Combined route churn, broader attribute churn, drains, and peer restarts.
+      - An approved blocking rule for long-term resource trends.
+  - requirement: G2-25
+    title: G2-25 current feature coverage
+    summary: >-
+      The current 20 playbooks provide one explicit runtime-policy assertion
+      and several supplemental scaling and implementation-health signals. They
+      do not yet establish complete G2-25 feature qualification coverage.
+    asserted:
+      - CICD-12 validates per-AFI prefix-list updates and route-count transitions without restarting BGP++.
+      - CICD-16 monitors queue, process-memory, and liveness behavior under route churn and CPU stress.
+      - CICD-17 and CICD-20 bound nexthop-group and ECMP state during route churn.
+      - CICD-18 validates IPv6 UPDATE packing with update groups enabled.
+      - CICD-19 validates route acceptance and attribute-storage memory growth across unique-combination scale.
+    exercised:
+      - MED, community, origin, and AS-path mutation during churn and drain workflows.
+      - Open/R metric changes, PNH withdrawal and restoration, and multipath recovery.
+      - Full-scale MP-BGP, RFC5549-style nexthops, and BGP-MON observation paths.
+    gaps:
+      - BGP weight support.
+      - Complete MED behavior, including missing-AS-worst.
+      - Enforce-first-as behavior.
+      - Netlink fast-neighbor teardown and latency.
+      - Dedicated update-group correctness, backpressure, and edge-case coverage.
+
+categories:
+  - id: lifecycle_and_sessions
+    title: Lifecycle and Session Stability
+  - id: route_and_igp_instability
+    title: Route and IGP Instability
+  - id: operational_procedures
+    title: Operational Procedures
+  - id: continuous_operation
+    title: Continuous Operation and Resource Regression
+  - id: scaling_and_features
+    title: Scaling and Feature Regression
+
+topologies:
+  - id: ebb_full_scale
+    status: modeled
+    artifact: neteng.test_infra.dne.taac.abstractions.topologies.ebb_full_scale.ebb_full_scale_topology
+    description: >-
+      Canonical 1,274-peer EBB topology with eBGP, four iBGP planes, BGP-MON,
+      dual-stack parent networks, and optional standalone Open/R.
+  - id: ipv6_update_packing
+    status: modeled
+    artifact: neteng.test_infra.dne.taac.abstractions.topologies.ipv6_update_packing.IPV6_UPDATE_PACKING
+    description: >-
+      Two-port IPv6 topology with eBGP ingress and iBGP capture egress used by
+      the UPDATE-packing workflow.
+  - id: bounded_ecmp
+    status: modeled
+    artifact: neteng.test_infra.dne.taac.abstractions.topologies.bounded_ecmp.BOUNDED_ECMP
+    description: >-
+      Two-port update-group topology with bounded-ECMP routing groups and
+      inspectable IXIA children.
+  - id: legacy_two_port_ebb
+    status: legacy
+    artifact: null
+    description: >-
+      Current two-port eBGP/iBGP wiring assembled by the BAG012 characteristic
+      factories. Constant-attribute storage and queue/memory monitoring must
+      migrate to a named topology artifact before this status can be modeled.
+
+entries:
+  - id: CICD-01
+    title: BGP daemon restart
+    category: lifecycle_and_sessions
+    playbook_name: bgp_ebb_daemon_restart_playbook
+    requirements:
+      - id: G2-11
+        role: direct
+        coverage: Restart BGP++ and verify full session and control-plane recovery.
+    required_topology: ebb_full_scale
+    purpose: Detect restart regressions in service recovery, convergence, and resource health.
+    stimulus: Restart the BGP++ daemon, restore IXIA peers, and wait 540 seconds for convergence.
+    scale: Canonical full-scale EBB peer and route population.
+    blocking_signals:
+      - Restart profile prechecks and postchecks pass.
+      - Expected BGP sessions recover and remain established.
+      - Snapshot checks show no unexpected state drift or core dump.
+    expected_runtime: Approximately 34 minutes including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - BGP service lifecycle and peer-state logs.
+      - Convergence timeline and failed peer identities.
+      - CPU and memory periodic-task samples.
+    artifacts:
+      - TAAC step and health-check results.
+      - BGP service logs and core-dump snapshot.
+      - CPU and memory time series.
+    qualification_delta: Daily CI performs one representative restart rather than the full qualification campaign.
+
+  - id: CICD-02
+    title: BGP cold start
+    category: lifecycle_and_sessions
+    playbook_name: bgp_ebb_cold_start_playbook
+    requirements:
+      - id: G2-10
+        role: direct
+        coverage: Start BGP++ at full scale and verify peer establishment and convergence.
+    required_topology: ebb_full_scale
+    purpose: Detect cold-start regressions in session fan-in, EOR handling, and convergence.
+    stimulus: Start BGP++ without active peers, enable all peer groups together, wait about 500 seconds, and collect thread CPU.
+    scale: Canonical full-scale EBB peer and route population.
+    blocking_signals:
+      - Cold-start profile checks pass.
+      - Expected sessions establish and convergence completes.
+      - Snapshot, CPU, and memory checks remain healthy.
+    expected_runtime: About 10 minutes of stimulus plus shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - EOR and convergence timeline.
+      - Per-thread CPU and peer-establishment failures.
+      - BGP startup logs.
+    artifacts:
+      - TAAC health-check results.
+      - BGP startup logs and session snapshots.
+      - Thread CPU collection.
+    qualification_delta: Daily CI uses the conveyor topology and one synchronized cold-start event.
+
+  - id: CICD-03
+    title: eBGP session oscillation
+    category: lifecycle_and_sessions
+    playbook_name: bgp_ebb_ebgp_session_oscillation_playbook
+    requirements:
+      - id: G2-18
+        role: direct
+        coverage: Repeatedly flap eBGP sessions and verify final recovery.
+    required_topology: ebb_full_scale
+    purpose: Detect session-manager and convergence regressions under sustained eBGP peer churn.
+    stimulus: Randomly flap eBGP sessions for 30 minutes using 30-second up and down intervals.
+    scale: Seventy eBGP sessions per cycle on the canonical full-scale topology.
+    blocking_signals:
+      - Oscillation profile prechecks and postchecks pass.
+      - All expected sessions recover after churn.
+      - No crash, snapshot regression, or resource-limit violation occurs.
+    expected_runtime: Approximately 1.5 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Flapped and failed peer sets.
+      - Session transition and convergence logs.
+      - CPU and memory periodic-task samples.
+    artifacts:
+      - TAAC stage and health-check results.
+      - BGP and IXIA logs.
+      - Session and resource snapshots.
+    qualification_delta: CI fixes the churn duration and cycle shape for repeatable daily comparison.
+
+  - id: CICD-04
+    title: iBGP plane session oscillation
+    category: lifecycle_and_sessions
+    playbook_name: bgp_ebb_ibgp_plane_session_oscillation_playbook
+    requirements:
+      - id: G2-19
+        role: direct
+        coverage: Flap iBGP sessions across all tornado planes and verify recovery.
+    required_topology: ebb_full_scale
+    purpose: Detect plane-specific session and convergence regressions under sustained iBGP churn.
+    stimulus: Flap iBGP sessions across planes 1 through 4 for 30 minutes using 30-second up and down intervals.
+    scale: Four dual-stack iBGP planes at canonical full-scale peer counts.
+    blocking_signals:
+      - Oscillation profile checks pass for every plane.
+      - All expected iBGP sessions recover after churn.
+      - No crash, snapshot regression, or resource-limit violation occurs.
+    expected_runtime: Approximately 1.6 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Plane and peer indexes for each failed transition.
+      - Session-manager and convergence logs.
+      - CPU and memory periodic-task samples.
+    artifacts:
+      - TAAC stage and health-check results.
+      - BGP and IXIA logs.
+      - Per-plane session snapshots.
+    qualification_delta: CI uses a fixed 30-minute churn window across the representative four-plane topology.
+
+  - id: CICD-05
+    title: eBGP route oscillation
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_ebgp_route_oscillation_playbook
+    requirements:
+      - id: G2-20
+        role: direct
+        coverage: Repeatedly withdraw and readvertise eBGP routes and verify convergence.
+    required_topology: ebb_full_scale
+    purpose: Detect RIB, FIB, and UPDATE-processing regressions under eBGP route churn.
+    stimulus: Repeatedly withdraw and readvertise eBGP prefix indexes 0 through 500.
+    scale: Canonical eBGP peer population with 501 selected prefixes per churn operation.
+    blocking_signals:
+      - Route-oscillation profile checks pass.
+      - RIB and FIB converge after the final readvertisement.
+      - Sessions, snapshots, and resource checks remain healthy.
+    expected_runtime: Approximately 1.9 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Prefix-pool actions and UPDATE timing.
+      - RIB, FIB, and convergence failures.
+      - BGP and IXIA logs.
+    artifacts:
+      - TAAC stage and health-check results.
+      - Route-state snapshots.
+      - BGP and IXIA logs.
+    qualification_delta: CI uses a deterministic prefix slice and conveyor-sized churn window.
+
+  - id: CICD-06
+    title: iBGP route oscillation
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_ibgp_route_oscillation_playbook
+    requirements:
+      - id: G2-21
+        role: direct
+        coverage: Repeatedly withdraw and readvertise iBGP routes and verify convergence.
+    required_topology: ebb_full_scale
+    purpose: Detect RIB, FIB, and UPDATE-processing regressions under iBGP route churn.
+    stimulus: Repeatedly withdraw and readvertise iBGP prefix indexes 0 through 100.
+    scale: Canonical iBGP plane population with 101 selected prefixes per churn operation.
+    blocking_signals:
+      - Route-oscillation profile checks pass.
+      - RIB and FIB converge after the final readvertisement.
+      - Sessions, snapshots, and resource checks remain healthy.
+    expected_runtime: Approximately 2 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Prefix-pool actions and UPDATE timing.
+      - RIB, FIB, and convergence failures.
+      - BGP and IXIA logs.
+    artifacts:
+      - TAAC stage and health-check results.
+      - Route-state snapshots.
+      - BGP and IXIA logs.
+    qualification_delta: CI uses a deterministic prefix slice and conveyor-sized churn window.
+
+  - id: CICD-07
+    title: IGP PNH metric oscillation
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_igp_pnh_metric_oscillation_playbook
+    requirements:
+      - id: G2-13
+        role: direct
+        coverage: Oscillate IGP metrics for protocol nexthops without destabilizing BGP sessions.
+    required_topology: ebb_full_scale
+    purpose: Detect best-path, nexthop tracking, and session regressions caused by repeated Open/R metric changes.
+    stimulus: Oscillate metrics for selected IPv4 and IPv6 PNH routes every 30 seconds for 40 minutes while capturing BGP traffic.
+    scale: Sixty-three IPv4 and IPv6 PNH routes on standalone Open/R links.
+    blocking_signals:
+      - IGP-instability profile checks pass.
+      - Packet validation sees only expected KEEPALIVE traffic and no OPEN or NOTIFICATION.
+      - Cleanup restores original metrics and stable route state.
+    expected_runtime: Approximately 50 minutes including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Open/R route and metric actions.
+      - Packet capture protocol messages.
+      - PNH state and BGP session health.
+    artifacts:
+      - BGP packet capture.
+      - Open/R route-operation logs.
+      - TAAC health-check and cleanup results.
+    qualification_delta: CI uses fixed metric cadence and route count for a repeatable daily signal.
+
+  - id: CICD-08
+    title: IGP unresolvable PNH
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_igp_unresolvable_pnh_playbook
+    requirements:
+      - id: G2-14
+        role: direct
+        coverage: Make selected PNHs unresolvable and verify withdrawal and restoration behavior.
+    required_topology: ebb_full_scale
+    purpose: Detect nexthop tracking and UPDATE convergence regressions when Open/R reachability disappears and returns.
+    stimulus: Delete selected Open/R routes, observe BGP updates, then re-inject the routes and verify recovery.
+    scale: Representative IPv4 and IPv6 PNHs on the full-scale Open/R topology.
+    blocking_signals:
+      - IGP-instability checks pass through withdrawal and restoration.
+      - UPDATE convergence and final session health meet expectations.
+      - Cleanup restores every deleted Open/R route.
+    expected_runtime: Measured standalone runtime is not yet recorded; the case shares an 8-hour conveyor node budget.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Open/R route state before and after deletion.
+      - Observer packet capture and UPDATE timing.
+      - RIB, FIB, and BGP session state.
+    artifacts:
+      - Observer packet capture.
+      - Open/R operation and cleanup logs.
+      - TAAC route and session checks.
+    qualification_delta: CI uses a representative PNH subset and requires deterministic restoration.
+
+  - id: CICD-09
+    title: Multipath-group oscillation
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_multipath_group_oscillation_playbook
+    requirements:
+      - id: G2-16
+        role: direct
+        coverage: Change live multipath width and verify restoration to the measured baseline.
+    required_topology: ebb_full_scale
+    purpose: Detect multipath selection and FIB programming regressions during peer loss and recovery.
+    stimulus: Measure live multipath width, then stop and start 1 through 11 eBGP peers every 280 seconds for 30 minutes.
+    scale: Canonical full-scale routes with a dynamically measured multipath baseline.
+    blocking_signals:
+      - Multipath width decreases during disruption.
+      - Width restores to the measured baseline after peers return.
+      - Final session, RIB, FIB, and health checks pass.
+    expected_runtime: Approximately 49 minutes including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Baseline and observed multipath widths.
+      - Stopped peer set and recovery timing.
+      - RIB, FIB, and session failures.
+    artifacts:
+      - Multipath width measurements.
+      - TAAC route and session checks.
+      - BGP and IXIA logs.
+    qualification_delta: CI measures the active baseline instead of assuming a qualification-lab width.
+
+  - id: CICD-10
+    title: BGP attribute churn
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_attribute_churn_playbook
+    requirements:
+      - id: G2-15
+        role: direct
+        coverage: Sustain multi-attribute route churn while preserving control-plane health.
+    required_topology: ebb_full_scale
+    purpose: Detect UPDATE generation, canonicalization, memory, and convergence regressions under attribute churn.
+    stimulus: Repeatedly change local preference, MED, origin, and AS path over iBGP plane-1 prefixes.
+    scale: Prefix indexes 0 through 500 on the canonical full-scale topology.
+    blocking_signals:
+      - Churn profile checks and expected session checks pass.
+      - No crash, snapshot regression, or blocking resource threshold is hit.
+      - Final route state converges after churn.
+    expected_runtime: Approximately 2 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: calibrating
+    triage_signals:
+      - Attribute assignments and generated updates.
+      - Session and convergence failures.
+      - CPU and memory trends.
+    artifacts:
+      - Attribute-change and IXIA logs.
+      - TAAC health-check results.
+      - CPU and memory time series.
+    qualification_delta: CI covers a deterministic attribute matrix and prefix slice; resource thresholds require ongoing calibration.
+
+  - id: CICD-11
+    title: BGP route storm
+    category: route_and_igp_instability
+    playbook_name: bgp_ebb_route_storm_playbook
+    requirements:
+      - id: G2-17
+        role: direct
+        coverage: Sustain large route advertise and withdraw cycles and verify recovery.
+    required_topology: ebb_full_scale
+    purpose: Detect route-processing, convergence, and memory regressions during sustained storm load.
+    stimulus: Advertise and withdraw iBGP plane-1 routes every 30 seconds for 60 minutes, then revert and wait 120 seconds.
+    scale: Canonical full-scale topology with AS-path length 255 and pool-size invariants.
+    blocking_signals:
+      - Storm profile and expected session checks pass.
+      - Final AS-path and pool invariants hold.
+      - No crash, snapshot regression, or blocking resource threshold is hit.
+    expected_runtime: Approximately 2.2 hours including shared topology setup.
+    cadence: Daily.
+    enforcement: calibrating
+    triage_signals:
+      - IXIA advertise and withdraw actions.
+      - AS-path, pool, RIB, and FIB diagnostics.
+      - CPU and memory trends.
+    artifacts:
+      - TAAC stage and health-check results.
+      - BGP and IXIA logs.
+      - Resource time series and snapshots.
+    qualification_delta: CI fixes the storm cadence and duration; resource thresholds require ongoing calibration.
+
+  - id: CICD-12
+    title: Route-registry runtime update
+    category: operational_procedures
+    playbook_name: bgp_ebb_route_registry_runtime_update_playbook
+    requirements:
+      - id: G2-24
+        role: direct
+        coverage: Apply prefix-list changes at runtime and verify expected route-count transitions.
+      - id: G2-25
+        role: supplemental
+        coverage: Assert one formal runtime-policy feature within the broader G2-25 umbrella.
+    required_topology: ebb_full_scale
+    purpose: Detect live policy evaluation and route-registry regressions without restarting BGP++.
+    stimulus: Change route-filter prefix lists at runtime, validate route counts, soak for 120 seconds, then restore policy and routes.
+    scale: Dual-stack full-scale topology with controlled prefix-list transitions.
+    blocking_signals:
+      - Every expected route-count transition is observed.
+      - Convergence and session health remain within the runtime-update profile.
+      - Cleanup restores permissive policy and withdrawn routes.
+    expected_runtime: Approximately 15 minutes including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Route-filter RPC requests and responses.
+      - Route counts and policy state at each transition.
+      - Cleanup and convergence failures.
+    artifacts:
+      - Route-filter operation logs.
+      - TAAC route-count and session checks.
+      - Before and after policy state.
+    qualification_delta: CI exercises a representative prefix-list transition sequence and makes cleanup blocking.
+
+  - id: CICD-13
+    title: FAUU drain and undrain
+    category: operational_procedures
+    playbook_name: bgp_ebb_fauu_drain_undrain_playbook
+    requirements:
+      - id: G2-23
+        role: direct
+        coverage: Drain and undrain FAUU routes while verifying convergence and peer views.
+    required_topology: ebb_full_scale
+    purpose: Detect operational drain-policy and attribute-propagation regressions.
+    stimulus: Change local preference and origin for FAUU prefixes, drain and undrain, capture three peer views, and soak for five minutes.
+    scale: Canonical full-scale eBGP, iBGP, and BGP-MON observation paths.
+    blocking_signals:
+      - Drain profile checks pass.
+      - Convergence completes within the five-minute stage limit.
+      - Final sessions and all observed peer views are restored.
+    expected_runtime: Approximately 33 minutes including shared topology setup.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Policy, local-preference, and origin state.
+      - eBGP, iBGP, and BGP-MON packet views.
+      - Convergence and session failures.
+    artifacts:
+      - Three packet captures.
+      - TAAC drain and convergence checks.
+      - BGP policy and session logs.
+    qualification_delta: CI performs one controlled drain and undrain sequence on the conveyor topology.
+
+  - id: CICD-14
+    title: Plane drain and undrain
+    category: operational_procedures
+    playbook_name: bgp_ebb_plane_drain_undrain_playbook
+    requirements:
+      - id: G2-22
+        role: direct
+        coverage: Drain and undrain iBGP planes while verifying convergence and peer views.
+    required_topology: ebb_full_scale
+    purpose: Detect plane-wide policy, attribute-propagation, and recovery regressions.
+    stimulus: Apply concurrent IXIA attribute and DUT policy changes across iBGP planes, then soak for 20 minutes.
+    scale: Four iBGP planes with eBGP, iBGP, and BGP-MON observation paths.
+    blocking_signals:
+      - Drain profile checks pass.
+      - Convergence completes within the ten-minute stage limit.
+      - Final plane policy, sessions, and peer views are restored.
+    expected_runtime: At least 20 minutes of soak plus shared topology setup.
+    cadence: Daily after signal calibration.
+    enforcement: calibrating
+    triage_signals:
+      - Per-plane policy and attribute state.
+      - eBGP, iBGP, and BGP-MON packet views.
+      - Convergence and session failures.
+    artifacts:
+      - Three packet captures.
+      - TAAC drain and convergence checks.
+      - BGP policy and session logs.
+    qualification_delta: CI uses one repeatable plane-drain sequence; runtime and signal-to-noise still require calibration.
+
+  - id: CICD-15
+    title: Longevity
+    category: continuous_operation
+    playbook_name: bgp_ebb_longevity_playbook
+    requirements:
+      - id: G2-12
+        role: proxy
+        coverage: Run a shortened community-churn soak as a daily continuous-operation signal.
+    required_topology: ebb_full_scale
+    purpose: Detect crashes, leaks, and stability regressions during sustained day-to-day churn.
+    stimulus: Add and remove communities once per minute for four hours, then quiesce and run postchecks.
+    scale: Canonical full-scale topology with repeated community changes.
+    blocking_signals:
+      - Snapshot and soak postchecks pass after quiescence.
+      - Final convergence and session state are healthy.
+      - No crash or blocking resource trend is observed.
+    expected_runtime: Four hours of churn plus shared topology setup and postchecks.
+    cadence: Daily on a dedicated node.
+    enforcement: calibrating
+    triage_signals:
+      - Churn cycle and final quiescence state.
+      - Longitudinal CPU and memory samples.
+      - Session, convergence, and core-dump state.
+    artifacts:
+      - CPU and memory time series.
+      - TAAC soak and postcheck results.
+      - BGP logs and state snapshots.
+    qualification_delta: >-
+      Gate2 qualification runs 48 hours and includes broader route, attribute,
+      drain, and restart stimuli. This four-hour community-churn workload is a
+      provisional daily proxy, not equivalent qualification coverage.
+
+  - id: CICD-16
+    title: Queue and memory monitoring
+    category: continuous_operation
+    playbook_name: bgp_ebb_queue_memory_monitoring_playbook
+    requirements:
+      - id: G2-25
+        role: supplemental
+        coverage: Monitor implementation queues and process memory during route churn and CPU stress.
+    required_topology: legacy_two_port_ebb
+    purpose: Detect queue growth, process-memory, and liveness regressions under sustained churn.
+    stimulus: Monitor BGP++ queues and memory for 60 minutes while routes flap every 15 seconds and CPU stress is active.
+    scale: 140 eBGP peers, 63 iBGP peers, and 10,000 IPv6 prefixes per eBGP peer.
+    blocking_signals:
+      - BGP process remains alive and sessions remain healthy.
+      - Queue and memory custom-step thresholds pass.
+      - Route churn completes without a snapshot regression.
+    expected_runtime: Sixty minutes of monitoring plus two-port topology setup.
+    cadence: Daily after threshold calibration.
+    enforcement: calibrating
+    triage_signals:
+      - Fiber queue samples.
+      - Process memory and CPU-stress timeline.
+      - BGP PID and session state.
+    artifacts:
+      - Queue and process-memory time series.
+      - TAAC custom-step and session results.
+      - BGP and CPU-stress logs.
+    qualification_delta: Supplemental implementation-health signal; it does not establish complete G2-25 feature coverage.
+
+  - id: CICD-17
+    title: Nexthop-group count threshold
+    category: scaling_and_features
+    playbook_name: bgp_ebb_nexthop_group_count_threshold_playbook
+    requirements:
+      - id: G2-25
+        role: supplemental
+        coverage: Bound nexthop-group growth while routes oscillate.
+    required_topology: ebb_full_scale
+    purpose: Detect nexthop-group allocation and cleanup regressions during route churn.
+    stimulus: Oscillate 5,000 eBGP prefixes for 20 minutes, poll nexthop groups against threshold 100, then soak for five minutes.
+    scale: Five thousand prefixes on the canonical full-scale topology.
+    blocking_signals:
+      - Nexthop-group count remains below 100.
+      - Convergence completes within ten minutes.
+      - Snapshot, RIB, FIB, and session checks pass.
+    expected_runtime: Approximately 52 minutes including shared topology setup.
+    cadence: Daily after threshold calibration.
+    enforcement: calibrating
+    triage_signals:
+      - Nexthop-group count series.
+      - Route actions and convergence timing.
+      - RIB, FIB, and session failures.
+    artifacts:
+      - Nexthop-group measurements.
+      - TAAC convergence and route checks.
+      - BGP and IXIA logs.
+    qualification_delta: Supplemental scale signal; it does not cover every best-path, Add-Path, or multipath permutation in G2-25.
+
+  - id: CICD-18
+    title: UPDATE packing
+    category: scaling_and_features
+    playbook_name: bgp_ebb_update_packing_playbook
+    requirements:
+      - id: G2-25
+        role: supplemental
+        coverage: Validate efficient IPv6 UPDATE packing under update-group-enabled distribution.
+    required_topology: ipv6_update_packing
+    purpose: Detect UPDATE batching and packing-efficiency regressions.
+    stimulus: Inject IPv6 routes from eBGP peers, restart BGP++ for a complete view, and capture UPDATEs at an iBGP peer for five minutes.
+    scale: Ten eBGP peers with 10,000 IPv6 prefixes each and one iBGP capture peer.
+    blocking_signals:
+      - Captured UPDATEs meet the minimum packed size of 4,000 prefixes.
+      - Custom packing validation completes successfully.
+      - BGP restart, IXIA protocols, and route acceptance remain healthy.
+    expected_runtime: Five minutes of capture plus topology setup; conveyor budget is three hours.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Packed-size distribution.
+      - BGP restart and complete-view timing.
+      - IXIA route and session state.
+    artifacts:
+      - Packet capture and tshark analysis.
+      - TAAC custom-step result.
+      - BGP and IXIA logs.
+    qualification_delta: Supplemental packing signal; it does not replace the dedicated update-group correctness and backpressure suite.
+
+  - id: CICD-19
+    title: Constant attribute storage
+    category: scaling_and_features
+    playbook_name: bgp_ebb_constant_attribute_storage_playbook
+    requirements:
+      - id: G2-25
+        role: supplemental
+        coverage: Measure attribute-storage behavior as unique attribute combinations increase.
+    required_topology: legacy_two_port_ebb
+    purpose: Detect memory growth and canonicalization regressions in constant attribute storage.
+    stimulus: Hold path and peer counts fixed while sweeping unique attribute combinations with two-minute soaks.
+    scale: 800,000 received paths with 100,000 through 800,000 unique attribute combinations.
+    blocking_signals:
+      - Required routes reach the RIB at every sweep point.
+      - Attribute assignments are collected successfully.
+      - The configured memory-growth gate passes.
+    expected_runtime: At least 16 minutes of soak plus per-stage setup; conveyor budget is three hours.
+    cadence: Daily.
+    enforcement: blocking
+    triage_signals:
+      - Attribute pools and assignment dumps.
+      - Accepted route counts at each sweep point.
+      - Process memory by combination count.
+    artifacts:
+      - Attribute-assignment dumps.
+      - Route-acceptance and memory measurements.
+      - TAAC stage results and BGP logs.
+    qualification_delta: Supplemental storage signal; it does not independently validate the complete community, AS-path, or policy feature matrices.
+
+  - id: CICD-20
+    title: Bounded ECMP sets
+    category: scaling_and_features
+    playbook_name: bgp_ebb_bounded_ecmp_sets_playbook
+    requirements:
+      - id: G2-25
+        role: supplemental
+        coverage: Verify ECMP and nexthop-group state remains bounded under update-group-enabled scale.
+    required_topology: bounded_ecmp
+    purpose: Detect ECMP-set and nexthop-group growth regressions during route oscillation.
+    stimulus: Oscillate 5,000 eBGP prefixes for 20 minutes, poll nexthop groups against threshold 50, then soak for five minutes.
+    scale: 128 eBGP and 128 iBGP peers per AFI with 5,000 prefixes per peer.
+    blocking_signals:
+      - Nexthop-group count remains below 50.
+      - Session, RIB, FIB, and convergence profile checks pass.
+      - Final state remains healthy after the soak.
+    expected_runtime: Twenty-five minutes of stimulus and soak plus topology setup; conveyor budget is three hours.
+    cadence: Daily after threshold calibration.
+    enforcement: calibrating
+    triage_signals:
+      - Nexthop-group count series.
+      - Route actions and convergence timing.
+      - RIB, FIB, and session failures.
+    artifacts:
+      - Nexthop-group measurements.
+      - TAAC profile and convergence results.
+      - BGP and IXIA logs.
+    qualification_delta: Supplemental bounded-state signal; complete G2-25 feature coverage still requires dedicated weight, MED, enforce-first-as, and fast-reset cases.
