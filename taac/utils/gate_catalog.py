@@ -28,7 +28,11 @@ from taac.utils.gate_control import (
 
 # ─── Gate name constants (import these; never hardcode a gate name string) ───
 # SC1 -- performance-scaling (egress iBGP peer-scale) sweep test:
+GATE_SC1_CPU_STABLE = "sc1_cpu_stable"
+GATE_SC1_CPU_TRANSIENT = "sc1_cpu_transient"
+GATE_SC1_MEMORY_STABLE = "sc1_memory_stable"
 GATE_SC1_MEMORY_TRANSIENT = "sc1_memory_transient"
+GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
@@ -42,6 +46,20 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # Transient (peak - stable) memory flatness across the egress-peer sweep --
     # observe until calibrated.
     GATE_SC1_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
+    # Stable (soak-mean) memory flatness across the egress-peer sweep -- observe
+    # (some small per-peer session overhead is expected, hence a tolerance).
+    GATE_SC1_MEMORY_STABLE: GATE_MODE_PERMISSIVE,
+    # Stable (soak-mean) CPU flatness across the egress-peer sweep -- the core
+    # "constant computation" characteristic (compute once per update-group, not
+    # per peer). Observe until calibrated.
+    GATE_SC1_CPU_STABLE: GATE_MODE_PERMISSIVE,
+    # Transient (peak - stable) CPU flatness across the egress-peer sweep (the
+    # convergence-burst compute) -- observe.
+    GATE_SC1_CPU_TRANSIENT: GATE_MODE_PERMISSIVE,
+    # Anti-vacuousness: the DUT must advertise the ingress route set OUT to its
+    # iBGP egress peers (per-peer postpolicy_sent_prefix_count) -- observe until
+    # the advertised floor is calibrated, then flip to blocking.
+    GATE_SC1_ROUTES_ADVERTISED: GATE_MODE_PERMISSIVE,
     # Anti-vacuousness: routes must reach the RIB -- hard from the start.
     GATE_SC2_ROUTES_ACCEPTANCE: GATE_MODE_BLOCKING,
     # Stable memory must grow sub-linearly (<= √k, k = path scale) across the
