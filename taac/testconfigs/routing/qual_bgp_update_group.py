@@ -40,6 +40,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc7_disruption_rec
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
     create_bgp_ug_best_path_change_test_config,
+    create_bgp_ug_cpu_quantification_test_config,
     create_bgp_ug_dual_stack_isolation_test_config,
     create_bgp_ug_edge_cases_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
@@ -149,8 +150,24 @@ BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG = (
     create_bgp_ug_best_path_change_test_config(BAG013_ASH6)
 )
 
+# Spec 2.9.8 Quantifying CPU reduction -- TWO WITHOUT_OPEN_R + next-hop-self
+# TestConfigs (UG off vs on) that run the identical 1-hr dual-AFI (v4 + v6) eBGP
+# churn workload and compare CPU. Run UG_OFF FIRST (baseline), then UG_ON (its
+# comparison step reads the UG-off metrics file the baseline wrote on the runner).
+# Select via ``--test-config BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF`` / ``..._UG_ON``.
+# (The factory also accepts ``smoke=True`` for a short machinery-validation variant
+# -- not committed as catalog constants to keep the golden/registry surface minimal.)
+BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG = (
+    create_bgp_ug_cpu_quantification_test_config(BAG013_ASH6, ug_enabled=False)
+)
+BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG = (
+    create_bgp_ug_cpu_quantification_test_config(BAG013_ASH6, ug_enabled=True)
+)
+
 
 __all__ = [
+    "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",

@@ -57,6 +57,8 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
     BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
@@ -172,4 +174,12 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # NOT wired into a conveyor stage (do NOT schedule until manually verified on the
     # device). Select with ``--regex 'bgp_ug_best_path_change'``.
     BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
+    # BGP++ UG 2.9.8 Quantifying CPU reduction on bag013.ash6 -- TWO WITHOUT_OPEN_R
+    # + next-hop-self TestConfigs (UG off vs on) running the identical 1-hr dual-AFI
+    # (v4 + v6) eBGP churn workload and comparing CPU. Run UG_OFF first (baseline),
+    # then UG_ON (its comparison step reads the UG-off metrics file). Ad-hoc; NOT
+    # wired into a conveyor stage (do NOT schedule until manually verified on the
+    # device).
+    BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
 ]

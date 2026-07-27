@@ -51,6 +51,7 @@ from taac.health_checks.healthcheck_definitions import (
 )
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases import (
     create_bgp_ug_best_path_change_playbook,
+    create_bgp_ug_cpu_quantification_playbook,
     create_bgp_ug_dual_stack_isolation_playbook,
     create_bgp_ug_empty_group_playbook,
     create_bgp_ug_simultaneous_disruptions_playbook,
@@ -222,6 +223,7 @@ def _extra_formulaic_advertisement(
     prefix_count: int,
     network_group_index: int,
     communities: list[str],
+    attributes: tuple[tuple[str, object], ...] = (),
 ) -> tuple[PrefixSet, PrefixAdvertisement]:
     intent_name = prefix_name.lower()
     prefix_set = PrefixSet(
@@ -249,6 +251,7 @@ def _extra_formulaic_advertisement(
             name=f"{intent_name}_policy",
             communities=tuple(communities),
         ),
+        attributes=attributes,
         legacy_ixia_name=prefix_name,
     )
 
@@ -517,6 +520,175 @@ _STAGGERED_V6_INTENTS = (
         communities=_STAGGERED_INJECT_COMMUNITIES,
     ),
 )
+
+
+# --- 2.9.8 Quantifying CPU reduction from Update Group ---
+# Churn BOTH eBGP AFI pools (v4 + v6) so v4 and v6 get the SAME treatment -- each
+# AFI forms its own update groups, so the CPU comparison must exercise both. The
+# pool is per-device, so withdrawing [0, N) turns off N prefixes on EVERY eBGP
+# peer = N per peer -- the spec's "withdraw 500 routes from each device".
+_CPU_QUANT_ROUTE_CHURN_COUNT = 500
+# --- Option A: pre-staged community-variant pools (no runtime community write) ---
+# IxNetwork REJECTS changing a route's community while the peer element is STARTED
+# ("Changing the property in a started element is not permitted") -- withdrawing
+# routes does NOT stop the peer, so the earlier runtime-community-write approach
+# failed on HW. Instead we PRE-STAGE N eBGP pools per AFI over the SAME NLRI, each
+# tagged with a DIFFERENT community at BUILD time (BgpPolicy.communities on each
+# DICE PrefixAdvertisement, staged via extra_prefix_sets/extra_prefix_advertisements
+# on the eBGP device groups -- the same mechanism master uses for 2.9.4/2.9.6). The
+# churn then only ROTATES which pool is Active (withdraw current, advertise next) --
+# a pure Active toggle (ixia_enable_disable_bgp_prefixes), which is proven safe and
+# never touches a community at runtime. The DUT sees the same 500 prefixes
+# re-advertised with a modified community each cycle (the spec's "re-advertise with
+# modified communities"), with no peer bounce and no started-element write.
+#
+# Three variant pools (A/B/C) so the community differs every cycle (A->B->C->A);
+# only 500 prefixes/AFI are ever Active at once (the playbook prime withdraws B/C,
+# then the churn keeps exactly one active). Trivially reducible to 2 if the IXIA
+# build is tight.
+_CPU_QUANT_CHURN_VARIANT_SUFFIXES = ["A", "B", "C"]
+# Accept communities so the DUT accepts + RE-ADVERTISES the pool (egress work for UG
+# to optimize) -- the same accept set 2.9.1/2.9.4 proved re-advertised on 120/8.
+_CPU_QUANT_CHURN_ACCEPT_COMMUNITIES = [
+    "65529:39744",  # EB-PRIVATE-PREFIXES accept community
+    "65060:10012",  # ADVERTISED-FROM-DC accept community
+    "65530:50320",  # anycast accept community
+]
+# Per-variant marker = the "modified community" that differs each cycle (filtering
+# only; distinct from 2.9.1/2.9.4's 65529:44444 so shared sessions don't collide).
+_CPU_QUANT_CHURN_MARKERS = ["65529:44481", "65529:44482", "65529:44483"]
+# The eBGP uplink device groups declare a route-attribute schema (ebb_full_scale.py:
+# ("med", None), ("local_pref", 100), ("origin", "igp")) that EVERY advertisement on
+# the DG must carry, or the DICE compiler rejects it ("missing route attribute
+# 'med'"). Match it on the churn pools (same values as the DG's base eBGP routes).
+_CPU_QUANT_CHURN_ROUTE_ATTRIBUTES = (
+    ("med", None),
+    ("local_pref", 100),
+    ("origin", "igp"),
+)
+# Same NLRI across all variants of an AFI (the DUT sees the SAME prefixes flip
+# community). Ranges disjoint from 2.9.1 (120.130.0.0/15, 2401:db00:11:2800::/54),
+# 2.9.4 (120.100/120.104) and 2.9.6 (120.150-152, 2401:db00:11:2000:: sub-ranges).
+_CPU_QUANT_CHURN_V4_STARTING_PREFIX = "120.160.0.0"
+_CPU_QUANT_CHURN_V4_PARENT_NETWORK = "120.0.0.0/8"
+_CPU_QUANT_CHURN_V4_PREFIX_LENGTH = 24
+_CPU_QUANT_CHURN_V6_STARTING_PREFIX = "2401:db00:11:2c00::"  # in EB-PRIVATE /52
+_CPU_QUANT_CHURN_V6_PARENT_NETWORK = "2401:db00:11:2000::/52"
+_CPU_QUANT_CHURN_V6_PREFIX_LENGTH = 64
+
+
+def _cpu_quant_churn_pool_regex(afi: str, suffix: str) -> str:
+    """$-anchored regex the churn withdraw/advertise step matches on the pool .Name
+    (== RouteScale.prefix_name)."""
+    return rf"PREFIX_POOL_{afi}_EBGP_CHURN_{suffix}$"
+
+
+def _cpu_quant_churn_intents(
+    *,
+    afi: str,
+    afi_tag: str,
+    start_prefix: str,
+    parent_network: str,
+    prefix_step: int,
+    prefix_length: int,
+) -> tuple[tuple[PrefixSet, PrefixAdvertisement], ...]:
+    """The A/B/C community-variant eBGP pools for one AFI, as DICE intents (mirrors
+    2.9.4/2.9.6): identical NLRI, distinct network_group_index + legacy_ixia_name +
+    build-time community (accept set + per-variant marker). ``legacy_ixia_name`` =
+    PREFIX_POOL_<afi_tag>_EBGP_CHURN_<suffix>, which becomes the IXIA pool .Name
+    suffix the churn's $-anchored regex matches."""
+    return tuple(
+        _extra_formulaic_advertisement(
+            prefix_name=f"PREFIX_POOL_{afi_tag}_EBGP_CHURN_{suffix}",
+            afi=afi,
+            start_prefix=start_prefix,
+            parent_network=parent_network,
+            prefix_step=prefix_step,
+            prefix_length=prefix_length,
+            prefix_count=_CPU_QUANT_ROUTE_CHURN_COUNT,
+            network_group_index=i + 1,
+            communities=(
+                _CPU_QUANT_CHURN_ACCEPT_COMMUNITIES + [_CPU_QUANT_CHURN_MARKERS[i]]
+            ),
+            attributes=_CPU_QUANT_CHURN_ROUTE_ATTRIBUTES,
+        )
+        for i, suffix in enumerate(_CPU_QUANT_CHURN_VARIANT_SUFFIXES)
+    )
+
+
+_CPU_QUANT_CHURN_V4_INTENTS = _cpu_quant_churn_intents(
+    afi="v4",
+    afi_tag="IPV4",
+    start_prefix=_CPU_QUANT_CHURN_V4_STARTING_PREFIX,
+    parent_network=_CPU_QUANT_CHURN_V4_PARENT_NETWORK,
+    prefix_step=1 << 8,  # one /24 per prefix
+    prefix_length=_CPU_QUANT_CHURN_V4_PREFIX_LENGTH,
+)
+_CPU_QUANT_CHURN_V6_INTENTS = _cpu_quant_churn_intents(
+    afi="v6",
+    afi_tag="IPV6",
+    start_prefix=_CPU_QUANT_CHURN_V6_STARTING_PREFIX,
+    parent_network=_CPU_QUANT_CHURN_V6_PARENT_NETWORK,
+    prefix_step=1 << 64,  # one /64 per prefix
+    prefix_length=_CPU_QUANT_CHURN_V6_PREFIX_LENGTH,
+)
+
+
+# Ordered per-AFI variant regexes for the churn rotation. Index 0 (A) is the pool
+# left Active at setup; the churn withdraws the current and advertises the next.
+_CPU_QUANT_CHURN_V4_VARIANT_REGEXES = [
+    _cpu_quant_churn_pool_regex("IPV4", s) for s in _CPU_QUANT_CHURN_VARIANT_SUFFIXES
+]
+_CPU_QUANT_CHURN_V6_VARIANT_REGEXES = [
+    _cpu_quant_churn_pool_regex("IPV6", s) for s in _CPU_QUANT_CHURN_VARIANT_SUFFIXES
+]
+# Per-variant CPU-metrics files on the runner. The UG-ON run's comparison step
+# reads the UG-OFF file, so the UG-OFF config MUST run before the UG-ON config.
+_CPU_QUANT_METRICS_DIR = "/tmp/taac_bgp_ug_cpu_quant"
+_CPU_QUANT_UG_OFF_METRICS_PATH = f"{_CPU_QUANT_METRICS_DIR}/ug_off.json"
+_CPU_QUANT_UG_ON_METRICS_PATH = f"{_CPU_QUANT_METRICS_DIR}/ug_on.json"
+
+
+def _cpu_quant_prechecks(bgp_mon_ignore_prefixes, ug_enabled):
+    """Prechecks for 2.9.8. Like ``_edge_cases_prechecks`` but (a) the UG-enabled
+    + group-count assertion is included ONLY for the UG-ON variant (the UG-OFF
+    baseline runs with Update Group disabled, so asserting it enabled would fail),
+    and (b) the session-establish check polls -- the WITHOUT_OPEN_R + next-hop-self
+    setup restarts the control-plane Bgp daemon on a fresh bring-up (like 2.9.6), so
+    the ~1272-session topology needs time to reach Established (the 2.9.x settle-race
+    finding)."""
+    checks = [
+        create_bgp_session_establish_check(
+            parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+            retry_count=12,
+            retry_delay_seconds=15.0,
+            retry_delay_multiplier=1.0,
+        ),
+        create_drain_state_check(),
+        create_memory_utilization_check(
+            threshold=Gigabyte.GIG_5.value,
+            start_time_jq_var="test_case_start_time",
+        ),
+        create_cpu_utilization_check(
+            threshold=400.0, start_time_jq_var="test_case_start_time"
+        ),
+    ]
+    if ug_enabled:
+        checks.append(
+            create_bgp_update_group_check(
+                expect_enabled=True,
+                expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
+            )
+        )
+    else:
+        # Positively ASSERT Update Group is OFF on the baseline run. The setup
+        # deploys the base bgpcpp_config (UG-off) and skips the UG patch for this
+        # variant, but a base-config drift to UG-on (or leftover state) would make
+        # the "UG-off" baseline secretly UG-on -- and the crit-1 comparison (UG-on
+        # avg CPU measurably lower) would then be meaningless. Fail loudly here
+        # instead of silently comparing UG-on vs UG-on.
+        checks.append(create_bgp_update_group_check(expect_enabled=False))
+    return checks
 
 
 def _edge_cases_prechecks(
@@ -1057,8 +1229,121 @@ def create_bgp_ug_best_path_change_test_config(
     )
 
 
+def create_bgp_ug_cpu_quantification_test_config(
+    testbed: PhysicalInventory,
+    *,
+    ug_enabled: bool,
+    smoke: bool = False,
+) -> taac_types.TestConfig:
+    """BGP++ Update Group qualification spec 2.9.8 (Quantifying CPU reduction from
+    Update Group) -- ONE variant (UG off or on) as its OWN WITHOUT_OPEN_R TestConfig.
+
+    Run BOTH, UG-OFF baseline FIRST then UG-ON (the UG-ON run's comparison step
+    reads the UG-off metrics file the baseline wrote). Select via:
+      --test-config BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF   (baseline; run first)
+      --test-config BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON    (run second)
+
+    Each run churns 500 eBGP routes/peer/min on BOTH AFIs (v4 + v6 get the same
+    treatment -- one churn track per pool) for an hour and measures device CPU%
+    (avg + peak), VmHWM, session stability, and load-average; the UG-ON run then
+    asserts UG-on avg CPU is measurably lower than UG-off (spec crit 1).
+    WITHOUT_OPEN_R + next-hop-self (D113330327) so the DUT resolves next-hops from
+    interface state and actually advertises with no Open/R daemon -- UG optimizes
+    egress, so there is nothing to measure if the DUT advertises ~0 (WITHOUT_OPEN_R
+    alone leaves the routes inactive; next-hop-self makes them active, proven at
+    scale by 2.9.6). The UG-OFF baseline is built ``enable_update_group=False``;
+    UG-ON is ``True`` (which also enables ``enableSerializeGroupPdu`` -- it defaults
+    True inside ``update_group_config``).
+
+    ``smoke=True`` runs a short (3-min) variant for validating the machinery on
+    hardware before the hour-long run. See ``create_bgp_ug_cpu_quantification_playbook``.
+    """
+    bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+    variant = "ug_on" if ug_enabled else "ug_off"
+    cpu_metrics_file_path = (
+        _CPU_QUANT_UG_ON_METRICS_PATH if ug_enabled else _CPU_QUANT_UG_OFF_METRICS_PATH
+    )
+    # Only the UG-ON run compares (against the UG-off baseline written earlier).
+    baseline_metrics_file_path = _CPU_QUANT_UG_OFF_METRICS_PATH if ug_enabled else None
+
+    ug_label = "UG_ON" if ug_enabled else "UG_OFF"
+    if smoke:
+        name = f"BAG013_ASH6_BGP_UG_CPU_QUANT_{ug_label}_SMOKE"
+        duration_s = 180
+        monitor_interval_s = 60
+    else:
+        name = f"BAG013_ASH6_BGP_UG_CPU_QUANT_{ug_label}"
+        duration_s = 3600
+        monitor_interval_s = 120
+
+    playbook = create_bgp_ug_cpu_quantification_playbook(
+        device_name=testbed.device_name,
+        # Churn BOTH AFIs (v4 + v6) equally -- one rotation track per AFI, each
+        # rotating its ordered pre-staged community-variant pools (A->B->C->A).
+        variant_pool_regexes_by_afi=[
+            _CPU_QUANT_CHURN_V4_VARIANT_REGEXES,
+            _CPU_QUANT_CHURN_V6_VARIANT_REGEXES,
+        ],
+        # 2.9.8 flaps nothing -- assert EVERY non-MON session stays Established.
+        all_sessions_ignore_prefixes=bgp_mon_ignore_prefixes,
+        cpu_metrics_file_path=cpu_metrics_file_path,
+        variant=variant,
+        baseline_metrics_file_path=baseline_metrics_file_path,
+        prechecks=_cpu_quant_prechecks(bgp_mon_ignore_prefixes, ug_enabled),
+        route_churn_count=_CPU_QUANT_ROUTE_CHURN_COUNT,
+        duration_s=duration_s,
+        monitor_interval_s=monitor_interval_s,
+        vmhwm_absolute_threshold_bytes=Gigabyte.GIG_10.value,
+        expect_update_group_enabled=ug_enabled,
+    )
+
+    return build_bag_conveyor_test_config(
+        testbed,
+        name=name,
+        playbooks=[playbook],
+        # WITHOUT_OPEN_R + next-hop-self (D113330327): the DUT resolves next-hops
+        # from interface state and advertises the full table with no Open/R daemon
+        # (proven at scale by 2.9.6) -- the precondition for a meaningful CPU
+        # comparison (UG optimizes egress work) without an Open/R dependency, and
+        # consistent with the other section-2.9 WITHOUT_OPEN_R tests (2.9.1/2.9.6).
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        ebgp_next_hop_self=True,
+        ibgp_next_hop_self=True,
+        # Mandatory alongside next-hop-self on master's DICE builder (it raises
+        # ValueError if next_hop_self != resolve_nexthops_from_interface_state).
+        resolve_nexthops_from_interface_state=True,
+        # Pre-staged community-variant churn pools (Option A): A/B/C over identical
+        # NLRI per AFI, each tagged with a distinct build-time community (BgpPolicy
+        # on the DICE PrefixAdvertisement); the churn rotates which is Active (no
+        # runtime community write -> cannot hit the "started element" IxNetwork
+        # error). Staged on the eBGP v4/v6 device groups exactly like 2.9.4/2.9.6.
+        extra_prefix_sets=tuple(
+            prefix_set
+            for prefix_set, _ in (
+                *_CPU_QUANT_CHURN_V4_INTENTS,
+                *_CPU_QUANT_CHURN_V6_INTENTS,
+            )
+        ),
+        extra_prefix_advertisements={
+            "dg_ebgp_v4": tuple(
+                advertisement for _, advertisement in _CPU_QUANT_CHURN_V4_INTENTS
+            ),
+            "dg_ebgp_v6": tuple(
+                advertisement for _, advertisement in _CPU_QUANT_CHURN_V6_INTENTS
+            ),
+        },
+        # UG off/on: enable_update_group=False trusts the base config (UG is opt-in;
+        # base configs are UG-off for these devices), and the UG-OFF precheck
+        # (_cpu_quant_prechecks -> create_bgp_update_group_check(expect_enabled=False))
+        # asserts it before the churn -- so no separate force-disable is needed under
+        # master's DICE topology (which has no force-disable knob).
+        enable_update_group=ug_enabled,
+    )
+
+
 __all__ = [
     "create_bgp_ug_best_path_change_test_config",
+    "create_bgp_ug_cpu_quantification_test_config",
     "create_bgp_ug_dual_stack_isolation_test_config",
     "create_bgp_ug_edge_cases_test_config",
     "create_bgp_ug_simultaneous_disruptions_test_config",
