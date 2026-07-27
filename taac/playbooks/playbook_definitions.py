@@ -18599,7 +18599,9 @@ def create_qos_playbooks(
             "test_qos_functionality_nc_be",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["NC"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["BE"]["traffic_name"]: "100",
             },
             [
@@ -18616,7 +18618,9 @@ def create_qos_playbooks(
             "test_qos_functionality_rdma_be",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["RDMA"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["BE"]["traffic_name"]: "100",
             },
             [
@@ -18633,7 +18637,9 @@ def create_qos_playbooks(
             "test_qos_functionality_nc_monitoring",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["NC"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["MONITORING"]["traffic_name"]: (
                     "0" if is_monitoring_lossless else "100"
                 ),
@@ -18652,7 +18658,9 @@ def create_qos_playbooks(
             "test_qos_functionality_rdma_nc",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["RDMA"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["NC"]["traffic_name"]: "0",
             },
             [
@@ -18669,7 +18677,9 @@ def create_qos_playbooks(
             "test_qos_functionality_monitoring_be",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["MONITORING"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["BE"]["traffic_name"]: "100",
             },
             [
@@ -18686,7 +18696,9 @@ def create_qos_playbooks(
             "test_qos_functionality_monitoring_rdma",
             # pyrefly: ignore [bad-argument-type]
             {
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["MONITORING"]["traffic_name"]: "0",
+                # pyrefly: ignore [bad-assignment]
                 traffic_item_details["RDMA"]["traffic_name"]: "0",
             },
             [],
