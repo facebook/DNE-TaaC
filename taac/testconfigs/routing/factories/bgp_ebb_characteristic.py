@@ -761,6 +761,10 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     return test_config_constant_attribute_storage_route_sweep_on_eos(
         test_config_name=name,
         device_name=testbed.device_name,
+        # Bind the DUT to the BGP++-aware AristaFbossSwitch driver (thrift), so
+        # health checks (BGP_SESSION_ESTABLISH_CHECK / BGP_RIB_FIB_CONSISTENCY_CHECK)
+        # query BGP++ instead of falling back to native ar-bgp CLI. Mirrors SC2.
+        host_os_type_map={testbed.device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         ixia_interface_mimic_ebgp=testbed.ixia_ports[0][0],
         ixia_interface_mimic_ibgp=testbed.ixia_ports[1][0],
         ebgp_remote_as=EBGP_REMOTE_AS,
