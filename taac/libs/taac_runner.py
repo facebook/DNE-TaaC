@@ -225,9 +225,9 @@ class TaacRunner:
         skip_prechecks: bool = False,
         # Skip FBOSS rsyslog configuration setup/teardown
         skip_fboss_rsyslog: bool = False,
-        # Opt-in: pull Keysight chassis diagnostics archive at Ixia teardown
-        # and upload to Manifold. Best-effort — failures never break teardown.
-        collect_ixia_diagnostics: bool = False,
+        # Pull the Keysight chassis diagnostics archive at Ixia teardown and
+        # upload to Manifold. Best-effort — failures never break teardown.
+        collect_ixia_diagnostics: bool = True,
         ixia_profile: str = "auto",
         setup_only: bool = False,
     ) -> None:
@@ -2118,7 +2118,7 @@ class TaacRunner:
             self.logger.warning(f"Failed to trigger triage minion (non-fatal): {e}")
 
     async def _async_collect_ixia_diagnostics_if_enabled(self, ixia: TaacIxia) -> None:
-        """Run IxiaDiagnosticsCollectionTask when the CLI flag opts in.
+        """Run IxiaDiagnosticsCollectionTask unless collection is disabled.
 
         Best-effort: any failure is logged and swallowed so diagnostics never
         turn a green test red. Must run BEFORE

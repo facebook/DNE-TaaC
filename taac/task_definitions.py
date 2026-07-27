@@ -2785,10 +2785,11 @@ def create_ixia_diagnostics_collection_task(
 ) -> Task:
     """Factory for the Ixia diagnostics collection teardown task.
 
-    The runner invokes this task automatically when ``--collect-ixia-diagnostics``
-    is passed on the netcastle CLI, so most TestConfigs do NOT need to add it to
-    ``teardown_tasks`` explicitly. This factory exists so a TestConfig CAN add it
-    by hand for tighter control (e.g., custom component list per testbed).
+    The runner invokes this task automatically unless
+    ``--no-collect-ixia-diagnostics`` is passed on the netcastle CLI, so most
+    TestConfigs do NOT need to add it to ``teardown_tasks`` explicitly. This
+    factory exists so a TestConfig CAN add it by hand for tighter control (e.g.,
+    custom component list per testbed).
 
     Args:
         components: Keysight DiagnosticService component display names to

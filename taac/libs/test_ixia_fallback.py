@@ -534,6 +534,18 @@ class SetupOnlyTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class IxiaDiagnosticsDefaultTest(unittest.TestCase):
+    def test_collection_is_enabled_by_default(self) -> None:
+        runner = TaacRunner(_config())
+
+        self.assertTrue(runner.collect_ixia_diagnostics)
+
+    def test_collection_can_be_disabled(self) -> None:
+        runner = TaacRunner(_config(), collect_ixia_diagnostics=False)
+
+        self.assertFalse(runner.collect_ixia_diagnostics)
+
+
 class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_secondary_post_setup_and_teardown_tasks_are_used(self) -> None:
         pre_task = taac_types.Task(task_name="common-pre", params=taac_types.Params())
