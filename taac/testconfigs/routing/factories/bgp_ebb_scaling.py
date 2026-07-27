@@ -49,7 +49,7 @@ from taac.playbooks.playbook_definitions import (
     PerIterationSetupStepsFactory,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
-    create_bgp_ebb_bounded_ecmp_sets_playbook,
+    get_bgp_ebb_bounded_ecmp_sets_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.ixia_configs_for_tests import (
     create_ebb_performance_scale_basic_port_configs,
@@ -1262,7 +1262,7 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
         teardown_tasks=[],
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_ebb_bounded_ecmp_sets_playbook(
+            get_bgp_ebb_bounded_ecmp_sets_playbook(
                 device_name=device_name,
             ),
         ],

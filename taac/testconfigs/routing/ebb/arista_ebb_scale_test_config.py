@@ -338,7 +338,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_daemon_restart_test_playbook",
+                name="bgp_ebb_daemon_restart_playbook",
                 setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -491,7 +491,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_cold_start_test_playbook",
+                name="bgp_ebb_cold_start_playbook",
                 setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -532,7 +532,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_igp_instability_pnh_metric_oscillation_playbook",
+                name="bgp_ebb_igp_pnh_metric_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -589,7 +589,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_igp_instability_unresolvable_pnhs_playbook",
+                name="bgp_ebb_igp_unresolvable_pnh_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -628,7 +628,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_ebgp_session_oscillations_test_playbook",
+                name="bgp_ebb_ebgp_session_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -708,7 +708,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_ibgp_tornado_plane_oscillations_test_playbook",
+                name="bgp_ebb_ibgp_plane_session_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -871,7 +871,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_ebgp_route_oscillations",
+                name="bgp_ebb_ebgp_route_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -903,7 +903,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_ibgp_route_oscillations",
+                name="bgp_ebb_ibgp_route_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -935,7 +935,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_instability_attribute_churn",
+                name="bgp_ebb_attribute_churn_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -977,7 +977,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_instability_route_storm",
+                name="bgp_ebb_route_storm_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
@@ -1019,7 +1019,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_longevity_playbook",
+                name="bgp_ebb_longevity_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 # prechecks=create_standard_prechecks(
                 #     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -1060,7 +1060,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_fauu_drain_undrain_playbook",
+                name="bgp_ebb_fauu_drain_undrain_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -1097,7 +1097,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_plane_drain_undrain_playbook",
+                name="bgp_ebb_plane_drain_undrain_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -1133,7 +1133,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ],
             ),
             build_arista_ebb_scale_playbook(
-                name="bgp_route_registry_prefix_list_runtime_update_playbook",
+                name="bgp_ebb_route_registry_runtime_update_playbook",
                 setup_steps=create_route_registry_prefix_list_setup_steps(
                     device_name=device_name
                 ),
@@ -1210,7 +1210,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
             # Test Case 5.2.4: BGP Instability - Multipath Group Oscillations
             # Check: https://docs.google.com/document/d/1Uz34DoQalHHwaR838YANitDR3GwLQXZIqNBW9W3nIk8/edit?tab=t.0#heading=h.gwh00bdildid
             build_arista_ebb_scale_playbook(
-                name="bgp_multipath_group_oscillation_playbook",
+                name="bgp_ebb_multipath_group_oscillation_playbook",
                 setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
                 prechecks=create_standard_prechecks(
                     peergroup_ibgp_v6=peergroup_ibgp_v6,

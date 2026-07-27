@@ -1,12 +1,12 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGPCPP-on-EBB playbook factories (one factory = one playbook = one test case).
+"""BGP++-on-EBB playbook factories (one factory = one test case).
 
-Naming: ``create_bgp_ebb_<usecase>_playbook``. Playbook ``name=`` field
-values are GRANDFATHERED from the legacy ``playbooks/playbook_definitions.py``
-home (Wave 4 will rename them to the canonical framework form).
+Naming: ``Playbook.name = bgp_ebb_<case>_playbook`` and each public factory is
+exactly ``get_{playbook_name}``. See README.md for the routing suite contract.
 
-See README.md.
+The ordered ``__all__`` below is the stable CI/CD catalog order, not
+alphabetical export order.
 """
 
 import typing as t
@@ -70,30 +70,30 @@ from taac.test_as_a_config.types import Playbook
 
 
 __all__ = [
-    "create_bgp_ebb_bounded_ecmp_sets_playbook",
-    "create_bgp_ebb_cold_start_playbook",
-    "create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook",
-    "create_bgp_ebb_daemon_restart_playbook",
-    "create_bgp_ebb_ebgp_route_oscillations_playbook",
-    "create_bgp_ebb_ebgp_session_oscillations_playbook",
-    "create_bgp_ebb_fauu_drain_undrain_playbook",
-    "create_bgp_ebb_ibgp_route_oscillations_playbook",
-    "create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook",
-    "create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook",
-    "create_bgp_ebb_igp_pnh_metric_oscillation_playbook",
-    "create_bgp_ebb_instability_attribute_churn_playbook",
-    "create_bgp_ebb_longevity_playbook",
-    "create_bgp_ebb_multipath_group_oscillation_playbook",
-    "create_bgp_ebb_nexthop_group_count_threshold_playbook",
-    "create_bgp_ebb_plane_drain_undrain_playbook",
-    "create_bgp_ebb_queue_memory_monitoring_playbook",
-    "create_bgp_ebb_route_registry_runtime_update_playbook",
-    "create_bgp_ebb_route_storm_playbook",
-    "create_bgp_ebb_update_packing_validation_playbook",
+    "get_bgp_ebb_daemon_restart_playbook",
+    "get_bgp_ebb_cold_start_playbook",
+    "get_bgp_ebb_ebgp_session_oscillation_playbook",
+    "get_bgp_ebb_ibgp_plane_session_oscillation_playbook",
+    "get_bgp_ebb_ebgp_route_oscillation_playbook",
+    "get_bgp_ebb_ibgp_route_oscillation_playbook",
+    "get_bgp_ebb_igp_pnh_metric_oscillation_playbook",
+    "get_bgp_ebb_igp_unresolvable_pnh_playbook",
+    "get_bgp_ebb_multipath_group_oscillation_playbook",
+    "get_bgp_ebb_attribute_churn_playbook",
+    "get_bgp_ebb_route_storm_playbook",
+    "get_bgp_ebb_route_registry_runtime_update_playbook",
+    "get_bgp_ebb_fauu_drain_undrain_playbook",
+    "get_bgp_ebb_plane_drain_undrain_playbook",
+    "get_bgp_ebb_longevity_playbook",
+    "get_bgp_ebb_queue_memory_monitoring_playbook",
+    "get_bgp_ebb_nexthop_group_count_threshold_playbook",
+    "get_bgp_ebb_update_packing_playbook",
+    "get_bgp_ebb_constant_attribute_storage_playbook",
+    "get_bgp_ebb_bounded_ecmp_sets_playbook",
 ]
 
 
-def create_bgp_ebb_daemon_restart_playbook(
+def get_bgp_ebb_daemon_restart_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -168,7 +168,7 @@ def create_bgp_ebb_daemon_restart_playbook(
         ),
     )
     return Playbook(
-        name="bgp_daemon_restart_test_playbook",
+        name="bgp_ebb_daemon_restart_playbook",
         setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
         prechecks=restart_checks.prechecks,
         postchecks=restart_checks.postchecks,
@@ -192,7 +192,7 @@ def create_bgp_ebb_daemon_restart_playbook(
     )
 
 
-def create_bgp_ebb_cold_start_playbook(
+def get_bgp_ebb_cold_start_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -279,7 +279,7 @@ def create_bgp_ebb_cold_start_playbook(
         ),
     )
     return Playbook(
-        name="bgp_cold_start_test_playbook",
+        name="bgp_ebb_cold_start_playbook",
         setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
         prechecks=cold_start_checks.prechecks,
         postchecks=cold_start_checks.postchecks,
@@ -305,7 +305,7 @@ def create_bgp_ebb_cold_start_playbook(
     )
 
 
-def create_bgp_ebb_instability_attribute_churn_playbook(
+def get_bgp_ebb_attribute_churn_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -333,7 +333,7 @@ def create_bgp_ebb_instability_attribute_churn_playbook(
             precheck when the OpenR variant is selected.
 
     Returns:
-        A `Playbook` named `bgp_instability_attribute_churn` with standard
+        A `Playbook` named `bgp_ebb_attribute_churn_playbook` with standard
         BGP++ prechecks/postchecks, core-dumps snapshot check, standard
         periodic tasks (CPU/memory @ 9 GiB, non-terminating), and one
         attribute-churn stage over prefix indices 0..500.
@@ -349,7 +349,7 @@ def create_bgp_ebb_instability_attribute_churn_playbook(
         ),
     )
     return Playbook(
-        name="bgp_instability_attribute_churn",
+        name="bgp_ebb_attribute_churn_playbook",
         setup_steps=create_bgp_instability_setup_steps(
             device_name=device_name,
         ),
@@ -380,7 +380,7 @@ def create_bgp_ebb_instability_attribute_churn_playbook(
     )
 
 
-def create_bgp_ebb_route_storm_playbook(
+def get_bgp_ebb_route_storm_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -409,7 +409,7 @@ def create_bgp_ebb_route_storm_playbook(
             when the OpenR variant is selected.
 
     Returns:
-        A `Playbook` named `bgp_instability_route_storm` with standard
+        A `Playbook` named `bgp_ebb_route_storm_playbook` with standard
         BGP++ prechecks/postchecks (postcheck enforces 255 AS path length
         and pool size 10), core-dumps snapshot check, standard periodic
         tasks (memory @ 10 GiB), a route-storm stage (3600s advertise/
@@ -432,7 +432,7 @@ def create_bgp_ebb_route_storm_playbook(
         ),
     )
     return Playbook(
-        name="bgp_instability_route_storm",
+        name="bgp_ebb_route_storm_playbook",
         setup_steps=create_bgp_instability_setup_steps(
             device_name=device_name,
         ),
@@ -474,7 +474,7 @@ def create_bgp_ebb_route_storm_playbook(
     )
 
 
-def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
+def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -556,7 +556,7 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
         ),
     )
     return Playbook(
-        name="bgp_igp_instability_pnh_metric_oscillation_playbook",
+        name="bgp_ebb_igp_pnh_metric_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=igp_checks.prechecks,
         postchecks=igp_checks.postchecks,
@@ -610,7 +610,7 @@ def create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     )
 
 
-def create_bgp_ebb_route_registry_runtime_update_playbook(
+def get_bgp_ebb_route_registry_runtime_update_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -678,7 +678,7 @@ def create_bgp_ebb_route_registry_runtime_update_playbook(
         ),
     )
     return Playbook(
-        name="bgp_route_registry_prefix_list_runtime_update_playbook",
+        name="bgp_ebb_route_registry_runtime_update_playbook",
         setup_steps=create_route_registry_prefix_list_setup_steps(
             device_name=device_name
         ),
@@ -717,7 +717,7 @@ def create_bgp_ebb_route_registry_runtime_update_playbook(
     )
 
 
-def create_bgp_ebb_multipath_group_oscillation_playbook(
+def get_bgp_ebb_multipath_group_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -807,7 +807,7 @@ def create_bgp_ebb_multipath_group_oscillation_playbook(
         ),
     )
     return Playbook(
-        name="bgp_multipath_group_oscillation_playbook",
+        name="bgp_ebb_multipath_group_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=osc_checks.prechecks,
         postchecks=osc_checks.postchecks,
@@ -836,7 +836,7 @@ def create_bgp_ebb_multipath_group_oscillation_playbook(
     )
 
 
-def create_bgp_ebb_fauu_drain_undrain_playbook(
+def get_bgp_ebb_fauu_drain_undrain_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -890,7 +890,7 @@ def create_bgp_ebb_fauu_drain_undrain_playbook(
         ),
     )
     return Playbook(
-        name="bgp_fauu_drain_undrain_playbook",
+        name="bgp_ebb_fauu_drain_undrain_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=drain_checks.prechecks,
         postchecks=drain_checks.postchecks,
@@ -915,7 +915,7 @@ def create_bgp_ebb_fauu_drain_undrain_playbook(
     )
 
 
-def create_bgp_ebb_plane_drain_undrain_playbook(
+def get_bgp_ebb_plane_drain_undrain_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -967,7 +967,7 @@ def create_bgp_ebb_plane_drain_undrain_playbook(
         ),
     )
     return Playbook(
-        name="bgp_plane_drain_undrain_playbook",
+        name="bgp_ebb_plane_drain_undrain_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=drain_checks.prechecks,
         postchecks=drain_checks.postchecks,
@@ -991,7 +991,7 @@ def create_bgp_ebb_plane_drain_undrain_playbook(
     )
 
 
-def create_bgp_ebb_longevity_playbook(
+def get_bgp_ebb_longevity_playbook(
     device_name: str,
     duration: int = 86400,
     community_churn_frequency: int = 60,
@@ -1028,7 +1028,7 @@ def create_bgp_ebb_longevity_playbook(
         ),
     )
     return Playbook(
-        name="bgp_longevity_playbook",
+        name="bgp_ebb_longevity_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         postchecks=soak_checks.postchecks,
         snapshot_checks=soak_checks.snapshot_checks,
@@ -1041,7 +1041,7 @@ def create_bgp_ebb_longevity_playbook(
     )
 
 
-def create_bgp_ebb_ebgp_route_oscillations_playbook(
+def get_bgp_ebb_ebgp_route_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -1087,7 +1087,7 @@ def create_bgp_ebb_ebgp_route_oscillations_playbook(
         ),
     )
     return Playbook(
-        name="bgp_ebgp_route_oscillations",
+        name="bgp_ebb_ebgp_route_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=osc_checks.prechecks,
         postchecks=osc_checks.postchecks,
@@ -1109,7 +1109,7 @@ def create_bgp_ebb_ebgp_route_oscillations_playbook(
     )
 
 
-def create_bgp_ebb_ibgp_route_oscillations_playbook(
+def get_bgp_ebb_ibgp_route_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -1154,7 +1154,7 @@ def create_bgp_ebb_ibgp_route_oscillations_playbook(
         ),
     )
     return Playbook(
-        name="bgp_ibgp_route_oscillations",
+        name="bgp_ebb_ibgp_route_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=osc_checks.prechecks,
         postchecks=osc_checks.postchecks,
@@ -1176,7 +1176,7 @@ def create_bgp_ebb_ibgp_route_oscillations_playbook(
     )
 
 
-def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
+def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -1245,7 +1245,7 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
         ),
     )
     return Playbook(
-        name="bgp_igp_instability_unresolvable_pnhs_playbook",
+        name="bgp_ebb_igp_unresolvable_pnh_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=igp_checks.prechecks,
         postchecks=igp_checks.postchecks,
@@ -1279,7 +1279,7 @@ def create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
     )
 
 
-def create_bgp_ebb_ebgp_session_oscillations_playbook(
+def get_bgp_ebb_ebgp_session_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -1332,7 +1332,7 @@ def create_bgp_ebb_ebgp_session_oscillations_playbook(
         ),
     )
     return Playbook(
-        name="bgp_ebgp_session_oscillations_test_playbook",
+        name="bgp_ebb_ebgp_session_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=osc_checks.prechecks,
         postchecks=osc_checks.postchecks,
@@ -1358,7 +1358,7 @@ def create_bgp_ebb_ebgp_session_oscillations_playbook(
     )
 
 
-def create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook(
+def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -1416,7 +1416,7 @@ def create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook(
         ),
     )
     return Playbook(
-        name="bgp_ibgp_tornado_plane_oscillations_test_playbook",
+        name="bgp_ebb_ibgp_plane_session_oscillation_playbook",
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         prechecks=osc_checks.prechecks,
         postchecks=osc_checks.postchecks,
@@ -1444,7 +1444,7 @@ def create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook(
     )
 
 
-def create_bgp_ebb_nexthop_group_count_threshold_playbook(
+def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     device_name: str,
     nexthop_group_threshold: int = 100,
     prefix_pool_regex: str = ".*EBGP.*",
@@ -1471,7 +1471,7 @@ def create_bgp_ebb_nexthop_group_count_threshold_playbook(
         ),
     )
     return Playbook(
-        name="nexthop_group_count_threshold_playbook",
+        name="bgp_ebb_nexthop_group_count_threshold_playbook",
         setup_steps=create_bgp_instability_setup_steps(
             device_name=device_name,
         ),
@@ -1507,7 +1507,7 @@ def create_bgp_ebb_nexthop_group_count_threshold_playbook(
     )
 
 
-def create_bgp_ebb_update_packing_validation_playbook(
+def get_bgp_ebb_update_packing_playbook(
     *,
     device_name: str,
     ixia_interface_mimic_ibgp: str,
@@ -1527,7 +1527,7 @@ def create_bgp_ebb_update_packing_validation_playbook(
 ) -> Playbook:
     """Build the BGP++ UPDATE-message packing validation Playbook."""
     return Playbook(
-        name="bgp_update_packing_validation_playbook",
+        name="bgp_ebb_update_packing_playbook",
         description="Validate BGP++ UPDATE message packing efficiency",
         stages=[
             create_steps_stage(
@@ -1566,7 +1566,7 @@ def create_bgp_ebb_update_packing_validation_playbook(
     )
 
 
-def create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
+def get_bgp_ebb_constant_attribute_storage_playbook(
     *,
     device_name: str,
     ixia_interface_mimic_ebgp: str,
@@ -1604,7 +1604,7 @@ def create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
 ) -> Playbook:
     """Build the constant-attribute-storage varying-combinations Playbook."""
     return Playbook(
-        name="bgp_plus_plus_constant_attribute_storage_varying_combinations_test",
+        name="bgp_ebb_constant_attribute_storage_playbook",
         description="Test BGP++ constant attribute storage with varying unique combination counts",
         stages=[
             create_steps_stage(
@@ -1661,7 +1661,7 @@ def create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
     )
 
 
-def create_bgp_ebb_queue_memory_monitoring_playbook(
+def get_bgp_ebb_queue_memory_monitoring_playbook(
     *,
     device_name: str,
     monitoring_duration_minutes: int,
@@ -1673,7 +1673,7 @@ def create_bgp_ebb_queue_memory_monitoring_playbook(
 ) -> Playbook:
     """Build the BGP++ queue/memory monitoring Playbook."""
     return Playbook(
-        name="bgp_queue_memory_monitoring_playbook",
+        name="bgp_ebb_queue_memory_monitoring_playbook",
         description="Monitor BGP++ queue and memory under route churn",
         snapshot_checks=[
             # CORE_DUMPS_CHECK is intentionally omitted because it catches
@@ -1709,7 +1709,7 @@ def create_bgp_ebb_queue_memory_monitoring_playbook(
     )
 
 
-def create_bgp_ebb_bounded_ecmp_sets_playbook(
+def get_bgp_ebb_bounded_ecmp_sets_playbook(
     *,
     device_name: str,
 ) -> Playbook:
@@ -1718,7 +1718,7 @@ def create_bgp_ebb_bounded_ecmp_sets_playbook(
         CheckProfile.PERF_SCALING_BOUNDED_ECMP, ProfileContext()
     )
     return Playbook(
-        name="bgp_plus_plus_arista_bounded_ecmp_sets_test",
+        name="bgp_ebb_bounded_ecmp_sets_playbook",
         description="Test BGP++ performance with bounded ECMP sets",
         snapshot_checks=profile_checks.snapshot_checks,
         periodic_tasks=create_standard_periodic_tasks(

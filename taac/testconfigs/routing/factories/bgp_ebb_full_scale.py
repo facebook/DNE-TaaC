@@ -16,22 +16,22 @@ from taac.abstractions.topology import (
 )
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
-    create_bgp_ebb_cold_start_playbook,
-    create_bgp_ebb_daemon_restart_playbook,
-    create_bgp_ebb_ebgp_route_oscillations_playbook,
-    create_bgp_ebb_ebgp_session_oscillations_playbook,
-    create_bgp_ebb_fauu_drain_undrain_playbook,
-    create_bgp_ebb_ibgp_route_oscillations_playbook,
-    create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook,
-    create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook,
-    create_bgp_ebb_igp_pnh_metric_oscillation_playbook,
-    create_bgp_ebb_instability_attribute_churn_playbook,
-    create_bgp_ebb_longevity_playbook,
-    create_bgp_ebb_multipath_group_oscillation_playbook,
-    create_bgp_ebb_nexthop_group_count_threshold_playbook,
-    create_bgp_ebb_plane_drain_undrain_playbook,
-    create_bgp_ebb_route_registry_runtime_update_playbook,
-    create_bgp_ebb_route_storm_playbook,
+    get_bgp_ebb_attribute_churn_playbook,
+    get_bgp_ebb_cold_start_playbook,
+    get_bgp_ebb_daemon_restart_playbook,
+    get_bgp_ebb_ebgp_route_oscillation_playbook,
+    get_bgp_ebb_ebgp_session_oscillation_playbook,
+    get_bgp_ebb_fauu_drain_undrain_playbook,
+    get_bgp_ebb_ibgp_plane_session_oscillation_playbook,
+    get_bgp_ebb_ibgp_route_oscillation_playbook,
+    get_bgp_ebb_igp_pnh_metric_oscillation_playbook,
+    get_bgp_ebb_igp_unresolvable_pnh_playbook,
+    get_bgp_ebb_longevity_playbook,
+    get_bgp_ebb_multipath_group_oscillation_playbook,
+    get_bgp_ebb_nexthop_group_count_threshold_playbook,
+    get_bgp_ebb_plane_drain_undrain_playbook,
+    get_bgp_ebb_route_registry_runtime_update_playbook,
+    get_bgp_ebb_route_storm_playbook,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     BGP_MON_PEER_COUNT,
@@ -93,14 +93,14 @@ def _get_bgp_ebb_full_scale_playbooks(
     other_link = _openr_helper_kv_link(physical_inventory)
 
     return [
-        create_bgp_ebb_instability_attribute_churn_playbook(
+        get_bgp_ebb_attribute_churn_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
             profile=profile,
         ),
-        create_bgp_ebb_route_storm_playbook(
+        get_bgp_ebb_route_storm_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -108,21 +108,21 @@ def _get_bgp_ebb_full_scale_playbooks(
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
             profile=profile,
         ),
-        create_bgp_ebb_route_registry_runtime_update_playbook(
+        get_bgp_ebb_route_registry_runtime_update_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
         ),
-        create_bgp_ebb_multipath_group_oscillation_playbook(
+        get_bgp_ebb_multipath_group_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
         ),
-        create_bgp_ebb_igp_pnh_metric_oscillation_playbook(
+        get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -132,7 +132,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_fauu_drain_undrain_playbook(
+        get_bgp_ebb_fauu_drain_undrain_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -142,7 +142,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
         ),
-        create_bgp_ebb_plane_drain_undrain_playbook(
+        get_bgp_ebb_plane_drain_undrain_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -152,25 +152,25 @@ def _get_bgp_ebb_full_scale_playbooks(
             tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
         ),
-        create_bgp_ebb_longevity_playbook(
+        get_bgp_ebb_longevity_playbook(
             device_name=device_name,
             duration=_LONGEVITY_DURATION_SECONDS,
         ),
-        create_bgp_ebb_daemon_restart_playbook(
+        get_bgp_ebb_daemon_restart_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_cold_start_playbook(
+        get_bgp_ebb_cold_start_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_ebgp_session_oscillations_playbook(
+        get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -180,14 +180,14 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_ebgp_route_oscillations_playbook(
+        get_bgp_ebb_ebgp_route_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
         ),
-        create_bgp_ebb_ibgp_tornado_plane_oscillations_playbook(
+        get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -197,14 +197,14 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_ibgp_route_oscillations_playbook(
+        get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
         ),
-        create_bgp_ebb_igp_instability_unresolvable_pnhs_playbook(
+        get_bgp_ebb_igp_unresolvable_pnh_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
@@ -214,7 +214,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
         ),
-        create_bgp_ebb_nexthop_group_count_threshold_playbook(
+        get_bgp_ebb_nexthop_group_count_threshold_playbook(
             device_name=device_name,
             nexthop_group_threshold=_NEXTHOP_GROUP_THRESHOLD,
         ),

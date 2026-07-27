@@ -45,55 +45,55 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
 
 
 # ─── BAG010 conveyor configs ─────────────────────────────────────────────────
-# CONVEYOR: dne_routing / bag010_instability_node (regex bgp_instability_)
-# CONVEYOR: dne_routing / bag010_runtime_node     (regex pnh_metric_oscillation|multipath_group_oscillation|route_registry_prefix_list_runtime_update)
+# CONVEYOR: dne_routing / bag010_instability_node
+# CONVEYOR: dne_routing / bag010_runtime_node
 BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG",
     playbooks_selected=[
-        "bgp_instability_attribute_churn",
-        "bgp_instability_route_storm",
-        "bgp_route_registry_prefix_list_runtime_update_playbook",
-        "bgp_multipath_group_oscillation_playbook",
-        "bgp_igp_instability_pnh_metric_oscillation_playbook",
+        "bgp_ebb_attribute_churn_playbook",
+        "bgp_ebb_route_storm_playbook",
+        "bgp_ebb_route_registry_runtime_update_playbook",
+        "bgp_ebb_multipath_group_oscillation_playbook",
+        "bgp_ebb_igp_pnh_metric_oscillation_playbook",
     ],
     enable_update_group=False,
 )
-# CONVEYOR: dne_routing / bag010_drain_node       (regex bgp_fauu_drain_undrain_playbook)
+# CONVEYOR: dne_routing / bag010_drain_node
 BAG010_DRAIN_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_DRAIN_TEST_CONFIG_UG",
     playbooks_selected=[
-        "bgp_fauu_drain_undrain_playbook",
-        "bgp_plane_drain_undrain_playbook",
+        "bgp_ebb_fauu_drain_undrain_playbook",
+        "bgp_ebb_plane_drain_undrain_playbook",
     ],
 )
 # CONVEYOR: dne_routing / bag010_longevity_node
 BAG010_LONGEVITY_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_LONGEVITY_TEST_CONFIG",
-    playbooks_selected=["bgp_longevity_playbook"],
+    playbooks_selected=["bgp_ebb_longevity_playbook"],
     enable_update_group=False,
 )
 
 
 # ─── BAG011 conveyor configs ─────────────────────────────────────────────────
-# Both bag010 and bag011 bind the same full-scale topology. Their catalog
-# bindings select different playbook subsets from the shared ordered suite.
-# CONVEYOR: dne_routing / bag011_restart_ebgp_node    (regex daemon_restart|cold_start|bgp_ebgp_)
-# CONVEYOR: dne_routing / bag011_ibgp_stability_node  (regex bgp_ibgp_|unresolvable_pnhs|nexthop_group_count)
+# Both bag010 and bag011 bind the same full-scale topology. Their runtime
+# arrangements select different playbook subsets from the shared ordered suite.
+# CONVEYOR: dne_routing / bag011_restart_ebgp_node
+# CONVEYOR: dne_routing / bag011_ibgp_stability_node
 BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
     BAG011_ASH6,
     name="BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG",
     playbooks_selected=[
-        "bgp_daemon_restart_test_playbook",
-        "bgp_cold_start_test_playbook",
-        "bgp_ebgp_session_oscillations_test_playbook",
-        "bgp_ebgp_route_oscillations",
-        "bgp_ibgp_tornado_plane_oscillations_test_playbook",
-        "bgp_ibgp_route_oscillations",
-        "bgp_igp_instability_unresolvable_pnhs_playbook",
-        "nexthop_group_count_threshold_playbook",
+        "bgp_ebb_daemon_restart_playbook",
+        "bgp_ebb_cold_start_playbook",
+        "bgp_ebb_ebgp_session_oscillation_playbook",
+        "bgp_ebb_ebgp_route_oscillation_playbook",
+        "bgp_ebb_ibgp_plane_session_oscillation_playbook",
+        "bgp_ebb_ibgp_route_oscillation_playbook",
+        "bgp_ebb_igp_unresolvable_pnh_playbook",
+        "bgp_ebb_nexthop_group_count_threshold_playbook",
     ],
 )
 

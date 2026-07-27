@@ -75,10 +75,10 @@ from taac.playbooks.playbook_definitions import (
     create_test_constant_attribute_storage_playbook,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
-    create_bgp_ebb_bounded_ecmp_sets_playbook,
-    create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook,
-    create_bgp_ebb_queue_memory_monitoring_playbook,
-    create_bgp_ebb_update_packing_validation_playbook,
+    get_bgp_ebb_bounded_ecmp_sets_playbook,
+    get_bgp_ebb_constant_attribute_storage_playbook,
+    get_bgp_ebb_queue_memory_monitoring_playbook,
+    get_bgp_ebb_update_packing_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.attribute_pool_generator import (
     generate_as_path_pool,
@@ -1021,7 +1021,7 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
             ),
         ],
         playbooks=[
-            create_bgp_ebb_constant_attribute_storage_varying_combinations_playbook(
+            get_bgp_ebb_constant_attribute_storage_playbook(
                 device_name=device_name,
                 ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
                 constant_ebgp_peer_count=constant_ebgp_peer_count,
@@ -1339,7 +1339,7 @@ def test_config_bgp_queue_memory_monitoring_with_route_scale(
             ),
         ],
         playbooks=[
-            create_bgp_ebb_queue_memory_monitoring_playbook(
+            get_bgp_ebb_queue_memory_monitoring_playbook(
                 device_name=device_name,
                 monitoring_duration_minutes=monitoring_duration_minutes,
                 monitoring_interval_seconds=monitoring_interval_seconds,
@@ -2202,7 +2202,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         teardown_tasks=compiled.teardown_tasks,
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_ebb_bounded_ecmp_sets_playbook(
+            get_bgp_ebb_bounded_ecmp_sets_playbook(
                 device_name=device_name,
             )
         ],
@@ -2740,7 +2740,7 @@ def test_config_bgp_update_packing_validation(
             ]
         ),
         playbooks=[
-            create_bgp_ebb_update_packing_validation_playbook(
+            get_bgp_ebb_update_packing_playbook(
                 device_name=device_name,
                 ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
                 ibgp_peer_count=ibgp_peer_count,
@@ -3628,7 +3628,7 @@ def create_bgp_ebb_characteristic_update_packing_test_config(
         teardown_tasks=[],
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
-            create_bgp_ebb_update_packing_validation_playbook(
+            get_bgp_ebb_update_packing_playbook(
                 device_name=device_name,
                 ixia_interface_mimic_ibgp=ibgp_iface,
                 ibgp_peer_count=ibgp_peer_count,
