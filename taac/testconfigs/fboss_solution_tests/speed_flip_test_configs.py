@@ -111,12 +111,19 @@ class SpeedTransitionStage:
     - speed to change them to
     - patcher name
     - boolean for change port state to DOWN
+    - target_port_cage_count: minimum dual-cage ports required per device
     """
 
     endpoints: t.Dict[str, t.List[str]]
     speed_in_gbps: int
     patcher_name: str
     port_state_change: bool = False
+    # Minimum number of distinct dual-cage ports each device in `endpoints` must
+    # supply. Enforced at test runtime by RegisterSpeedFlipPatcherStep — the onus
+    # is on the POC configuring/running the test to provide at least this many
+    # cages per device (spec calls for 4). NOTE: the existing configs below still
+    # supply 1 cage and will fail this runtime gate until expanded to 4.
+    target_port_cage_count: int = 4
 
     def __post_init__(self):
         """Validate that inputs are correct"""
@@ -191,6 +198,7 @@ class SpeedFlipPlaybook:
                 patcher_name=transition_stage.patcher_name,
                 endpoints=transition_stage.endpoints,
                 speed_in_gbps=transition_stage.speed_in_gbps,
+                target_port_cage_count=transition_stage.target_port_cage_count,
             )
 
             taac_stage = create_steps_stage(steps=[step])
@@ -215,6 +223,7 @@ class SpeedFlipPlaybook:
                 patcher_name=transition_stage.patcher_name,
                 endpoints=transition_stage.endpoints,
                 speed_in_gbps=transition_stage.speed_in_gbps,
+                target_port_cage_count=transition_stage.target_port_cage_count,
             )
 
             taac_stage = create_steps_stage(steps=[step])

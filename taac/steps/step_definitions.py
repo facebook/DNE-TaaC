@@ -2640,6 +2640,7 @@ def create_register_speed_flip_patcher_step(
     endpoints: t.Any,
     speed_in_gbps: int,
     description: t.Optional[str] = None,
+    target_port_cage_count: int = 4,
 ) -> Step:
     """
     Create a step to register/unregister speed flip patcher (v3 shape used by speed_flip_test_configs).
@@ -2651,6 +2652,11 @@ def create_register_speed_flip_patcher_step(
         endpoints: List of endpoints
         speed_in_gbps: Target speed in Gbps
         description: Custom description for the step
+        target_port_cage_count: Minimum number of distinct dual-cage ports that
+            must be supplied per device in ``endpoints``. Enforced at test
+            runtime (see ``RegisterSpeedFlipPatcherStep.run``). The onus is on
+            the POC configuring/running the test to supply at least this many
+            cages per device; defaults to 4.
     """
     return Step(
         name=StepName.REGISTER_SPEED_FLIP_PATCHER,
@@ -2662,6 +2668,7 @@ def create_register_speed_flip_patcher_step(
                     "patcher_name": patcher_name,
                     "endpoints": endpoints,
                     "speed_in_gbps": speed_in_gbps,
+                    "target_port_cage_count": target_port_cage_count,
                 }
             )
         ),
@@ -7486,6 +7493,8 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
         port_state_change = params["port_state_change"]
         patcher_name = params.get("patcher_name", _SPEED_FLIP_PATCHER_NAME)
         endpoints = params["endpoints"]
+        target_port_cage_count = params.get("target_port_cage_count", 4)
+        self._assert_target_port_cage_count(endpoints, target_port_cage_count)
         device_infos = await self._gather_device_infos(endpoints)
         speed_in_gbps = params.get("speed_in_gbps", 0)
 
@@ -7505,6 +7514,30 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
             )
 
         await self._warmboot_agent(device_infos=device_infos)
+
+    def _assert_target_port_cage_count(
+        self,
+        endpoints: t.Dict[str, t.List[str]],
+        target_port_cage_count: int,
+    ) -> None:
+        """Enforce that each device supplies >= ``target_port_cage_count`` dual-cage ports.
+
+        A dual-cage port is identified by its cage base (the interface name minus
+        the trailing subport, e.g. ``eth1/17/1`` and ``eth1/17/5`` both belong to
+        cage ``eth1/17``). This is a runtime gate: the onus is on the POC
+        configuring/running the speed-flip test to supply at least the target
+        number of cages per device. It is intentionally generic so it applies to
+        any speed-flip TestConfig, not just the ones in speed_flip_test_configs.
+        """
+        for hostname, ports in endpoints.items():
+            cages = {port.rsplit("/", 1)[0] for port in ports}
+            if len(cages) < target_port_cage_count:
+                raise AssertionError(
+                    f"Speed-flip requires at least {target_port_cage_count} "
+                    f"dual-cage ports on {hostname}, but only {len(cages)} "
+                    f"were supplied (cages={sorted(cages)}, ports={ports}). "
+                    f"Provide at least {target_port_cage_count} distinct cages."
+                )
 
     async def _gather_device_infos(
         self, endpoints: t.Dict[str, t.List[str]]
