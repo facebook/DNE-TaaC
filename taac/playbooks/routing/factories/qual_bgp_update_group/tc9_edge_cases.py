@@ -8,6 +8,7 @@ Implemented:
 - 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
 - 2.9.6 Staggered Peer Startup: Peers Coming Up at Different Times
 - 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
+- 2.9.8 Quantifying CPU Reduction from Update Group
 
 The remaining section-2.9 scenario (2.9.3 NOTIFICATION isolation) lands as its own
 factory function here when implemented. Spec 2.9.5 is struck-through / excluded in
@@ -615,17 +616,87 @@ def create_bgp_ug_empty_group_playbook(
 def _route_churn_track_steps(
     *,
     device_name: str,
-    prefix_pool_regex: str,
     route_count: int,
-    community_values: t.List[str],
     interval_s: int,
     duration_s: int,
+    prefix_pool_regex: t.Optional[str] = None,
+    community_values: t.Optional[t.List[str]] = None,
+    variant_pool_regexes: t.Optional[t.List[str]] = None,
 ) -> t.List[Step]:
     """Track: every ``interval_s`` withdraw + re-advertise ``route_count`` eBGP
-    routes, rotating the community each cycle (spec 2.9.2 route churn)."""
+    routes. Two modes:
+
+    - 2.9.2 legacy (``prefix_pool_regex`` + ``community_values``): each cycle
+      rotate the community on the single eBGP pool via ``ixia_modify_communities``
+      (which bounces the owning peer) then withdraw -> wait -> re-advertise.
+
+    - 2.9.8 Option-A (``variant_pool_regexes``, ordered A/B/C): each cycle withdraw
+      the currently-active pre-staged variant pool and advertise the NEXT one,
+      rotating A->B->C->A. Each variant carries a DIFFERENT community set at BUILD
+      time (RouteScale.bgp_communities), so the DUT sees the same NLRI re-advertised
+      with a modified community every cycle with NO runtime community write (which
+      IxNetwork rejects on a started element -- the run-2 failure) and NO peer
+      bounce -- only the proven Active-flag toggle runs. Exactly one variant pool
+      is Active at a time: the playbook's prime stage leaves ``variant[0]`` active
+      before this rotation starts, and each cycle withdraws the active pool before
+      advertising the next (never two same-NLRI pools active at once).
+    """
     steps: t.List[Step] = []
     iterations = max(1, duration_s // interval_s)
     half = max(1, interval_s // 2)
+
+    if variant_pool_regexes is not None:
+        assert len(variant_pool_regexes) >= 2, (
+            "2.9.8 variant rotation needs >= 2 pre-staged pools so the community "
+            "changes each cycle"
+        )
+        n = len(variant_pool_regexes)
+        # variant[0] is Active coming in (the playbook prime stage). Each cycle:
+        # withdraw the active pool -> wait -> advertise the next (a DIFFERENT
+        # build-time community). Exactly one variant Active throughout.
+        active_idx = 0
+        for i in range(iterations):
+            cur = variant_pool_regexes[active_idx]
+            nxt = variant_pool_regexes[(active_idx + 1) % n]
+            steps.extend(
+                [
+                    create_advertise_withdraw_prefixes_step(
+                        device_name=device_name,
+                        advertise=False,
+                        prefix_pool_regex=cur,
+                        prefix_start_index=0,
+                        # None -> toggle the whole (multiplier=1) pool. route_count
+                        # is the pool size, used only for the readable count; a
+                        # numeric end-index would be a no-op for multiplier=1 pools.
+                        prefix_end_index=None,
+                        description=(
+                            f"route churn -- withdraw {route_count} eBGP routes "
+                            f"({cur}) (cycle {i + 1}/{iterations})"
+                        ),
+                    ),
+                    create_longevity_step(duration=half),
+                    create_advertise_withdraw_prefixes_step(
+                        device_name=device_name,
+                        advertise=True,
+                        prefix_pool_regex=nxt,
+                        prefix_start_index=0,
+                        prefix_end_index=None,
+                        description=(
+                            f"route churn -- re-advertise {route_count} eBGP routes "
+                            f"with modified community ({nxt}) "
+                            f"(cycle {i + 1}/{iterations})"
+                        ),
+                    ),
+                    create_longevity_step(duration=interval_s - half),
+                ]
+            )
+            active_idx = (active_idx + 1) % n
+        return steps
+
+    # 2.9.2 legacy community-rotate-then-churn (byte-identical to the original).
+    assert prefix_pool_regex is not None and community_values is not None, (
+        "legacy route churn requires prefix_pool_regex + community_values"
+    )
     for i in range(iterations):
         community = community_values[i % len(community_values)]
         steps.extend(
@@ -674,6 +745,54 @@ def _route_churn_track_steps(
                 create_longevity_step(duration=interval_s - half),
             ]
         )
+    return steps
+
+
+def _variant_pool_prime_steps(
+    *,
+    device_name: str,
+    variant_pool_regexes: t.List[str],
+) -> t.List[Step]:
+    """Bring the pre-staged variant pools to a SINGLE-active baseline (only
+    ``variant_pool_regexes[0]`` Active) before the measured churn. All variant
+    pools come up Active at build and share identical NLRI, so if left as-is the
+    DUT sees the same NLRI advertised by every pool at once (ambiguous
+    last-writer-wins community).
+
+    Withdraw EVERY variant first (including ``variant[0]``), THEN advertise only
+    ``variant[0]``. Doing variant[0] via an explicit inactive->active transition
+    (rather than just leaving its build-time Active state) forces a guaranteed
+    fresh re-advertise, so the single-active baseline holds regardless of
+    IxNetwork's overlapping-same-NLRI withdraw semantics (an "assert variant[0]
+    active" on an already-Active pool would be a no-op). ``prefix_end_index=None``
+    toggles the whole (multiplier=1) pool."""
+    steps: t.List[Step] = []
+    # 1) Clean slate: withdraw ALL variants so no same-NLRI pool is left active.
+    for regex in variant_pool_regexes:
+        steps.append(
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=False,
+                prefix_pool_regex=regex,
+                prefix_start_index=0,
+                prefix_end_index=None,
+                description=f"churn prime -- withdraw variant {regex} (clean slate)",
+            )
+        )
+    # 2) Advertise exactly variant[0] -> a guaranteed inactive->active re-send.
+    steps.append(
+        create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=True,
+            prefix_pool_regex=variant_pool_regexes[0],
+            prefix_start_index=0,
+            prefix_end_index=None,
+            description=(
+                f"churn prime -- advertise variant {variant_pool_regexes[0]} "
+                f"(single-active baseline)"
+            ),
+        )
+    )
     return steps
 
 
@@ -2862,6 +2981,257 @@ def create_bgp_ug_best_path_change_playbook(
 
     return Playbook(
         name="bgp_ug_best_path_change",
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+# =============================================================================
+# 2.9.8 Quantifying CPU reduction from Update Group
+# =============================================================================
+#
+# The spec runs the SAME 1-hour route-churn workload TWICE -- Update Group OFF
+# (baseline) vs ON -- and compares CPU: with UG on the average CPU must be
+# measurably lower, peak CPU < 40% in both runs, VmHWM < 10 GB in both, no crash,
+# no session flaps, and 1m/5m/15m load-average < 12. Because UG optimizes EGRESS
+# (update packing), the DUT must actually advertise the full table -- otherwise
+# there is no egress work for UG to reduce and no measurable difference. This runs
+# WITHOUT_OPEN_R + next-hop-self (the bgpcpp interface-state gflag), which resolves
+# the iBGP next-hops so the DUT advertises the full table with no Open/R dependency.
+#
+# Two runs => two TestConfigs (enable_update_group False vs True). Each run's
+# playbook (this factory, one variant):
+#   - churns ``route_churn_count`` eBGP routes/peer every minute for the hour
+#     (withdraw -> 30s -> re-advertise with a rotated community) -- the CPU
+#     stimulus, reusing the 2.9.2 route-churn track;
+#   - runs ``bgp_cpu_utilization_monitor`` spanning the hour: samples device CPU%,
+#     records avg + peak, FAILs on peak >= 40% (crit 2), reads VmHWM (crit 3), and
+#     PERSISTS its metrics to a per-variant file;
+#   - runs a session-stability + load-average monitor (the 2.9.2 monitor track,
+#     scoped to ALL non-MON sessions since 2.9.8 flaps nothing) -- crit 4 (no
+#     crash), crit 5 (no flaps), crit 6 (load-avg).
+# The UG-ON run additionally runs ``bgp_cpu_reduction_compare`` at the end, reading
+# the UG-off baseline file + its own and asserting the average dropped (crit 1) --
+# so the UG-OFF config MUST run before the UG-ON config (metrics handoff via a file
+# on the runner).
+
+
+def create_bgp_ug_cpu_quantification_playbook(
+    *,
+    device_name: str,
+    # One ORDERED list of pre-staged community-variant pool regexes PER AFI
+    # (e.g. [[v4_A, v4_B, v4_C], [v6_A, v6_B, v6_C]]) -- 2.9.8 runs one rotation
+    # track per AFI, each rotating its variants A->B->C->A, so v4 and v6 get the
+    # same treatment.
+    variant_pool_regexes_by_afi: t.List[t.List[str]],
+    # BGP-MON parent(s) only -- 2.9.8 does not flap sessions, so the monitor
+    # asserts EVERY non-MON session stays Established throughout (crit 5, no flaps).
+    all_sessions_ignore_prefixes: t.List[str],
+    # This run's CPU-metrics output file (the monitor writes it).
+    cpu_metrics_file_path: str,
+    variant: str,
+    # UG-ON run only: the UG-off baseline metrics file to compare against. None on
+    # the UG-off run (no comparison stage).
+    baseline_metrics_file_path: t.Optional[str] = None,
+    # --- Checks ---
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    # --- Tunables (spec defaults) ---
+    route_churn_count: int = 500,
+    route_churn_interval_s: int = 60,
+    # Settle after the prime stage (before the measured churn+monitor stage) so the
+    # DUT converges from the one-time prime route change and the CPU monitor does
+    # not fold that startup convergence into the measured window (protects crit-2).
+    prime_settle_s: int = 60,
+    duration_s: int = 3600,
+    cpu_sample_interval_s: int = 15,
+    peak_cpu_threshold_percent: float = 40.0,
+    min_reduction_percent: float = 0.0,
+    monitor_interval_s: int = 120,
+    monitor_retry_count: int = 3,
+    monitor_retry_delay_s: float = 10.0,
+    load_avg_baseline: float = 12.0,
+    vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+    expect_update_group_enabled: bool = True,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.9.8 playbook (Quantifying CPU
+    reduction from Update Group) -- ONE variant (UG off or on).
+
+    Intent (spec 2.9.8): run the identical 1-hour churn workload with UG off then
+    on; UG-on average CPU must be measurably lower, with peak CPU < 40%, VmHWM
+    < 10 GB, no crash, no session flaps, and load-average < 12 in both runs.
+
+    Structure -- a sequential PRIME stage, then one concurrent stage of tracks for
+    ``duration_s`` (1 hr):
+      0. Prime (``_variant_pool_prime_steps``, per AFI): the pre-staged variant
+         pools all come up Active at build (same NLRI), so withdraw EVERY variant
+         then re-advertise only variant[0] -> exactly one community per prefix
+         before the measured churn.
+      1. Route churn (``_route_churn_track_steps``), one rotation track per AFI in
+         ``variant_pool_regexes_by_afi`` (BOTH AFIs get the same treatment): every
+         ``route_churn_interval_s`` (60s) withdraw the active variant pool (500
+         routes/peer), wait 30s, advertise the NEXT variant (a DIFFERENT build-time
+         community) -- the CPU stimulus with NO runtime community write (Option A).
+      2. CPU-utilization monitor (``bgp_cpu_utilization_monitor`` custom step):
+         sample device CPU% every ``cpu_sample_interval_s``, record avg + peak,
+         FAIL if peak >= ``peak_cpu_threshold_percent`` (crit 2), read VmHWM and
+         FAIL if >= ``vmhwm_absolute_threshold_bytes`` (crit 3), and persist
+         {variant, avg, peak, vmhwm} to ``cpu_metrics_file_path``.
+      3. Session-stability + load monitor (``_monitor_track_steps``, scoped to all
+         non-MON sessions): every ``monitor_interval_s`` assert no crash (crit 4),
+         all sessions Established (crit 5, no flaps), load-average < baseline
+         (crit 6).
+
+    When ``baseline_metrics_file_path`` is set (the UG-ON run), a final stage runs
+    ``bgp_cpu_reduction_compare`` to assert UG-on avg CPU is measurably lower than
+    UG-off (crit 1) -- so the UG-OFF run must complete first (file handoff).
+
+    ``expect_update_group_enabled`` appends a UG-enabled postcheck on the UG-ON run
+    (omitted on the UG-off baseline, where UG is intentionally disabled).
+    """
+    cpu_monitor_params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_cpu_utilization_monitor",
+        "hostname": device_name,
+        "duration_seconds": duration_s,
+        "sample_interval_seconds": cpu_sample_interval_s,
+        "metrics_file_path": cpu_metrics_file_path,
+        "variant": variant,
+        "peak_cpu_threshold_percent": peak_cpu_threshold_percent,
+    }
+    if vmhwm_absolute_threshold_bytes is not None:
+        cpu_monitor_params["vmhwm_threshold_bytes"] = vmhwm_absolute_threshold_bytes
+
+    concurrent_steps = [
+        # One route-churn ROTATION track per AFI (v4 + v6) -- both AFIs churned
+        # equally so the CPU comparison exercises every AFI's update groups. Each
+        # track rotates its ordered pre-staged community-variant pools (A->B->C->A)
+        # via pure Active-flag toggles: no runtime community write (which IxNetwork
+        # rejects on a started element) and no peer bounce.
+        *[
+            ConcurrentStep(
+                steps=_route_churn_track_steps(
+                    device_name=device_name,
+                    route_count=route_churn_count,
+                    interval_s=route_churn_interval_s,
+                    duration_s=duration_s,
+                    variant_pool_regexes=variant_pool_regexes,
+                )
+            )
+            for variant_pool_regexes in variant_pool_regexes_by_afi
+        ],
+        ConcurrentStep(
+            steps=[
+                create_custom_step(
+                    params_dict=cpu_monitor_params,
+                    description=(
+                        f"2.9.8 ({variant}) -- sample device CPU% over the "
+                        f"{duration_s}s churn window; record avg+peak; FAIL if peak "
+                        f">= {peak_cpu_threshold_percent}%; record VmHWM; persist "
+                        f"metrics for the UG-off/on comparison"
+                    ),
+                ),
+            ]
+        ),
+        ConcurrentStep(
+            steps=_monitor_track_steps(
+                non_ibgp_parent_prefixes=all_sessions_ignore_prefixes,
+                load_avg_baseline=load_avg_baseline,
+                interval_s=monitor_interval_s,
+                duration_s=duration_s,
+                retry_count=monitor_retry_count,
+                retry_delay_s=monitor_retry_delay_s,
+            )
+        ),
+    ]
+
+    # Sequential PRIME stage: the variant pools all come up Active at build (same
+    # NLRI per AFI), so reduce each AFI to a single-active baseline (only
+    # variant[0] advertised) BEFORE the measured churn, so exactly one community is
+    # on the wire per prefix when the rotation starts (no ambiguous multi-active).
+    prime_steps: t.List[Step] = []
+    for variant_pool_regexes in variant_pool_regexes_by_afi:
+        prime_steps.extend(
+            _variant_pool_prime_steps(
+                device_name=device_name,
+                variant_pool_regexes=variant_pool_regexes,
+            )
+        )
+    # Let the one-time prime route change converge before the measured window.
+    prime_steps.append(create_longevity_step(duration=prime_settle_s))
+
+    stages = [
+        create_steps_stage(
+            steps=prime_steps,
+            description=(
+                f"2.9.8 ({variant}) -- prime variant pools to a single-active "
+                f"baseline (only variant[0] per AFI advertised) before churn"
+            ),
+        ),
+        create_steps_stage(
+            concurrent=True,
+            concurrent_steps=concurrent_steps,
+            description=(
+                f"2.9.8 ({variant}) -- 1-hour eBGP route churn "
+                f"({route_churn_count} routes/peer/min) + CPU-utilization monitor "
+                f"+ session/load monitor"
+            ),
+        ),
+    ]
+
+    # UG-ON run: compare against the UG-off baseline (crit 1). Runs last, after the
+    # monitor has written this run's metrics file. Skipped on the UG-off run.
+    if baseline_metrics_file_path is not None:
+        compare_params: t.Dict[str, t.Any] = {
+            "custom_step_name": "bgp_cpu_reduction_compare",
+            "baseline_metrics_path": baseline_metrics_file_path,
+            "ug_metrics_path": cpu_metrics_file_path,
+            "min_reduction_percent": min_reduction_percent,
+            "peak_cpu_threshold_percent": peak_cpu_threshold_percent,
+        }
+        if vmhwm_absolute_threshold_bytes is not None:
+            compare_params["vmhwm_threshold_bytes"] = vmhwm_absolute_threshold_bytes
+        stages.append(
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict=compare_params,
+                        description=(
+                            "2.9.8 -- compare UG-on vs UG-off CPU: assert UG-on avg "
+                            "CPU measurably lower (crit 1); both peaks < ceiling; "
+                            "both VmHWM < ceiling"
+                        ),
+                    ),
+                ],
+            )
+        )
+
+    # Always-appended bounds. The monitor track already asserts no-crash /
+    # sessions-up / load-avg PER SAMPLE across the hour; these postchecks re-assert
+    # at test end (load-avg) + add the no-Error-logs gate. The UG-ON run also
+    # asserts UG is still enabled (omitted on the UG-off baseline).
+    base_postchecks = (
+        list(postchecks) if postchecks is not None else list(BGP_STANDARD_POSTCHECKS)
+    )
+    postchecks = base_postchecks + [
+        create_system_cpu_load_average_check(baseline=load_avg_baseline),
+        create_log_parsing_check(start_time_jq_var="test_case_start_time"),
+    ]
+    if expect_update_group_enabled:
+        postchecks.append(create_bgp_update_group_check(expect_enabled=True))
+    if vmhwm_absolute_threshold_bytes is not None:
+        postchecks.append(
+            create_memory_utilization_check(
+                vmhwm_threshold=vmhwm_absolute_threshold_bytes
+            )
+        )
+    if snapshot_checks is None:
+        snapshot_checks = list(BGP_STANDARD_SNAPSHOT_CHECKS)
+
+    return Playbook(
+        name="bgp_ug_cpu_quantification",
         stages=stages,
         prechecks=prechecks,
         postchecks=postchecks,
