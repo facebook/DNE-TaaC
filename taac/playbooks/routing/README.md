@@ -142,6 +142,28 @@ def get_bgp_ebb_daemon_restart_playbook(...) -> Playbook:
 Do not duplicate the full catalog entry in a docstring. Document parameter
 semantics and non-obvious implementation invariants next to the code.
 
+## Rendering catalogs
+
+The YAML catalog is the editable source of truth. Keep the generated Markdown
+beside it for human review and downstream publishing:
+
+```text
+<suite>_catalog.yaml  # edit this
+<suite>_catalog.md    # generated; do not edit directly
+```
+
+Render any suite catalog with the generic target:
+
+```bash
+buck run fbcode//neteng/test_infra/dne/taac/playbooks/routing:render_playbook_catalog -- \
+  fbcode/neteng/test_infra/dne/taac/playbooks/routing/<suite>_catalog.yaml \
+  fbcode/neteng/test_infra/dne/taac/playbooks/routing/<suite>_catalog.md
+```
+
+Use `--check` in tests and automation. It exits nonzero when the Markdown is
+missing or stale. Google Docs synchronization consumes the generated Markdown,
+not the YAML and not a TestConfig.
+
 ## Imports and exports
 
 Each suite module maintains an explicit `__all__` containing its public
