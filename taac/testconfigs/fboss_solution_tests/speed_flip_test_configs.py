@@ -19,11 +19,13 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
+    create_drain_undrain_step,
     create_longevity_step,
     create_port_speed_validation_step as get_validation_step,
     create_register_speed_flip_patcher_step,
     create_service_convergence_step,
     create_service_interruption_step,
+    create_system_reboot_step,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, Playbook, Stage, TestConfig
@@ -101,6 +103,55 @@ def service_event_stages(health_check_params: t.Dict[str, t.Any]) -> t.List[Stag
     ]
 
 
+def _reboot_undrain_stages(
+    health_check_params: t.Dict[str, t.Any],
+    trigger: taac_types.SystemRebootTrigger,
+) -> t.List[Stage]:
+    """Trigger stages that validate a speed flip across a system reboot.
+
+    Reboots the device (microserver-only or full BMC power reset), then
+    undrains it (a reboot leaves the device drained), waits for agent
+    convergence, settles, and validates the flipped ports are at the target
+    speed. Used as a ``trigger_stage_builder`` override on SpeedFlipPlaybook in
+    place of the default agent-restart-based ``service_event_stages``.
+    """
+    return [
+        create_steps_stage(
+            steps=[
+                create_system_reboot_step(trigger=trigger),
+                # A reboot leaves the device drained; undrain before validating.
+                create_drain_undrain_step(drain=False),
+                create_service_convergence_step(
+                    services=[taac_types.Service.AGENT],
+                ),
+                # Settle: convergence can complete before traffic fully restores.
+                create_longevity_step(duration=300),
+                get_validation_step(health_check_params),
+            ]
+        ),
+    ]
+
+
+def microserver_reboot_undrain_stages(
+    health_check_params: t.Dict[str, t.Any],
+) -> t.List[Stage]:
+    """Microserver-only reboot (wedge_power.sh reset -s) + undrain + validate."""
+    return _reboot_undrain_stages(
+        health_check_params,
+        taac_types.SystemRebootTrigger.BMC_MICROSERVER_ONLY_RESET,
+    )
+
+
+def bmc_reboot_undrain_stages(
+    health_check_params: t.Dict[str, t.Any],
+) -> t.List[Stage]:
+    """Full BMC power reset (wedge_power.sh reset) + undrain + validate."""
+    return _reboot_undrain_stages(
+        health_check_params,
+        taac_types.SystemRebootTrigger.BMC_POWER_RESET,
+    )
+
+
 @dataclass
 class SpeedTransitionStage:
     """
@@ -163,6 +214,14 @@ class SpeedFlipPlaybook:
     health_check_params: t.Dict[str, t.Any]
     playbook_name: str
     number_of_iterations: int = 1
+    # Optional override for the playbook's "trigger" phase (Phase 2). When None,
+    # the default agent-restart-based `service_event_stages` (warmboot + coldboot
+    # + agent-crash + coop-crash) is used. Set to e.g.
+    # `microserver_reboot_undrain_stages` / `bmc_reboot_undrain_stages` to instead
+    # validate the flip across a system reboot (reboot + undrain + validate).
+    trigger_stage_builder: t.Optional[
+        t.Callable[[t.Dict[str, t.Any]], t.List[Stage]]
+    ] = None
 
     def __post_init__(self) -> None:
         """"""
@@ -207,8 +266,8 @@ class SpeedFlipPlaybook:
         """
         PHASE 2: SERVICE EVENT STAGES
         """
-        service_stages = service_event_stages(self.health_check_params)
-        taac_stages.extend(service_stages)
+        trigger_builder = self.trigger_stage_builder or service_event_stages
+        taac_stages.extend(trigger_builder(self.health_check_params))
 
         """
         PHASE 3: PATHCER UNREGISTRATION STAGES
@@ -803,6 +862,86 @@ SPEED_FLIP_TEST_CONFIGS = [
                 },
                 playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_200G_PLAYBOOK",
                 number_of_iterations=10,
+            ),
+            # 100G to 200G, validated across a microserver reboot (+ undrain)
+            SpeedFlipPlaybook(
+                stages=[
+                    SpeedTransitionStage(
+                        endpoints={
+                            "fsw003.p001.m001.qzr1": ["eth1/17/1", "eth1/17/5"],
+                            "rsw001.p001.m001.qzr1": ["eth1/33/1", "eth1/33/5"],
+                        },
+                        speed_in_gbps=100,
+                        patcher_name="change_speed_test_100",
+                        port_state_change=True,
+                    ),
+                    SpeedTransitionStage(
+                        endpoints={
+                            "fsw003.p001.m001.qzr1": ["eth1/17/1", "eth1/17/5"],
+                            "rsw001.p001.m001.qzr1": ["eth1/33/1", "eth1/33/5"],
+                        },
+                        speed_in_gbps=200,
+                        patcher_name="change_speed_test_200",
+                        port_state_change=True,
+                    ),
+                ],
+                health_check_params={
+                    "fsw003.p001.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/17/1", "expected_speed": 200},
+                            {"interface_name": "eth1/17/5", "expected_speed": 200},
+                        ]
+                    },
+                    "rsw001.p001.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/33/1", "expected_speed": 200},
+                            {"interface_name": "eth1/33/5", "expected_speed": 200},
+                        ]
+                    },
+                },
+                playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_200G_MICROSERVER_REBOOT_PLAYBOOK",
+                number_of_iterations=10,
+                trigger_stage_builder=microserver_reboot_undrain_stages,
+            ),
+            # 100G to 200G, validated across a full BMC power reset (+ undrain)
+            SpeedFlipPlaybook(
+                stages=[
+                    SpeedTransitionStage(
+                        endpoints={
+                            "fsw003.p001.m001.qzr1": ["eth1/17/1", "eth1/17/5"],
+                            "rsw001.p001.m001.qzr1": ["eth1/33/1", "eth1/33/5"],
+                        },
+                        speed_in_gbps=100,
+                        patcher_name="change_speed_test_100",
+                        port_state_change=True,
+                    ),
+                    SpeedTransitionStage(
+                        endpoints={
+                            "fsw003.p001.m001.qzr1": ["eth1/17/1", "eth1/17/5"],
+                            "rsw001.p001.m001.qzr1": ["eth1/33/1", "eth1/33/5"],
+                        },
+                        speed_in_gbps=200,
+                        patcher_name="change_speed_test_200",
+                        port_state_change=True,
+                    ),
+                ],
+                health_check_params={
+                    "fsw003.p001.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/17/1", "expected_speed": 200},
+                            {"interface_name": "eth1/17/5", "expected_speed": 200},
+                        ]
+                    },
+                    "rsw001.p001.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/33/1", "expected_speed": 200},
+                            {"interface_name": "eth1/33/5", "expected_speed": 200},
+                        ]
+                    },
+                },
+                playbook_name="SPEED_FLIP_51T_TEST_PORTS_DOWN_100G_TO_200G_BMC_REBOOT_PLAYBOOK",
+                number_of_iterations=10,
+                trigger_stage_builder=bmc_reboot_undrain_stages,
             ),
             # 100G to 400G Playbook
             SpeedFlipPlaybook(
