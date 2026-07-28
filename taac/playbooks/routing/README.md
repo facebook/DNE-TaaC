@@ -142,6 +142,33 @@ def get_bgp_ebb_daemon_restart_playbook(...) -> Playbook:
 Do not duplicate the full catalog entry in a docstring. Document parameter
 semantics and non-obvious implementation invariants next to the code.
 
+## Validation traceability
+
+Every blocking signal in a catalog entry must map to the playbook-level
+health-check chain that currently enforces it. Define reusable precheck,
+postcheck, and snapshot phases in `validation_phases`, compose them in
+`validation_chains`, and select one chain from each entry's `validation` block.
+
+Coverage has four states:
+
+- `implemented`: the selected health-check chain directly enforces the signal.
+- `partial`: health checks enforce only part of the signal; document the gap.
+- `missing`: no playbook-level health check enforces the signal.
+- `not_applicable`: the signal intentionally does not require a health check;
+  document the rationale.
+
+The `spec_vs_implemented` specifications must exactly match the entry's ordered
+`blocking_signals`. References in `implemented_by` must be phases in the selected
+chain. A trigger completing, a custom step returning success, a stage-local
+assertion, or a periodic task is not part of the health-check chain. Record such
+behavior under `non_chain_validations`; it remains visible in rendered docs but
+cannot upgrade health-check coverage.
+
+Schema version 2 introduces this required traceability contract. The BGP EBB
+catalog was the only TAAC playbook catalog using version 1, so it and its
+renderer consumer migrate atomically. Version 1 input fails with migration
+instructions rather than being interpreted without validation coverage.
+
 ## Rendering catalogs
 
 The YAML catalog is the editable source of truth. Keep the generated Markdown

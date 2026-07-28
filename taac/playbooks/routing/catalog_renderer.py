@@ -10,8 +10,11 @@ from pathlib import Path
 from taac.playbooks.routing.catalog import (
     CatalogEntry,
     CatalogValidationError,
+    EntryValidation,
     load_catalog_text,
     PlaybookCatalog,
+    ValidationChain,
+    ValidationPhase,
 )
 
 
@@ -41,8 +44,87 @@ def _requirement_label(entry: CatalogEntry) -> str:
     )
 
 
+def _validation_coverage_status(validation: EntryValidation) -> str:
+    coverages = {mapping.coverage for mapping in validation.spec_vs_implemented}
+    if coverages <= {"implemented", "not_applicable"}:
+        return "Complete"
+    if coverages.isdisjoint({"implemented", "partial"}):
+        return "Missing"
+    return "Partial"
+
+
+def _validation_remaining_gap(validation: EntryValidation) -> str:
+    gaps = dict.fromkeys(
+        mapping.gap
+        for mapping in validation.spec_vs_implemented
+        if mapping.coverage not in {"implemented", "not_applicable"} and mapping.gap
+    )
+    return " ".join(gaps) or "None"
+
+
+def _render_validation(
+    validation: EntryValidation,
+    chain: ValidationChain,
+    phase_by_id: dict[str, ValidationPhase],
+) -> list[str]:
+    profile = f"`CheckProfile.{chain.check_profile}`" if chain.check_profile else "None"
+    lines = [
+        "**Outcome validation traceability**",
+        "",
+        f"- **Health-check chain:** `{chain.id}`",
+        f"- **Check profile:** {profile}",
+        f"- **Implementation:** `{chain.implementation}`",
+        "",
+        "The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.",
+        "",
+    ]
+    if chain.phases:
+        lines.extend(
+            _table(
+                ["Phase", "Chain ID", "Implemented Health Checks", "Notes"],
+                (
+                    (
+                        phase_by_id[phase_id].phase,
+                        f"`{phase_id}`",
+                        ", ".join(
+                            f"`{healthcheck}`"
+                            for healthcheck in phase_by_id[phase_id].healthchecks
+                        ),
+                        phase_by_id[phase_id].notes,
+                    )
+                    for phase_id in chain.phases
+                ),
+            )
+        )
+    else:
+        lines.append("No playbook-level health-check chain is implemented.")
+    lines.extend(["", "**Specification vs. implemented health checks**", ""])
+    lines.extend(
+        _table(
+            ["Required Validation", "Implemented By", "Coverage", "Gap"],
+            (
+                (
+                    mapping.spec,
+                    ", ".join(f"`{item}`" for item in mapping.implemented_by) or "None",
+                    mapping.coverage,
+                    mapping.gap or "None",
+                )
+                for mapping in validation.spec_vs_implemented
+            ),
+        )
+    )
+    lines.extend(["", "**Validations outside the health-check chain**", ""])
+    if validation.non_chain_validations:
+        lines.extend(_bullets(validation.non_chain_validations))
+    else:
+        lines.append("- None.")
+    return lines
+
+
 def render_catalog(catalog: PlaybookCatalog) -> str:
     topology_by_id = {topology.id: topology for topology in catalog.topologies}
+    phase_by_id = {phase.id: phase for phase in catalog.validation_phases}
+    chain_by_id = {chain.id: chain for chain in catalog.validation_chains}
     lines = [
         f"# {catalog.suite.title}",
         "",
@@ -122,6 +204,28 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
         _table(["Requirement", "Catalog Cases", "Current Coverage"], coverage_rows)
     )
 
+    lines.extend(["", "## Outcome Validation Coverage", ""])
+    lines.extend(
+        [
+            "This summary compares catalog-required blocking signals with the playbook-level health-check chains currently implemented. Step-local assertions and periodic monitors are reported separately and never upgrade health-check coverage.",
+            "",
+        ]
+    )
+    lines.extend(
+        _table(
+            ["ID", "Test Case", "Health-check Coverage", "Remaining Gap"],
+            (
+                (
+                    entry.id,
+                    entry.title,
+                    _validation_coverage_status(entry.validation),
+                    _validation_remaining_gap(entry.validation),
+                )
+                for entry in catalog.entries
+            ),
+        )
+    )
+
     if catalog.coverage_notes:
         lines.extend(["", "## Coverage Notes", ""])
         for note in catalog.coverage_notes:
@@ -146,9 +250,9 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
                 ]
             )
 
-    lines.extend(["## Test Cases", ""])
+    lines.extend(["# Test Cases", ""])
     for category in catalog.categories:
-        lines.extend([f"### {category.title}", ""])
+        lines.extend([f"## {category.title}", ""])
         for entry in catalog.entries:
             if entry.category != category.id:
                 continue
@@ -165,7 +269,7 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
             )
             lines.extend(
                 [
-                    f"#### {entry.id}: {entry.title}",
+                    f"### {entry.id}: {entry.title}",
                     "",
                     f"- **Playbook:** `{entry.playbook_name}`",
                     f"- **Factory:** `{entry.factory_name}`",
@@ -183,6 +287,12 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
                     "**Blocking signals**",
                     "",
                     *_bullets(entry.blocking_signals),
+                    "",
+                    *_render_validation(
+                        entry.validation,
+                        chain_by_id[entry.validation.chain],
+                        phase_by_id,
+                    ),
                     "",
                     f"**Expected runtime:** {entry.expected_runtime}",
                     "",

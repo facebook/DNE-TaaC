@@ -67,6 +67,33 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 | G2-24 | CICD-12 (direct) | Apply prefix-list changes at runtime and verify expected route-count transitions. |
 | G2-25 | CICD-12 (supplemental), CICD-16 (supplemental), CICD-17 (supplemental), CICD-18 (supplemental), CICD-19 (supplemental), CICD-20 (supplemental) | Assert one formal runtime-policy feature within the broader G2-25 umbrella. Monitor implementation queues and process memory during route churn and CPU stress. Bound nexthop-group growth while routes oscillate. Validate efficient IPv6 UPDATE packing under update-group-enabled distribution. Measure attribute-storage behavior as unique attribute combinations increase. Verify ECMP and nexthop-group state remains bounded under update-group-enabled scale. |
 
+## Outcome Validation Coverage
+
+This summary compares catalog-required blocking signals with the playbook-level health-check chains currently implemented. Step-local assertions and periodic monitors are reported separately and never upgrade health-check coverage.
+
+| ID | Test Case | Health-check Coverage | Remaining Gap |
+| --- | --- | --- | --- |
+| CICD-01 | BGP daemon restart | Complete | None |
+| CICD-02 | BGP cold start | Partial | CPU and memory are periodic tasks, not playbook-level health checks. |
+| CICD-03 | eBGP session oscillation | Partial | Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+| CICD-04 | iBGP plane session oscillation | Partial | The shared health-check profile is not evaluated independently per plane. Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+| CICD-05 | eBGP route oscillation | Partial | Session uptime is skipped; resource checks are periodic tasks. |
+| CICD-06 | iBGP route oscillation | Partial | Resource checks are periodic tasks, not playbook-level health checks. |
+| CICD-07 | IGP PNH metric oscillation | Partial | No playbook-level health check validates the packet-message expectation. Cleanup executes route injection but has no post-cleanup health check. |
+| CICD-08 | IGP unresolvable PNH | Partial | The health-check chain runs around the workload, not after cleanup restoration. Final session and RIB/FIB health are checked, but explicit convergence is disabled. Cleanup re-injects routes without a post-cleanup route-state health check. |
+| CICD-09 | Multipath-group oscillation | Partial | Multipath width is asserted inside the oscillation stage, not by a health check. Baseline restoration is asserted inside the oscillation stage, not by a health check. |
+| CICD-10 | BGP attribute churn | Partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. RIB/FIB consistency is checked, but the explicit convergence health check is disabled. |
+| CICD-11 | BGP route storm | Partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
+| CICD-12 | Route-registry runtime update | Partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. Cleanup actions run after the health-check chain and have no post-cleanup check. |
+| CICD-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
+| CICD-14 | Plane drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but plane policy and captured views are stage-local validations. |
+| CICD-15 | Longevity | Partial | Session and RIB/FIB state are checked, but the explicit convergence health check is disabled. Core dumps are checked, but this playbook has no CPU or memory periodic validation. |
+| CICD-16 | Queue and memory monitoring | Partial | Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step. Queue and memory thresholds have no playbook-level health check. The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
+| CICD-17 | Nexthop-group count threshold | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
+| CICD-18 | UPDATE packing | Missing | Packing size is asserted only inside the custom step; no health-check chain exists. Custom-step completion is not a playbook-level health check. These conditions are handled inside the custom step with no independent health checks. |
+| CICD-19 | Constant attribute storage | Missing | Route acceptance is asserted only inside the custom step; no health-check chain exists. Attribute collection is custom-step-local and has no independent health check. The memory-growth gate is custom-step-local and has no independent health check. |
+| CICD-20 | Bounded ECMP sets | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
+
 ## Coverage Notes
 
 ### G2-12 daily proxy status
@@ -114,11 +141,11 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Netlink fast-neighbor teardown and latency.
 - Dedicated update-group correctness, backpressure, and edge-case coverage.
 
-## Test Cases
+# Test Cases
 
-### Lifecycle and Session Stability
+## Lifecycle and Session Stability
 
-#### CICD-01: BGP daemon restart
+### CICD-01: BGP daemon restart
 
 - **Playbook:** `bgp_ebb_daemon_restart_playbook`
 - **Factory:** `get_bgp_ebb_daemon_restart_playbook`
@@ -139,6 +166,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Expected BGP sessions recover and remain established.
 - Snapshot checks show no unexpected state drift or core dump.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `daemon_restart`
+- **Check profile:** `CheckProfile.DAEMON_RESTART`
+- **Implementation:** `get_profile_checks(CheckProfile.DAEMON_RESTART)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.restart_recovery` | `postcheck_bgp_convergence_time`, `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `restart-aware BGP service check` | Treats the intentional BGP restart as expected and detects later restarts. |
+| snapshot | `snapshot.skip_uptime` | `core-dump snapshot check`, `BGP session flap and peer-identity snapshot check` | Session uptime is intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Restart profile prechecks and postchecks pass. | `pre.standard_bgp`, `post.restart_recovery` | implemented | None |
+| Expected BGP sessions recover and remain established. | `post.restart_recovery`, `snapshot.skip_uptime` | implemented | None |
+| Snapshot checks show no unexpected state drift or core dump. | `snapshot.skip_uptime` | implemented | None |
+
+**Validations outside the health-check chain**
+
+- None.
+
 **Expected runtime:** Approximately 34 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -155,7 +208,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Daily CI performs one representative restart rather than the full qualification campaign.
 
-#### CICD-02: BGP cold start
+### CICD-02: BGP cold start
 
 - **Playbook:** `bgp_ebb_cold_start_playbook`
 - **Factory:** `get_bgp_ebb_cold_start_playbook`
@@ -176,6 +229,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Expected sessions establish and convergence completes.
 - Snapshot, CPU, and memory checks remain healthy.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `cold_start`
+- **Check profile:** `CheckProfile.COLD_START`
+- **Implementation:** `get_profile_checks(CheckProfile.COLD_START)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.cold_start_recovery` | `postcheck_bgp_convergence_time`, `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `restart-aware BGP service check` | EOR timer expiry is tolerated while final convergence remains enforced. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Cold-start profile checks pass. | `pre.standard_bgp`, `post.cold_start_recovery` | implemented | None |
+| Expected sessions establish and convergence completes. | `post.cold_start_recovery`, `snapshot.full` | implemented | None |
+| Snapshot, CPU, and memory checks remain healthy. | `snapshot.full` | partial | CPU and memory are periodic tasks, not playbook-level health checks. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** About 10 minutes of stimulus plus shared topology setup.
 
 **Primary triage signals**
@@ -192,7 +271,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Daily CI uses the conveyor topology and one synchronized cold-start event.
 
-#### CICD-03: eBGP session oscillation
+### CICD-03: eBGP session oscillation
 
 - **Playbook:** `bgp_ebb_ebgp_session_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ebgp_session_oscillation_playbook`
@@ -213,6 +292,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - All expected sessions recover after churn.
 - No crash, snapshot regression, or resource-limit violation occurs.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `oscillation_skip_flap_and_uptime`
+- **Check profile:** `CheckProfile.OSCILLATION`
+- **Implementation:** `get_profile_checks(CheckProfile.OSCILLATION)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Oscillation profile prechecks and postchecks pass. | `pre.standard_bgp`, `post.standard_without_convergence` | implemented | None |
+| All expected sessions recover after churn. | `post.standard_without_convergence`, `snapshot.skip_flap_and_uptime` | implemented | None |
+| No crash, snapshot regression, or resource-limit violation occurs. | `snapshot.skip_flap_and_uptime` | partial | Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 1.5 hours including shared topology setup.
 
 **Primary triage signals**
@@ -229,7 +334,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI fixes the churn duration and cycle shape for repeatable daily comparison.
 
-#### CICD-04: iBGP plane session oscillation
+### CICD-04: iBGP plane session oscillation
 
 - **Playbook:** `bgp_ebb_ibgp_plane_session_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ibgp_plane_session_oscillation_playbook`
@@ -250,6 +355,33 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - All expected iBGP sessions recover after churn.
 - No crash, snapshot regression, or resource-limit violation occurs.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `oscillation_skip_flap_and_uptime`
+- **Check profile:** `CheckProfile.OSCILLATION`
+- **Implementation:** `get_profile_checks(CheckProfile.OSCILLATION)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Oscillation profile checks pass for every plane. | `pre.standard_bgp`, `post.standard_without_convergence` | partial | The shared health-check profile is not evaluated independently per plane. |
+| All expected iBGP sessions recover after churn. | `post.standard_without_convergence`, `snapshot.skip_flap_and_uptime` | implemented | None |
+| No crash, snapshot regression, or resource-limit violation occurs. | `snapshot.skip_flap_and_uptime` | partial | Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+
+**Validations outside the health-check chain**
+
+- The oscillation stage selects and restores sessions by plane.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 1.6 hours including shared topology setup.
 
 **Primary triage signals**
@@ -266,9 +398,9 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses a fixed 30-minute churn window across the representative four-plane topology.
 
-### Route and IGP Instability
+## Route and IGP Instability
 
-#### CICD-05: eBGP route oscillation
+### CICD-05: eBGP route oscillation
 
 - **Playbook:** `bgp_ebb_ebgp_route_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ebgp_route_oscillation_playbook`
@@ -289,6 +421,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - RIB and FIB converge after the final readvertisement.
 - Sessions, snapshots, and resource checks remain healthy.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `oscillation_skip_uptime`
+- **Check profile:** `CheckProfile.OSCILLATION`
+- **Implementation:** `get_profile_checks(CheckProfile.OSCILLATION)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_uptime` | `core-dump snapshot check`, `BGP session flap and peer-identity snapshot check` | Session uptime is intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Route-oscillation profile checks pass. | `pre.standard_bgp`, `post.standard_without_convergence` | implemented | None |
+| RIB and FIB converge after the final readvertisement. | `post.standard_without_convergence` | implemented | None |
+| Sessions, snapshots, and resource checks remain healthy. | `post.standard_without_convergence`, `snapshot.skip_uptime` | partial | Session uptime is skipped; resource checks are periodic tasks. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 1.9 hours including shared topology setup.
 
 **Primary triage signals**
@@ -305,7 +463,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-#### CICD-06: iBGP route oscillation
+### CICD-06: iBGP route oscillation
 
 - **Playbook:** `bgp_ebb_ibgp_route_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ibgp_route_oscillation_playbook`
@@ -326,6 +484,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - RIB and FIB converge after the final readvertisement.
 - Sessions, snapshots, and resource checks remain healthy.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `oscillation_full_snapshot`
+- **Check profile:** `CheckProfile.OSCILLATION`
+- **Implementation:** `get_profile_checks(CheckProfile.OSCILLATION)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Route-oscillation profile checks pass. | `pre.standard_bgp`, `post.standard_without_convergence` | implemented | None |
+| RIB and FIB converge after the final readvertisement. | `post.standard_without_convergence` | implemented | None |
+| Sessions, snapshots, and resource checks remain healthy. | `post.standard_without_convergence`, `snapshot.full` | partial | Resource checks are periodic tasks, not playbook-level health checks. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 2 hours including shared topology setup.
 
 **Primary triage signals**
@@ -342,7 +526,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-#### CICD-07: IGP PNH metric oscillation
+### CICD-07: IGP PNH metric oscillation
 
 - **Playbook:** `bgp_ebb_igp_pnh_metric_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_igp_pnh_metric_oscillation_playbook`
@@ -363,6 +547,34 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Packet validation sees only expected KEEPALIVE traffic and no OPEN or NOTIFICATION.
 - Cleanup restores original metrics and stable route state.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `igp_instability`
+- **Check profile:** `CheckProfile.IGP_INSTABILITY`
+- **Implementation:** `get_profile_checks(CheckProfile.IGP_INSTABILITY)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| IGP-instability profile checks pass. | `pre.standard_bgp`, `post.standard_without_convergence`, `snapshot.full` | implemented | None |
+| Packet validation sees only expected KEEPALIVE traffic and no OPEN or NOTIFICATION. | None | missing | No playbook-level health check validates the packet-message expectation. |
+| Cleanup restores original metrics and stable route state. | None | missing | Cleanup executes route injection but has no post-cleanup health check. |
+
+**Validations outside the health-check chain**
+
+- A stage-local counter assertion verifies that metric oscillation sends no BGP withdrawals.
+- The cleanup step re-injects the Open/R routes.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 50 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -379,7 +591,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses fixed metric cadence and route count for a repeatable daily signal.
 
-#### CICD-08: IGP unresolvable PNH
+### CICD-08: IGP unresolvable PNH
 
 - **Playbook:** `bgp_ebb_igp_unresolvable_pnh_playbook`
 - **Factory:** `get_bgp_ebb_igp_unresolvable_pnh_playbook`
@@ -400,6 +612,34 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - UPDATE convergence and final session health meet expectations.
 - Cleanup restores every deleted Open/R route.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `igp_instability`
+- **Check profile:** `CheckProfile.IGP_INSTABILITY`
+- **Implementation:** `get_profile_checks(CheckProfile.IGP_INSTABILITY)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| IGP-instability checks pass through withdrawal and restoration. | `pre.standard_bgp`, `post.standard_without_convergence`, `snapshot.full` | partial | The health-check chain runs around the workload, not after cleanup restoration. |
+| UPDATE convergence and final session health meet expectations. | `post.standard_without_convergence`, `snapshot.full` | partial | Final session and RIB/FIB health are checked, but explicit convergence is disabled. |
+| Cleanup restores every deleted Open/R route. | None | missing | Cleanup re-injects routes without a post-cleanup route-state health check. |
+
+**Validations outside the health-check chain**
+
+- The unresolvable-PNH stage performs direct BGP++ UPDATE counter validation.
+- The cleanup step re-injects the deleted Open/R routes.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Measured standalone runtime is not yet recorded; the case shares an 8-hour conveyor node budget.
 
 **Primary triage signals**
@@ -416,7 +656,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses a representative PNH subset and requires deterministic restoration.
 
-#### CICD-09: Multipath-group oscillation
+### CICD-09: Multipath-group oscillation
 
 - **Playbook:** `bgp_ebb_multipath_group_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_multipath_group_oscillation_playbook`
@@ -437,6 +677,33 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Width restores to the measured baseline after peers return.
 - Final session, RIB, FIB, and health checks pass.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `oscillation_skip_flap_and_uptime`
+- **Check profile:** `CheckProfile.OSCILLATION`
+- **Implementation:** `get_profile_checks(CheckProfile.OSCILLATION)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Multipath width decreases during disruption. | None | missing | Multipath width is asserted inside the oscillation stage, not by a health check. |
+| Width restores to the measured baseline after peers return. | None | missing | Baseline restoration is asserted inside the oscillation stage, not by a health check. |
+| Final session, RIB, FIB, and health checks pass. | `post.standard_without_convergence`, `snapshot.skip_flap_and_uptime` | implemented | None |
+
+**Validations outside the health-check chain**
+
+- The multipath oscillation stage measures, reduces, and validates restoration of live width.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 49 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -453,7 +720,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI measures the active baseline instead of assuming a qualification-lab width.
 
-#### CICD-10: BGP attribute churn
+### CICD-10: BGP attribute churn
 
 - **Playbook:** `bgp_ebb_attribute_churn_playbook`
 - **Factory:** `get_bgp_ebb_attribute_churn_playbook`
@@ -474,6 +741,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - No crash, snapshot regression, or blocking resource threshold is hit.
 - Final route state converges after churn.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `churn_storm`
+- **Check profile:** `CheckProfile.CHURN_STORM`
+- **Implementation:** `get_profile_checks(CheckProfile.CHURN_STORM)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.churn_storm` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check. CICD-11 supplies AS-path length and pool size invariants to the RIB/FIB consistency check. |
+| snapshot | `snapshot.core_only` | `core-dump snapshot check` | Session snapshots are omitted because sessions may churn throughout the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Churn profile checks and expected session checks pass. | `pre.standard_bgp`, `post.churn_storm` | implemented | None |
+| No crash, snapshot regression, or blocking resource threshold is hit. | `snapshot.core_only` | partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
+| Final route state converges after churn. | `post.churn_storm` | partial | RIB/FIB consistency is checked, but the explicit convergence health check is disabled. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run in non-terminating mode.
+
 **Expected runtime:** Approximately 2 hours including shared topology setup.
 
 **Primary triage signals**
@@ -490,7 +783,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI covers a deterministic attribute matrix and prefix slice; resource thresholds require ongoing calibration.
 
-#### CICD-11: BGP route storm
+### CICD-11: BGP route storm
 
 - **Playbook:** `bgp_ebb_route_storm_playbook`
 - **Factory:** `get_bgp_ebb_route_storm_playbook`
@@ -511,6 +804,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Final AS-path and pool invariants hold.
 - No crash, snapshot regression, or blocking resource threshold is hit.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `churn_storm`
+- **Check profile:** `CheckProfile.CHURN_STORM`
+- **Implementation:** `get_profile_checks(CheckProfile.CHURN_STORM)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.churn_storm` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check. CICD-11 supplies AS-path length and pool size invariants to the RIB/FIB consistency check. |
+| snapshot | `snapshot.core_only` | `core-dump snapshot check` | Session snapshots are omitted because sessions may churn throughout the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Storm profile and expected session checks pass. | `pre.standard_bgp`, `post.churn_storm` | implemented | None |
+| Final AS-path and pool invariants hold. | `post.churn_storm` | implemented | None |
+| No crash, snapshot regression, or blocking resource threshold is hit. | `snapshot.core_only` | partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
+
+**Validations outside the health-check chain**
+
+- Standard CPU and memory periodic tasks run in non-terminating mode.
+
 **Expected runtime:** Approximately 2.2 hours including shared topology setup.
 
 **Primary triage signals**
@@ -527,9 +846,9 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI fixes the storm cadence and duration; resource thresholds require ongoing calibration.
 
-### Operational Procedures
+## Operational Procedures
 
-#### CICD-12: Route-registry runtime update
+### CICD-12: Route-registry runtime update
 
 - **Playbook:** `bgp_ebb_route_registry_runtime_update_playbook`
 - **Factory:** `get_bgp_ebb_route_registry_runtime_update_playbook`
@@ -550,6 +869,34 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Convergence and session health remain within the runtime-update profile.
 - Cleanup restores permissive policy and withdrawn routes.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `runtime_update`
+- **Check profile:** `CheckProfile.RUNTIME_UPDATE`
+- **Implementation:** `get_profile_checks(CheckProfile.RUNTIME_UPDATE)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.runtime_update` | `standard BGP prechecks`, `BGP route-count verification` | Adds an eBGP post-policy route-count baseline to the standard prechecks. |
+| postcheck | `post.standard_with_convergence` | `postcheck_bgp_convergence_time`, `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Enforces final convergence and common BGP control-plane health. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Every expected route-count transition is observed. | `pre.runtime_update` | partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. |
+| Convergence and session health remain within the runtime-update profile. | `post.standard_with_convergence`, `snapshot.full` | implemented | None |
+| Cleanup restores permissive policy and withdrawn routes. | None | missing | Cleanup actions run after the health-check chain and have no post-cleanup check. |
+
+**Validations outside the health-check chain**
+
+- The runtime-update stage validates route counts after each policy transition.
+- Cleanup steps re-advertise prefixes and restore the permissive route filter.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 15 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -566,7 +913,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI exercises a representative prefix-list transition sequence and makes cleanup blocking.
 
-#### CICD-13: FAUU drain and undrain
+### CICD-13: FAUU drain and undrain
 
 - **Playbook:** `bgp_ebb_fauu_drain_undrain_playbook`
 - **Factory:** `get_bgp_ebb_fauu_drain_undrain_playbook`
@@ -587,6 +934,33 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Convergence completes within the five-minute stage limit.
 - Final sessions and all observed peer views are restored.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `drain_undrain`
+- **Check profile:** `CheckProfile.DRAIN_UNDRAIN`
+- **Implementation:** `get_profile_checks(CheckProfile.DRAIN_UNDRAIN)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap` | `core-dump snapshot check`, `BGP session uptime and peer-identity snapshot check` | Expected session flaps are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Drain profile checks pass. | `pre.standard_bgp`, `post.standard_without_convergence`, `snapshot.skip_flap` | implemented | None |
+| Convergence completes within the five-minute stage limit. | None | missing | The profile disables the convergence health check; the limit is enforced inside the drain stage. |
+| Final sessions and all observed peer views are restored. | `post.standard_without_convergence`, `snapshot.skip_flap` | partial | Sessions are checked, but captured peer views are validated inside the stage. |
+
+**Validations outside the health-check chain**
+
+- The FAUU drain stage enforces its convergence limit and validates eBGP, iBGP, and BGP-MON views.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 33 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -603,7 +977,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI performs one controlled drain and undrain sequence on the conveyor topology.
 
-#### CICD-14: Plane drain and undrain
+### CICD-14: Plane drain and undrain
 
 - **Playbook:** `bgp_ebb_plane_drain_undrain_playbook`
 - **Factory:** `get_bgp_ebb_plane_drain_undrain_playbook`
@@ -624,6 +998,33 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Convergence completes within the ten-minute stage limit.
 - Final plane policy, sessions, and peer views are restored.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `drain_undrain`
+- **Check profile:** `CheckProfile.DRAIN_UNDRAIN`
+- **Implementation:** `get_profile_checks(CheckProfile.DRAIN_UNDRAIN)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap` | `core-dump snapshot check`, `BGP session uptime and peer-identity snapshot check` | Expected session flaps are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Drain profile checks pass. | `pre.standard_bgp`, `post.standard_without_convergence`, `snapshot.skip_flap` | implemented | None |
+| Convergence completes within the ten-minute stage limit. | None | missing | The profile disables the convergence health check; the limit is enforced inside the drain stage. |
+| Final plane policy, sessions, and peer views are restored. | `post.standard_without_convergence`, `snapshot.skip_flap` | partial | Sessions are checked, but plane policy and captured views are stage-local validations. |
+
+**Validations outside the health-check chain**
+
+- The plane-drain stages enforce convergence limits and validate policy and captured peer views.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** At least 20 minutes of soak plus shared topology setup.
 
 **Primary triage signals**
@@ -640,9 +1041,9 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** CI uses one repeatable plane-drain sequence; runtime and signal-to-noise still require calibration.
 
-### Continuous Operation and Resource Regression
+## Continuous Operation and Resource Regression
 
-#### CICD-15: Longevity
+### CICD-15: Longevity
 
 - **Playbook:** `bgp_ebb_longevity_playbook`
 - **Factory:** `get_bgp_ebb_longevity_playbook`
@@ -663,6 +1064,31 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Final convergence and session state are healthy.
 - No crash or blocking resource trend is observed.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `soak_without_convergence`
+- **Check profile:** `CheckProfile.SOAK_NO_PRECHECK`
+- **Implementation:** `get_profile_checks(CheckProfile.SOAK_NO_PRECHECK)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| postcheck | `post.standard_without_convergence` | `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the explicit BGP convergence-time health check. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Snapshot and soak postchecks pass after quiescence. | `post.standard_without_convergence`, `snapshot.skip_flap_and_uptime` | implemented | None |
+| Final convergence and session state are healthy. | `post.standard_without_convergence`, `snapshot.skip_flap_and_uptime` | partial | Session and RIB/FIB state are checked, but the explicit convergence health check is disabled. |
+| No crash or blocking resource trend is observed. | `snapshot.skip_flap_and_uptime` | partial | Core dumps are checked, but this playbook has no CPU or memory periodic validation. |
+
+**Validations outside the health-check chain**
+
+- None.
+
 **Expected runtime:** Four hours of churn plus shared topology setup and postchecks.
 
 **Primary triage signals**
@@ -679,7 +1105,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Gate2 qualification runs 48 hours and includes broader route, attribute, drain, and restart stimuli. This four-hour community-churn workload is a provisional daily proxy, not equivalent qualification coverage.
 
-#### CICD-16: Queue and memory monitoring
+### CICD-16: Queue and memory monitoring
 
 - **Playbook:** `bgp_ebb_queue_memory_monitoring_playbook`
 - **Factory:** `get_bgp_ebb_queue_memory_monitoring_playbook`
@@ -700,6 +1126,30 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Queue and memory custom-step thresholds pass.
 - Route churn completes without a snapshot regression.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `session_snapshot_only`
+- **Check profile:** None
+- **Implementation:** `create_bgp_session_snapshot_check(skip_flap_check=True)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| snapshot | `snapshot.session_only_skip_flap` | `BGP session uptime snapshot check` | Used by CICD-16. The general core-dump check is intentionally omitted so unrelated process crashes do not fail this BGP++-specific monitor. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| BGP process remains alive and sessions remain healthy. | `snapshot.session_only_skip_flap` | partial | Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step. |
+| Queue and memory custom-step thresholds pass. | None | missing | Queue and memory thresholds have no playbook-level health check. |
+| Route churn completes without a snapshot regression. | `snapshot.session_only_skip_flap` | partial | The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
+
+**Validations outside the health-check chain**
+
+- The queue and memory custom step monitors the BGP PID, focused queues, process memory, churn, and CPU stress.
+
 **Expected runtime:** Sixty minutes of monitoring plus two-port topology setup.
 
 **Primary triage signals**
@@ -716,9 +1166,9 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Supplemental implementation-health signal; it does not establish complete G2-25 feature coverage.
 
-### Scaling and Feature Regression
+## Scaling and Feature Regression
 
-#### CICD-17: Nexthop-group count threshold
+### CICD-17: Nexthop-group count threshold
 
 - **Playbook:** `bgp_ebb_nexthop_group_count_threshold_playbook`
 - **Factory:** `get_bgp_ebb_nexthop_group_count_threshold_playbook`
@@ -739,6 +1189,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Convergence completes within ten minutes.
 - Snapshot, RIB, FIB, and session checks pass.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `soak_with_convergence`
+- **Check profile:** `CheckProfile.SOAK_NO_PRECHECK`
+- **Implementation:** `get_profile_checks(CheckProfile.SOAK_NO_PRECHECK)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| postcheck | `post.standard_with_convergence` | `postcheck_bgp_convergence_time`, `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Enforces final convergence and common BGP control-plane health. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Nexthop-group count remains below 100. | None | missing | The threshold is enforced by a periodic task, not a playbook-level health check. |
+| Convergence completes within ten minutes. | `post.standard_with_convergence` | implemented | None |
+| Snapshot, RIB, FIB, and session checks pass. | `post.standard_with_convergence`, `snapshot.skip_flap_and_uptime` | implemented | None |
+
+**Validations outside the health-check chain**
+
+- The nexthop-group polling periodic task enforces the count threshold during route oscillation.
+- Standard CPU and memory periodic tasks run during the workload.
+
 **Expected runtime:** Approximately 52 minutes including shared topology setup.
 
 **Primary triage signals**
@@ -755,7 +1231,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Supplemental scale signal; it does not cover every best-path, Add-Path, or multipath permutation in G2-25.
 
-#### CICD-18: UPDATE packing
+### CICD-18: UPDATE packing
 
 - **Playbook:** `bgp_ebb_update_packing_playbook`
 - **Factory:** `get_bgp_ebb_update_packing_playbook`
@@ -776,6 +1252,28 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Custom packing validation completes successfully.
 - BGP restart, IXIA protocols, and route acceptance remain healthy.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `custom_step_only`
+- **Check profile:** None
+- **Implementation:** `No playbook-level health checks`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+No playbook-level health-check chain is implemented.
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Captured UPDATEs meet the minimum packed size of 4,000 prefixes. | None | missing | Packing size is asserted only inside the custom step; no health-check chain exists. |
+| Custom packing validation completes successfully. | None | missing | Custom-step completion is not a playbook-level health check. |
+| BGP restart, IXIA protocols, and route acceptance remain healthy. | None | missing | These conditions are handled inside the custom step with no independent health checks. |
+
+**Validations outside the health-check chain**
+
+- The UPDATE-packing custom step drives IXIA, restarts BGP++, captures UPDATEs, and asserts packed size.
+
 **Expected runtime:** Five minutes of capture plus topology setup; conveyor budget is three hours.
 
 **Primary triage signals**
@@ -792,7 +1290,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Supplemental packing signal; it does not replace the dedicated update-group correctness and backpressure suite.
 
-#### CICD-19: Constant attribute storage
+### CICD-19: Constant attribute storage
 
 - **Playbook:** `bgp_ebb_constant_attribute_storage_playbook`
 - **Factory:** `get_bgp_ebb_constant_attribute_storage_playbook`
@@ -813,6 +1311,28 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Attribute assignments are collected successfully.
 - The configured memory-growth gate passes.
 
+**Outcome validation traceability**
+
+- **Health-check chain:** `custom_step_only`
+- **Check profile:** None
+- **Implementation:** `No playbook-level health checks`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+No playbook-level health-check chain is implemented.
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Required routes reach the RIB at every sweep point. | None | missing | Route acceptance is asserted only inside the custom step; no health-check chain exists. |
+| Attribute assignments are collected successfully. | None | missing | Attribute collection is custom-step-local and has no independent health check. |
+| The configured memory-growth gate passes. | None | missing | The memory-growth gate is custom-step-local and has no independent health check. |
+
+**Validations outside the health-check chain**
+
+- The constant-attribute custom step validates route acceptance, assignment collection, and memory growth.
+
 **Expected runtime:** At least 16 minutes of soak plus per-stage setup; conveyor budget is three hours.
 
 **Primary triage signals**
@@ -829,7 +1349,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Qualification difference:** Supplemental storage signal; it does not independently validate the complete community, AS-path, or policy feature matrices.
 
-#### CICD-20: Bounded ECMP sets
+### CICD-20: Bounded ECMP sets
 
 - **Playbook:** `bgp_ebb_bounded_ecmp_sets_playbook`
 - **Factory:** `get_bgp_ebb_bounded_ecmp_sets_playbook`
@@ -849,6 +1369,32 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 - Nexthop-group count remains below 50.
 - Session, RIB, FIB, and convergence profile checks pass.
 - Final state remains healthy after the soak.
+
+**Outcome validation traceability**
+
+- **Health-check chain:** `bounded_ecmp`
+- **Check profile:** `CheckProfile.PERF_SCALING_BOUNDED_ECMP`
+- **Implementation:** `get_profile_checks(CheckProfile.PERF_SCALING_BOUNDED_ECMP)`
+
+The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
+
+| Phase | Chain ID | Implemented Health Checks | Notes |
+| --- | --- | --- | --- |
+| postcheck | `post.bounded_ecmp` | `BGP session establishment`, `BGP RIB/FIB consistency`, `postcheck_bgp_convergence_time` | Minimal bounded-ECMP recovery chain with standardized retry behavior. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
+
+**Specification vs. implemented health checks**
+
+| Required Validation | Implemented By | Coverage | Gap |
+| --- | --- | --- | --- |
+| Nexthop-group count remains below 50. | None | missing | The threshold is enforced by a periodic task, not a playbook-level health check. |
+| Session, RIB, FIB, and convergence profile checks pass. | `post.bounded_ecmp`, `snapshot.skip_flap_and_uptime` | implemented | None |
+| Final state remains healthy after the soak. | `post.bounded_ecmp`, `snapshot.skip_flap_and_uptime` | implemented | None |
+
+**Validations outside the health-check chain**
+
+- The nexthop-group polling periodic task enforces the count threshold during route oscillation.
+- Standard CPU and memory periodic tasks run in non-terminating mode.
 
 **Expected runtime:** Twenty-five minutes of stimulus and soak plus topology setup; conveyor budget is three hours.
 

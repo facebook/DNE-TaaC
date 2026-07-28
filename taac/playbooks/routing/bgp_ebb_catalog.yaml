@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 suite:
   id: bgp_ebb
@@ -115,6 +115,193 @@ topologies:
       factories. Constant-attribute storage and queue/memory monitoring must
       migrate to a named topology artifact before this status can be modeled.
 
+validation_phases:
+  - id: pre.standard_bgp
+    phase: precheck
+    implementation: create_standard_prechecks
+    healthchecks:
+      - startup_bgp_session_verification
+      - startup_cpu_load_average_baseline
+      - startup_bgp_graceful_restart_disabled_check_v6
+      - startup_bgp_graceful_restart_disabled_check_v4
+      - startup_hardware_capacity_baseline
+      - startup_bgp_convergence
+      - startup_ibgp_pnh_verification
+      - rib_fib_consistency_precheck
+    notes: >-
+      The PNH check is present only for Open/R profiles. The remaining checks
+      establish the session, resource, convergence, and RIB/FIB baseline.
+  - id: pre.runtime_update
+    phase: precheck
+    implementation: get_profile_checks(CheckProfile.RUNTIME_UPDATE).prechecks
+    healthchecks:
+      - standard BGP prechecks
+      - BGP route-count verification
+    notes: Adds an eBGP post-policy route-count baseline to the standard prechecks.
+  - id: post.standard_with_convergence
+    phase: postcheck
+    implementation: create_standard_postchecks(check_bgp_convergence=True)
+    healthchecks:
+      - postcheck_bgp_convergence_time
+      - BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - service restart detection
+    notes: Enforces final convergence and common BGP control-plane health.
+  - id: post.restart_recovery
+    phase: postcheck
+    implementation: get_profile_checks(CheckProfile.DAEMON_RESTART).postchecks
+    healthchecks:
+      - postcheck_bgp_convergence_time
+      - BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - restart-aware BGP service check
+    notes: Treats the intentional BGP restart as expected and detects later restarts.
+  - id: post.cold_start_recovery
+    phase: postcheck
+    implementation: get_profile_checks(CheckProfile.COLD_START).postchecks
+    healthchecks:
+      - postcheck_bgp_convergence_time
+      - BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - restart-aware BGP service check
+    notes: EOR timer expiry is tolerated while final convergence remains enforced.
+  - id: post.standard_without_convergence
+    phase: postcheck
+    implementation: create_standard_postchecks(check_bgp_convergence=False)
+    healthchecks:
+      - BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - service restart detection
+    notes: Omits the explicit BGP convergence-time health check.
+  - id: post.churn_storm
+    phase: postcheck
+    implementation: get_profile_checks(CheckProfile.CHURN_STORM).postchecks
+    healthchecks:
+      - expected-count BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - service restart detection
+    notes: >-
+      Omits the convergence-time check. CICD-11 supplies AS-path length and pool
+      size invariants to the RIB/FIB consistency check.
+  - id: post.bounded_ecmp
+    phase: postcheck
+    implementation: get_profile_checks(CheckProfile.PERF_SCALING_BOUNDED_ECMP).postchecks
+    healthchecks:
+      - BGP session establishment
+      - BGP RIB/FIB consistency
+      - postcheck_bgp_convergence_time
+    notes: Minimal bounded-ECMP recovery chain with standardized retry behavior.
+  - id: snapshot.full
+    phase: snapshot
+    implementation: create_standard_snapshot_checks
+    healthchecks:
+      - core-dump snapshot check
+      - BGP session flap, uptime, and peer-identity snapshot check
+    notes: Compares the full session and crash state before and after the workload.
+  - id: snapshot.skip_uptime
+    phase: snapshot
+    implementation: create_standard_snapshot_checks(skip_uptime_check=True)
+    healthchecks:
+      - core-dump snapshot check
+      - BGP session flap and peer-identity snapshot check
+    notes: Session uptime is intentionally excluded.
+  - id: snapshot.skip_flap
+    phase: snapshot
+    implementation: create_standard_snapshot_checks(skip_flap_check=True)
+    healthchecks:
+      - core-dump snapshot check
+      - BGP session uptime and peer-identity snapshot check
+    notes: Expected session flaps are intentionally excluded.
+  - id: snapshot.skip_flap_and_uptime
+    phase: snapshot
+    implementation: create_standard_snapshot_checks(skip_flap_check=True, skip_uptime_check=True)
+    healthchecks:
+      - core-dump snapshot check
+      - BGP session peer-identity snapshot check
+    notes: Expected flap and uptime changes are intentionally excluded.
+  - id: snapshot.core_only
+    phase: snapshot
+    implementation: get_profile_checks(CheckProfile.CHURN_STORM).snapshot_checks
+    healthchecks:
+      - core-dump snapshot check
+    notes: Session snapshots are omitted because sessions may churn throughout the workload.
+  - id: snapshot.session_only_skip_flap
+    phase: snapshot
+    implementation: create_bgp_session_snapshot_check(skip_flap_check=True)
+    healthchecks:
+      - BGP session uptime snapshot check
+    notes: >-
+      Used by CICD-16. The general core-dump check is intentionally omitted so
+      unrelated process crashes do not fail this BGP++-specific monitor.
+
+validation_chains:
+  - id: daemon_restart
+    check_profile: DAEMON_RESTART
+    implementation: get_profile_checks(CheckProfile.DAEMON_RESTART)
+    phases: [pre.standard_bgp, post.restart_recovery, snapshot.skip_uptime]
+  - id: cold_start
+    check_profile: COLD_START
+    implementation: get_profile_checks(CheckProfile.COLD_START)
+    phases: [pre.standard_bgp, post.cold_start_recovery, snapshot.full]
+  - id: oscillation_skip_flap_and_uptime
+    check_profile: OSCILLATION
+    implementation: get_profile_checks(CheckProfile.OSCILLATION)
+    phases: [pre.standard_bgp, post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+  - id: oscillation_skip_uptime
+    check_profile: OSCILLATION
+    implementation: get_profile_checks(CheckProfile.OSCILLATION)
+    phases: [pre.standard_bgp, post.standard_without_convergence, snapshot.skip_uptime]
+  - id: oscillation_full_snapshot
+    check_profile: OSCILLATION
+    implementation: get_profile_checks(CheckProfile.OSCILLATION)
+    phases: [pre.standard_bgp, post.standard_without_convergence, snapshot.full]
+  - id: igp_instability
+    check_profile: IGP_INSTABILITY
+    implementation: get_profile_checks(CheckProfile.IGP_INSTABILITY)
+    phases: [pre.standard_bgp, post.standard_without_convergence, snapshot.full]
+  - id: churn_storm
+    check_profile: CHURN_STORM
+    implementation: get_profile_checks(CheckProfile.CHURN_STORM)
+    phases: [pre.standard_bgp, post.churn_storm, snapshot.core_only]
+  - id: runtime_update
+    check_profile: RUNTIME_UPDATE
+    implementation: get_profile_checks(CheckProfile.RUNTIME_UPDATE)
+    phases: [pre.runtime_update, post.standard_with_convergence, snapshot.full]
+  - id: drain_undrain
+    check_profile: DRAIN_UNDRAIN
+    implementation: get_profile_checks(CheckProfile.DRAIN_UNDRAIN)
+    phases: [pre.standard_bgp, post.standard_without_convergence, snapshot.skip_flap]
+  - id: soak_without_convergence
+    check_profile: SOAK_NO_PRECHECK
+    implementation: get_profile_checks(CheckProfile.SOAK_NO_PRECHECK)
+    phases: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+  - id: session_snapshot_only
+    check_profile: null
+    implementation: create_bgp_session_snapshot_check(skip_flap_check=True)
+    phases: [snapshot.session_only_skip_flap]
+  - id: soak_with_convergence
+    check_profile: SOAK_NO_PRECHECK
+    implementation: get_profile_checks(CheckProfile.SOAK_NO_PRECHECK)
+    phases: [post.standard_with_convergence, snapshot.skip_flap_and_uptime]
+  - id: custom_step_only
+    check_profile: null
+    implementation: No playbook-level health checks
+    phases: []
+  - id: bounded_ecmp
+    check_profile: PERF_SCALING_BOUNDED_ECMP
+    implementation: get_profile_checks(CheckProfile.PERF_SCALING_BOUNDED_ECMP)
+    phases: [post.bounded_ecmp, snapshot.skip_flap_and_uptime]
+
 entries:
   - id: CICD-01
     title: BGP daemon restart
@@ -132,6 +319,22 @@ entries:
       - Restart profile prechecks and postchecks pass.
       - Expected BGP sessions recover and remain established.
       - Snapshot checks show no unexpected state drift or core dump.
+    validation:
+      chain: daemon_restart
+      spec_vs_implemented:
+        - spec: Restart profile prechecks and postchecks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.restart_recovery]
+          gap: null
+        - spec: Expected BGP sessions recover and remain established.
+          coverage: implemented
+          implemented_by: [post.restart_recovery, snapshot.skip_uptime]
+          gap: null
+        - spec: Snapshot checks show no unexpected state drift or core dump.
+          coverage: implemented
+          implemented_by: [snapshot.skip_uptime]
+          gap: null
+      non_chain_validations: []
     expected_runtime: Approximately 34 minutes including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -161,6 +364,23 @@ entries:
       - Cold-start profile checks pass.
       - Expected sessions establish and convergence completes.
       - Snapshot, CPU, and memory checks remain healthy.
+    validation:
+      chain: cold_start
+      spec_vs_implemented:
+        - spec: Cold-start profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.cold_start_recovery]
+          gap: null
+        - spec: Expected sessions establish and convergence completes.
+          coverage: implemented
+          implemented_by: [post.cold_start_recovery, snapshot.full]
+          gap: null
+        - spec: Snapshot, CPU, and memory checks remain healthy.
+          coverage: partial
+          implemented_by: [snapshot.full]
+          gap: CPU and memory are periodic tasks, not playbook-level health checks.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: About 10 minutes of stimulus plus shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -190,6 +410,23 @@ entries:
       - Oscillation profile prechecks and postchecks pass.
       - All expected sessions recover after churn.
       - No crash, snapshot regression, or resource-limit violation occurs.
+    validation:
+      chain: oscillation_skip_flap_and_uptime
+      spec_vs_implemented:
+        - spec: Oscillation profile prechecks and postchecks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence]
+          gap: null
+        - spec: All expected sessions recover after churn.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+          gap: null
+        - spec: No crash, snapshot regression, or resource-limit violation occurs.
+          coverage: partial
+          implemented_by: [snapshot.skip_flap_and_uptime]
+          gap: Flap and uptime comparisons are skipped; resource limits are periodic tasks.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 1.5 hours including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -219,6 +456,24 @@ entries:
       - Oscillation profile checks pass for every plane.
       - All expected iBGP sessions recover after churn.
       - No crash, snapshot regression, or resource-limit violation occurs.
+    validation:
+      chain: oscillation_skip_flap_and_uptime
+      spec_vs_implemented:
+        - spec: Oscillation profile checks pass for every plane.
+          coverage: partial
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence]
+          gap: The shared health-check profile is not evaluated independently per plane.
+        - spec: All expected iBGP sessions recover after churn.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+          gap: null
+        - spec: No crash, snapshot regression, or resource-limit violation occurs.
+          coverage: partial
+          implemented_by: [snapshot.skip_flap_and_uptime]
+          gap: Flap and uptime comparisons are skipped; resource limits are periodic tasks.
+      non_chain_validations:
+        - The oscillation stage selects and restores sessions by plane.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 1.6 hours including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -248,6 +503,23 @@ entries:
       - Route-oscillation profile checks pass.
       - RIB and FIB converge after the final readvertisement.
       - Sessions, snapshots, and resource checks remain healthy.
+    validation:
+      chain: oscillation_skip_uptime
+      spec_vs_implemented:
+        - spec: Route-oscillation profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence]
+          gap: null
+        - spec: RIB and FIB converge after the final readvertisement.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence]
+          gap: null
+        - spec: Sessions, snapshots, and resource checks remain healthy.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.skip_uptime]
+          gap: Session uptime is skipped; resource checks are periodic tasks.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 1.9 hours including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -277,6 +549,23 @@ entries:
       - Route-oscillation profile checks pass.
       - RIB and FIB converge after the final readvertisement.
       - Sessions, snapshots, and resource checks remain healthy.
+    validation:
+      chain: oscillation_full_snapshot
+      spec_vs_implemented:
+        - spec: Route-oscillation profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence]
+          gap: null
+        - spec: RIB and FIB converge after the final readvertisement.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence]
+          gap: null
+        - spec: Sessions, snapshots, and resource checks remain healthy.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.full]
+          gap: Resource checks are periodic tasks, not playbook-level health checks.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 2 hours including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -306,6 +595,25 @@ entries:
       - IGP-instability profile checks pass.
       - Packet validation sees only expected KEEPALIVE traffic and no OPEN or NOTIFICATION.
       - Cleanup restores original metrics and stable route state.
+    validation:
+      chain: igp_instability
+      spec_vs_implemented:
+        - spec: IGP-instability profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence, snapshot.full]
+          gap: null
+        - spec: Packet validation sees only expected KEEPALIVE traffic and no OPEN or NOTIFICATION.
+          coverage: missing
+          implemented_by: []
+          gap: No playbook-level health check validates the packet-message expectation.
+        - spec: Cleanup restores original metrics and stable route state.
+          coverage: missing
+          implemented_by: []
+          gap: Cleanup executes route injection but has no post-cleanup health check.
+      non_chain_validations:
+        - A stage-local counter assertion verifies that metric oscillation sends no BGP withdrawals.
+        - The cleanup step re-injects the Open/R routes.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 50 minutes including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -335,6 +643,25 @@ entries:
       - IGP-instability checks pass through withdrawal and restoration.
       - UPDATE convergence and final session health meet expectations.
       - Cleanup restores every deleted Open/R route.
+    validation:
+      chain: igp_instability
+      spec_vs_implemented:
+        - spec: IGP-instability checks pass through withdrawal and restoration.
+          coverage: partial
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence, snapshot.full]
+          gap: The health-check chain runs around the workload, not after cleanup restoration.
+        - spec: UPDATE convergence and final session health meet expectations.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.full]
+          gap: Final session and RIB/FIB health are checked, but explicit convergence is disabled.
+        - spec: Cleanup restores every deleted Open/R route.
+          coverage: missing
+          implemented_by: []
+          gap: Cleanup re-injects routes without a post-cleanup route-state health check.
+      non_chain_validations:
+        - The unresolvable-PNH stage performs direct BGP++ UPDATE counter validation.
+        - The cleanup step re-injects the deleted Open/R routes.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Measured standalone runtime is not yet recorded; the case shares an 8-hour conveyor node budget.
     cadence: Daily.
     enforcement: blocking
@@ -364,6 +691,24 @@ entries:
       - Multipath width decreases during disruption.
       - Width restores to the measured baseline after peers return.
       - Final session, RIB, FIB, and health checks pass.
+    validation:
+      chain: oscillation_skip_flap_and_uptime
+      spec_vs_implemented:
+        - spec: Multipath width decreases during disruption.
+          coverage: missing
+          implemented_by: []
+          gap: Multipath width is asserted inside the oscillation stage, not by a health check.
+        - spec: Width restores to the measured baseline after peers return.
+          coverage: missing
+          implemented_by: []
+          gap: Baseline restoration is asserted inside the oscillation stage, not by a health check.
+        - spec: Final session, RIB, FIB, and health checks pass.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+          gap: null
+      non_chain_validations:
+        - The multipath oscillation stage measures, reduces, and validates restoration of live width.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 49 minutes including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -393,6 +738,23 @@ entries:
       - Churn profile checks and expected session checks pass.
       - No crash, snapshot regression, or blocking resource threshold is hit.
       - Final route state converges after churn.
+    validation:
+      chain: churn_storm
+      spec_vs_implemented:
+        - spec: Churn profile checks and expected session checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.churn_storm]
+          gap: null
+        - spec: No crash, snapshot regression, or blocking resource threshold is hit.
+          coverage: partial
+          implemented_by: [snapshot.core_only]
+          gap: Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks.
+        - spec: Final route state converges after churn.
+          coverage: partial
+          implemented_by: [post.churn_storm]
+          gap: RIB/FIB consistency is checked, but the explicit convergence health check is disabled.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run in non-terminating mode.
     expected_runtime: Approximately 2 hours including shared topology setup.
     cadence: Daily.
     enforcement: calibrating
@@ -422,6 +784,23 @@ entries:
       - Storm profile and expected session checks pass.
       - Final AS-path and pool invariants hold.
       - No crash, snapshot regression, or blocking resource threshold is hit.
+    validation:
+      chain: churn_storm
+      spec_vs_implemented:
+        - spec: Storm profile and expected session checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.churn_storm]
+          gap: null
+        - spec: Final AS-path and pool invariants hold.
+          coverage: implemented
+          implemented_by: [post.churn_storm]
+          gap: null
+        - spec: No crash, snapshot regression, or blocking resource threshold is hit.
+          coverage: partial
+          implemented_by: [snapshot.core_only]
+          gap: Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks.
+      non_chain_validations:
+        - Standard CPU and memory periodic tasks run in non-terminating mode.
     expected_runtime: Approximately 2.2 hours including shared topology setup.
     cadence: Daily.
     enforcement: calibrating
@@ -454,6 +833,25 @@ entries:
       - Every expected route-count transition is observed.
       - Convergence and session health remain within the runtime-update profile.
       - Cleanup restores permissive policy and withdrawn routes.
+    validation:
+      chain: runtime_update
+      spec_vs_implemented:
+        - spec: Every expected route-count transition is observed.
+          coverage: partial
+          implemented_by: [pre.runtime_update]
+          gap: The health-check chain validates only the baseline count; transitions are stage-local assertions.
+        - spec: Convergence and session health remain within the runtime-update profile.
+          coverage: implemented
+          implemented_by: [post.standard_with_convergence, snapshot.full]
+          gap: null
+        - spec: Cleanup restores permissive policy and withdrawn routes.
+          coverage: missing
+          implemented_by: []
+          gap: Cleanup actions run after the health-check chain and have no post-cleanup check.
+      non_chain_validations:
+        - The runtime-update stage validates route counts after each policy transition.
+        - Cleanup steps re-advertise prefixes and restore the permissive route filter.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 15 minutes including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -483,6 +881,24 @@ entries:
       - Drain profile checks pass.
       - Convergence completes within the five-minute stage limit.
       - Final sessions and all observed peer views are restored.
+    validation:
+      chain: drain_undrain
+      spec_vs_implemented:
+        - spec: Drain profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence, snapshot.skip_flap]
+          gap: null
+        - spec: Convergence completes within the five-minute stage limit.
+          coverage: missing
+          implemented_by: []
+          gap: The profile disables the convergence health check; the limit is enforced inside the drain stage.
+        - spec: Final sessions and all observed peer views are restored.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap]
+          gap: Sessions are checked, but captured peer views are validated inside the stage.
+      non_chain_validations:
+        - The FAUU drain stage enforces its convergence limit and validates eBGP, iBGP, and BGP-MON views.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 33 minutes including shared topology setup.
     cadence: Daily.
     enforcement: blocking
@@ -512,6 +928,24 @@ entries:
       - Drain profile checks pass.
       - Convergence completes within the ten-minute stage limit.
       - Final plane policy, sessions, and peer views are restored.
+    validation:
+      chain: drain_undrain
+      spec_vs_implemented:
+        - spec: Drain profile checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.standard_without_convergence, snapshot.skip_flap]
+          gap: null
+        - spec: Convergence completes within the ten-minute stage limit.
+          coverage: missing
+          implemented_by: []
+          gap: The profile disables the convergence health check; the limit is enforced inside the drain stage.
+        - spec: Final plane policy, sessions, and peer views are restored.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap]
+          gap: Sessions are checked, but plane policy and captured views are stage-local validations.
+      non_chain_validations:
+        - The plane-drain stages enforce convergence limits and validate policy and captured peer views.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: At least 20 minutes of soak plus shared topology setup.
     cadence: Daily after signal calibration.
     enforcement: calibrating
@@ -541,6 +975,22 @@ entries:
       - Snapshot and soak postchecks pass after quiescence.
       - Final convergence and session state are healthy.
       - No crash or blocking resource trend is observed.
+    validation:
+      chain: soak_without_convergence
+      spec_vs_implemented:
+        - spec: Snapshot and soak postchecks pass after quiescence.
+          coverage: implemented
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+          gap: null
+        - spec: Final convergence and session state are healthy.
+          coverage: partial
+          implemented_by: [post.standard_without_convergence, snapshot.skip_flap_and_uptime]
+          gap: Session and RIB/FIB state are checked, but the explicit convergence health check is disabled.
+        - spec: No crash or blocking resource trend is observed.
+          coverage: partial
+          implemented_by: [snapshot.skip_flap_and_uptime]
+          gap: Core dumps are checked, but this playbook has no CPU or memory periodic validation.
+      non_chain_validations: []
     expected_runtime: Four hours of churn plus shared topology setup and postchecks.
     cadence: Daily on a dedicated node.
     enforcement: calibrating
@@ -573,6 +1023,23 @@ entries:
       - BGP process remains alive and sessions remain healthy.
       - Queue and memory custom-step thresholds pass.
       - Route churn completes without a snapshot regression.
+    validation:
+      chain: session_snapshot_only
+      spec_vs_implemented:
+        - spec: BGP process remains alive and sessions remain healthy.
+          coverage: partial
+          implemented_by: [snapshot.session_only_skip_flap]
+          gap: Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step.
+        - spec: Queue and memory custom-step thresholds pass.
+          coverage: missing
+          implemented_by: []
+          gap: Queue and memory thresholds have no playbook-level health check.
+        - spec: Route churn completes without a snapshot regression.
+          coverage: partial
+          implemented_by: [snapshot.session_only_skip_flap]
+          gap: The session snapshot excludes expected flaps; route-churn completion is custom-step-local.
+      non_chain_validations:
+        - The queue and memory custom step monitors the BGP PID, focused queues, process memory, churn, and CPU stress.
     expected_runtime: Sixty minutes of monitoring plus two-port topology setup.
     cadence: Daily after threshold calibration.
     enforcement: calibrating
@@ -602,6 +1069,24 @@ entries:
       - Nexthop-group count remains below 100.
       - Convergence completes within ten minutes.
       - Snapshot, RIB, FIB, and session checks pass.
+    validation:
+      chain: soak_with_convergence
+      spec_vs_implemented:
+        - spec: Nexthop-group count remains below 100.
+          coverage: missing
+          implemented_by: []
+          gap: The threshold is enforced by a periodic task, not a playbook-level health check.
+        - spec: Convergence completes within ten minutes.
+          coverage: implemented
+          implemented_by: [post.standard_with_convergence]
+          gap: null
+        - spec: Snapshot, RIB, FIB, and session checks pass.
+          coverage: implemented
+          implemented_by: [post.standard_with_convergence, snapshot.skip_flap_and_uptime]
+          gap: null
+      non_chain_validations:
+        - The nexthop-group polling periodic task enforces the count threshold during route oscillation.
+        - Standard CPU and memory periodic tasks run during the workload.
     expected_runtime: Approximately 52 minutes including shared topology setup.
     cadence: Daily after threshold calibration.
     enforcement: calibrating
@@ -631,6 +1116,23 @@ entries:
       - Captured UPDATEs meet the minimum packed size of 4,000 prefixes.
       - Custom packing validation completes successfully.
       - BGP restart, IXIA protocols, and route acceptance remain healthy.
+    validation:
+      chain: custom_step_only
+      spec_vs_implemented:
+        - spec: Captured UPDATEs meet the minimum packed size of 4,000 prefixes.
+          coverage: missing
+          implemented_by: []
+          gap: Packing size is asserted only inside the custom step; no health-check chain exists.
+        - spec: Custom packing validation completes successfully.
+          coverage: missing
+          implemented_by: []
+          gap: Custom-step completion is not a playbook-level health check.
+        - spec: BGP restart, IXIA protocols, and route acceptance remain healthy.
+          coverage: missing
+          implemented_by: []
+          gap: These conditions are handled inside the custom step with no independent health checks.
+      non_chain_validations:
+        - The UPDATE-packing custom step drives IXIA, restarts BGP++, captures UPDATEs, and asserts packed size.
     expected_runtime: Five minutes of capture plus topology setup; conveyor budget is three hours.
     cadence: Daily.
     enforcement: blocking
@@ -660,6 +1162,23 @@ entries:
       - Required routes reach the RIB at every sweep point.
       - Attribute assignments are collected successfully.
       - The configured memory-growth gate passes.
+    validation:
+      chain: custom_step_only
+      spec_vs_implemented:
+        - spec: Required routes reach the RIB at every sweep point.
+          coverage: missing
+          implemented_by: []
+          gap: Route acceptance is asserted only inside the custom step; no health-check chain exists.
+        - spec: Attribute assignments are collected successfully.
+          coverage: missing
+          implemented_by: []
+          gap: Attribute collection is custom-step-local and has no independent health check.
+        - spec: The configured memory-growth gate passes.
+          coverage: missing
+          implemented_by: []
+          gap: The memory-growth gate is custom-step-local and has no independent health check.
+      non_chain_validations:
+        - The constant-attribute custom step validates route acceptance, assignment collection, and memory growth.
     expected_runtime: At least 16 minutes of soak plus per-stage setup; conveyor budget is three hours.
     cadence: Daily.
     enforcement: blocking
@@ -689,6 +1208,24 @@ entries:
       - Nexthop-group count remains below 50.
       - Session, RIB, FIB, and convergence profile checks pass.
       - Final state remains healthy after the soak.
+    validation:
+      chain: bounded_ecmp
+      spec_vs_implemented:
+        - spec: Nexthop-group count remains below 50.
+          coverage: missing
+          implemented_by: []
+          gap: The threshold is enforced by a periodic task, not a playbook-level health check.
+        - spec: Session, RIB, FIB, and convergence profile checks pass.
+          coverage: implemented
+          implemented_by: [post.bounded_ecmp, snapshot.skip_flap_and_uptime]
+          gap: null
+        - spec: Final state remains healthy after the soak.
+          coverage: implemented
+          implemented_by: [post.bounded_ecmp, snapshot.skip_flap_and_uptime]
+          gap: null
+      non_chain_validations:
+        - The nexthop-group polling periodic task enforces the count threshold during route oscillation.
+        - Standard CPU and memory periodic tasks run in non-terminating mode.
     expected_runtime: Twenty-five minutes of stimulus and soak plus topology setup; conveyor budget is three hours.
     cadence: Daily after threshold calibration.
     enforcement: calibrating
