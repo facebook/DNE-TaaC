@@ -191,6 +191,35 @@ Use `--check` in tests and automation. It exits nonzero when the Markdown is
 missing or stale. Google Docs synchronization consumes the generated Markdown,
 not the YAML and not a TestConfig.
 
+## Synchronizing catalogs to Google Docs
+
+`catalog_gdoc_sync.yaml` is the registry for every catalog published to Google
+Docs. Add one enabled target with its catalog resource, generated Markdown,
+document ID, stable tab ID, and document mode. Use `pageless` for catalog tabs
+so wide tables have room to remain readable. The generic command processes all
+enabled targets; `--target` narrows a manual run to one suite:
+
+```bash
+# Verify that every registered remote tab has the current Markdown fingerprint.
+buck run fbcode//neteng/test_infra/dne/taac/playbooks/routing:sync_playbook_catalogs_to_gdocs -- \
+  --check
+
+# Preview Google's merge-aware GHTML update without writing.
+buck run fbcode//neteng/test_infra/dne/taac/playbooks/routing:sync_playbook_catalogs_to_gdocs -- \
+  --target bgp_ebb --dry-run
+
+# Synchronize all enabled catalogs.
+buck run fbcode//neteng/test_infra/dne/taac/playbooks/routing:sync_playbook_catalogs_to_gdocs
+```
+
+The publisher refuses stale generated Markdown. It fetches only the configured
+tab as GHTML, preserves the tab and document metadata, replaces that tab's body,
+and atomically replaces that tab through `meta google.docs.advanced replace`.
+A configured tab is generated output: the local catalog owns that tab, so do
+not edit its published body directly. Every write is read back and fingerprint
+verified. Markdown tables become native Google Docs tables. Content in other
+tabs is never part of the update.
+
 ## Imports and exports
 
 Each suite module maintains an explicit `__all__` containing its public

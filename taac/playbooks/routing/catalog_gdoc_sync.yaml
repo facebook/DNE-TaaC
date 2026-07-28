@@ -1,0 +1,10 @@
+schema_version: 1
+
+targets:
+  - id: bgp_ebb
+    enabled: true
+    catalog: bgp_ebb_catalog.yaml
+    markdown: bgp_ebb_catalog.md
+    document_id: 1x8xcLAuIKh7yULkq6lbX3yW8jqCo2h6QWxl-rQIBuFw
+    tab_id: t.q0og5ppdkq7l
+    document_mode: pageless
