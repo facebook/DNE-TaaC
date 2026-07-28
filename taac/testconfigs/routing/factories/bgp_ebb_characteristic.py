@@ -367,6 +367,12 @@ _CONSTANT_ATTR_ROUTE_SWEEP: list[int] = [10000, 20000, 30000, 40000, 50000]
 # EB_FA_TRANSITED -- satisfies the EB-FA-IN ingress allowlist so eBGP-learned
 # scale prefixes are accepted (and re-advertised out the egress peers).
 _CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES: list[str] = ["65529:39744"]
+# Cap communities-per-route so the IXIA driver's NoOfCommunities stays small
+# enough to materialize BgpCommunitiesList. A large per-route count (e.g. the
+# full 50-entry pool) makes the driver silently drop ALL communities -- incl.
+# the 65529:39744 acceptance tag -- so EB-FA-IN rejects every route (Accepted=0).
+# Matches SC2 / the legacy single-axis config.
+_CONSTANT_ATTR_MAX_COMMUNITIES_PER_ROUTE: int = 5
 
 # Interface-state nexthop-resolution gflag. This test runs WITHOUT_OPEN_R, so
 # recursive/loopback nexthops never resolve via the (dead) Open/R FIB stream;
@@ -784,6 +790,10 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
         router_id=testbed.router_id,
         enable_update_group=enable_update_group,
         constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,
+        # Without this cap the full 50-entry pool is attached per route; the IXIA
+        # community driver then silently drops ALL communities (incl. the
+        # 65529:39744 acceptance tag) -> EB-FA-IN denies every route (Accepted=0).
+        max_communities_per_route_from_pool=_CONSTANT_ATTR_MAX_COMMUNITIES_PER_ROUTE,
         as_path_pool_size=100,
         community_pool_size=50,
         as_path_length=4,
