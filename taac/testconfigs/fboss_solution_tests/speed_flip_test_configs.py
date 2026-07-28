@@ -20,6 +20,7 @@ from taac.playbooks.playbook_definitions import (
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_drain_undrain_step,
+    create_fpf_set_interface_admin_step,
     create_longevity_step,
     create_port_speed_validation_step as get_validation_step,
     create_register_speed_flip_patcher_step,
@@ -149,6 +150,239 @@ def bmc_reboot_undrain_stages(
     return _reboot_undrain_stages(
         health_check_params,
         taac_types.SystemRebootTrigger.BMC_POWER_RESET,
+    )
+
+
+@dataclass
+class Circuit:
+    """One physical link (subport) exercised by a speed-flip test.
+
+    ``a_end`` is the DUT side (where patchers, reboots and admin-down run);
+    ``z_end`` is the peer side of the same link. Both ends flip together, since a
+    link's two ends must run at the same speed. A "cage" is the interface minus
+    its trailing subport (``eth1/17/1`` and ``eth1/17/5`` -> cage ``eth1/17``);
+    subport ``/1`` is the primary (goes to the target speed, subsuming its mate)
+    and ``/5`` is the subsumable subport.
+    """
+
+    a_end_device_name: str
+    a_end_interface_name: str
+    z_end_device_name: str
+    z_end_interface_name: str
+
+
+def _cage_base(interface_name: str) -> str:
+    """Cage base = interface minus trailing subport (eth1/17/1 -> eth1/17)."""
+    return interface_name.rsplit("/", 1)[0]
+
+
+def _subport(interface_name: str) -> str:
+    """Trailing subport id (eth1/17/1 -> '1')."""
+    return interface_name.rsplit("/", 1)[1]
+
+
+def _speed_flip_hc_params(
+    ports_by_device: t.Dict[str, t.List[str]], expected_speed_gbps: int
+) -> t.Dict[str, t.Any]:
+    """Build health_check_params validating each given port at a speed."""
+    return {
+        device: {
+            "interfaces": [
+                {"interface_name": port, "expected_speed": expected_speed_gbps}
+                for port in ports
+            ]
+        }
+        for device, ports in ports_by_device.items()
+    }
+
+
+def _circuit_endpoints(circuits: t.List[Circuit]) -> t.Dict[str, t.List[str]]:
+    """Collapse circuits into an {device: [interfaces]} map covering BOTH ends."""
+    endpoints: t.Dict[str, t.List[str]] = {}
+    for circuit in circuits:
+        endpoints.setdefault(circuit.a_end_device_name, []).append(
+            circuit.a_end_interface_name
+        )
+        endpoints.setdefault(circuit.z_end_device_name, []).append(
+            circuit.z_end_interface_name
+        )
+    return endpoints
+
+
+def build_speed_flip_subsume_churn_playbook(
+    playbook_name: str,
+    circuit_info: t.List[Circuit],
+    baseline_speed_gbps: int = 400,
+    target_speed_gbps: int = 800,
+    churn_iterations: int = 1,
+) -> Playbook:
+    """SPD_041: multi-patcher 400G<->800G subsume churn on 51T.
+
+    ``circuit_info`` must contain exactly 6 circuits = 3 dual cages x 2 subports.
+    Per cage, subport ``/1`` is the primary (-> target_speed_gbps, subsumes its
+    mate) and ``/5`` is the subsumable subport. Cages are ordered by a_end cage
+    base -> the spec's A-F: A=cage_1 /1, B=cage_1 /5, C=cage_2 /1, D=cage_2 /5,
+    E=cage_3 /1, F=cage_3 /5. Both a_end (DUT) and z_end (peer) ends flip.
+
+    Two named patchers overlap on C,D,E,F:
+    - churn_patcher_1 = all 3 cages (A-F)
+    - churn_patcher_2 = cages 2 & 3 (C,D,E,F)
+
+    Sequence (each register/unregister step warmboots the agent):
+      0. Precheck: assert all 6 circuits (both ends) at baseline_speed_gbps (400G).
+      1. Register churn_patcher_1 (A-F -> 800G). B,D up initially, subsumed by the
+         flip. Validate primaries at 800G.
+      2. Force F (cage_3 /5) admin-down on the DUT, then register churn_patcher_2
+         (C,D,E,F -> 800G). Validate primaries at 800G.
+      3. Churn x churn_iterations: remove p1, remove p2, reapply p1, reapply p2,
+         remove p2 (each +warmboot, each followed by a primary-speed validation).
+
+    Asserts: exactly 6 circuits; exactly 3 distinct a_end cages; exactly 3
+    distinct z_end cages. The all-at-400G check is enforced at runtime (step 0).
+
+    NOTE (review): create_fpf_set_interface_admin_step downs F on the DUT (a_end)
+    only; the z_end side of F is not admin-downed by this builder.
+    """
+    if len(circuit_info) != 6:
+        raise ValueError(
+            f"SPD_041 subsume churn requires exactly 6 circuits "
+            f"(3 dual cages x 2 subports); got {len(circuit_info)}."
+        )
+    a_cages = {_cage_base(c.a_end_interface_name) for c in circuit_info}
+    z_cages = {_cage_base(c.z_end_interface_name) for c in circuit_info}
+    if len(a_cages) != 3:
+        raise ValueError(
+            f"SPD_041 requires exactly 3 a_end cages; got {len(a_cages)}: "
+            f"{sorted(a_cages)}."
+        )
+    if len(z_cages) != 3:
+        raise ValueError(
+            f"SPD_041 requires exactly 3 z_end cages; got {len(z_cages)}: "
+            f"{sorted(z_cages)}."
+        )
+
+    patcher1_name = "churn_patcher_1"
+    patcher2_name = "churn_patcher_2"
+
+    # Order cages deterministically by a_end cage base -> cage_1, cage_2, cage_3.
+    cages_by_base: t.Dict[str, t.List[Circuit]] = {}
+    for circuit in circuit_info:
+        cages_by_base.setdefault(_cage_base(circuit.a_end_interface_name), []).append(
+            circuit
+        )
+    ordered_cages = [cages_by_base[base] for base in sorted(cages_by_base)]
+
+    patcher1_circuits = circuit_info  # A-F
+    patcher2_circuits = ordered_cages[1] + ordered_cages[2]  # cages 2 & 3
+    primary_circuits = [
+        c for c in circuit_info if _subport(c.a_end_interface_name) == "1"
+    ]
+    # F = subsumable (/5) subport of cage_3, DUT (a_end) side.
+    f_circuit = next(
+        c for c in ordered_cages[2] if _subport(c.a_end_interface_name) == "5"
+    )
+
+    primary_hc = _speed_flip_hc_params(
+        _circuit_endpoints(primary_circuits), target_speed_gbps
+    )
+
+    def _patcher_step(
+        patcher_name: str, circuits: t.List[Circuit], register: bool
+    ) -> Stage:
+        # target_port_cage_count = number of a_end cages this patcher covers, so
+        # the runtime cage gate passes for this intentionally-3/2-cage test.
+        cage_count = len({_cage_base(c.a_end_interface_name) for c in circuits})
+        return create_steps_stage(
+            steps=[
+                create_register_speed_flip_patcher_step(
+                    register_patcher=register,
+                    port_state_change=False,  # B,D up initially; F handled below
+                    patcher_name=patcher_name,
+                    endpoints=_circuit_endpoints(circuits),
+                    speed_in_gbps=target_speed_gbps,
+                    target_port_cage_count=cage_count,
+                ),
+                get_validation_step(primary_hc),
+            ]
+        )
+
+    stages: t.List[Stage] = []
+
+    # 0. Precheck: all 6 circuits (both ends) at baseline (400G).
+    stages.append(
+        create_steps_stage(
+            steps=[
+                get_validation_step(
+                    _speed_flip_hc_params(
+                        _circuit_endpoints(circuit_info), baseline_speed_gbps
+                    )
+                )
+            ]
+        )
+    )
+
+    # 1. churn_patcher_1 (A-F) -> 800G; B,D subsumed (were up).
+    stages.append(_patcher_step(patcher1_name, patcher1_circuits, register=True))
+
+    # 2. Force F down (DUT a_end), then churn_patcher_2 (C,D,E,F) -> 800G.
+    stages.append(
+        create_steps_stage(
+            steps=[
+                create_fpf_set_interface_admin_step(
+                    interfaces=[f_circuit.a_end_interface_name], enable=False
+                ),
+            ]
+        )
+    )
+    stages.append(_patcher_step(patcher2_name, patcher2_circuits, register=True))
+
+    # 3. Churn: remove p1, remove p2, reapply p1, reapply p2, remove p2.
+    for _ in range(churn_iterations):
+        stages.append(_patcher_step(patcher1_name, patcher1_circuits, register=False))
+        stages.append(_patcher_step(patcher2_name, patcher2_circuits, register=False))
+        stages.append(_patcher_step(patcher1_name, patcher1_circuits, register=True))
+        stages.append(_patcher_step(patcher2_name, patcher2_circuits, register=True))
+        stages.append(_patcher_step(patcher2_name, patcher2_circuits, register=False))
+
+    return create_speed_flip_playbook(
+        name=playbook_name,
+        stages=stages,
+        iteration=1,
+    )
+
+
+def build_subsume_churn_test_config(
+    test_config_name: str,
+    playbook_name: str,
+    circuit_info: t.List[Circuit],
+    churn_iterations: int = 1,
+) -> TestConfig:
+    """Wrap the SPD_041 subsume-churn playbook into a runnable TestConfig."""
+    churn_playbook = build_speed_flip_subsume_churn_playbook(
+        playbook_name=playbook_name,
+        circuit_info=circuit_info,
+        churn_iterations=churn_iterations,
+    )
+    endpoints = _circuit_endpoints(circuit_info)
+    dut_device = circuit_info[0].a_end_device_name
+    snapshot_checks = [
+        create_port_speed_snapshot_check(
+            json_params={"endpoints": endpoints},
+            pre_snapshot_checkpoint_id="test_case_start",
+            post_snapshot_checkpoint_id="test_case_end",
+        ),
+    ]
+    wrapped = create_speed_flip_test_config_playbook(
+        built_playbook=churn_playbook,
+        snapshot_checks=snapshot_checks,
+    )
+    return TestConfig(
+        name=test_config_name,
+        basset_pool="dne.test",
+        endpoints=[
+            Endpoint(name=device, dut=(device == dut_device)) for device in endpoints
+        ],
+        playbooks=[wrapped],
     )
 
 
@@ -1997,4 +2231,50 @@ SPEED_FLIP_TEST_CONFIGS = [
             ),
         ],
     ).build_test_config(),
+    # SPD_041: multi-patcher 400G<->800G subsume churn on 51T (fsw003 DUT).
+    # 3 dual cages x 2 subports = 6 circuits, all provisioned at 400G, all to
+    # peer rsw001. cage_1=eth1/17, cage_2=eth1/21, cage_3=eth1/22 (a_end).
+    build_subsume_churn_test_config(
+        test_config_name="SPEED_FLIP_51T_SUBSUME_CHURN",
+        playbook_name="SPEED_FLIP_51T_SUBSUME_CHURN_PLAYBOOK",
+        circuit_info=[
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/17/1",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/1/1",
+            ),
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/17/5",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/1/5",
+            ),
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/21/1",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/2/1",
+            ),
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/21/5",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/2/5",
+            ),
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/22/1",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/3/1",
+            ),
+            Circuit(
+                a_end_device_name="fsw003.p001.m001.qzr1",
+                a_end_interface_name="eth1/22/5",
+                z_end_device_name="rsw001.p001.m001.qzr1",
+                z_end_interface_name="eth1/3/5",
+            ),
+        ],
+        churn_iterations=10,
+    ),
 ]
