@@ -23,6 +23,7 @@ from taac.health_checks.healthcheck_definitions import (
 )
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
+    create_bgp_ebb_route_storm_stage,
     create_bgp_igp_instability_unresolvable_pnhs_stage,
     create_bgp_restart_test_stage,
     create_bgp_session_oscillation_stage,
@@ -32,10 +33,8 @@ from taac.stages.stage_definitions import (
     create_multipath_group_oscillation_stage,
     create_plane_aware_bgp_session_oscillation_stage,
     create_plane_drain_undrain_stage,
-    create_revert_route_storm_stage,
     create_route_oscillations_stage,
     create_route_registry_runtime_update_stage,
-    create_route_storm_stage,
     create_steps_stage,
 )
 from taac.steps.step_definitions import (
@@ -434,6 +433,7 @@ def get_bgp_ebb_route_storm_playbook(
     peergroup_ibgp_v4: str,
     total_session_count: int,
     ixia_interface_mimic_ibgp: str,
+    observer_peer_parent_prefix: str,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
@@ -441,12 +441,10 @@ def get_bgp_ebb_route_storm_playbook(
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
-    Drives the BGP++ peer set through a route-storm advertise/withdraw
-    cycle on the IBGP plane 1 traffic generator interface, then reverts
-    and waits for convergence. Used by the BAG010_ASH6 BGP++ instability
-    TestConfigs to verify bgpcpp survives sustained route churn (and that
-    the constant-attribute-storage path holds AS path / pool size
-    invariants set in `rib_fib_json_params`).
+    Drives 10,500 dual-stack plane-1 route paths through 60 verified
+    advertise/withdraw cycles with a deterministic supported heavy-attribute
+    shape. The workflow groups IXIA protocol lifecycle changes, proves each
+    transition on IXIA and the DUT, and restores the exact captured baseline.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -455,16 +453,15 @@ def get_bgp_ebb_route_storm_playbook(
         total_session_count: Total expected established BGP sessions.
         ixia_interface_mimic_ibgp: IXIA logical interface name that mimics
             the IBGP peers; route-storm and revert stages target this.
+        observer_peer_parent_prefix: Parent prefix selecting BGP-MON sessions
+            that are excluded from the fail-closed measured session count.
         profile: `BgpPlusPlusProfile` enum value; enables IBGP-PNH precheck
             when the OpenR variant is selected.
 
     Returns:
         A `Playbook` named `bgp_ebb_route_storm_playbook` with standard
-        BGP++ prechecks/postchecks (postcheck enforces 255 AS path length
-        and pool size 10), core-dumps snapshot check, standard periodic
-        tasks (memory @ 10 GiB), a route-storm stage (3600s advertise/
-        withdraw on the IBGP plane 1 pool), a revert stage, and a 120s
-        convergence-wait stage.
+        BGP++ prechecks/postchecks, core-dump snapshots, standard periodic
+        resource tasks, and one audited failure-safe route-storm stage.
     """
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
@@ -474,11 +471,6 @@ def get_bgp_ebb_route_storm_playbook(
             expected_established_sessions=total_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             exclude_bgp_mon=exclude_bgp_mon,
-            rib_fib_json_params={
-                "debug_route_attributes": True,
-                "expected_as_path_length": 255,
-                "expected_pool_size": 10,
-            },
         ),
     )
     return Playbook(
@@ -496,29 +488,32 @@ def get_bgp_ebb_route_storm_playbook(
             memory_terminate_on_error=False,
         ),
         stages=[
-            create_route_storm_stage(
-                device_name=device_name,
-                interface=ixia_interface_mimic_ibgp,
-                prefix_pool_regex=".*IBGP.*PLANE_1.*",
-                prefix_start_index=0,
-                prefix_end_index=500,
-                device_group_regex=".*IBGP.*PLANE_1.*",
-                test_duration_seconds=3600,
-                advertise_time=30,
-                withdraw_time=30,
-            ),
-            create_revert_route_storm_stage(
-                device_name=device_name,
-                interface=ixia_interface_mimic_ibgp,
-                device_group_regex=".*IBGP.*PLANE_1.*",
-            ),
-            create_steps_stage(
-                steps=[
-                    create_longevity_step(
-                        duration=120,
-                        description="Wait for BGP convergence after revert",
-                    ),
-                ]
+            create_bgp_ebb_route_storm_stage(
+                hostname=device_name,
+                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                expected_established_sessions=total_session_count,
+                observer_peer_parent_prefix=observer_peer_parent_prefix,
+                prefix_pool_names={
+                    "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+                    "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+                },
+                peer_count_per_plane=62,
+                selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
+                routes_per_peer=750,
+                samples_per_block=2,
+                cycles=60,
+                advertise_seconds=30,
+                withdraw_seconds=30,
+                poll_interval_seconds=5,
+                transition_timeout_seconds=30,
+                session_establish_timeout_seconds=300,
+                restore_timeout_seconds=300,
+                quiet_window_seconds=120,
+                max_lookup_concurrency=8,
+                as_path_pool_size=10,
+                as_path_length=255,
+                communities_per_route=32,
+                extended_communities_per_route=1,
             ),
         ],
     )

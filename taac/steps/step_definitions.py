@@ -365,6 +365,90 @@ def create_bgp_attribute_churn_step(
     )
 
 
+def create_bgp_route_storm_step(
+    *,
+    hostname: str,
+    ixia_interface_mimic_ibgp: str,
+    expected_established_sessions: int,
+    observer_peer_parent_prefix: str,
+    prefix_pool_names: t.Mapping[str, str],
+    peer_count_per_plane: int,
+    selected_peer_rows: t.Sequence[int],
+    routes_per_peer: int,
+    samples_per_block: int,
+    cycles: int,
+    advertise_seconds: int,
+    withdraw_seconds: int,
+    poll_interval_seconds: int,
+    transition_timeout_seconds: int,
+    session_establish_timeout_seconds: int,
+    restore_timeout_seconds: int,
+    quiet_window_seconds: int,
+    max_lookup_concurrency: int,
+    as_path_pool_size: int,
+    as_path_length: int,
+    communities_per_route: int,
+    extended_communities_per_route: int,
+    description: str | None = None,
+) -> Step:
+    """Create the audited CICD-11 route-storm workflow."""
+    if not hostname or not ixia_interface_mimic_ibgp or not observer_peer_parent_prefix:
+        raise ValueError(
+            "hostname, IXIA iBGP interface, and observer prefix must be non-empty"
+        )
+    if set(prefix_pool_names) != {"ipv4", "ipv6"} or any(
+        not name for name in prefix_pool_names.values()
+    ):
+        raise ValueError("prefix_pool_names must define non-empty ipv4 and ipv6 pools")
+
+    rows = list(selected_peer_rows)
+    if rows != sorted(set(rows)) or any(
+        row < 0 or row >= peer_count_per_plane for row in rows
+    ):
+        raise ValueError("selected_peer_rows must be unique, sorted, and in range")
+    if len(rows) * routes_per_peer * 2 != 10_500:
+        raise ValueError("CICD-11 requires exactly 10,500 dual-stack route paths")
+    numeric_params = {
+        "expected_established_sessions": expected_established_sessions,
+        "peer_count_per_plane": peer_count_per_plane,
+        "routes_per_peer": routes_per_peer,
+        "samples_per_block": samples_per_block,
+        "cycles": cycles,
+        "advertise_seconds": advertise_seconds,
+        "withdraw_seconds": withdraw_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "transition_timeout_seconds": transition_timeout_seconds,
+        "session_establish_timeout_seconds": session_establish_timeout_seconds,
+        "restore_timeout_seconds": restore_timeout_seconds,
+        "quiet_window_seconds": quiet_window_seconds,
+        "max_lookup_concurrency": max_lookup_concurrency,
+        "as_path_pool_size": as_path_pool_size,
+        "as_path_length": as_path_length,
+        "communities_per_route": communities_per_route,
+        "extended_communities_per_route": extended_communities_per_route,
+    }
+    if any(value <= 0 for value in numeric_params.values()):
+        raise ValueError("BGP route-storm numeric parameters must be positive")
+    if extended_communities_per_route != 1:
+        raise ValueError(
+            "CICD-11 currently requires exactly one extended community pending "
+            "isolated IXIA capability validation"
+        )
+
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_route_storm",
+            "hostname": hostname,
+            "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
+            "observer_peer_parent_prefix": observer_peer_parent_prefix,
+            "prefix_pool_names": dict(prefix_pool_names),
+            "selected_peer_rows": rows,
+            **numeric_params,
+        },
+        description=description or "Run audited dual-stack BGP route storm",
+    )
+
+
 def create_snapshot_bgp_sent_route_counts_step(
     hostname: str,
     snapshot_key: str,

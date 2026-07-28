@@ -78,8 +78,8 @@ class CheckProfile(enum.Enum):
     # skips flap only (uptime still checked).
     DRAIN_UNDRAIN = "drain_undrain"
     # CICD-11 route storm: convergence OFF, expected established-session count
-    # enforced, optional RIB-FIB route-storm invariants, and a context-selected
-    # snapshot shape.
+    # enforced, and a context-selected snapshot shape. The custom steps own
+    # exact in-window route, attribute, and session-stability verdicts.
     CHURN_STORM = "churn_storm"
     # IGP instability (PNH-metric oscillation / unresolvable PNHs): convergence
     # OFF, standard snapshot, plus a BGP tcpdump check whose message-types and
@@ -135,9 +135,6 @@ class ProfileContext:
     expected_established_sessions: int = 0
     snapshot_skip_flap: bool = False
     snapshot_skip_uptime: bool = False
-    # Churn-storm: extra RIB-FIB consistency json_params (route-storm invariants
-    # such as expected AS-path length / pool size); None = standard RIB-FIB check.
-    rib_fib_json_params: t.Optional[t.Dict[str, t.Any]] = None
     # CICD-10 restores an exact baseline before requiring the full session
     # snapshot. CICD-11 leaves this false because its setup and cleanup restart
     # generator sessions outside the measured storm window.
@@ -278,7 +275,13 @@ def _drain_undrain(ctx: ProfileContext) -> ProfileChecks:
 
 
 def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
-    """BGP attribute-churn / route-storm checks with context-selected snapshots."""
+    """BGP churn/storm checks with custom in-window stability verdicts.
+
+    The grouped IXIA setup and cleanup intentionally restart generator sessions
+    outside the measured route-storm window, so CICD-11 keeps the default
+    core-dumps-only snapshot. CICD-10 opts into the full session snapshot after
+    restoring its exact baseline.
+    """
     return ProfileChecks(
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
@@ -290,7 +293,6 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
         postchecks=create_standard_postchecks(
             check_bgp_convergence=False,
             expected_established_session_count=ctx.expected_established_sessions,
-            rib_fib_json_params=ctx.rib_fib_json_params,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
         snapshot_checks=(

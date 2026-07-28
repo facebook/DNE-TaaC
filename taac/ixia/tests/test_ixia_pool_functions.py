@@ -7,6 +7,42 @@ from ixia.ixia import types as ixia_types
 from taac.ixia.ixia import Ixia
 
 
+class _MultiValue:
+    def __init__(self, values=None):
+        self.Values = list(values or [])
+
+    def Single(self, value):
+        self.Values = [value]
+
+    def ValueList(self, values):
+        self.Values = list(values)
+
+
+class _ExtendedCommunity:
+    def __init__(self):
+        self.Type = _MultiValue()
+        self.SubType = _MultiValue()
+        self.AsNumber2Bytes = _MultiValue()
+        self.AssignedNumber4Bytes = _MultiValue()
+        self.AsNumber4Bytes = _MultiValue()
+        self.AssignedNumber2Bytes = _MultiValue()
+
+
+class _ExtendedCommunityCollection:
+    def __init__(self, positions):
+        self._positions = positions
+
+    def find(self):
+        return self._positions
+
+
+class _RouteProperty:
+    def __init__(self, positions):
+        self.EnableExtendedCommunity = _MultiValue()
+        self.NoOfExternalCommunities = 0
+        self.BgpExtendedCommunitiesList = _ExtendedCommunityCollection(positions)
+
+
 def _make_device_group(name: str, network_groups=None):
     """Create a mock device group with a given name and optional network groups."""
     dg = MagicMock()
@@ -159,6 +195,81 @@ class TestGeneratedRouteNextHop(unittest.TestCase):
         route_property.NextHopType.Single.assert_called_once_with("sameaslocalip")
 
 
+class TestExtendedCommunityPool(unittest.TestCase):
+    def setUp(self):
+        self.ixia = _create_ixia_instance()
+
+    def test_two_byte_as_route_target_uses_four_byte_assigned_number(self):
+        position = _ExtendedCommunity()
+        route = _RouteProperty([position])
+        self.ixia._configure_extended_community_pool_on_route_property(
+            route,
+            [["rt:65001:1"], ["rt:65001:70000"]],
+        )
+        self.assertEqual([True], route.EnableExtendedCommunity.Values)
+        self.assertEqual(1, route.NoOfExternalCommunities)
+        self.assertEqual(
+            ["administratoras2octet", "administratoras2octet"],
+            position.Type.Values,
+        )
+        self.assertEqual(["routetarget", "routetarget"], position.SubType.Values)
+        self.assertEqual([65001, 65001], position.AsNumber2Bytes.Values)
+        self.assertEqual([1, 70000], position.AssignedNumber4Bytes.Values)
+        self.assertEqual([0, 0], position.AsNumber4Bytes.Values)
+        self.assertEqual([0, 0], position.AssignedNumber2Bytes.Values)
+
+    def test_four_byte_as_route_target_uses_two_byte_assigned_number(self):
+        position = _ExtendedCommunity()
+        route = _RouteProperty([position])
+        self.ixia._configure_extended_community_pool_on_route_property(
+            route,
+            [["rt:70000:7"]],
+        )
+        self.assertEqual(["administratoras4octet"], position.Type.Values)
+        self.assertEqual([0], position.AsNumber2Bytes.Values)
+        self.assertEqual([0], position.AssignedNumber4Bytes.Values)
+        self.assertEqual([70000], position.AsNumber4Bytes.Values)
+        self.assertEqual([7], position.AssignedNumber2Bytes.Values)
+
+    def test_two_byte_as_site_of_origin_uses_site_of_origin_subtype(self):
+        position = _ExtendedCommunity()
+        route = _RouteProperty([position])
+
+        self.ixia._configure_extended_community_pool_on_route_property(
+            route,
+            [["soo:65001:70000"]],
+        )
+
+        self.assertEqual(["administratoras2octet"], position.Type.Values)
+        self.assertEqual(["origin"], position.SubType.Values)
+        self.assertEqual([65001], position.AsNumber2Bytes.Values)
+        self.assertEqual([70000], position.AssignedNumber4Bytes.Values)
+
+    def test_schema_and_shape_errors_are_not_silently_ignored(self):
+        with self.assertRaisesRegex(ValueError, "position count mismatch"):
+            self.ixia._configure_extended_community_pool_on_route_property(
+                _RouteProperty([]),
+                [["rt:65001:1"]],
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            self.ixia._configure_extended_community_pool_on_route_property(
+                _RouteProperty([_ExtendedCommunity()]),
+                [["color:65001:1"]],
+            )
+
+    def test_extended_community_api_errors_are_logged_and_reraised(self):
+        position = _ExtendedCommunity()
+        position.Type.ValueList = MagicMock(side_effect=RuntimeError("write failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            self.ixia._configure_extended_community_pool_on_route_property(
+                _RouteProperty([position]),
+                [["rt:65001:1"]],
+            )
+
+        self.ixia.logger.exception.assert_called_once()
+
+
 class TestDeviceGroupRegexFiltering(unittest.TestCase):
     """Tests for device_group_regex filtering in pool configuration functions."""
 
@@ -253,6 +364,7 @@ class TestDeviceGroupRegexFiltering(unittest.TestCase):
         self.ixia.get_device_groups_by_port_and_interface = MagicMock(
             return_value=self.all_device_groups
         )
+        self.ixia._configure_extended_community_pool_on_route_property = MagicMock()
 
         combinations = [["rt:100:1", "rt:100:2"]]
         result = self.ixia.configure_extended_community_pool(
@@ -268,6 +380,10 @@ class TestDeviceGroupRegexFiltering(unittest.TestCase):
         self.dg_ebgp.NetworkGroup.find.assert_called_once()
         self.dg_plane1.NetworkGroup.find.assert_not_called()
         self.dg_plane2.NetworkGroup.find.assert_not_called()
+        self.assertEqual(
+            2,
+            self.ixia._configure_extended_community_pool_on_route_property.call_count,
+        )
 
     def test_no_device_groups_returns_false(self):
         """Returns False when no device groups found for interface."""

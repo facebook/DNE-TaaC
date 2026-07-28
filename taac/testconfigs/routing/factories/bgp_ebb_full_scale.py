@@ -108,6 +108,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+            observer_peer_parent_prefix=f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80",
             profile=profile,
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(

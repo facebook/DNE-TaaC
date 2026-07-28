@@ -7912,167 +7912,165 @@ class Ixia:
             extended_community_combinations: List of extended community lists (one per route)
                 Example: [["rt:100:1", "rt:100:2"], ["rt:100:3", "rt:100:4"], ...]
         """
+        if not extended_community_combinations:
+            raise ValueError("extended community combinations must not be empty")
+        ext_communities_per_prefix = len(extended_community_combinations[0])
+        if ext_communities_per_prefix == 0 or any(
+            len(combination) != ext_communities_per_prefix
+            for combination in extended_community_combinations
+        ):
+            raise ValueError(
+                "extended community combinations must have one consistent width"
+            )
+
+        positions = self._initialize_extended_community_positions(
+            bgp_route_prop,
+            ext_communities_per_prefix,
+            len(extended_community_combinations),
+        )
+        if len(positions) != ext_communities_per_prefix:
+            raise ValueError(
+                "extended community position count mismatch: "
+                f"expected {ext_communities_per_prefix}, got {len(positions)}"
+            )
+
+        for position_index, position in enumerate(positions):
+            values = self._build_extended_community_position_values(
+                extended_community_combinations, position_index
+            )
+            self._write_extended_community_position(
+                position,
+                values,
+                position_index,
+                ext_communities_per_prefix,
+                len(extended_community_combinations),
+            )
+
+        self.logger.info(
+            "Configured %d extended-community position(s) across %d route row(s)",
+            ext_communities_per_prefix,
+            len(extended_community_combinations),
+        )
+
+    def _initialize_extended_community_positions(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        position_count: int,
+        route_row_count: int,
+    ) -> t.Sequence[t.Any]:
         try:
-            if not extended_community_combinations:
-                self.logger.warning("Empty extended community combinations provided")
-                return
-
-            ext_communities_per_prefix = len(extended_community_combinations[0])
-
-            # Step 1: Enable extended communities FIRST (this may initialize BgpExtendedCommunitiesList)
-            if not hasattr(bgp_route_prop, "EnableExtendedCommunity"):
-                self.logger.warning("EnableExtendedCommunity attribute not found")
-                return
-
             bgp_route_prop.EnableExtendedCommunity.Single(True)
-            self.logger.info("Enabled extended communities on route property")
+            bgp_route_prop.NoOfExternalCommunities = position_count
+            return bgp_route_prop.BgpExtendedCommunitiesList.find()
+        except Exception:
+            self.logger.exception(
+                "Failed to initialize %d extended-community position(s) "
+                "across %d route row(s)",
+                position_count,
+                route_row_count,
+            )
+            raise
 
-            # Step 2: Try to set number of extended communities per route
-            # Note: NoOfExtendedCommunity only exists for EVPN route types, not regular BGP routes
-            # For regular BGP routes created via route_scales, Ixia only supports 1 extended community
-            if hasattr(bgp_route_prop, "NoOfExtendedCommunity"):
-                # EVPN routes support multiple extended communities
-                # pyre-ignore[16]: NoOfExtendedCommunity only exists for EVPN route types, checked dynamically
-                bgp_route_prop.NoOfExtendedCommunity = ext_communities_per_prefix
-                self.logger.info(
-                    f"Set NoOfExtendedCommunity to {ext_communities_per_prefix} extended communities per prefix"
-                )
+    @staticmethod
+    def _build_extended_community_position_values(
+        combinations: t.Sequence[t.Sequence[str]],
+        position_index: int,
+    ) -> t.Tuple[
+        t.List[str],
+        t.List[str],
+        t.List[int],
+        t.List[int],
+        t.List[int],
+        t.List[int],
+    ]:
+        types: t.List[str] = []
+        subtypes: t.List[str] = []
+        as2_values: t.List[int] = []
+        assigned4_values: t.List[int] = []
+        as4_values: t.List[int] = []
+        assigned2_values: t.List[int] = []
+        for combination in combinations:
+            parts = combination[position_index].split(":")
+            if len(parts) == 2:
+                kind = "rt"
+                as_number, assigned_number = parts
+            elif len(parts) == 3:
+                kind, as_number, assigned_number = parts
             else:
-                # Regular BGP routes only support 1 extended community
-                self.logger.warning(
-                    f"NoOfExtendedCommunity attribute not available for this route type. "
-                    f"Regular BGP routes created via route_scales only support 1 extended community. "
-                    f"Requested {ext_communities_per_prefix}, but will configure only 1."
+                raise ValueError(
+                    f"invalid extended community: {combination[position_index]!r}"
                 )
-
-            # Step 3: NOW access the BGP extended community list (should have correct count now)
-            if not hasattr(bgp_route_prop, "BgpExtendedCommunitiesList"):
-                self.logger.warning(
-                    "BgpExtendedCommunitiesList attribute not found even after enabling extended communities. "
-                    "This may be a limitation of programmatically created routes."
+            subtype = {
+                "rt": "routetarget",
+                "target": "routetarget",
+                "soo": "origin",
+            }.get(kind.lower())
+            if subtype is None:
+                raise ValueError(f"unsupported extended community type {kind!r}")
+            asn = int(as_number)
+            value = int(assigned_number)
+            if not 0 <= asn <= 0xFFFFFFFF or not 0 <= value <= 0xFFFFFFFF:
+                raise ValueError("extended community value is out of range")
+            is_as2 = asn <= 0xFFFF
+            if not is_as2 and value > 0xFFFF:
+                raise ValueError(
+                    "four-byte-AS extended community requires a two-byte "
+                    "assigned number"
                 )
-                return
+            types.append("administratoras2octet" if is_as2 else "administratoras4octet")
+            subtypes.append(subtype)
+            as2_values.append(asn if is_as2 else 0)
+            assigned4_values.append(value if is_as2 else 0)
+            as4_values.append(asn if not is_as2 else 0)
+            assigned2_values.append(value if not is_as2 else 0)
+        return (
+            types,
+            subtypes,
+            as2_values,
+            assigned4_values,
+            as4_values,
+            assigned2_values,
+        )
 
-            bgp_ext_community_list = bgp_route_prop.BgpExtendedCommunitiesList.find()
-
-            if not bgp_ext_community_list:
-                self.logger.warning("No BgpExtendedCommunitiesList found")
-                return
-
-            self.logger.info(
-                f"Found {len(bgp_ext_community_list)} extended community positions to configure"
+    def _write_extended_community_position(
+        self,
+        position: t.Any,
+        values: t.Tuple[
+            t.List[str],
+            t.List[str],
+            t.List[int],
+            t.List[int],
+            t.List[int],
+            t.List[int],
+        ],
+        position_index: int,
+        position_count: int,
+        route_row_count: int,
+    ) -> None:
+        (
+            types,
+            subtypes,
+            as2_values,
+            assigned4_values,
+            as4_values,
+            assigned2_values,
+        ) = values
+        try:
+            position.Type.ValueList(types)
+            position.SubType.ValueList(subtypes)
+            position.AsNumber2Bytes.ValueList(as2_values)
+            position.AssignedNumber4Bytes.ValueList(assigned4_values)
+            position.AsNumber4Bytes.ValueList(as4_values)
+            position.AssignedNumber2Bytes.ValueList(assigned2_values)
+        except Exception:
+            self.logger.exception(
+                "Failed to configure extended-community position %d of %d "
+                "across %d route row(s)",
+                position_index + 1,
+                position_count,
+                route_row_count,
             )
-
-            # Configure each extended community position to cycle through values from the pool
-            for ext_comm_idx in range(ext_communities_per_prefix):
-                if ext_comm_idx >= len(bgp_ext_community_list):
-                    self.logger.warning(
-                        f"Not enough extended community list entries ({len(bgp_ext_community_list)}) "
-                        f"for {ext_communities_per_prefix} extended communities"
-                    )
-                    break
-
-                # Collect extended community values at this position from all combinations
-                ext_comm_values_at_position = []
-
-                for ext_comm_combination in extended_community_combinations:
-                    if ext_comm_idx < len(ext_comm_combination):
-                        ext_comm_str = ext_comm_combination[ext_comm_idx]
-
-                        # Parse extended community string
-                        # Formats: "rt:AS:VALUE", "soo:AS:VALUE", "target:AS:VALUE"
-                        try:
-                            if ":" in ext_comm_str:
-                                parts = ext_comm_str.split(":")
-                                if len(parts) == 3:
-                                    # Format: type:AS:VALUE (e.g., "rt:100:1")
-                                    ec_type, as_num, value = parts
-                                    ext_comm_values_at_position.append(
-                                        {
-                                            "type": ec_type.lower(),
-                                            "as_number": int(as_num),
-                                            "value": int(value),
-                                        }
-                                    )
-                                elif len(parts) == 2:
-                                    # Format: AS:VALUE (default to route-target)
-                                    as_num, value = parts
-                                    ext_comm_values_at_position.append(
-                                        {
-                                            "type": "rt",
-                                            "as_number": int(as_num),
-                                            "value": int(value),
-                                        }
-                                    )
-                                else:
-                                    raise ValueError(
-                                        f"Invalid extended community format: {ext_comm_str}"
-                                    )
-                            else:
-                                # Integer format (not typical for extended communities)
-                                self.logger.warning(
-                                    f"Unexpected integer format for extended community: {ext_comm_str}"
-                                )
-                                ext_comm_values_at_position.append(
-                                    {"type": "rt", "as_number": 0, "value": 0}
-                                )
-                        except (ValueError, IndexError) as e:
-                            self.logger.warning(
-                                f"Invalid extended community format '{ext_comm_str}': {e}"
-                            )
-                            ext_comm_values_at_position.append(
-                                {"type": "rt", "as_number": 0, "value": 0}
-                            )
-                    else:
-                        # This combination doesn't have an extended community at this position
-                        ext_comm_values_at_position.append(
-                            {"type": "rt", "as_number": 0, "value": 0}
-                        )
-
-                # Apply ValueList to cycle through extended community values
-                bgp_ext_community = bgp_ext_community_list[ext_comm_idx]
-
-                # Set extended community type using Ixia enum values
-                # Valid enum values: 0=administratoras2octet, 1=administratorip, 2=administratoras4octet,
-                # 3=opaque, 6=evpn, 64=administratoras2octetlinkbw, 255=custom
-                if hasattr(bgp_ext_community, "Type"):
-                    # Map common types to Ixia extended community type enums
-                    ec_type = ext_comm_values_at_position[0]["type"]
-                    type_mapping = {
-                        "rt": "administratoras2octet",  # Route Target (enum 0)
-                        "soo": "opaque",  # Site of Origin (enum 3)
-                        "target": "administratoras2octet",  # Route Target (enum 0)
-                    }
-                    # pyrefly: ignore [no-matching-overload]
-                    ixia_type = type_mapping.get(ec_type, "administratoras2octet")
-                    bgp_ext_community.Type.Single(ixia_type)
-
-                # Configure the AS number field with ValueList
-                if hasattr(bgp_ext_community, "AsNumber"):
-                    as_numbers = [ec["as_number"] for ec in ext_comm_values_at_position]
-                    bgp_ext_community.AsNumber.ValueList(as_numbers)
-
-                # Configure the assigned number field with ValueList
-                if hasattr(bgp_ext_community, "AssignedNumberSubType"):
-                    values = [ec["value"] for ec in ext_comm_values_at_position]
-                    bgp_ext_community.AssignedNumberSubType.ValueList(values)
-
-                self.logger.debug(
-                    f"Extended community position {ext_comm_idx}: cycling through {len(ext_comm_values_at_position)} values"
-                )
-
-            self.logger.info(
-                f"Successfully configured extended community distribution for {len(extended_community_combinations)} routes"
-            )
-            self.logger.info(
-                f"  - Each route will get {ext_communities_per_prefix} extended communities from the pool"
-            )
-            self.logger.info(
-                "  - Extended communities will cycle: route 1 → combination 1, route 2 → combination 2, ..."
-            )
-
-        except Exception as e:
-            self.logger.warning(f"Error configuring extended community pool: {str(e)}")
+            raise
 
     def import_bgp_attribute_profile_from_configerator(
         self,
