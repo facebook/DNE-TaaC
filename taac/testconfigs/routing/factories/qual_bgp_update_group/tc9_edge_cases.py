@@ -54,6 +54,7 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc9_edge_cases impor
     create_bgp_ug_cpu_quantification_playbook,
     create_bgp_ug_dual_stack_isolation_playbook,
     create_bgp_ug_empty_group_playbook,
+    create_bgp_ug_notification_isolation_playbook,
     create_bgp_ug_simultaneous_disruptions_playbook,
     create_bgp_ug_staggered_startup_playbook,
 )
@@ -104,6 +105,10 @@ from taac.test_as_a_config import types as taac_types
 # cleanly disjoint, and neither matches the BGP-MON peer.
 _EBGP_PEER_REGEX = r"BGP_PEER_IPV[46]_EBGP$"
 _IBGP_PEER_REGEX = r"BGP_PEER_IPV[46]_IBGP_PLANE_\d+_REMOTE_(?:EB|MP)$"
+# Per-AFI eBGP peer-name regexes -- 2.9.3 silences ONE session on each so the
+# hold-timer NOTIFICATION is triggered on a single v4 AND a single v6 session.
+_EBGP_V4_PEER_REGEX = r"BGP_PEER_IPV4_EBGP$"
+_EBGP_V6_PEER_REGEX = r"BGP_PEER_IPV6_EBGP$"
 
 # Parent prefixes of every NON-eBGP peer (all 8 iBGP planes, v6 + v4, plus
 # BGP-MON). The 2.9.7 playbook ignores these when asserting the eBGP group
@@ -647,6 +652,65 @@ _CPU_QUANT_CHURN_V6_VARIANT_REGEXES = [
 _CPU_QUANT_METRICS_DIR = "/tmp/taac_bgp_ug_cpu_quant"
 _CPU_QUANT_UG_OFF_METRICS_PATH = f"{_CPU_QUANT_METRICS_DIR}/ug_off.json"
 _CPU_QUANT_UG_ON_METRICS_PATH = f"{_CPU_QUANT_METRICS_DIR}/ug_on.json"
+
+
+# --- 2.9.3 NOTIFICATION Sent to One Peer -> Group Isolation ---
+# During the isolation window the DUT is asked to distribute 50 genuinely-new
+# eBGP routes/AFI to every iBGP peer, so each inject pool needs UNIQUE NLRI. Both
+# pools are staged on the eBGP device groups (so the DUT receives + re-advertises
+# them to iBGP), come up Active at build, and are withdrawn at the playbook's
+# baseline stage so the later advertise is a measurable +50 at the iBGP egress.
+# NLRI ranges are disjoint from every other test: v4 in 120/8 (2.9.1=120.130,
+# 2.9.4=120.100/104, 2.9.6=120.150-152, 2.9.8=120.160[+500]) -> 120.170.0.0; v6 a
+# fresh /64 block in the EB-PRIVATE /52 after 2.9.8's ::2c00[+500] pool (which
+# spans through ::2df3) and clear of 2.9.1 (::2800/54) and 2.9.6 (::2000) ->
+# 2401:db00:11:2e00::.
+_NOTIF_INJECT_ROUTE_COUNT = 50
+# Accept communities so the DUT accepts + re-advertises the pool iBGP-ward (the
+# same accept set proven re-advertised on 120/8 by 2.9.1/2.9.4/2.9.6/2.9.8).
+_NOTIF_ACCEPT_COMMUNITIES = [
+    "65529:39744",  # EB-PRIVATE-PREFIXES accept community
+    "65060:10012",  # ADVERTISED-FROM-DC accept community
+    "65530:50320",  # anycast accept community
+]
+# The eBGP uplink DGs declare a mandatory route-attribute schema; every
+# advertisement on the DG must carry it or the DICE compiler rejects it (same
+# values as the CPU-quant churn pools).
+_NOTIF_INJECT_ROUTE_ATTRIBUTES = (
+    ("med", None),
+    ("local_pref", 100),
+    ("origin", "igp"),
+)
+_NOTIF_INJECT_V4_POOL_REGEX = r"PREFIX_POOL_IPV4_EBGP_NOTIF_INJECT$"
+_NOTIF_INJECT_V6_POOL_REGEX = r"PREFIX_POOL_IPV6_EBGP_NOTIF_INJECT$"
+_NOTIF_V4_INTENTS = (
+    _extra_formulaic_advertisement(
+        prefix_name="PREFIX_POOL_IPV4_EBGP_NOTIF_INJECT",
+        afi="v4",
+        start_prefix="120.170.0.0",
+        parent_network="120.0.0.0/8",
+        prefix_step=1 << 8,  # one /24 per prefix
+        prefix_length=24,
+        prefix_count=_NOTIF_INJECT_ROUTE_COUNT,
+        network_group_index=1,
+        communities=_NOTIF_ACCEPT_COMMUNITIES,
+        attributes=_NOTIF_INJECT_ROUTE_ATTRIBUTES,
+    ),
+)
+_NOTIF_V6_INTENTS = (
+    _extra_formulaic_advertisement(
+        prefix_name="PREFIX_POOL_IPV6_EBGP_NOTIF_INJECT",
+        afi="v6",
+        start_prefix="2401:db00:11:2e00::",
+        parent_network="2401:db00:11:2000::/52",
+        prefix_step=1 << 64,  # one /64 per prefix
+        prefix_length=64,
+        prefix_count=_NOTIF_INJECT_ROUTE_COUNT,
+        network_group_index=1,
+        communities=_NOTIF_ACCEPT_COMMUNITIES,
+        attributes=_NOTIF_INJECT_ROUTE_ATTRIBUTES,
+    ),
+)
 
 
 def _cpu_quant_prechecks(bgp_mon_ignore_prefixes, ug_enabled):
@@ -1341,11 +1405,115 @@ def create_bgp_ug_cpu_quantification_test_config(
     )
 
 
+def create_bgp_ug_notification_isolation_test_config(
+    testbed: PhysicalInventory,
+) -> taac_types.TestConfig:
+    """BGP++ Update Group qualification spec 2.9.3 (NOTIFICATION Sent to One Peer
+    -> Group Isolation) TestConfig -- its OWN WITHOUT_OPEN_R + next-hop-self config
+    on the bag conveyor topology (like 2.9.1/2.9.6/2.9.8).
+
+    StopKeepAlive on ONE eBGP session per AFI silences that neighbor so the DUT
+    hits hold-timer expiry and originates a Hold-Timer-Expired NOTIFICATION,
+    tearing down JUST that session. The playbook then verifies the disruption is
+    isolated (the rest of the eBGP group + all iBGP groups undisturbed), that
+    distribution to everyone else keeps working (50 new eBGP routes/AFI reach
+    every iBGP peer), and that ResumeKeepAlive re-syncs the peer cleanly into the
+    update group (JOINED_RUNNING + all-Established + full membership).
+    Select via ``--test-config BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST``.
+    See ``create_bgp_ug_notification_isolation_playbook``.
+
+    Dual-AFI (v4 AND v6). The v6 distribution + re-sync verifies leave the XFAIL
+    escape hatch OFF (the default) -- flip v6_distribution_expected_fail /
+    v6_resync_expected_fail on ONLY if a fresh cold build regresses on v6
+    next-hop resolution, matching 2.9.1/2.9.6. Uses
+    WITHOUT_OPEN_R + the next-hop-self resolution infra (D113330327) so the DUT
+    resolves next-hops from interface state and actually advertises with no Open/R
+    daemon -- the precondition for the per-peer PS-gauge distribution checks.
+    """
+    bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+    # Everything that is NOT iBGP (both eBGP AFIs + BGP-MON): scopes the
+    # "iBGP fully Established" cross-group-isolation check + the no-flap snapshot
+    # to iBGP, since the targeted eBGP session is intentionally flapping.
+    non_ibgp_parent_prefixes = (
+        _EBGP_V6_PARENT_PREFIXES + _EBGP_V4_PARENT_PREFIXES + bgp_mon_ignore_prefixes
+    )
+
+    notification_isolation_playbook = create_bgp_ug_notification_isolation_playbook(
+        device_name=testbed.device_name,
+        ebgp_v4_peer_regex=_EBGP_V4_PEER_REGEX,
+        ebgp_v6_peer_regex=_EBGP_V6_PEER_REGEX,
+        ebgp_v4_peer_group=PEERGROUP_EBGP_V4,
+        ebgp_v6_peer_group=PEERGROUP_EBGP_V6,
+        ibgp_v6_peer_group=PEERGROUP_IBGP_V6,
+        # eBGP peer-address parents: target/isolation scope + recovery uniform scope.
+        ebgp_v4_peer_parent_prefixes=_EBGP_V4_PARENT_PREFIXES,
+        ebgp_v6_peer_parent_prefixes=_EBGP_V6_PARENT_PREFIXES,
+        # iBGP peer-address parents: the PS-gauge distribution scope (all planes).
+        ibgp_v4_peer_parent_prefixes=_IBGP_V4_PARENT_PREFIXES,
+        ibgp_v6_peer_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
+        non_ibgp_parent_prefixes=non_ibgp_parent_prefixes,
+        # Dedicated genuinely-new eBGP inject pools (one per AFI), withdrawn at
+        # baseline then advertised whole during the isolation window (+50/AFI).
+        ebgp_v4_inject_pool_regex=_NOTIF_INJECT_V4_POOL_REGEX,
+        ebgp_v6_inject_pool_regex=_NOTIF_INJECT_V6_POOL_REGEX,
+        inject_route_count=_NOTIF_INJECT_ROUTE_COUNT,
+        # eBGP UG member baseline per AFI (140 on the EBB-scale topology).
+        ebgp_members_per_afi=_DUAL_STACK_EXPECTED_MEMBER_COUNTS[PEERGROUP_EBGP_V4],
+        expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
+        # v6 is STRICT by default (next-hop-self resolves v6 deterministically, as
+        # proven on bag013 by 2.9.1/2.9.6); flip these on only if a fresh cold
+        # build regresses on the v6 next-hop resolution.
+        v6_distribution_expected_fail=False,
+        v6_resync_expected_fail=False,
+        # Poll the session-establish precheck: the WITHOUT_OPEN_R + next-hop-self
+        # setup restarts the control-plane Bgp daemon on a fresh bring-up, so the
+        # ~1272-session topology needs time to reach Established (the 2.9.x
+        # settle-race finding, same as 2.9.6/2.9.8).
+        prechecks=_edge_cases_prechecks(
+            bgp_mon_ignore_prefixes,
+            establish_retry_count=12,
+            establish_retry_delay_seconds=15.0,
+            establish_retry_delay_multiplier=1.0,
+        ),
+        bgp_mon_ignore_prefixes=bgp_mon_ignore_prefixes,
+        vmhwm_absolute_threshold_bytes=Gigabyte.GIG_10.value,
+    )
+
+    return build_bag_conveyor_test_config(
+        testbed,
+        name="BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST",
+        playbooks=[notification_isolation_playbook],
+        # WITHOUT_OPEN_R + next-hop-self (D113330327): the DUT resolves next-hops
+        # from interface state and advertises with no Open/R daemon -- the
+        # precondition for the per-peer PS-gauge distribution checks. Consistent
+        # with the other section-2.9 WITHOUT_OPEN_R tests (2.9.1/2.9.6/2.9.8).
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        ebgp_next_hop_self=True,
+        ibgp_next_hop_self=True,
+        resolve_nexthops_from_interface_state=True,
+        enable_update_group=True,
+        # Dedicated unique-NLRI inject pools staged on the eBGP device groups so
+        # the DUT receives + re-advertises the 50 new routes/AFI to iBGP.
+        extra_prefix_sets=tuple(
+            prefix_set for prefix_set, _ in (*_NOTIF_V4_INTENTS, *_NOTIF_V6_INTENTS)
+        ),
+        extra_prefix_advertisements={
+            "dg_ebgp_v4": tuple(
+                advertisement for _, advertisement in _NOTIF_V4_INTENTS
+            ),
+            "dg_ebgp_v6": tuple(
+                advertisement for _, advertisement in _NOTIF_V6_INTENTS
+            ),
+        },
+    )
+
+
 __all__ = [
     "create_bgp_ug_best_path_change_test_config",
     "create_bgp_ug_cpu_quantification_test_config",
     "create_bgp_ug_dual_stack_isolation_test_config",
     "create_bgp_ug_edge_cases_test_config",
+    "create_bgp_ug_notification_isolation_test_config",
     "create_bgp_ug_simultaneous_disruptions_test_config",
     "create_bgp_ug_staggered_startup_test_config",
 ]

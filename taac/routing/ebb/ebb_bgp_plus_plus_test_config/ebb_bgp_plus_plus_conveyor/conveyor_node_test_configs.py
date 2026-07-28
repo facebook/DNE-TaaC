@@ -60,6 +60,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     BGP_UG_BACKPRESSURE_TEST_CONFIG,
@@ -182,4 +183,13 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # device).
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
+    # BGP++ UG 2.9.3 NOTIFICATION Sent to One Peer -> Group Isolation on
+    # bag013.ash6 -- its own WITHOUT_OPEN_R + next-hop-self TestConfig.
+    # StopKeepAlive on ONE eBGP session/AFI drives a DUT-originated
+    # Hold-Timer-Expired NOTIFICATION; the playbook verifies the drop is isolated
+    # to that peer, distribution to everyone else keeps working, and the peer
+    # re-syncs on ResumeKeepAlive. Dual-AFI. Ad-hoc; NOT wired into a conveyor
+    # stage (do NOT schedule until manually verified on the device). Select with
+    # ``--regex 'bgp_ug_notification_isolation'``.
+    BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
 ]

@@ -43,6 +43,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases imp
     create_bgp_ug_cpu_quantification_test_config,
     create_bgp_ug_dual_stack_isolation_test_config,
     create_bgp_ug_edge_cases_test_config,
+    create_bgp_ug_notification_isolation_test_config,
     create_bgp_ug_simultaneous_disruptions_test_config,
     create_bgp_ug_staggered_startup_test_config,
 )
@@ -164,6 +165,18 @@ BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG = (
     create_bgp_ug_cpu_quantification_test_config(BAG013_ASH6, ug_enabled=True)
 )
 
+# Spec 2.9.3 NOTIFICATION Sent to One Peer -> Group Isolation on bag013 -- its OWN
+# WITHOUT_OPEN_R + next-hop-self TestConfig. StopKeepAlive on ONE eBGP session/AFI
+# drives a DUT-originated Hold-Timer-Expired NOTIFICATION; the playbook verifies
+# the drop is isolated to that peer (rest of the eBGP group + all iBGP groups
+# undisturbed), distribution to everyone else keeps working (50 new eBGP
+# routes/AFI reach every iBGP peer), and ResumeKeepAlive re-syncs the peer into
+# the update group. Dual-AFI. Select via
+# ``--test-config BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST``.
+BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG = (
+    create_bgp_ug_notification_isolation_test_config(BAG013_ASH6)
+)
+
 
 __all__ = [
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
@@ -174,6 +187,7 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
     "BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
