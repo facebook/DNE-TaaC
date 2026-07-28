@@ -2,6 +2,8 @@
 # pyre-unsafe
 """Factory for the 1274-peer EBB full-scale topology."""
 
+from collections import Counter
+
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
@@ -238,9 +240,26 @@ def create_bgp_ebb_full_scale_test_config(
         profile=profile,
     )
     if playbooks_selected:
-        playbooks = [
-            playbook for playbook in playbooks if playbook.name in playbooks_selected
+        duplicate_names = sorted(
+            name for name, count in Counter(playbooks_selected).items() if count > 1
+        )
+        if duplicate_names:
+            raise ValueError(
+                f"Duplicate BGP EBB playbook selections: {duplicate_names}"
+            )
+
+        playbooks_by_name = {playbook.name: playbook for playbook in playbooks}
+        unknown_names = [
+            playbook_name
+            for playbook_name in playbooks_selected
+            if playbook_name not in playbooks_by_name
         ]
+        if unknown_names:
+            raise ValueError(
+                "Unknown BGP EBB playbook selections: "
+                f"{unknown_names}; available: {sorted(playbooks_by_name)}"
+            )
+        playbooks = [playbooks_by_name[name] for name in playbooks_selected]
 
     openr_mode = (
         OpenRMode.STANDALONE
