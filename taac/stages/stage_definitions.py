@@ -46,6 +46,7 @@ from taac.health_checks.healthcheck_definitions import (
 )
 from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
+    create_bgp_attribute_churn_step,
     create_bgp_prefixes_med_value_step,
     create_change_as_path_length_step,
     create_clear_traffic_stats_step,
@@ -1745,6 +1746,50 @@ def _create_change_as_path_length_step(
         )
 
     return steps
+
+
+def create_bgp_ebb_attribute_churn_stage(
+    *,
+    hostname: str,
+    prefix_pool_names: dict[str, dict[str, str]],
+    observer_peer_parent_prefix: str,
+    peer_count_per_plane: int,
+    selected_block_count_per_afi: int,
+    samples_per_block: int,
+    routes_per_block: int,
+    iterations_per_family: int,
+    cadence_seconds: int,
+    poll_interval_seconds: int,
+    transition_timeout_seconds: int,
+    reference_setup_timeout_seconds: int,
+    restore_timeout_seconds: int,
+    quiet_window_seconds: int,
+    max_lookup_concurrency: int,
+    attribute_matrix: dict[str, dict[str, Any]],
+) -> Stage:
+    """Create CICD-10 as one failure-safe, audited custom workflow."""
+    return Stage(
+        steps=[
+            create_bgp_attribute_churn_step(
+                hostname=hostname,
+                prefix_pool_names=prefix_pool_names,
+                observer_peer_parent_prefix=observer_peer_parent_prefix,
+                peer_count_per_plane=peer_count_per_plane,
+                selected_block_count_per_afi=selected_block_count_per_afi,
+                samples_per_block=samples_per_block,
+                routes_per_block=routes_per_block,
+                iterations_per_family=iterations_per_family,
+                cadence_seconds=cadence_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                transition_timeout_seconds=transition_timeout_seconds,
+                reference_setup_timeout_seconds=reference_setup_timeout_seconds,
+                restore_timeout_seconds=restore_timeout_seconds,
+                quiet_window_seconds=quiet_window_seconds,
+                max_lookup_concurrency=max_lookup_concurrency,
+                attribute_matrix=attribute_matrix,
+            )
+        ]
+    )
 
 
 def create_attribute_churn_stage(

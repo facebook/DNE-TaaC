@@ -93,6 +93,34 @@ class TestBuildAsPathPositionValues(unittest.TestCase):
         self.assertEqual(result[1], [])
 
 
+class TestColdAsPathConstruction(unittest.TestCase):
+    def test_ten_slot_sequence_is_created_without_protocol_restart(self) -> None:
+        ixia = _create_ixia_instance()
+        route_property = MagicMock()
+        segment = MagicMock()
+        slots = [MagicMock() for _ in range(10)]
+        segment.BgpAsNumberList.find.return_value = slots
+        route_property.BgpAsPathSegmentList.find.return_value = [segment]
+
+        ixia._configure_as_path_prepend(
+            route_property,
+            port_identifier="dut:Ethernet1",
+            prefix_name="PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+            ip_version=ixia_types.IpAddressFamily.IPV4,
+            as_path_prepend_flag=True,
+            as_path_prepend_configs=[ixia_types.AsPathPrepend(as_numbers=[64512] * 10)],
+        )
+
+        route_property.EnableAsPathSegments.Single.assert_called_once_with(True)
+        self.assertEqual(1, route_property.NoOfASPathSegmentsPerRouteRange)
+        segment.SegmentType.Single.assert_called_once_with("asseq")
+        self.assertEqual(10, segment.NumberOfAsNumberInSegment)
+        for slot in slots:
+            slot.AsNumber.Single.assert_called_once_with(64512)
+        ixia.stop_protocols.assert_not_called()
+        ixia.start_protocols.assert_not_called()
+
+
 class TestGeneratedRouteNextHop(unittest.TestCase):
     def test_create_bgp_prefixes_programs_requested_next_hop_type(self) -> None:
         ixia = _create_ixia_instance()

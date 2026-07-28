@@ -39,6 +39,7 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
     IBGP_PEER_SCALE_PER_PLANE,
+    IXIA_BGP_MON_IC_PARENT_NETWORK,
     PEERGROUP_IBGP_V4,
     PEERGROUP_IBGP_V6,
 )
@@ -98,6 +99,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
+            observer_peer_parent_prefix=f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80",
             profile=profile,
         ),
         get_bgp_ebb_route_storm_playbook(
@@ -244,8 +246,14 @@ def create_bgp_ebb_full_scale_test_config(
         if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
         else OpenRMode.NONE
     )
+    enable_attribute_churn = not playbooks_selected or (
+        "bgp_ebb_attribute_churn_playbook" in playbooks_selected
+    )
     compiled = (
-        ebb_full_scale_topology(openr_mode=openr_mode)
+        ebb_full_scale_topology(
+            openr_mode=openr_mode,
+            enable_attribute_churn=enable_attribute_churn,
+        )
         .bind_to_inventory(
             physical_inventory=physical_inventory,
             port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,

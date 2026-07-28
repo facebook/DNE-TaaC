@@ -77,9 +77,9 @@ class CheckProfile(enum.Enum):
     # FA/plane drain-undrain: convergence OFF, iBGP-PNH precheck off, snapshot
     # skips flap only (uptime still checked).
     DRAIN_UNDRAIN = "drain_undrain"
-    # bag010 BGP instability (attribute-churn / route-storm): convergence OFF,
-    # expected established-session count enforced, optional RIB-FIB route-storm
-    # invariants, and a core-dumps-ONLY snapshot (sessions churn throughout).
+    # CICD-11 route storm: convergence OFF, expected established-session count
+    # enforced, optional RIB-FIB route-storm invariants, and a context-selected
+    # snapshot shape.
     CHURN_STORM = "churn_storm"
     # IGP instability (PNH-metric oscillation / unresolvable PNHs): convergence
     # OFF, standard snapshot, plus a BGP tcpdump check whose message-types and
@@ -138,6 +138,10 @@ class ProfileContext:
     # Churn-storm: extra RIB-FIB consistency json_params (route-storm invariants
     # such as expected AS-path length / pool size); None = standard RIB-FIB check.
     rib_fib_json_params: t.Optional[t.Dict[str, t.Any]] = None
+    # CICD-10 restores an exact baseline before requiring the full session
+    # snapshot. CICD-11 leaves this false because its setup and cleanup restart
+    # generator sessions outside the measured storm window.
+    full_session_snapshot: bool = False
     # IGP-instability: parameters for the appended BGP tcpdump check. message
     # types that must / must not appear in the capture, and an optional window
     # (seconds) the capture's last-mod time must fall within.
@@ -274,12 +278,7 @@ def _drain_undrain(ctx: ProfileContext) -> ProfileChecks:
 
 
 def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
-    """bag010 BGP instability (attribute-churn / route-storm): standard prechecks,
-    postchecks with convergence OFF (attributes/routes intentionally churn) and the
-    expected established-session count enforced, plus optional RIB-FIB route-storm
-    invariants from the context. The snapshot is core-dumps ONLY — no bgp-session
-    snapshot, since sessions are deliberately disrupted throughout the test.
-    """
+    """BGP attribute-churn / route-storm checks with context-selected snapshots."""
     return ProfileChecks(
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
@@ -294,9 +293,15 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
             rib_fib_json_params=ctx.rib_fib_json_params,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
-        snapshot_checks=[
-            create_core_dumps_snapshot_check(),
-        ],
+        snapshot_checks=(
+            create_standard_snapshot_checks(
+                expected_peer_identity=ctx.expected_peer_identity,
+                parent_prefixes_to_ignore=ctx.parent_prefixes_to_ignore,
+                exclude_bgp_mon=ctx.exclude_bgp_mon,
+            )
+            if ctx.full_session_snapshot
+            else [create_core_dumps_snapshot_check()]
+        ),
     )
 
 

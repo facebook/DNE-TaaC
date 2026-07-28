@@ -22,7 +22,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_snapshot_check,
 )
 from taac.stages.stage_definitions import (
-    create_attribute_churn_stage,
+    create_bgp_ebb_attribute_churn_stage,
     create_bgp_igp_instability_unresolvable_pnhs_stage,
     create_bgp_restart_test_stage,
     create_bgp_session_oscillation_stage,
@@ -314,6 +314,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
     total_session_count: int,
+    observer_peer_parent_prefix: str,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
@@ -321,12 +322,11 @@ def get_bgp_ebb_attribute_churn_playbook(
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
-    Drives the BGP++ peer set through a sustained attribute-churn stage
-    (local_pref / med / origin / as_path iterations on the IBGP plane 1
-    drain pool) to stress bgpcpp routing-attribute storage and update
-    generation. Used by the BAG010_ASH6 BGP++ instability TestConfigs to
-    verify the device does not crash, leak memory, or drop sessions under
-    continuous attribute mutation.
+    Drives deterministic local-pref, MED, origin, and AS-path transitions on
+    seven dual-stack plane-1 peer blocks. Planes 2-4 provide controlled
+    comparison paths. Every transition is verified through IXIA readback,
+    exact DUT RIB state, session counters, and the BGP-MON observer before all
+    mutated state is restored.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -335,14 +335,16 @@ def get_bgp_ebb_attribute_churn_playbook(
         peergroup_ibgp_v4: IBGP IPv4 peer-group name on the DUT.
         total_session_count: Total expected established BGP sessions used
             by precheck/postcheck health checks.
+        observer_peer_parent_prefix: Parent prefix selecting the BGP-MON
+            sessions used as the outbound UPDATE observer.
         profile: `BgpPlusPlusProfile` enum value; enables the IBGP-PNH
             precheck when the OpenR variant is selected.
 
     Returns:
         A `Playbook` named `bgp_ebb_attribute_churn_playbook` with standard
-        BGP++ prechecks/postchecks, core-dumps snapshot check, standard
-        periodic tasks (CPU/memory @ 9 GiB, non-terminating), and one
-        attribute-churn stage over prefix indices 0..500.
+        BGP++ prechecks/postchecks, full session snapshots, standard periodic
+        tasks (CPU/memory @ 9 GiB, non-terminating), and one audited custom
+        attribute-churn stage.
     """
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
@@ -352,6 +354,7 @@ def get_bgp_ebb_attribute_churn_playbook(
             expected_established_sessions=total_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             exclude_bgp_mon=exclude_bgp_mon,
+            full_session_snapshot=True,
         ),
     )
     return Playbook(
@@ -369,18 +372,57 @@ def get_bgp_ebb_attribute_churn_playbook(
             memory_terminate_on_error=False,
         ),
         stages=[
-            create_attribute_churn_stage(
-                prefix_pool_regex=".*",
-                prefix_pool_regex_as_path="PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB_DRAIN",
-                prefix_start_index=0,
-                prefix_end_index=500,
-                churn_time=60,
-                local_pref_iters=5,
-                med_iters=5,
-                origin_iters=5,
-                as_path_iters=5,
-                med_value=-1,
-                as_path_length_max=10,
+            create_bgp_ebb_attribute_churn_stage(
+                hostname=device_name,
+                prefix_pool_names={
+                    "ipv4": {
+                        "1": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+                        "2": "PREFIX_POOL_IBGP_IPV4_PLANE_2_REMOTE_EB",
+                        "3": "PREFIX_POOL_IBGP_IPV4_PLANE_3_REMOTE_EB",
+                        "4": "PREFIX_POOL_IBGP_IPV4_PLANE_4_REMOTE_EB",
+                    },
+                    "ipv6": {
+                        "1": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+                        "2": "PREFIX_POOL_IBGP_IPV6_PLANE_2_REMOTE_EB",
+                        "3": "PREFIX_POOL_IBGP_IPV6_PLANE_3_REMOTE_EB",
+                        "4": "PREFIX_POOL_IBGP_IPV6_PLANE_4_REMOTE_EB",
+                    },
+                },
+                observer_peer_parent_prefix=observer_peer_parent_prefix,
+                peer_count_per_plane=62,
+                selected_block_count_per_afi=7,
+                samples_per_block=2,
+                routes_per_block=750,
+                iterations_per_family=15,
+                cadence_seconds=60,
+                poll_interval_seconds=5,
+                transition_timeout_seconds=60,
+                reference_setup_timeout_seconds=120,
+                restore_timeout_seconds=120,
+                quiet_window_seconds=120,
+                max_lookup_concurrency=8,
+                attribute_matrix={
+                    "local_pref": {
+                        "plane_1_preferred": 200,
+                        "reference": 100,
+                        "plane_1_nonpreferred": 50,
+                    },
+                    "med": {
+                        "plane_1_preferred": 100,
+                        "reference": 200,
+                        "plane_1_nonpreferred": 300,
+                    },
+                    "origin": {
+                        "plane_1_preferred": "igp",
+                        "reference": "egp",
+                        "plane_1_nonpreferred": "incomplete",
+                    },
+                    "as_path": {
+                        "plane_1_preferred": 1,
+                        "reference": 5,
+                        "plane_1_nonpreferred": 10,
+                    },
+                },
             )
         ],
     )

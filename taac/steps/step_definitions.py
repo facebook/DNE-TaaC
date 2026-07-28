@@ -240,6 +240,131 @@ def create_custom_step(
     )
 
 
+def _normalize_bgp_attribute_churn_pool_names(
+    prefix_pool_names: t.Mapping[str, t.Mapping[str, str]],
+) -> t.Dict[str, t.Dict[str, str]]:
+    expected_afis = {"ipv4", "ipv6"}
+    expected_planes = {"1", "2", "3", "4"}
+    if set(prefix_pool_names) != expected_afis:
+        raise ValueError("prefix_pool_names must contain exactly ipv4 and ipv6")
+
+    normalized: t.Dict[str, t.Dict[str, str]] = {}
+    for afi in sorted(expected_afis):
+        pools = prefix_pool_names[afi]
+        if set(pools) != expected_planes or any(not value for value in pools.values()):
+            raise ValueError(
+                f"prefix_pool_names[{afi!r}] must contain non-empty planes 1-4"
+            )
+        normalized[afi] = {plane: pools[plane] for plane in sorted(expected_planes)}
+    return normalized
+
+
+def _normalize_bgp_attribute_churn_matrix(
+    attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
+) -> t.Dict[str, t.Dict[str, t.Any]]:
+    expected_families = {"local_pref", "med", "origin", "as_path"}
+    expected_values = {
+        "plane_1_preferred",
+        "reference",
+        "plane_1_nonpreferred",
+    }
+    if set(attribute_matrix) != expected_families:
+        raise ValueError(
+            "attribute_matrix must contain local_pref, med, origin, and as_path"
+        )
+
+    normalized: t.Dict[str, t.Dict[str, t.Any]] = {}
+    for family in sorted(expected_families):
+        values = attribute_matrix[family]
+        if set(values) != expected_values:
+            raise ValueError(
+                f"attribute_matrix[{family!r}] must contain preferred, reference, "
+                "and nonpreferred values"
+            )
+        normalized[family] = {key: values[key] for key in sorted(expected_values)}
+    return normalized
+
+
+def _validate_bgp_attribute_churn_geometry(
+    numeric_params: t.Mapping[str, int],
+) -> None:
+    if numeric_params["quiet_window_seconds"] < 0:
+        raise ValueError("quiet_window_seconds must be non-negative")
+    if any(
+        value <= 0
+        for name, value in numeric_params.items()
+        if name != "quiet_window_seconds"
+    ):
+        raise ValueError(
+            "BGP attribute-churn numeric parameters other than "
+            "quiet_window_seconds must be positive"
+        )
+    if (
+        numeric_params["selected_block_count_per_afi"]
+        > numeric_params["peer_count_per_plane"]
+    ):
+        raise ValueError("selected block count cannot exceed peers per plane")
+    if numeric_params["selected_block_count_per_afi"] < 2:
+        raise ValueError("selected_block_count_per_afi must be at least 2")
+    if numeric_params["samples_per_block"] > numeric_params["routes_per_block"]:
+        raise ValueError("samples per block cannot exceed routes per block")
+
+
+def create_bgp_attribute_churn_step(
+    *,
+    hostname: str,
+    prefix_pool_names: t.Mapping[str, t.Mapping[str, str]],
+    observer_peer_parent_prefix: str,
+    peer_count_per_plane: int,
+    selected_block_count_per_afi: int,
+    samples_per_block: int,
+    routes_per_block: int,
+    iterations_per_family: int,
+    cadence_seconds: int,
+    poll_interval_seconds: int,
+    transition_timeout_seconds: int,
+    reference_setup_timeout_seconds: int,
+    restore_timeout_seconds: int,
+    quiet_window_seconds: int,
+    max_lookup_concurrency: int,
+    attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
+    description: str | None = None,
+) -> Step:
+    """Create the audited CICD-10 dual-stack attribute-churn workflow."""
+    numeric_params = {
+        "peer_count_per_plane": peer_count_per_plane,
+        "selected_block_count_per_afi": selected_block_count_per_afi,
+        "samples_per_block": samples_per_block,
+        "routes_per_block": routes_per_block,
+        "iterations_per_family": iterations_per_family,
+        "cadence_seconds": cadence_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "transition_timeout_seconds": transition_timeout_seconds,
+        "reference_setup_timeout_seconds": reference_setup_timeout_seconds,
+        "restore_timeout_seconds": restore_timeout_seconds,
+        "quiet_window_seconds": quiet_window_seconds,
+        "max_lookup_concurrency": max_lookup_concurrency,
+    }
+    if not hostname or not observer_peer_parent_prefix:
+        raise ValueError("hostname and observer_peer_parent_prefix must be non-empty")
+    _validate_bgp_attribute_churn_geometry(numeric_params)
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_attribute_churn",
+        "hostname": hostname,
+        "prefix_pool_names": _normalize_bgp_attribute_churn_pool_names(
+            prefix_pool_names
+        ),
+        "observer_peer_parent_prefix": observer_peer_parent_prefix,
+        "attribute_matrix": _normalize_bgp_attribute_churn_matrix(attribute_matrix),
+        **numeric_params,
+    }
+    return create_custom_step(
+        params_dict=params,
+        description=description or "Run audited dual-stack BGP attribute churn",
+    )
+
+
 def create_snapshot_bgp_sent_route_counts_step(
     hostname: str,
     snapshot_key: str,

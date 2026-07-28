@@ -335,6 +335,47 @@ class CheckProfileRegistryTest(unittest.TestCase):
             [create_core_dumps_snapshot_check()],
         )
 
+    def test_churn_storm_supports_attribute_churn_full_session_snapshot(self):
+        ctx = ProfileContext(
+            peergroup_ibgp_v6="PG_IBGP_V6",
+            peergroup_ibgp_v4="PG_IBGP_V4",
+            expected_established_sessions=42,
+            check_ibgp_pnh=True,
+            expected_peer_identity={"2401:db00::a": "2401:db00::b"},
+            parent_prefixes_to_ignore=["10.0.0.0/24"],
+            exclude_bgp_mon=True,
+            full_session_snapshot=True,
+        )
+
+        checks = get_profile_checks(CheckProfile.CHURN_STORM, ctx)
+
+        self.assertEqual(
+            checks.prechecks,
+            create_standard_prechecks(
+                peergroup_ibgp_v6="PG_IBGP_V6",
+                peergroup_ibgp_v4="PG_IBGP_V4",
+                expected_established_sessions=42,
+                check_ibgp_pnh=True,
+                exclude_bgp_mon=True,
+            ),
+        )
+        self.assertEqual(
+            checks.postchecks,
+            create_standard_postchecks(
+                check_bgp_convergence=False,
+                expected_established_session_count=42,
+                exclude_bgp_mon=True,
+            ),
+        )
+        self.assertEqual(
+            checks.snapshot_checks,
+            create_standard_snapshot_checks(
+                expected_peer_identity={"2401:db00::a": "2401:db00::b"},
+                parent_prefixes_to_ignore=["10.0.0.0/24"],
+                exclude_bgp_mon=True,
+            ),
+        )
+
     def test_churn_storm_route_storm_matches_factory(self):
         """CHURN_STORM with rib_fib_json_params reproduces the bag010 route-storm
         playbook (route-storm RIB-FIB invariants threaded into the postcheck)."""
