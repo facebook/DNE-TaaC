@@ -5,14 +5,13 @@
 Implemented:
 - 2.9.1 Best-Path Change During Active Distribution
 - 2.9.2 Simultaneous Disruptions Across All Groups
+- 2.9.3 NOTIFICATION Sent to One Peer -> Group Isolation
 - 2.9.4 Dual-Stack Isolation: IPv4 Operations Do Not Affect IPv6 Group
 - 2.9.6 Staggered Peer Startup: Peers Coming Up at Different Times
 - 2.9.7 Empty Group, Last Peer Goes Down Without Detached Peers
 - 2.9.8 Quantifying CPU Reduction from Update Group
 
-The remaining section-2.9 scenario (2.9.3 NOTIFICATION isolation) lands as its own
-factory function here when implemented. Spec 2.9.5 is struck-through / excluded in
-the qualification plan.
+Spec 2.9.5 is struck-through / excluded in the qualification plan.
 """
 
 import typing as t
@@ -20,6 +19,7 @@ import typing as t
 from taac.constants import OpenRRouteAction
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
+    create_bgp_session_snapshot_check,
     create_bgp_update_group_check,
     create_device_core_dumps_check,
     create_log_parsing_check,
@@ -34,15 +34,19 @@ from taac.steps.step_definitions import (
     create_ixia_api_step,
     create_longevity_step,
     create_openr_route_action_step,
+    create_resume_bgp_keepalive_step,
     create_run_task_step,
     create_set_bgp_prefixes_local_preference_step,
     create_snapshot_bgp_dut_best_path_as_path_step,
     create_snapshot_bgp_peer_advertised_as_path_step,
     create_snapshot_bgp_sent_route_counts_step,
     create_start_stop_bgp_peers_step,
+    create_stop_bgp_keepalive_step,
     create_validation_step,
     create_verify_bgp_dut_best_path_as_path_converged_step,
+    create_verify_bgp_notification_occurred_step,
     create_verify_bgp_peer_advertised_as_path_converged_step,
+    create_verify_bgp_peers_joined_running_step,
     create_verify_bgp_sent_route_count_delta_step,
     create_verify_bgp_sent_route_counts_uniform_step,
 )
@@ -3232,6 +3236,567 @@ def create_bgp_ug_cpu_quantification_playbook(
 
     return Playbook(
         name="bgp_ug_cpu_quantification",
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+# =============================================================================
+# 2.9.3 NOTIFICATION Sent to One Peer -> Group Isolation
+# =============================================================================
+#
+# StopKeepAlive on ONE eBGP session per AFI silences that neighbor while its
+# session stays materialized, so the DUT hits hold-timer expiry on it and
+# originates a Hold-Timer-Expired NOTIFICATION -- tearing down JUST that one
+# session. The spec's isolation claim is that this must NOT disturb the rest of
+# the group (the other eBGP peers keep their sessions) or the other update
+# groups (iBGP stays fully Established), route distribution to everyone else
+# keeps working, and on recovery (ResumeKeepAlive) the peer re-syncs cleanly
+# into the update group.
+#
+# Robust-signal design (the targeted session flaps down/up on the hold-timer
+# cycle while KeepAlive is suppressed, so its instantaneous state is unreliable):
+#   * "a NOTIFICATION happened, isolated to the target" is asserted on the
+#     per-peer num_resets DELTA (snapshot before / verify after) + the
+#     last_reset_reason string, and by requiring every OTHER eBGP peer in the
+#     AFI scope to be undisturbed -- ``verify_bgp_notification_occurred``.
+#   * cross-group isolation = iBGP stays fully Established (a session-establish
+#     check that ignores the eBGP + BGP-MON parents) + a no-iBGP-flap snapshot
+#     check across the whole run.
+#   * distribution during isolation = inject 50 genuinely-new eBGP routes/AFI
+#     (SHARED across all eBGP peers, so it lands even with the target down) and
+#     assert every iBGP peer's PS grew by ~50 (the DUT re-advertised them).
+#   * recovery re-sync = ResumeKeepAlive, then assert the target + its mates are
+#     back in PeerUpdateState JOINED_RUNNING (the DNE-approved primary re-sync
+#     signal), all sessions re-Established, and full UG membership restored. There
+#     is NO DUT->eBGP uniform-advertise check: the DUT advertises 0 to eBGP peers
+#     in this config (they are route sources) -- see the NOTE in the recovery
+#     stage. (HW-validated on bag013.)
+# Dual-AFI throughout (v4 AND v6); the v6 distribution/re-sync verifies carry the
+# XFAIL escape hatch for the first HW run (like 2.9.1/2.9.6).
+
+
+def create_bgp_ug_notification_isolation_playbook(
+    *,
+    device_name: str,
+    # Per-AFI eBGP peer-name regexes -- the StopKeepAlive/ResumeKeepAlive trigger
+    # targets ONE session index on each.
+    ebgp_v4_peer_regex: str,
+    ebgp_v6_peer_regex: str,
+    # Update-group peer-group names for the UG structure checks.
+    ebgp_v4_peer_group: str,
+    ebgp_v6_peer_group: str,
+    ibgp_v6_peer_group: str,
+    # eBGP peer-address parents per AFI: the target/isolation scope (identify the
+    # reset peer + assert the rest undisturbed) AND the recovery JOINED_RUNNING
+    # re-sync scope (the update-group members that must return to JOINED_RUNNING).
+    ebgp_v4_peer_parent_prefixes: t.List[str],
+    ebgp_v6_peer_parent_prefixes: t.List[str],
+    # iBGP peer-address parents per AFI: the PS-gauge scope for the "50 new eBGP
+    # routes reach every iBGP peer" distribution delta.
+    ibgp_v4_peer_parent_prefixes: t.List[str],
+    ibgp_v6_peer_parent_prefixes: t.List[str],
+    # Everything that is NOT iBGP (both eBGP AFIs + BGP-MON): scopes the
+    # "iBGP fully Established" cross-group-isolation check + the no-flap snapshot
+    # to iBGP, since the targeted eBGP session is intentionally flapping.
+    non_ibgp_parent_prefixes: t.List[str],
+    # Dedicated genuinely-new inject pools (one per AFI) staged on the eBGP DGs,
+    # withdrawn at baseline and advertised whole during the isolation window so
+    # each is a measurable +N at the DUT's iBGP egress.
+    ebgp_v4_inject_pool_regex: str,
+    ebgp_v6_inject_pool_regex: str,
+    inject_route_count: int = 50,
+    # eBGP UG member baseline PER AFI (140 on the EBB-scale topology): asserted
+    # restored after recovery.
+    ebgp_members_per_afi: int = 140,
+    # The single 1-based session index silenced per AFI.
+    target_session_index: int = 1,
+    expected_group_count: int = 4,
+    # --- Checks ---
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    bgp_mon_ignore_prefixes: t.Optional[t.List[str]] = None,
+    # --- Timing / gates ---
+    keepalive_settle_s: int = 200,
+    inject_settle_s: int = 30,
+    recovery_convergence_s: int = 180,
+    monitor_interval_s: int = 60,
+    monitor_retry_count: int = 3,
+    monitor_retry_delay_s: float = 10.0,
+    session_retry_count: int = 10,
+    session_retry_delay_s: float = 30.0,
+    distribution_count_window: int = 10,
+    distribution_tolerance: int = 3,
+    load_avg_baseline: float = 12.0,
+    vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+    # v6 first-HW-run escape hatches (default OFF -> v6 STRICT), like 2.9.1/2.9.6.
+    v6_distribution_expected_fail: bool = False,
+    v6_distribution_expected_fail_reason: t.Optional[str] = None,
+    v6_resync_expected_fail: bool = False,
+    v6_resync_expected_fail_reason: t.Optional[str] = None,
+    # First-HW-run escape hatch for the notification-occurred verify (both AFIs):
+    # the hold-timer ``last_reset_reason`` phrasing is device-specific and
+    # unverified on the first run, so allow XFAIL until confirmed. Default OFF
+    # (strict). ``notification_reason_substrings`` overrides the default match set
+    # once the actual on-device reason string is known (None keeps the default).
+    notification_expected_fail: bool = False,
+    notification_expected_fail_reason: t.Optional[str] = None,
+    notification_reason_substrings: t.Optional[t.List[str]] = None,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.9.3 playbook (NOTIFICATION
+    Sent to One Peer -> Group Isolation).
+
+    Flow (dual-AFI):
+      1. Baseline: withdraw the per-AFI eBGP inject pools (so their later
+         advertise is a genuine +N), log the targeted eBGP session address per
+         AFI, and snapshot the eBGP num_resets baseline per AFI (the notification
+         reference).
+      2. Trigger + monitor (concurrent): StopKeepAlive on ONE eBGP session per
+         AFI, wait ``keepalive_settle_s`` for the DUT hold-timer to expire and
+         originate the Hold-Timer-Expired NOTIFICATION, and -- concurrently --
+         run the monitor track (no crash + iBGP stays Established + load-avg)
+         across the window (no iBGP flap). After the settle, in the same track:
+         assert iBGP fully Established (cross-group isolation), the update groups
+         are intact/enabled, no crash, and -- per AFI -- exactly the targeted
+         peer took a hold-timer NOTIFICATION with every other eBGP peer in the
+         group undisturbed (intra-group isolation).
+      3. Distribution during isolation: snapshot the iBGP PS (now that the target
+         is isolated), advertise the 50 genuinely-new eBGP routes per AFI (SHARED,
+         so they land even with the target down) and assert every iBGP peer's PS
+         grew by ~``inject_route_count`` (the DUT re-advertised them) --
+         distribution to the rest keeps working.
+      4. Recovery: ResumeKeepAlive on the same session per AFI, wait
+         ``recovery_convergence_s``, then assert all sessions re-Established +
+         full UG membership restored + no crash, and -- per AFI -- the target +
+         its mates back in PeerUpdateState JOINED_RUNNING (the DNE-approved
+         re-sync signal). No DUT->eBGP uniform-advertise check -- the DUT
+         advertises 0 to eBGP peers here (see the NOTE in the recovery stage).
+
+    v6 distribution + re-sync verifies carry the XFAIL escape hatch (default off).
+    The notification-occurred verify has its own escape hatch
+    (``notification_expected_fail``, default off) plus a
+    ``notification_reason_substrings`` override for the device-specific hold-timer
+    reason string, since the exact phrasing is unverified until the first HW run.
+    """
+    inject_min_delta = max(1, inject_route_count - distribution_count_window)
+
+    # --- Stage 1: baseline -----------------------------------------------------
+    baseline_steps: t.List[Step] = [
+        create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=False,
+            prefix_pool_regex=ebgp_v4_inject_pool_regex,
+            prefix_start_index=0,
+            prefix_end_index=inject_route_count,
+            description=(
+                "2.9.3 baseline -- withdraw the eBGP v4 inject pool so its later "
+                "advertise is a genuinely-new +N at the iBGP egress"
+            ),
+        ),
+        create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=False,
+            prefix_pool_regex=ebgp_v6_inject_pool_regex,
+            prefix_start_index=0,
+            prefix_end_index=inject_route_count,
+            description="2.9.3 baseline -- withdraw the eBGP v6 inject pool",
+        ),
+        create_longevity_step(
+            duration=inject_settle_s,
+            description="2.9.3 baseline -- settle after withdrawing inject pools",
+        ),
+        # Log the targeted session's (peer, DUT) address per AFI (the IXIA method
+        # logs it; the return value is unused -- the checks identify the target
+        # dynamically via the num_resets delta, robust to build-time IP unknowns).
+        create_ixia_api_step(
+            api_name="get_bgp_session_addresses",
+            args_dict={
+                "regex": ebgp_v4_peer_regex,
+                "session_idx": target_session_index,
+            },
+            description=(
+                f"2.9.3 baseline -- log the targeted eBGP v4 session "
+                f"{target_session_index} address"
+            ),
+        ),
+        create_ixia_api_step(
+            api_name="get_bgp_session_addresses",
+            args_dict={
+                "regex": ebgp_v6_peer_regex,
+                "session_idx": target_session_index,
+            },
+            description=(
+                f"2.9.3 baseline -- log the targeted eBGP v6 session "
+                f"{target_session_index} address"
+            ),
+        ),
+        create_verify_bgp_notification_occurred_step(
+            hostname=device_name,
+            snapshot_key="notif_ebgp_v4",
+            mode="snapshot",
+            peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+            description=(
+                "2.9.3 baseline -- snapshot eBGP v4 num_resets (notification ref)"
+            ),
+        ),
+        create_verify_bgp_notification_occurred_step(
+            hostname=device_name,
+            snapshot_key="notif_ebgp_v6",
+            mode="snapshot",
+            peer_parent_prefixes=ebgp_v6_peer_parent_prefixes,
+            description=(
+                "2.9.3 baseline -- snapshot eBGP v6 num_resets (notification ref)"
+            ),
+        ),
+    ]
+
+    # --- Stage 2: trigger + settle + isolation verify (monitor concurrently) ---
+    trigger_isolation_track: t.List[Step] = [
+        create_stop_bgp_keepalive_step(
+            peer_regex=ebgp_v4_peer_regex,
+            session_index=target_session_index,
+            description=(
+                f"2.9.3 -- StopKeepAlive on ONE eBGP v4 session "
+                f"({target_session_index}) -> DUT hold-timer NOTIFICATION"
+            ),
+        ),
+        create_stop_bgp_keepalive_step(
+            peer_regex=ebgp_v6_peer_regex,
+            session_index=target_session_index,
+            description=(
+                f"2.9.3 -- StopKeepAlive on ONE eBGP v6 session "
+                f"({target_session_index}) -> DUT hold-timer NOTIFICATION"
+            ),
+        ),
+        create_longevity_step(
+            duration=keepalive_settle_s,
+            description=(
+                "2.9.3 -- wait for the DUT hold-timer to expire on the silenced "
+                "session and originate the Hold-Timer-Expired NOTIFICATION"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=[
+                *_no_crash_checks(),
+                # Cross-group isolation: iBGP stays fully Established (the eBGP
+                # target is intentionally down/flapping, so ignore eBGP + MON).
+                create_bgp_session_establish_check(
+                    parent_prefixes_to_ignore=non_ibgp_parent_prefixes,
+                    retry_count=session_retry_count,
+                    retry_delay_seconds=session_retry_delay_s,
+                    check_id="notif_ibgp_isolation_established",
+                ),
+                # Groups intact / still enabled. eBGP member counts are NOT pinned
+                # here (the target flaps on the hold-timer cycle so the count
+                # oscillates 139<->140); the per-peer isolation is asserted
+                # robustly by verify_bgp_notification_occurred below.
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    peer_group_substrings=[
+                        ebgp_v4_peer_group,
+                        ebgp_v6_peer_group,
+                        ibgp_v6_peer_group,
+                    ],
+                    expected_group_count=expected_group_count,
+                    check_id="notif_ug_intact",
+                ),
+            ],
+            description=(
+                "2.9.3 -- isolation: iBGP fully Established (cross-group), update "
+                "groups intact/enabled, no crash"
+            ),
+        ),
+        create_verify_bgp_notification_occurred_step(
+            hostname=device_name,
+            snapshot_key="notif_ebgp_v4",
+            mode="verify",
+            peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+            expected_notified_peers=1,
+            reason_substrings=notification_reason_substrings,
+            expected_fail=notification_expected_fail,
+            expected_fail_reason=notification_expected_fail_reason,
+            description=(
+                "2.9.3 -- exactly ONE eBGP v4 peer took a hold-timer NOTIFICATION; "
+                "every other eBGP v4 peer undisturbed (intra-group isolation)"
+            ),
+        ),
+        create_verify_bgp_notification_occurred_step(
+            hostname=device_name,
+            snapshot_key="notif_ebgp_v6",
+            mode="verify",
+            peer_parent_prefixes=ebgp_v6_peer_parent_prefixes,
+            expected_notified_peers=1,
+            reason_substrings=notification_reason_substrings,
+            expected_fail=notification_expected_fail,
+            expected_fail_reason=notification_expected_fail_reason,
+            description=(
+                "2.9.3 -- exactly ONE eBGP v6 peer took a hold-timer NOTIFICATION; "
+                "every other eBGP v6 peer undisturbed (intra-group isolation)"
+            ),
+        ),
+    ]
+    trigger_isolation_stage = create_steps_stage(
+        concurrent=True,
+        concurrent_steps=[
+            ConcurrentStep(steps=trigger_isolation_track),
+            # No-iBGP-flap + no-crash monitor across the whole isolation window.
+            ConcurrentStep(
+                steps=_monitor_track_steps(
+                    non_ibgp_parent_prefixes=non_ibgp_parent_prefixes,
+                    load_avg_baseline=load_avg_baseline,
+                    interval_s=monitor_interval_s,
+                    duration_s=keepalive_settle_s,
+                    retry_count=monitor_retry_count,
+                    retry_delay_s=monitor_retry_delay_s,
+                )
+            ),
+        ],
+        description=(
+            "2.9.3 -- trigger the hold-timer NOTIFICATION on one eBGP session/AFI, "
+            "settle, and verify isolation while monitoring iBGP stability"
+        ),
+    )
+
+    # --- Stage 3: distribution during isolation --------------------------------
+    # Snapshot the iBGP PS baseline HERE (after the target is isolated, before the
+    # inject) so the delta measures ONLY the 50-route inject -- immune to any RIB
+    # change from the targeted eBGP peer being down.
+    distribution_steps: t.List[Step] = [
+        create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key="notif_ibgp_v4",
+            peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+            description=(
+                "2.9.3 distribution -- snapshot iBGP v4 PS during isolation "
+                "(delta ref for the v4 inject)"
+            ),
+        ),
+        create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key="notif_ibgp_v6",
+            peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+            description=(
+                "2.9.3 distribution -- snapshot iBGP v6 PS during isolation "
+                "(delta ref for the v6 inject)"
+            ),
+        ),
+        create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=True,
+            prefix_pool_regex=ebgp_v4_inject_pool_regex,
+            prefix_start_index=0,
+            prefix_end_index=inject_route_count,
+            description=(
+                f"2.9.3 distribution -- advertise {inject_route_count} genuinely-new "
+                f"eBGP v4 routes (SHARED; lands even with the target down)"
+            ),
+        ),
+        create_longevity_step(
+            duration=inject_settle_s,
+            description="2.9.3 distribution -- settle after the v4 inject",
+        ),
+        create_verify_bgp_sent_route_count_delta_step(
+            hostname=device_name,
+            snapshot_key="notif_ibgp_v4",
+            peer_parent_prefixes=ibgp_v4_peer_parent_prefixes,
+            min_delta=inject_min_delta,
+            tolerance=distribution_tolerance,
+            description=(
+                f"2.9.3 distribution -- every iBGP v4 peer's PS grew by "
+                f">= ~{inject_route_count} (the 50 new eBGP routes reached iBGP)"
+            ),
+        ),
+        create_advertise_withdraw_prefixes_step(
+            device_name=device_name,
+            advertise=True,
+            prefix_pool_regex=ebgp_v6_inject_pool_regex,
+            prefix_start_index=0,
+            prefix_end_index=inject_route_count,
+            description=(
+                f"2.9.3 distribution -- advertise {inject_route_count} genuinely-new "
+                f"eBGP v6 routes (SHARED)"
+            ),
+        ),
+        create_longevity_step(
+            duration=inject_settle_s,
+            description="2.9.3 distribution -- settle after the v6 inject",
+        ),
+        create_verify_bgp_sent_route_count_delta_step(
+            hostname=device_name,
+            snapshot_key="notif_ibgp_v6",
+            peer_parent_prefixes=ibgp_v6_peer_parent_prefixes,
+            min_delta=inject_min_delta,
+            # No max: the DUT may re-advertise the v6 EB-PRIVATE range with
+            # expansion (HW-observed on bag013; see 2.9.6 criterion 3).
+            tolerance=distribution_tolerance,
+            expected_fail=v6_distribution_expected_fail,
+            expected_fail_reason=v6_distribution_expected_fail_reason,
+            description=(
+                f"2.9.3 distribution (v6) -- every iBGP v6 peer's PS grew by "
+                f">= ~{inject_route_count}"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=list(_no_crash_checks()),
+            description="2.9.3 distribution -- no crash after the injects",
+        ),
+    ]
+
+    # --- Stage 4: recovery + re-sync -------------------------------------------
+    recovery_steps: t.List[Step] = [
+        create_resume_bgp_keepalive_step(
+            peer_regex=ebgp_v4_peer_regex,
+            session_index=target_session_index,
+            description=(
+                f"2.9.3 recovery -- ResumeKeepAlive on the eBGP v4 session "
+                f"({target_session_index})"
+            ),
+        ),
+        create_resume_bgp_keepalive_step(
+            peer_regex=ebgp_v6_peer_regex,
+            session_index=target_session_index,
+            description=(
+                f"2.9.3 recovery -- ResumeKeepAlive on the eBGP v6 session "
+                f"({target_session_index})"
+            ),
+        ),
+        create_longevity_step(
+            duration=recovery_convergence_s,
+            description=(
+                "2.9.3 recovery -- allow the recovered session to re-establish and "
+                "the update group to re-sync"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=[
+                *_no_crash_checks(),
+                # All sessions back (incl the recovered target), excl BGP-MON.
+                create_bgp_session_establish_check(
+                    parent_prefixes_to_ignore=bgp_mon_ignore_prefixes,
+                    retry_count=session_retry_count,
+                    retry_delay_seconds=session_retry_delay_s,
+                    check_id="notif_recovery_sessions",
+                ),
+                # Full UG membership restored (the target rejoined) -- safe to pin
+                # now that KeepAlive is resumed and the session is stable.
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    peer_group_substrings=[
+                        ebgp_v4_peer_group,
+                        ebgp_v6_peer_group,
+                        ibgp_v6_peer_group,
+                    ],
+                    expected_member_counts={
+                        ebgp_v4_peer_group: ebgp_members_per_afi,
+                        ebgp_v6_peer_group: ebgp_members_per_afi,
+                    },
+                    expected_group_count=expected_group_count,
+                    check_id="notif_recovery_ug_membership",
+                ),
+            ],
+            description=(
+                "2.9.3 recovery -- all sessions re-Established; full UG membership "
+                "restored; no crash"
+            ),
+        ),
+        create_verify_bgp_peers_joined_running_step(
+            hostname=device_name,
+            peer_parent_prefixes=ebgp_v4_peer_parent_prefixes,
+            description=(
+                "2.9.3 re-sync -- every eBGP v4 peer (incl the recovered target) is "
+                "back in PeerUpdateState JOINED_RUNNING"
+            ),
+        ),
+        create_verify_bgp_peers_joined_running_step(
+            hostname=device_name,
+            peer_parent_prefixes=ebgp_v6_peer_parent_prefixes,
+            expected_fail=v6_resync_expected_fail,
+            expected_fail_reason=v6_resync_expected_fail_reason,
+            description=(
+                "2.9.3 re-sync (v6) -- every eBGP v6 peer is back in "
+                "PeerUpdateState JOINED_RUNNING"
+            ),
+        ),
+        # NOTE (HW-observed on bag013, 2026-07-26): the DUT advertises 0 prefixes
+        # to the eBGP peers in this config -- min=max=0 uniformly across all 140,
+        # with every session Established and JOINED_RUNNING. The eBGP peers are
+        # route SOURCES here (they inject -> DUT -> iBGP, which the distribution
+        # stage verifies), so there is no iBGP-sourced table for the DUT to
+        # re-advertise back to them (unlike 2.9.6, which injects iBGP DC routes and
+        # therefore does see ~45k of DUT->eBGP egress). A DUT->eBGP "non-zero
+        # advertised count" is thus not a meaningful re-sync signal for 2.9.3.
+        # Per DNE, JOINED_RUNNING is the primary re-sync proof -- covered above by
+        # verify_bgp_peers_joined_running (recovered target + all mates) plus the
+        # all-Established + full-UG-membership validation checks. A DUT->eBGP
+        # received-count re-sync assertion would require injecting iBGP/DC routes
+        # the way 2.9.6 does; deferred, as DNE deemed JOINED_RUNNING sufficient.
+    ]
+
+    stages = [
+        create_steps_stage(
+            steps=baseline_steps,
+            description=(
+                "2.9.3 baseline -- withdraw inject pools; snapshot eBGP reset "
+                "baselines; log the targeted sessions"
+            ),
+        ),
+        trigger_isolation_stage,
+        create_steps_stage(
+            steps=distribution_steps,
+            description=(
+                "2.9.3 distribution -- inject 50 new eBGP routes/AFI and verify "
+                "every iBGP peer received them"
+            ),
+        ),
+        create_steps_stage(
+            steps=recovery_steps,
+            description=(
+                "2.9.3 recovery -- resume KeepAlive and verify the peer + its "
+                "mates re-sync into the update group"
+            ),
+        ),
+    ]
+
+    # Always-appended bounds (whether the caller takes the default
+    # BGP_STANDARD_POSTCHECKS bundle or supplies its own). BGP_STANDARD_POSTCHECKS
+    # covers no-stale-routes / unclean-exit; _no_crash_checks adds the
+    # service-restart + core-dump gate; plus the UG-specific bounds the spec calls
+    # out (log-parsing, load-avg, UG enabled).
+    base_postchecks = (
+        list(postchecks) if postchecks is not None else list(BGP_STANDARD_POSTCHECKS)
+    )
+    postchecks = base_postchecks + [
+        *_no_crash_checks(),
+        create_system_cpu_load_average_check(baseline=load_avg_baseline),
+        create_log_parsing_check(start_time_jq_var="test_case_start_time"),
+        create_bgp_update_group_check(expect_enabled=True),
+    ]
+    if vmhwm_absolute_threshold_bytes is not None:
+        postchecks.append(
+            create_memory_utilization_check(
+                vmhwm_threshold=vmhwm_absolute_threshold_bytes
+            )
+        )
+    # BGP_STANDARD_SNAPSHOT_CHECKS does NOT include the session/flap check, so add
+    # it explicitly: no iBGP peer may flap across the whole run (the targeted eBGP
+    # session legitimately does, so ignore the eBGP + BGP-MON parents). Append it
+    # UNCONDITIONALLY -- even when a caller supplies custom snapshot_checks -- so
+    # criterion 2 (no iBGP flap) can never be silently dropped by an override.
+    snapshot_checks = (
+        list(snapshot_checks)
+        if snapshot_checks is not None
+        else list(BGP_STANDARD_SNAPSHOT_CHECKS)
+    ) + [
+        create_bgp_session_snapshot_check(
+            parent_prefixes_to_ignore=non_ibgp_parent_prefixes,
+        )
+    ]
+
+    return Playbook(
+        name="bgp_ug_notification_isolation",
         stages=stages,
         prechecks=prechecks,
         postchecks=postchecks,
