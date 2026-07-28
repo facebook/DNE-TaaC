@@ -766,6 +766,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     @staticmethod
     def _formulaic_next_hop_values(
         mutation: t.Dict[str, t.Any],
+        *,
+        flatten_prefix_pool: bool = False,
     ) -> t.List[str]:
         next_hop = mutation["next_hop"]
         peer_count = mutation["peer_count"]
@@ -799,6 +801,9 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         else:
             raise ValueError(f"unsupported next-hop kind {next_hop['kind']!r}")
 
+        if distribution == "per_peer" and not flatten_prefix_pool:
+            return [address_at(peer_index) for peer_index in range(peer_count)]
+
         values = []
         for peer_index in range(peer_count):
             for prefix_index in range(prefixes_per_peer):
@@ -828,26 +833,44 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 raise ValueError(f"duplicate formulaic BGP route target {key!r}")
             seen.add(key)
             shell = self._find_formulaic_bgp_route_shell(*key)
-            device_group, _network_group, prefix_pool, _route_property = shell
+            device_group, network_group, prefix_pool, _route_property = shell
             if device_group.Multiplier != mutation["peer_count"]:
                 raise ValueError(
                     f"peer count mismatch for {key!r}: expected "
                     f"{mutation['peer_count']}, got {device_group.Multiplier}"
                 )
-            if prefix_pool.NumberOfAddresses != mutation["prefixes_per_peer"]:
+            prefix = mutation["prefix"]
+            flatten_prefix_pool = bool(prefix["excluded_indices"])
+            prefixes_per_peer = mutation["prefixes_per_peer"]
+            if flatten_prefix_pool:
+                compact_geometry = (
+                    network_group.Multiplier in (None, 1)
+                    and prefix_pool.NumberOfAddresses == prefixes_per_peer
+                )
+                flat_geometry = (
+                    network_group.Multiplier == prefixes_per_peer
+                    and prefix_pool.NumberOfAddresses == 1
+                )
+                if not compact_geometry and not flat_geometry:
+                    raise ValueError(
+                        f"sparse prefix geometry mismatch for {key!r}: expected "
+                        f"(network group, pool)=((1, {prefixes_per_peer}) or "
+                        f"({prefixes_per_peer}, 1)), got "
+                        f"({network_group.Multiplier}, "
+                        f"{prefix_pool.NumberOfAddresses})"
+                    )
+            elif prefix_pool.NumberOfAddresses != prefixes_per_peer:
                 raise ValueError(
                     f"prefix count mismatch for {key!r}: expected "
-                    f"{mutation['prefixes_per_peer']}, got "
-                    f"{prefix_pool.NumberOfAddresses}"
+                    f"{prefixes_per_peer}, got {prefix_pool.NumberOfAddresses}"
                 )
-            prefix = mutation["prefix"]
             prefix_values = None
-            if prefix["excluded_indices"]:
+            if flatten_prefix_pool:
                 prefix_values = self._formulaic_prefix_values(prefix)
                 expected_prefix_count = (
-                    mutation["prefixes_per_peer"]
+                    prefixes_per_peer
                     if prefix["distribution"] == "shared"
-                    else mutation["peer_count"] * mutation["prefixes_per_peer"]
+                    else mutation["peer_count"] * prefixes_per_peer
                 )
                 if len(prefix_values) != expected_prefix_count:
                     raise ValueError(
@@ -857,7 +880,10 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 if prefix["distribution"] == "shared":
                     prefix_values *= mutation["peer_count"]
             next_hop_values = (
-                self._formulaic_next_hop_values(mutation)
+                self._formulaic_next_hop_values(
+                    mutation,
+                    flatten_prefix_pool=flatten_prefix_pool,
+                )
                 if mutation["next_hop"] is not None
                 else None
             )
@@ -881,8 +907,22 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         prefix_values: t.Optional[t.List[str]],
         next_hop_values: t.Optional[t.List[str]],
     ) -> None:
-        _device_group, _network_group, pool, route = shell
+        device_group, network_group, pool, route = shell
         if prefix_values is not None:
+            for attempt in range(4):
+                try:
+                    network_group.Multiplier = mutation["prefixes_per_peer"]
+                    break
+                except Exception as error:
+                    if (
+                        "Changing the Multiplier in a started" not in str(error)
+                        or attempt == 3
+                    ):
+                        raise
+                    device_group.Stop()
+                    network_group.Stop()
+                    time.sleep(3)
+            pool.NumberOfAddresses = 1
             pool.NetworkAddress.ValueList(prefix_values)
         if next_hop_values is not None:
             route.NextHopType.Single(

@@ -26,8 +26,31 @@ class _LifecycleObject:
         self.start_count += 1
 
 
+class _RetryMultiplierNetworkGroup:
+    def __init__(self) -> None:
+        self._multiplier = 1
+        self.multiplier_write_count = 0
+        self.stop_count = 0
+
+    @property
+    def Multiplier(self) -> int:
+        return self._multiplier
+
+    @Multiplier.setter
+    def Multiplier(self, value: int) -> None:
+        self.multiplier_write_count += 1
+        if self.multiplier_write_count == 1:
+            raise RuntimeError("Changing the Multiplier in a started Network Group")
+        self._multiplier = value
+
+    def Stop(self) -> None:
+        self.stop_count += 1
+
+
 class _Pool:
-    NumberOfAddresses = 2
+    def __init__(self) -> None:
+        self.NumberOfAddresses = 2
+        self.NetworkAddress = mock.MagicMock()
 
 
 class _Harness(TaacIxia):
@@ -86,9 +109,9 @@ class FormulaicBgpRoutesTest(unittest.TestCase):
             ),
         )
 
-    def test_formulaic_per_peer_next_hops_repeat_for_each_peer_pool(self) -> None:
+    def test_formulaic_per_peer_next_hops_emit_one_value_per_peer(self) -> None:
         self.assertEqual(
-            ["10.0.0.1"] * 3 + ["10.0.0.3"] * 3,
+            ["10.0.0.1", "10.0.0.3"],
             TaacIxia._formulaic_next_hop_values(
                 {
                     "peer_count": 2,
@@ -106,7 +129,7 @@ class FormulaicBgpRoutesTest(unittest.TestCase):
 
     def test_explicit_per_peer_next_hops_preserve_authored_order(self) -> None:
         self.assertEqual(
-            ["10.0.0.10"] * 2 + ["10.0.0.100"] * 2,
+            ["10.0.0.10", "10.0.0.100"],
             TaacIxia._formulaic_next_hop_values(
                 {
                     "peer_count": 2,
@@ -181,6 +204,110 @@ class FormulaicBgpRoutesTest(unittest.TestCase):
                 {**base, "prefix": {"distribution": "disjoint"}}
             ),
         )
+
+    def test_prepare_sparse_disjoint_route_uses_flat_child_geometry(self) -> None:
+        device_group = _LifecycleObject(multiplier=2)
+        network_group = _LifecycleObject()
+        harness = _Harness((device_group, network_group, _Pool(), object()))
+        mutation = {
+            "device_group_name": "dg",
+            "prefix_pool_name": "pool",
+            "afi": "v4",
+            "peer_count": 2,
+            "prefixes_per_peer": 2,
+            "prefix": {
+                "start": "11.0.0.0",
+                "step": 1 << 8,
+                "count": 4,
+                "excluded_indices": [1],
+                "distribution": "disjoint",
+            },
+            "next_hop": {
+                "kind": "explicit",
+                "addresses": ["10.0.0.10", "10.0.0.100"],
+                "distribution": "per_peer",
+            },
+            "attributes": {"med": 0, "local_pref": 100, "origin": "igp"},
+        }
+
+        prepared = harness._prepare_formulaic_bgp_routes([mutation])
+
+        self.assertEqual(
+            ["11.0.0.0", "11.0.2.0", "11.0.3.0", "11.0.4.0"],
+            prepared[0][2],
+        )
+        self.assertEqual(
+            ["10.0.0.10"] * 2 + ["10.0.0.100"] * 2,
+            prepared[0][3],
+        )
+
+    def test_sparse_route_flattening_is_idempotent(self) -> None:
+        device_group = _LifecycleObject(multiplier=2)
+        network_group = _LifecycleObject(multiplier=1)
+        pool = _Pool()
+        route = mock.MagicMock()
+        harness = _Harness((device_group, network_group, pool, route))
+        mutation = {
+            "device_group_name": "dg",
+            "prefix_pool_name": "pool",
+            "afi": "v4",
+            "peer_count": 2,
+            "prefixes_per_peer": 2,
+            "prefix": {
+                "start": "11.0.0.0",
+                "step": 1 << 8,
+                "count": 4,
+                "excluded_indices": [1],
+                "distribution": "disjoint",
+            },
+            "next_hop": {
+                "kind": "explicit",
+                "addresses": ["10.0.0.10", "10.0.0.100"],
+                "distribution": "per_peer",
+            },
+            "attributes": {"med": 0, "local_pref": 100, "origin": "igp"},
+        }
+
+        with mock.patch.object(harness, "apply_changes"):
+            harness.configure_formulaic_bgp_routes([mutation])
+            harness.configure_formulaic_bgp_routes([mutation])
+
+        self.assertEqual(2, network_group.Multiplier)
+        self.assertEqual(1, pool.NumberOfAddresses)
+        pool.NetworkAddress.ValueList.assert_called_with(
+            ["11.0.0.0", "11.0.2.0", "11.0.3.0", "11.0.4.0"]
+        )
+        route.Ipv4NextHop.ValueList.assert_called_with(
+            ["10.0.0.10"] * 2 + ["10.0.0.100"] * 2
+        )
+
+    def test_sparse_route_multiplier_write_retries_after_stopping_groups(self) -> None:
+        device_group = _LifecycleObject(multiplier=2)
+        network_group = _RetryMultiplierNetworkGroup()
+        pool = _Pool()
+        route = mock.MagicMock()
+        harness = _Harness((device_group, network_group, pool, route))
+        mutation = {
+            "afi": "v4",
+            "prefixes_per_peer": 2,
+            "attributes": {"med": 0, "local_pref": 100, "origin": "igp"},
+        }
+
+        with mock.patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.time.sleep"
+        ) as sleep:
+            harness._apply_formulaic_bgp_route(
+                mutation,
+                harness.shell,
+                ["11.0.0.0", "11.0.2.0"],
+                ["10.0.0.10", "10.0.0.10"],
+            )
+
+        self.assertEqual(2, network_group.multiplier_write_count)
+        self.assertEqual(2, network_group.Multiplier)
+        self.assertEqual(1, device_group.stop_count)
+        self.assertEqual(1, network_group.stop_count)
+        sleep.assert_called_once_with(3)
 
     def test_preflight_finishes_before_any_route_shell_is_stopped(self) -> None:
         device_group = _LifecycleObject(multiplier=1)
