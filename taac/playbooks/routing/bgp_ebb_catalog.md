@@ -35,7 +35,7 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 | CICD-08 | IGP unresolvable PNH | `bgp_ebb_igp_unresolvable_pnh_playbook` | G2-14 (direct) | `ebb_full_scale` | blocking |
 | CICD-09 | Multipath-group oscillation | `bgp_ebb_multipath_group_oscillation_playbook` | G2-16 (direct) | `ebb_full_scale` | blocking |
 | CICD-10 | BGP attribute churn | `bgp_ebb_attribute_churn_playbook` | G2-15 (direct) | `ebb_full_scale` | blocking |
-| CICD-11 | BGP route storm | `bgp_ebb_route_storm_playbook` | G2-17 (direct) | `ebb_full_scale` | calibrating |
+| CICD-11 | BGP route storm | `bgp_ebb_route_storm_playbook` | G2-17 (direct) | `ebb_full_scale` | blocking |
 | CICD-12 | Route-registry runtime update | `bgp_ebb_route_registry_runtime_update_playbook` | G2-24 (direct), G2-25 (supplemental) | `ebb_full_scale` | blocking |
 | CICD-13 | FAUU drain and undrain | `bgp_ebb_fauu_drain_undrain_playbook` | G2-23 (direct) | `ebb_full_scale` | blocking |
 | CICD-14 | Plane drain and undrain | `bgp_ebb_plane_drain_undrain_playbook` | G2-22 (direct) | `ebb_full_scale` | calibrating |
@@ -57,7 +57,7 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 | G2-14 | CICD-08 (direct) | Make selected PNHs unresolvable and verify withdrawal and restoration behavior. |
 | G2-15 | CICD-10 (direct) | Sustain one hour of minute-cadence multi-attribute route churn with exact transition and restoration verdicts. |
 | G2-16 | CICD-09 (direct) | Change live multipath width and verify restoration to the measured baseline. |
-| G2-17 | CICD-11 (direct) | Sustain large route advertise and withdraw cycles and verify recovery. |
+| G2-17 | CICD-11 (direct) | Sustain one hour of exact dual-stack route-path advertise and withdraw transitions and verify recovery. |
 | G2-18 | CICD-03 (direct) | Repeatedly flap eBGP sessions and verify final recovery. |
 | G2-19 | CICD-04 (direct) | Flap iBGP sessions across all tornado planes and verify recovery. |
 | G2-20 | CICD-05 (direct) | Repeatedly withdraw and readvertise eBGP routes and verify convergence. |
@@ -83,7 +83,7 @@ This summary compares catalog-required blocking signals with the playbook-level 
 | CICD-08 | IGP unresolvable PNH | Partial | The health-check chain runs around the workload, not after cleanup restoration. Final session and RIB/FIB health are checked, but explicit convergence is disabled. Cleanup re-injects routes without a post-cleanup route-state health check. |
 | CICD-09 | Multipath-group oscillation | Partial | Multipath width is asserted inside the oscillation stage, not by a health check. Baseline restoration is asserted inside the oscillation stage, not by a health check. |
 | CICD-10 | BGP attribute churn | Partial | Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain. Sampled exact-prefix path and best-path verdicts are enforced inside the custom step. The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the workload. |
-| CICD-11 | BGP route storm | Partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
+| CICD-11 | BGP route storm | Partial | Exact row-scoped IXIA Active readback is enforced inside the custom step for every transition. The health-check chain verifies boundary session health; runtime stability and source counters are enforced inside the custom step. The postcheck verifies final RIB/FIB invariants; per-transition exact-prefix verdicts are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the storm. |
 | CICD-12 | Route-registry runtime update | Partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. Cleanup actions run after the health-check chain and have no post-cleanup check. |
 | CICD-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
 | CICD-14 | Plane drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but plane policy and captured views are stage-local validations. |
@@ -796,19 +796,21 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 - **Requirements:** G2-17 (direct)
 - **Required topology:** `neteng.test_infra.dne.taac.abstractions.topologies.ebb_full_scale.ebb_full_scale_topology`
 - **Cadence:** Daily.
-- **Enforcement:** calibrating
+- **Enforcement:** blocking
 
-**Purpose:** Detect route-processing, convergence, and memory regressions during sustained storm load.
+**Purpose:** Detect UPDATE processing, RIB convergence, session-stability, and restoration regressions during sustained route storm load.
 
-**Stimulus:** Advertise and withdraw iBGP plane-1 routes every 30 seconds for 60 minutes, then revert and wait 120 seconds.
+**Stimulus:** On the Open/R-backed full-scale topology, group one IXIA protocol restart around deterministic plane-1 heavy-attribute setup, require a 120-second quiet window, then run 60 cycles of 30-second withdraw and 30-second advertise phases. Restore the exact captured IXIA and DUT baseline after the final advertised dwell.
 
-**Scale:** Canonical full-scale topology with AS-path length 255 and pool-size invariants.
+**Scale:** Toggle seven deterministic 750-route rows per AFI: 5,250 IPv4 and 5,250 IPv6 plane-1 route paths, or 10,500 stormed paths total. Sample the first and last prefix of every row for 28 exact DUT RIB verdicts. Configure and read back ten deterministic heavy profiles across all 62 plane-1 rows; the seven storm rows exercise seven distinct profiles. Each profile uses one 255-AS AS_SEQUENCE, 32 distinct standard communities, one route target, and deterministic local preference, MED, and origin.
 
 **Blocking signals**
 
-- Storm profile and expected session checks pass.
-- Final AS-path and pool invariants hold.
-- No crash, snapshot regression, or blocking resource threshold is hit.
+- IXIA Active readback matches every selected advertise or withdraw state while every non-target row remains at baseline.
+- All 1,272 expected non-BGP-MON sessions re-establish before measurement and remain established without reset, flap, or uptime regression; selected source counters prove every announcement and withdrawal.
+- Every transition advances global and sampled-prefix RIB versions; advertised paths have exact heavy attributes, withdrawn source paths are absent, path selection is complete, and an alternate best path remains.
+- The Open/R profile enables the iBGP PNH precheck, and standard session, RIB/FIB, and core-dump checks pass.
+- Failure-safe cleanup restores exact IXIA structure, vectors, route attributes, Active state, sampled DUT paths, and a 120-second session-stable quiet window.
 
 **Outcome validation traceability**
 
@@ -828,29 +830,34 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 | Required Validation | Implemented By | Coverage | Gap |
 | --- | --- | --- | --- |
-| Storm profile and expected session checks pass. | `pre.standard_bgp`, `post.churn_storm` | implemented | None |
-| Final AS-path and pool invariants hold. | `post.churn_storm` | implemented | None |
-| No crash, snapshot regression, or blocking resource threshold is hit. | `snapshot.core_only` | partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
+| IXIA Active readback matches every selected advertise or withdraw state while every non-target row remains at baseline. | None | missing | Exact row-scoped IXIA Active readback is enforced inside the custom step for every transition. |
+| All 1,272 expected non-BGP-MON sessions re-establish before measurement and remain established without reset, flap, or uptime regression; selected source counters prove every announcement and withdrawal. | `pre.standard_bgp`, `post.churn_storm` | partial | The health-check chain verifies boundary session health; runtime stability and source counters are enforced inside the custom step. |
+| Every transition advances global and sampled-prefix RIB versions; advertised paths have exact heavy attributes, withdrawn source paths are absent, path selection is complete, and an alternate best path remains. | `post.churn_storm` | partial | The postcheck verifies final RIB/FIB invariants; per-transition exact-prefix verdicts are enforced inside the custom step. |
+| The Open/R profile enables the iBGP PNH precheck, and standard session, RIB/FIB, and core-dump checks pass. | `pre.standard_bgp`, `post.churn_storm`, `snapshot.core_only` | implemented | None |
+| Failure-safe cleanup restores exact IXIA structure, vectors, route attributes, Active state, sampled DUT paths, and a 120-second session-stable quiet window. | None | missing | Exact restoration and the quiet window are enforced inside the custom step after the storm. |
 
 **Validations outside the health-check chain**
 
+- The custom step enforces row-scoped Active state, source counters, sampled-route transitions, heavy attributes, and exact baseline restoration.
 - Standard CPU and memory periodic tasks run in non-terminating mode.
 
-**Expected runtime:** Approximately 2.2 hours including shared topology setup.
+**Expected runtime:** One hour of measured storm transitions plus two 120-second quiet windows, bounded setup and restoration convergence, and shared topology setup.
 
 **Primary triage signals**
 
-- IXIA advertise and withdraw actions.
-- AS-path, pool, RIB, and FIB diagnostics.
-- CPU and memory trends.
+- Cycle, phase, AFI, peer row, prefix pool, and exact IXIA Active mismatch.
+- Sampled prefix path identities, heavy attributes, best peers, path-selection state, and RIB versions.
+- Expected-session count plus source UPDATE, reset, flap, uptime, announcement, and withdrawal counters.
+- Primary and restoration errors retained together when both fail.
+- CPU and memory trends as non-blocking calibration telemetry.
 
 **Artifacts**
 
-- TAAC stage and health-check results.
-- BGP and IXIA logs.
-- Resource time series and snapshots.
+- TAAC custom-step result with completed transitions, storm footprint, heavy-attribute scope, and structured primary and restoration errors.
+- TAAC health-check and core-dump snapshot results.
+- BGP and IXIA logs plus CPU and memory time series.
 
-**Qualification difference:** CI fixes the storm cadence and duration; resource thresholds require ongoing calibration.
+**Qualification difference:** CI now blocks on the one-hour cadence, 10,500-path footprint, exact transition evidence, session stability, and restoration. Gate2 still requests AS_SET length 255 and 16 extended communities; CI currently verifies AS_SEQUENCE length 255 and one route target pending an isolated IXIA capability probe. IXIA proves ten heavy profiles across full plane 1, while row-scoped Active control limits the exact 10,500-path storm to seven distinct profiles. Resource thresholds remain non-blocking pending baseline calibration.
 
 ## Operational Procedures
 

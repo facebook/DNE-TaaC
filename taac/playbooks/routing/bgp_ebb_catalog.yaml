@@ -812,44 +812,77 @@ entries:
     requirements:
       - id: G2-17
         role: direct
-        coverage: Sustain large route advertise and withdraw cycles and verify recovery.
+        coverage: Sustain one hour of exact dual-stack route-path advertise and withdraw transitions and verify recovery.
     required_topology: ebb_full_scale
-    purpose: Detect route-processing, convergence, and memory regressions during sustained storm load.
-    stimulus: Advertise and withdraw iBGP plane-1 routes every 30 seconds for 60 minutes, then revert and wait 120 seconds.
-    scale: Canonical full-scale topology with AS-path length 255 and pool-size invariants.
+    purpose: Detect UPDATE processing, RIB convergence, session-stability, and restoration regressions during sustained route storm load.
+    stimulus: >-
+      On the Open/R-backed full-scale topology, group one IXIA protocol restart
+      around deterministic plane-1 heavy-attribute setup, require a 120-second
+      quiet window, then run 60 cycles of 30-second withdraw and 30-second
+      advertise phases. Restore the exact captured IXIA and DUT baseline after
+      the final advertised dwell.
+    scale: >-
+      Toggle seven deterministic 750-route rows per AFI: 5,250 IPv4 and 5,250
+      IPv6 plane-1 route paths, or 10,500 stormed paths total. Sample the first
+      and last prefix of every row for 28 exact DUT RIB verdicts. Configure and
+      read back ten deterministic heavy profiles across all 62 plane-1 rows;
+      the seven storm rows exercise seven distinct profiles. Each profile uses
+      one 255-AS AS_SEQUENCE, 32 distinct standard communities, one route
+      target, and deterministic local preference, MED, and origin.
     blocking_signals:
-      - Storm profile and expected session checks pass.
-      - Final AS-path and pool invariants hold.
-      - No crash, snapshot regression, or blocking resource threshold is hit.
+      - IXIA Active readback matches every selected advertise or withdraw state while every non-target row remains at baseline.
+      - All 1,272 expected non-BGP-MON sessions re-establish before measurement and remain established without reset, flap, or uptime regression; selected source counters prove every announcement and withdrawal.
+      - Every transition advances global and sampled-prefix RIB versions; advertised paths have exact heavy attributes, withdrawn source paths are absent, path selection is complete, and an alternate best path remains.
+      - The Open/R profile enables the iBGP PNH precheck, and standard session, RIB/FIB, and core-dump checks pass.
+      - Failure-safe cleanup restores exact IXIA structure, vectors, route attributes, Active state, sampled DUT paths, and a 120-second session-stable quiet window.
     validation:
       chain: churn_storm
       spec_vs_implemented:
-        - spec: Storm profile and expected session checks pass.
-          coverage: implemented
-          implemented_by: [pre.standard_bgp, post.churn_storm]
-          gap: null
-        - spec: Final AS-path and pool invariants hold.
-          coverage: implemented
-          implemented_by: [post.churn_storm]
-          gap: null
-        - spec: No crash, snapshot regression, or blocking resource threshold is hit.
+        - spec: IXIA Active readback matches every selected advertise or withdraw state while every non-target row remains at baseline.
+          coverage: missing
+          implemented_by: []
+          gap: Exact row-scoped IXIA Active readback is enforced inside the custom step for every transition.
+        - spec: All 1,272 expected non-BGP-MON sessions re-establish before measurement and remain established without reset, flap, or uptime regression; selected source counters prove every announcement and withdrawal.
           coverage: partial
-          implemented_by: [snapshot.core_only]
-          gap: Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks.
+          implemented_by: [pre.standard_bgp, post.churn_storm]
+          gap: The health-check chain verifies boundary session health; runtime stability and source counters are enforced inside the custom step.
+        - spec: Every transition advances global and sampled-prefix RIB versions; advertised paths have exact heavy attributes, withdrawn source paths are absent, path selection is complete, and an alternate best path remains.
+          coverage: partial
+          implemented_by: [post.churn_storm]
+          gap: The postcheck verifies final RIB/FIB invariants; per-transition exact-prefix verdicts are enforced inside the custom step.
+        - spec: The Open/R profile enables the iBGP PNH precheck, and standard session, RIB/FIB, and core-dump checks pass.
+          coverage: implemented
+          implemented_by: [pre.standard_bgp, post.churn_storm, snapshot.core_only]
+          gap: null
+        - spec: Failure-safe cleanup restores exact IXIA structure, vectors, route attributes, Active state, sampled DUT paths, and a 120-second session-stable quiet window.
+          coverage: missing
+          implemented_by: []
+          gap: Exact restoration and the quiet window are enforced inside the custom step after the storm.
       non_chain_validations:
+        - The custom step enforces row-scoped Active state, source counters, sampled-route transitions, heavy attributes, and exact baseline restoration.
         - Standard CPU and memory periodic tasks run in non-terminating mode.
-    expected_runtime: Approximately 2.2 hours including shared topology setup.
+    expected_runtime: One hour of measured storm transitions plus two 120-second quiet windows, bounded setup and restoration convergence, and shared topology setup.
     cadence: Daily.
-    enforcement: calibrating
+    enforcement: blocking
     triage_signals:
-      - IXIA advertise and withdraw actions.
-      - AS-path, pool, RIB, and FIB diagnostics.
-      - CPU and memory trends.
+      - Cycle, phase, AFI, peer row, prefix pool, and exact IXIA Active mismatch.
+      - Sampled prefix path identities, heavy attributes, best peers, path-selection state, and RIB versions.
+      - Expected-session count plus source UPDATE, reset, flap, uptime, announcement, and withdrawal counters.
+      - Primary and restoration errors retained together when both fail.
+      - CPU and memory trends as non-blocking calibration telemetry.
     artifacts:
-      - TAAC stage and health-check results.
-      - BGP and IXIA logs.
-      - Resource time series and snapshots.
-    qualification_delta: CI fixes the storm cadence and duration; resource thresholds require ongoing calibration.
+      - TAAC custom-step result with completed transitions, storm footprint, heavy-attribute scope, and structured primary and restoration errors.
+      - TAAC health-check and core-dump snapshot results.
+      - BGP and IXIA logs plus CPU and memory time series.
+    qualification_delta: >-
+      CI now blocks on the one-hour cadence, 10,500-path footprint, exact
+      transition evidence, session stability, and restoration. Gate2 still
+      requests AS_SET length 255 and 16 extended communities; CI currently
+      verifies AS_SEQUENCE length 255 and one route target pending an isolated
+      IXIA capability probe. IXIA proves ten heavy profiles across full plane 1,
+      while row-scoped Active control limits the exact 10,500-path storm to
+      seven distinct profiles. Resource thresholds remain non-blocking pending
+      baseline calibration.
 
   - id: CICD-12
     title: Route-registry runtime update
