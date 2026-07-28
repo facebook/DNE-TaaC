@@ -181,6 +181,16 @@ validation_phases:
       - rib_fib_consistency_postcheck
       - service restart detection
     notes: Omits the explicit BGP convergence-time health check.
+  - id: post.attribute_churn
+    phase: postcheck
+    implementation: get_profile_checks(CheckProfile.CHURN_STORM, ProfileContext(full_session_snapshot=True)).postchecks
+    healthchecks:
+      - expected-count BGP session establishment
+      - BGP stale-route check
+      - BGP and system log parsing
+      - rib_fib_consistency_postcheck
+      - service restart detection
+    notes: Omits the convergence-time check because the custom step proves every sampled route transition directly.
   - id: post.churn_storm
     phase: postcheck
     implementation: get_profile_checks(CheckProfile.CHURN_STORM).postchecks
@@ -273,6 +283,10 @@ validation_chains:
     check_profile: CHURN_STORM
     implementation: get_profile_checks(CheckProfile.CHURN_STORM)
     phases: [pre.standard_bgp, post.churn_storm, snapshot.core_only]
+  - id: attribute_churn
+    check_profile: CHURN_STORM
+    implementation: get_profile_checks(CheckProfile.CHURN_STORM, ProfileContext(full_session_snapshot=True))
+    phases: [pre.standard_bgp, post.attribute_churn, snapshot.full]
   - id: runtime_update
     check_profile: RUNTIME_UPDATE
     implementation: get_profile_checks(CheckProfile.RUNTIME_UPDATE)
@@ -729,44 +743,67 @@ entries:
     requirements:
       - id: G2-15
         role: direct
-        coverage: Sustain multi-attribute route churn while preserving control-plane health.
+        coverage: Sustain one hour of minute-cadence multi-attribute route churn with exact transition and restoration verdicts.
     required_topology: ebb_full_scale
-    purpose: Detect UPDATE generation, canonicalization, memory, and convergence regressions under attribute churn.
-    stimulus: Repeatedly change local preference, MED, origin, and AS path over iBGP plane-1 prefixes.
-    scale: Prefix indexes 0 through 500 on the canonical full-scale topology.
+    purpose: Detect UPDATE propagation, best-path selection, decision-process, and restoration regressions under attribute churn.
+    stimulus: >-
+      Run 15 one-minute plane-1 transitions for local preference
+      200/reference 100/50, MED 100/reference 200/300, origin
+      IGP/reference EGP/INCOMPLETE, and AS-path length 1/reference 5/10 while
+      planes 2 through 4 provide controlled reference paths. AS-path changes
+      use fixed cold slots and never restart a peer.
+    scale: >-
+      Seven deterministic 750-route peer blocks per AFI: 5,250 IPv4 and 5,250
+      IPv6 routes, or 10,500 unique routes total. Two prefixes per block are
+      sampled for exact dual-stack RIB-path verification.
     blocking_signals:
-      - Churn profile checks and expected session checks pass.
-      - No crash, snapshot regression, or blocking resource threshold is hit.
-      - Final route state converges after churn.
+      - Every mutation has exact IXIA readback and advances global and sampled-prefix RIB versions.
+      - Sampled DUT paths contain the requested attribute and deterministic plane-1 or reference-plane best path.
+      - Selected source and BGP-MON sessions remain established without resets, flaps, or withdrawals; BGP-MON observes dual-stack UPDATE progress.
+      - Failure-safe cleanup restores every IXIA vector, sampled DUT attribute, baseline best path, and a 120-second quiet window.
+      - Attribute-churn profile checks and full session snapshots pass without a crash or snapshot regression.
     validation:
-      chain: churn_storm
+      chain: attribute_churn
       spec_vs_implemented:
-        - spec: Churn profile checks and expected session checks pass.
+        - spec: Every mutation has exact IXIA readback and advances global and sampled-prefix RIB versions.
+          coverage: missing
+          implemented_by: []
+          gap: Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain.
+        - spec: Sampled DUT paths contain the requested attribute and deterministic plane-1 or reference-plane best path.
+          coverage: missing
+          implemented_by: []
+          gap: Sampled exact-prefix path and best-path verdicts are enforced inside the custom step.
+        - spec: Selected source and BGP-MON sessions remain established without resets, flaps, or withdrawals; BGP-MON observes dual-stack UPDATE progress.
+          coverage: partial
+          implemented_by: [pre.standard_bgp, post.attribute_churn]
+          gap: The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step.
+        - spec: Failure-safe cleanup restores every IXIA vector, sampled DUT attribute, baseline best path, and a 120-second quiet window.
+          coverage: missing
+          implemented_by: []
+          gap: Exact restoration and the quiet window are enforced inside the custom step after the workload.
+        - spec: Attribute-churn profile checks and full session snapshots pass without a crash or snapshot regression.
           coverage: implemented
-          implemented_by: [pre.standard_bgp, post.churn_storm]
+          implemented_by: [pre.standard_bgp, post.attribute_churn, snapshot.full]
           gap: null
-        - spec: No crash, snapshot regression, or blocking resource threshold is hit.
-          coverage: partial
-          implemented_by: [snapshot.core_only]
-          gap: Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks.
-        - spec: Final route state converges after churn.
-          coverage: partial
-          implemented_by: [post.churn_storm]
-          gap: RIB/FIB consistency is checked, but the explicit convergence health check is disabled.
       non_chain_validations:
+        - The custom step enforces exact IXIA, sampled-route, best-path, RIB-version, session-counter, BGP-MON, and restoration verdicts.
         - Standard CPU and memory periodic tasks run in non-terminating mode.
-    expected_runtime: Approximately 2 hours including shared topology setup.
+    expected_runtime: One hour of measured transitions plus reference setup, restoration, the quiet window, and shared topology setup.
     cadence: Daily.
-    enforcement: calibrating
+    enforcement: blocking
     triage_signals:
-      - Attribute assignments and generated updates.
-      - Session and convergence failures.
-      - CPU and memory trends.
+      - Attribute family, iteration, AFI, plane, prefix pool, peer, and exact IXIA vector mismatch.
+      - Sampled prefix paths, source-peer attributes, best-path identities, and RIB versions.
+      - Source and BGP-MON UPDATE, reset, flap, uptime, and withdrawal counters.
+      - CPU and memory trends as non-blocking calibration telemetry.
     artifacts:
-      - Attribute-change and IXIA logs.
-      - TAAC health-check results.
+      - TAAC custom-step result with structured primary and restoration failure details.
+      - TAAC health-check and full session snapshot results.
       - CPU and memory time series.
-    qualification_delta: CI covers a deterministic attribute matrix and prefix slice; resource thresholds require ongoing calibration.
+    qualification_delta: >-
+      CI enforces the Gate2 one-hour cadence and attribute matrix on deterministic
+      route blocks with sampled exact-prefix verdicts. CPU and memory thresholds
+      remain non-blocking telemetry pending resource-baseline calibration.
 
   - id: CICD-11
     title: BGP route storm

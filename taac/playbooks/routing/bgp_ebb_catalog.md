@@ -34,7 +34,7 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 | CICD-07 | IGP PNH metric oscillation | `bgp_ebb_igp_pnh_metric_oscillation_playbook` | G2-13 (direct) | `ebb_full_scale` | blocking |
 | CICD-08 | IGP unresolvable PNH | `bgp_ebb_igp_unresolvable_pnh_playbook` | G2-14 (direct) | `ebb_full_scale` | blocking |
 | CICD-09 | Multipath-group oscillation | `bgp_ebb_multipath_group_oscillation_playbook` | G2-16 (direct) | `ebb_full_scale` | blocking |
-| CICD-10 | BGP attribute churn | `bgp_ebb_attribute_churn_playbook` | G2-15 (direct) | `ebb_full_scale` | calibrating |
+| CICD-10 | BGP attribute churn | `bgp_ebb_attribute_churn_playbook` | G2-15 (direct) | `ebb_full_scale` | blocking |
 | CICD-11 | BGP route storm | `bgp_ebb_route_storm_playbook` | G2-17 (direct) | `ebb_full_scale` | calibrating |
 | CICD-12 | Route-registry runtime update | `bgp_ebb_route_registry_runtime_update_playbook` | G2-24 (direct), G2-25 (supplemental) | `ebb_full_scale` | blocking |
 | CICD-13 | FAUU drain and undrain | `bgp_ebb_fauu_drain_undrain_playbook` | G2-23 (direct) | `ebb_full_scale` | blocking |
@@ -55,7 +55,7 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 | G2-12 | CICD-15 (proxy) | Run a shortened community-churn soak as a daily continuous-operation signal. |
 | G2-13 | CICD-07 (direct) | Oscillate IGP metrics for protocol nexthops without destabilizing BGP sessions. |
 | G2-14 | CICD-08 (direct) | Make selected PNHs unresolvable and verify withdrawal and restoration behavior. |
-| G2-15 | CICD-10 (direct) | Sustain multi-attribute route churn while preserving control-plane health. |
+| G2-15 | CICD-10 (direct) | Sustain one hour of minute-cadence multi-attribute route churn with exact transition and restoration verdicts. |
 | G2-16 | CICD-09 (direct) | Change live multipath width and verify restoration to the measured baseline. |
 | G2-17 | CICD-11 (direct) | Sustain large route advertise and withdraw cycles and verify recovery. |
 | G2-18 | CICD-03 (direct) | Repeatedly flap eBGP sessions and verify final recovery. |
@@ -82,7 +82,7 @@ This summary compares catalog-required blocking signals with the playbook-level 
 | CICD-07 | IGP PNH metric oscillation | Partial | No playbook-level health check validates the packet-message expectation. Cleanup executes route injection but has no post-cleanup health check. |
 | CICD-08 | IGP unresolvable PNH | Partial | The health-check chain runs around the workload, not after cleanup restoration. Final session and RIB/FIB health are checked, but explicit convergence is disabled. Cleanup re-injects routes without a post-cleanup route-state health check. |
 | CICD-09 | Multipath-group oscillation | Partial | Multipath width is asserted inside the oscillation stage, not by a health check. Baseline restoration is asserted inside the oscillation stage, not by a health check. |
-| CICD-10 | BGP attribute churn | Partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. RIB/FIB consistency is checked, but the explicit convergence health check is disabled. |
+| CICD-10 | BGP attribute churn | Partial | Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain. Sampled exact-prefix path and best-path verdicts are enforced inside the custom step. The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the workload. |
 | CICD-11 | BGP route storm | Partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
 | CICD-12 | Route-registry runtime update | Partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. Cleanup actions run after the health-check chain and have no post-cleanup check. |
 | CICD-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
@@ -727,61 +727,67 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 - **Requirements:** G2-15 (direct)
 - **Required topology:** `neteng.test_infra.dne.taac.abstractions.topologies.ebb_full_scale.ebb_full_scale_topology`
 - **Cadence:** Daily.
-- **Enforcement:** calibrating
+- **Enforcement:** blocking
 
-**Purpose:** Detect UPDATE generation, canonicalization, memory, and convergence regressions under attribute churn.
+**Purpose:** Detect UPDATE propagation, best-path selection, decision-process, and restoration regressions under attribute churn.
 
-**Stimulus:** Repeatedly change local preference, MED, origin, and AS path over iBGP plane-1 prefixes.
+**Stimulus:** Run 15 one-minute plane-1 transitions for local preference 200/reference 100/50, MED 100/reference 200/300, origin IGP/reference EGP/INCOMPLETE, and AS-path length 1/reference 5/10 while planes 2 through 4 provide controlled reference paths. AS-path changes use fixed cold slots and never restart a peer.
 
-**Scale:** Prefix indexes 0 through 500 on the canonical full-scale topology.
+**Scale:** Seven deterministic 750-route peer blocks per AFI: 5,250 IPv4 and 5,250 IPv6 routes, or 10,500 unique routes total. Two prefixes per block are sampled for exact dual-stack RIB-path verification.
 
 **Blocking signals**
 
-- Churn profile checks and expected session checks pass.
-- No crash, snapshot regression, or blocking resource threshold is hit.
-- Final route state converges after churn.
+- Every mutation has exact IXIA readback and advances global and sampled-prefix RIB versions.
+- Sampled DUT paths contain the requested attribute and deterministic plane-1 or reference-plane best path.
+- Selected source and BGP-MON sessions remain established without resets, flaps, or withdrawals; BGP-MON observes dual-stack UPDATE progress.
+- Failure-safe cleanup restores every IXIA vector, sampled DUT attribute, baseline best path, and a 120-second quiet window.
+- Attribute-churn profile checks and full session snapshots pass without a crash or snapshot regression.
 
 **Outcome validation traceability**
 
-- **Health-check chain:** `churn_storm`
+- **Health-check chain:** `attribute_churn`
 - **Check profile:** `CheckProfile.CHURN_STORM`
-- **Implementation:** `get_profile_checks(CheckProfile.CHURN_STORM)`
+- **Implementation:** `get_profile_checks(CheckProfile.CHURN_STORM, ProfileContext(full_session_snapshot=True))`
 
 The chain below contains only playbook-level health checks. Trigger, step, task, and periodic-monitor assertions are not counted as health-check coverage.
 
 | Phase | Chain ID | Implemented Health Checks | Notes |
 | --- | --- | --- | --- |
 | precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
-| postcheck | `post.churn_storm` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check. CICD-11 supplies AS-path length and pool size invariants to the RIB/FIB consistency check. |
-| snapshot | `snapshot.core_only` | `core-dump snapshot check` | Session snapshots are omitted because sessions may churn throughout the workload. |
+| postcheck | `post.attribute_churn` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check because the custom step proves every sampled route transition directly. |
+| snapshot | `snapshot.full` | `core-dump snapshot check`, `BGP session flap, uptime, and peer-identity snapshot check` | Compares the full session and crash state before and after the workload. |
 
 **Specification vs. implemented health checks**
 
 | Required Validation | Implemented By | Coverage | Gap |
 | --- | --- | --- | --- |
-| Churn profile checks and expected session checks pass. | `pre.standard_bgp`, `post.churn_storm` | implemented | None |
-| No crash, snapshot regression, or blocking resource threshold is hit. | `snapshot.core_only` | partial | Only core dumps are snapshotted; resource monitors are non-blocking periodic tasks. |
-| Final route state converges after churn. | `post.churn_storm` | partial | RIB/FIB consistency is checked, but the explicit convergence health check is disabled. |
+| Every mutation has exact IXIA readback and advances global and sampled-prefix RIB versions. | None | missing | Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain. |
+| Sampled DUT paths contain the requested attribute and deterministic plane-1 or reference-plane best path. | None | missing | Sampled exact-prefix path and best-path verdicts are enforced inside the custom step. |
+| Selected source and BGP-MON sessions remain established without resets, flaps, or withdrawals; BGP-MON observes dual-stack UPDATE progress. | `pre.standard_bgp`, `post.attribute_churn` | partial | The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step. |
+| Failure-safe cleanup restores every IXIA vector, sampled DUT attribute, baseline best path, and a 120-second quiet window. | None | missing | Exact restoration and the quiet window are enforced inside the custom step after the workload. |
+| Attribute-churn profile checks and full session snapshots pass without a crash or snapshot regression. | `pre.standard_bgp`, `post.attribute_churn`, `snapshot.full` | implemented | None |
 
 **Validations outside the health-check chain**
 
+- The custom step enforces exact IXIA, sampled-route, best-path, RIB-version, session-counter, BGP-MON, and restoration verdicts.
 - Standard CPU and memory periodic tasks run in non-terminating mode.
 
-**Expected runtime:** Approximately 2 hours including shared topology setup.
+**Expected runtime:** One hour of measured transitions plus reference setup, restoration, the quiet window, and shared topology setup.
 
 **Primary triage signals**
 
-- Attribute assignments and generated updates.
-- Session and convergence failures.
-- CPU and memory trends.
+- Attribute family, iteration, AFI, plane, prefix pool, peer, and exact IXIA vector mismatch.
+- Sampled prefix paths, source-peer attributes, best-path identities, and RIB versions.
+- Source and BGP-MON UPDATE, reset, flap, uptime, and withdrawal counters.
+- CPU and memory trends as non-blocking calibration telemetry.
 
 **Artifacts**
 
-- Attribute-change and IXIA logs.
-- TAAC health-check results.
+- TAAC custom-step result with structured primary and restoration failure details.
+- TAAC health-check and full session snapshot results.
 - CPU and memory time series.
 
-**Qualification difference:** CI covers a deterministic attribute matrix and prefix slice; resource thresholds require ongoing calibration.
+**Qualification difference:** CI enforces the Gate2 one-hour cadence and attribute matrix on deterministic route blocks with sampled exact-prefix verdicts. CPU and memory thresholds remain non-blocking telemetry pending resource-baseline calibration.
 
 ### CICD-11: BGP route storm
 
