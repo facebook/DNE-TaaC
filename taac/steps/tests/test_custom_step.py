@@ -84,6 +84,134 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
         # Verify that test_ndp_clear was called with the correct parameters
         mock_test_ndp_clear.assert_called_once_with(params)
 
+    @patch(f"{BASE_PATH}.FibAgentOpenrClientHelper")
+    async def test_verify_openr_pnh_routes_present(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "start_ipv4s": ["20.164.28.10"],
+            "start_ipv6s": ["2401:db00:e80d:11:9::10"],
+            "count": 2,
+            "step": 2,
+            "expected_present": True,
+            "timeout_seconds": 0,
+        }
+        targets = self.custom_step._openr_pnh_target_prefixes(params)
+        routes = [
+            SimpleNamespace(
+                dest=SimpleNamespace(
+                    prefixAddress=SimpleNamespace(
+                        addr=ipaddress.ip_address(prefix.split("/")[0]).packed
+                    ),
+                    prefixLength=int(prefix.split("/")[1]),
+                )
+            )
+            for prefix in targets
+        ]
+        helper_cls.return_value.get_routes = AsyncMock(return_value=routes)
+        self.driver_mock.async_get_static_routes.return_value = {
+            prefix: {} for prefix in targets
+        }
+
+        await self.custom_step.verify_openr_pnh_route_state(params)
+
+    @patch(f"{BASE_PATH}.FibAgentOpenrClientHelper")
+    async def test_verify_openr_pnh_routes_waits_until_absent(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "start_ipv4s": ["20.164.28.10"],
+            "start_ipv6s": ["2401:db00:e80d:11:9::10"],
+            "count": 1,
+            "step": 2,
+            "expected_present": False,
+            "timeout_seconds": 30,
+            "poll_interval_seconds": 2,
+        }
+        targets = self.custom_step._openr_pnh_target_prefixes(params)
+        routes = [
+            SimpleNamespace(
+                dest=SimpleNamespace(
+                    prefixAddress=SimpleNamespace(
+                        addr=ipaddress.ip_address(prefix.split("/")[0]).packed
+                    ),
+                    prefixLength=int(prefix.split("/")[1]),
+                )
+            )
+            for prefix in targets
+        ]
+        helper_cls.return_value.get_routes = AsyncMock(side_effect=[routes, []])
+        self.driver_mock.async_get_static_routes.side_effect = [
+            {prefix: {} for prefix in targets},
+            {},
+        ]
+
+        with (
+            patch.object(self.custom_step, "_monotonic_time", side_effect=[0, 0]),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            await self.custom_step.verify_openr_pnh_route_state(params)
+
+        sleep.assert_awaited_once_with(2)
+
+    @patch(f"{BASE_PATH}.FibAgentOpenrClientHelper")
+    async def test_verify_openr_pnh_routes_rejects_unapplied_delete(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "start_ipv4s": ["20.164.28.10"],
+            "start_ipv6s": [],
+            "count": 1,
+            "step": 2,
+            "expected_present": False,
+            "timeout_seconds": 0,
+        }
+        target = "20.164.28.10/32"
+        helper_cls.return_value.get_routes = AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    dest=SimpleNamespace(
+                        prefixAddress=SimpleNamespace(
+                            addr=ipaddress.ip_address("20.164.28.10").packed
+                        ),
+                        prefixLength=32,
+                    )
+                )
+            ]
+        )
+        self.driver_mock.async_get_static_routes.return_value = {target: {}}
+
+        with self.assertRaisesRegex(TestCaseFailure, "did not become absent"):
+            await self.custom_step.verify_openr_pnh_route_state(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_timer_starts_before_trigger_validation(self, helper_cls):
+        key = "unit-trigger-timing"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
+        helper_cls.return_value.async_get_counter = AsyncMock(return_value=11)
+
+        with patch.object(self.custom_step, "_monotonic_time", return_value=100):
+            await self.custom_step.mark_bgp_update_trigger(
+                {"hostname": "bag011.ash6", "snapshot_key": key}
+            )
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[110, 110, 160],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.wait_for_bgp_update_sent(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                    "timeout_seconds": 60,
+                }
+            )
+
+        snapshot = CustomStep._convergence_data_storage[storage_key]
+        self.assertEqual(snapshot["first_update_elapsed_seconds"], 10)
+
     @patch(f"{BASE_PATH}.BgpClientHelper")
     async def test_bgp_update_send_window_success_and_quiet(self, helper_cls):
         key = "unit-success"
@@ -147,6 +275,7 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             "snapshot_key": "unit-late-first-update",
             "timeout_seconds": 60,
             "poll_interval_seconds": 10,
+            "late_observation_timeout_seconds": 1800,
         }
         helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 10, 11])
 
@@ -159,7 +288,62 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
         ):
             await self.custom_step.snapshot_bgp_update_sent_counter(params)
-            with self.assertRaisesRegex(TestCaseFailure, "within 60s"):
+            with self.assertRaisesRegex(
+                TestCaseFailure,
+                "observed after 61.0s, exceeding the 60s convergence limit",
+            ):
+                await self.custom_step.wait_for_bgp_update_sent(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_reports_late_update(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": "unit-diagnostic-late-update",
+            "timeout_seconds": 60,
+            "poll_interval_seconds": 10,
+            "late_observation_timeout_seconds": 30,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 10, 11])
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 0, 10, 60, 60, 75],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(params)
+            with self.assertRaisesRegex(
+                TestCaseFailure,
+                "observed after 75.0s, exceeding the 60s convergence limit",
+            ):
+                await self.custom_step.wait_for_bgp_update_sent(params)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_send_window_exhausts_diagnostic_window(self, helper_cls):
+        params = {
+            "hostname": "bag011.ash6",
+            "snapshot_key": "unit-no-late-update",
+            "timeout_seconds": 60,
+            "poll_interval_seconds": 10,
+            "late_observation_timeout_seconds": 30,
+        }
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 10, 10])
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[0, 0, 10, 60, 60, 75, 90],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.snapshot_bgp_update_sent_counter(params)
+            with self.assertRaisesRegex(
+                TestCaseFailure,
+                "no late UPDATE was observed during the subsequent 30s diagnostic window",
+            ):
                 await self.custom_step.wait_for_bgp_update_sent(params)
 
     async def test_bgp_update_send_window_bounds_last_counter_read(self):

@@ -63,6 +63,7 @@ from taac.steps.step_definitions import (
     create_ixia_device_group_toggle_step,
     create_ixia_packet_capture_step,
     create_longevity_step,
+    create_mark_bgp_update_trigger_step,
     create_modify_bgp_prefixes_origin_value_step,
     create_multipath_nexthop_count_health_check_step,
     create_openr_route_action_step,
@@ -90,6 +91,7 @@ from taac.steps.step_definitions import (
     create_validation_step,
     create_verify_bgp_update_send_quiet_step,
     create_verify_bgp_withdraw_send_quiet_step,
+    create_verify_openr_pnh_route_state_step,
     create_verify_port_operational_state_step,
     create_verify_port_speed_step_v2,
     create_verify_received_routes_step,
@@ -1224,11 +1226,13 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
     BGP converges properly and remains stable without continuous route updates.
 
     The test sequence:
-    1. Snapshot BGP++'s cumulative sent-UPDATE and withdrawal counters
-    2. Delete Open/R routes sequentially to create unresolvable BGP next-hops
-    3. Require an UPDATE within the bounded convergence window
-    4. Soak for 30 minutes to ensure sustained convergence
-    5. Verify that no further UPDATEs occurred during the soak and that no
+    1. Verify the selected PNH routes exist in FibAgent Open/R and hardware FIB
+    2. Snapshot BGP++'s cumulative sent-UPDATE and withdrawal counters
+    3. Delete Open/R routes sequentially and verify the selected PNH routes disappear
+    4. Require an UPDATE within the bounded convergence window; if this
+       fails, observe through the stability budget to report any late UPDATE
+    5. Soak for 30 minutes to ensure sustained convergence after an in-window UPDATE
+    6. Verify that no further UPDATEs occurred during the soak and that no
        withdrawals occurred during the trigger or soak
 
     Args:
@@ -1240,7 +1244,8 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
         step: Step size for routes
         delete_count: Number of routes to delete (default: 20)
         update_timeout_seconds: Maximum time to observe the first UPDATE
-        stability_duration_seconds: Quiet period after the convergence window
+        stability_duration_seconds: Quiet period after convergence, or late-UPDATE
+            observation period when convergence fails
 
     Returns:
         Stage object for BGP IGP instability test with unresolvable PNHs
@@ -1255,11 +1260,23 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
     snapshot_key = "igp_unresolvable_pnhs"
     withdraw_snapshot_key = "igp_unresolvable_pnhs_withdrawals"
     steps = [
+        create_verify_openr_pnh_route_state_step(
+            hostname=device_name,
+            start_ipv4s=start_ipv4s,
+            start_ipv6s=start_ipv6s,
+            count=delete_count,
+            step=step,
+            expected_present=True,
+        ),
         create_snapshot_bgp_withdraw_sent_counter_step(
             hostname=device_name,
             snapshot_key=withdraw_snapshot_key,
         ),
         create_snapshot_bgp_update_sent_counter_step(
+            hostname=device_name,
+            snapshot_key=snapshot_key,
+        ),
+        create_mark_bgp_update_trigger_step(
             hostname=device_name,
             snapshot_key=snapshot_key,
         ),
@@ -1281,10 +1298,21 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
         ),
     )
     steps.append(
+        create_verify_openr_pnh_route_state_step(
+            hostname=device_name,
+            start_ipv4s=start_ipv4s,
+            start_ipv6s=start_ipv6s,
+            count=delete_count,
+            step=step,
+            expected_present=False,
+        )
+    )
+    steps.append(
         create_wait_for_bgp_update_sent_step(
             hostname=device_name,
             snapshot_key=snapshot_key,
             timeout_seconds=update_timeout_seconds,
+            late_observation_timeout_seconds=stability_duration_seconds,
         )
     )
     steps.append(

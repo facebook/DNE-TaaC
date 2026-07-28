@@ -921,13 +921,59 @@ def create_snapshot_bgp_update_sent_counter_step(
     )
 
 
+def create_mark_bgp_update_trigger_step(
+    hostname: str,
+    snapshot_key: str,
+) -> Step:
+    """Record the start of an Open/R trigger for BGP convergence timing."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "mark_bgp_update_trigger",
+            "hostname": hostname,
+            "snapshot_key": snapshot_key,
+        },
+        description=f"Start BGP UPDATE convergence timer on {hostname}",
+    )
+
+
+def create_verify_openr_pnh_route_state_step(
+    hostname: str,
+    start_ipv4s: t.Sequence[str],
+    start_ipv6s: t.Sequence[str],
+    count: int,
+    step: int,
+    expected_present: bool,
+    timeout_seconds: int = 30,
+    poll_interval_seconds: int = 2,
+) -> Step:
+    """Verify selected Open/R PNH routes in FibAgent and hardware FIB."""
+    expected_state = "present" if expected_present else "absent"
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "verify_openr_pnh_route_state",
+            "hostname": hostname,
+            "start_ipv4s": list(start_ipv4s),
+            "start_ipv6s": list(start_ipv6s),
+            "count": count,
+            "step": step,
+            "expected_present": expected_present,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+        description=(
+            f"Verify selected Open/R PNH routes are {expected_state} on {hostname}"
+        ),
+    )
+
+
 def create_wait_for_bgp_update_sent_step(
     hostname: str,
     snapshot_key: str,
     timeout_seconds: int = 60,
     poll_interval_seconds: int = 5,
+    late_observation_timeout_seconds: int = 0,
 ) -> Step:
-    """Require BGP++ to send an UPDATE within a bounded trigger window."""
+    """Require an UPDATE in-window and optionally observe late UPDATEs."""
     return create_custom_step(
         params_dict={
             "custom_step_name": "wait_for_bgp_update_sent",
@@ -935,9 +981,11 @@ def create_wait_for_bgp_update_sent_step(
             "snapshot_key": snapshot_key,
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
+            "late_observation_timeout_seconds": late_observation_timeout_seconds,
         },
         description=(
-            f"Require BGP++ to send an UPDATE on {hostname} within {timeout_seconds}s"
+            f"Require BGP++ to send an UPDATE on {hostname} within {timeout_seconds}s; "
+            f"observe late UPDATEs for {late_observation_timeout_seconds}s"
         ),
     )
 
