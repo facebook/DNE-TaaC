@@ -88,7 +88,7 @@ This summary compares catalog-required blocking signals with the playbook-level 
 | CICD-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
 | CICD-14 | Plane drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but plane policy and captured views are stage-local validations. |
 | CICD-15 | Longevity | Partial | Session and RIB/FIB state are checked, but the explicit convergence health check is disabled. Core dumps are checked, but this playbook has no CPU or memory periodic validation. |
-| CICD-16 | Queue and memory monitoring | Partial | Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step. Queue and memory thresholds have no playbook-level health check. The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
+| CICD-16 | Queue and memory monitoring | Partial | Session uptime is snapshotted; stable PID, peer presence, and established state are enforced inside the custom step rather than a playbook health check. Collector integrity is enforced inside the custom step rather than a playbook health check; numeric queue and memory thresholds remain unapproved calibration work. The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
 | CICD-17 | Nexthop-group count threshold | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
 | CICD-18 | UPDATE packing | Missing | Packing size is asserted only inside the custom step; no health-check chain exists. Custom-step completion is not a playbook-level health check. These conditions are handled inside the custom step with no independent health checks. |
 | CICD-19 | Constant attribute storage | Missing | Route acceptance is asserted only inside the custom step; no health-check chain exists. Attribute collection is custom-step-local and has no independent health check. The memory-growth gate is custom-step-local and has no independent health check. |
@@ -1127,7 +1127,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 - **Cadence:** Daily after threshold calibration.
 - **Enforcement:** calibrating
 
-**Purpose:** Detect queue growth, process-memory, and liveness regressions under sustained churn.
+**Purpose:** Collect queue and process-memory telemetry and detect evidence-integrity or liveness regressions under sustained churn.
 
 **Stimulus:** Monitor BGP++ queues and memory for 60 minutes while routes flap every 15 seconds and CPU stress is active.
 
@@ -1135,8 +1135,8 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Blocking signals**
 
-- BGP process remains alive and sessions remain healthy.
-- Queue and memory custom-step thresholds pass.
+- The BGP process keeps the same PID and monitored sessions remain present and established.
+- Queue, memory, PID, and session collectors return valid nonempty samples.
 - Route churn completes without a snapshot regression.
 
 **Outcome validation traceability**
@@ -1155,13 +1155,14 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 | Required Validation | Implemented By | Coverage | Gap |
 | --- | --- | --- | --- |
-| BGP process remains alive and sessions remain healthy. | `snapshot.session_only_skip_flap` | partial | Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step. |
-| Queue and memory custom-step thresholds pass. | None | missing | Queue and memory thresholds have no playbook-level health check. |
+| The BGP process keeps the same PID and monitored sessions remain present and established. | `snapshot.session_only_skip_flap` | partial | Session uptime is snapshotted; stable PID, peer presence, and established state are enforced inside the custom step rather than a playbook health check. |
+| Queue, memory, PID, and session collectors return valid nonempty samples. | None | missing | Collector integrity is enforced inside the custom step rather than a playbook health check; numeric queue and memory thresholds remain unapproved calibration work. |
 | Route churn completes without a snapshot regression. | `snapshot.session_only_skip_flap` | partial | The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
 
 **Validations outside the health-check chain**
 
-- The queue and memory custom step monitors the BGP PID, focused queues, process memory, churn, and CPU stress.
+- The custom step fails on missing collector evidence, PID changes, lost or non-established sessions, and session uptime regressions.
+- Queue depths and process-memory values remain calibration telemetry without numeric verdict thresholds.
 
 **Expected runtime:** Sixty minutes of monitoring plus two-port topology setup.
 

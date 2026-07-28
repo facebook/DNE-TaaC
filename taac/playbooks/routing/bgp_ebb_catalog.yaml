@@ -1086,30 +1086,31 @@ entries:
         role: supplemental
         coverage: Monitor implementation queues and process memory during route churn and CPU stress.
     required_topology: legacy_two_port_ebb
-    purpose: Detect queue growth, process-memory, and liveness regressions under sustained churn.
+    purpose: Collect queue and process-memory telemetry and detect evidence-integrity or liveness regressions under sustained churn.
     stimulus: Monitor BGP++ queues and memory for 60 minutes while routes flap every 15 seconds and CPU stress is active.
     scale: 140 eBGP peers, 63 iBGP peers, and 10,000 IPv6 prefixes per eBGP peer.
     blocking_signals:
-      - BGP process remains alive and sessions remain healthy.
-      - Queue and memory custom-step thresholds pass.
+      - The BGP process keeps the same PID and monitored sessions remain present and established.
+      - Queue, memory, PID, and session collectors return valid nonempty samples.
       - Route churn completes without a snapshot regression.
     validation:
       chain: session_snapshot_only
       spec_vs_implemented:
-        - spec: BGP process remains alive and sessions remain healthy.
+        - spec: The BGP process keeps the same PID and monitored sessions remain present and established.
           coverage: partial
           implemented_by: [snapshot.session_only_skip_flap]
-          gap: Session uptime is snapshotted, but BGP process liveness is validated only inside the custom step.
-        - spec: Queue and memory custom-step thresholds pass.
+          gap: Session uptime is snapshotted; stable PID, peer presence, and established state are enforced inside the custom step rather than a playbook health check.
+        - spec: Queue, memory, PID, and session collectors return valid nonempty samples.
           coverage: missing
           implemented_by: []
-          gap: Queue and memory thresholds have no playbook-level health check.
+          gap: Collector integrity is enforced inside the custom step rather than a playbook health check; numeric queue and memory thresholds remain unapproved calibration work.
         - spec: Route churn completes without a snapshot regression.
           coverage: partial
           implemented_by: [snapshot.session_only_skip_flap]
           gap: The session snapshot excludes expected flaps; route-churn completion is custom-step-local.
       non_chain_validations:
-        - The queue and memory custom step monitors the BGP PID, focused queues, process memory, churn, and CPU stress.
+        - The custom step fails on missing collector evidence, PID changes, lost or non-established sessions, and session uptime regressions.
+        - Queue depths and process-memory values remain calibration telemetry without numeric verdict thresholds.
     expected_runtime: Sixty minutes of monitoring plus two-port topology setup.
     cadence: Daily after threshold calibration.
     enforcement: calibrating
