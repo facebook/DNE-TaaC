@@ -268,6 +268,10 @@ def create_bgp_rib_fib_consistency_check(
 
 def create_bgp_convergence_check(
     convergence_threshold: t.Optional[int] = None,
+    hard_timeout_seconds: t.Optional[float] = None,
+    poll_interval_seconds: t.Optional[float] = None,
+    stability_window_seconds: t.Optional[float] = None,
+    predicate_timeout_seconds: t.Optional[float] = None,
     fail_on_eor_expired: t.Optional[bool] = None,
     validate_sequence: t.Optional[bool] = None,
     extra_json_params: t.Optional[t.Dict[str, t.Any]] = None,
@@ -284,12 +288,26 @@ def create_bgp_convergence_check(
     `extra_json_params` covers custom variants (e.g. ``{"start_event": "3",
     "end_event": "4"}``) and is merged after the named kwargs.
 
+    `convergence_threshold` remains the soft-SLA field for backward-compatible
+    serialized configs. When `hard_timeout_seconds` is omitted, the runtime
+    uses that same value as the hard observation cap, preserving the previous
+    single-threshold behavior. Supplying a larger hard timeout keeps measuring
+    after the SLA is breached without changing the eventual FAIL verdict.
+
     `validate_sequence` opts into asserting the BGP++ initialization events
     occurred in the canonical order (terminal INITIALIZED reached, no present
     event out of timestamp order). Default (None) = off — byte-identical to
     today for callers that omit it.
 
     Args:
+        hard_timeout_seconds: Maximum continuous observation time. Defaults at
+            runtime to `convergence_threshold` when omitted.
+        poll_interval_seconds: Delay between predicate observations. Runtime
+            default is 5 seconds.
+        stability_window_seconds: Continuous-convergence confirmation window.
+            Runtime default is zero.
+        predicate_timeout_seconds: Optional timeout for each device read. The
+            overall hard timeout always bounds a predicate call as well.
         retry_count: Number of retries after the initial attempt. 0 (or None,
             the default) = single-shot. The retry wraps the full data-fetch +
             validation cycle in ``AbstractPointInTimeHealthCheck.run()``.
@@ -298,9 +316,16 @@ def create_bgp_convergence_check(
         retry_delay_multiplier: Exponential backoff multiplier (run() default
             1.5 when unset).
     """
-    json_payload: t.Dict[str, t.Any] = {}
-    if convergence_threshold is not None:
-        json_payload["convergence_threshold"] = convergence_threshold
+    observer_params = {
+        "convergence_threshold": convergence_threshold,
+        "hard_timeout_seconds": hard_timeout_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "stability_window_seconds": stability_window_seconds,
+        "predicate_timeout_seconds": predicate_timeout_seconds,
+    }
+    json_payload: t.Dict[str, t.Any] = {
+        key: value for key, value in observer_params.items() if value is not None
+    }
     if fail_on_eor_expired is not None:
         json_payload["fail_on_eor_expired"] = fail_on_eor_expired
     if validate_sequence is not None:
