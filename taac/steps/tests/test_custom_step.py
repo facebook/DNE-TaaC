@@ -982,3 +982,428 @@ class TestRegisterCpuQueueStaticRoutePatcher(unittest.IsolatedAsyncioTestCase):
             py_func_name="add_static_routes",
             patcher_desc="",
         )
+
+
+# A sentinel that is never equal to TBgpPeerState.ESTABLISHED, so a session
+# carrying it is treated as "not Established" without depending on any specific
+# down-state enum member.
+_NOT_ESTABLISHED = object()
+
+
+def _ug_session(
+    peer_addr: str,
+    *,
+    num_resets: int = 0,
+    last_reset_reason: str = "",
+    established: bool = True,
+    ug_state: Any = "JOINED_RUNNING",  # str | None (peer_state_update_group is optional)
+    peer_group: Any = None,
+    postpolicy_sent_prefix_count: int = 0,
+) -> SimpleNamespace:
+    """A fake TBgpSession exposing the fields the 2.9.3 readers touch."""
+    from neteng.fboss.bgp_thrift.types import TBgpPeerState
+
+    return SimpleNamespace(
+        peer_addr=peer_addr,
+        num_resets=num_resets,
+        last_reset_reason=last_reset_reason,
+        peer=SimpleNamespace(
+            peer_state=(TBgpPeerState.ESTABLISHED if established else _NOT_ESTABLISHED)
+        ),
+        peer_state_update_group=ug_state,
+        peer_group=peer_group,
+        postpolicy_sent_prefix_count=postpolicy_sent_prefix_count,
+    )
+
+
+class VerifyBgpNotificationOccurredTest(unittest.IsolatedAsyncioTestCase):
+    KEY = "bgp_reset_snapshot::ebgp_v4"
+    SCOPE = ["10.163.0.0/16"]
+
+    def setUp(self) -> None:
+        self.step = CustomStep.__new__(CustomStep)
+        self.step.logger = MagicMock()
+        CustomStep._convergence_data_storage.pop(self.KEY, None)
+
+    def tearDown(self) -> None:
+        CustomStep._convergence_data_storage.pop(self.KEY, None)
+
+    async def _run(self, sessions, **over):
+        params = {
+            "hostname": "dut",
+            "snapshot_key": "ebgp_v4",
+            "peer_parent_prefixes": self.SCOPE,
+        }
+        params.update(over)
+        with patch(f"{BASE_PATH}.BgpClientHelper") as helper_cls:
+            helper_cls.return_value.async_get_bgp_sessions = AsyncMock(
+                return_value=sessions
+            )
+            await self.step.verify_bgp_notification_occurred(params)
+
+    async def test_snapshot_stores_num_resets_baseline(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1", num_resets=5),
+            _ug_session("10.163.0.2", num_resets=2),
+        ]
+        await self._run(sessions, mode="snapshot")
+        snap = CustomStep._convergence_data_storage[self.KEY]
+        self.assertEqual(snap["num_resets"], {"10.163.0.1": 5, "10.163.0.2": 2})
+
+    async def test_snapshot_vacuous_scope_raises(self) -> None:
+        # No in-scope sessions -> a vacuous snapshot must fail loudly.
+        with self.assertRaises(TestCaseFailure):
+            await self._run([_ug_session("10.99.0.1")], mode="snapshot")
+
+    def _seed_baseline(self, baseline):
+        CustomStep._convergence_data_storage[self.KEY] = {
+            "hostname": "dut",
+            "num_resets": baseline,
+            "peer_parent_prefixes": self.SCOPE,
+            "peer_group_filter": None,
+            "peer_addrs": None,
+            "timestamp": 0.0,
+        }
+
+    async def test_verify_isolated_hold_timer_reset_passes(self) -> None:
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2, "10.163.0.3": 3})
+        sessions = [
+            # target reset once more, hold-timer reason
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="BGP Hold Timer Expired",
+                established=False,
+            ),
+            _ug_session("10.163.0.2", num_resets=2),
+            _ug_session("10.163.0.3", num_resets=3),
+        ]
+        await self._run(sessions)  # no raise
+
+    async def test_verify_empty_reason_reset_passes(self) -> None:
+        # HW reality (bag013, 2026-07-26): bgpcpp leaves last_reset_reason EMPTY
+        # on a hold-timer teardown. An empty reason on the (isolated) reset peer
+        # must be ACCEPTED -- the num_resets delta is the notification evidence.
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2, "10.163.0.3": 3})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="",  # blank -> accepted, not a violation
+                established=False,
+            ),
+            _ug_session("10.163.0.2", num_resets=2),
+            _ug_session("10.163.0.3", num_resets=3),
+        ]
+        await self._run(sessions)  # no raise
+
+    async def test_verify_no_reset_raises(self) -> None:
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2})
+        sessions = [
+            _ug_session("10.163.0.1", num_resets=5),
+            _ug_session("10.163.0.2", num_resets=2),
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_verify_wrong_reason_raises(self) -> None:
+        self._seed_baseline({"10.163.0.1": 5})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="Administratively reset (Cease)",
+                established=False,
+            )
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_verify_collateral_down_peer_raises(self) -> None:
+        # A non-reset peer that is down = collateral disruption -> isolation fail.
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+            _ug_session("10.163.0.2", num_resets=2, established=False),
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_verify_too_many_reset_raises(self) -> None:
+        # Two peers reset with hold-timer reason -> exceeds expected 1 (isolation).
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+            _ug_session(
+                "10.163.0.2",
+                num_resets=3,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_verify_xfail_does_not_raise(self) -> None:
+        self._seed_baseline({"10.163.0.1": 5})
+        sessions = [_ug_session("10.163.0.1", num_resets=5)]  # no reset -> would fail
+        await self._run(sessions, expected_fail=True, expected_fail_reason="known")
+
+    async def test_verify_missing_snapshot_raises(self) -> None:
+        sessions = [_ug_session("10.163.0.1", num_resets=6)]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_verify_notified_tolerance_allows_extra_reset(self) -> None:
+        # Two peers reset but notified_tolerance=1 absorbs the extra one (expected 1).
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+            _ug_session(
+                "10.163.0.2",
+                num_resets=3,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+        ]
+        await self._run(sessions, notified_tolerance=1)  # no raise
+
+    async def test_verify_expected_notified_peers_two_passes(self) -> None:
+        # expected_notified_peers=2 -> exactly two hold-timer resets is a PASS.
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2, "10.163.0.3": 3})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+            _ug_session(
+                "10.163.0.2",
+                num_resets=3,
+                last_reset_reason="hold timer expired",
+                established=False,
+            ),
+            _ug_session("10.163.0.3", num_resets=3),
+        ]
+        await self._run(sessions, expected_notified_peers=2)  # no raise
+
+    async def test_verify_reset_then_reestablished_target_passes(self) -> None:
+        # Robustness: the target's num_resets grew with a hold-timer reason but it
+        # has since RE-ESTABLISHED (established=True). The num_resets DELTA (not the
+        # instantaneous state) must still count it as the notified peer -> PASS.
+        self._seed_baseline({"10.163.0.1": 5, "10.163.0.2": 2})
+        sessions = [
+            _ug_session(
+                "10.163.0.1",
+                num_resets=6,
+                last_reset_reason="hold timer expired",
+                established=True,
+            ),
+            _ug_session("10.163.0.2", num_resets=2),
+        ]
+        await self._run(sessions)  # no raise
+
+
+class VerifyBgpPeersJoinedRunningTest(unittest.IsolatedAsyncioTestCase):
+    SCOPE = ["10.163.0.0/16"]
+
+    def setUp(self) -> None:
+        self.step = CustomStep.__new__(CustomStep)
+        self.step.logger = MagicMock()
+
+    async def _run(self, sessions, **over):
+        params = {"hostname": "dut", "peer_parent_prefixes": self.SCOPE}
+        params.update(over)
+        with patch(f"{BASE_PATH}.BgpClientHelper") as helper_cls:
+            helper_cls.return_value.async_get_bgp_sessions = AsyncMock(
+                return_value=sessions
+            )
+            await self.step.verify_bgp_peers_joined_running(params)
+
+    async def test_all_joined_running_passes(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1", ug_state="JOINED_RUNNING"),
+            _ug_session("10.163.0.2", ug_state="JOINED_RUNNING"),
+        ]
+        await self._run(sessions)  # no raise
+
+    async def test_one_not_joined_running_raises(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1", ug_state="JOINED_RUNNING"),
+            _ug_session("10.163.0.2", ug_state="DETACHED_READY_TO_JOIN"),
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_none_state_raises(self) -> None:
+        sessions = [_ug_session("10.163.0.1", ug_state=None)]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions)
+
+    async def test_tolerance_allows_one_violation(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1", ug_state="JOINED_RUNNING"),
+            _ug_session("10.163.0.2", ug_state="DETACHED_READY_TO_JOIN"),
+        ]
+        await self._run(sessions, tolerance=1)  # no raise
+
+    async def test_xfail_does_not_raise(self) -> None:
+        sessions = [_ug_session("10.163.0.1", ug_state="DETACHED_READY_TO_JOIN")]
+        await self._run(sessions, expected_fail=True, expected_fail_reason="known")
+
+    async def test_vacuous_scope_raises(self) -> None:
+        with self.assertRaises(TestCaseFailure):
+            await self._run([_ug_session("10.99.0.1")])
+
+    async def test_non_default_expected_state_passes(self) -> None:
+        # A non-default expected_state is honored: peers in that state PASS...
+        sessions = [
+            _ug_session("10.163.0.1", ug_state="DETACHED_READY_TO_JOIN"),
+            _ug_session("10.163.0.2", ug_state="DETACHED_READY_TO_JOIN"),
+        ]
+        await self._run(sessions, expected_state="DETACHED_READY_TO_JOIN")
+
+    async def test_non_default_expected_state_mismatch_raises(self) -> None:
+        # ...and a peer NOT in the requested non-default state fails.
+        sessions = [
+            _ug_session("10.163.0.1", ug_state="DETACHED_READY_TO_JOIN"),
+            _ug_session("10.163.0.2", ug_state="JOINED_RUNNING"),
+        ]
+        with self.assertRaises(TestCaseFailure):
+            await self._run(sessions, expected_state="DETACHED_READY_TO_JOIN")
+
+
+class SelectSessionsInScopeTest(unittest.TestCase):
+    """Direct tests of the @staticmethod selector (precedence + each branch)."""
+
+    def test_peer_parent_prefixes_branch(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1"),
+            _ug_session("10.99.0.1"),  # out of scope
+        ]
+        selected = CustomStep._select_sessions_in_scope(
+            sessions, None, None, ["10.163.0.0/16"]
+        )
+        self.assertEqual([s.peer_addr for s in selected], ["10.163.0.1"])
+
+    def test_peer_group_filter_branch(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1", peer_group="EB-EB-V4"),
+            _ug_session("10.163.0.2", peer_group="EB-MP-V6"),
+            _ug_session("10.163.0.3", peer_group=None),
+        ]
+        selected = CustomStep._select_sessions_in_scope(sessions, None, "EB-EB", None)
+        self.assertEqual([s.peer_addr for s in selected], ["10.163.0.1"])
+
+    def test_peer_addrs_branch(self) -> None:
+        sessions = [
+            _ug_session("10.163.0.1"),
+            _ug_session("10.163.0.2"),
+            _ug_session("10.163.0.3"),
+        ]
+        selected = CustomStep._select_sessions_in_scope(
+            sessions, ["10.163.0.1", "10.163.0.3"], None, None
+        )
+        self.assertEqual(
+            sorted(s.peer_addr for s in selected), ["10.163.0.1", "10.163.0.3"]
+        )
+
+    def test_precedence_parent_prefixes_wins(self) -> None:
+        # All three selectors supplied -> peer_parent_prefixes takes precedence,
+        # so peer_group_filter / peer_addrs are ignored.
+        sessions = [
+            _ug_session("10.163.0.1", peer_group="EB-EB-V4"),
+            _ug_session("10.99.0.1", peer_group="EB-EB-V4"),
+        ]
+        selected = CustomStep._select_sessions_in_scope(
+            sessions, ["10.99.0.1"], "EB-EB", ["10.163.0.0/16"]
+        )
+        # parent-prefix scope wins -> only the 10.163 peer, NOT the 10.99 addr.
+        self.assertEqual([s.peer_addr for s in selected], ["10.163.0.1"])
+
+
+class VerifyBgpSentRouteCountsUniformMinCountToleranceTest(
+    unittest.IsolatedAsyncioTestCase
+):
+    """FIX C: opt-in split accounting -- a peer at zero must fail when
+    min_count_tolerance=0 even if it is within the spread tolerance, while the
+    historical single-bucket behavior (min_count_tolerance unset) still absorbs
+    it."""
+
+    SCOPE = ["10.163.0.0/16"]
+
+    def setUp(self) -> None:
+        self.step = CustomStep.__new__(CustomStep)
+        self.step.logger = MagicMock()
+
+    async def _run(self, sessions, **over):
+        params = {"hostname": "dut", "peer_parent_prefixes": self.SCOPE}
+        params.update(over)
+        with patch(f"{BASE_PATH}.BgpClientHelper") as helper_cls:
+            helper_cls.return_value.async_get_bgp_sessions = AsyncMock(
+                return_value=sessions
+            )
+            await self.step.verify_bgp_sent_route_counts_uniform(params)
+
+    def _sessions(self):
+        # One peer at zero (the "recovered target" that got nothing), the rest at
+        # the same non-zero count (so spread is fine, only the zero is a problem).
+        return [
+            _ug_session("10.163.0.1", postpolicy_sent_prefix_count=0),
+            _ug_session("10.163.0.2", postpolicy_sent_prefix_count=100),
+            _ug_session("10.163.0.3", postpolicy_sent_prefix_count=100),
+        ]
+
+    async def test_split_min_count_tolerance_zero_fails_on_zero_peer(self) -> None:
+        # spread tolerance is generous, but min_count_tolerance=0 -> the zero peer
+        # MUST fail (crit-4: every peer, incl the recovered target, non-zero).
+        with self.assertRaises(TestCaseFailure):
+            await self._run(
+                self._sessions(),
+                min_count=1,
+                max_spread=100,
+                tolerance=3,
+                min_count_tolerance=0,
+            )
+
+    async def test_historical_single_bucket_absorbs_zero_peer(self) -> None:
+        # Without min_count_tolerance (unset) the single tolerance=3 budget covers
+        # the one below-min_count peer -> PASS (unchanged legacy behavior).
+        await self._run(
+            self._sessions(),
+            min_count=1,
+            max_spread=100,
+            tolerance=3,
+        )
+
+    async def test_split_spread_still_uses_tolerance(self) -> None:
+        # With split accounting, a pure spread violation is still allowed up to
+        # ``tolerance`` (no below-min_count peers here) -> PASS.
+        sessions = [
+            _ug_session("10.163.0.1", postpolicy_sent_prefix_count=100),
+            _ug_session("10.163.0.2", postpolicy_sent_prefix_count=100),
+            _ug_session("10.163.0.3", postpolicy_sent_prefix_count=50),  # lags
+        ]
+        await self._run(
+            sessions,
+            min_count=1,
+            max_spread=0,  # 50 lags 100 by 50 > 0 -> one spread violation
+            tolerance=1,
+            min_count_tolerance=0,
+        )

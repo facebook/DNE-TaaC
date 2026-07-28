@@ -2870,6 +2870,95 @@ class Ixia:
             )
 
     @external_api
+    def stop_bgp_keepalive(
+        self,
+        regex: str,
+        session_index: t.Optional[int] = None,
+        ignore_case: bool = False,
+    ) -> None:
+        """Stop sending KeepAlive on the matched IXIA BGP peer session(s).
+
+        Unlike ``start_bgp_peers`` (which Stops/Starts the whole BGP FSM), this
+        only suppresses KeepAlive on the given session so the peer goes silent
+        while the TCP session and emulated router stay materialized. The DUT then
+        hits its hold-timer expiry on that neighbor and originates a
+        Hold-Timer-Expired NOTIFICATION, tearing the one session down -- the
+        trigger for the 2.9.3 "NOTIFICATION to one peer -> group isolation" test.
+
+        Args:
+            regex: Regex matched against the BGP peer .Name. When
+                ``session_index`` is given the regex must match exactly ONE peer
+                object -- call once per AFI (the 2.9.3 playbook passes a per-AFI
+                eBGP peer regex for v4, then again for v6).
+            session_index: 1-based session to silence. ``None`` -> every session
+                of the matched peer(s) (``1-Count``). Pass a single index to
+                isolate ONE eBGP session.
+            ignore_case: Case-insensitive name match.
+        """
+        bgp_peers = self.find_bgp_peers(regex, ignore_case)
+        if not bgp_peers:
+            raise ValueError(
+                f"stop_bgp_keepalive: regex {regex!r} matched 0 BGP peer objects"
+            )
+        if session_index is not None and len(bgp_peers) != 1:
+            raise ValueError(
+                f"stop_bgp_keepalive: single session_index={session_index} requested "
+                f"but regex {regex!r} matched {len(bgp_peers)} peer object(s) "
+                f"({[p.Name for p in bgp_peers]}); pass a regex matching exactly one "
+                f"peer object per AFI, or session_index=None for all."
+            )
+        for bgp_peer in bgp_peers:
+            session_indices = (
+                str(session_index)
+                if session_index is not None
+                else f"1-{bgp_peer.Count}"
+            )
+            bgp_peer.StopKeepAlive(SessionIndices=session_indices)
+            self.logger.info(
+                f"Stopped BGP KeepAlive on sessions {session_indices} of "
+                f"{bgp_peer.Name}"
+            )
+
+    @external_api
+    def resume_bgp_keepalive(
+        self,
+        regex: str,
+        session_index: t.Optional[int] = None,
+        ignore_case: bool = False,
+    ) -> None:
+        """Resume sending KeepAlive on the matched IXIA BGP peer session(s).
+
+        The recovery counterpart to ``stop_bgp_keepalive``: the peer starts
+        sending KeepAlive again so the DUT re-establishes the session and the
+        update group re-syncs (2.9.3 recovery). Same ``regex`` / ``session_index``
+        grammar as ``stop_bgp_keepalive`` (a per-AFI regex matching exactly one
+        peer object when ``session_index`` is given).
+        """
+        bgp_peers = self.find_bgp_peers(regex, ignore_case)
+        if not bgp_peers:
+            raise ValueError(
+                f"resume_bgp_keepalive: regex {regex!r} matched 0 BGP peer objects"
+            )
+        if session_index is not None and len(bgp_peers) != 1:
+            raise ValueError(
+                f"resume_bgp_keepalive: single session_index={session_index} requested "
+                f"but regex {regex!r} matched {len(bgp_peers)} peer object(s) "
+                f"({[p.Name for p in bgp_peers]}); pass a regex matching exactly one "
+                f"peer object per AFI, or session_index=None for all."
+            )
+        for bgp_peer in bgp_peers:
+            session_indices = (
+                str(session_index)
+                if session_index is not None
+                else f"1-{bgp_peer.Count}"
+            )
+            bgp_peer.ResumeKeepAlive(SessionIndices=session_indices)
+            self.logger.info(
+                f"Resumed BGP KeepAlive on sessions {session_indices} of "
+                f"{bgp_peer.Name}"
+            )
+
+    @external_api
     def toggle_device_groups(
         self,
         enable: bool,

@@ -639,6 +639,7 @@ def create_verify_bgp_sent_route_counts_uniform_step(
     min_count: int = 1,
     max_spread: int = 0,
     tolerance: int = 0,
+    min_count_tolerance: t.Optional[int] = None,
     expected_fail: bool = False,
     expected_fail_reason: t.Optional[str] = None,
     description: t.Optional[str] = None,
@@ -664,6 +665,16 @@ def create_verify_bgp_sent_route_counts_uniform_step(
             a peer that received nothing (default 1).
         max_spread: permitted (max - min) across peers; 0 = exactly equal.
         tolerance: peers allowed to violate before the step fails (default 0).
+            With ``min_count_tolerance`` set this budget covers ONLY the spread
+            violations; otherwise (default) it covers both violation classes.
+        min_count_tolerance: OPT-IN split accounting. None (default) keeps the
+            historical single-``tolerance`` budget for both below-min_count and
+            spread violations -- byte-identical params, so existing callers/goldens
+            are unchanged and this key is omitted. When set, below-min_count /
+            non-zero-floor violations are checked against this budget while spread
+            violations are checked against ``tolerance`` (fail if EITHER is
+            exceeded). Pass 0 to require every peer non-zero (e.g. enforce a single
+            recovered peer's advertised count) while still allowing spread slack.
         expected_fail: mark XFAIL (logged loudly + non-fatal) for a documented
             external uncertainty (e.g. the v6 cold-start next-hop-resolution
             slowness); warns if it unexpectedly passes. Default False.
@@ -696,6 +707,161 @@ def create_verify_bgp_sent_route_counts_uniform_step(
         "hostname": hostname,
         "min_count": min_count,
         "max_spread": max_spread,
+        "tolerance": tolerance,
+    }
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
+    # Only serialize the split-accounting key when opted in, so existing callers
+    # produce byte-identical params (no golden regression).
+    if min_count_tolerance is not None:
+        params["min_count_tolerance"] = min_count_tolerance
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_notification_occurred_step(
+    hostname: str,
+    snapshot_key: str,
+    mode: str = "verify",
+    peer_addrs: t.Optional[t.List[str]] = None,
+    peer_group_filter: t.Optional[str] = None,
+    peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    expected_notified_peers: int = 1,
+    notified_tolerance: int = 0,
+    reason_substrings: t.Optional[t.List[str]] = None,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Assert a BGP hold-timer NOTIFICATION isolated to the targeted peer(s).
+
+    Two modes over the SAME scope (``snapshot_key`` pairs them):
+
+    - ``mode="snapshot"``: record each in-scope peer's ``num_resets`` baseline
+      BEFORE the trigger (spec 2.9.3 step 2).
+    - ``mode="verify"`` (default): re-read; the peers whose ``num_resets`` grew
+      since the snapshot are the ones that reset in-window. Assert (a) at least
+      ``expected_notified_peers`` and at most ``expected_notified_peers +
+      notified_tolerance`` peers reset (spec "NOTIFICATION to ONE peer"), (b)
+      each reset peer's ``last_reset_reason`` matches a hold-timer substring (a
+      Hold-Timer-Expired NOTIFICATION, not some other reset), and (c) every
+      in-scope peer that did NOT reset is still Established (intra-group
+      isolation -- the other peers in the group are undisturbed).
+
+    Peers are selected by ``peer_parent_prefixes`` (subnets, e.g. the eBGP AFI
+    parent), ``peer_group_filter``, or ``peer_addrs`` (same precedence + vacuous
+    guard as the PS-gauge steps). ``reason_substrings`` defaults to the
+    hold-timer-expiry phrasings; ``expected_fail`` is the XFAIL escape hatch.
+    """
+    if (
+        peer_addrs is None
+        and peer_group_filter is None
+        and peer_parent_prefixes is None
+    ):
+        raise ValueError(
+            "create_verify_bgp_notification_occurred_step: pass peer_addrs, "
+            "peer_group_filter, or peer_parent_prefixes"
+        )
+    if mode not in ("snapshot", "verify"):
+        raise ValueError(
+            f"create_verify_bgp_notification_occurred_step: mode must be "
+            f"'snapshot' or 'verify', got {mode!r}"
+        )
+    if description is None:
+        _who = (
+            f"peers under {peer_parent_prefixes}"
+            if peer_parent_prefixes
+            else f"peer-group ~{peer_group_filter!r}"
+            if peer_group_filter
+            else f"{len(peer_addrs or [])} peer(s)"
+        )
+        if mode == "snapshot":
+            description = (
+                f"Snapshot BGP reset baseline for {_who} on {hostname} "
+                f"(key={snapshot_key})"
+            )
+        else:
+            description = (
+                f"Verify hold-timer NOTIFICATION isolated to "
+                f"{expected_notified_peers} peer(s) among {_who} on {hostname} "
+                f"(key={snapshot_key})"
+            )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_notification_occurred",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "mode": mode,
+    }
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
+    if mode == "verify":
+        params["expected_notified_peers"] = expected_notified_peers
+        params["notified_tolerance"] = notified_tolerance
+        if reason_substrings is not None:
+            params["reason_substrings"] = list(reason_substrings)
+        if expected_fail:
+            params["expected_fail"] = True
+            if expected_fail_reason is not None:
+                params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_peers_joined_running_step(
+    hostname: str,
+    peer_addrs: t.Optional[t.List[str]] = None,
+    peer_group_filter: t.Optional[str] = None,
+    peer_parent_prefixes: t.Optional[t.List[str]] = None,
+    expected_state: str = "JOINED_RUNNING",
+    tolerance: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Verify every selected peer's update-group state is ``JOINED_RUNNING``.
+
+    Reads ``TBgpSession.peer_state_update_group`` (the reliable per-session UG
+    state under next-hop-self) via ``getBgpSessions`` and asserts each selected
+    peer equals ``expected_state`` -- the "recovered peer + its group-mates
+    re-synced into the update group" gate (spec 2.9.3 step 8). Scope the whole
+    update group with ``peer_parent_prefixes`` (the eBGP AFI parent). Vacuous
+    guard + XFAIL escape hatch match the PS-gauge steps.
+    """
+    if (
+        peer_addrs is None
+        and peer_group_filter is None
+        and peer_parent_prefixes is None
+    ):
+        raise ValueError(
+            "create_verify_bgp_peers_joined_running_step: pass peer_addrs, "
+            "peer_group_filter, or peer_parent_prefixes"
+        )
+    if description is None:
+        _who = (
+            f"peers under {peer_parent_prefixes}"
+            if peer_parent_prefixes
+            else f"peer-group ~{peer_group_filter!r}"
+            if peer_group_filter
+            else f"{len(peer_addrs or [])} peer(s)"
+        )
+        description = (
+            f"Verify update-group state {expected_state} on {_who} on {hostname} "
+            f"(tol={tolerance})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_peers_joined_running",
+        "hostname": hostname,
+        "expected_state": expected_state,
         "tolerance": tolerance,
     }
     if peer_addrs is not None:
@@ -3616,6 +3782,73 @@ def create_start_stop_bgp_peers_step(
             "session_start_idx": start_idx,
             "session_end_idx": end_idx,
         },
+        description=description,
+    )
+
+
+def create_stop_bgp_keepalive_step(
+    peer_regex: str,
+    session_index: t.Optional[int] = None,
+    ignore_case: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Stop KeepAlive on one (or all) IXIA BGP peer session(s).
+
+    Wraps the IXIA ``stop_bgp_keepalive`` API: the peer goes silent while the
+    session stays materialized, so the DUT hits hold-timer expiry on that
+    neighbor and originates a Hold-Timer-Expired NOTIFICATION (the 2.9.3
+    trigger). Pass ``session_index`` (1-based) to isolate ONE session; omit it to
+    silence every session of the matched peer(s). A combined ``v4|v6`` regex
+    hits the same session on both AFIs.
+
+    Args:
+        peer_regex: Regex matched against the IXIA BGP peer (group) .Name.
+        session_index: 1-based session to silence; ``None`` -> all sessions.
+        ignore_case: Case-insensitive name match.
+        description: Custom description; a default is generated if omitted.
+    """
+    if description is None:
+        _which = (
+            f"session {session_index}" if session_index is not None else "all sessions"
+        )
+        description = f"Stop BGP KeepAlive on {_which} of ~{peer_regex!r}"
+    args_dict: t.Dict[str, t.Any] = {"regex": peer_regex}
+    if session_index is not None:
+        args_dict["session_index"] = session_index
+    if ignore_case:
+        args_dict["ignore_case"] = True
+    return create_ixia_api_step(
+        api_name="stop_bgp_keepalive",
+        args_dict=args_dict,
+        description=description,
+    )
+
+
+def create_resume_bgp_keepalive_step(
+    peer_regex: str,
+    session_index: t.Optional[int] = None,
+    ignore_case: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Resume KeepAlive on one (or all) IXIA BGP peer session(s).
+
+    Recovery counterpart to ``create_stop_bgp_keepalive_step``: the peer resumes
+    sending KeepAlive so the DUT re-establishes the session and the update group
+    re-syncs (2.9.3 recovery). Same ``peer_regex`` / ``session_index`` grammar.
+    """
+    if description is None:
+        _which = (
+            f"session {session_index}" if session_index is not None else "all sessions"
+        )
+        description = f"Resume BGP KeepAlive on {_which} of ~{peer_regex!r}"
+    args_dict: t.Dict[str, t.Any] = {"regex": peer_regex}
+    if session_index is not None:
+        args_dict["session_index"] = session_index
+    if ignore_case:
+        args_dict["ignore_case"] = True
+    return create_ixia_api_step(
+        api_name="resume_bgp_keepalive",
+        args_dict=args_dict,
         description=description,
     )
 
