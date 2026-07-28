@@ -82,9 +82,8 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         """Arista EOS implementation for log parsing health check."""
-        params = self._validate_arista_params(check_params)
-
         try:
+            params = self._validate_arista_params(check_params)
             if params["agent_name"]:
                 return await self._handle_arista_agent_logs(obj, params)
             else:
@@ -101,15 +100,24 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         """Extract and validate parameters for Arista log checking."""
         include_regex = check_params.get("include_regex")
         exclude_regex = check_params.get("exclude_regex")
+        raw_start_time = check_params.get("start_time")
+        raw_end_time = check_params.get("end_time")
+        start_time = int(raw_start_time) if raw_start_time is not None else None
+        end_time = int(raw_end_time) if raw_end_time is not None else int(time.time())
 
         if include_regex or exclude_regex:
             assert bool(include_regex) ^ bool(exclude_regex), (
                 "Please provide either include_regex or exclude_regex, but not both"
             )
+        if start_time is not None and end_time < start_time:
+            raise ValueError(
+                f"end_time ({end_time}) must not be earlier than start_time "
+                f"({start_time})"
+            )
 
         return {
-            "start_time": check_params.get("start_time"),
-            "end_time": int(check_params.get("end_time") or time.time()),
+            "start_time": start_time,
+            "end_time": end_time,
             "include_regex": include_regex,
             "exclude_regex": exclude_regex,
             "agent_name": check_params.get("agent_name"),
@@ -130,7 +138,33 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             )
 
         log_file = arista_utils.get_agent_log_file(agent_name, pid)
-        log_content = await self._get_log_content_with_time_filter(log_file, params)
+        self.logger.info(f"[LOG_PARSING] Getting log content from: {log_file}")
+        live_log_found = True
+        try:
+            # pyrefly: ignore [missing-attribute]
+            live_content = await self.driver.async_read_file(log_file)
+        except FileNotFoundError:
+            live_log_found = False
+            live_content = ""
+            self.logger.info(
+                f"[LOG_PARSING] Live agent log is no longer present: {log_file}"
+            )
+
+        archived_content = await arista_utils.get_archived_agent_logs(
+            self.driver,
+            agent_name,
+            pid,
+        )
+        if not live_log_found and not archived_content:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=(f"No live or archived {agent_name} logs found for PID {pid}"),
+            )
+
+        log_content = "\n".join(
+            content for content in (live_content, archived_content) if content
+        )
+        log_content = self._filter_log_content_with_time_filter(log_content, params)
 
         return self._check_log_content(log_content, params, agent_name)
 
@@ -158,27 +192,23 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             message="No emergency/critical/error logs found in EOS system logs",
         )
 
-    async def _get_log_content_with_time_filter(
-        self, log_file: str, params: t.Dict[str, t.Any]
+    def _filter_log_content_with_time_filter(
+        self, content: str, params: t.Dict[str, t.Any]
     ) -> str:
-        """Get log content with optional time filtering for BGP logs."""
+        """Apply an optional time window to combined live and archived logs."""
         start_time = params["start_time"]
         end_time = params["end_time"]
 
-        self.logger.info(f"[LOG_PARSING] Getting log content from: {log_file}")
         self.logger.info(
             f"[LOG_PARSING] Time filter - start: {start_time}, end: {end_time}"
         )
 
-        # Read the full file content first
-        # pyrefly: ignore [missing-attribute]
-        content = await self.driver.async_read_file(log_file)
         if not content:
-            self.logger.info("[LOG_PARSING] File is empty")
+            self.logger.info("[LOG_PARSING] Combined log content is empty")
             return ""
 
         # Apply time filtering if specified
-        if start_time and end_time:
+        if start_time is not None:
             self.logger.info("[LOG_PARSING] Applying BGP-specific time filtering")
             filtered_content = log_parsing_utils.filter_agent_logs_by_time(
                 content, start_time, end_time

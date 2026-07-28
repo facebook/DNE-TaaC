@@ -141,7 +141,7 @@ def create_bgp_restart_test_stage(
         device_name: Name of the device
         daemon_name: Name of the daemon to restart (default: "Bgp")
         sleep_after_disable_seconds: Sleep duration after disabling daemon
-        convergence_wait_seconds: Wait time for BGP convergence (default: 480s)
+        convergence_wait_seconds: Wait time for BGP convergence (default: 540s)
         device_group_regex: Regex pattern for device groups to enable
         enable_thread_cpu_monitoring: Enable BGP++ thread CPU monitoring (default: False)
         thread_cpu_monitoring_interval_seconds: CPU sampling interval (default: 5s)
@@ -226,7 +226,7 @@ def create_bgp_restart_test_stage(
                 [
                     create_thread_cpu_monitoring_step(
                         device_name=device_name,
-                        duration_minutes=convergence_wait_seconds // (60 * 4),
+                        duration_minutes=convergence_wait_seconds // 60,
                         thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
                         thread_name_filter=thread_name_filter,
                         enable_bgp_events=enable_bgp_events,
@@ -370,7 +370,7 @@ def create_cold_start_test_stage(
                 [
                     create_thread_cpu_monitoring_step(
                         device_name=device_name,
-                        duration_minutes=convergence_wait_seconds // (60 * 4),
+                        duration_minutes=convergence_wait_seconds // 60,
                         thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
                         thread_name_filter=thread_name_filter,
                         enable_bgp_events=enable_bgp_events,

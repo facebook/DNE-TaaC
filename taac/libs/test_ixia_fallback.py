@@ -27,7 +27,10 @@ _test_configs = types.ModuleType(_TEST_CONFIGS_MODULE)
 _test_configs.get_test_config = lambda config: config
 sys.modules[_TEST_CONFIGS_MODULE] = _test_configs
 
-from taac.libs.taac_runner import TaacRunner
+from taac.libs.taac_runner import (
+    _start_test_case_time_window,
+    TaacRunner,
+)
 from taac.libs.test_setup_orchestrator import (
     TestSetupOrchestrator,
 )
@@ -83,6 +86,21 @@ def _config(
         teardown_tasks=primary_teardown_tasks,
         secondary_ixia_profile=secondary_profile,
     )
+
+
+class TaacRunnerTimeWindowTest(unittest.TestCase):
+    def test_start_clears_previous_playbook_end_time(self) -> None:
+        jq_vars = {
+            "test_case_start_time": 100,
+            "test_case_end_time": 150,
+            "unrelated": "preserved",
+        }
+
+        _start_test_case_time_window(jq_vars, 200)
+
+        self.assertEqual(200, jq_vars["test_case_start_time"])
+        self.assertNotIn("test_case_end_time", jq_vars)
+        self.assertEqual("preserved", jq_vars["unrelated"])
 
 
 class IxiaCandidateTest(unittest.TestCase):

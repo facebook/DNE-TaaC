@@ -179,6 +179,13 @@ DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID: str = "test_case_start"
 DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
 
 
+def _start_test_case_time_window(
+    jq_vars: t.MutableMapping[str, t.Any], start_time: int
+) -> None:
+    jq_vars.pop("test_case_end_time", None)
+    jq_vars["test_case_start_time"] = start_time
+
+
 class TaacRunner:
     def __init__(
         self,
@@ -809,7 +816,7 @@ class TaacRunner:
                 self._current_playbook_section = self.test_summary.start_section(
                     f"Playbook: {playbook.name} | {test_device.name}"
                 )
-                self.jq_vars["test_case_start_time"] = int(time.time())
+                _start_test_case_time_window(self.jq_vars, int(time.time()))
                 with suppress_console_logs(self.logger):
                     await self.async_test_case_setUp(playbook, test_device)
                 test_case_start_time = int(time.time())
