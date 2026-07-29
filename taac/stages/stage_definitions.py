@@ -1906,7 +1906,7 @@ def create_bgp_ebb_attribute_churn_stage(
     attribute_matrix: dict[str, dict[str, Any]],
     convergence_hard_timeout_seconds: int = 300,
 ) -> Stage:
-    """Create CICD-10 as one failure-safe, audited custom workflow."""
+    """Create CICD-EBB-10 as one failure-safe, audited custom workflow."""
     return Stage(
         steps=[
             create_bgp_attribute_churn_step(
@@ -1958,7 +1958,7 @@ def create_bgp_ebb_route_storm_stage(
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
 ) -> Stage:
-    """Create CICD-11 as one failure-safe, audited custom workflow."""
+    """Create CICD-EBB-11 as one failure-safe, audited custom workflow."""
     return Stage(
         steps=[
             create_bgp_route_storm_step(

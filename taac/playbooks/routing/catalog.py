@@ -10,11 +10,13 @@ from collections.abc import Mapping
 import yaml
 
 
-_CATALOG_ID_PATTERN = re.compile(r"CICD-(\d{2})")
-_REQUIREMENT_ID_PATTERN = re.compile(r"G2-(\d+)")
+_CATALOG_ID_PATTERN = re.compile(r"([A-Z][A-Z0-9_-]*)-(\d{2})")
+_REQUIREMENT_ID_PATTERN = re.compile(r"[A-Z][A-Z0-9]*-\d+(?:\.\d+)*")
 _SCHEMA_VERSION = 2
+_CATALOG_TYPES = frozenset({"CICD", "QUAL"})
 _COVERAGE_ROLES = frozenset({"direct", "proxy", "supplemental"})
 _ENFORCEMENT_MODES = frozenset({"blocking", "calibrating", "informational"})
+_IMPLEMENTATION_STATUSES = frozenset({"implemented", "skeleton"})
 _TOPOLOGY_STATUSES = frozenset({"modeled", "legacy"})
 _VALIDATION_COVERAGE = frozenset(
     {"implemented", "partial", "missing", "not_applicable"}
@@ -29,6 +31,7 @@ class CatalogValidationError(ValueError):
 @dataclasses.dataclass(frozen=True)
 class CatalogSuite:
     id: str
+    type: str
     title: str
     owner: str
     summary: str
@@ -112,6 +115,8 @@ class CatalogEntry:
     title: str
     category: str
     playbook_name: str
+    factory_name: str
+    implementation_status: str
     requirements: tuple[RequirementCoverage, ...]
     required_topology: str
     purpose: str
@@ -125,10 +130,6 @@ class CatalogEntry:
     triage_signals: tuple[str, ...]
     artifacts: tuple[str, ...]
     qualification_delta: str
-
-    @property
-    def factory_name(self) -> str:
-        return f"get_{self.playbook_name}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -213,6 +214,7 @@ def _parse_suite(value: object) -> CatalogSuite:
         frozenset(
             {
                 "id",
+                "type",
                 "title",
                 "owner",
                 "summary",
@@ -230,8 +232,14 @@ def _parse_suite(value: object) -> CatalogSuite:
             raise CatalogValidationError(
                 f"suite.required_requirements has invalid ID {requirement!r}"
             )
+    catalog_type = _string(mapping["type"], "suite.type")
+    if catalog_type not in _CATALOG_TYPES:
+        raise CatalogValidationError(
+            f"suite.type must be one of {sorted(_CATALOG_TYPES)}"
+        )
     return CatalogSuite(
         id=_string(mapping["id"], "suite.id"),
+        type=catalog_type,
         title=_string(mapping["title"], "suite.title"),
         owner=_string(mapping["owner"], "suite.owner"),
         summary=_string(mapping["summary"], "suite.summary"),
@@ -503,7 +511,7 @@ def _parse_entry_validation(value: object, location: str) -> EntryValidation:
 
 
 def _parse_entries(value: object) -> tuple[CatalogEntry, ...]:
-    expected_fields = frozenset(
+    required_fields = frozenset(
         {
             "id",
             "title",
@@ -524,7 +532,9 @@ def _parse_entries(value: object) -> tuple[CatalogEntry, ...]:
             "qualification_delta",
         }
     )
+    optional_fields = frozenset({"factory_name", "implementation_status"})
     result = []
+    catalog_prefix = None
     for index, item in enumerate(_sequence(value, "entries")):
         location = f"entries[{index}]"
         mapping = _mapping(item, location)
@@ -533,18 +543,49 @@ def _parse_entries(value: object) -> tuple[CatalogEntry, ...]:
                 f"{location}.validation is required in schema version 2; "
                 "map every blocking signal to an outcome validation chain"
             )
-        _check_keys(mapping, location, expected_fields)
+        actual_fields = frozenset(mapping)
+        missing = sorted(required_fields - actual_fields)
+        extra = sorted(actual_fields - required_fields - optional_fields)
+        if missing or extra:
+            raise CatalogValidationError(
+                f"{location} has invalid fields; missing={missing}, extra={extra}"
+            )
         catalog_id = _string(mapping["id"], f"{location}.id")
         match = _CATALOG_ID_PATTERN.fullmatch(catalog_id)
         expected_number = index + 1
-        if match is None or int(match.group(1)) != expected_number:
+        if match is None:
             raise CatalogValidationError(
-                f"{location}.id must be CICD-{expected_number:02d}, got {catalog_id!r}"
+                f"{location}.id must use PREFIX-NN format, got {catalog_id!r}"
+            )
+        entry_prefix, entry_number = match.groups()
+        if catalog_prefix is None:
+            catalog_prefix = entry_prefix
+        if entry_prefix != catalog_prefix or int(entry_number) != expected_number:
+            raise CatalogValidationError(
+                f"{location}.id must be {catalog_prefix}-{expected_number:02d}, "
+                f"got {catalog_id!r}"
             )
         playbook_name = _string(mapping["playbook_name"], f"{location}.playbook_name")
-        if re.fullmatch(r"[a-z0-9_]+_playbook", playbook_name) is None:
+        if re.fullmatch(r"[a-z0-9_]+", playbook_name) is None:
             raise CatalogValidationError(
                 f"{location}.playbook_name has invalid format {playbook_name!r}"
+            )
+        factory_name = _string(
+            mapping.get("factory_name", f"get_{playbook_name}"),
+            f"{location}.factory_name",
+        )
+        if re.fullmatch(r"[a-z][a-z0-9_]+", factory_name) is None:
+            raise CatalogValidationError(
+                f"{location}.factory_name has invalid format {factory_name!r}"
+            )
+        implementation_status = _string(
+            mapping.get("implementation_status", "implemented"),
+            f"{location}.implementation_status",
+        )
+        if implementation_status not in _IMPLEMENTATION_STATUSES:
+            raise CatalogValidationError(
+                f"{location}.implementation_status must be one of "
+                f"{sorted(_IMPLEMENTATION_STATUSES)}"
             )
         enforcement = _string(mapping["enforcement"], f"{location}.enforcement")
         if enforcement not in _ENFORCEMENT_MODES:
@@ -557,6 +598,8 @@ def _parse_entries(value: object) -> tuple[CatalogEntry, ...]:
                 title=_string(mapping["title"], f"{location}.title"),
                 category=_string(mapping["category"], f"{location}.category"),
                 playbook_name=playbook_name,
+                factory_name=factory_name,
+                implementation_status=implementation_status,
                 requirements=_parse_requirements(
                     mapping["requirements"], f"{location}.requirements"
                 ),

@@ -130,7 +130,7 @@ Factory docstrings stay implementation-focused:
 
 ```python
 def get_bgp_ebb_daemon_restart_playbook(...) -> Playbook:
-    """Build CICD-01: BGP daemon restart.
+    """Build CICD-EBB-01: BGP daemon restart.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 

@@ -339,7 +339,7 @@ def create_bgp_attribute_churn_step(
     convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
 ) -> Step:
-    """Create the audited CICD-10 dual-stack attribute-churn workflow."""
+    """Create the audited CICD-EBB-10 dual-stack attribute-churn workflow."""
     numeric_params = {
         "peer_count_per_plane": peer_count_per_plane,
         "selected_block_count_per_afi": selected_block_count_per_afi,
@@ -402,7 +402,7 @@ def create_bgp_route_storm_step(
     convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
 ) -> Step:
-    """Create the audited CICD-11 route-storm workflow."""
+    """Create the audited CICD-EBB-11 route-storm workflow."""
     if not hostname or not ixia_interface_mimic_ibgp or not observer_peer_parent_prefix:
         raise ValueError(
             "hostname, IXIA iBGP interface, and observer prefix must be non-empty"
@@ -418,7 +418,7 @@ def create_bgp_route_storm_step(
     ):
         raise ValueError("selected_peer_rows must be unique, sorted, and in range")
     if len(rows) * routes_per_peer * 2 != 10_500:
-        raise ValueError("CICD-11 requires exactly 10,500 dual-stack route paths")
+        raise ValueError("CICD-EBB-11 requires exactly 10,500 dual-stack route paths")
     numeric_params = {
         "expected_established_sessions": expected_established_sessions,
         "peer_count_per_plane": peer_count_per_plane,
@@ -447,7 +447,7 @@ def create_bgp_route_storm_step(
         )
     if extended_communities_per_route != 1:
         raise ValueError(
-            "CICD-11 currently requires exactly one extended community pending "
+            "CICD-EBB-11 currently requires exactly one extended community pending "
             "isolated IXIA capability validation"
         )
 

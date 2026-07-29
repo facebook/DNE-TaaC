@@ -79,7 +79,7 @@ class CheckProfile(enum.Enum):
     # FA/plane drain-undrain: convergence OFF, iBGP-PNH precheck off, snapshot
     # skips flap only (uptime still checked).
     DRAIN_UNDRAIN = "drain_undrain"
-    # CICD-11 route storm: convergence OFF, expected established-session count
+    # CICD-EBB-11 route storm: convergence OFF, expected established-session count
     # enforced, and a context-selected snapshot shape. The custom steps own
     # exact in-window route, attribute, and session-stability verdicts.
     CHURN_STORM = "churn_storm"
@@ -137,8 +137,8 @@ class ProfileContext:
     expected_established_sessions: int = 0
     snapshot_skip_flap: bool = False
     snapshot_skip_uptime: bool = False
-    # CICD-10 restores an exact baseline before requiring the full session
-    # snapshot. CICD-11 leaves this false because its setup and cleanup restart
+    # CICD-EBB-10 restores an exact baseline before requiring the full session
+    # snapshot. CICD-EBB-11 leaves this false because its setup and cleanup restart
     # generator sessions outside the measured storm window.
     full_session_snapshot: bool = False
     # IGP-instability: parameters for the appended BGP tcpdump check. message
@@ -294,8 +294,8 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
     """BGP churn/storm checks with custom in-window stability verdicts.
 
     The grouped IXIA setup and cleanup intentionally restart generator sessions
-    outside the measured route-storm window, so CICD-11 keeps the default
-    core-dumps-only snapshot. CICD-10 opts into the full session snapshot after
+    outside the measured route-storm window, so CICD-EBB-11 keeps the default
+    core-dumps-only snapshot. CICD-EBB-10 opts into the full session snapshot after
     restoring its exact baseline.
     """
     return ProfileChecks(

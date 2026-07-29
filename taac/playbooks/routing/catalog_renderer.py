@@ -125,6 +125,9 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
     topology_by_id = {topology.id: topology for topology in catalog.topologies}
     phase_by_id = {phase.id: phase for phase in catalog.validation_phases}
     chain_by_id = {chain.id: chain for chain in catalog.validation_chains}
+    show_implementation_status = any(
+        entry.implementation_status != "implemented" for entry in catalog.entries
+    )
     lines = [
         f"# {catalog.suite.title}",
         "",
@@ -132,6 +135,7 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
         "",
         catalog.suite.summary,
         "",
+        f"- **Type:** `{catalog.suite.type}`",
         f"- **Owner:** `{catalog.suite.owner}`",
         f"- **Playbook module:** `{catalog.suite.playbook_module}`",
         "",
@@ -157,29 +161,24 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
     )
 
     lines.extend(["", "## Catalog at a Glance", ""])
-    lines.extend(
-        _table(
+    glance_headers = ["ID", "Test Case", "Playbook"]
+    if show_implementation_status:
+        glance_headers.append("Status")
+    glance_headers.extend(["Requirement Coverage", "Topology", "Enforcement"])
+    glance_rows = []
+    for entry in catalog.entries:
+        row = [entry.id, entry.title, f"`{entry.playbook_name}`"]
+        if show_implementation_status:
+            row.append(entry.implementation_status)
+        row.extend(
             [
-                "ID",
-                "Test Case",
-                "Playbook",
-                "Gate2 Coverage",
-                "Topology",
-                "Enforcement",
-            ],
-            (
-                (
-                    entry.id,
-                    entry.title,
-                    f"`{entry.playbook_name}`",
-                    _requirement_label(entry),
-                    f"`{entry.required_topology}`",
-                    entry.enforcement,
-                )
-                for entry in catalog.entries
-            ),
+                _requirement_label(entry),
+                f"`{entry.required_topology}`",
+                entry.enforcement,
+            ]
         )
-    )
+        glance_rows.append(row)
+    lines.extend(_table(glance_headers, glance_rows))
 
     lines.extend(["", "## Requirement Coverage", ""])
     coverage_rows = []
@@ -273,6 +272,11 @@ def render_catalog(catalog: PlaybookCatalog) -> str:
                     "",
                     f"- **Playbook:** `{entry.playbook_name}`",
                     f"- **Factory:** `{entry.factory_name}`",
+                    *(
+                        [f"- **Implementation status:** {entry.implementation_status}"]
+                        if show_implementation_status
+                        else []
+                    ),
                     f"- **Requirements:** {_requirement_label(entry)}",
                     f"- **Required topology:** {topology_artifact}",
                     f"- **Cadence:** {entry.cadence}",

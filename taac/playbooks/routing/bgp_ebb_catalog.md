@@ -4,6 +4,7 @@
 
 Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qualification and CI/CD have different purposes: this suite continuously detects revision regressions while maintaining representative coverage of Gate2 requirements G2-10 through G2-25. The planned 25-case target will add five catalog entries only when their executable playbooks land.
 
+- **Type:** `CICD`
 - **Owner:** `routing_qual`
 - **Playbook module:** `neteng.test_infra.dne.taac.playbooks.routing.bgp_ebb_playbooks`
 
@@ -23,49 +24,49 @@ Daily regression catalog for the 20 currently executable BGP++ EBB playbooks. Qu
 
 ## Catalog at a Glance
 
-| ID | Test Case | Playbook | Gate2 Coverage | Topology | Enforcement |
+| ID | Test Case | Playbook | Requirement Coverage | Topology | Enforcement |
 | --- | --- | --- | --- | --- | --- |
-| CICD-01 | BGP daemon restart | `bgp_ebb_daemon_restart_playbook` | G2-11 (direct) | `ebb_full_scale` | blocking |
-| CICD-02 | BGP cold start | `bgp_ebb_cold_start_playbook` | G2-10 (direct) | `ebb_full_scale` | blocking |
-| CICD-03 | eBGP session oscillation | `bgp_ebb_ebgp_session_oscillation_playbook` | G2-18 (direct) | `ebb_full_scale` | blocking |
-| CICD-04 | iBGP plane session oscillation | `bgp_ebb_ibgp_plane_session_oscillation_playbook` | G2-19 (direct) | `ebb_full_scale` | blocking |
-| CICD-05 | eBGP route oscillation | `bgp_ebb_ebgp_route_oscillation_playbook` | G2-20 (direct) | `ebb_full_scale` | blocking |
-| CICD-06 | iBGP route oscillation | `bgp_ebb_ibgp_route_oscillation_playbook` | G2-21 (direct) | `ebb_full_scale` | blocking |
-| CICD-07 | IGP PNH metric oscillation | `bgp_ebb_igp_pnh_metric_oscillation_playbook` | G2-13 (direct) | `ebb_full_scale` | blocking |
-| CICD-08 | IGP unresolvable PNH | `bgp_ebb_igp_unresolvable_pnh_playbook` | G2-14 (direct) | `ebb_full_scale` | blocking |
-| CICD-09 | Multipath-group oscillation | `bgp_ebb_multipath_group_oscillation_playbook` | G2-16 (direct) | `ebb_full_scale` | blocking |
-| CICD-10 | BGP attribute churn | `bgp_ebb_attribute_churn_playbook` | G2-15 (direct) | `ebb_full_scale` | blocking |
-| CICD-11 | BGP route storm | `bgp_ebb_route_storm_playbook` | G2-17 (direct) | `ebb_full_scale` | blocking |
-| CICD-12 | Route-registry runtime update | `bgp_ebb_route_registry_runtime_update_playbook` | G2-24 (direct), G2-25 (supplemental) | `ebb_full_scale` | blocking |
-| CICD-13 | FAUU drain and undrain | `bgp_ebb_fauu_drain_undrain_playbook` | G2-23 (direct) | `ebb_full_scale` | blocking |
-| CICD-14 | Plane drain and undrain | `bgp_ebb_plane_drain_undrain_playbook` | G2-22 (direct) | `ebb_full_scale` | calibrating |
-| CICD-15 | Longevity | `bgp_ebb_longevity_playbook` | G2-12 (proxy) | `ebb_full_scale` | calibrating |
-| CICD-16 | Queue and memory monitoring | `bgp_ebb_queue_memory_monitoring_playbook` | G2-25 (supplemental) | `legacy_two_port_ebb` | calibrating |
-| CICD-17 | Nexthop-group count threshold | `bgp_ebb_nexthop_group_count_threshold_playbook` | G2-25 (supplemental) | `ebb_full_scale` | calibrating |
-| CICD-18 | UPDATE packing | `bgp_ebb_update_packing_playbook` | G2-25 (supplemental) | `ipv6_update_packing` | blocking |
-| CICD-19 | Constant attribute storage | `bgp_ebb_constant_attribute_storage_playbook` | G2-25 (supplemental) | `legacy_two_port_ebb` | blocking |
-| CICD-20 | Bounded ECMP sets | `bgp_ebb_bounded_ecmp_sets_playbook` | G2-25 (supplemental) | `bounded_ecmp` | calibrating |
+| CICD-EBB-01 | BGP daemon restart | `bgp_ebb_daemon_restart_playbook` | G2-11 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-02 | BGP cold start | `bgp_ebb_cold_start_playbook` | G2-10 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-03 | eBGP session oscillation | `bgp_ebb_ebgp_session_oscillation_playbook` | G2-18 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-04 | iBGP plane session oscillation | `bgp_ebb_ibgp_plane_session_oscillation_playbook` | G2-19 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-05 | eBGP route oscillation | `bgp_ebb_ebgp_route_oscillation_playbook` | G2-20 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-06 | iBGP route oscillation | `bgp_ebb_ibgp_route_oscillation_playbook` | G2-21 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-07 | IGP PNH metric oscillation | `bgp_ebb_igp_pnh_metric_oscillation_playbook` | G2-13 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-08 | IGP unresolvable PNH | `bgp_ebb_igp_unresolvable_pnh_playbook` | G2-14 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-09 | Multipath-group oscillation | `bgp_ebb_multipath_group_oscillation_playbook` | G2-16 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-10 | BGP attribute churn | `bgp_ebb_attribute_churn_playbook` | G2-15 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-11 | BGP route storm | `bgp_ebb_route_storm_playbook` | G2-17 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-12 | Route-registry runtime update | `bgp_ebb_route_registry_runtime_update_playbook` | G2-24 (direct), G2-25 (supplemental) | `ebb_full_scale` | blocking |
+| CICD-EBB-13 | FAUU drain and undrain | `bgp_ebb_fauu_drain_undrain_playbook` | G2-23 (direct) | `ebb_full_scale` | blocking |
+| CICD-EBB-14 | Plane drain and undrain | `bgp_ebb_plane_drain_undrain_playbook` | G2-22 (direct) | `ebb_full_scale` | calibrating |
+| CICD-EBB-15 | Longevity | `bgp_ebb_longevity_playbook` | G2-12 (proxy) | `ebb_full_scale` | calibrating |
+| CICD-EBB-16 | Queue and memory monitoring | `bgp_ebb_queue_memory_monitoring_playbook` | G2-25 (supplemental) | `legacy_two_port_ebb` | calibrating |
+| CICD-EBB-17 | Nexthop-group count threshold | `bgp_ebb_nexthop_group_count_threshold_playbook` | G2-25 (supplemental) | `ebb_full_scale` | calibrating |
+| CICD-EBB-18 | UPDATE packing | `bgp_ebb_update_packing_playbook` | G2-25 (supplemental) | `ipv6_update_packing` | blocking |
+| CICD-EBB-19 | Constant attribute storage | `bgp_ebb_constant_attribute_storage_playbook` | G2-25 (supplemental) | `legacy_two_port_ebb` | blocking |
+| CICD-EBB-20 | Bounded ECMP sets | `bgp_ebb_bounded_ecmp_sets_playbook` | G2-25 (supplemental) | `bounded_ecmp` | calibrating |
 
 ## Requirement Coverage
 
 | Requirement | Catalog Cases | Current Coverage |
 | --- | --- | --- |
-| G2-10 | CICD-02 (direct) | Start BGP++ at full scale and verify peer establishment and convergence. |
-| G2-11 | CICD-01 (direct) | Restart BGP++ and verify full session and control-plane recovery. |
-| G2-12 | CICD-15 (proxy) | Run a shortened community-churn soak as a daily continuous-operation signal. |
-| G2-13 | CICD-07 (direct) | Oscillate IGP metrics for protocol nexthops without destabilizing BGP sessions. |
-| G2-14 | CICD-08 (direct) | Make selected PNHs unresolvable and verify withdrawal and restoration behavior. |
-| G2-15 | CICD-10 (direct) | Sustain one hour of minute-cadence multi-attribute route churn with exact transition and restoration verdicts. |
-| G2-16 | CICD-09 (direct) | Change live multipath width and verify restoration to the measured baseline. |
-| G2-17 | CICD-11 (direct) | Sustain one hour of exact dual-stack route-path advertise and withdraw transitions and verify recovery. |
-| G2-18 | CICD-03 (direct) | Repeatedly flap eBGP sessions and verify final recovery. |
-| G2-19 | CICD-04 (direct) | Flap iBGP sessions across all tornado planes and verify recovery. |
-| G2-20 | CICD-05 (direct) | Repeatedly withdraw and readvertise eBGP routes and verify convergence. |
-| G2-21 | CICD-06 (direct) | Repeatedly withdraw and readvertise iBGP routes and verify convergence. |
-| G2-22 | CICD-14 (direct) | Drain and undrain iBGP planes while verifying convergence and peer views. |
-| G2-23 | CICD-13 (direct) | Drain and undrain FAUU routes while verifying convergence and peer views. |
-| G2-24 | CICD-12 (direct) | Apply prefix-list changes at runtime and verify expected route-count transitions. |
-| G2-25 | CICD-12 (supplemental), CICD-16 (supplemental), CICD-17 (supplemental), CICD-18 (supplemental), CICD-19 (supplemental), CICD-20 (supplemental) | Assert one formal runtime-policy feature within the broader G2-25 umbrella. Monitor implementation queues and process memory during route churn and CPU stress. Bound nexthop-group growth while routes oscillate. Validate efficient IPv6 UPDATE packing under update-group-enabled distribution. Measure attribute-storage behavior as unique attribute combinations increase. Verify ECMP and nexthop-group state remains bounded under update-group-enabled scale. |
+| G2-10 | CICD-EBB-02 (direct) | Start BGP++ at full scale and verify peer establishment and convergence. |
+| G2-11 | CICD-EBB-01 (direct) | Restart BGP++ and verify full session and control-plane recovery. |
+| G2-12 | CICD-EBB-15 (proxy) | Run a shortened community-churn soak as a daily continuous-operation signal. |
+| G2-13 | CICD-EBB-07 (direct) | Oscillate IGP metrics for protocol nexthops without destabilizing BGP sessions. |
+| G2-14 | CICD-EBB-08 (direct) | Make selected PNHs unresolvable and verify withdrawal and restoration behavior. |
+| G2-15 | CICD-EBB-10 (direct) | Sustain one hour of minute-cadence multi-attribute route churn with exact transition and restoration verdicts. |
+| G2-16 | CICD-EBB-09 (direct) | Change live multipath width and verify restoration to the measured baseline. |
+| G2-17 | CICD-EBB-11 (direct) | Sustain one hour of exact dual-stack route-path advertise and withdraw transitions and verify recovery. |
+| G2-18 | CICD-EBB-03 (direct) | Repeatedly flap eBGP sessions and verify final recovery. |
+| G2-19 | CICD-EBB-04 (direct) | Flap iBGP sessions across all tornado planes and verify recovery. |
+| G2-20 | CICD-EBB-05 (direct) | Repeatedly withdraw and readvertise eBGP routes and verify convergence. |
+| G2-21 | CICD-EBB-06 (direct) | Repeatedly withdraw and readvertise iBGP routes and verify convergence. |
+| G2-22 | CICD-EBB-14 (direct) | Drain and undrain iBGP planes while verifying convergence and peer views. |
+| G2-23 | CICD-EBB-13 (direct) | Drain and undrain FAUU routes while verifying convergence and peer views. |
+| G2-24 | CICD-EBB-12 (direct) | Apply prefix-list changes at runtime and verify expected route-count transitions. |
+| G2-25 | CICD-EBB-12 (supplemental), CICD-EBB-16 (supplemental), CICD-EBB-17 (supplemental), CICD-EBB-18 (supplemental), CICD-EBB-19 (supplemental), CICD-EBB-20 (supplemental) | Assert one formal runtime-policy feature within the broader G2-25 umbrella. Monitor implementation queues and process memory during route churn and CPU stress. Bound nexthop-group growth while routes oscillate. Validate efficient IPv6 UPDATE packing under update-group-enabled distribution. Measure attribute-storage behavior as unique attribute combinations increase. Verify ECMP and nexthop-group state remains bounded under update-group-enabled scale. |
 
 ## Outcome Validation Coverage
 
@@ -73,32 +74,32 @@ This summary compares catalog-required blocking signals with the playbook-level 
 
 | ID | Test Case | Health-check Coverage | Remaining Gap |
 | --- | --- | --- | --- |
-| CICD-01 | BGP daemon restart | Complete | None |
-| CICD-02 | BGP cold start | Partial | CPU and memory are periodic tasks, not playbook-level health checks. |
-| CICD-03 | eBGP session oscillation | Partial | Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
-| CICD-04 | iBGP plane session oscillation | Partial | The shared health-check profile is not evaluated independently per plane. Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
-| CICD-05 | eBGP route oscillation | Partial | Session uptime is skipped; resource checks are periodic tasks. |
-| CICD-06 | iBGP route oscillation | Partial | Resource checks are periodic tasks, not playbook-level health checks. |
-| CICD-07 | IGP PNH metric oscillation | Partial | No playbook-level health check validates the packet-message expectation. Cleanup executes route injection but has no post-cleanup health check. |
-| CICD-08 | IGP unresolvable PNH | Partial | The health-check chain runs around the workload, not after cleanup restoration. Final session and RIB/FIB health are checked, but explicit convergence is disabled. Cleanup re-injects routes without a post-cleanup route-state health check. |
-| CICD-09 | Multipath-group oscillation | Partial | Multipath width is asserted inside the oscillation stage, not by a health check. Baseline restoration is asserted inside the oscillation stage, not by a health check. |
-| CICD-10 | BGP attribute churn | Partial | Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain. Sampled exact-prefix path and best-path verdicts are enforced inside the custom step. The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the workload. |
-| CICD-11 | BGP route storm | Partial | Exact row-scoped IXIA Active readback is enforced inside the custom step for every transition. The health-check chain verifies boundary session health; runtime stability and source counters are enforced inside the custom step. The postcheck verifies final RIB/FIB invariants; per-transition exact-prefix verdicts are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the storm. |
-| CICD-12 | Route-registry runtime update | Partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. Cleanup actions run after the health-check chain and have no post-cleanup check. |
-| CICD-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
-| CICD-14 | Plane drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but plane policy and captured views are stage-local validations. |
-| CICD-15 | Longevity | Partial | Session and RIB/FIB state are checked, but the explicit convergence health check is disabled. Core dumps are checked, but this playbook has no CPU or memory periodic validation. |
-| CICD-16 | Queue and memory monitoring | Partial | Session uptime is snapshotted; stable PID, peer presence, and established state are enforced inside the custom step rather than a playbook health check. Collector integrity is enforced inside the custom step rather than a playbook health check; numeric queue and memory thresholds remain unapproved calibration work. The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
-| CICD-17 | Nexthop-group count threshold | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
-| CICD-18 | UPDATE packing | Missing | Packing size is asserted only inside the custom step; no health-check chain exists. Custom-step completion is not a playbook-level health check. These conditions are handled inside the custom step with no independent health checks. |
-| CICD-19 | Constant attribute storage | Missing | Route acceptance is asserted only inside the custom step; no health-check chain exists. Attribute collection is custom-step-local and has no independent health check. The memory-growth gate is custom-step-local and has no independent health check. |
-| CICD-20 | Bounded ECMP sets | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
+| CICD-EBB-01 | BGP daemon restart | Complete | None |
+| CICD-EBB-02 | BGP cold start | Partial | CPU and memory are periodic tasks, not playbook-level health checks. |
+| CICD-EBB-03 | eBGP session oscillation | Partial | Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+| CICD-EBB-04 | iBGP plane session oscillation | Partial | The shared health-check profile is not evaluated independently per plane. Flap and uptime comparisons are skipped; resource limits are periodic tasks. |
+| CICD-EBB-05 | eBGP route oscillation | Partial | Session uptime is skipped; resource checks are periodic tasks. |
+| CICD-EBB-06 | iBGP route oscillation | Partial | Resource checks are periodic tasks, not playbook-level health checks. |
+| CICD-EBB-07 | IGP PNH metric oscillation | Partial | No playbook-level health check validates the packet-message expectation. Cleanup executes route injection but has no post-cleanup health check. |
+| CICD-EBB-08 | IGP unresolvable PNH | Partial | The health-check chain runs around the workload, not after cleanup restoration. Final session and RIB/FIB health are checked, but explicit convergence is disabled. Cleanup re-injects routes without a post-cleanup route-state health check. |
+| CICD-EBB-09 | Multipath-group oscillation | Partial | Multipath width is asserted inside the oscillation stage, not by a health check. Baseline restoration is asserted inside the oscillation stage, not by a health check. |
+| CICD-EBB-10 | BGP attribute churn | Partial | Exact IXIA and per-transition RIB-version verdicts are enforced inside the custom step, not by the health-check chain. Sampled exact-prefix path and best-path verdicts are enforced inside the custom step. The health-check chain verifies boundary session health; runtime source and BGP-MON counters are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the workload. |
+| CICD-EBB-11 | BGP route storm | Partial | Exact row-scoped IXIA Active readback is enforced inside the custom step for every transition. The health-check chain verifies boundary session health; runtime stability and source counters are enforced inside the custom step. The postcheck verifies final RIB/FIB invariants; per-transition exact-prefix verdicts are enforced inside the custom step. Exact restoration and the quiet window are enforced inside the custom step after the storm. |
+| CICD-EBB-12 | Route-registry runtime update | Partial | The health-check chain validates only the baseline count; transitions are stage-local assertions. Cleanup actions run after the health-check chain and have no post-cleanup check. |
+| CICD-EBB-13 | FAUU drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but captured peer views are validated inside the stage. |
+| CICD-EBB-14 | Plane drain and undrain | Partial | The profile disables the convergence health check; the limit is enforced inside the drain stage. Sessions are checked, but plane policy and captured views are stage-local validations. |
+| CICD-EBB-15 | Longevity | Partial | Session and RIB/FIB state are checked, but the explicit convergence health check is disabled. Core dumps are checked, but this playbook has no CPU or memory periodic validation. |
+| CICD-EBB-16 | Queue and memory monitoring | Partial | Session uptime is snapshotted; stable PID, peer presence, and established state are enforced inside the custom step rather than a playbook health check. Collector integrity is enforced inside the custom step rather than a playbook health check; numeric queue and memory thresholds remain unapproved calibration work. The session snapshot excludes expected flaps; route-churn completion is custom-step-local. |
+| CICD-EBB-17 | Nexthop-group count threshold | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
+| CICD-EBB-18 | UPDATE packing | Missing | Packing size is asserted only inside the custom step; no health-check chain exists. Custom-step completion is not a playbook-level health check. These conditions are handled inside the custom step with no independent health checks. |
+| CICD-EBB-19 | Constant attribute storage | Missing | Route acceptance is asserted only inside the custom step; no health-check chain exists. Attribute collection is custom-step-local and has no independent health check. The memory-growth gate is custom-step-local and has no independent health check. |
+| CICD-EBB-20 | Bounded ECMP sets | Partial | The threshold is enforced by a periodic task, not a playbook-level health check. |
 
 ## Coverage Notes
 
 ### G2-12 daily proxy status
 
-CICD-15 is a provisional daily stability proxy, not equivalent to the 48-hour qualification workload.
+CICD-EBB-15 is a provisional daily stability proxy, not equivalent to the 48-hour qualification workload.
 
 **Asserted**
 
@@ -121,11 +122,11 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Asserted**
 
-- CICD-12 validates per-AFI prefix-list updates and route-count transitions without restarting BGP++.
-- CICD-16 monitors queue, process-memory, and liveness behavior under route churn and CPU stress.
-- CICD-17 and CICD-20 bound nexthop-group and ECMP state during route churn.
-- CICD-18 validates IPv6 UPDATE packing with update groups enabled.
-- CICD-19 validates route acceptance and attribute-storage memory growth across unique-combination scale.
+- CICD-EBB-12 validates per-AFI prefix-list updates and route-count transitions without restarting BGP++.
+- CICD-EBB-16 monitors queue, process-memory, and liveness behavior under route churn and CPU stress.
+- CICD-EBB-17 and CICD-EBB-20 bound nexthop-group and ECMP state during route churn.
+- CICD-EBB-18 validates IPv6 UPDATE packing with update groups enabled.
+- CICD-EBB-19 validates route acceptance and attribute-storage memory growth across unique-combination scale.
 
 **Exercised but not feature-complete**
 
@@ -145,7 +146,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 ## Lifecycle and Session Stability
 
-### CICD-01: BGP daemon restart
+### CICD-EBB-01: BGP daemon restart
 
 - **Playbook:** `bgp_ebb_daemon_restart_playbook`
 - **Factory:** `get_bgp_ebb_daemon_restart_playbook`
@@ -210,7 +211,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** Daily CI performs one representative restart rather than the full qualification campaign.
 
-### CICD-02: BGP cold start
+### CICD-EBB-02: BGP cold start
 
 - **Playbook:** `bgp_ebb_cold_start_playbook`
 - **Factory:** `get_bgp_ebb_cold_start_playbook`
@@ -274,7 +275,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** Daily CI uses the conveyor topology and one synchronized cold-start event.
 
-### CICD-03: eBGP session oscillation
+### CICD-EBB-03: eBGP session oscillation
 
 - **Playbook:** `bgp_ebb_ebgp_session_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ebgp_session_oscillation_playbook`
@@ -337,7 +338,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI fixes the churn duration and cycle shape for repeatable daily comparison.
 
-### CICD-04: iBGP plane session oscillation
+### CICD-EBB-04: iBGP plane session oscillation
 
 - **Playbook:** `bgp_ebb_ibgp_plane_session_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ibgp_plane_session_oscillation_playbook`
@@ -403,7 +404,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 ## Route and IGP Instability
 
-### CICD-05: eBGP route oscillation
+### CICD-EBB-05: eBGP route oscillation
 
 - **Playbook:** `bgp_ebb_ebgp_route_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ebgp_route_oscillation_playbook`
@@ -466,7 +467,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-### CICD-06: iBGP route oscillation
+### CICD-EBB-06: iBGP route oscillation
 
 - **Playbook:** `bgp_ebb_ibgp_route_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_ibgp_route_oscillation_playbook`
@@ -529,7 +530,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-### CICD-07: IGP PNH metric oscillation
+### CICD-EBB-07: IGP PNH metric oscillation
 
 - **Playbook:** `bgp_ebb_igp_pnh_metric_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_igp_pnh_metric_oscillation_playbook`
@@ -594,7 +595,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI uses fixed metric cadence and route count for a repeatable daily signal.
 
-### CICD-08: IGP unresolvable PNH
+### CICD-EBB-08: IGP unresolvable PNH
 
 - **Playbook:** `bgp_ebb_igp_unresolvable_pnh_playbook`
 - **Factory:** `get_bgp_ebb_igp_unresolvable_pnh_playbook`
@@ -659,7 +660,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI uses a representative PNH subset and requires deterministic restoration.
 
-### CICD-09: Multipath-group oscillation
+### CICD-EBB-09: Multipath-group oscillation
 
 - **Playbook:** `bgp_ebb_multipath_group_oscillation_playbook`
 - **Factory:** `get_bgp_ebb_multipath_group_oscillation_playbook`
@@ -723,7 +724,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI measures the active baseline instead of assuming a qualification-lab width.
 
-### CICD-10: BGP attribute churn
+### CICD-EBB-10: BGP attribute churn
 
 - **Playbook:** `bgp_ebb_attribute_churn_playbook`
 - **Factory:** `get_bgp_ebb_attribute_churn_playbook`
@@ -792,7 +793,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI enforces the Gate2 one-hour cadence and attribute matrix on deterministic route blocks with sampled exact-prefix verdicts. CPU and memory thresholds remain non-blocking telemetry pending resource-baseline calibration.
 
-### CICD-11: BGP route storm
+### CICD-EBB-11: BGP route storm
 
 - **Playbook:** `bgp_ebb_route_storm_playbook`
 - **Factory:** `get_bgp_ebb_route_storm_playbook`
@@ -826,7 +827,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 | Phase | Chain ID | Implemented Health Checks | Notes |
 | --- | --- | --- | --- |
 | precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
-| postcheck | `post.churn_storm` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check. CICD-11 supplies AS-path length and pool size invariants to the RIB/FIB consistency check. |
+| postcheck | `post.churn_storm` | `expected-count BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `service restart detection` | Omits the convergence-time check. CICD-EBB-11 supplies AS-path length and pool size invariants to the RIB/FIB consistency check. |
 | snapshot | `snapshot.core_only` | `core-dump snapshot check` | Session snapshots are omitted because sessions may churn throughout the workload. |
 
 **Specification vs. implemented health checks**
@@ -864,7 +865,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 ## Operational Procedures
 
-### CICD-12: Route-registry runtime update
+### CICD-EBB-12: Route-registry runtime update
 
 - **Playbook:** `bgp_ebb_route_registry_runtime_update_playbook`
 - **Factory:** `get_bgp_ebb_route_registry_runtime_update_playbook`
@@ -929,7 +930,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI exercises a representative prefix-list transition sequence and makes cleanup blocking.
 
-### CICD-13: FAUU drain and undrain
+### CICD-EBB-13: FAUU drain and undrain
 
 - **Playbook:** `bgp_ebb_fauu_drain_undrain_playbook`
 - **Factory:** `get_bgp_ebb_fauu_drain_undrain_playbook`
@@ -993,7 +994,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** CI performs one controlled drain and undrain sequence on the conveyor topology.
 
-### CICD-14: Plane drain and undrain
+### CICD-EBB-14: Plane drain and undrain
 
 - **Playbook:** `bgp_ebb_plane_drain_undrain_playbook`
 - **Factory:** `get_bgp_ebb_plane_drain_undrain_playbook`
@@ -1059,7 +1060,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 ## Continuous Operation and Resource Regression
 
-### CICD-15: Longevity
+### CICD-EBB-15: Longevity
 
 - **Playbook:** `bgp_ebb_longevity_playbook`
 - **Factory:** `get_bgp_ebb_longevity_playbook`
@@ -1121,7 +1122,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** Gate2 qualification runs 48 hours and includes broader route, attribute, drain, and restart stimuli. This four-hour community-churn workload is a provisional daily proxy, not equivalent qualification coverage.
 
-### CICD-16: Queue and memory monitoring
+### CICD-EBB-16: Queue and memory monitoring
 
 - **Playbook:** `bgp_ebb_queue_memory_monitoring_playbook`
 - **Factory:** `get_bgp_ebb_queue_memory_monitoring_playbook`
@@ -1152,7 +1153,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 | Phase | Chain ID | Implemented Health Checks | Notes |
 | --- | --- | --- | --- |
-| snapshot | `snapshot.session_only_skip_flap` | `BGP session uptime snapshot check` | Used by CICD-16. The general core-dump check is intentionally omitted so unrelated process crashes do not fail this BGP++-specific monitor. |
+| snapshot | `snapshot.session_only_skip_flap` | `BGP session uptime snapshot check` | Used by CICD-EBB-16. The general core-dump check is intentionally omitted so unrelated process crashes do not fail this BGP++-specific monitor. |
 
 **Specification vs. implemented health checks**
 
@@ -1185,7 +1186,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 ## Scaling and Feature Regression
 
-### CICD-17: Nexthop-group count threshold
+### CICD-EBB-17: Nexthop-group count threshold
 
 - **Playbook:** `bgp_ebb_nexthop_group_count_threshold_playbook`
 - **Factory:** `get_bgp_ebb_nexthop_group_count_threshold_playbook`
@@ -1248,7 +1249,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Qualification difference:** Supplemental scale signal; it does not cover every best-path, Add-Path, or multipath permutation in G2-25.
 
-### CICD-18: UPDATE packing
+### CICD-EBB-18: UPDATE packing
 
 - **Playbook:** `bgp_ebb_update_packing_playbook`
 - **Factory:** `get_bgp_ebb_update_packing_playbook`
@@ -1307,7 +1308,7 @@ No playbook-level health-check chain is implemented.
 
 **Qualification difference:** Supplemental packing signal; it does not replace the dedicated update-group correctness and backpressure suite.
 
-### CICD-19: Constant attribute storage
+### CICD-EBB-19: Constant attribute storage
 
 - **Playbook:** `bgp_ebb_constant_attribute_storage_playbook`
 - **Factory:** `get_bgp_ebb_constant_attribute_storage_playbook`
@@ -1366,7 +1367,7 @@ No playbook-level health-check chain is implemented.
 
 **Qualification difference:** Supplemental storage signal; it does not independently validate the complete community, AS-path, or policy feature matrices.
 
-### CICD-20: Bounded ECMP sets
+### CICD-EBB-20: Bounded ECMP sets
 
 - **Playbook:** `bgp_ebb_bounded_ecmp_sets_playbook`
 - **Factory:** `get_bgp_ebb_bounded_ecmp_sets_playbook`

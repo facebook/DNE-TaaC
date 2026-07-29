@@ -307,7 +307,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
         )
 
     def test_churn_storm_route_storm_matches_factory(self):
-        """CICD-11 uses final session checks and in-workflow stability gates."""
+        """CICD-EBB-11 uses final session checks and in-workflow stability gates."""
         ctx = ProfileContext(
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",

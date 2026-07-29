@@ -2,6 +2,7 @@ schema_version: 2
 
 suite:
   id: bgp_ebb
+  type: CICD
   title: BGP++ EBB CI/CD Catalog
   owner: routing_qual
   summary: >-
@@ -42,7 +43,7 @@ coverage_notes:
   - requirement: G2-12
     title: G2-12 daily proxy status
     summary: >-
-      CICD-15 is a provisional daily stability proxy, not equivalent to the
+      CICD-EBB-15 is a provisional daily stability proxy, not equivalent to the
       48-hour qualification workload.
     asserted:
       - Four hours of repeated community churn followed by quiesced health checks.
@@ -60,11 +61,11 @@ coverage_notes:
       and several supplemental scaling and implementation-health signals. They
       do not yet establish complete G2-25 feature qualification coverage.
     asserted:
-      - CICD-12 validates per-AFI prefix-list updates and route-count transitions without restarting BGP++.
-      - CICD-16 monitors queue, process-memory, and liveness behavior under route churn and CPU stress.
-      - CICD-17 and CICD-20 bound nexthop-group and ECMP state during route churn.
-      - CICD-18 validates IPv6 UPDATE packing with update groups enabled.
-      - CICD-19 validates route acceptance and attribute-storage memory growth across unique-combination scale.
+      - CICD-EBB-12 validates per-AFI prefix-list updates and route-count transitions without restarting BGP++.
+      - CICD-EBB-16 monitors queue, process-memory, and liveness behavior under route churn and CPU stress.
+      - CICD-EBB-17 and CICD-EBB-20 bound nexthop-group and ECMP state during route churn.
+      - CICD-EBB-18 validates IPv6 UPDATE packing with update groups enabled.
+      - CICD-EBB-19 validates route acceptance and attribute-storage memory growth across unique-combination scale.
     exercised:
       - MED, community, origin, and AS-path mutation during churn and drain workflows.
       - Open/R metric changes, PNH withdrawal and restoration, and multipath recovery.
@@ -201,7 +202,7 @@ validation_phases:
       - rib_fib_consistency_postcheck
       - service restart detection
     notes: >-
-      Omits the convergence-time check. CICD-11 supplies AS-path length and pool
+      Omits the convergence-time check. CICD-EBB-11 supplies AS-path length and pool
       size invariants to the RIB/FIB consistency check.
   - id: post.bounded_ecmp
     phase: postcheck
@@ -251,7 +252,7 @@ validation_phases:
     healthchecks:
       - BGP session uptime snapshot check
     notes: >-
-      Used by CICD-16. The general core-dump check is intentionally omitted so
+      Used by CICD-EBB-16. The general core-dump check is intentionally omitted so
       unrelated process crashes do not fail this BGP++-specific monitor.
 
 validation_chains:
@@ -317,7 +318,7 @@ validation_chains:
     phases: [post.bounded_ecmp, snapshot.skip_flap_and_uptime]
 
 entries:
-  - id: CICD-01
+  - id: CICD-EBB-01
     title: BGP daemon restart
     category: lifecycle_and_sessions
     playbook_name: bgp_ebb_daemon_restart_playbook
@@ -368,7 +369,7 @@ entries:
       - CPU and memory time series.
     qualification_delta: Daily CI performs one representative restart rather than the full qualification campaign.
 
-  - id: CICD-02
+  - id: CICD-EBB-02
     title: BGP cold start
     category: lifecycle_and_sessions
     playbook_name: bgp_ebb_cold_start_playbook
@@ -418,7 +419,7 @@ entries:
       - Thread CPU collection and structured lifecycle convergence record.
     qualification_delta: Daily CI uses the conveyor topology and one synchronized cold-start event.
 
-  - id: CICD-03
+  - id: CICD-EBB-03
     title: eBGP session oscillation
     category: lifecycle_and_sessions
     playbook_name: bgp_ebb_ebgp_session_oscillation_playbook
@@ -464,7 +465,7 @@ entries:
       - Session and resource snapshots.
     qualification_delta: CI fixes the churn duration and cycle shape for repeatable daily comparison.
 
-  - id: CICD-04
+  - id: CICD-EBB-04
     title: iBGP plane session oscillation
     category: lifecycle_and_sessions
     playbook_name: bgp_ebb_ibgp_plane_session_oscillation_playbook
@@ -511,7 +512,7 @@ entries:
       - Per-plane session snapshots.
     qualification_delta: CI uses a fixed 30-minute churn window across the representative four-plane topology.
 
-  - id: CICD-05
+  - id: CICD-EBB-05
     title: eBGP route oscillation
     category: route_and_igp_instability
     playbook_name: bgp_ebb_ebgp_route_oscillation_playbook
@@ -557,7 +558,7 @@ entries:
       - BGP and IXIA logs.
     qualification_delta: CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-  - id: CICD-06
+  - id: CICD-EBB-06
     title: iBGP route oscillation
     category: route_and_igp_instability
     playbook_name: bgp_ebb_ibgp_route_oscillation_playbook
@@ -603,7 +604,7 @@ entries:
       - BGP and IXIA logs.
     qualification_delta: CI uses a deterministic prefix slice and conveyor-sized churn window.
 
-  - id: CICD-07
+  - id: CICD-EBB-07
     title: IGP PNH metric oscillation
     category: route_and_igp_instability
     playbook_name: bgp_ebb_igp_pnh_metric_oscillation_playbook
@@ -651,7 +652,7 @@ entries:
       - TAAC health-check and cleanup results.
     qualification_delta: CI uses fixed metric cadence and route count for a repeatable daily signal.
 
-  - id: CICD-08
+  - id: CICD-EBB-08
     title: IGP unresolvable PNH
     category: route_and_igp_instability
     playbook_name: bgp_ebb_igp_unresolvable_pnh_playbook
@@ -699,7 +700,7 @@ entries:
       - TAAC route and session checks.
     qualification_delta: CI uses a representative PNH subset and requires deterministic restoration.
 
-  - id: CICD-09
+  - id: CICD-EBB-09
     title: Multipath-group oscillation
     category: route_and_igp_instability
     playbook_name: bgp_ebb_multipath_group_oscillation_playbook
@@ -746,7 +747,7 @@ entries:
       - BGP and IXIA logs.
     qualification_delta: CI measures the active baseline instead of assuming a qualification-lab width.
 
-  - id: CICD-10
+  - id: CICD-EBB-10
     title: BGP attribute churn
     category: route_and_igp_instability
     playbook_name: bgp_ebb_attribute_churn_playbook
@@ -815,7 +816,7 @@ entries:
       route blocks with sampled exact-prefix verdicts. CPU and memory thresholds
       remain non-blocking telemetry pending resource-baseline calibration.
 
-  - id: CICD-11
+  - id: CICD-EBB-11
     title: BGP route storm
     category: route_and_igp_instability
     playbook_name: bgp_ebb_route_storm_playbook
@@ -894,7 +895,7 @@ entries:
       seven distinct profiles. Resource thresholds remain non-blocking pending
       baseline calibration.
 
-  - id: CICD-12
+  - id: CICD-EBB-12
     title: Route-registry runtime update
     category: operational_procedures
     playbook_name: bgp_ebb_route_registry_runtime_update_playbook
@@ -945,7 +946,7 @@ entries:
       - Before and after policy state.
     qualification_delta: CI exercises a representative prefix-list transition sequence and makes cleanup blocking.
 
-  - id: CICD-13
+  - id: CICD-EBB-13
     title: FAUU drain and undrain
     category: operational_procedures
     playbook_name: bgp_ebb_fauu_drain_undrain_playbook
@@ -992,7 +993,7 @@ entries:
       - BGP policy and session logs.
     qualification_delta: CI performs one controlled drain and undrain sequence on the conveyor topology.
 
-  - id: CICD-14
+  - id: CICD-EBB-14
     title: Plane drain and undrain
     category: operational_procedures
     playbook_name: bgp_ebb_plane_drain_undrain_playbook
@@ -1039,7 +1040,7 @@ entries:
       - BGP policy and session logs.
     qualification_delta: CI uses one repeatable plane-drain sequence; runtime and signal-to-noise still require calibration.
 
-  - id: CICD-15
+  - id: CICD-EBB-15
     title: Longevity
     category: continuous_operation
     playbook_name: bgp_ebb_longevity_playbook
@@ -1087,7 +1088,7 @@ entries:
       drain, and restart stimuli. This four-hour community-churn workload is a
       provisional daily proxy, not equivalent qualification coverage.
 
-  - id: CICD-16
+  - id: CICD-EBB-16
     title: Queue and memory monitoring
     category: continuous_operation
     playbook_name: bgp_ebb_queue_memory_monitoring_playbook
@@ -1134,7 +1135,7 @@ entries:
       - BGP and CPU-stress logs.
     qualification_delta: Supplemental implementation-health signal; it does not establish complete G2-25 feature coverage.
 
-  - id: CICD-17
+  - id: CICD-EBB-17
     title: Nexthop-group count threshold
     category: scaling_and_features
     playbook_name: bgp_ebb_nexthop_group_count_threshold_playbook
@@ -1181,7 +1182,7 @@ entries:
       - BGP and IXIA logs.
     qualification_delta: Supplemental scale signal; it does not cover every best-path, Add-Path, or multipath permutation in G2-25.
 
-  - id: CICD-18
+  - id: CICD-EBB-18
     title: UPDATE packing
     category: scaling_and_features
     playbook_name: bgp_ebb_update_packing_playbook
@@ -1227,7 +1228,7 @@ entries:
       - BGP and IXIA logs.
     qualification_delta: Supplemental packing signal; it does not replace the dedicated update-group correctness and backpressure suite.
 
-  - id: CICD-19
+  - id: CICD-EBB-19
     title: Constant attribute storage
     category: scaling_and_features
     playbook_name: bgp_ebb_constant_attribute_storage_playbook
@@ -1273,7 +1274,7 @@ entries:
       - TAAC stage results and BGP logs.
     qualification_delta: Supplemental storage signal; it does not independently validate the complete community, AS-path, or policy feature matrices.
 
-  - id: CICD-20
+  - id: CICD-EBB-20
     title: Bounded ECMP sets
     category: scaling_and_features
     playbook_name: bgp_ebb_bounded_ecmp_sets_playbook

@@ -115,7 +115,7 @@ def get_bgp_ebb_daemon_restart_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-01: BGP daemon restart.
+    Build CICD-EBB-01: BGP daemon restart.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -230,7 +230,7 @@ def get_bgp_ebb_cold_start_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-02: BGP cold start.
+    Build CICD-EBB-02: BGP cold start.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -335,7 +335,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
-    """Build CICD-10: BGP attribute churn.
+    """Build CICD-EBB-10: BGP attribute churn.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -455,7 +455,7 @@ def get_bgp_ebb_route_storm_playbook(
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
-    """Build CICD-11: BGP route storm.
+    """Build CICD-EBB-11: BGP route storm.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -561,7 +561,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-07: IGP PNH metric oscillation.
+    Build CICD-EBB-07: IGP PNH metric oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -698,7 +698,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-12: Route-registry runtime update.
+    Build CICD-EBB-12: Route-registry runtime update.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -833,7 +833,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-09: Multipath-group oscillation.
+    Build CICD-EBB-09: Multipath-group oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -946,7 +946,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-13: FAUU drain and undrain.
+    Build CICD-EBB-13: FAUU drain and undrain.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1026,7 +1026,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-14: Plane drain and undrain.
+    Build CICD-EBB-14: Plane drain and undrain.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1095,7 +1095,7 @@ def get_bgp_ebb_longevity_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-15: Longevity.
+    Build CICD-EBB-15: Longevity.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1158,7 +1158,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-05: eBGP route oscillation.
+    Build CICD-EBB-05: eBGP route oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1228,7 +1228,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-06: iBGP route oscillation.
+    Build CICD-EBB-06: iBGP route oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1301,7 +1301,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     tcp_dump_capture_interface: t.Optional[str] = None,
 ) -> Playbook:
     """
-    Build CICD-08: IGP unresolvable PNH.
+    Build CICD-EBB-08: IGP unresolvable PNH.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1408,7 +1408,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-03: eBGP session oscillation.
+    Build CICD-EBB-03: eBGP session oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1491,7 +1491,7 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-04: iBGP plane session oscillation.
+    Build CICD-EBB-04: iBGP plane session oscillation.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1564,7 +1564,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-17: Nexthop-group count threshold.
+    Build CICD-EBB-17: Nexthop-group count threshold.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1635,7 +1635,7 @@ def get_bgp_ebb_update_packing_playbook(
     min_packed_size: int,
     restart_bgp_for_complete_view: bool,
 ) -> Playbook:
-    """Build CICD-18: UPDATE packing.
+    """Build CICD-EBB-18: UPDATE packing.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
@@ -1715,7 +1715,7 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
     peergroup_ibgp_v4: str | None,
     ssh_password: str,
 ) -> Playbook:
-    """Build CICD-19: Constant attribute storage.
+    """Build CICD-EBB-19: Constant attribute storage.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
@@ -1787,7 +1787,7 @@ def get_bgp_ebb_queue_memory_monitoring_playbook(
     ixia_interface_mimic_ebgp: str,
     monitor_cpu_stress: bool,
 ) -> Playbook:
-    """Build CICD-16: Queue and memory monitoring.
+    """Build CICD-EBB-16: Queue and memory monitoring.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
@@ -1832,7 +1832,7 @@ def get_bgp_ebb_bounded_ecmp_sets_playbook(
     *,
     device_name: str,
 ) -> Playbook:
-    """Build CICD-20: Bounded ECMP sets.
+    """Build CICD-EBB-20: Bounded ECMP sets.
 
     See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
