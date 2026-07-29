@@ -192,6 +192,8 @@ async def _invoke_predicate(
 ) -> tuple[ConvergenceSample | None, Exception | None]:
     try:
         return await asyncio.wait_for(predicate(), timeout=timeout_seconds), None
+    except asyncio.CancelledError:
+        raise
     except Exception as error:
         return None, error
 

@@ -19,6 +19,8 @@ from taac.health_check.health_check import types as hc_types
 
 class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
     CHECK_NAME = hc_types.CheckName.BGP_CONVERGENCE_CHECK
+    # The observer owns transient retries; outer retries would discard its
+    # measured duration and any failures latched during the observation.
     RETRY_ON_FAIL = False
     OPERATING_SYSTEMS = [
         "FBOSS",
@@ -46,33 +48,46 @@ class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         input: hc_types.BaseHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
-        convergence_threshold = float(check_params.get("convergence_threshold", 150))
-        hard_timeout_seconds = float(
-            check_params.get("hard_timeout_seconds", convergence_threshold)
-        )
-        poll_interval_seconds = float(check_params.get("poll_interval_seconds", 5))
-        stability_window_seconds = float(
-            check_params.get("stability_window_seconds", 0)
-        )
-        raw_predicate_timeout = check_params.get("predicate_timeout_seconds")
-        predicate_timeout_seconds = (
-            float(raw_predicate_timeout) if raw_predicate_timeout is not None else None
-        )
-        start_event = check_params.get(
-            "start_event", BgpInitializationEvent.AGENT_CONFIGURED.value
-        )
-        end_event = check_params.get(
-            "end_event", BgpInitializationEvent.INITIALIZED.value
-        )
+        try:
+            convergence_threshold = float(
+                check_params.get("convergence_threshold", 150)
+            )
+            hard_timeout_seconds = float(
+                check_params.get("hard_timeout_seconds", convergence_threshold)
+            )
+            poll_interval_seconds = float(check_params.get("poll_interval_seconds", 5))
+            stability_window_seconds = float(
+                check_params.get("stability_window_seconds", 0)
+            )
+            raw_predicate_timeout = check_params.get("predicate_timeout_seconds")
+            predicate_timeout_seconds = (
+                float(raw_predicate_timeout)
+                if raw_predicate_timeout is not None
+                else None
+            )
+            start_event_enum = BgpInitializationEvent(
+                int(
+                    check_params.get(
+                        "start_event",
+                        BgpInitializationEvent.AGENT_CONFIGURED.value,
+                    )
+                )
+            )
+            end_event_enum = BgpInitializationEvent(
+                int(
+                    check_params.get(
+                        "end_event",
+                        BgpInitializationEvent.INITIALIZED.value,
+                    )
+                )
+            )
+        except (TypeError, ValueError) as error:
+            return self._configuration_failure(obj.name, error)
         fail_on_eor_expired = check_params.get("fail_on_eor_expired", True)
         validate_sequence = check_params.get("validate_sequence", False)
-        start_event_enum = BgpInitializationEvent(int(start_event))
-        end_event_enum = BgpInitializationEvent(int(end_event))
-        latest_events: t.Mapping[BgpInitializationEvent, int] = {}
         semantic_failures: t.Dict[str, str] = {}
 
         async def sample_initialization() -> ConvergenceSample:
-            nonlocal latest_events
             latest_events = (
                 # pyrefly: ignore [missing-attribute]
                 await self.driver.async_get_bgp_initialization_events()
@@ -86,17 +101,18 @@ class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                     "eor",
                     f"EOR timer expired on {obj.name} during BGP convergence",
                 )
+            endpoints_present = (
+                start_event_enum in latest_events and end_event_enum in latest_events
+            )
             if validate_sequence:
-                sequence_error = self._validate_present_event_order(
-                    latest_events, obj.name
+                sequence_error = self._validate_event_sequence(
+                    latest_events,
+                    obj.name,
+                    require_initialized=endpoints_present,
                 )
                 if sequence_error is not None:
                     semantic_failures.setdefault("sequence", sequence_error)
-
-            if (
-                start_event_enum not in latest_events
-                or end_event_enum not in latest_events
-            ):
+            if not endpoints_present:
                 return ConvergenceSample(converged=False, detail=stage_details)
 
             convergence_time = (
@@ -119,19 +135,17 @@ class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                 convergence_time_seconds=convergence_time,
             )
 
-        observation = await observe_convergence(
-            sample_initialization,
-            soft_threshold_seconds=convergence_threshold,
-            hard_timeout_seconds=hard_timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            stability_window_seconds=stability_window_seconds,
-            predicate_timeout_seconds=predicate_timeout_seconds,
-        )
-
-        if validate_sequence:
-            sequence_error = self._validate_event_sequence(latest_events, obj.name)
-            if sequence_error is not None:
-                semantic_failures.setdefault("sequence", sequence_error)
+        try:
+            observation = await observe_convergence(
+                sample_initialization,
+                soft_threshold_seconds=convergence_threshold,
+                hard_timeout_seconds=hard_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                stability_window_seconds=stability_window_seconds,
+                predicate_timeout_seconds=predicate_timeout_seconds,
+            )
+        except ValueError as error:
+            return self._configuration_failure(obj.name, error)
 
         self._record_observation(observation)
         message = self._format_result_message(
@@ -141,14 +155,30 @@ class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             end_event=end_event_enum,
             semantic_failures=tuple(semantic_failures.values()),
         )
-        self.logger.debug(message)
         status = (
             hc_types.HealthCheckStatus.PASS
             if observation.outcome is ConvergenceOutcome.WITHIN_SLA
             and not semantic_failures
             else hc_types.HealthCheckStatus.FAIL
         )
+        if status is hc_types.HealthCheckStatus.PASS:
+            self.logger.debug(message)
+        else:
+            self.logger.warning(message)
         return hc_types.HealthCheckResult(status=status, message=message)
+
+    def _configuration_failure(
+        self,
+        device_name: str,
+        error: TypeError | ValueError,
+    ) -> hc_types.HealthCheckResult:
+        message = f"Invalid BGP convergence configuration for {device_name}: {error}"
+        self.add_data_to_log({"convergence_configuration_error": str(error)})
+        self.logger.warning(message)
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.FAIL,
+            message=message,
+        )
 
     def _record_observation(self, observation: ConvergenceResult) -> None:
         self.add_data_to_log(
@@ -245,21 +275,17 @@ class BgpConvergenceHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         self,
         events_dict: t.Mapping[BgpInitializationEvent, int],
         device_name: str,
+        *,
+        require_initialized: bool,
     ) -> t.Optional[str]:
-        """Validate BGP++ init events occurred in the canonical order.
-
-        Robust by design: only the canonical happy-path events that are
-        actually present are ordered, so a legitimately-absent intermediate
-        does not produce a false failure. Returns an error message when the
-        sequence is invalid (terminal INITIALIZED missing, or a present
-        canonical event out of timestamp order), or None when healthy.
-        """
-        if BgpInitializationEvent.INITIALIZED not in events_dict:
+        if (
+            require_initialized
+            and BgpInitializationEvent.INITIALIZED not in events_dict
+        ):
             return (
                 f"BGP did not reach INITIALIZED on {device_name}; "
                 "initialization sequence incomplete"
             )
-
         return self._validate_present_event_order(events_dict, device_name)
 
     def _validate_present_event_order(

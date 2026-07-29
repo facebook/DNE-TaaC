@@ -286,6 +286,18 @@ class ConvergenceObserverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(result.predicate_errors))
         self.assertEqual("TimeoutError", result.predicate_errors[0].error_type)
 
+    async def test_cancellation_propagates(self) -> None:
+        async def predicate() -> ConvergenceSample:
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await observe_convergence(
+                predicate,
+                soft_threshold_seconds=1,
+                hard_timeout_seconds=2,
+                poll_interval_seconds=1,
+            )
+
     async def test_authoritative_predicate_time_controls_sla(self) -> None:
         clock = _FakeClock()
 

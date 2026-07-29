@@ -47,24 +47,32 @@ class BgpConvergenceHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.device.name = "bag012.ash6"
         self.input = hc_types.BaseHealthCheckIn()
 
-    # ---- _validate_event_sequence (pure helper) ----
+    # ---- _validate_present_event_order (pure helper) ----
     def test_sequence_helper_ok(self):
         self.assertIsNone(
-            self.health_check._validate_event_sequence(_full_ordered_events(), "dev")
+            self.health_check._validate_present_event_order(
+                _full_ordered_events(), "dev"
+            )
         )
 
-    def test_sequence_helper_missing_initialized(self):
+    def test_sequence_helper_requires_initialized(self):
         events = _full_ordered_events()
         del events[BgpInitializationEvent.INITIALIZED]
-        err = self.health_check._validate_event_sequence(events, "dev")
-        self.assertIsNotNone(err)
-        self.assertIn("INITIALIZED", err)
+
+        error = self.health_check._validate_event_sequence(
+            events,
+            "dev",
+            require_initialized=True,
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("INITIALIZED", error)
 
     def test_sequence_helper_out_of_order(self):
         events = _full_ordered_events()
         # FIB_SYNCED occurs before RIB_COMPUTED -> inversion
         events[BgpInitializationEvent.FIB_SYNCED] = 3500
-        err = self.health_check._validate_event_sequence(events, "dev")
+        err = self.health_check._validate_present_event_order(events, "dev")
         self.assertIsNotNone(err)
         self.assertIn("out of order", err)
 
@@ -72,7 +80,9 @@ class BgpConvergenceHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         """A legitimately-absent intermediate must not fail the sequence."""
         events = _full_ordered_events()
         del events[BgpInitializationEvent.PEER_INFO_LOADED]
-        self.assertIsNone(self.health_check._validate_event_sequence(events, "dev"))
+        self.assertIsNone(
+            self.health_check._validate_present_event_order(events, "dev")
+        )
 
     # ---- _run end-to-end ----
     async def test_run_validate_sequence_pass(self):
@@ -83,8 +93,10 @@ class BgpConvergenceHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             self.device, self.input, {"validate_sequence": True}
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.logger.debug.assert_called_once()
+        self.logger.warning.assert_not_called()
 
-    async def test_run_validate_sequence_out_of_order_fail(self):
+    async def test_observed_sample_runs_sequence_validation(self):
         events = _full_ordered_events()
         events[BgpInitializationEvent.FIB_SYNCED] = 3500
         self.health_check.driver.async_get_bgp_initialization_events = AsyncMock(
@@ -95,6 +107,29 @@ class BgpConvergenceHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("out of order", result.message)
+        self.logger.warning.assert_called_once()
+        self.health_check.driver.async_get_bgp_initialization_events.assert_awaited_once()
+
+    async def test_custom_endpoint_still_requires_complete_sequence(self):
+        events = _full_ordered_events()
+        del events[BgpInitializationEvent.INITIALIZED]
+        self.health_check.driver.async_get_bgp_initialization_events = AsyncMock(
+            return_value=events
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "validate_sequence": True,
+                "end_event": BgpInitializationEvent.RIB_COMPUTED.value,
+                "convergence_threshold": 10,
+                "hard_timeout_seconds": 10,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("initialization sequence incomplete", result.message)
 
     async def test_run_eor_timer_expired_fail(self):
         events = _full_ordered_events()
@@ -327,6 +362,43 @@ class BgpConvergenceHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
         self.assertIn("predicate_errors=1", result.message)
         self.assertIn("temporary thrift failure", result.message)
+
+    async def test_all_read_errors_do_not_report_sequence_failure(self):
+        self.health_check.driver.async_get_bgp_initialization_events = AsyncMock(
+            side_effect=RuntimeError("thrift unavailable")
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "validate_sequence": True,
+                "convergence_threshold": 0.005,
+                "hard_timeout_seconds": 0.01,
+                "poll_interval_seconds": 0.001,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("could not be observed", result.message)
+        self.assertIn("thrift unavailable", result.message)
+        self.assertNotIn("initialization sequence incomplete", result.message)
+
+    async def test_invalid_observer_parameters_return_failure(self):
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "convergence_threshold": 5,
+                "hard_timeout_seconds": 4,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("Invalid BGP convergence configuration", result.message)
+        self.assertIn("greater than or equal to soft_threshold_seconds", result.message)
+        self.logger.warning.assert_called_once()
+        self.health_check.driver.async_get_bgp_initialization_events.assert_not_awaited()
 
     def test_all_predicate_errors_have_distinct_summary(self):
         observation = ConvergenceResult(
