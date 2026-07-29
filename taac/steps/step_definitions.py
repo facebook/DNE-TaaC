@@ -6425,6 +6425,7 @@ def create_update_prefix_count_step(
     interface: str,
     prefix_count: int,
     distribution_type: str,
+    network_group_multiplier: t.Optional[int] = None,
 ) -> Step:
     """Resize the prefix block advertised by an IXIA port for one device.
 
@@ -6451,6 +6452,7 @@ def create_update_prefix_count_step(
             "hostname": device_name,
             "interface": interface,
             "prefix_count": prefix_count,
+            "network_group_multiplier": network_group_multiplier,
         },
         description=f"Update prefix count={prefix_count} for {distribution_type} network group",
     )

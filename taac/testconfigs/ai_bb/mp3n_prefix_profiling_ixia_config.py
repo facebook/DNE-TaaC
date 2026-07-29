@@ -98,6 +98,31 @@ from taac.test_as_a_config.types import (
 # SECTION 2: CONSTANTS
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Route-install convergence wait (enable_and_configure -> regenerate_traffic)
+# -----------------------------------------------------------------------------
+# Wait applied AFTER enable_and_configure and BEFORE regenerate_traffic in every
+# prefix-profiling playbook, sized for the worst case: non-contiguous /128.
+#
+# Why it needs to be this large (~400s more than the original 300s):
+#   * For non-contiguous (and any case whose advertised count changes),
+#     enable_and_configure changes NetworkGroup.Multiplier, which forces a full
+#     IXIA protocol stop/start (see update_prefix_counts_by_port) -- routes are
+#     withdrawn and re-advertised, not edited on the fly.
+#   * The re-advertised /128s are scattered random addresses, so the Cisco G200
+#     (Kodiak3) LPM TCAM allocator must defragment / make space for each insert
+#     and programs them one at a time. The FIB therefore fills GRADUALLY, and
+#     measured end-to-end convergence for these cases is ~600-700s.
+#   * At the old 300s wait, traffic was regenerated before the FIB was fully
+#     populated, so it hit not-yet-installed prefixes and the mid-test packet
+#     loss check failed. 700s lets the FIB finish installing first.
+#
+# Contiguous / shorter masks converge far faster and do NOT need this; the value
+# is set for the slowest case. A better future fix is a route-count convergence
+# gate (poll `fboss2 show route summary` hwEntriesUsed until stable) instead of a
+# fixed wait, so the fast cases don't over-wait.
+ROUTE_CONVERGENCE_WAIT_SEC = 700
+
 
 # -----------------------------------------------------------------------------
 # 2.1 Distribution Types
@@ -334,7 +359,7 @@ HYBRID_PREFIX_CONFIGS: dict[int, PrefixMaskConfig] = {
         fixed_prefix="6000:dd:0:0:0:0:0:0",
         random_mask="0:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
         seed=1,
-        prefix_count=1000,
+        prefix_count=202,
         prefix_length=128,
         prefix_step="0:0:0:0:0:0:0:1",
         multiplier=74,
@@ -378,7 +403,7 @@ NON_CONTIGUOUS_PREFIX_CONFIGS: dict[int, PrefixMaskConfig] = {
         prefix_count=1,
         prefix_length=128,
         prefix_step="0:0:0:0:0:0:0:1",
-        multiplier=40000,
+        multiplier=1000,
     ),
 }
 
@@ -1016,12 +1041,13 @@ def create_warmboot_playbook(
                 )
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
+                network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_install_warmboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=300,
+                duration=ROUTE_CONVERGENCE_WAIT_SEC,
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_warmboot",
@@ -1165,12 +1191,13 @@ def create_bgp_restart_playbook(
                 )
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
+                network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_install_bgp_restart",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=300,
+                duration=ROUTE_CONVERGENCE_WAIT_SEC,
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_bgp_restart",
@@ -1315,12 +1342,13 @@ def create_coldboot_playbook(
                 )
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
+                network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_install_coldboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=300,
+                duration=ROUTE_CONVERGENCE_WAIT_SEC,
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_coldboot",

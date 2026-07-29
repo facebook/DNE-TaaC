@@ -6174,11 +6174,33 @@ class Ixia:
         for dg in device_groups:
             for network_group in dg.NetworkGroup.find():
                 # Update network group multiplier if specified
-                if network_group_multiplier is not None:
+                if (
+                    network_group_multiplier is not None
+                    and int(network_group.Multiplier) != network_group_multiplier
+                ):
+                    # Multiplier is not on-the-fly editable — IxNetwork rejects
+                    # the change while the network group is started. A per-device
+                    # -group stop did not reliably lift this, so stop all
+                    # protocols synchronously, apply the multiplier, then restart
+                    # (StartAllProtocols honors Enabled, so disabled groups stay
+                    # down).
+                    self.logger.info(
+                        f"Multiplier change {network_group.Multiplier} -> "
+                        f"{network_group_multiplier} for {network_group.Name}; "
+                        "stopping all protocols"
+                    )
+                    # StopAllProtocols can return before the protocol state fully
+                    # settles; wait so the network group has actually left the
+                    # started state before the (non-on-the-fly) multiplier PATCH.
+                    self.stop_protocols(sleep_timer=30)
                     self.logger.info(
                         f"Setting multiplier to {network_group_multiplier} for network group {network_group.Name}"
                     )
                     network_group.Multiplier = network_group_multiplier
+                    self.logger.info(
+                        f"Multiplier set for {network_group.Name}; starting all protocols"
+                    )
+                    self.start_protocols()
 
                 # Update IPv6 prefix pools
                 for ipv6_prefix_pool in network_group.Ipv6PrefixPools.find():

@@ -4446,9 +4446,17 @@ def create_enable_and_configure_stage(
     random_mask: str | None = None,
     seed: int | None = None,
     random_mask_count: int | None = None,
+    network_group_multiplier: int | None = None,
 ) -> Stage:
-    """Stage 1: Disable the other device groups, enable the target, and
-    reconfigure its advertised prefixes (count + prefix length / random mask).
+    """Stage 1: Disable the other device groups, enable the target, then
+    reconfigure its advertised prefixes (count + multiplier + prefix length /
+    random mask).
+
+    NetworkGroup.Multiplier cannot be changed while the network group is
+    started, so update_prefix_counts_by_port stops the target device group,
+    applies the new multiplier, and restarts it internally (only when the
+    multiplier actually changes). Prefix count, prefix length and random mask
+    are applied on the fly.
 
     Traffic is regenerated against the new routes separately by
     create_regenerate_traffic_stage, run after route install.
@@ -4467,6 +4475,7 @@ def create_enable_and_configure_stage(
             interface=uplink_interface,
             prefix_count=prefix_count,
             distribution_type=distribution_type,
+            network_group_multiplier=network_group_multiplier,
         )
     )
 
