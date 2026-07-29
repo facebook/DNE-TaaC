@@ -46,9 +46,23 @@ from taac.libs.fpf.fpf_stress_checks import (
     PerLaneResult,
 )
 
-
-_collectors: t.Dict[str, t.Any] = {}
-_test_case_start_time: float = 0.0
+# The registry state + register/get/clear/test_case_start_time helpers were
+# extracted to ``taac.libs.collectors.registry`` so OSS test configs can
+# consume them without importing this file's FPF-specific dependencies.
+# Re-exported here for backward compatibility (including ``_collectors``,
+# which was this module's own global before the extraction and is safe to
+# re-export by identity since ``clear()`` mutates in place); ``clear_all()``
+# below still owns clearing FPF-specific state (artifacts, disruption gate,
+# baseline lanes) in addition to delegating to ``clear_collectors()``.
+from taac.libs.collectors.registry import (  # noqa: F401
+    _collectors,
+    get_all_collectors,
+    get_collector,
+    get_test_case_start_time,
+    register_collector,
+    set_test_case_start_time,
+)
+from taac.libs.collectors.registry import clear_collectors as _clear_collectors
 # Debug artifacts (category, label, url) generated during a test case — collector
 # detail Everpastes and ODS query links — accumulated so a consolidated summary
 # table can be emitted at teardown for easy access. Cleared by clear_all().
@@ -187,15 +201,6 @@ DEFAULT_SIGNAL3_STABILITY_DURATION_SEC: float = 60.0
 DEFAULT_STABILITY_PARTIAL_CREDIT_FRACTION: float = 0.8
 
 
-def set_test_case_start_time(ts: float) -> None:
-    global _test_case_start_time
-    _test_case_start_time = ts
-
-
-def get_test_case_start_time() -> float:
-    return _test_case_start_time
-
-
 async def everpaste_details_suffix(
     title: str,
     lines: t.List[str],
@@ -255,26 +260,15 @@ def get_disruption_time() -> float:
     return _disruption_time
 
 
-def register_collector(name: str, collector: t.Any) -> None:
-    _collectors[name] = collector
-
-
-def get_collector(name: str) -> t.Optional[t.Any]:
-    return _collectors.get(name)
-
-
-def get_all_collectors() -> t.Dict[str, t.Any]:
-    return dict(_collectors)
-
-
 def clear_all() -> None:
-    global _test_case_start_time, _disruption_time
+    global _disruption_time
     global _disruption_effective, _disruption_effective_detail
     global _baseline_impaired_lanes, _allow_baseline_failures
-    _collectors.clear()
+    # Shared registry state (collectors dict + test-case start time) lives in
+    # taac.libs.collectors.registry — delegate its reset there.
+    _clear_collectors()
     _artifacts.clear()
     _check_results.clear()
-    _test_case_start_time = 0.0
     _disruption_time = 0.0
     _disruption_effective = None
     _disruption_effective_detail = ""

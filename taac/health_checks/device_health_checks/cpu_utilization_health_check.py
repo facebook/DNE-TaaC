@@ -2,6 +2,7 @@
 
 # pyre-unsafe
 import asyncio
+import os
 import time
 import typing as t
 
@@ -13,14 +14,22 @@ from taac.health_checks.constants import (
     DAILY_TABLE_TRANSFORM_DESC,
     DEFAULT_SERVICE_NAMES,
 )
-from taac.internal.ods_utils import (
-    async_generate_ods_url,
-    async_query_ods,
+from taac.libs.collectors.cpu_utilization_collector import CpuUtilizationCollector
+from taac.libs.collectors.registry import (
+    get_collector,
 )
-from taac.utils.common import async_get_fburl
-from taac.utils.health_check_utils import format_timestamp
+from taac.utils.health_check_utils import collector_window_start, format_timestamp
 from taac.health_check.health_check import types as hc_types
 from tabulate import tabulate
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from taac.internal.ods_utils import (
+        async_generate_ods_url,
+        async_query_ods,
+    )
+    from taac.utils.common import async_get_fburl
 
 
 CPU_UTILIZATION_KEY_DESC_FBOSS = "regex(cgroup.slice.workload.*({service}).*.cpu.stat.util_pct),!filter(.*(metalos).*)"
@@ -269,26 +278,15 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         """
         Args:
             check_params:
-                - delta: Max allowed delta between cpu utilization checks. When
-                    not provided the check is skipped, since the Arista path is
-                    sampling-based and has no meaningful default.
+                - delta: Max allowed delta between cpu utilization checks (required)
                 - sleep_timer: Time to sleep before gettig counter again (defaults to 60 seconds)
                 - total_time: Total time to measure counters (defaults to 2 min)
         """
         # TODO(loo): Once we get ODS support use ODS instead
-        delta = check_params.get("delta")
-        if delta is None:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=(
-                    "CPU utilization check skipped on Arista device "
-                    f"{obj.name}: no 'delta' threshold configured."
-                ),
-            )
+        delta = check_params["delta"]
         sleep_timer = check_params.get("sleep_timer", 60)
         total_time = check_params.get("total_time", 120)
 
-        # pyrefly: ignore [missing-attribute]
         last_count = await self.driver.async_get_counter(CPU_UTILIZATION_KEY_DESC_EOS)
         self.logger.debug(f"Initial CPU utilization count: {last_count}")
         iterations = total_time // sleep_timer
@@ -298,7 +296,6 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                 f"Sleeping for {sleep_timer} seconds (iteration {i + 1}/{iterations})"
             )
             await asyncio.sleep(sleep_timer)
-            # pyrefly: ignore [missing-attribute]
             current_count = await self.driver.async_get_counter(
                 CPU_UTILIZATION_KEY_DESC_EOS
             )
@@ -326,6 +323,9 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         input: hc_types.BaseHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
+        if TAAC_OSS:
+            return await self._run_oss(obj, check_params)
+
         self.logger.info(
             f"Starting CPU utilization health check for device: {obj.name}"
         )
@@ -399,6 +399,177 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             )
 
         self.logger.info(f"CPU utilization health check PASSED for device {obj.name}")
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.PASS,
+            message="CPU utilization is within the defined threshold.",
+        )
+
+    async def _run_oss(
+        self,
+        obj: TestDevice,
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        """OSS path — no ODS.
+
+        Requires a ``CpuUtilizationCollector`` started as a setup task and
+        registered under ``"cpu_utilization"``. Queries the collector's
+        ``max_per_service_in_window`` for the check window, which gives
+        MAX-over-window semantics closer to the ODS ``cpu.stat.util_pct``
+        counter. The window defaults to ``[test_case_start_time, now]`` —
+        the current playbook iteration — and can be overridden per-check
+        via ``check_params["window_start"]`` / ``["window_end"]``.
+        """
+        services = check_params.get("services", DEFAULT_SERVICE_NAMES)
+        threshold_by_service = check_params.get("threshold_by_service", {})
+        threshold = check_params.get("threshold", 70.0)
+
+        return await self._run_oss_via_collector(
+            obj, services, threshold, threshold_by_service, check_params
+        )
+
+    async def _run_oss_via_collector(
+        self,
+        obj: TestDevice,
+        services: t.Sequence[str],
+        threshold: float,
+        threshold_by_service: t.Dict[str, float],
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        """MAX-over-window CPU check backed by a live collector.
+
+        Query window defaults to the current playbook iteration (``[test_case
+        _start_time, now]``). Fallbacks: if ``test_case_start_time`` is unset,
+        use ``[now - lookback_sec, now]`` (default ``lookback_sec=900``).
+        Callers can override either endpoint via ``check_params``.
+        """
+        collector = get_collector("cpu_utilization")
+        if not isinstance(collector, CpuUtilizationCollector):
+            # CollectorsTestHandler starts collectors for every OSS test
+            # config, so a missing one here is unexpected. SKIP (not FAIL) per
+            # registry.get_collector's contract, but warn loudly -- silently
+            # losing this check's coverage is exactly the failure mode SKIP is
+            # meant to make visible.
+            self.logger.warning(
+                "No CpuUtilizationCollector registered under 'cpu_utilization' -- "
+                "CollectorsTestHandler runs by default under TAAC_OSS, so this "
+                "means either no FBOSS device in the topology, the "
+                "'no_oss_collectors' opt-out tag, or a failed handler setUp. "
+                "Skipping."
+            )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "No CpuUtilizationCollector registered under 'cpu_utilization'. "
+                    "The test config didn't start one — this check has nothing to "
+                    "evaluate."
+                ),
+            )
+        if collector.host != obj.name:
+            # Only one DUT gets a collector today (see CollectorsTestHandler);
+            # a mismatch means we'd be evaluating the wrong device's samples.
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    f"Registered CpuUtilizationCollector is bound to host "
+                    f"'{collector.host}', not '{obj.name}' — multi-DUT collector "
+                    "support isn't implemented; skipping this device."
+                ),
+            )
+        now = time.time()
+        window_end = check_params.get("window_end", now)
+        lookback_sec = check_params.get("lookback_sec", 900)
+        window_start = check_params.get(
+            "window_start",
+            collector_window_start(check_params, window_end, lookback_sec),
+        )
+
+        max_per_service = collector.max_per_service_in_window(
+            window_start, window_end
+        )
+
+        missing_from_collector = [s for s in services if s not in collector.services]
+        if missing_from_collector:
+            self.logger.warning(
+                f"Requested services not monitored by the running "
+                f"CpuUtilizationCollector (started with services="
+                f"{collector.services}): {missing_from_collector}. These will "
+                f"not be checked."
+            )
+
+        violations: t.List[str] = []
+        service_data_list: t.List[t.Dict[str, t.Any]] = []
+        for service in services:
+            max_pct = max_per_service.get(service)
+            if max_pct is None:
+                # Collector had no measurable sample for this service in the
+                # window — most likely masked/inactive. Skip, same as the
+                # fallback-path treatment.
+                continue
+
+            svc_threshold = threshold_by_service.get(service, threshold)
+            service_data_list.append(
+                {
+                    "service": service,
+                    "cpu_pct": max_pct,
+                    "threshold": svc_threshold,
+                }
+            )
+            self.add_data_to_log({f"current_{service}_cpu_pct": max_pct})
+
+            if max_pct > svc_threshold:
+                violations.append(
+                    f"{service}: {max_pct:.1f}% > {svc_threshold}% threshold "
+                    f"(MAX-over-window from continuous collector)"
+                )
+
+        if not service_data_list:
+            # No requested service had a measurable sample in the window --
+            # don't report PASS on an empty check.
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "CpuUtilizationCollector had no measurable samples for any "
+                    f"requested service in window [{window_start:.0f}, "
+                    f"{window_end:.0f}] (services may be masked/inactive, or "
+                    "the collector hasn't polled yet)."
+                ),
+            )
+
+        window_sec = max(0.0, window_end - window_start)
+        table_rows = [
+            [d["service"], f"{d['cpu_pct']:.2f}", f"{d['threshold']}"]
+            for d in service_data_list
+        ]
+        self.logger.info(
+            "\nCPU Utilization Summary (OSS collector, "
+            f"MAX over {window_sec:.0f}s window)\n"
+            + tabulate(
+                table_rows,
+                headers=["Service", "CPU (%) [MAX]", "Threshold (%)"],
+                tablefmt="simple_grid",
+            )
+        )
+
+        # Warn — don't fail — if the collector recorded any poll timeouts in
+        # the window. For CPU/mem the samples we DO have are still meaningful;
+        # a poll timeout here means one SSH command timed out, not that the
+        # DUT was unhealthy.
+        timeouts = collector.timeout_count_in_window(window_start, window_end)
+        if timeouts > 0:
+            self.logger.warning(
+                f"CpuUtilizationCollector had {timeouts} poll timeout(s) in "
+                f"window [{window_start:.0f}, {window_end:.0f}] — some samples "
+                f"may be missing but the MAX below is based on what did land."
+            )
+
+        if violations:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    f"CPU utilization exceeded threshold on {obj.name}:\n"
+                    + "\n".join(violations)
+                ),
+            )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
             message="CPU utilization is within the defined threshold.",

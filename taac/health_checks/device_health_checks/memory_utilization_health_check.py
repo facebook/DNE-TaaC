@@ -2,6 +2,7 @@
 
 # pyre-unsafe
 import asyncio
+import os
 import re
 import time
 import typing as t
@@ -13,15 +14,25 @@ from taac.health_checks.abstract_health_check import (
 from taac.health_checks.constants import (
     DAILY_TABLE_TRANSFORM_DESC,
 )
-from taac.internal.ods_utils import (
-    async_generate_ods_url,
-    async_query_ods,
-)
 from taac.utils.arista_utils import find_process_pid
-from taac.utils.common import async_get_fburl_retry
-from taac.utils.health_check_utils import format_timestamp
+from taac.libs.collectors.memory_utilization_collector import (
+    MemoryUtilizationCollector,
+)
+from taac.libs.collectors.registry import (
+    get_collector,
+)
+from taac.utils.health_check_utils import collector_window_start, format_timestamp
 from taac.health_check.health_check import types as hc_types
 from tabulate import tabulate
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from taac.internal.ods_utils import (
+        async_generate_ods_url,
+        async_query_ods,
+    )
+    from taac.utils.common import async_get_fburl_retry
 
 
 # BGP++ process name as it appears in EOS ``show processes`` on ARISTA_FBOSS
@@ -390,19 +401,10 @@ class MemoryUtilizationHealthCheck(
             return await self._check_vmhwm_arista(obj, vmhwm_threshold)
 
         # TODO(loo): Once we get ODS support use ODS instead
-        delta = check_params.get("delta")
-        if delta is None:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=(
-                    "Memory utilization check skipped on Arista device "
-                    f"{obj.name}: no 'delta' threshold configured."
-                ),
-            )
+        delta = check_params["delta"]
         sleep_timer = check_params.get("sleep_timer", 60)
         total_time = check_params.get("total_time", 120)
 
-        # pyrefly: ignore [missing-attribute]
         last_count = await self.driver.async_get_counter(
             MEMORY_UTILIZATION_KEY_DESC_EOS
         )
@@ -415,7 +417,6 @@ class MemoryUtilizationHealthCheck(
                 f"Sleeping for {sleep_timer} seconds (iteration {i + 1}/{iterations})"
             )
             await asyncio.sleep(sleep_timer)
-            # pyrefly: ignore [missing-attribute]
             current_count = await self.driver.async_get_counter(
                 MEMORY_UTILIZATION_KEY_DESC_EOS
             )
@@ -443,6 +444,9 @@ class MemoryUtilizationHealthCheck(
         input: hc_types.BaseHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
+        if TAAC_OSS:
+            return await self._run_oss(obj, check_params)
+
         self.logger.info(
             f"Starting memory utilization health check for device: {obj.name}"
         )
@@ -544,6 +548,178 @@ class MemoryUtilizationHealthCheck(
         self.logger.info(
             f"Memory utilization health check PASSED for device {obj.name}"
         )
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.PASS,
+            message="Memory utilization is within the defined threshold.",
+        )
+
+    async def _run_oss(
+        self,
+        obj: TestDevice,
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        """OSS path — no ODS.
+
+        Requires a ``MemoryUtilizationCollector`` started as a setup task and
+        registered under ``"memory_utilization"``. Queries the collector's
+        ``max_per_service_in_window`` for the check window, which gives
+        MAX-over-window semantics closer to the ODS memory counter.
+        The window defaults to ``[test_case_start_time, now]`` — the current
+        playbook iteration — and can be overridden per-check via
+        ``check_params["window_start"]`` / ``["window_end"]``.
+        """
+        services = check_params.get("services", DEFAULT_SERVICE_NAMES)
+        threshold_by_service = check_params.get("threshold_by_service", {})
+        threshold = check_params.get("threshold", 0.0)
+
+        return await self._run_oss_via_collector(
+            obj, services, threshold, threshold_by_service, check_params
+        )
+
+    async def _run_oss_via_collector(
+        self,
+        obj: TestDevice,
+        services: t.Sequence[str],
+        threshold: float,
+        threshold_by_service: t.Dict[str, float],
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        """MAX-over-window memory check backed by a live collector.
+
+        Query window defaults to the current playbook iteration (``[test_case
+        _start_time, now]``). If ``test_case_start_time`` is unset, falls back
+        to ``[now - lookback_sec, now]`` (default ``lookback_sec=900``).
+        Callers can override either endpoint via ``check_params``.
+        """
+        collector = get_collector("memory_utilization")
+        if not isinstance(collector, MemoryUtilizationCollector):
+            # CollectorsTestHandler starts collectors for every OSS test
+            # config, so a missing one here is unexpected. SKIP (not FAIL) per
+            # registry.get_collector's contract, but warn loudly -- silently
+            # losing this check's coverage is exactly the failure mode SKIP is
+            # meant to make visible.
+            self.logger.warning(
+                "No MemoryUtilizationCollector registered under 'memory_utilization' -- "
+                "CollectorsTestHandler runs by default under TAAC_OSS, so this "
+                "means either no FBOSS device in the topology, the "
+                "'no_oss_collectors' opt-out tag, or a failed handler setUp. "
+                "Skipping."
+            )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "No MemoryUtilizationCollector registered under "
+                    "'memory_utilization'. The test config didn't start one — "
+                    "this check has nothing to evaluate."
+                ),
+            )
+        if collector.host != obj.name:
+            # Only one DUT gets a collector today (see CollectorsTestHandler);
+            # a mismatch means we'd be evaluating the wrong device's samples.
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    f"Registered MemoryUtilizationCollector is bound to host "
+                    f"'{collector.host}', not '{obj.name}' — multi-DUT collector "
+                    "support isn't implemented; skipping this device."
+                ),
+            )
+        now = time.time()
+        window_end = check_params.get("window_end", now)
+        lookback_sec = check_params.get("lookback_sec", 900)
+        window_start = check_params.get(
+            "window_start",
+            collector_window_start(check_params, window_end, lookback_sec),
+        )
+
+        max_per_service = collector.max_per_service_in_window(
+            window_start, window_end
+        )
+
+        missing_from_collector = [s for s in services if s not in collector.services]
+        if missing_from_collector:
+            self.logger.warning(
+                f"Requested services not monitored by the running "
+                f"MemoryUtilizationCollector (started with services="
+                f"{collector.services}): {missing_from_collector}. These will "
+                f"not be checked."
+            )
+
+        violations: t.List[str] = []
+        service_data_list: t.List[t.Dict[str, t.Any]] = []
+        for service in services:
+            max_bytes = max_per_service.get(service)
+            if max_bytes is None:
+                # Collector had no measurable sample for this service in the
+                # window — most likely masked/inactive. Skip, same as the
+                # fallback-path treatment.
+                continue
+
+            svc_threshold = threshold_by_service.get(service, threshold)
+            service_data_list.append(
+                {
+                    "service": service,
+                    "memory_bytes": max_bytes,
+                    "threshold": svc_threshold,
+                }
+            )
+            self.add_data_to_log({f"current_{service}_memory_bytes": max_bytes})
+
+            # threshold=0 means "no global check" (matches the fallback path).
+            if svc_threshold > 0 and max_bytes > svc_threshold:
+                violations.append(
+                    f"{service}: {max_bytes:,} bytes > {svc_threshold:,.0f} bytes "
+                    f"threshold (MAX-over-window from continuous collector)"
+                )
+
+        if not service_data_list:
+            # No requested service had a measurable sample in the window --
+            # don't report PASS on an empty check.
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "MemoryUtilizationCollector had no measurable samples for "
+                    f"any requested service in window [{window_start:.0f}, "
+                    f"{window_end:.0f}] (services may be masked/inactive, or "
+                    "the collector hasn't polled yet)."
+                ),
+            )
+
+        window_sec = max(0.0, window_end - window_start)
+        table_rows = [
+            [d["service"], f"{d['memory_bytes']:,}", f"{d['threshold']:,.0f}"]
+            for d in service_data_list
+        ]
+        self.logger.info(
+            "\nMemory Utilization Summary (OSS collector, "
+            f"MAX over {window_sec:.0f}s window)\n"
+            + tabulate(
+                table_rows,
+                headers=["Service", "Memory (bytes) [MAX]", "Threshold (bytes)"],
+                tablefmt="simple_grid",
+            )
+        )
+
+        # Warn — don't fail — on collector poll timeouts in the window (same
+        # as CpuUtilizationHealthCheck._run_oss_via_collector). A missed
+        # memory sample isn't a health failure; the MAX below stands on
+        # whatever samples did land.
+        timeouts = collector.timeout_count_in_window(window_start, window_end)
+        if timeouts > 0:
+            self.logger.warning(
+                f"MemoryUtilizationCollector had {timeouts} poll timeout(s) in "
+                f"window [{window_start:.0f}, {window_end:.0f}] — some samples "
+                f"may be missing but the MAX below is based on what did land."
+            )
+
+        if violations:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    f"Memory utilization exceeded threshold on {obj.name}:\n"
+                    + "\n".join(violations)
+                ),
+            )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
             message="Memory utilization is within the defined threshold.",
