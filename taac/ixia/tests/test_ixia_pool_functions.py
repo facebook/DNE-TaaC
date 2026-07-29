@@ -202,7 +202,7 @@ class TestExtendedCommunityPool(unittest.TestCase):
     def test_two_byte_as_route_target_uses_four_byte_assigned_number(self):
         position = _ExtendedCommunity()
         route = _RouteProperty([position])
-        self.ixia._configure_extended_community_pool_on_route_property(
+        self.ixia.configure_extended_community_pool_on_route_property(
             route,
             [["rt:65001:1"], ["rt:65001:70000"]],
         )
@@ -247,12 +247,12 @@ class TestExtendedCommunityPool(unittest.TestCase):
 
     def test_schema_and_shape_errors_are_not_silently_ignored(self):
         with self.assertRaisesRegex(ValueError, "position count mismatch"):
-            self.ixia._configure_extended_community_pool_on_route_property(
+            self.ixia.configure_extended_community_pool_on_route_property(
                 _RouteProperty([]),
                 [["rt:65001:1"]],
             )
         with self.assertRaisesRegex(ValueError, "unsupported"):
-            self.ixia._configure_extended_community_pool_on_route_property(
+            self.ixia.configure_extended_community_pool_on_route_property(
                 _RouteProperty([_ExtendedCommunity()]),
                 [["color:65001:1"]],
             )
@@ -262,12 +262,129 @@ class TestExtendedCommunityPool(unittest.TestCase):
         position.Type.ValueList = MagicMock(side_effect=RuntimeError("write failed"))
 
         with self.assertRaisesRegex(RuntimeError, "write failed"):
-            self.ixia._configure_extended_community_pool_on_route_property(
+            self.ixia.configure_extended_community_pool_on_route_property(
                 _RouteProperty([position]),
                 [["rt:65001:1"]],
             )
 
         self.ixia.logger.exception.assert_called_once()
+
+    def test_legacy_extended_community_helper_remains_best_effort(self):
+        self.ixia._configure_extended_community_pool_on_route_property(
+            _RouteProperty([]),
+            [["rt:65001:1"]],
+        )
+
+        self.ixia.logger.warning.assert_called_once()
+
+
+class TestRoutePropertyPublicApis(unittest.TestCase):
+    def setUp(self):
+        self.ixia = _create_ixia_instance()
+
+    def test_as_path_api_programs_each_asn_position(self):
+        route = MagicMock()
+        segment = MagicMock()
+        slots = [MagicMock(), MagicMock()]
+        route.BgpAsPathSegmentList.find.return_value = [segment]
+        segment.BgpAsNumberList.find.return_value = slots
+
+        self.ixia.configure_as_path_pool_on_route_property(
+            route, ["65001 65002", "65003 65004"]
+        )
+
+        route.EnableAsPathSegments.Single.assert_called_once_with(True)
+        self.assertEqual(1, route.NoOfASPathSegmentsPerRouteRange)
+        segment.SegmentType.Single.assert_called_once_with("asseq")
+        self.assertEqual(2, segment.NumberOfAsNumberInSegment)
+        slots[0].AsNumber.ValueList.assert_called_once_with([65001, 65003])
+        slots[1].AsNumber.ValueList.assert_called_once_with([65002, 65004])
+        for slot in slots:
+            slot.EnableASNumber.Single.assert_called_once_with(True)
+
+    def test_as_path_api_rejects_empty_pool_before_programming(self):
+        route = MagicMock()
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            self.ixia.configure_as_path_pool_on_route_property(route, [])
+
+        route.EnableAsPathSegments.Single.assert_not_called()
+
+    def test_community_api_programs_each_community_position(self):
+        route = MagicMock()
+        positions = [MagicMock(), MagicMock()]
+        route.BgpCommunitiesList.find.return_value = positions
+
+        self.ixia.configure_community_pool_on_route_property(
+            route,
+            [["65000:1", "65001:2"], ["65002:3", "65003:4"]],
+        )
+
+        route.EnableCommunity.Single.assert_called_once_with(True)
+        self.assertEqual(2, route.NoOfCommunities)
+        positions[0].AsNumber.ValueList.assert_called_once_with([65000, 65002])
+        positions[0].LastTwoOctets.ValueList.assert_called_once_with([1, 3])
+        positions[1].AsNumber.ValueList.assert_called_once_with([65001, 65003])
+        positions[1].LastTwoOctets.ValueList.assert_called_once_with([2, 4])
+
+    def test_public_apis_reject_incomplete_route_property_schema(self):
+        as_path_route = MagicMock()
+        as_path_route.BgpAsPathSegmentList.find.return_value = []
+        community_route = MagicMock()
+        community_route.BgpCommunitiesList.find.return_value = []
+
+        with self.assertRaisesRegex(ValueError, "AS path segment list"):
+            self.ixia.configure_as_path_pool_on_route_property(
+                as_path_route, ["65001 65002"]
+            )
+        with self.assertRaisesRegex(ValueError, "community list entries"):
+            self.ixia.configure_community_pool_on_route_property(
+                community_route, [["65000:1"]]
+            )
+
+        missing_community_route = MagicMock()
+        missing_community_route.BgpCommunitiesList.find.return_value = None
+        with self.assertRaisesRegex(ValueError, "community list entries"):
+            self.ixia.configure_community_pool_on_route_property(
+                missing_community_route, [["65000:1"]]
+            )
+
+    def test_public_apis_preserve_ixia_failure_context(self):
+        as_path_route = MagicMock()
+        as_path_route.BgpAsPathSegmentList.find.side_effect = RuntimeError(
+            "AS path read failed"
+        )
+        community_route = MagicMock()
+        position = MagicMock()
+        position.AsNumber.ValueList.side_effect = RuntimeError("community write failed")
+        community_route.BgpCommunitiesList.find.return_value = [position]
+
+        with self.assertRaisesRegex(RuntimeError, "AS path read failed"):
+            self.ixia.configure_as_path_pool_on_route_property(
+                as_path_route, ["65001 65002"]
+            )
+        with self.assertRaisesRegex(RuntimeError, "community write failed"):
+            self.ixia.configure_community_pool_on_route_property(
+                community_route, [["65000:1"]]
+            )
+
+    def test_public_community_api_validates_before_programming(self):
+        route = MagicMock()
+
+        with self.assertRaises(ValueError):
+            self.ixia.configure_community_pool_on_route_property(route, [["invalid"]])
+
+        route.EnableCommunity.Single.assert_not_called()
+
+    def test_private_community_api_preserves_best_effort_values(self):
+        route = MagicMock()
+        position = MagicMock()
+        route.BgpCommunitiesList.find.return_value = [position]
+
+        self.ixia._configure_community_pool_on_route_property(route, [["invalid"], []])
+
+        position.AsNumber.ValueList.assert_called_once_with([0, 0])
+        position.LastTwoOctets.ValueList.assert_called_once_with([0, 0])
 
 
 class TestDeviceGroupRegexFiltering(unittest.TestCase):

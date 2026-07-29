@@ -7250,59 +7250,55 @@ class Ixia:
             as_path_pool: List of AS path strings
         """
         try:
-            self.logger.info(
-                f"Configuring AS path pool with {len(as_path_pool)} unique paths"
-            )
-
-            # Enable AS path segments
-            bgp_route_prop.EnableAsPathSegments.Single(True)
-
-            # Configure to use 1 AS path segment per route
-            bgp_route_prop.NoOfASPathSegmentsPerRouteRange = 1
-
-            # Get the AS path segment list
-            bgp_as_path_segment_list = bgp_route_prop.BgpAsPathSegmentList.find()
-
-            if not bgp_as_path_segment_list:
-                self.logger.warning("No BGP AS path segment list found")
-                return
-
-            # Configure the first (and only) segment to cycle through AS paths
-            bgp_as_path_segment = bgp_as_path_segment_list[0]
-
-            # Set segment type to AS_SEQUENCE (type 2) instead of AS_SET (type 1)
-            bgp_as_path_segment.SegmentType.Single("asseq")
-
-            # Find the maximum AS path length in the pool
-            max_as_path_length = max(len(as_path.split()) for as_path in as_path_pool)
-
-            # Set the segment to hold the maximum number of AS numbers
-            bgp_as_path_segment.NumberOfAsNumberInSegment = max_as_path_length
-
-            self.logger.info(f"Maximum AS path length in pool: {max_as_path_length}")
-
-            # Get AS number list
-            bgp_as_number_list = bgp_as_path_segment.BgpAsNumberList.find()
-
-            if not bgp_as_number_list:
-                self.logger.warning("No BGP AS number list found")
-                return
-
-            position_values = self._build_as_path_position_values(
-                as_path_pool, max_as_path_length
-            )
-            self._apply_as_positions_concurrently(bgp_as_number_list, position_values)
-
-            self.logger.info("Successfully configured AS path distribution")
-            self.logger.info(
-                f"  - Each route will get ONE AS path from the {len(as_path_pool)}-path pool"
-            )
-            self.logger.info(
-                "  - AS paths will cycle: route 1 → path 1, route 2 → path 2, ..."
-            )
-
+            self._program_as_path_pool_on_route_property(bgp_route_prop, as_path_pool)
         except Exception as e:
             self.logger.warning(f"Error configuring AS path pool: {str(e)}")
+
+    def _program_as_path_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        as_path_pool: t.List[str],
+    ) -> None:
+        if not as_path_pool:
+            raise ValueError("AS path pool must not be empty")
+        self.logger.info(
+            f"Configuring AS path pool with {len(as_path_pool)} unique paths"
+        )
+        bgp_route_prop.EnableAsPathSegments.Single(True)
+        bgp_route_prop.NoOfASPathSegmentsPerRouteRange = 1
+        bgp_as_path_segment_list = bgp_route_prop.BgpAsPathSegmentList.find()
+        if not bgp_as_path_segment_list:
+            raise ValueError("No BGP AS path segment list found")
+
+        bgp_as_path_segment = bgp_as_path_segment_list[0]
+        bgp_as_path_segment.SegmentType.Single("asseq")
+        max_as_path_length = max(len(as_path.split()) for as_path in as_path_pool)
+        bgp_as_path_segment.NumberOfAsNumberInSegment = max_as_path_length
+        self.logger.info(f"Maximum AS path length in pool: {max_as_path_length}")
+
+        bgp_as_number_list = bgp_as_path_segment.BgpAsNumberList.find()
+        if not bgp_as_number_list:
+            raise ValueError("No BGP AS number list found")
+
+        position_values = self._build_as_path_position_values(
+            as_path_pool, max_as_path_length
+        )
+        self._apply_as_positions_concurrently(bgp_as_number_list, position_values)
+        self.logger.info("Successfully configured AS path distribution")
+        self.logger.info(
+            f"  - Each route will get ONE AS path from the {len(as_path_pool)}-path pool"
+        )
+        self.logger.info(
+            "  - AS paths will cycle: route 1 → path 1, route 2 → path 2, ..."
+        )
+
+    def configure_as_path_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        as_path_pool: t.List[str],
+    ) -> None:
+        """Configure AS paths on an already-resolved BGP route property."""
+        self._program_as_path_pool_on_route_property(bgp_route_prop, as_path_pool)
 
     @external_api
     def configure_bgp_peer_tcp_window_size(
@@ -7599,129 +7595,193 @@ class Ixia:
                 Example: [["100:1", "100:2"], ["100:3", "100:4"], ...]
         """
         try:
-            if not community_combinations:
-                self.logger.warning("Empty community combinations provided")
-                return
-
-            communities_per_prefix = len(community_combinations[0])
-
-            # Step 1: Enable communities FIRST (this may initialize BgpCommunitiesList)
-            if not hasattr(bgp_route_prop, "EnableCommunity"):
-                self.logger.warning("EnableCommunity attribute not found")
-                return
-
-            bgp_route_prop.EnableCommunity.Single(True)
-            self.logger.info("Enabled communities on route property")
-
-            # Step 2: Set number of communities per route (similar to AS path pattern at line 4671)
-            if not hasattr(bgp_route_prop, "NoOfCommunities"):
-                self.logger.warning("NoOfCommunities attribute not found")
-                return
-
-            # Direct assignment (not .Single()) - matches existing pattern at line 3110
-            bgp_route_prop.NoOfCommunities = communities_per_prefix
-            self.logger.info(
-                f"Set NoOfCommunities to {communities_per_prefix} communities per prefix"
+            self._program_community_pool_on_route_property(
+                bgp_route_prop, community_combinations, fail_closed=False
             )
-
-            # Step 3: NOW try to access the BGP community list (should be available after enabling)
-            if not hasattr(bgp_route_prop, "BgpCommunitiesList"):
-                self.logger.warning(
-                    "BgpCommunitiesList attribute not found even after enabling communities. "
-                    "This may be a limitation of programmatically created routes."
-                )
-                return
-
-            bgp_community_list = bgp_route_prop.BgpCommunitiesList.find()
-
-            if not bgp_community_list:
-                self.logger.warning(
-                    "No BGP community objects found in BgpCommunitiesList after enabling"
-                )
-                return
-
-            self.logger.info(
-                f"Found {len(bgp_community_list)} community positions to configure"
-            )
-
-            # Configure each community position to cycle through values from the pool
-            for community_idx in range(communities_per_prefix):
-                if community_idx >= len(bgp_community_list):
-                    self.logger.warning(
-                        f"Not enough community list entries ({len(bgp_community_list)}) "
-                        f"for {communities_per_prefix} communities"
-                    )
-                    break
-
-                # Collect community values at this position from all combinations
-                community_values_at_position = []
-
-                for community_combination in community_combinations:
-                    if community_idx < len(community_combination):
-                        community_str = community_combination[community_idx]
-                        # Parse community string (format: "AS:VALUE" or integer)
-                        # Convert to integer format that Ixia expects
-                        try:
-                            if ":" in community_str:
-                                # Format: AS:VALUE (e.g., "100:1")
-                                as_num, value = community_str.split(":")
-                                # Convert to 32-bit integer: (AS << 16) | VALUE
-                                community_int = (int(as_num) << 16) | int(value)
-                            else:
-                                # Already an integer
-                                community_int = int(community_str)
-
-                            community_values_at_position.append(community_int)
-                        except ValueError as e:
-                            self.logger.warning(
-                                f"Invalid community format '{community_str}': {e}"
-                            )
-                            community_values_at_position.append(0)
-                    else:
-                        # This combination doesn't have a community at this position
-                        community_values_at_position.append(0)
-
-                # Apply ValueList to cycle through community values
-                bgp_community = bgp_community_list[community_idx]
-
-                # Set community type (typically manual AS number)
-                if hasattr(bgp_community, "Type"):
-                    bgp_community.Type.Single("manual")
-
-                # Configure the AS number field with ValueList
-                if hasattr(bgp_community, "AsNumber"):
-                    # Extract AS numbers (high 16 bits)
-                    as_numbers = [
-                        (comm >> 16) if comm != 0 else 0
-                        for comm in community_values_at_position
-                    ]
-                    bgp_community.AsNumber.ValueList(as_numbers)
-
-                # Configure the last two octets field with ValueList
-                if hasattr(bgp_community, "LastTwoOctets"):
-                    # Extract values (low 16 bits)
-                    values = [
-                        (comm & 0xFFFF) if comm != 0 else 0
-                        for comm in community_values_at_position
-                    ]
-                    bgp_community.LastTwoOctets.ValueList(values)
-
-                self.logger.debug(
-                    f"Community position {community_idx}: cycling through {len(community_values_at_position)} values"
-                )
-
-            self.logger.info(
-                f"Successfully configured community distribution for {len(community_combinations)} routes"
-            )
-            self.logger.info(
-                f"  - Each route will get {communities_per_prefix} communities from the pool"
-            )
-            self.logger.info(
-                "  - Communities will cycle: route 1 → combination 1, route 2 → combination 2, ..."
-            )
-
         except Exception as e:
             self.logger.warning(f"Error configuring community pool: {str(e)}")
+
+    @staticmethod
+    def _community_value(community: str) -> int:
+        if ":" not in community:
+            return int(community)
+        as_num, value = community.split(":")
+        return (int(as_num) << 16) | int(value)
+
+    def _validate_community_combinations(
+        self, community_combinations: t.List[t.List[str]]
+    ) -> int:
+        if not community_combinations:
+            raise ValueError("Community combinations must not be empty")
+        width = len(community_combinations[0])
+        if width == 0 or any(
+            len(combination) != width for combination in community_combinations
+        ):
+            raise ValueError("Community combinations must have one consistent width")
+        for combination in community_combinations:
+            for community in combination:
+                self._community_value(community)
+        return width
+
+    @staticmethod
+    def _validate_community_positions(
+        bgp_community_list: t.Sequence[t.Any], communities_per_prefix: int
+    ) -> None:
+        if len(bgp_community_list) < communities_per_prefix:
+            raise ValueError(
+                "Not enough community list entries: "
+                f"expected {communities_per_prefix}, got {len(bgp_community_list)}"
+            )
+        for community_idx, bgp_community in enumerate(
+            bgp_community_list[:communities_per_prefix]
+        ):
+            if not all(
+                hasattr(bgp_community, attribute)
+                for attribute in ("Type", "AsNumber", "LastTwoOctets")
+            ):
+                raise ValueError(
+                    f"Community position {community_idx} is missing required fields"
+                )
+
+    def _prepare_community_positions(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        communities_per_prefix: int,
+        *,
+        fail_closed: bool,
+    ) -> t.Sequence[t.Any] | None:
+        for attribute in (
+            "EnableCommunity",
+            "NoOfCommunities",
+            "BgpCommunitiesList",
+        ):
+            if hasattr(bgp_route_prop, attribute):
+                continue
+            message = f"{attribute} attribute not found"
+            if fail_closed:
+                raise ValueError(message)
+            self.logger.warning(message)
+            return None
+
+        bgp_route_prop.EnableCommunity.Single(True)
+        self.logger.info("Enabled communities on route property")
+        bgp_route_prop.NoOfCommunities = communities_per_prefix
+        self.logger.info(
+            f"Set NoOfCommunities to {communities_per_prefix} communities per prefix"
+        )
+        positions = bgp_route_prop.BgpCommunitiesList.find()
+        if positions is None:
+            positions = ()
+        if fail_closed:
+            self._validate_community_positions(positions, communities_per_prefix)
+        elif not positions:
+            self.logger.warning(
+                "No BGP community objects found in BgpCommunitiesList after enabling"
+            )
+            return None
+        return positions
+
+    def _community_values_for_position(
+        self,
+        community_combinations: t.Sequence[t.Sequence[str]],
+        position_index: int,
+        *,
+        fail_closed: bool,
+    ) -> t.List[int]:
+        values = []
+        for combination in community_combinations:
+            if position_index >= len(combination):
+                values.append(0)
+                continue
+            community = combination[position_index]
+            try:
+                values.append(self._community_value(community))
+            except ValueError as error:
+                if fail_closed:
+                    raise
+                self.logger.warning(f"Invalid community format '{community}': {error}")
+                values.append(0)
+        return values
+
+    @staticmethod
+    def _write_community_position(position: t.Any, values: t.Sequence[int]) -> None:
+        if hasattr(position, "Type"):
+            position.Type.Single("manual")
+        if hasattr(position, "AsNumber"):
+            position.AsNumber.ValueList([community >> 16 for community in values])
+        if hasattr(position, "LastTwoOctets"):
+            position.LastTwoOctets.ValueList(
+                [community & 0xFFFF for community in values]
+            )
+
+    def _program_community_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        community_combinations: t.List[t.List[str]],
+        *,
+        fail_closed: bool,
+    ) -> None:
+        if fail_closed:
+            communities_per_prefix = self._validate_community_combinations(
+                community_combinations
+            )
+        elif not community_combinations:
+            self.logger.warning("Empty community combinations provided")
+            return
+        else:
+            communities_per_prefix = len(community_combinations[0])
+
+        bgp_community_list = self._prepare_community_positions(
+            bgp_route_prop,
+            communities_per_prefix,
+            fail_closed=fail_closed,
+        )
+        if bgp_community_list is None:
+            return
+
+        self.logger.info(
+            f"Found {len(bgp_community_list)} community positions to configure"
+        )
+        for community_idx in range(communities_per_prefix):
+            if community_idx >= len(bgp_community_list):
+                self.logger.warning(
+                    f"Not enough community list entries ({len(bgp_community_list)}) "
+                    f"for {communities_per_prefix} communities"
+                )
+                break
+
+            community_values_at_position = self._community_values_for_position(
+                community_combinations,
+                community_idx,
+                fail_closed=fail_closed,
+            )
+            self._write_community_position(
+                bgp_community_list[community_idx], community_values_at_position
+            )
+            self.logger.debug(
+                f"Community position {community_idx}: cycling through "
+                f"{len(community_values_at_position)} values"
+            )
+
+        self.logger.info(
+            f"Successfully configured community distribution for {len(community_combinations)} routes"
+        )
+        self.logger.info(
+            f"  - Each route will get {communities_per_prefix} communities from the pool"
+        )
+        self.logger.info(
+            "  - Communities will cycle: route 1 → combination 1, route 2 → combination 2, ..."
+        )
+
+    def configure_community_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        community_combinations: t.List[t.List[str]],
+    ) -> None:
+        """Configure communities on an already-resolved BGP route property."""
+        self._program_community_pool_on_route_property(
+            bgp_route_prop, community_combinations, fail_closed=True
+        )
 
     @external_api
     def configure_extended_community_pool(
@@ -7900,6 +7960,25 @@ class Ixia:
         self,
         bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
         extended_community_combinations: t.List[t.List[str]],
+        *,
+        fail_closed: bool = False,
+    ) -> None:
+        try:
+            self._program_extended_community_pool_on_route_property(
+                bgp_route_prop,
+                extended_community_combinations,
+            )
+        except Exception as error:
+            if fail_closed:
+                raise
+            self.logger.warning(
+                f"Error configuring extended community route property: {error}"
+            )
+
+    def _program_extended_community_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        extended_community_combinations: t.List[t.List[str]],
     ) -> None:
         """
         Configure extended community pool on a BGP route property using ValueList API.
@@ -7950,6 +8029,18 @@ class Ixia:
             "Configured %d extended-community position(s) across %d route row(s)",
             ext_communities_per_prefix,
             len(extended_community_combinations),
+        )
+
+    def configure_extended_community_pool_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        extended_community_combinations: t.List[t.List[str]],
+    ) -> None:
+        """Configure extended communities on a resolved BGP route property."""
+        self._configure_extended_community_pool_on_route_property(
+            bgp_route_prop,
+            extended_community_combinations,
+            fail_closed=True,
         )
 
     def _initialize_extended_community_positions(
