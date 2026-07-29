@@ -227,6 +227,9 @@ def create_npi_cpu_queue_test_config(
     basset_pool=None,
     ixia_packet_loss_threshold: str = "0.1",
     service_restart_services=None,
+    low_queue: int | None = None,
+    mid_queue: int | None = None,
+    high_queue: int | None = None,
 ):
     """Build the DC-TypeF 51T NPI CPU queue TestConfig.
 
@@ -254,6 +257,11 @@ def create_npi_cpu_queue_test_config(
             Restart iteration counts (sic — preserves historical typo).
         direct_ixia_connections: Optional explicit direct-IXIA connection mapping.
         basset_pool: Override basset pool selection.
+        low_queue / mid_queue / high_queue: Optional explicit CPU queue indices.
+            When all three are provided they bypass the netwhoami-driven
+            get_cpu_queue_constants() lookup. Required for NPI devices not yet in
+            netwhoami inventory (e.g. a pre-arrival bring-up stub like w800). If
+            any is None, indices are resolved from hardware via netwhoami.
 
     Returns:
         TestConfig: The DC-TypeF NPI CPU queue TestConfig.
@@ -262,8 +270,12 @@ def create_npi_cpu_queue_test_config(
     # test-config construction (not a module-import side effect) so the
     # IXIA wrapper sees the entries only when this test config is built.
     _register_arp_custom_payloads()
-    # Get hardware-specific CPU queue constants
-    low_queue, mid_queue, high_queue = get_cpu_queue_constants(device_name)
+    # Resolve CPU queue indices. Prefer explicit indices when the caller supplies
+    # all three (required for NPI devices not yet in netwhoami inventory, e.g. a
+    # pre-arrival w800 stub); otherwise fall back to the hardware-driven
+    # netwhoami lookup.
+    if low_queue is None or mid_queue is None or high_queue is None:
+        low_queue, mid_queue, high_queue = get_cpu_queue_constants(device_name)
     # Create and return the complete test configuration
     return TestConfig(
         name=test_config_name,

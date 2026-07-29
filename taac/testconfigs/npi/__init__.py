@@ -36,6 +36,13 @@ from taac.testconfigs.npi.thrift_hardening_test_config import (
     ICEPACK_GTSW_STSW_FLAP_PORTS,
     NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG,
 )
+from taac.testconfigs.npi.wedge800_npi_test_config import (
+    W800_BGP_HARDENING_TEST_CONFIG,
+    W800_CPU_QUEUE_TEST_CONFIG,
+    W800_LONGEVITY_TEST_CONFIG,
+    W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG,
+    W800_THRIFT_HARDENING_TEST_CONFIG,
+)
 
 __all__ = [
     "ICEPACK_GTSW_STSW_FLAP_PORTS",
@@ -47,6 +54,11 @@ __all__ = [
     "NPI_DVT_ICEPACK_GTSW__ECMP_RESOURCE_TESTING",
     "NPI_DVT_ICEPACK_GTSW__MULTI_NODE_PFC_TEST_CONFIG",
     "NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG",
+    "W800_BGP_HARDENING_TEST_CONFIG",
+    "W800_CPU_QUEUE_TEST_CONFIG",
+    "W800_LONGEVITY_TEST_CONFIG",
+    "W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG",
+    "W800_THRIFT_HARDENING_TEST_CONFIG",
     "build_dlb_hardening_testconfig",
     "create_dctypef_npi_cpu_queue_test_config",
     "create_npi_cpu_queue_test_config",

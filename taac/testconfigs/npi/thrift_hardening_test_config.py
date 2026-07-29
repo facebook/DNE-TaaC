@@ -109,6 +109,7 @@ def create_npi_thrift_hardening_test_config(
     direct_ixia_connections=None,
     basset_pool: str | None = None,
     service_restart_services: list | None = None,
+    skip_platform_assert: bool = False,
 ):
     """Build the NPI Thrift Hardening (THFT) TestConfig.
 
@@ -145,11 +146,18 @@ def create_npi_thrift_hardening_test_config(
         direct_ixia_connections: Optional explicit direct-IXIA mapping.
         basset_pool: Optional override pool selection. Default "dne.test".
         service_restart_services: Override default service-restart-check list.
+        skip_platform_assert: When True, skip the live netwhoami FBOSS-platform
+            check. For NPI devices not yet in inventory (e.g. a pre-arrival
+            w800 stub) where the caller vouches for the platform. Default
+            preserves the fail-fast check for real devices.
 
     Returns:
         TestConfig: The NPI THFT TestConfig.
     """
-    _assert_fboss_platform(device_name)
+    # NPI devices not yet in netwhoami inventory (e.g. a pre-arrival w800 stub)
+    # pass skip_platform_assert=True; real devices keep the fail-fast check.
+    if not skip_platform_assert:
+        _assert_fboss_platform(device_name)
     return TestConfig(
         name=test_config_name,
         ixia_protocol_verification_timeout=600,
