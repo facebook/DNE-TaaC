@@ -57,7 +57,7 @@ BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
         "bgp_ebb_multipath_group_oscillation_playbook",
         "bgp_ebb_igp_pnh_metric_oscillation_playbook",
     ],
-    enable_update_group=False,
+    enable_update_group=True,
 )
 # CONVEYOR: dne_routing / bag010_drain_node
 BAG010_DRAIN_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -67,13 +67,14 @@ BAG010_DRAIN_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
         "bgp_ebb_fauu_drain_undrain_playbook",
         "bgp_ebb_plane_drain_undrain_playbook",
     ],
+    enable_update_group=True,
 )
 # CONVEYOR: dne_routing / bag010_longevity_node
 BAG010_LONGEVITY_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_LONGEVITY_TEST_CONFIG",
     playbooks_selected=["bgp_ebb_longevity_playbook"],
-    enable_update_group=False,
+    enable_update_group=True,
 )
 
 
@@ -95,6 +96,7 @@ BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG = create_bgp_ebb_full_scale_test_config(
         "bgp_ebb_igp_unresolvable_pnh_playbook",
         "bgp_ebb_nexthop_group_count_threshold_playbook",
     ],
+    enable_update_group=True,
 )
 
 
@@ -108,11 +110,19 @@ BAG012_UPDATE_PACKING_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config
 )
 # CONVEYOR: dne_routing / bag012_cas_node
 BAG012_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG = (
-    create_bgp_ebb_constant_attribute_storage_test_config(BAG012_ASH6)
+    create_bgp_ebb_constant_attribute_storage_test_config(
+        BAG012_ASH6,
+        enable_update_group=True,
+        name_override="BAG012_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG",
+    )
 )
 # CONVEYOR: dne_routing / bag012_qmm_node
 BAG012_QUEUE_MEMORY_MONITOR_TEST_CONFIG = (
-    create_bgp_ebb_queue_memory_monitor_test_config(BAG012_ASH6)
+    create_bgp_ebb_queue_memory_monitor_test_config(
+        BAG012_ASH6,
+        enable_update_group=True,
+        name_override="BAG012_QUEUE_MEMORY_MONITOR_TEST_CONFIG",
+    )
 )
 # CONVEYOR: dne_routing / bag012_bounded_ecmp_node
 BAG012_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
