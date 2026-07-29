@@ -149,7 +149,9 @@ from taac.steps.step_definitions import (
     TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY,
     wait_time_after_disable_churn_s,
 )
-from taac.task_definitions import create_thrift_stress_periodic_task
+from taac.task_definitions import (
+    create_thrift_stress_periodic_task,
+)
 from taac.tasks.thrift_stress_payloads import (
     fboss_with_qsfp_flaps,
     ThriftStressCall,
@@ -19719,6 +19721,115 @@ def create_dsf_dtsw_mesh_consecutive_warmboot_endurance_playbook(
         ],
         postchecks=[
             create_packetloss_health_check(),
+        ],
+        traffic_items_to_start=[traffic_item_name],
+        enabled=True,
+    )
+
+
+def create_icepack_gtsw_warmboot_troubleshooting_playbook(
+    name: str,
+    traffic_item_name: str,
+    longevity_duration_seconds: int = 300,
+) -> Playbook:
+    """Playbook factory for the IcePack GTSW agent-warmboot + RoCE
+    troubleshooting Playbook.
+
+    Single-device flow used by
+    `NPI_ICEPACK_GTSW007_WARMBOOT_TROUBLESHOOTING_TEST_CONFIG`: run RoCE
+    (RDMA/IB) traffic on the DUT, `systemctl restart` the FBOSS agent
+    (warmboot), wait for agent convergence, hold for a longevity window,
+    then verify no traffic loss / rate drop / discards and that only the
+    expected agent-warmboot service cascade restarted.
+
+    Prechecks mirror the canonical IcePack GTSW panel
+    (`add_common_checks_to_thft_playbooks`).
+    """
+    return Playbook(
+        name=name,
+        prechecks=[
+            create_drain_state_check(),
+            # min_established_pct=0.9: this single-box IXIA-loopback test does
+            # not use the fabric, and the GTSW carries 2 structural always-IDLE
+            # non-peer entries (an AS-0 aggregate + a self-ASN entry) that a
+            # 100%-established gate flags. 48/50 real peers up = 0.96 > 0.9.
+            create_bgp_session_establish_check(min_established_pct=0.9),
+            create_systemctl_active_state_check(),
+            create_memory_utilization_check(
+                threshold=5 * (1024**3),  # 5 GiB
+                start_time_jq_var="test_case_start_time",
+            ),
+            create_port_state_check(),
+            create_lldp_check(),
+            create_clear_counters_check(),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT],
+                    ),
+                    create_longevity_step(duration=longevity_duration_seconds),
+                ],
+            )
+        ],
+        postchecks=[
+            create_ixia_packet_loss_check(
+                clear_traffic_stats=False,
+                thresholds=[
+                    hc_types.PacketLossThreshold(
+                        names=[traffic_item_name],
+                        str_value="0",
+                        metric=hc_types.PacketLossMetric.PERCENTAGE,
+                    ),
+                ],
+            ),
+            create_ixia_traffic_rate_check(
+                thresholds=[
+                    hc_types.TrafficRateThreshold(
+                        names=[traffic_item_name],
+                        value=45,
+                        threshold_type=hc_types.ThresholdType.PERCENT,
+                        metric=hc_types.TrafficRateMetric.TX_RATE,
+                    ),
+                ],
+                base_bandwidth_gbps=200,  # IcePack GTSW IXIA links are 200G
+            ),
+            create_port_counters_check(),
+            # IcePack GTSW (TH6) runs the split sw/hw agent + wedge_agent + bgpd
+            # and does NOT run openr. The check's `services` list (active-state
+            # scan) defaults to DEFAULT_SERVICE_NAMES, which includes openr —
+            # legitimately inactive here — so we MUST pass an explicit `services`
+            # list, not just `expected_restarted_services`. Scope both to the
+            # services that cycle on a Service.AGENT warmboot (verified live
+            # 2026-07-28: wedge_agent/fboss_sw_agent/fboss_hw_agent@0/bgpd all
+            # restart at the warmboot instant; fsdb/qsfp are preserved).
+            create_service_restart_check(
+                services=[
+                    "wedge_agent",
+                    "fboss_sw_agent",
+                    "fboss_hw_agent@0",
+                    "bgpd",
+                ],
+                expected_restarted_services=[
+                    "wedge_agent",
+                    "fboss_sw_agent",
+                    "fboss_hw_agent@0",
+                    "bgpd",
+                ],
+            ),
+            create_unclean_exit_check(),
+            create_cpu_utilization_check(
+                threshold=400.0, start_time_jq_var="test_case_start_time"
+            ),
+        ],
+        snapshot_checks=[
+            create_core_dumps_snapshot_check(),
+            create_bgp_peer_route_snapshot_check(),
         ],
         traffic_items_to_start=[traffic_item_name],
         enabled=True,

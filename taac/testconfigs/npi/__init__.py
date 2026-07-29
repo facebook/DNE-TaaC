@@ -28,6 +28,9 @@ from taac.testconfigs.npi.icepack_ecmp_resource_testing_config import (
     NPI_DVT_ICEPACK_GTSW__ECMP_RESOURCE_TESTING,
     test_config_for_icepack_ecmp_resource_testing,
 )
+from taac.testconfigs.npi.icepack_gtsw_warmboot_troubleshooting_config import (
+    NPI_ICEPACK_GTSW007_WARMBOOT_TROUBLESHOOTING_TEST_CONFIG,
+)
 from taac.testconfigs.npi.multinode_pfc_test_config import (
     NPI_DVT_ICEPACK_GTSW__MULTI_NODE_PFC_TEST_CONFIG,
 )
@@ -54,6 +57,7 @@ __all__ = [
     "NPI_DVT_ICEPACK_GTSW__ECMP_RESOURCE_TESTING",
     "NPI_DVT_ICEPACK_GTSW__MULTI_NODE_PFC_TEST_CONFIG",
     "NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG",
+    "NPI_ICEPACK_GTSW007_WARMBOOT_TROUBLESHOOTING_TEST_CONFIG",
     "W800_BGP_HARDENING_TEST_CONFIG",
     "W800_CPU_QUEUE_TEST_CONFIG",
     "W800_LONGEVITY_TEST_CONFIG",
