@@ -94,6 +94,30 @@ class TestBgpSessionUptimeCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("Flapped", result.message)
 
+    async def test_intentional_restart_requires_both_snapshot_skips(self):
+        pre = {_KEY: _session(uptime_seconds=6000, has_details=False)}
+        post = {_KEY: _session(uptime_seconds=10, has_details=False)}
+
+        uptime_only = await self._compare(
+            pre,
+            post,
+            pre_ts=1000,
+            post_ts=1001,
+            skip_uptime_check=True,
+        )
+        both_skipped = await self._compare(
+            pre,
+            post,
+            pre_ts=1000,
+            post_ts=1001,
+            skip_flap_check=True,
+            skip_uptime_check=True,
+        )
+
+        self.assertEqual(uptime_only.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("Flapped", uptime_only.message)
+        self.assertEqual(both_skipped.status, hc_types.HealthCheckStatus.PASS)
+
     async def test_restart_backstop_uptime_less_than_interval(self):
         """Flap counter unchanged and uptime did not decrease, but post uptime
         (50s) is less than the inter-snapshot interval (200s) -> the session

@@ -156,7 +156,7 @@ The current 20 playbooks provide one explicit runtime-policy assertion and sever
 
 **Purpose:** Detect restart regressions in service recovery, convergence, and resource health.
 
-**Stimulus:** Restart the BGP++ daemon, restore IXIA peers, and wait 540 seconds for convergence.
+**Stimulus:** Establish the exact active-peer baseline, restart BGP++ without retoggling IXIA, and observe exact lifecycle recovery with a 600-second soft SLA, 1,200-second hard timeout, and 5-second polling.
 
 **Scale:** Canonical full-scale EBB peer and route population.
 
@@ -178,32 +178,34 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 | --- | --- | --- | --- |
 | precheck | `pre.standard_bgp` | `startup_bgp_session_verification`, `startup_cpu_load_average_baseline`, `startup_bgp_graceful_restart_disabled_check_v6`, `startup_bgp_graceful_restart_disabled_check_v4`, `startup_hardware_capacity_baseline`, `startup_bgp_convergence`, `startup_ibgp_pnh_verification`, `rib_fib_consistency_precheck` | The PNH check is present only for Open/R profiles. The remaining checks establish the session, resource, convergence, and RIB/FIB baseline. |
 | postcheck | `post.restart_recovery` | `postcheck_bgp_convergence_time`, `BGP session establishment`, `BGP stale-route check`, `BGP and system log parsing`, `rib_fib_consistency_postcheck`, `restart-aware BGP service check` | Treats the intentional BGP restart as expected and detects later restarts. |
-| snapshot | `snapshot.skip_uptime` | `core-dump snapshot check`, `BGP session flap and peer-identity snapshot check` | Session uptime is intentionally excluded. |
+| snapshot | `snapshot.skip_flap_and_uptime` | `core-dump snapshot check`, `BGP session peer-identity snapshot check` | Expected flap and uptime changes are intentionally excluded. |
 
 **Specification vs. implemented health checks**
 
 | Required Validation | Implemented By | Coverage | Gap |
 | --- | --- | --- | --- |
 | Restart profile prechecks and postchecks pass. | `pre.standard_bgp`, `post.restart_recovery` | implemented | None |
-| Expected BGP sessions recover and remain established. | `post.restart_recovery`, `snapshot.skip_uptime` | implemented | None |
-| Snapshot checks show no unexpected state drift or core dump. | `snapshot.skip_uptime` | implemented | None |
+| Expected BGP sessions recover and remain established. | `post.restart_recovery`, `snapshot.skip_flap_and_uptime` | implemented | None |
+| Snapshot checks show no unexpected state drift or core dump. | `snapshot.skip_flap_and_uptime` | implemented | None |
 
 **Validations outside the health-check chain**
 
-- None.
+- Setup requires the exact non-BGP-MON session count and the BGP INITIALIZED event before the restart.
+- The restart stage records the exact lifecycle convergence outcome and fails late or missing convergence after completing observation.
 
-**Expected runtime:** Approximately 34 minutes including shared topology setup.
+**Expected runtime:** Shared topology setup plus adaptive restart recovery, bounded at 20 minutes of stage observation.
 
 **Primary triage signals**
 
 - BGP service lifecycle and peer-state logs.
-- Convergence timeline and failed peer identities.
+- Exact session count, lifecycle events, and convergence outcome.
 - CPU and memory periodic-task samples.
 
 **Artifacts**
 
 - TAAC step and health-check results.
 - BGP service logs and core-dump snapshot.
+- Structured lifecycle convergence record.
 - CPU and memory time series.
 
 **Qualification difference:** Daily CI performs one representative restart rather than the full qualification campaign.
@@ -219,7 +221,7 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 
 **Purpose:** Detect cold-start regressions in session fan-in, EOR handling, and convergence.
 
-**Stimulus:** Start BGP++ without active peers, enable all peer groups together, wait about 500 seconds, and collect thread CPU.
+**Stimulus:** Start BGP++ without active peers, use the synchronized IXIA peer enable as T0, and collect thread CPU while observing exact lifecycle convergence with a 600-second soft SLA, 1,200-second hard timeout, and 5-second polling.
 
 **Scale:** Canonical full-scale EBB peer and route population.
 
@@ -254,20 +256,21 @@ The chain below contains only playbook-level health checks. Trigger, step, task,
 **Validations outside the health-check chain**
 
 - Standard CPU and memory periodic tasks run during the workload.
+- The adaptive CPU step stops on convergence, uploads diagnostics, and then fails late or missing convergence.
 
-**Expected runtime:** About 10 minutes of stimulus plus shared topology setup.
+**Expected runtime:** Shared topology setup plus adaptive cold-start recovery, bounded at 20 minutes of stage observation.
 
 **Primary triage signals**
 
 - EOR and convergence timeline.
-- Per-thread CPU and peer-establishment failures.
+- Exact session count, lifecycle events, and per-thread CPU.
 - BGP startup logs.
 
 **Artifacts**
 
 - TAAC health-check results.
 - BGP startup logs and session snapshots.
-- Thread CPU collection.
+- Thread CPU collection and structured lifecycle convergence record.
 
 **Qualification difference:** Daily CI uses the conveyor topology and one synchronized cold-start event.
 

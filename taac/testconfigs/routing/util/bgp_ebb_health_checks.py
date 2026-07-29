@@ -304,6 +304,7 @@ def create_standard_prechecks(
 def create_standard_postchecks(
     postcheck_thresholds=None,
     convergence_threshold: int = _BGP_CONVERGENCE_THRESHOLD_SECONDS,
+    convergence_hard_timeout_seconds: int | None = None,
     services_to_check: list[str] | None = None,
     daemons_to_check: list[str] | None = None,
     expected_message_types: list[str] | None = None,
@@ -329,6 +330,10 @@ def create_standard_postchecks(
     Args:
         postcheck_thresholds: Hardware capacity thresholds (optional)
         convergence_threshold: BGP convergence time threshold in seconds
+        convergence_hard_timeout_seconds: Optional hard observation cap for BGP
+            convergence. When larger than ``convergence_threshold``, an SLA
+            breach remains a failure while observation continues to capture the
+            actual convergence time.
         services_to_check: List of EOS Sand agents to check via 'show agent uptime'
             (optional, defaults to ["Bgp", "FibAgent", "FibAgentBgp"])
         daemons_to_check: List of EOS daemons to check via 'show daemon'. Daemons
@@ -414,6 +419,7 @@ def create_standard_postchecks(
         postchecks.append(
             create_bgp_convergence_check(
                 convergence_threshold=convergence_threshold,
+                hard_timeout_seconds=convergence_hard_timeout_seconds,
                 fail_on_eor_expired=fail_on_eor_expired,
                 validate_sequence=False,
                 check_id="postcheck_bgp_convergence_time",

@@ -308,6 +308,14 @@ def _validate_bgp_attribute_churn_geometry(
         raise ValueError("selected_block_count_per_afi must be at least 2")
     if numeric_params["samples_per_block"] > numeric_params["routes_per_block"]:
         raise ValueError("samples per block cannot exceed routes per block")
+    if numeric_params["convergence_hard_timeout_seconds"] <= max(
+        numeric_params["transition_timeout_seconds"],
+        numeric_params["reference_setup_timeout_seconds"],
+    ):
+        raise ValueError(
+            "convergence_hard_timeout_seconds must exceed transition and "
+            "reference setup timeouts"
+        )
 
 
 def create_bgp_attribute_churn_step(
@@ -328,6 +336,7 @@ def create_bgp_attribute_churn_step(
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
+    convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-10 dual-stack attribute-churn workflow."""
@@ -340,6 +349,7 @@ def create_bgp_attribute_churn_step(
         "cadence_seconds": cadence_seconds,
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
         "reference_setup_timeout_seconds": reference_setup_timeout_seconds,
         "restore_timeout_seconds": restore_timeout_seconds,
         "quiet_window_seconds": quiet_window_seconds,
@@ -389,6 +399,7 @@ def create_bgp_route_storm_step(
     as_path_length: int,
     communities_per_route: int,
     extended_communities_per_route: int,
+    convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-11 route-storm workflow."""
@@ -418,6 +429,7 @@ def create_bgp_route_storm_step(
         "withdraw_seconds": withdraw_seconds,
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
         "session_establish_timeout_seconds": session_establish_timeout_seconds,
         "restore_timeout_seconds": restore_timeout_seconds,
         "quiet_window_seconds": quiet_window_seconds,
@@ -429,6 +441,10 @@ def create_bgp_route_storm_step(
     }
     if any(value <= 0 for value in numeric_params.values()):
         raise ValueError("BGP route-storm numeric parameters must be positive")
+    if convergence_hard_timeout_seconds <= transition_timeout_seconds:
+        raise ValueError(
+            "convergence_hard_timeout_seconds must exceed transition_timeout_seconds"
+        )
     if extended_communities_per_route != 1:
         raise ValueError(
             "CICD-11 currently requires exactly one extended community pending "
@@ -2259,6 +2275,33 @@ def create_fpf_stsw_drain_and_reinject_steps(
     ]
 
 
+def create_bgp_lifecycle_convergence_step(
+    device_name: str,
+    expected_established_sessions: int,
+    parent_prefixes_to_ignore: t.Sequence[str],
+    convergence_hard_timeout_seconds: float,
+    convergence_poll_interval_seconds: float,
+    *,
+    require_initialized: bool = True,
+    convergence_soft_threshold_seconds: float | None = None,
+    description: str = "Observe exact BGP lifecycle convergence",
+) -> Step:
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "test_bgp_lifecycle_convergence",
+        "hostname": device_name,
+        "expected_established_sessions": expected_established_sessions,
+        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+        "require_initialized": require_initialized,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+    }
+    if convergence_soft_threshold_seconds is not None:
+        params["convergence_soft_threshold_seconds"] = (
+            convergence_soft_threshold_seconds
+        )
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_thread_cpu_monitoring_step(
     device_name: str,
     duration_minutes: int,
@@ -2268,6 +2311,12 @@ def create_thread_cpu_monitoring_step(
     enable_perf_profiling: bool = False,
     enable_offcpu_profiling: bool = False,
     enable_socket_monitoring: bool = False,
+    convergence_soft_threshold_seconds: float | None = None,
+    convergence_hard_timeout_seconds: float | None = None,
+    convergence_poll_interval_seconds: float | None = None,
+    expected_established_sessions: int | None = None,
+    parent_prefixes_to_ignore: t.Sequence[str] | None = None,
+    convergence_trigger_time_jq_var: str | None = None,
 ) -> Step:
     """
     Create a BGP++ thread CPU monitoring step.
@@ -2285,24 +2334,52 @@ def create_thread_cpu_monitoring_step(
     Returns:
         Step object for BGP++ thread CPU monitoring
     """
+    convergence_params = (
+        convergence_soft_threshold_seconds,
+        convergence_hard_timeout_seconds,
+        convergence_poll_interval_seconds,
+        expected_established_sessions,
+    )
+    convergence_enabled = any(value is not None for value in convergence_params)
+    if convergence_enabled and not all(
+        value is not None for value in convergence_params
+    ):
+        raise ValueError("adaptive convergence parameters must be supplied together")
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "test_bgp_thread_cpu_monitor_eos_bgp_plus_plus",
+        "hostname": device_name,
+        "duration_minutes": duration_minutes,
+        "interval_seconds": thread_cpu_monitoring_interval_seconds,
+        "thread_name_filter": thread_name_filter,
+        "enable_bgp_events": enable_bgp_events,
+        "enable_perf_profiling": enable_perf_profiling,
+        "enable_offcpu_profiling": enable_offcpu_profiling,
+        "enable_socket_monitoring": enable_socket_monitoring,
+    }
+    if convergence_enabled:
+        params.update(
+            {
+                "observe_lifecycle_convergence": True,
+                "convergence_soft_threshold_seconds": (
+                    convergence_soft_threshold_seconds
+                ),
+                "convergence_hard_timeout_seconds": (convergence_hard_timeout_seconds),
+                "convergence_poll_interval_seconds": (
+                    convergence_poll_interval_seconds
+                ),
+                "expected_established_sessions": expected_established_sessions,
+                "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore or ()),
+                "require_initialized": True,
+            }
+        )
+        if convergence_trigger_time_jq_var is not None:
+            params["convergence_trigger_time_jq_var"] = convergence_trigger_time_jq_var
+
     return Step(
         name=StepName.CUSTOM_STEP,
         description="Monitor BGP++ thread CPU during convergence",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "test_bgp_thread_cpu_monitor_eos_bgp_plus_plus",
-                    "hostname": device_name,
-                    "duration_minutes": duration_minutes,
-                    "interval_seconds": thread_cpu_monitoring_interval_seconds,
-                    "thread_name_filter": thread_name_filter,
-                    "enable_bgp_events": enable_bgp_events,
-                    "enable_perf_profiling": enable_perf_profiling,
-                    "enable_offcpu_profiling": enable_offcpu_profiling,
-                    "enable_socket_monitoring": enable_socket_monitoring,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -3805,6 +3882,56 @@ def create_set_peer_groups_policy_step(
     )
 
 
+def _validated_route_stability_params(
+    *,
+    expected_count: t.Optional[int],
+    min_count: t.Optional[int],
+    max_count: t.Optional[int],
+    convergence_enabled: bool,
+    duration_seconds: t.Optional[float],
+    hard_timeout_seconds: t.Optional[float],
+    poll_interval_seconds: t.Optional[float],
+) -> t.Dict[str, float]:
+    params = {
+        "stability_duration_seconds": duration_seconds,
+        "stability_hard_timeout_seconds": hard_timeout_seconds,
+        "stability_poll_interval_seconds": poll_interval_seconds,
+    }
+    values = tuple(params.values())
+    if not any(value is not None for value in values):
+        return {}
+    if (
+        duration_seconds is None
+        or hard_timeout_seconds is None
+        or poll_interval_seconds is None
+    ):
+        raise ValueError(
+            "stability_duration_seconds, stability_hard_timeout_seconds, and "
+            "stability_poll_interval_seconds must be provided together"
+        )
+    if convergence_enabled:
+        raise ValueError("convergence and stability observation are mutually exclusive")
+    if expected_count is None or min_count is not None or max_count is not None:
+        raise ValueError(
+            "stability observation requires expected_count and does not support "
+            "min_count or max_count"
+        )
+    duration = float(duration_seconds)
+    hard_timeout = float(hard_timeout_seconds)
+    poll_interval = float(poll_interval_seconds)
+    if duration <= 0 or poll_interval <= 0:
+        raise ValueError("stability duration and poll interval must be positive")
+    if hard_timeout <= duration:
+        raise ValueError(
+            "stability_hard_timeout_seconds must exceed stability_duration_seconds"
+        )
+    return {
+        "stability_duration_seconds": duration,
+        "stability_hard_timeout_seconds": hard_timeout,
+        "stability_poll_interval_seconds": poll_interval,
+    }
+
+
 def create_verify_received_routes_step(
     device_name: str,
     expected_count: t.Optional[int] = None,
@@ -3815,6 +3942,12 @@ def create_verify_received_routes_step(
     direction: str = "received",
     policy_type: str = "post_policy",
     description: t.Optional[str] = None,
+    convergence_soft_threshold_seconds: t.Optional[float] = None,
+    convergence_hard_timeout_seconds: t.Optional[float] = None,
+    convergence_poll_interval_seconds: t.Optional[float] = None,
+    stability_duration_seconds: t.Optional[float] = None,
+    stability_hard_timeout_seconds: t.Optional[float] = None,
+    stability_poll_interval_seconds: t.Optional[float] = None,
 ) -> Step:
     """
     Create a step to verify BGP received routes count from peers.
@@ -3833,6 +3966,12 @@ def create_verify_received_routes_step(
         direction: "received" or "advertised" (default: "received")
         policy_type: "pre_policy" or "post_policy" (default: "post_policy")
         description: Custom description for the step
+        convergence_soft_threshold_seconds: Optional exact-count convergence SLA
+        convergence_hard_timeout_seconds: Optional exact-count observation timeout
+        convergence_poll_interval_seconds: Optional exact-count polling interval
+        stability_duration_seconds: Optional continuous exact stability duration
+        stability_hard_timeout_seconds: Optional stability operational hard timeout
+        stability_poll_interval_seconds: Optional stability polling interval
 
     Returns:
         Step object for verifying BGP received routes count
@@ -3872,6 +4011,29 @@ def create_verify_received_routes_step(
 
     if max_count is not None:
         params_dict["max_count"] = max_count
+
+    convergence_params = {
+        "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+    }
+    params_dict.update(
+        {key: value for key, value in convergence_params.items() if value is not None}
+    )
+
+    params_dict.update(
+        _validated_route_stability_params(
+            expected_count=expected_count,
+            min_count=min_count,
+            max_count=max_count,
+            convergence_enabled=any(
+                value is not None for value in convergence_params.values()
+            ),
+            duration_seconds=stability_duration_seconds,
+            hard_timeout_seconds=stability_hard_timeout_seconds,
+            poll_interval_seconds=stability_poll_interval_seconds,
+        )
+    )
 
     return create_run_task_step(
         task_name="bgp_verify_received_routes",
@@ -4782,7 +4944,15 @@ def create_standard_setup_steps(
     return steps
 
 
-def create_bgp_restart_setup_steps(device_name: str) -> t.List[Step]:
+def create_bgp_restart_setup_steps(
+    device_name: str,
+    *,
+    start_with_active_peers: bool = False,
+    expected_established_sessions: int | None = None,
+    parent_prefixes_to_ignore: t.Sequence[str] = (),
+    readiness_hard_timeout_seconds: float = 600,
+    readiness_poll_interval_seconds: float = 5,
+) -> t.List[Step]:
     """
     Create setup steps specifically for BGP restart tests.
 
@@ -4792,11 +4962,29 @@ def create_bgp_restart_setup_steps(device_name: str) -> t.List[Step]:
     Returns:
         List of setup steps for BGP restart tests
     """
-    return create_standard_setup_steps(
+    steps = create_standard_setup_steps(
         device_name=device_name,
-        disable_all_device_groups=True,
+        disable_all_device_groups=not start_with_active_peers,
+        enable_all_device_groups=start_with_active_peers,
         enable_bgp_daemon=True,
     )
+    if start_with_active_peers:
+        if expected_established_sessions is None:
+            raise ValueError(
+                "expected_established_sessions is required for active-peer setup"
+            )
+        steps.append(
+            create_bgp_lifecycle_convergence_step(
+                device_name=device_name,
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                require_initialized=True,
+                convergence_hard_timeout_seconds=readiness_hard_timeout_seconds,
+                convergence_poll_interval_seconds=readiness_poll_interval_seconds,
+                description="Wait for exact steady-state BGP readiness",
+            )
+        )
+    return steps
 
 
 def create_bgp_instability_setup_steps(
@@ -4832,55 +5020,110 @@ def create_bgp_instability_setup_steps(
 
 
 def create_route_registry_prefix_list_setup_steps(
-    device_name: str, convergence_wait_seconds: int = 300
+    device_name: str,
+    convergence_wait_seconds: int = 300,
+    prefix_start_index: int = 0,
+    prefix_end_index: int = 100,
+    baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
+    expected_route_count: int | None = None,
+    convergence_soft_threshold_seconds: float | None = None,
+    convergence_hard_timeout_seconds: float | None = None,
+    convergence_poll_interval_seconds: float | None = None,
 ) -> t.List[Step]:
     """
     Create setup steps for BGP route registry prefix list runtime update testing.
 
-    These setup steps establish the baseline state before runtime policy updates:
-    First we create standard setup steps (enable all device groups, then start start bgp)
-    1. Wait for convergence.
-    2. Withdraw the 100 test prefixes (0-100) that will be used for verification
-    3. Load the baseline route filter policy without these prefixes
+    These setup steps establish the baseline state before runtime policy updates.
+    The adaptive path disables the test slice and loads the baseline policy
+    before peer startup, then polls the exact baseline count. Legacy callers
+    retain the original startup, fixed wait, withdrawal, and policy order.
 
     Args:
         device_name: Name of the device
         convergence_wait_seconds: Time to wait for BGP convergence (default: 5 minutes)
+        prefix_start_index: First runtime-update prefix index (inclusive)
+        prefix_end_index: Last runtime-update prefix index (exclusive)
+        baseline_policy_path: Route-filter policy that excludes the test slice
+        expected_route_count: Optional exact baseline count to observe
+        convergence_soft_threshold_seconds: Optional exact-count SLA
+        convergence_hard_timeout_seconds: Optional observation timeout
+        convergence_poll_interval_seconds: Optional polling interval
 
     Returns:
         List of setup steps for route registry prefix list runtime update tests
     """
-    steps = create_standard_setup_steps(
+    convergence_params = (
+        convergence_soft_threshold_seconds,
+        convergence_hard_timeout_seconds,
+        convergence_poll_interval_seconds,
+    )
+    convergence_enabled = any(value is not None for value in convergence_params)
+    if convergence_enabled and (
+        expected_route_count is None
+        or not all(value is not None for value in convergence_params)
+    ):
+        raise ValueError(
+            "expected_route_count and all convergence parameters must be "
+            "provided together"
+        )
+    standard_steps = create_standard_setup_steps(
         device_name=device_name,
         enable_all_device_groups=True,
         enable_bgp_daemon=True,
     )
-
-    steps.append(
-        create_longevity_step(
-            duration=convergence_wait_seconds,
-            description=f"Wait for BGP session establishment and convergence ({convergence_wait_seconds}s)",
-        )
+    default_policy_path = (
+        "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json"
+    )
+    withdraw_description = (
+        "Withdraw 100 prefixes (0-100) that will be tested for runtime updates"
+        if prefix_start_index == 0 and prefix_end_index == 100
+        else f"Withdraw {prefix_end_index - prefix_start_index} prefixes "
+        f"({prefix_start_index}-{prefix_end_index}) that will be tested for runtime updates"
+    )
+    policy_description = (
+        "Load baseline route filter policy without test prefixes "
+        "(RP state file 650.json)"
+        if baseline_policy_path == default_policy_path
+        else f"Load baseline route filter policy without test prefixes ({baseline_policy_path})"
     )
 
-    steps.append(
-        create_advertise_withdraw_prefixes_step(
-            device_name=device_name,
-            advertise=False,
-            prefix_pool_regex=".*EBGP.*",
-            prefix_start_index=0,
-            prefix_end_index=100,
-            description="Withdraw 100 prefixes (0-100) that will be tested for runtime updates",
-        )
+    withdraw_step = create_advertise_withdraw_prefixes_step(
+        device_name=device_name,
+        advertise=False,
+        prefix_pool_regex=".*EBGP.*",
+        prefix_start_index=prefix_start_index,
+        prefix_end_index=prefix_end_index,
+        description=withdraw_description,
+    )
+    baseline_policy_step = create_set_route_filter_step(
+        device_name=device_name,
+        config_path=baseline_policy_path,
+        description=policy_description,
     )
 
-    steps.append(
-        create_set_route_filter_step(
-            device_name=device_name,
-            config_path="taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
-            description="Load baseline route filter policy without test prefixes (RP state file 650.json)",
+    if convergence_enabled:
+        steps = [withdraw_step, baseline_policy_step, *standard_steps]
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=["EBGP"],
+                expected_count=expected_route_count,
+                convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
+                convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
+                convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
+                description=f"Observe exact baseline route-count convergence to {expected_route_count}",
+            )
         )
-    )
+    else:
+        steps = [
+            *standard_steps,
+            create_longevity_step(
+                duration=convergence_wait_seconds,
+                description=f"Wait for BGP session establishment and convergence ({convergence_wait_seconds}s)",
+            ),
+            withdraw_step,
+            baseline_policy_step,
+        ]
 
     return steps
 

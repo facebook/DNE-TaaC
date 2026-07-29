@@ -47,6 +47,7 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
     create_bgp_attribute_churn_step,
+    create_bgp_lifecycle_convergence_step,
     create_bgp_prefixes_med_value_step,
     create_bgp_route_storm_step,
     create_change_as_path_length_step,
@@ -70,6 +71,7 @@ from taac.steps.step_definitions import (
     create_multipath_nexthop_count_health_check_step,
     create_openr_route_action_step,
     create_randomize_prefix_local_preference_step,
+    create_record_jq_timestamp_step,
     create_regenerate_traffic_step,
     create_register_port_channel_min_link_percentage_patcher_step,
     create_register_speed_flip_patcher_step_v2,
@@ -126,6 +128,13 @@ def create_bgp_restart_test_stage(
     enable_perf_profiling: bool = False,
     enable_offcpu_profiling: bool = False,
     enable_socket_monitoring: bool = False,
+    reactivate_device_groups: bool = True,
+    adaptive_convergence: bool = False,
+    expected_established_sessions: int | None = None,
+    parent_prefixes_to_ignore: list[str] | None = None,
+    convergence_soft_threshold_seconds: float = 600,
+    convergence_hard_timeout_seconds: float = 1200,
+    convergence_poll_interval_seconds: float = 5,
 ) -> Stage:
     """
     Create a standard BGP restart test stage.
@@ -176,6 +185,10 @@ def create_bgp_restart_test_stage(
           * Phase-specific top functions reports
           * Starts from PEER_INFO_LOADED onwards (skips early init phases)
     """
+    if adaptive_convergence and expected_established_sessions is None:
+        raise ValueError(
+            "expected_established_sessions is required for adaptive convergence"
+        )
     return Stage(
         steps=[
             # Step 1: Disable BGP daemon
@@ -190,11 +203,16 @@ def create_bgp_restart_test_stage(
                 duration=sleep_after_disable_seconds,
                 description=f"Sleep for {sleep_after_disable_seconds} seconds",
             ),
-            # Step 3: Toggle all device groups back to active
-            create_ixia_device_group_toggle_step(
-                enable=True,
-                device_group_name_regex=device_group_regex,
-                description="Toggle all device groups back to active",
+            *(
+                [
+                    create_ixia_device_group_toggle_step(
+                        enable=True,
+                        device_group_name_regex=device_group_regex,
+                        description="Toggle all device groups back to active",
+                    )
+                ]
+                if reactivate_device_groups
+                else []
             ),
             # Step 4: Enable BGP daemon
             create_daemon_control_step(
@@ -226,23 +244,68 @@ def create_bgp_restart_test_stage(
                 [
                     create_thread_cpu_monitoring_step(
                         device_name=device_name,
-                        duration_minutes=convergence_wait_seconds // 60,
+                        duration_minutes=(
+                            (int(convergence_hard_timeout_seconds) + 59) // 60
+                            if adaptive_convergence
+                            else convergence_wait_seconds // 60
+                        ),
                         thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
                         thread_name_filter=thread_name_filter,
                         enable_bgp_events=enable_bgp_events,
                         enable_perf_profiling=enable_perf_profiling,
                         enable_offcpu_profiling=enable_offcpu_profiling,
                         enable_socket_monitoring=enable_socket_monitoring,
+                        convergence_soft_threshold_seconds=(
+                            convergence_soft_threshold_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        convergence_hard_timeout_seconds=(
+                            convergence_hard_timeout_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        convergence_poll_interval_seconds=(
+                            convergence_poll_interval_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        expected_established_sessions=(
+                            expected_established_sessions
+                            if adaptive_convergence
+                            else None
+                        ),
+                        parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                     )
                 ]
                 if enable_thread_cpu_monitoring
-                else [
-                    # If monitoring is disabled, just wait for convergence
-                    create_longevity_step(
-                        duration=convergence_wait_seconds,
-                        description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
-                    )
-                ]
+                else (
+                    [
+                        create_bgp_lifecycle_convergence_step(
+                            device_name=device_name,
+                            expected_established_sessions=(
+                                expected_established_sessions or 0
+                            ),
+                            parent_prefixes_to_ignore=(parent_prefixes_to_ignore or ()),
+                            convergence_soft_threshold_seconds=(
+                                convergence_soft_threshold_seconds
+                            ),
+                            convergence_hard_timeout_seconds=(
+                                convergence_hard_timeout_seconds
+                            ),
+                            convergence_poll_interval_seconds=(
+                                convergence_poll_interval_seconds
+                            ),
+                        )
+                    ]
+                    if adaptive_convergence
+                    else [
+                        create_longevity_step(
+                            duration=convergence_wait_seconds,
+                            description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
+                        )
+                    ]
+                )
             ),
         ],
     )
@@ -261,6 +324,12 @@ def create_cold_start_test_stage(
     enable_perf_profiling: bool = False,
     enable_offcpu_profiling: bool = False,
     enable_socket_monitoring: bool = False,
+    adaptive_convergence: bool = False,
+    expected_established_sessions: int | None = None,
+    parent_prefixes_to_ignore: list[str] | None = None,
+    convergence_soft_threshold_seconds: float = 600,
+    convergence_hard_timeout_seconds: float = 1200,
+    convergence_poll_interval_seconds: float = 5,
 ) -> Stage:
     """
     Create a BGP cold start test stage.
@@ -318,6 +387,10 @@ def create_cold_start_test_stage(
           * Phase-specific top functions reports
           * Starts from PEER_INFO_LOADED onwards (skips early init phases)
     """
+    if adaptive_convergence and expected_established_sessions is None:
+        raise ValueError(
+            "expected_established_sessions is required for adaptive convergence"
+        )
     return Stage(
         steps=[
             # Step 1: Disable BGP daemon
@@ -352,10 +425,25 @@ def create_cold_start_test_stage(
                     )
                 ),
             ),
-            # Step 5: Wait for EOR timer to expire
-            create_longevity_step(
-                duration=180,
-                description=f"Wait for BGP convergence ({180} seconds)",
+            *(
+                []
+                if adaptive_convergence
+                else [
+                    create_longevity_step(
+                        duration=180,
+                        description="Wait for BGP convergence (180 seconds)",
+                    )
+                ]
+            ),
+            *(
+                [
+                    create_record_jq_timestamp_step(
+                        var_name="convergence_trigger_time",
+                        description="Record IXIA peer-enable convergence trigger",
+                    )
+                ]
+                if adaptive_convergence
+                else []
             ),
             # Step 5: Toggle device groups (cold start trigger)
             create_ixia_device_group_toggle_step(
@@ -370,22 +458,71 @@ def create_cold_start_test_stage(
                 [
                     create_thread_cpu_monitoring_step(
                         device_name=device_name,
-                        duration_minutes=convergence_wait_seconds // 60,
+                        duration_minutes=(
+                            (int(convergence_hard_timeout_seconds) + 59) // 60
+                            if adaptive_convergence
+                            else convergence_wait_seconds // 60
+                        ),
                         thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
                         thread_name_filter=thread_name_filter,
                         enable_bgp_events=enable_bgp_events,
                         enable_perf_profiling=enable_perf_profiling,
                         enable_offcpu_profiling=enable_offcpu_profiling,
                         enable_socket_monitoring=enable_socket_monitoring,
+                        convergence_soft_threshold_seconds=(
+                            convergence_soft_threshold_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        convergence_hard_timeout_seconds=(
+                            convergence_hard_timeout_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        convergence_poll_interval_seconds=(
+                            convergence_poll_interval_seconds
+                            if adaptive_convergence
+                            else None
+                        ),
+                        expected_established_sessions=(
+                            expected_established_sessions
+                            if adaptive_convergence
+                            else None
+                        ),
+                        parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                        convergence_trigger_time_jq_var=(
+                            "convergence_trigger_time" if adaptive_convergence else None
+                        ),
                     )
                 ]
                 if enable_thread_cpu_monitoring
-                else [
-                    create_longevity_step(
-                        duration=convergence_wait_seconds,
-                        description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
-                    ),
-                ]
+                else (
+                    [
+                        create_bgp_lifecycle_convergence_step(
+                            device_name=device_name,
+                            expected_established_sessions=(
+                                expected_established_sessions or 0
+                            ),
+                            parent_prefixes_to_ignore=(parent_prefixes_to_ignore or ()),
+                            convergence_soft_threshold_seconds=(
+                                convergence_soft_threshold_seconds
+                            ),
+                            convergence_hard_timeout_seconds=(
+                                convergence_hard_timeout_seconds
+                            ),
+                            convergence_poll_interval_seconds=(
+                                convergence_poll_interval_seconds
+                            ),
+                        )
+                    ]
+                    if adaptive_convergence
+                    else [
+                        create_longevity_step(
+                            duration=convergence_wait_seconds,
+                            description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
+                        ),
+                    ]
+                )
             ),
         ],
     )
@@ -1767,6 +1904,7 @@ def create_bgp_ebb_attribute_churn_stage(
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     attribute_matrix: dict[str, dict[str, Any]],
+    convergence_hard_timeout_seconds: int = 300,
 ) -> Stage:
     """Create CICD-10 as one failure-safe, audited custom workflow."""
     return Stage(
@@ -1783,6 +1921,7 @@ def create_bgp_ebb_attribute_churn_stage(
                 cadence_seconds=cadence_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 transition_timeout_seconds=transition_timeout_seconds,
+                convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
                 reference_setup_timeout_seconds=reference_setup_timeout_seconds,
                 restore_timeout_seconds=restore_timeout_seconds,
                 quiet_window_seconds=quiet_window_seconds,
@@ -1817,6 +1956,7 @@ def create_bgp_ebb_route_storm_stage(
     as_path_length: int,
     communities_per_route: int,
     extended_communities_per_route: int,
+    convergence_hard_timeout_seconds: int = 300,
 ) -> Stage:
     """Create CICD-11 as one failure-safe, audited custom workflow."""
     return Stage(
@@ -1836,6 +1976,7 @@ def create_bgp_ebb_route_storm_stage(
                 withdraw_seconds=withdraw_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 transition_timeout_seconds=transition_timeout_seconds,
+                convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
                 session_establish_timeout_seconds=session_establish_timeout_seconds,
                 restore_timeout_seconds=restore_timeout_seconds,
                 quiet_window_seconds=quiet_window_seconds,
@@ -3097,6 +3238,11 @@ def create_route_registry_runtime_update_stage(
     prefix_end_index: int = 100,
     soak_time_seconds: int = 600,
     baseline_route_count: int = 650,
+    convergence_soft_threshold_seconds: float | None = None,
+    convergence_hard_timeout_seconds: float | None = None,
+    convergence_poll_interval_seconds: float | None = None,
+    expanded_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
+    baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
 ) -> Stage:
     """
     Create a test stage to verify route registry runtime update behavior for prefix-lists.
@@ -3105,8 +3251,8 @@ def create_route_registry_runtime_update_stage(
     1. Starting to advertise 100 additional prefixes (per-AFI) from FAUU to DUT
     2. Verifying these prefixes are denied by prefix-list on EB-FA peer-groups
     3. Add these 100 prefixes to prefix-list using setRouteFilterPolicy
-    4. Soak for stability verification
-    5. Verify route count increased to baseline + added prefixes (e.g., 750)
+    4. Optionally observe exact-count convergence after the policy transition
+    5. Soak for stability verification
     6. Remove the 100 prefixes from prefix-list using setRouteFilterPolicy
     7. Soak for stability verification
     8. Verify route count returned to baseline (e.g., 650)
@@ -3119,10 +3265,30 @@ def create_route_registry_runtime_update_stage(
         prefix_end_index: Ending index for the additional prefixes (default: 100)
         soak_time_seconds: Soak duration for BGP stability verification (default: 600 / 10 minutes)
         baseline_route_count: Expected baseline route count (default: 650)
+        convergence_soft_threshold_seconds: Optional exact-count SLA
+        convergence_hard_timeout_seconds: Optional observation timeout
+        convergence_poll_interval_seconds: Optional polling interval
+        expanded_policy_path: Route-filter policy that includes the test slice
+        baseline_policy_path: Route-filter policy that excludes the test slice
 
     Returns:
         Stage object for route registry runtime update test
     """
+    convergence_params = (
+        convergence_soft_threshold_seconds,
+        convergence_hard_timeout_seconds,
+        convergence_poll_interval_seconds,
+    )
+    if any(value is not None for value in convergence_params) and not all(
+        value is not None for value in convergence_params
+    ):
+        raise ValueError(
+            "convergence_soft_threshold_seconds, "
+            "convergence_hard_timeout_seconds, and "
+            "convergence_poll_interval_seconds must be provided together"
+        )
+    convergence_enabled = all(value is not None for value in convergence_params)
+    added_route_count = baseline_route_count + (prefix_end_index - prefix_start_index)
     steps = []
 
     # Step 1: Start advertising additional prefixes (per-AFI) from FAUU to DUT
@@ -3144,7 +3310,8 @@ def create_route_registry_runtime_update_stage(
         create_verify_received_routes_step(
             device_name=device_name,
             descriptions_to_check=[ebgp_peer_description],
-            max_count=baseline_route_count,
+            expected_count=(baseline_route_count if convergence_enabled else None),
+            max_count=(None if convergence_enabled else baseline_route_count),
             description=f"Verify {prefix_end_index - prefix_start_index} additional prefixes are denied by prefix-list on {ebgp_peer_description} peers",
         ),
     )
@@ -3153,56 +3320,97 @@ def create_route_registry_runtime_update_stage(
     steps.append(
         create_set_route_filter_step(
             device_name=device_name,
-            config_path="taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
-            description=f"Add {prefix_end_index - prefix_start_index} prefixes to prefix-list using setRouteFilterPolicy (750 config)",
+            config_path=expanded_policy_path,
+            description=f"Add {prefix_end_index - prefix_start_index} prefixes to prefix-list using setRouteFilterPolicy ({added_route_count} config)",
         ),
     )
 
-    # Step 4: Soak for stability verification
-    steps.append(
-        create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Soak for {soak_time_seconds} seconds with all BGP sessions in Established state",
-        ),
-    )
+    if convergence_enabled:
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=[ebgp_peer_description],
+                expected_count=added_route_count,
+                convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
+                convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
+                convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
+                description=f"Observe exact route-count convergence to {added_route_count} after adding prefixes to the prefix-list",
+            ),
+        )
 
-    # Step 5: Verify route count increased to baseline + added prefixes
+    # Continuously verify exact route and session stability after convergence.
     steps.append(
         create_verify_received_routes_step(
             device_name=device_name,
             descriptions_to_check=[ebgp_peer_description],
-            expected_count=baseline_route_count
-            + (prefix_end_index - prefix_start_index),
-            description=f"Verify {prefix_end_index - prefix_start_index} prefixes were accepted after adding to prefix-list on {ebgp_peer_description} peers",
+            expected_count=added_route_count,
+            stability_duration_seconds=soak_time_seconds,
+            stability_hard_timeout_seconds=soak_time_seconds + 30,
+            stability_poll_interval_seconds=5,
+            description=(
+                f"Continuously verify {added_route_count} routes and stable BGP "
+                f"sessions for {soak_time_seconds} seconds after policy expansion"
+            ),
         ),
     )
+
+    if not convergence_enabled:
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=[ebgp_peer_description],
+                expected_count=added_route_count,
+                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were accepted after adding to prefix-list on {ebgp_peer_description} peers",
+            ),
+        )
 
     # Step 6: Remove the prefixes from prefix-list using setRouteFilterPolicy
     steps.append(
         create_set_route_filter_step(
             device_name=device_name,
-            config_path="taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
-            description=f"Remove {prefix_end_index - prefix_start_index} prefixes from prefix-list using setRouteFilterPolicy (650 config)",
+            config_path=baseline_policy_path,
+            description=f"Remove {prefix_end_index - prefix_start_index} prefixes from prefix-list using setRouteFilterPolicy ({baseline_route_count} config)",
         ),
     )
 
-    # Step 7: Soak for stability verification
-    steps.append(
-        create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Final soak for {soak_time_seconds} seconds with all BGP sessions in Established state",
-        ),
-    )
+    if convergence_enabled:
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=[ebgp_peer_description],
+                expected_count=baseline_route_count,
+                convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
+                convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
+                convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
+                description=f"Observe exact route-count convergence to {baseline_route_count} after removing prefixes from the prefix-list",
+            ),
+        )
 
-    # Step 8: Verify route count returned to baseline
+    # Continuously verify exact route and session stability after convergence.
     steps.append(
         create_verify_received_routes_step(
             device_name=device_name,
             descriptions_to_check=[ebgp_peer_description],
             expected_count=baseline_route_count,
-            description=f"Verify {prefix_end_index - prefix_start_index} prefixes were denied after removing from prefix-list on {ebgp_peer_description} peers",
+            stability_duration_seconds=soak_time_seconds,
+            stability_hard_timeout_seconds=soak_time_seconds + 30,
+            stability_poll_interval_seconds=5,
+            description=(
+                f"Continuously verify {baseline_route_count} routes and stable BGP "
+                f"sessions for {soak_time_seconds} seconds after policy contraction"
+            ),
         ),
     )
+
+    if not convergence_enabled:
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=[ebgp_peer_description],
+                expected_count=baseline_route_count,
+                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were denied after removing from prefix-list on {ebgp_peer_description} peers",
+            ),
+        )
 
     # Step 9: Verify all BGP sessions are still established
     # This catches any actual session flaps that occurred during the test,

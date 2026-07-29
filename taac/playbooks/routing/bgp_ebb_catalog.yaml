@@ -258,7 +258,7 @@ validation_chains:
   - id: daemon_restart
     check_profile: DAEMON_RESTART
     implementation: get_profile_checks(CheckProfile.DAEMON_RESTART)
-    phases: [pre.standard_bgp, post.restart_recovery, snapshot.skip_uptime]
+    phases: [pre.standard_bgp, post.restart_recovery, snapshot.skip_flap_and_uptime]
   - id: cold_start
     check_profile: COLD_START
     implementation: get_profile_checks(CheckProfile.COLD_START)
@@ -327,7 +327,10 @@ entries:
         coverage: Restart BGP++ and verify full session and control-plane recovery.
     required_topology: ebb_full_scale
     purpose: Detect restart regressions in service recovery, convergence, and resource health.
-    stimulus: Restart the BGP++ daemon, restore IXIA peers, and wait 540 seconds for convergence.
+    stimulus: >-
+      Establish the exact active-peer baseline, restart BGP++ without
+      retoggling IXIA, and observe exact lifecycle recovery with a 600-second
+      soft SLA, 1,200-second hard timeout, and 5-second polling.
     scale: Canonical full-scale EBB peer and route population.
     blocking_signals:
       - Restart profile prechecks and postchecks pass.
@@ -342,23 +345,26 @@ entries:
           gap: null
         - spec: Expected BGP sessions recover and remain established.
           coverage: implemented
-          implemented_by: [post.restart_recovery, snapshot.skip_uptime]
+          implemented_by: [post.restart_recovery, snapshot.skip_flap_and_uptime]
           gap: null
         - spec: Snapshot checks show no unexpected state drift or core dump.
           coverage: implemented
-          implemented_by: [snapshot.skip_uptime]
+          implemented_by: [snapshot.skip_flap_and_uptime]
           gap: null
-      non_chain_validations: []
-    expected_runtime: Approximately 34 minutes including shared topology setup.
+      non_chain_validations:
+        - Setup requires the exact non-BGP-MON session count and the BGP INITIALIZED event before the restart.
+        - The restart stage records the exact lifecycle convergence outcome and fails late or missing convergence after completing observation.
+    expected_runtime: Shared topology setup plus adaptive restart recovery, bounded at 20 minutes of stage observation.
     cadence: Daily.
     enforcement: blocking
     triage_signals:
       - BGP service lifecycle and peer-state logs.
-      - Convergence timeline and failed peer identities.
+      - Exact session count, lifecycle events, and convergence outcome.
       - CPU and memory periodic-task samples.
     artifacts:
       - TAAC step and health-check results.
       - BGP service logs and core-dump snapshot.
+      - Structured lifecycle convergence record.
       - CPU and memory time series.
     qualification_delta: Daily CI performs one representative restart rather than the full qualification campaign.
 
@@ -372,7 +378,10 @@ entries:
         coverage: Start BGP++ at full scale and verify peer establishment and convergence.
     required_topology: ebb_full_scale
     purpose: Detect cold-start regressions in session fan-in, EOR handling, and convergence.
-    stimulus: Start BGP++ without active peers, enable all peer groups together, wait about 500 seconds, and collect thread CPU.
+    stimulus: >-
+      Start BGP++ without active peers, use the synchronized IXIA peer enable
+      as T0, and collect thread CPU while observing exact lifecycle convergence
+      with a 600-second soft SLA, 1,200-second hard timeout, and 5-second polling.
     scale: Canonical full-scale EBB peer and route population.
     blocking_signals:
       - Cold-start profile checks pass.
@@ -395,17 +404,18 @@ entries:
           gap: CPU and memory are periodic tasks, not playbook-level health checks.
       non_chain_validations:
         - Standard CPU and memory periodic tasks run during the workload.
-    expected_runtime: About 10 minutes of stimulus plus shared topology setup.
+        - The adaptive CPU step stops on convergence, uploads diagnostics, and then fails late or missing convergence.
+    expected_runtime: Shared topology setup plus adaptive cold-start recovery, bounded at 20 minutes of stage observation.
     cadence: Daily.
     enforcement: blocking
     triage_signals:
       - EOR and convergence timeline.
-      - Per-thread CPU and peer-establishment failures.
+      - Exact session count, lifecycle events, and per-thread CPU.
       - BGP startup logs.
     artifacts:
       - TAAC health-check results.
       - BGP startup logs and session snapshots.
-      - Thread CPU collection.
+      - Thread CPU collection and structured lifecycle convergence record.
     qualification_delta: Daily CI uses the conveyor topology and one synchronized cold-start event.
 
   - id: CICD-03

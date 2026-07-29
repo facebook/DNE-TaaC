@@ -117,6 +117,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             check_ibgp_pnh=False,
             expected_peer_identity={"2401:db00::a": "2401:db00::b"},
             parent_prefixes_to_ignore=["10.0.0.0/24"],
+            expected_established_sessions=42,
             exclude_bgp_mon=True,
         )
         checks = get_profile_checks(CheckProfile.DAEMON_RESTART, ctx)
@@ -127,6 +128,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
                 peergroup_ibgp_v6="PG_IBGP_V6",
                 peergroup_ibgp_v4="PG_IBGP_V4",
                 precheck_thresholds=None,
+                expected_established_sessions=42,
                 cpu_baseline=8.0,
                 check_ibgp_pnh=False,
                 exclude_bgp_mon=True,
@@ -136,6 +138,8 @@ class CheckProfileRegistryTest(unittest.TestCase):
             checks.postchecks,
             create_standard_postchecks(
                 postcheck_thresholds=None,
+                convergence_hard_timeout_seconds=1200,
+                expected_established_session_count=42,
                 expected_restarted_services=["Bgp"],
                 restart_start_time_jq_var="daemon_restart_time",
                 exclude_bgp_mon=True,
@@ -144,6 +148,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
         self.assertEqual(
             checks.snapshot_checks,
             create_standard_snapshot_checks(
+                skip_flap_check=True,
                 skip_uptime_check=True,
                 expected_peer_identity={"2401:db00::a": "2401:db00::b"},
                 parent_prefixes_to_ignore=["10.0.0.0/24"],
@@ -161,6 +166,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             cpu_baseline=8.0,
             check_ibgp_pnh=False,
             expected_peer_identity={"2401:db00::a": "2401:db00::b"},
+            expected_established_sessions=42,
             exclude_bgp_mon=True,
             fail_on_eor_expired=False,
         )
@@ -181,7 +187,9 @@ class CheckProfileRegistryTest(unittest.TestCase):
             checks.postchecks,
             create_standard_postchecks(
                 postcheck_thresholds=None,
+                convergence_hard_timeout_seconds=1200,
                 fail_on_eor_expired=False,
+                expected_established_session_count=42,
                 expected_restarted_services=["Bgp"],
                 restart_start_time_jq_var="daemon_restart_time",
                 exclude_bgp_mon=True,

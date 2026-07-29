@@ -53,6 +53,7 @@ from taac.test_as_a_config.types import TestConfig
 
 _LONGEVITY_DURATION_SECONDS = 14400
 _NEXTHOP_GROUP_THRESHOLD = 100
+_RUNTIME_UPDATE_EBGP_PREFIX_COUNT = 850
 
 
 def _openr_owner_kv_link(physical_inventory: PhysicalInventory) -> dict:
@@ -165,15 +166,19 @@ def _get_bgp_ebb_full_scale_playbooks(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
+            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
         ),
         get_bgp_ebb_cold_start_playbook(
             device_name=device_name,
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
+            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
         ),
         get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name=device_name,
@@ -269,10 +274,16 @@ def create_bgp_ebb_full_scale_test_config(
     enable_attribute_churn = not playbooks_selected or (
         "bgp_ebb_attribute_churn_playbook" in playbooks_selected
     )
+    enable_runtime_update = not playbooks_selected or (
+        "bgp_ebb_route_registry_runtime_update_playbook" in playbooks_selected
+    )
     compiled = (
         ebb_full_scale_topology(
             openr_mode=openr_mode,
             enable_attribute_churn=enable_attribute_churn,
+            ebgp_prefix_count=(
+                _RUNTIME_UPDATE_EBGP_PREFIX_COUNT if enable_runtime_update else 750
+            ),
         )
         .bind_to_inventory(
             physical_inventory=physical_inventory,

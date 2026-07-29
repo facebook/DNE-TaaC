@@ -59,6 +59,8 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCheck
 
+_LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS = 1200
+
 
 class CheckProfile(enum.Enum):
     """Named check profiles. Add one entry per de-facto test profile and route
@@ -167,24 +169,32 @@ class ProfileChecks(t.NamedTuple):
 def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
     """BGP/agent daemon restart: convergence ON, restart-aware postcheck, strict
     EOR (inherits create_standard_postchecks default fail_on_eor_expired=True),
-    snapshot skips uptime (sessions are expected to have just come back up).
+    snapshot skips flap and uptime checks because sessions intentionally reset.
     """
     return ProfileChecks(
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
             peergroup_ibgp_v4=ctx.peergroup_ibgp_v4,
             precheck_thresholds=ctx.precheck_thresholds,
+            expected_established_sessions=(ctx.expected_established_sessions or 0),
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
         postchecks=create_standard_postchecks(
             postcheck_thresholds=ctx.postcheck_thresholds,
+            convergence_hard_timeout_seconds=(
+                _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
+            ),
+            expected_established_session_count=(
+                ctx.expected_established_sessions or None
+            ),
             expected_restarted_services=["Bgp"],
             restart_start_time_jq_var="daemon_restart_time",
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
         snapshot_checks=create_standard_snapshot_checks(
+            skip_flap_check=True,
             skip_uptime_check=True,
             expected_peer_identity=ctx.expected_peer_identity,
             parent_prefixes_to_ignore=ctx.parent_prefixes_to_ignore,
@@ -208,7 +218,13 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
         ),
         postchecks=create_standard_postchecks(
             postcheck_thresholds=ctx.postcheck_thresholds,
+            convergence_hard_timeout_seconds=(
+                _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
+            ),
             fail_on_eor_expired=ctx.fail_on_eor_expired,
+            expected_established_session_count=(
+                ctx.expected_established_sessions or None
+            ),
             expected_restarted_services=["Bgp"],
             restart_start_time_jq_var="daemon_restart_time",
             exclude_bgp_mon=ctx.exclude_bgp_mon,

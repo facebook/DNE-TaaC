@@ -96,6 +96,7 @@ def get_bgp_ebb_daemon_restart_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
+    expected_established_sessions: int,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     cpu_baseline: float = 8.0,
     memory_threshold: int = Gigabyte.GIG_5.value,
@@ -165,12 +166,18 @@ def get_bgp_ebb_daemon_restart_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
         ),
     )
     return Playbook(
         name="bgp_ebb_daemon_restart_playbook",
-        setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
+        setup_steps=create_bgp_restart_setup_steps(
+            device_name=device_name,
+            start_with_active_peers=True,
+            expected_established_sessions=expected_established_sessions,
+            parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+        ),
         prechecks=restart_checks.prechecks,
         postchecks=restart_checks.postchecks,
         snapshot_checks=restart_checks.snapshot_checks,
@@ -188,6 +195,11 @@ def get_bgp_ebb_daemon_restart_playbook(
                 enable_offcpu_profiling=enable_offcpu_profiling,
                 enable_perf_profiling=enable_perf_profiling,
                 enable_bgp_events=enable_bgp_events,
+                enable_socket_monitoring=enable_socket_monitoring,
+                reactivate_device_groups=False,
+                adaptive_convergence=True,
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             ),
         ],
     )
@@ -197,6 +209,7 @@ def get_bgp_ebb_cold_start_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
+    expected_established_sessions: int,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     cpu_baseline: float = 8.0,
     memory_threshold: int = Gigabyte.GIG_5.value,
@@ -213,6 +226,7 @@ def get_bgp_ebb_cold_start_playbook(
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
+    parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
@@ -277,6 +291,7 @@ def get_bgp_ebb_cold_start_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
+            expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
             fail_on_eor_expired=fail_on_eor_expired,
         ),
@@ -303,6 +318,9 @@ def get_bgp_ebb_cold_start_playbook(
                 enable_perf_profiling=enable_perf_profiling,
                 enable_bgp_events=enable_bgp_events,
                 enable_socket_monitoring=enable_socket_monitoring,
+                adaptive_convergence=True,
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             ),
         ],
     )
@@ -669,8 +687,12 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     memory_terminate_on_error: bool = False,
     ebgp_peer_description: str = "EBGP",
     prefix_pool_regex: str = ".*EBGP.*",
-    soak_time_seconds: int = 120,
-    expected_route_count: int = 650,
+    soak_time_seconds: int = 600,
+    expected_route_count: int = 750,
+    runtime_prefix_start_index: int = 750,
+    runtime_prefix_end_index: int = 850,
+    baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
+    expanded_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_850.json",
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
@@ -698,8 +720,12 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         memory_terminate_on_error: Terminate test on memory threshold breach
         ebgp_peer_description: Description substring to match EBGP peers (default: "EBGP")
         prefix_pool_regex: Regex to match prefix pool names (default: ".*EBGP.*")
-        soak_time_seconds: Soak duration for BGP stability (default: 120s)
-        expected_route_count: Expected baseline eBGP route count (default: 650)
+        soak_time_seconds: Soak duration for BGP stability (default: 600s)
+        expected_route_count: Expected baseline eBGP route count (default: 750)
+        runtime_prefix_start_index: First test prefix index (default: 750)
+        runtime_prefix_end_index: Last test prefix index (default: 850)
+        baseline_policy_path: Policy that accepts only the baseline route set
+        expanded_policy_path: Policy that also accepts the runtime-update slice
         precheck_thresholds: Custom precheck thresholds (uses defaults if None)
         postcheck_thresholds: Custom postcheck thresholds (uses defaults if None)
 
@@ -729,7 +755,14 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     return Playbook(
         name="bgp_ebb_route_registry_runtime_update_playbook",
         setup_steps=create_route_registry_prefix_list_setup_steps(
-            device_name=device_name
+            device_name=device_name,
+            prefix_start_index=runtime_prefix_start_index,
+            prefix_end_index=runtime_prefix_end_index,
+            baseline_policy_path=baseline_policy_path,
+            expected_route_count=expected_route_count,
+            convergence_soft_threshold_seconds=60,
+            convergence_hard_timeout_seconds=300,
+            convergence_poll_interval_seconds=5,
         ),
         prechecks=runtime_update_checks.prechecks,
         postchecks=runtime_update_checks.postchecks,
@@ -745,7 +778,15 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 device_name=device_name,
                 ebgp_peer_description=ebgp_peer_description,
                 prefix_pool_regex=prefix_pool_regex,
+                prefix_start_index=runtime_prefix_start_index,
+                prefix_end_index=runtime_prefix_end_index,
                 soak_time_seconds=soak_time_seconds,
+                baseline_route_count=expected_route_count,
+                convergence_soft_threshold_seconds=60,
+                convergence_hard_timeout_seconds=300,
+                convergence_poll_interval_seconds=5,
+                expanded_policy_path=expanded_policy_path,
+                baseline_policy_path=baseline_policy_path,
             )
         ],
         cleanup_steps=[
@@ -753,14 +794,14 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 device_name=device_name,
                 advertise=True,
                 prefix_pool_regex=prefix_pool_regex,
-                prefix_start_index=0,
-                prefix_end_index=100,
-                description="Cleanup: Re-advertise 100 test prefixes (0-100) so next playbook has full prefix pool",
+                prefix_start_index=runtime_prefix_start_index,
+                prefix_end_index=runtime_prefix_end_index,
+                description=f"Cleanup: Re-advertise {runtime_prefix_end_index - runtime_prefix_start_index} test prefixes ({runtime_prefix_start_index}-{runtime_prefix_end_index}) so next playbook has the full prefix pool",
             ),
             create_set_route_filter_step(
                 device_name=device_name,
-                config_path="taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
-                description="Cleanup: Restore permissive route filter policy (750.json) so next playbook receives all prefixes",
+                config_path=expanded_policy_path,
+                description="Cleanup: Restore permissive route filter policy so the next playbook receives all prefixes",
             ),
         ],
     )
