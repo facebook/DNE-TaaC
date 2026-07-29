@@ -16,6 +16,37 @@ Smoke-tested via [facebook/fboss](https://github.com/facebook/fboss)'s public Do
 
 That single command builds the FBOSS CentOS base image if missing, compiles the full dep tree (folly, fizz, wangle, mvfst, fbthrift), builds TAAC, and produces `fboss-taac` — a self-contained image with all transitive deps baked in.
 
+### Validating a change
+
+To build *and* verify in one step — the entry point CI and contributors should use:
+
+```bash
+# Build the image, then run unit tests + smoke test against it
+./scripts/validate.sh
+```
+
+Run it with no arguments and it needs no registry, no credentials, and no host-side
+state beyond Docker. Useful variants:
+
+```bash
+./scripts/validate.sh --skip-smoke              # unit tests only, skip the smoke test
+./scripts/validate.sh --skip-tests              # build the image, run no tests
+./scripts/validate.sh --pull --image IMAGE      # test a prebuilt image instead of building one
+./scripts/validate.sh --dry-run                 # print the commands, execute nothing
+```
+
+Anything after `--` is forwarded verbatim to pytest, so pytest's own selection flags
+work unchanged — `-k` filters by test name, for example:
+
+```bash
+./scripts/validate.sh -- -k retry               # run only tests whose name matches "retry"
+./scripts/validate.sh -- taac/runner/tests/ -v  # run one directory, verbosely
+```
+
+`validate.sh` composes the two scripts either side of it — `docker/build-taac-image.sh`
+to acquire an image and `scripts/run_tests.sh` to test one — so either can still be
+driven directly when you want just one half.
+
 The image's entrypoint sets `PYTHONPATH` and `LD_LIBRARY_PATH` automatically, so vendors can `docker run --rm fboss-taac python3 ...` with no host-side state. See [`docker/README.md`](docker/README.md) for the build-flow diagram and layer-cache contract.
 
 For iterative work on TAAC source or thrift schemas in a bind-mounted workspace — no image rebuild required — see the in-container iteration section in [`docker/README.md`](docker/README.md) (Python source edits work via `PYTHONPATH`; thrift edits use the baked-in `taac-regen-thrift` helper).
