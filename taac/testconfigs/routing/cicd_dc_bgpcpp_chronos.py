@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP-DC chronos_node CICD catalog (Wave 3B).
+"""BGP-DC chronos_node CICD lifecycle bindings (Wave 3B).
 
 Sole source of the four BGP-DC chronos_node bindings scheduled on the
 CICD conveyor. Each binding calls

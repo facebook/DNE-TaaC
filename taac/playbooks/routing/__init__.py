@@ -1,16 +1,10 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""Routing playbook factories package — single re-export point.
+"""Routing Playbook package discovery hook.
 
-Testconfig factories under ``testconfigs/routing/factories/`` import
-playbook factories from this package root, never from a domain file
-directly. See README.md §6.
-
-Force-import the domain modules + subpackages so downstream force-import
-via ``import neteng.test_infra.dne.taac.playbooks.routing`` (used by
-``tests/test_no_inline_playbook_construction.py``) reaches every playbook
-factory module and their ``Playbook(...)`` construction sites get
-registered by the gate test.
+Force-import domain modules and subpackages so construction-gate tests reach
+every routing ``Playbook(...)`` site. Consumers import the owning module or
+subpackage directly; this initializer is not a root-level symbol facade.
 """
 
 from taac.playbooks.routing import (  # noqa: F401

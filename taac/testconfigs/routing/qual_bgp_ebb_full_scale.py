@@ -6,14 +6,16 @@ Wave 5E.2 -- migrates the 3 thin wrappers previously living at
 ``testconfigs/routing/ebb/eb01_arista_mimic_ebb_test_full_scale_without_open_r_test_config.py``,
 ``testconfigs/routing/ebb/eb03_arista_mimic_ebb_test_full_scale_with_open_r_test_config.py``
 and ``testconfigs/routing/ebb/eb04_arista_mimic_ebb_test_full_scale_with_open_r_test_config.py``
-into this catalog. Each ``TestConfig.name`` string is grandfathered from
-the legacy wrapper so the golden manifest hash is byte-wise identical.
+into this qualification lifecycle binding module. Each ``TestConfig.name``
+string is grandfathered from the legacy wrapper so the golden manifest hash is
+byte-wise identical.
 
 The shared/generic ``ARISTA_MIMIC_EBB_TEST_FULL_SCALE`` sibling targets
 the ``JSW002_M001_SNC1`` production physical_inventory (usage=adhoc) and lives in
 ``adhoc_bgp_ebb_full_scale.py``.
 
-External consumers import via ``testconfigs.routing`` root; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

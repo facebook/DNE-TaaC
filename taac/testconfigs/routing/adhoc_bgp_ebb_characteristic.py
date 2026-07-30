@@ -6,10 +6,11 @@ Re-homed here after D111520998 consolidated ``cicd_ebb_int_tc.py`` down to the
 8 conveyor-scheduled configs. The bag010 egress peer-scale (perf-scaling case1)
 sweep is runnable via the Netcastle CLI (``--test-config``) but is not (yet)
 wired into a ``dne_routing`` conveyor node, so it belongs in this ad-hoc
-catalog rather than in ``cicd_ebb_int_tc.py`` (which is now the scheduled-only
-source of truth).
+lifecycle binding module rather than in ``cicd_ebb_int_tc.py`` (which is now
+the scheduled-only source of truth).
 
-External consumers import from this member module directly; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

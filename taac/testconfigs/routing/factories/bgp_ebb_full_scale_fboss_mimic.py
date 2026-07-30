@@ -7,7 +7,7 @@ Thin ``(physical_inventory, *, name, ...) -> TestConfig`` shims around the legac
 ``test_config_for_bgp_plus_plus_ebb_with_bgp_mon`` factories in
 ``ebb/fboss_ebb_scale_test_config.py``. Wave 5E.4 migrates the 4
 ``*single_node_topology_mimic_ebb_test_full_scale*`` wrappers previously
-living under ``testconfigs/routing/ebb/`` into the Wave-5 catalog framework.
+living under ``testconfigs/routing/ebb/`` into the Wave-5 lifecycle framework.
 
 Two entry points:
 

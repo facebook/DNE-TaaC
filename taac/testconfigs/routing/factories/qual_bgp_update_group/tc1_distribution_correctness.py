@@ -10,7 +10,7 @@ dispatches internally on ``physical_inventory.device_name``.
 Golden regen for ``BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG``
 is EXPECTED and legitimate: the former empty-playbook TestConfig is
 replaced by a TestConfig that actually wires the 2.1.1 playbook. The
-eb03 catalog constant remains byte-wise identical.
+eb03 lifecycle constant remains byte-wise identical.
 
 The bag conveyor topology builder is re-used by tc7 (sustained link flap)
 and tc9 (edge cases), so ``build_bag_conveyor_test_config`` is a public
@@ -174,7 +174,7 @@ def build_bag_conveyor_test_config(
     DUT-agnostic across the bag010/011/012/013 EBB conveyor nodes: every
     value is read from ``physical_inventory`` (device_name, dut_bgp_as, ixia_ports,
     bgpcpp_configerator_path), so cloning to a new bag node is a one-line
-    catalog change. Renamed from ``build_bag013_conveyor_test_config``
+    lifecycle-binding change. Renamed from ``build_bag013_conveyor_test_config``
     (formerly bag013-hardcoded) during the tc9 edge-cases work;
     behavior-preserving, so existing bag013 goldens stay byte-identical.
     """
@@ -566,9 +566,9 @@ def create_bgp_ug_distribution_correctness_test_config(
     admin/password auth + mock device info; bag013 is a production EBB with
     OpenR route injection + Port-Channel).
 
-    Golden regen for the bag013 catalog constant is EXPECTED: pre-Wave-6
+    Golden regen for the bag013 lifecycle constant is EXPECTED: pre-Wave-6
     the bag013 constant returned an empty-playbook TestConfig; Wave 6
-    wires the 2.1.1 playbook so the catalog name matches the actual
+    wires the 2.1.1 playbook so the TestConfig name matches the actual
     behavior. eb03 golden hash is byte-wise identical.
     """
     if physical_inventory.device_name == "eb03.lab.ash6":

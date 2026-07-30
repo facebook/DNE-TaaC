@@ -1,11 +1,12 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""EBB integration TestConfigs scheduled on the ``dne_routing`` conveyor.
+"""EBB CICD lifecycle bindings scheduled on the ``dne_routing`` conveyor.
 
-The catalog contains two stages across four BAG devices. Stage 1 partitions the
-canonical 16 full-scale playbooks into four runtime-balanced groups. Stage 2
-runs one scale-and-characteristic workflow per device. Every config explicitly
-uses standalone OpenR and update groups.
+The lifecycle layout contains two stages across four BAG devices. Stage 1
+partitions the canonical 16 full-scale Playbooks into four runtime-balanced
+groups. Stage 2 runs one scale-and-characteristic workflow per device. Every
+config explicitly uses standalone OpenR and update groups. Catalog governance
+lives in ``catalogs/routing/bgp_ebb_catalog.yaml``.
 """
 
 from taac.abstractions.physical_inventory import (

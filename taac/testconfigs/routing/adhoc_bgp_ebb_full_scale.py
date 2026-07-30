@@ -5,8 +5,8 @@
 Wave 5E.2 -- migrates the shared/generic mimic-full-scale wrapper
 previously living at
 ``testconfigs/routing/ebb/arista_mimic_ebb_test_full_scale_test_config.py``
-into this catalog. ``TestConfig.name`` preserved verbatim so the golden
-manifest hash is byte-wise identical.
+into this ad-hoc lifecycle binding module. ``TestConfig.name`` is preserved
+verbatim so the golden manifest hash is byte-wise identical.
 
 Wave 5E.4 -- appends 4 FBOSS EBB single-node ``mimic`` full-scale
 wrappers previously living at
@@ -18,7 +18,8 @@ patcher variants) rather than the Arista mimic factory used by 5E.2.
 The 3 lab-box siblings (eb01/eb03/eb04) live in
 ``qual_bgp_ebb_full_scale.py`` since they target ``qual``-usage physical inventories.
 
-External consumers import via ``testconfigs.routing`` root; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

@@ -2,14 +2,15 @@
 # pyre-unsafe
 """CTE UCMP feature testconfigs (ad-hoc — not on the CICD conveyor).
 
-First ``adhoc_`` catalog file. Both TestConfigs and their Python constant
-names are grandfathered from
+This is an ``adhoc_`` lifecycle binding module. Both TestConfigs and their
+Python constant names are grandfathered from
 ``testconfigs/routing/test_config_cte_ucmp{,_stand_alone}.py`` (Wave 2C
 hierarchical move only). The internal ``TestConfig.name`` field is preserved
 verbatim via the factory ``name=`` kwarg so the golden manifest stays
 byte-wise identical.
 
-External consumers import via ``testconfigs.routing`` root; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

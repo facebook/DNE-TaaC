@@ -3,7 +3,7 @@
 """Spec 2.9 — Edge Cases and Adversarial Scenarios. UG qualification testconfig factory.
 
 Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks onto one shared
-EBB-scale conveyor topology (one IXIA setup, one catalog constant), selected
+EBB-scale conveyor topology (one IXIA setup, one lifecycle constant), selected
 at run time via ``--regex 'bgp_ug_<usecase>'``. The bundle currently wires
 2.9.7 (empty group); the remaining WITHOUT_OPEN_R sub-specs (2.9.1 / 2.9.3 /
 2.9.6) land incrementally as their playbook factories in

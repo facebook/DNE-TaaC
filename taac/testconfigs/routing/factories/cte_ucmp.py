@@ -7,10 +7,10 @@ Wave 2C — moved verbatim from
 ``testconfigs/routing/test_config_cte_ucmp_stand_alone.py``. Both bodies
 retain their private module-level constants; only DUT identity fields are
 sourced from ``physical_inventory``. The ``name`` field is a required kwarg so the
-catalog binding preserves the legacy ``TestConfig.name`` verbatim and the
+lifecycle binding preserves the legacy ``TestConfig.name`` verbatim and the
 golden manifest hash stays byte-identical.
 
-See ../README.md §3 for the factory contract.
+See ``docs/routing/TESTCONFIGS.md`` for the factory contract.
 """
 
 import json

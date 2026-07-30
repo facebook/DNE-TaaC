@@ -1,10 +1,10 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP Update Group qualification testconfigs — one catalog constant per spec section.
+"""BGP Update Group qualification lifecycle bindings.
 
-Post-Wave-6 layout: all 7 sub-sections (2.1 through 2.7) have a catalog
-constant here. Sections 2.2, 2.5, 2.6 are SKELETON — empty-playbook
-TestConfigs establishing the catalog surface pending implementation. See
+This module publishes TestConfig constants for sections 2.1 through 2.7 and
+2.9. Sections 2.2, 2.5, and 2.6 retain empty-playbook skeleton bindings pending
+implementation. See
 ``factories/qual_bgp_update_group/tc{N}_*.py`` for per-section factories.
 
 Grandfathered Python constant names (referenced from cconf and elsewhere)
@@ -123,7 +123,7 @@ BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG = (
 # separate from the WITHOUT_OPEN_R edge-cases bundle. Select via
 # ``--test-config BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST``. (The factory
 # also accepts ``smoke=True`` for a short, ad-hoc machinery-validation variant --
-# not committed as a catalog constant to keep the golden/registry surface minimal.)
+# not committed as a lifecycle constant to keep the golden/registry surface minimal.)
 BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG = (
     create_bgp_ug_simultaneous_disruptions_test_config(BAG011_ASH6)
 )
@@ -157,7 +157,7 @@ BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG = (
 # comparison step reads the UG-off metrics file the baseline wrote on the runner).
 # Select via ``--test-config BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF`` / ``..._UG_ON``.
 # (The factory also accepts ``smoke=True`` for a short machinery-validation variant
-# -- not committed as catalog constants to keep the golden/registry surface minimal.)
+# -- not committed as lifecycle constants to keep the golden/registry surface minimal.)
 BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG = (
     create_bgp_ug_cpu_quantification_test_config(BAG013_ASH6, ug_enabled=False)
 )

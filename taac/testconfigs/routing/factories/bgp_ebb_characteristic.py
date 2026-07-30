@@ -11,9 +11,10 @@ Wave 5D.1 absorbs the ``test_config_constant_attribute_storage_on_eos``,
 ``test_config_bgp_queue_memory_monitoring_with_route_scale`` helpers
 (historically in ``testconfigs/routing/ebb/test_config_performance_scaling_case2.py``
 and ``test_config_queue_memory_monitor.py``) into this module so that the
-Wave 5D catalog (``qual_bgp_ebb_characteristic.py``) can call them via the
-new ``create_bgp_ebb_characteristic_*`` factories. The playbook factories
-for these catalog entries live in ``playbooks/routing/bgp_ebb_playbooks.py``;
+Wave 5D lifecycle binding module (``qual_bgp_ebb_characteristic.py``) can call
+them via the new ``create_bgp_ebb_characteristic_*`` factories. The Playbook
+factories for these lifecycle exports live in
+``playbooks/routing/bgp_ebb_playbooks.py``;
 the generic ``build_case2_playbook`` trampoline remains in
 ``playbook_definitions.py`` for two unrelated legacy callers.
 
@@ -23,11 +24,11 @@ retired: ``test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy``
 ``test_config_to_verify_computational_load_of_bgp_plus_plus`` and
 ``test_config_to_verify_constant_attribute_storage`` (verify pair). The
 new physical-inventory-driven factories (``create_bgp_ebb_characteristic_*``)
-call these helpers by name. The update-packing catalog playbook is centralized
-in ``playbooks/routing/bgp_ebb_playbooks.py``; the remaining legacy playbook
+call these helpers by name. The update-packing Playbook is centralized in
+``playbooks/routing/bgp_ebb_playbooks.py``; the remaining legacy Playbook
 factories stay in ``playbook_definitions.py``.
 
-See ../README.md §3.
+See ``docs/routing/TESTCONFIGS.md``.
 """
 
 import os
@@ -1367,7 +1368,7 @@ def test_config_bgp_queue_memory_monitoring_with_route_scale(
 
 
 # =============================================================================
-# Wave 5D.1 -- new physical-inventory-driven factories for the routing catalog.
+# Wave 5D.1 -- physical-inventory-driven routing TestConfig factories.
 # =============================================================================
 
 
@@ -3508,7 +3509,7 @@ def test_config_to_verify_constant_attribute_storage(
 
 
 # =============================================================================
-# Wave 5D.2 -- new physical-inventory-driven factories for the routing catalog.
+# Wave 5D.2 -- physical-inventory-driven routing TestConfig factories.
 # =============================================================================
 
 

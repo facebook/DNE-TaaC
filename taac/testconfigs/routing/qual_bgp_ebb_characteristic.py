@@ -9,10 +9,12 @@ Wave 5D.1 -- migrates the 5 thin wrappers previously living at
 ``testconfigs/routing/ebb/eb04_arista_bgp_queue_memory_monitor_ipv6_50ebgp_25ibgp_with_flapping_test_config.py``
 and
 ``testconfigs/routing/ebb/eb_test_device_bgp_queue_memory_monitor_ipv6_50ebgp_25ibgp_with_flapping_test_config.py``
-into this catalog. Each ``TestConfig.name`` string is grandfathered from
-the legacy wrapper so the golden manifest hash is byte-wise identical.
+into this qualification lifecycle binding module. Each ``TestConfig.name``
+string is grandfathered from the legacy wrapper so the golden manifest hash is
+byte-wise identical.
 
-External consumers import via ``testconfigs.routing`` root; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

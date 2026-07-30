@@ -7,7 +7,7 @@ Thin ``(physical_inventory, *, name, ...) -> TestConfig`` shim around the legacy
 ``ebb/arista_ebb_scale_test_config.py``. Wave 5E.2 migrates the 4
 wrappers previously living at
 ``testconfigs/routing/ebb/*arista_mimic_ebb_test_full_scale*`` into the
-Wave-5 catalog framework.
+Wave-5 lifecycle framework.
 
 The wrapper hardcodes every "shared EBB scale" default (peer-group
 names, ASNs, IXIA parent networks, communities, policy names,

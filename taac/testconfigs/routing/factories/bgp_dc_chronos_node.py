@@ -9,7 +9,7 @@ surfaces live here:
 
 * ``build_bgp_dc_test_config`` — the legacy 90-arg builder. Preserved
   verbatim so byte-for-byte-identical TestConfigs continue to fall out
-  of every catalog binding + external consumer (kodiak RBB, the deleted
+  of every lifecycle binding + external consumer (kodiak RBB, the deleted
   ``internal_test_configs.py`` inline list, etc.).
 
 * ``create_bgp_dc_chronos_node_test_config(physical_inventory, *, name, **overrides)``

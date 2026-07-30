@@ -6,11 +6,12 @@ Wave 5D.2 -- migrates the 2 thin wrappers previously living at
 ``testconfigs/routing/ebb/bgp_plus_plus_verify_computational_load_test_config.py``
 and
 ``testconfigs/routing/ebb/bgp_plus_plus_verify_constant_attribute_storage_test_config.py``
-into this catalog. Each ``TestConfig.name`` string is grandfathered from
-the legacy wrapper (note plural ``TEST_CONFIGS`` suffix) so the golden
-manifest hash is byte-wise identical.
+into this qualification lifecycle binding module. Each ``TestConfig.name``
+string is grandfathered from the legacy wrapper (note plural ``TEST_CONFIGS``
+suffix) so the golden manifest hash is byte-wise identical.
 
-External consumers import via ``testconfigs.routing`` root; see README.md §7.
+External consumers import from this member module directly; see
+``docs/routing/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import FA001_UU001_QZD1

@@ -117,7 +117,7 @@ def get_bgp_ebb_daemon_restart_playbook(
     """
     Build CICD-EBB-01: BGP daemon restart.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests the BGP daemon restart behavior by:
     1. Setting up BGP restart prerequisites
@@ -232,7 +232,7 @@ def get_bgp_ebb_cold_start_playbook(
     """
     Build CICD-EBB-02: BGP cold start.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests the BGP cold start behavior by:
     1. Setting up BGP restart prerequisites
@@ -337,7 +337,7 @@ def get_bgp_ebb_attribute_churn_playbook(
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Drives deterministic local-pref, MED, origin, and AS-path transitions on
     seven dual-stack plane-1 peer blocks. Planes 2-4 provide controlled
@@ -457,7 +457,7 @@ def get_bgp_ebb_route_storm_playbook(
 ) -> Playbook:
     """Build CICD-EBB-11: BGP route storm.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Drives 10,500 dual-stack plane-1 route paths through 60 verified
     advertise/withdraw cycles with a deterministic supported heavy-attribute
@@ -563,7 +563,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     """
     Build CICD-EBB-07: IGP PNH metric oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP behavior during IGP metric oscillations by:
     1. Setting up BGP instability prerequisites
@@ -700,7 +700,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     """
     Build CICD-EBB-12: Route-registry runtime update.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP's handling of prefix-list runtime updates by:
     1. Setting up route registry prefix-list prerequisites
@@ -835,7 +835,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     """
     Build CICD-EBB-09: Multipath-group oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Test Case 5.2.4: BGP Instability - Multipath Group Oscillations
 
@@ -948,7 +948,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
     """
     Build CICD-EBB-13: FAUU drain and undrain.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP convergence during FAUU (FA Drain/Undrain)
     drain/undrain operations with IXIA-side attribute changes (local_pref + origin).
@@ -1028,7 +1028,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
     """
     Build CICD-EBB-14: Plane drain and undrain.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP convergence during plane drain/undrain operations
     with concurrent IXIA attribute changes and DUT policy changes.
@@ -1097,7 +1097,7 @@ def get_bgp_ebb_longevity_playbook(
     """
     Build CICD-EBB-15: Longevity.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Runs a long-duration soak with IN-STAGE community churn (add/remove every
     ``community_churn_frequency`` seconds, each cycle returning the RIB to
@@ -1160,7 +1160,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     """
     Build CICD-EBB-05: eBGP route oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP stability during eBGP route advertisement/withdrawal
     oscillations by repeatedly advertising and withdrawing prefixes from eBGP peers.
@@ -1230,7 +1230,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     """
     Build CICD-EBB-06: iBGP route oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP stability during iBGP route advertisement/withdrawal
     oscillations by repeatedly advertising and withdrawing prefixes from iBGP peers.
@@ -1303,7 +1303,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     """
     Build CICD-EBB-08: IGP unresolvable PNH.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     This playbook tests BGP behavior when protocol next-hops become unresolvable by:
     1. Setting up BGP instability prerequisites
@@ -1410,7 +1410,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
     """
     Build CICD-EBB-03: eBGP session oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Randomly disrupts subsets of eBGP sessions in cycles.
     """
@@ -1493,7 +1493,7 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     """
     Build CICD-EBB-04: iBGP plane session oscillation.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Disrupts iBGP sessions across tornado planes in cycles.
     """
@@ -1566,7 +1566,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     """
     Build CICD-EBB-17: Nexthop-group count threshold.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
     Monitors nexthop group counts during eBGP route oscillations and fails
     if the count meets or exceeds the configured threshold.
@@ -1637,7 +1637,7 @@ def get_bgp_ebb_update_packing_playbook(
 ) -> Playbook:
     """Build CICD-EBB-18: UPDATE packing.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
     return Playbook(
         name="bgp_ebb_update_packing_playbook",
@@ -1717,7 +1717,7 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
 ) -> Playbook:
     """Build CICD-EBB-19: Constant attribute storage.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
     return Playbook(
         name="bgp_ebb_constant_attribute_storage_playbook",
@@ -1789,7 +1789,7 @@ def get_bgp_ebb_queue_memory_monitoring_playbook(
 ) -> Playbook:
     """Build CICD-EBB-16: Queue and memory monitoring.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
     return Playbook(
         name="bgp_ebb_queue_memory_monitoring_playbook",
@@ -1834,7 +1834,7 @@ def get_bgp_ebb_bounded_ecmp_sets_playbook(
 ) -> Playbook:
     """Build CICD-EBB-20: Bounded ECMP sets.
 
-    See `bgp_ebb_catalog.yaml` for the test contract and triage guidance.
+    See `fbcode/neteng/test_infra/dne/taac/catalogs/routing/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
     """
     profile_checks = get_profile_checks(
         CheckProfile.PERF_SCALING_BOUNDED_ECMP, ProfileContext()

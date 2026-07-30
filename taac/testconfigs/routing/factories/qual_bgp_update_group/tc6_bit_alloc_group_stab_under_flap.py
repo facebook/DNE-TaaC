@@ -2,7 +2,7 @@
 # pyre-unsafe
 """Spec 2.6 — Bit Allocation and Group Stability Under Flaps. SKELETON testconfig factory.
 
-Empty-playbook placeholder. Establishes the catalog surface so the
+Empty-playbook placeholder. Establishes the lifecycle-binding surface while the
 qualification plan enumerates all 7 UG spec sections; sub-spec playbook
 implementations pending.
 
