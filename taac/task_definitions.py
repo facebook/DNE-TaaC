@@ -1658,6 +1658,7 @@ def create_standard_periodic_tasks(
     enable_process_monitor: bool = True,
     process_filter: t.Optional[t.List[str]] = None,
     process_monitor_interval: int = 5,
+    enable_queue_backpressure_monitor: bool = True,
 ) -> t.List[taac_types.PeriodicTask]:
     """
     Create standard periodic tasks for monitoring during tests.
@@ -1675,6 +1676,10 @@ def create_standard_periodic_tasks(
         enable_process_monitor: Whether to enable process monitoring
         process_filter: Optional list of process names to monitor
         process_monitor_interval: Interval for process monitoring
+        enable_queue_backpressure_monitor: Whether to poll BGP++ egress-queue
+            backpressure counters (permissive, observe-only). Generic bgpd
+            health signal, like CPU/memory; the poll no-ops on daemons that do
+            not implement getPeerEgressStats.
 
     Returns:
         List of standard periodic monitoring tasks
@@ -1732,6 +1737,13 @@ def create_standard_periodic_tasks(
                 terminate_on_error=False,
             )
         )
+
+    if enable_queue_backpressure_monitor:
+        # Generic bgpd health signal alongside CPU/memory: observe egress-queue
+        # backpressure (cumulative block-count delta) under load. Permissive
+        # (terminate_on_error defaults False); no-ops if getPeerEgressStats is
+        # unavailable on the daemon.
+        tasks.append(create_bgp_queue_backpressure_poll_periodic_task(device_name))
 
     return tasks
 
@@ -3191,6 +3203,55 @@ def create_nexthop_group_poll_periodic_task(
                         "hostname": device_name,
                         "threshold": threshold,
                         "enable_plotting": enable_plotting,
+                    }
+                )
+            )
+        ],
+    )
+
+
+def create_bgp_queue_backpressure_poll_periodic_task(
+    device_name: str,
+    threshold: int = 1000,
+    interval: int = 10,
+    terminate_on_error: bool = False,
+) -> PeriodicTask:
+    """Periodic task to poll BGP++ egress-queue backpressure against a threshold.
+
+    Wraps the `bgp_queue_backpressure_poll` runtime task in a `PeriodicTask` that
+    samples the device's per-peer CUMULATIVE queue-block counters
+    (`adjribout_queue_blocks` + `send_queue_blocks`, summed across peers) every
+    `interval` seconds and gates on the DELTA accumulated over the test window. A
+    growing delta means BGP's egress pipeline is backpressured (falling behind),
+    which is the direct "keeping up under churn/scale" signal -- unlike the
+    instantaneous fiber-queue depth, these cumulative counters survive between
+    samples. Non-terminating by default: a breach is recorded but does not abort
+    the test until a test author flips `terminate_on_error` after calibration.
+
+    Args:
+        device_name: Device hostname to poll.
+        threshold: Max allowed queue-block delta over the run. Default `1000`
+            (deliberately generous / observe-first until calibrated).
+        interval: Polling interval in seconds. Default `10`.
+        terminate_on_error: If True, a threshold breach aborts the test.
+            Default False (observe-only).
+
+    Returns:
+        A `PeriodicTask` named `"bgp_queue_backpressure_check"` wrapping
+        `task_name="bgp_queue_backpressure_poll"`.
+    """
+    return PeriodicTask(
+        name="bgp_queue_backpressure_check",
+        interval=interval,
+        task=Task(task_name="bgp_queue_backpressure_poll"),
+        retryable=False,
+        terminate_on_error=terminate_on_error,
+        params_list=[
+            Params(
+                json_params=json.dumps(
+                    {
+                        "hostname": device_name,
+                        "threshold": threshold,
                     }
                 )
             )

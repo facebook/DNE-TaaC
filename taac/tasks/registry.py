@@ -17,6 +17,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
         GetEnforceFirstAsRejectsTask,
         SetPeerGroupEnforceFirstAsTask,
     )
+    from taac.internal.tasks.bgp_queue_backpressure_poll_task import (
+        BgpQueueBackpressurePoll,
+    )
     from taac.internal.tasks.bgp_replace_peers_task import (
         ReplaceBgpPeersTask,
         RestoreBgpPeersTask,
@@ -199,6 +202,7 @@ if not TAAC_OSS:
         [
             OpenRRouteActionTask,
             DeviceProvisioningTask,
+            BgpQueueBackpressurePoll,
             BgpSetRouteFilterTask,
             BgpClearRouteFilterTask,
             BgpSetPeerGroupsPolicyTask,
