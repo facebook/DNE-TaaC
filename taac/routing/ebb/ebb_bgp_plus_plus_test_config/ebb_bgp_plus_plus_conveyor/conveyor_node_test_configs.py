@@ -24,6 +24,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
 
@@ -127,6 +128,13 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # (peak-minus-stable) memory (dedup rides along), update-group enabled.
     # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
     BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    # bag010.ash6 SC4 transient memory (char-4) — the INGRESS complement of SC1:
+    # sweeps the eBGP ingress sender count (per AF, each n → 2*n eBGP peers) at a
+    # fixed iBGP egress fan-out + fixed route count, routes resolvable/advertised,
+    # and gates on the transient (peak-minus-stable) memory staying ~flat as the
+    # sender count grows. Update-group enabled. Ad-hoc; runnable via --test-config,
+    # not yet wired into a conveyor node.
+    BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag011.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6

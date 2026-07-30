@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP++ EBB characteristic ad-hoc testconfigs (SC1 egress peer-scale + SC2 constant-storage ingress + SC3 transient-memory route-scale).
+"""BGP++ EBB characteristic ad-hoc testconfigs (SC1 egress peer-scale + SC2 constant-storage ingress + SC3 transient-memory route-scale + SC4 transient-memory ingress-peer-scale).
 
 Re-homed here after D111520998 consolidated ``cicd_ebb_int_tc.py`` down to the
 8 conveyor-scheduled configs. The bag010 egress peer-scale (perf-scaling case1)
@@ -20,6 +20,7 @@ from taac.abstractions.physical_inventory import (
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
+    create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_update_packing_test_config,
 )
@@ -89,9 +90,28 @@ BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 )
 
 
+# ─── bag010.ash6 — SC4 Transient Memory (eBGP INGRESS-sender sweep, char-4) ─
+# Testbed-driven factory. Sweeps the eBGP INGRESS sender count (per AF; each n →
+# 2*n total eBGP peers) while holding the iBGP egress fan-out and route count
+# fixed; routes are RESOLVABLE and advertised. PRIMARY signal = the TRANSIENT
+# memory (peak high-watermark - stable steady-state), gated by the shared
+# perf-scaling step to stay ~flat as the sender count grows (bounded by
+# update-queue backpressure). INGRESS complement to SC1 (iBGP egress sweep).
+# Ad-hoc: resolvable via --test-config but not scheduled on a conveyor node. All
+# SC tests run with update-group enabled, so only the ``_UPDATE_GROUP`` variant is
+# kept. The TestConfig.name is
+# ``BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP``.
+BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
+    create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
+        BAG010_ASH6, enable_update_group=True
+    )
+)
+
+
 __all__ = [
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
+    "BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
 ]

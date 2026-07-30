@@ -24,90 +24,98 @@ _COMMON_KWARGS = {
 }
 
 
-def _ebgp_import_params(configs):
-    params = []
+def _ebgp_bgp_configs(configs):
+    """All eBGP BgpConfigs (v4 + v6) across the returned port configs."""
+    bgp_cfgs = []
     for port in configs:
         for dg in port.device_group_configs or []:
             if "EBGP" not in dg.device_group_name:
                 continue
             for bgp_cfg in (dg.v4_bgp_config, dg.v6_bgp_config):
-                if bgp_cfg is None:
-                    continue
-                params.extend(bgp_cfg.import_bgp_routes_params_list or [])
+                if bgp_cfg is not None:
+                    bgp_cfgs.append(bgp_cfg)
+    return bgp_cfgs
+
+
+def _ebgp_import_params(configs):
+    params = []
+    for bgp_cfg in _ebgp_bgp_configs(configs):
+        params.extend(bgp_cfg.import_bgp_routes_params_list or [])
     return params
 
 
-class EbgpNextHopSelfTest(unittest.TestCase):
-    """The eBGP next-hop must be the connected tester IP so the DUT can resolve
-    it. The route property NextHopType (SAME_AS_LOCAL_IP) is the authoritative
-    knob (it otherwise defaults to MANUALLY and pins the next-hop to the CSV
-    value); the import-time modification type stays PRESERVE_FROM_FILE."""
+def _ebgp_route_scales(configs):
+    """All eBGP v4/v6 RouteScale objects (compact geometry)."""
+    scales = []
+    for bgp_cfg in _ebgp_bgp_configs(configs):
+        for spec in bgp_cfg.route_scales or []:
+            for rs in (spec.v4_route_scale, spec.v6_route_scale):
+                if rs is not None:
+                    scales.append(rs)
+    return scales
 
-    def test_next_hop_self_sets_same_as_local_ip(self) -> None:
-        params = _ebgp_import_params(
-            create_ebb_performance_scale_basic_port_configs(
-                ebgp_next_hop_self=True, **_COMMON_KWARGS
-            )
+
+class EbgpNextHopSelfCompactGeometryTest(unittest.TestCase):
+    """next-hop-self callers (perf-scaling SC1/SC4) advertise a uniform route set,
+    so they use the COMPACT route_scales geometry -- one prefix-pool object per
+    sender (RouteScale multiplier=1, prefix_count=<count>) with next-hop-self --
+    NOT the flat import_bgp_routes path (one IxNetwork object per route), which
+    explodes the object count and fails the commit at high sender counts."""
+
+    def test_next_hop_self_uses_compact_route_scales(self) -> None:
+        configs = create_ebb_performance_scale_basic_port_configs(
+            ebgp_next_hop_self=True,
+            ebgp_fixed_communities=["65529:39744"],
+            **_COMMON_KWARGS,
         )
-        self.assertEqual(len(params), 2)  # one v4, one v6 eBGP pool
-        for p in params:
+        # Compact geometry: route_scales present, flat import path absent.
+        self.assertEqual(len(_ebgp_import_params(configs)), 0)
+        scales = _ebgp_route_scales(configs)
+        self.assertEqual(len(scales), 2)  # one v4, one v6 eBGP pool
+        for rs in scales:
+            # One compact pool object per sender: NumberOfAddresses=count with
+            # NetworkGroup Multiplier=1 -- NOT Multiplier=count (the explosion).
+            self.assertEqual(rs.multiplier, 1)
+            self.assertEqual(rs.prefix_count, 50000)
+            # next-hop-self so the DUT resolves via the connected interface.
             self.assertEqual(
-                p.set_next_hop_type,
+                rs.set_next_hop_type,
                 ixia_types.SetNextHopType.SAME_AS_LOCAL_IP,
             )
-            # OVER_WRITE_TESTERS_ADDRESS was dropped as redundant -- NextHopType
-            # does the work, so the modification type stays PRESERVE_FROM_FILE.
-            self.assertEqual(
-                p.bgp_next_hop_modification_type,
-                ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
-            )
+            # The fixed community rides on the compact route directly.
+            self.assertEqual(rs.bgp_communities, ["65529:39744"])
 
-    def test_default_leaves_next_hop_type_unset(self) -> None:
-        # Existing PRESERVE_FROM_FILE callers must stay byte-identical: the
-        # field is left unset (runtime defaults it to MANUALLY).
-        params = _ebgp_import_params(
-            create_ebb_performance_scale_basic_port_configs(**_COMMON_KWARGS)
-        )
-        self.assertEqual(len(params), 2)
+
+class EbgpFlatImportPathTest(unittest.TestCase):
+    """Callers that need a CSV-baked next-hop (PRESERVE_FROM_FILE, e.g.
+    separable-policy) keep the flat import_bgp_routes path unchanged -- at 1
+    sender its object count is small, so it is safe."""
+
+    def test_default_uses_flat_import_with_unset_next_hop(self) -> None:
+        configs = create_ebb_performance_scale_basic_port_configs(**_COMMON_KWARGS)
+        # Flat path: import params present, compact route_scales absent.
+        self.assertEqual(len(_ebgp_route_scales(configs)), 0)
+        params = _ebgp_import_params(configs)
+        self.assertEqual(len(params), 2)  # one v4, one v6 eBGP pool
         for p in params:
+            # Unset next-hop type -> runtime defaults to MANUALLY (CSV-baked
+            # next-hop); modification type stays PRESERVE_FROM_FILE.
             self.assertIsNone(p.set_next_hop_type)
             self.assertEqual(
                 p.bgp_next_hop_modification_type,
                 ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
             )
 
-
-def _ebgp_community_configs(configs):
-    community_cfgs = []
-    for p in _ebgp_import_params(configs):
-        for attr in p.bgp_attribute_configs or []:
-            if attr.attribute == ixia_types.BgpAttribute.COMMUNITIES:
-                community_cfgs.append(attr)
-    return community_cfgs
-
-
-class EbgpFixedCommunitiesTest(unittest.TestCase):
-    """Perf-scaling tags every eBGP route with a single clean community so it
-    passes the DUT's EB-FA-IN inbound allowlist and avoids confusing
-    named-community noise; other callers keep the CSV distribution."""
-
-    def test_fixed_communities_use_inline_value_lists(self) -> None:
-        cfgs = _ebgp_community_configs(
-            create_ebb_performance_scale_basic_port_configs(
-                ebgp_fixed_communities=["65529:39744"], **_COMMON_KWARGS
-            )
-        )
-        self.assertEqual(len(cfgs), 2)  # v4 + v6 eBGP pools
-        for c in cfgs:
-            self.assertEqual(c.value_lists, [["65529:39744"]])
-            self.assertIsNone(c.file_path)
-
-    def test_default_uses_csv_distribution(self) -> None:
-        cfgs = _ebgp_community_configs(
-            create_ebb_performance_scale_basic_port_configs(**_COMMON_KWARGS)
-        )
-        self.assertEqual(len(cfgs), 2)
-        for c in cfgs:
+    def test_default_uses_csv_community_distribution(self) -> None:
+        configs = create_ebb_performance_scale_basic_port_configs(**_COMMON_KWARGS)
+        community_cfgs = [
+            attr
+            for p in _ebgp_import_params(configs)
+            for attr in (p.bgp_attribute_configs or [])
+            if attr.attribute == ixia_types.BgpAttribute.COMMUNITIES
+        ]
+        self.assertEqual(len(community_cfgs), 2)
+        for c in community_cfgs:
             self.assertIsNone(c.value_lists)
             self.assertIsNotNone(c.file_path)
             self.assertIn("communities", c.file_path)

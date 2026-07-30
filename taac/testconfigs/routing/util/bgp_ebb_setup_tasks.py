@@ -935,6 +935,8 @@ def build_sweep_peer_list(
     peergroup_ibgp_v4: str,
     ebgp_peer_count: int,
     ibgp_peer_count: int,
+    ebgp_peer_count_v4: t.Optional[int] = None,
+    ibgp_peer_count_v4: t.Optional[int] = None,
     v4_peer_start_offset: int = 16,
 ) -> t.List[t.Dict[str, t.Any]]:
     """Build the full peer-list for one sweep iteration: v6+v4 EBGP + v6+v4 IBGP.
@@ -943,12 +945,24 @@ def build_sweep_peer_list(
     result to ``build_bgpcpp_peers_patch_shell_cmds`` to splice it into
     the deployed bgpcpp_config.
 
+    ``ebgp_peer_count``/``ibgp_peer_count`` set the IPv6 peer count.
+    ``ebgp_peer_count_v4``/``ibgp_peer_count_v4`` default to the IPv6 count
+    (symmetric dual-stack -- the existing SC1 behavior); pass an explicit value
+    to make an AF asymmetric -- e.g. 0 for a v6-only test, which omits that AF's
+    peers entirely (a 0 count yields no entries from the generator).
+
     ``v4_peer_start_offset`` is the host offset of the first IPv4 peer's local
     address; it MUST match the device's v4 secondary-interface-IP offset
     (``IXIA_IPV4_START_OFFSET``) or those v4 sessions have no local source
     address and stay IDLE. The v6 offset is fixed at 16 (matches the v6
     interface IPs).
     """
+    ebgp_v4_count = (
+        ebgp_peer_count if ebgp_peer_count_v4 is None else ebgp_peer_count_v4
+    )
+    ibgp_v4_count = (
+        ibgp_peer_count if ibgp_peer_count_v4 is None else ibgp_peer_count_v4
+    )
     return (
         _generate_ixia_v6_peer_entries_for_bgpcpp(
             ebgp_remote_as, ebgp_v6_base, ebgp_peer_count, peergroup_ebgp_v6
@@ -956,7 +970,7 @@ def build_sweep_peer_list(
         + _generate_ixia_v4_peer_entries_for_bgpcpp(
             ebgp_remote_as,
             ebgp_v4_base,
-            ebgp_peer_count,
+            ebgp_v4_count,
             peergroup_ebgp_v4,
             start_offset=v4_peer_start_offset,
         )
@@ -966,7 +980,7 @@ def build_sweep_peer_list(
         + _generate_ixia_v4_peer_entries_for_bgpcpp(
             ibgp_remote_as,
             ibgp_v4_base,
-            ibgp_peer_count,
+            ibgp_v4_count,
             peergroup_ibgp_v4,
             start_offset=v4_peer_start_offset,
         )
@@ -1185,6 +1199,126 @@ def build_per_iteration_factory_v4_capable(
             router_id=router_id,
             config_path=config_path,
         ) + build_ixia_ibgp_subset_activation_steps(n_v6=n_v6, n_v4=n_v4)
+
+    return factory
+
+
+# =============================================================================
+# Ingress (eBGP-sender) sweep variants -- mirror the iBGP-egress helpers above.
+# SC4 (char-4, Transient Memory ~independent of PEER scale) sweeps the eBGP
+# INGRESS sender count while holding the iBGP egress fan-out fixed. The device-
+# side rewrite + generic peer-list builder are shared; only the swept axis and
+# the IXIA session subset differ (EBGP sessions instead of IBGP).
+# =============================================================================
+_REGEX_EBGP_V6: str = "BGP_PEER_IPV6_EBGP"
+_REGEX_EBGP_V4: str = "BGP_PEER_IPV4_EBGP"
+# Upper bound used when stopping IXIA EBGP peers between iterations.
+PER_ITERATION_MAX_EBGP_SESSIONS_TO_STOP: int = 500
+
+
+def build_ixia_ebgp_subset_activation_steps(n_v6: int, n_v4: int) -> list:
+    """Stop any prior IXIA EBGP sessions on both AFs, then start n_v6 + n_v4.
+
+    Ingress (eBGP-sender) sweep counterpart of
+    ``build_ixia_ibgp_subset_activation_steps``. Skips the start step for an AF
+    whose count is 0.
+    """
+    from taac.steps.step_definitions import create_ixia_api_step
+
+    def _args(start: bool, regex: str, end_idx: int) -> t.Dict[str, t.Any]:
+        return {
+            "start": start,
+            "regex": regex,
+            "session_start_idx": 1,
+            "session_end_idx": end_idx,
+        }
+
+    steps = [
+        create_ixia_api_step(
+            api_name="start_bgp_peers",
+            args_dict=_args(False, regex, PER_ITERATION_MAX_EBGP_SESSIONS_TO_STOP),
+            description=f"Stop any {label} EBGP peers from prior iterations",
+        )
+        for regex, label in (
+            (_REGEX_EBGP_V6, "IPv6"),
+            (_REGEX_EBGP_V4, "IPv4"),
+        )
+    ]
+    for regex, label, n in (
+        (_REGEX_EBGP_V6, "IPv6", n_v6),
+        (_REGEX_EBGP_V4, "IPv4", n_v4),
+    ):
+        if n > 0:
+            steps.append(
+                create_ixia_api_step(
+                    api_name="start_bgp_peers",
+                    args_dict=_args(True, regex, n),
+                    description=f"Start {n} {label} EBGP peers for this iteration",
+                )
+            )
+    return steps
+
+
+def build_per_iteration_factory_ingress_v4_capable(
+    *,
+    device_name: str,
+    router_id: t.Optional[str],
+    ebgp_remote_as: int,
+    ibgp_remote_as: int,
+    ebgp_v6_base: str,
+    ebgp_v4_base: str,
+    ibgp_v6_base: str,
+    ibgp_v4_base: str,
+    peergroup_ebgp_v6: str,
+    peergroup_ebgp_v4: str,
+    peergroup_ibgp_v6: str,
+    peergroup_ibgp_v4: str,
+    ibgp_peer_count: int,
+    ibgp_peer_count_v4: t.Optional[int] = None,
+    v4_peer_start_offset: int = 16,
+    config_path: str = BGPCPP_CONFIG_PATH,
+):
+    """Return a closure ``(n_v6, n_v4) -> List[Step]`` for an eBGP-INGRESS sweep.
+
+    Ingress counterpart of ``build_per_iteration_factory_v4_capable``: each
+    iteration sweeps the eBGP sender count per AF (``n_v6``/``n_v4`` are threaded
+    to the v6/v4 eBGP counts independently, so ``n_v4=0`` yields a v6-only
+    ingress) while the iBGP egress fan-out is held constant at ``ibgp_peer_count``
+    (v6) with ``ibgp_peer_count_v4`` defaulting to it -- pass 0 for v6-only
+    egress. Used by
+    SC4 (char-4, transient memory ~independent of peer scale). The fixed iBGP
+    egress peers come up once at initial protocol start and are never stopped, so
+    only the eBGP session subset is (re)activated per iteration.
+
+    ``v4_peer_start_offset`` must match the device's v4 secondary-interface-IP
+    offset (``IXIA_IPV4_START_OFFSET``); otherwise the per-iteration v4 peers are
+    generated with local addresses the interface does not have and stay IDLE.
+    """
+
+    def factory(n_v6: int, n_v4: int) -> list:
+        peers = build_sweep_peer_list(
+            ebgp_remote_as=ebgp_remote_as,
+            ibgp_remote_as=ibgp_remote_as,
+            ebgp_v6_base=ebgp_v6_base,
+            ebgp_v4_base=ebgp_v4_base,
+            ibgp_v6_base=ibgp_v6_base,
+            ibgp_v4_base=ibgp_v4_base,
+            peergroup_ebgp_v6=peergroup_ebgp_v6,
+            peergroup_ebgp_v4=peergroup_ebgp_v4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
+            ebgp_peer_count=n_v6,
+            ebgp_peer_count_v4=n_v4,
+            ibgp_peer_count=ibgp_peer_count,
+            ibgp_peer_count_v4=ibgp_peer_count_v4,
+            v4_peer_start_offset=v4_peer_start_offset,
+        )
+        return build_rescale_bgpcpp_config_steps(
+            device_name=device_name,
+            peers=peers,
+            router_id=router_id,
+            config_path=config_path,
+        ) + build_ixia_ebgp_subset_activation_steps(n_v6=n_v6, n_v4=n_v4)
 
     return factory
 

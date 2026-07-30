@@ -54,6 +54,130 @@ def _ebgp_community_attribute_config(
     )
 
 
+# ── Compact eBGP route-pool geometry (perf-scale next-hop-self callers) ──────
+# Uniform perf-scale eBGP routes (one fixed community + next-hop-self) are built
+# with the COMPACT route_scales geometry: one prefix-pool object per sender
+# (NetworkGroup Multiplier=1, NumberOfAddresses=_EBGP_PREFIX_COUNT_PER_SENDER).
+# The flat import_bgp_routes path instead materializes one IxNetwork object PER
+# ROUTE (NetworkGroup Multiplier=<count>), so at N senders it is <count>*N
+# discrete objects (e.g. 50000*16 = 800k) and blows past IxNetwork's commit
+# ceiling. Prefix values are arbitrary -- the DUT accepts on community, not
+# prefix. Mirrors the sibling compact builders in this file.
+_EBGP_PREFIX_COUNT_PER_SENDER: int = 50000
+_EBGP_V6_STARTING_PREFIX: str = "2001:db8:1000::"
+_EBGP_V6_PREFIX_STEP: str = "0:0:0:0:0:0:0:0"
+_EBGP_V6_PREFIX_LENGTH: int = 64
+_EBGP_V4_STARTING_PREFIX: str = "10.100.0.0"
+_EBGP_V4_PREFIX_STEP: str = "0.0.0.0"
+_EBGP_V4_PREFIX_LENGTH: int = 24
+
+
+def _ebgp_ingress_bgp_config(
+    *,
+    is_v6: bool,
+    ebgp_remote_as: int,
+    ebgp_next_hop_self: bool,
+    ebgp_fixed_communities: list[str] | None,
+    same_community: bool,
+    ebgp_next_hop_mod: ixia_types.BgpNextHopModificationType,
+    ebgp_set_next_hop: ixia_types.SetNextHopType | None,
+    flat_end_index: int = 0,
+) -> BgpConfig:
+    """Build the eBGP ingress BgpConfig for one AFI, choosing the IxNetwork geometry.
+
+    next-hop-self callers (perf-scaling SC1/SC4) advertise a UNIFORM route set
+    (one fixed community, next-hop-self), so use the COMPACT ``route_scales``
+    geometry -- one prefix-pool object per sender. The flat ``import_bgp_routes``
+    path (retained for callers that need a CSV-baked next-hop like separable
+    policy's PRESERVE_FROM_FILE, or per-route CSV attributes) instead creates one
+    object per route, which exceeds IxNetwork's commit ceiling at high sender
+    counts. ``flat_end_index`` is consumed only on the v6 flat path (byte-for-byte
+    parity with the historical config).
+    """
+    afi = "ipv6" if is_v6 else "ipv4"
+    peer_name = f"BGP_PEER_{afi.upper()}_EBGP"
+    prefix_pool_name = f"PREFIX_POOL_{afi.upper()}_EBGP"
+    capability = (
+        ixia_types.BgpCapability.IpV6Unicast
+        if is_v6
+        else ixia_types.BgpCapability.IpV4Unicast
+    )
+    if ebgp_next_hop_self:
+        route_scale = RouteScale(
+            prefix_name=prefix_pool_name,
+            starting_prefixes=(
+                _EBGP_V6_STARTING_PREFIX if is_v6 else _EBGP_V4_STARTING_PREFIX
+            ),
+            prefix_step=_EBGP_V6_PREFIX_STEP if is_v6 else _EBGP_V4_PREFIX_STEP,
+            prefix_length=(_EBGP_V6_PREFIX_LENGTH if is_v6 else _EBGP_V4_PREFIX_LENGTH),
+            multiplier=1,
+            prefix_count=_EBGP_PREFIX_COUNT_PER_SENDER,
+            ip_address_family=(
+                ixia_types.IpAddressFamily.IPV6
+                if is_v6
+                else ixia_types.IpAddressFamily.IPV4
+            ),
+            bgp_communities=ebgp_fixed_communities or [],
+            set_next_hop_type=ebgp_set_next_hop,
+        )
+        spec = (
+            RouteScaleSpec(
+                v6_route_scale=route_scale, multiplier=1, network_group_index=0
+            )
+            if is_v6
+            else RouteScaleSpec(
+                v4_route_scale=route_scale, multiplier=1, network_group_index=0
+            )
+        )
+        return BgpConfig(
+            bgp_peer_name=peer_name,
+            local_as_4_bytes=ebgp_remote_as,
+            enable_4_byte_local_as=True,
+            bgp_capabilities=[capability],
+            bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+            route_scales=[spec],
+        )
+    community_config = _ebgp_community_attribute_config(
+        same_community, ebgp_fixed_communities, is_v6=is_v6
+    )
+    if is_v6:
+        import_params = ixia_types.ImportBgpRoutesParams(
+            prefix_pool_name=prefix_pool_name,
+            multiplier=_EBGP_PREFIX_COUNT_PER_SENDER,
+            bgp_route_import_file_path=get_bgp_route_file_path(
+                "ebgp_ipv6_50k_prefixes.csv"
+            ),
+            import_file_type=ixia_types.BgpRouteImportFileType.CSV,
+            network_group_index=0,
+            bgp_attribute_configs=[community_config],
+            bgp_next_hop_modification_type=ebgp_next_hop_mod,
+            set_next_hop_type=ebgp_set_next_hop,
+            start_index=0,
+            end_index=flat_end_index,
+        )
+    else:
+        import_params = ixia_types.ImportBgpRoutesParams(
+            prefix_pool_name=prefix_pool_name,
+            multiplier=_EBGP_PREFIX_COUNT_PER_SENDER,
+            bgp_route_import_file_path=get_bgp_route_file_path(
+                "ebgp_ipv4_50k_prefixes.csv"
+            ),
+            import_file_type=ixia_types.BgpRouteImportFileType.CSV,
+            network_group_index=0,
+            bgp_attribute_configs=[community_config],
+            bgp_next_hop_modification_type=ebgp_next_hop_mod,
+            set_next_hop_type=ebgp_set_next_hop,
+        )
+    return BgpConfig(
+        bgp_peer_name=peer_name,
+        local_as_4_bytes=ebgp_remote_as,
+        enable_4_byte_local_as=True,
+        bgp_capabilities=[capability],
+        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+        import_bgp_routes_params_list=[import_params],
+    )
+
+
 def create_ebb_performance_scale_basic_port_configs(
     device_name: str,
     ixia_interface_mimic_ebgp: str,
@@ -143,34 +267,15 @@ def create_ebb_performance_scale_basic_port_configs(
                         gateway_increment_ip="0:0:0:0::2",
                         start_index=0,
                     ),
-                    v6_bgp_config=BgpConfig(
-                        bgp_peer_name="BGP_PEER_IPV6_EBGP",
-                        local_as_4_bytes=ebgp_remote_as,
-                        enable_4_byte_local_as=True,
-                        bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
-                        import_bgp_routes_params_list=[
-                            ixia_types.ImportBgpRoutesParams(
-                                prefix_pool_name="PREFIX_POOL_IPV6_EBGP",
-                                multiplier=50000,
-                                bgp_route_import_file_path=get_bgp_route_file_path(
-                                    "ebgp_ipv6_50k_prefixes.csv"
-                                ),
-                                import_file_type=ixia_types.BgpRouteImportFileType.CSV,
-                                network_group_index=0,
-                                bgp_attribute_configs=[
-                                    _ebgp_community_attribute_config(
-                                        same_community,
-                                        ebgp_fixed_communities,
-                                        is_v6=True,
-                                    )
-                                ],
-                                bgp_next_hop_modification_type=_ebgp_next_hop_mod,
-                                set_next_hop_type=_ebgp_set_next_hop,
-                                start_index=0,
-                                end_index=ebgp_peer_count_v6,
-                            )
-                        ],
+                    v6_bgp_config=_ebgp_ingress_bgp_config(
+                        is_v6=True,
+                        ebgp_remote_as=ebgp_remote_as,
+                        ebgp_next_hop_self=ebgp_next_hop_self,
+                        ebgp_fixed_communities=ebgp_fixed_communities,
+                        same_community=same_community,
+                        ebgp_next_hop_mod=_ebgp_next_hop_mod,
+                        ebgp_set_next_hop=_ebgp_set_next_hop,
+                        flat_end_index=ebgp_peer_count_v6,
                     ),
                 ),
             )
@@ -189,32 +294,14 @@ def create_ebb_performance_scale_basic_port_configs(
                         mask=31,
                         start_index=0,
                     ),
-                    v4_bgp_config=BgpConfig(
-                        bgp_peer_name="BGP_PEER_IPV4_EBGP",
-                        local_as_4_bytes=ebgp_remote_as,
-                        enable_4_byte_local_as=True,
-                        bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
-                        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
-                        import_bgp_routes_params_list=[
-                            ixia_types.ImportBgpRoutesParams(
-                                prefix_pool_name="PREFIX_POOL_IPV4_EBGP",
-                                multiplier=50000,
-                                bgp_route_import_file_path=get_bgp_route_file_path(
-                                    "ebgp_ipv4_50k_prefixes.csv"
-                                ),
-                                import_file_type=ixia_types.BgpRouteImportFileType.CSV,
-                                network_group_index=0,
-                                bgp_attribute_configs=[
-                                    _ebgp_community_attribute_config(
-                                        same_community,
-                                        ebgp_fixed_communities,
-                                        is_v6=False,
-                                    )
-                                ],
-                                bgp_next_hop_modification_type=_ebgp_next_hop_mod,
-                                set_next_hop_type=_ebgp_set_next_hop,
-                            )
-                        ],
+                    v4_bgp_config=_ebgp_ingress_bgp_config(
+                        is_v6=False,
+                        ebgp_remote_as=ebgp_remote_as,
+                        ebgp_next_hop_self=ebgp_next_hop_self,
+                        ebgp_fixed_communities=ebgp_fixed_communities,
+                        same_community=same_community,
+                        ebgp_next_hop_mod=_ebgp_next_hop_mod,
+                        ebgp_set_next_hop=_ebgp_set_next_hop,
                     ),
                 ),
             )

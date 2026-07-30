@@ -46,6 +46,7 @@ from taac.playbooks.playbook_definitions import (
     create_bgp_plus_plus_transient_memory_peer_scale_playbook,
     create_bgp_plus_plus_transient_memory_route_scale_playbook,
     create_performance_scaling_egress_peer_sweep_playbook,
+    create_performance_scaling_ingress_peer_sweep_playbook,
     PerIterationSetupStepsFactory,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
@@ -238,6 +239,130 @@ def create_bgp_ebb_scaling_performance_test_config(
                 prefix_count=prefix_count,
                 ebgp_peer_count=ebgp_peer_count,
                 per_iteration_setup_steps_factory=per_iteration_setup_steps_factory,
+            ),
+        ],
+    )
+
+
+def create_bgp_ebb_scaling_ingress_peer_scale_test_config(
+    testbed: PhysicalInventory,
+    *,
+    name: str,
+    ingress_peer_counts: list[int],
+    ibgp_peer_count: int,
+    prefix_count: int = 50000,
+    address_families: list[str] | None = None,
+    ebgp_remote_as: int = 65334,
+    ibgp_remote_as: int = 64981,
+    ixia_ebgp_ic_parent_network_v6: str = "2401:db00:e50d:11:8",
+    ixia_ebgp_ic_parent_network_v4: str = "10.163.28",
+    ixia_ibgp_ic_parent_network_v6: str = "2401:db00:e50d:11:9",
+    ixia_ibgp_ic_parent_network_v4: str = "10.164.28",
+    log_collection_timeout: int | None = None,
+    setup_tasks: list | None = None,
+    teardown_tasks: list | None = None,
+    per_iteration_setup_steps_factory: PerIterationSetupStepsFactory | None = None,
+    direct_ixia_connections: list[DirectIxiaConnection] | None = None,
+    host_driver_args: dict[str, str] | None = None,
+    oss_mock_device_data: dict[str, taac_types.MockDeviceInfo] | None = None,
+    host_os_type_map: dict[str, taac_types.DeviceOsType] | None = None,
+) -> TestConfig:
+    """BGP++ eBGP-INGRESS-sender sweep TestConfig -- SC4 (char-4).
+
+    Ingress counterpart of ``create_bgp_ebb_scaling_performance_test_config``:
+    sweeps the eBGP ingress sender count (``ingress_peer_counts``) while holding
+    the iBGP egress fan-out constant at ``ibgp_peer_count`` per AF. The basic-port
+    topology therefore creates eBGP device groups at the sweep max (all sessions
+    exist; the per-iteration factory activates the swept subset each Stage) and
+    iBGP device groups at the fixed count (brought up once, never stopped). Runs
+    the ingress-sweep playbook, which reuses the shared perf-scaling convergence +
+    transient-memory step.
+    """
+    device_name = testbed.device_name
+    ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
+    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    max_ebgp_n = max(ingress_peer_counts)
+    # AF gating: default dual-stack (v6+v4). A v6-only sweep
+    # (address_families=["ipv6"]) drops the v4 eBGP + v4 iBGP device groups so the
+    # single IXIA port stays v6-only (matches SC2's single-AF ingress).
+    afis = address_families or ["ipv6", "ipv4"]
+    ingress_v4 = "ipv4" in afis
+    ebgp_peer_count_v4 = max_ebgp_n if ingress_v4 else 0
+    ibgp_peer_count_v4 = ibgp_peer_count if ingress_v4 else 0
+
+    resolved_host_driver_args = (
+        host_driver_args if host_driver_args is not None else testbed.host_driver_args
+    )
+    resolved_oss_mock_device_data = (
+        oss_mock_device_data
+        if oss_mock_device_data is not None
+        else testbed.oss_mock_device_data
+    )
+    resolved_host_os_type_map = (
+        host_os_type_map
+        if host_os_type_map is not None
+        else {device_name: taac_types.DeviceOsType.ARISTA_FBOSS}
+    )
+    resolved_direct_ixia_connections = (
+        direct_ixia_connections
+        if direct_ixia_connections is not None
+        else _direct_ixia_conns_two_port(testbed)
+    )
+
+    return TestConfig(
+        name=name,
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=log_collection_timeout,
+        basset_pool="dne.test",
+        endpoints=[
+            Endpoint(
+                name=device_name,
+                dut=True,
+                ixia_ports=[
+                    ixia_interface_mimic_ebgp,
+                    ixia_interface_mimic_ibgp,
+                ],
+                direct_ixia_connections=resolved_direct_ixia_connections,
+            ),
+        ],
+        host_driver_args=resolved_host_driver_args,
+        oss_mock_device_data=resolved_oss_mock_device_data,
+        host_os_type_map=resolved_host_os_type_map,
+        startup_checks=[],
+        setup_tasks=setup_tasks if setup_tasks is not None else [],
+        teardown_tasks=teardown_tasks if teardown_tasks is not None else [],
+        basic_port_configs=create_ebb_performance_scale_basic_port_configs(
+            device_name=device_name,
+            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+            # Ingress sweep: eBGP device groups sized to the sweep max (all
+            # sessions exist; the per-iteration factory activates the swept
+            # subset), iBGP egress fan-out held constant.
+            ebgp_peer_count_v6=max_ebgp_n,
+            ebgp_peer_count_v4=ebgp_peer_count_v4,
+            ibgp_peer_count_v6=ibgp_peer_count,
+            ibgp_peer_count_v4=ibgp_peer_count_v4,
+            ebgp_remote_as=ebgp_remote_as,
+            ibgp_remote_as=ibgp_remote_as,
+            ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
+            ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
+            ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
+            ixia_ibgp_ic_parent_network_v4=ixia_ibgp_ic_parent_network_v4,
+            # next-hop-self so eBGP routes carry the connected IXIA peer address
+            # and the DUT resolves them without Open/R/IGP (same as case1).
+            ebgp_next_hop_self=True,
+            # Tag every eBGP route with only EB_FA_TRANSITED so they pass the
+            # DUT's EB-FA-IN inbound allowlist.
+            ebgp_fixed_communities=[_EB_FA_TRANSITED_COMMUNITY],
+        ),
+        playbooks=[
+            create_performance_scaling_ingress_peer_sweep_playbook(
+                device_name=device_name,
+                ingress_peer_counts=ingress_peer_counts,
+                prefix_count=prefix_count,
+                ibgp_peer_count=ibgp_peer_count,
+                per_iteration_setup_steps_factory=per_iteration_setup_steps_factory,
+                address_families=address_families,
             ),
         ],
     )

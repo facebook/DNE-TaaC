@@ -2298,6 +2298,238 @@ def create_performance_scaling_egress_peer_sweep_playbook(
     )
 
 
+def create_performance_scaling_ingress_peer_sweep_playbook(
+    *,
+    device_name: str,
+    ingress_peer_counts: list[int],
+    prefix_count: int,
+    ibgp_peer_count: int,
+    per_iteration_setup_steps_factory: PerIterationSetupStepsFactory | None = None,
+    address_families: list[str] | None = None,
+) -> Playbook:
+    """Build the ingress-eBGP-sender-sweep performance-scaling Playbook (SC4).
+
+    Ingress counterpart of `create_performance_scaling_egress_peer_sweep_playbook`
+    (char-4, Transient Memory ~independent of PEER scale). One Stage per entry in
+    `ingress_peer_counts` brings up `n` v6 + `n` v4 eBGP INGRESS senders (the
+    swept axis) while the iBGP egress fan-out is held constant at
+    `ibgp_peer_count` per AF, then measures the convergence + transient-memory
+    burst against `prefix_count` prefixes. A trailing aggregator Stage
+    consolidates the per-Stage results into one plot.
+
+    Args:
+        device_name: DUT hostname.
+        ingress_peer_counts: eBGP ingress sender counts to sweep (each entry `n`
+            becomes `n_afis*n` total eBGP peers -- x2 for dual-stack, x1 for a
+            v6-only sweep).
+        prefix_count: Prefixes advertised per eBGP sender.
+        ibgp_peer_count: Constant iBGP egress peer count per AF present in every
+            Stage (contributes `n_afis * ibgp_peer_count` to total peer count).
+        per_iteration_setup_steps_factory: Per-iteration peer-setup steps factory
+            (the ingress closure from
+            `build_per_iteration_factory_ingress_v4_capable`); required.
+        address_families: AFs advertised on ingress. Defaults to dual-stack
+            (["ipv6", "ipv4"]); pass ["ipv6"] for a v6-only sweep, which halves
+            the session-gate totals and the per-stage prefix expectation.
+
+    Returns:
+        A `Playbook` named `Performance_Scaling_Ingress_Peer_Sweep` with N sweep
+        Stages + 1 aggregator Stage, sharing the PS-Case1 snapshot checks,
+        periodic tasks, and RIB/FIB + convergence postchecks.
+    """
+    if per_iteration_setup_steps_factory is None:
+        raise ValueError(
+            "ingress peer sweep requires per_iteration_setup_steps_factory"
+        )
+
+    stages: list[taac_types.Stage] = []
+    # The AF count multiplies the per-AF peer counts into the session-establish
+    # gate totals: dual-stack (default) advertises v6+v4 in parallel (x2); a
+    # v6-only sweep (address_families=["ipv6"]) advertises a single AF (x1).
+    afis = address_families or ["ipv6", "ipv4"]
+    n_afis = len(afis)
+    ingress_v4 = "ipv4" in afis
+    ibgp_total = n_afis * ibgp_peer_count
+    for idx, n in enumerate(ingress_peer_counts):
+        # eBGP senders start per AF in parallel, so the X-axis label for this
+        # Stage is n_afis*n eBGP senders; the iBGP egress fan-out is constant.
+        n_v4 = n if ingress_v4 else 0
+        ebgp_total = n_afis * n
+        total_peer_count = ebgp_total + ibgp_total
+        steps = per_iteration_setup_steps_factory(n, n_v4)
+        # Gate the iteration on all expected sessions reaching Established BEFORE
+        # advertising prefixes. A device that did not reload the reduced peer set
+        # surfaces here (established/total != total_peer_count) instead of
+        # silently measuring against the deployed base config.
+        steps.append(
+            create_validation_step(
+                point_in_time_checks=[
+                    create_bgp_session_establish_check(
+                        expected_established_sessions=total_peer_count,
+                        retry_count=_PS_CASE1_SESSION_RETRY_COUNT,
+                        retry_delay_seconds=_PS_CASE1_SESSION_RETRY_DELAY_SECONDS,
+                    )
+                ],
+                description=(
+                    f"Verify all {total_peer_count} expected BGP sessions"
+                    f" ({ebgp_total} EBGP + {ibgp_total} IBGP) are Established"
+                    " before advertising prefixes"
+                ),
+            )
+        )
+        steps.append(
+            create_performance_scaling_convergence_step(
+                device_name=device_name,
+                prefix_counts=[prefix_count],
+                total_peer_count=total_peer_count,
+                ibgp_peer_count=ibgp_total,
+                ebgp_peer_count=ebgp_total,
+                # None -> dual-stack default (total_prefixes == prefix_count*2);
+                # ["ipv6"] -> single-AF (total_prefixes == prefix_count).
+                address_families=address_families,
+            )
+        )
+        stages.append(
+            create_steps_stage(
+                stage_id=f"ingress_{ebgp_total}_ebgp_peers",
+                description=(
+                    f"Iteration {idx + 1}/{len(ingress_peer_counts)}:"
+                    f" {ebgp_total} EBGP ingress senders (v6={n}, v4={n_v4}) +"
+                    f" {ibgp_total} IBGP @ prefix_count={prefix_count}"
+                ),
+                steps=steps,
+            )
+        )
+
+    # Final aggregator Stage -- one consolidated plot across all Stages (the
+    # aggregator is axis-agnostic: it plots convergence-time vs total-peer-count).
+    stages.append(
+        create_steps_stage(
+            stage_id="ingress_sweep_aggregator",
+            description=(
+                "Aggregate per-Stage convergence results into one plot of"
+                f" convergence-time vs total-peer-count @ prefix_count={prefix_count}"
+            ),
+            steps=[
+                create_performance_scaling_egress_sweep_aggregator_step(
+                    prefix_count=prefix_count,
+                ),
+            ],
+        )
+    )
+
+    return Playbook(
+        name="Performance_Scaling_Ingress_Peer_Sweep",
+        setup_steps=[],
+        periodic_tasks=_ps_case1_common_periodic_tasks(device_name),
+        prechecks=[],
+        snapshot_checks=_ps_case1_common_snapshot_checks(),
+        postchecks=[
+            create_bgp_rib_fib_consistency_check(),
+            create_bgp_convergence_check(
+                convergence_threshold=_PS_CASE1_CONVERGENCE_THRESHOLD_SECONDS,
+                fail_on_eor_expired=True,
+            ),
+        ],
+        stages=stages,
+    )
+
+
+def create_bgp_update_packing_validation_playbook(
+    device_name: str,
+    ixia_interface_mimic_ibgp: str,
+    ibgp_peer_count: int,
+    prefixes_per_peer: int,
+    ixia_interface_mimic_ebgp: str,
+    ebgp_peer_count: int,
+    test_address_families: list[str],
+    as_path_pool,
+    community_pool,
+    communities_per_route: int,
+    ibgp_route_acceptance_communities: list[str] | None,
+    ebgp_route_acceptance_communities: list[str] | None,
+    capture_duration_seconds: int,
+    min_packed_size: int,
+    restart_bgp_for_complete_view: bool,
+) -> Playbook:
+    """Build the BGP++ UPDATE message packing validation Playbook.
+
+    Runs the `test_bgp_update_packing_eos_bgp_plus_plus` custom step,
+    which captures BGP UPDATE packets via tshark and validates that the
+    EOS BGP++ implementation packs prefixes per UPDATE message at or
+    above the configured minimum efficiency threshold. Used by the EOS
+    BGP++ UPDATE-packing validation TestConfig.
+
+    Args:
+        device_name: DUT hostname (EOS BGP++).
+        ixia_interface_mimic_ibgp: IXIA logical interface mimicking IBGP
+            peers.
+        ibgp_peer_count: Number of IBGP peers to mimic.
+        prefixes_per_peer: Prefixes advertised per peer.
+        ixia_interface_mimic_ebgp: IXIA logical interface mimicking EBGP
+            peers.
+        ebgp_peer_count: Number of EBGP peers to mimic.
+        test_address_families: AF list (e.g. `["ipv6", "ipv4"]`).
+        as_path_pool: AS path pool spec used for per-prefix AS path
+            generation.
+        community_pool: Community pool spec used for per-prefix community
+            generation.
+        communities_per_route: Communities attached per advertised route.
+        ibgp_route_acceptance_communities: Communities the IBGP ingress
+            policy requires for route acceptance (or None to skip).
+        ebgp_route_acceptance_communities: Communities the EBGP ingress
+            policy requires for route acceptance (or None to skip).
+        capture_duration_seconds: tshark capture window in seconds.
+        min_packed_size: Minimum acceptable number of prefixes packed per
+            UPDATE message.
+        restart_bgp_for_complete_view: If True, restart BGP++ during the
+            test to force a full advertisement cycle (cleaner capture at
+            the cost of test time).
+
+    Returns:
+        A `Playbook` named `bgp_update_packing_validation_playbook` with
+        a single custom-step stage.
+    """
+    return Playbook(
+        name="bgp_update_packing_validation_playbook",
+        description="Validate BGP++ UPDATE message packing efficiency",
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "test_bgp_update_packing_eos_bgp_plus_plus",
+                            "hostname": device_name,
+                            "ixia_interface_mimic_ibgp": ixia_interface_mimic_ibgp,
+                            "ibgp_peer_count": ibgp_peer_count,
+                            "prefixes_per_peer": prefixes_per_peer,
+                            "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
+                            "ebgp_peer_count": ebgp_peer_count,
+                            "test_address_families": test_address_families,
+                            "as_path_pool": as_path_pool,
+                            "community_pool": community_pool,
+                            "communities_per_route": communities_per_route,
+                            "ibgp_route_acceptance_communities": (
+                                ibgp_route_acceptance_communities
+                                if ibgp_route_acceptance_communities
+                                else []
+                            ),
+                            "ebgp_route_acceptance_communities": (
+                                ebgp_route_acceptance_communities
+                                if ebgp_route_acceptance_communities
+                                else []
+                            ),
+                            "capture_duration_seconds": capture_duration_seconds,
+                            "min_packed_size": min_packed_size,
+                            "restart_bgp_for_complete_view": restart_bgp_for_complete_view,
+                        },
+                    ),
+                ],
+            )
+        ],
+    )
+
+
 def create_test_constant_attribute_storage_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
