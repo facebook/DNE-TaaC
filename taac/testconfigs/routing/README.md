@@ -12,6 +12,9 @@ and catalog maintenance is in [CATALOGS.md](../../docs/routing/CATALOGS.md).
 TestConfig constants; they are not catalogs. Routing catalogs live in
 `../../catalogs/routing/`.
 
+Routing factory, selector, setup, and lifecycle-binding tests live in `tests/`
+with their own BUCK package.
+
 `testconfigs/routing/__init__.py` is intentionally side-effect free. Import a
 constant from its specific lifecycle module rather than the package root.
 

@@ -11,6 +11,9 @@ This package contains executable routing Playbooks and Playbook factories only.
 Catalog governance lives in `../../catalogs/routing/`; lifecycle binding modules
 live in `../../testconfigs/routing/`.
 
+Routing Playbook unit and composition tests live in `tests/` with their own
+BUCK package.
+
 For new suites, prefer one suite-owned module, `get_*` factories, and runtime
 names ending in `_playbook`. Update Group qualification's spec-section modules,
 `create_*` factories, and established unsuffixed runtime names are legacy
