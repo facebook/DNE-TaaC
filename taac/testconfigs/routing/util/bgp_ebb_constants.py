@@ -238,6 +238,8 @@ ADD_INTERN_USER_IDS_CMD = (
 
 POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
 
+EBB_BGPCPP_LOGGING_CONFIG = "DBG3;default:async=true"
+
 UPDATE_GROUP_VERIFICATION_CMD = (
     "bash sudo bash -c 'set +e; "
     'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
