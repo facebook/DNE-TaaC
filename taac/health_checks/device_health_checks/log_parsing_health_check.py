@@ -22,6 +22,7 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         "FBOSS",
         "EOS",
     ]
+    _REGEX_META_CHARACTERS = frozenset(r"\.^$*+?{}[]|()")
 
     async def _run(
         self,
@@ -154,6 +155,11 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             self.driver,
             agent_name,
             pid,
+            start_time=params["start_time"],
+            end_time=params["end_time"],
+            matching_literal=(
+                self._get_matching_literal(params) if live_log_found else None
+            ),
         )
         if not live_log_found and not archived_content:
             return hc_types.HealthCheckResult(
@@ -167,6 +173,14 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         log_content = self._filter_log_content_with_time_filter(log_content, params)
 
         return self._check_log_content(log_content, params, agent_name)
+
+    def _get_matching_literal(self, params: t.Dict[str, t.Any]) -> t.Optional[str]:
+        pattern = params["include_regex"] or params["exclude_regex"]
+        if not isinstance(pattern, str) or any(
+            character in self._REGEX_META_CHARACTERS for character in pattern
+        ):
+            return None
+        return pattern
 
     async def _handle_arista_system_logs(
         self, params: t.Dict[str, t.Any]

@@ -124,11 +124,20 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             ) as archived_logs,
         ):
             result = await self.health_check._run_arista(
-                self.device, self.input, self._arista_params()
+                self.device,
+                self.input,
+                self._arista_params(start_time=100, end_time=200),
             )
 
         self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
-        archived_logs.assert_awaited_once_with(self.health_check.driver, "Bgp", "26775")
+        archived_logs.assert_awaited_once_with(
+            self.health_check.driver,
+            "Bgp",
+            "26775",
+            start_time=100,
+            end_time=200,
+            matching_literal=None,
+        )
 
     async def test_arista_combines_live_and_archived_logs(self):
         self.health_check.driver.async_read_file.return_value = "healthy live BGP log"
@@ -142,14 +151,24 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
                 log_parsing_health_check_module.arista_utils,
                 "get_archived_agent_logs",
                 new=AsyncMock(return_value="Memory Limit Reached in archive"),
-            ),
+            ) as archived_logs,
         ):
             result = await self.health_check._run_arista(
-                self.device, self.input, self._arista_params()
+                self.device,
+                self.input,
+                self._arista_params(start_time=100, end_time=200),
             )
 
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("exclude regex", result.message)
+        archived_logs.assert_awaited_once_with(
+            self.health_check.driver,
+            "Bgp",
+            "26775",
+            start_time=100,
+            end_time=200,
+            matching_literal="Memory Limit Reached",
+        )
 
     async def test_arista_archive_error_is_not_hidden_by_live_log(self):
         self.health_check.driver.async_read_file.return_value = "healthy live BGP log"

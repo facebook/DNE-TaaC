@@ -116,13 +116,16 @@ def is_agent_log_line_in_time_range(
         minute = int(time_part[3:5])
         second = int(time_part[6:8])
 
-        # Create timestamp for comparison
-        log_timestamp = time.mktime(
-            (current_year, month, day, hour, minute, second, 0, 0, -1)
+        start_year = time.localtime(start_time).tm_year
+        end_year = time.localtime(end_time).tm_year
+        candidate_years = set(range(start_year, end_year + 1))
+        candidate_years.add(current_year)
+        return any(
+            start_time
+            <= time.mktime((year, month, day, hour, minute, second, 0, 0, -1))
+            <= end_time
+            for year in candidate_years
         )
-
-        # Check if within range
-        return start_time <= log_timestamp <= end_time
 
     except (ValueError, IndexError):
         # If parsing fails, include the line (safer)

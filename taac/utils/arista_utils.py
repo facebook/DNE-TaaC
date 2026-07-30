@@ -3,6 +3,7 @@
 # pyre-strict
 import logging
 import re
+import shlex
 import time
 import typing as t
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 AGENT_LOGS_PATH = "/var/log/agents"
 ARCHIVED_AGENT_LOGS_PATH = "/mnt/flash/archive/current/var/log/agents"
+_ARCHIVED_LOG_ROTATION_EPOCH_RE = re.compile(r"_(\d{10})\.gz$")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SHELL_PROMPT_RE = re.compile(r"^(?:bash-[\d.]+|[\w.-]+)#(?:\s|$)")
 
 
 def find_pid_in_output(output: str) -> t.Optional[str]:
@@ -99,19 +103,31 @@ def get_agent_log_file(daemon_name: str, pid: str) -> str:
 
 
 async def get_archived_agent_logs(
-    driver: t.Any, daemon_name: str, pid: str, time_to_mointor: Optional[str] = None
+    driver: t.Any,
+    daemon_name: str,
+    pid: str,
+    time_to_mointor: Optional[str] = None,
+    *,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+    matching_literal: Optional[str] = None,
 ) -> str:
     """
     Find and extract archived agent logs for a given daemon and PID.
 
-    Searches in both AGENT_LOGS_PATH and ARCHIVED_AGENT_LOGS_PATH directories
-    for archived log files (*.gz) matching the daemon's log file pattern.
-    Unzips files while preserving originals, reads contents, and returns combined output.
+    Searches ARCHIVED_AGENT_LOGS_PATH for archived log files (*.gz) matching
+    the daemon's log file pattern.
+    When a time window is provided, skips rotations that cannot overlap the
+    window and filters relevant archives on the device before returning their
+    combined output.
 
     Args:
         driver: Device driver for running commands
         daemon_name: Name of the daemon
         pid: Process ID of the daemon
+        start_time: Optional beginning of the log window as a Unix timestamp
+        end_time: Optional end of the log window as a Unix timestamp
+        matching_literal: Optional fixed string to select on the device
 
     Returns:
         Combined contents of all archived log files as a string
@@ -124,7 +140,11 @@ async def get_archived_agent_logs(
         f"[ARISTA_UTILS] Searching for archived logs in {ARCHIVED_AGENT_LOGS_PATH} matching {log_name}*.gz"
     )
 
-    find_cmd = f"bash find {ARCHIVED_AGENT_LOGS_PATH} -name '{log_name}*.gz' 2>/dev/null || true"
+    archive_pattern = shlex.quote(f"{log_name}*.gz")
+    find_cmd = (
+        f"bash find {ARCHIVED_AGENT_LOGS_PATH} -name {archive_pattern} "
+        "2>/dev/null || true"
+    )
     output = await driver.async_execute_show_or_configure_cmd_on_shell(find_cmd)
 
     if not output or not output.strip():
@@ -133,34 +153,41 @@ async def get_archived_agent_logs(
         )
         return ""
 
-    archived_files = [f.strip() for f in output.strip().split("\n") if f.strip()]
-    archived_files = set(archived_files)
+    archived_files = sorted(
+        {f.strip() for f in output.strip().split("\n") if f.strip()}
+    )
     logger.info(
         f"[ARISTA_UTILS] Found {len(archived_files)} archived log files in {ARCHIVED_AGENT_LOGS_PATH}"
+    )
+
+    archived_files = _select_archived_agent_logs(
+        archived_files,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    logger.info(
+        f"[ARISTA_UTILS] Selected {len(archived_files)} archived log files for the requested time window"
     )
 
     for archived_file in archived_files:
         try:
             logger.info(f"[ARISTA_UTILS] Processing archived file: {archived_file}")
-
-            unzip_cmd = f"bash sudo su\ngunzip -k {archived_file} 2>/dev/null\nexit"
-            await driver.async_run_cmd_on_shell(unzip_cmd)
-
-            unzipped_file = archived_file.rstrip(".gz")
-
-            read_cmd = f"bash cat {unzipped_file}"
+            read_cmd = _build_archived_log_read_cmd(
+                archived_file,
+                start_time=start_time,
+                end_time=end_time,
+                matching_literal=matching_literal,
+            )
             content = await driver.async_execute_show_or_configure_cmd_on_shell(
                 read_cmd
             )
+            content = _strip_privileged_shell_output(content)
 
             if content:
                 combined_contents.append(content)
                 logger.info(
-                    f"[ARISTA_UTILS] Read {len(content)} bytes from {unzipped_file}"
+                    f"[ARISTA_UTILS] Read {len(content)} filtered bytes from {archived_file}"
                 )
-
-            cleanup_cmd = f"rm -f {unzipped_file}"
-            await driver.async_run_cmd_on_shell(cleanup_cmd)
 
         except Exception as e:
             error_msg = (
@@ -174,6 +201,112 @@ async def get_archived_agent_logs(
         f"[ARISTA_UTILS] Combined archived logs total size: {len(result)} bytes"
     )
     return result
+
+
+def _get_archived_log_rotation_epoch(archived_file: str) -> Optional[int]:
+    match = _ARCHIVED_LOG_ROTATION_EPOCH_RE.search(archived_file)
+    return int(match.group(1)) if match else None
+
+
+def _select_archived_agent_logs(
+    archived_files: t.Iterable[str],
+    *,
+    start_time: Optional[int],
+    end_time: Optional[int],
+) -> t.List[str]:
+    files = sorted(set(archived_files))
+    if start_time is None or end_time is None:
+        return files
+
+    files_with_epochs = []
+    files_without_epochs = []
+    for archived_file in files:
+        rotation_epoch = _get_archived_log_rotation_epoch(archived_file)
+        if rotation_epoch is None:
+            files_without_epochs.append(archived_file)
+        else:
+            files_with_epochs.append((rotation_epoch, archived_file))
+
+    if files_without_epochs:
+        raise ArchivedLogError(
+            "Cannot determine rotation time for archived log file(s): "
+            + ", ".join(files_without_epochs)
+        )
+
+    files_with_epochs.sort()
+    selected = [
+        archived_file
+        for rotation_epoch, archived_file in files_with_epochs
+        if start_time <= rotation_epoch <= end_time
+    ]
+
+    first_rotation_after_window = next(
+        (
+            archived_file
+            for rotation_epoch, archived_file in files_with_epochs
+            if rotation_epoch > end_time
+        ),
+        None,
+    )
+    if first_rotation_after_window is not None:
+        selected.append(first_rotation_after_window)
+
+    return selected
+
+
+def _build_archived_log_read_cmd(
+    archived_file: str,
+    *,
+    start_time: Optional[int],
+    end_time: Optional[int],
+    matching_literal: Optional[str],
+) -> str:
+    quoted_file = shlex.quote(archived_file)
+    if start_time is None or end_time is None:
+        command = f"bash sudo su\ngzip -cd -- {quoted_file} 2>/dev/null"
+        if matching_literal is not None:
+            command += f" | grep -F -- {shlex.quote(matching_literal)} || true"
+        return f"{command}\nexit"
+
+    start_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(start_time)))
+    end_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(end_time)))
+    awk_program = (
+        "BEGIN { wraps = start > end } "
+        "{ is_timestamp = length($0) >= 15 "
+        "&& substr($0, 1, 1) ~ /[[:alpha:]]/ "
+        "&& substr($0, 2, 4) ~ /^[[:digit:]][[:digit:]][[:digit:]][[:digit:]]$/ "
+        '&& substr($0, 6, 1) == " " '
+        "&& substr($0, 7, 2) ~ /^[[:digit:]][[:digit:]]$/ "
+        '&& substr($0, 9, 1) == ":" '
+        "&& substr($0, 10, 2) ~ /^[[:digit:]][[:digit:]]$/ "
+        '&& substr($0, 12, 1) == ":" '
+        "&& substr($0, 13, 2) ~ /^[[:digit:]][[:digit:]]$/; "
+        "if (is_timestamp) { key = substr($0, 2, 13); "
+        "keep = wraps ? (key >= start || key <= end) "
+        ": (key >= start && key <= end) } "
+        "if (keep) print }"
+    )
+    command = (
+        "bash sudo su\n"
+        f"gzip -cd -- {quoted_file} 2>/dev/null | "
+        f"awk -v start={start_key} -v end={end_key} {shlex.quote(awk_program)}"
+    )
+    if matching_literal is not None:
+        command += f" | grep -F -- {shlex.quote(matching_literal)} || true"
+    return f"{command}\nexit"
+
+
+def _strip_privileged_shell_output(content: str) -> str:
+    lines = []
+    for line in content.splitlines():
+        line_without_ansi = _ANSI_ESCAPE_RE.sub("", line)
+        shell_line = line_without_ansi.strip()
+        if not shell_line or shell_line in {"exit", "logout"}:
+            continue
+        if _SHELL_PROMPT_RE.match(shell_line):
+            continue
+        lines.append(line_without_ansi)
+    return "\n".join(lines)
 
 
 async def check_eos_system_logs(

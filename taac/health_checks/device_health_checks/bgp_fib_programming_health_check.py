@@ -84,7 +84,11 @@ class BgpFibProgrammingCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckI
         )
         try:
             log_content_archived = await arista_utils.get_archived_agent_logs(
-                self.driver, agent_name, pid
+                self.driver,
+                agent_name,
+                pid,
+                start_time=start_time,
+                end_time=end_time,
             )
         except Exception as e:
             self.logger.error(
