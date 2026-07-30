@@ -586,14 +586,14 @@ Variant suffix goes **after** `_TEST_CONFIG`, not before it. The invariant is th
 ### Examples
 
 ```
-BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG
-BAG010_DRAIN_TEST_CONFIG_UG
-BAG010_LONGEVITY_TEST_CONFIG
-BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG
+BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG
+BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG
+BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG
+BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG
+BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG
+BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG
 BAG012_UPDATE_PACKING_TEST_CONFIG_UG
-BAG012_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG
-BAG012_QUEUE_MEMORY_MONITOR_TEST_CONFIG
-BAG012_BOUNDED_ECMP_SETS_TEST_CONFIG_UG
+BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG
 BAG013_BGP_UG_BACKPRESSURE_TEST_CONFIG
 BAG013_BGP_UG_BACKPRESSURE_TEST_CONFIG_SMOKE
 EB02_LAB_BGP_PERF_SCALING_EGRESS_PEER_SWEEP_TEST_CONFIG_200_IBGP_PEERS
@@ -813,10 +813,9 @@ authored, resolved, compiled, and workflow-effect assertions. Exact legacy JSON
 is not the contract; reviewed semantic parity is. The golden manifest remains a
 diagnostic drift check.
 
-The seven Phase 1.3 topology instances and the 23 classified catalog exports
-are enforced by `tests:test_phase13_catalog_adoption`. Only the three named
-graphless update-group skeletons may remain deferred. Catalog registrations use
-the canonical catalog objects rather than reconstructing equivalent configs.
+Catalog registrations use canonical catalog objects rather than reconstructing
+equivalent configs. Factory and topology tests own the durable behavior checks;
+completed migration-phase ledgers are not retained as production tests.
 
 ---
 

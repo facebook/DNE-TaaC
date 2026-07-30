@@ -1383,6 +1383,7 @@ def get_update_packing_setup_tasks(
     ebgp_peer_group_v6: str = "EB-FA-V6",
     ibgp_peer_group_v6: str = "EB-EB-V6",
     openr_configerator_path: t.Optional[str] = None,
+    openr_standalone_link: OpenRStandaloneLink | None = None,
     ixia_ebgp_ic_parent_network_v4: t.Optional[str] = None,
     ixia_ibgp_ic_parent_network_v4: t.Optional[str] = None,
     ebgp_peer_group_v4: str = "EB-FA-V4",
@@ -1564,7 +1565,13 @@ def get_update_packing_setup_tasks(
     )
 
     # 6. OpenR setup (conditional on profile)
-    setup_tasks.extend(_get_openr_setup_tasks(device_name=device_name, profile=profile))
+    setup_tasks.extend(
+        _get_openr_setup_tasks(
+            device_name=device_name,
+            profile=profile,
+            openr_standalone_link=openr_standalone_link,
+        )
+    )
 
     # 7. Flush iptables
     setup_tasks.extend(_get_iptables_flush_tasks(device_name=device_name))

@@ -1685,12 +1685,21 @@ def _two_port_direct_ixia_connections(
     ]
 
 
+def _openr_mode_for_profile(profile: BgpPlusPlusProfile) -> OpenRMode:
+    return (
+        OpenRMode.STANDALONE
+        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+        else OpenRMode.NONE
+    )
+
+
 def create_bgp_ebb_update_packing_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
 ) -> taac_types.TestConfig:
-    """BGP Update Packing conveyor test config for bag012.ash6.
+    """BGP Update Packing conveyor test config.
 
     Renamed from ``create_bgp_ebb_conveyor_test_config`` — the "conveyor"
     label was ambiguous (all configs in this file are conveyor-scheduled);
@@ -1714,10 +1723,6 @@ def create_bgp_ebb_update_packing_test_config(
     assert physical_inventory.dut_bgp_as is not None, (
         "factory requires dut_bgp_as on physical_inventory"
     )
-    assert physical_inventory.router_id, (
-        "factory requires router_id on physical_inventory"
-    )
-
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
@@ -1733,6 +1738,7 @@ def create_bgp_ebb_update_packing_test_config(
         peer_groups=IPV6_UPDATE_PACKING_PEER_GROUPS,
         as_numbers=IPV6_UPDATE_PACKING_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
+            openr_mode=_openr_mode_for_profile(profile),
             update_group_enable=enable_update_group,
         ),
     )
@@ -1778,8 +1784,9 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
 ) -> taac_types.TestConfig:
-    """Constant Attribute Storage varying-combinations test config for bag012.ash6.
+    """Constant Attribute Storage varying-combinations test config.
 
     Extracted verbatim from the legacy
     ``bag012_ash6_test_config.create_bag012_ash6_constant_attribute_storage_test_config``
@@ -1796,10 +1803,6 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
     assert physical_inventory.dut_bgp_as is not None, (
         "factory requires dut_bgp_as on physical_inventory"
     )
-    assert physical_inventory.router_id, (
-        "factory requires router_id on physical_inventory"
-    )
-
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
@@ -1821,7 +1824,13 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
         router_id=physical_inventory.router_id,
         bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        profile=profile,
+        openr_configerator_path=(
+            physical_inventory.openr_configerator_path
+            if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+            else None
+        ),
+        openr_standalone_link=physical_inventory.openr_standalone_link,
         enable_update_group=enable_update_group,
     )
 
@@ -1854,7 +1863,7 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         soak_time_minutes=2,
         dump_attribute_assignments=True,
         test_address_families=["ipv6"],
-        # Custom setup tasks (no openR)
+        # Custom setup tasks
         setup_tasks=setup_tasks,
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
@@ -1986,8 +1995,9 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
 ) -> taac_types.TestConfig:
-    """Queue-memory-monitor conveyor test config for bag012.ash6.
+    """Queue-memory-monitor conveyor test config.
 
     Extracted verbatim from the legacy
     ``bag012_ash6_test_config.create_bag012_ash6_queue_memory_monitor_test_config``
@@ -2003,10 +2013,6 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
     assert physical_inventory.dut_bgp_as is not None, (
         "factory requires dut_bgp_as on physical_inventory"
     )
-    assert physical_inventory.router_id, (
-        "factory requires router_id on physical_inventory"
-    )
-
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
@@ -2028,7 +2034,13 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
         router_id=physical_inventory.router_id,
         bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        profile=profile,
+        openr_configerator_path=(
+            physical_inventory.openr_configerator_path
+            if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+            else None
+        ),
+        openr_standalone_link=physical_inventory.openr_standalone_link,
         enable_update_group=enable_update_group,
     )
 
@@ -2168,8 +2180,10 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
 def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     physical_inventory: PhysicalInventory,
     name_override: str | None = None,
+    enable_update_group: bool = True,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
 ) -> taac_types.TestConfig:
-    """Build the scheduled BAG012 bounded-ECMP config from DICE intent.
+    """Build a scheduled bounded-ECMP config from DICE intent.
 
     The topology owns four public routing groups and eight inspectable IXIA
     children. The compiler retains the standard update-packing setup recipe,
@@ -2184,10 +2198,6 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     assert physical_inventory.dut_bgp_as is not None, (
         "factory requires dut_bgp_as on physical_inventory"
     )
-    assert physical_inventory.router_id, (
-        "factory requires router_id on physical_inventory"
-    )
-
     device_name = physical_inventory.device_name
     bound = BOUNDED_ECMP.bind_to_inventory(
         physical_inventory=physical_inventory,
@@ -2195,14 +2205,19 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         parent_networks=BOUNDED_ECMP_PARENT_NETWORKS,
         peer_groups=BOUNDED_ECMP_PEER_GROUPS,
         as_numbers=BOUNDED_ECMP_AS_NUMBERS,
-        device_config_override=RoutingDeviceConfig(update_group_enable=True),
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=_openr_mode_for_profile(profile),
+            update_group_enable=enable_update_group,
+        ),
     )
     compiled = bound.compile()
 
     return TestConfig(
         name=name_override
         or _derive_test_config_name(
-            physical_inventory, "BOUNDED_ECMP_SETS", enable_update_group=True
+            physical_inventory,
+            "BOUNDED_ECMP_SETS",
+            enable_update_group=enable_update_group,
         ),
         skip_ixia_protocol_verification=True,
         log_collection_timeout=600,

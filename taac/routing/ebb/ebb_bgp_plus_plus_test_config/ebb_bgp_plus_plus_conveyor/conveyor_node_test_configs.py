@@ -32,14 +32,14 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
 # Every entry below has an inline ``CONVEYOR: dne_routing / <node>`` marker at
 # its definition site (see cicd_ebb_int_tc.py) identifying the scheduling node.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG010_DRAIN_TEST_CONFIG_UG,
-    BAG010_LONGEVITY_TEST_CONFIG,
-    BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG,
-    BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG,
-    BAG012_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
-    BAG012_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG,
-    BAG012_QUEUE_MEMORY_MONITOR_TEST_CONFIG,
+    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
+    BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 
 # Migrated to the routing framework in Diffs 2 + 3 (Wave 1 Struct-Init):
@@ -76,30 +76,16 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 #   2. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
 #      via Netcastle CLI but not (yet) wired into a conveyor node.
 EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
-    # bag010.ash6 — Stage 1 consolidated (attribute_churn + route_storm +
-    # runtime_update + multipath_oscillation + pnh_metric_oscillation moved
-    # from bag011 for cross-device balance). Sliced by cconf regex into
-    # ``bag010_instability_node`` + ``bag010_runtime_node``.
-    BAG010_STAGE1_CONSOLIDATED_TEST_CONFIG,
-    # bag010.ash6 — Drain (UG variant is the scheduled one).
-    BAG010_DRAIN_TEST_CONFIG_UG,
-    # bag010.ash6 — Longevity (Stage 2, solo).
-    BAG010_LONGEVITY_TEST_CONFIG,
-    # bag011.ash6 — Stage 1 consolidated (Restart + Oscillations + Stability,
-    # minus pnh_metric_oscillation moved to bag010). Sliced by cconf regex
-    # into ``bag011_restart_ebgp_node`` + ``bag011_ibgp_stability_node``.
-    BAG011_STAGE1_CONSOLIDATED_TEST_CONFIG,
-    # bag012.ash6 (Update Packing, Const Attr, Queue Memory). BGP++ update_group
-    # + enableSerializeGroupPdu patched into ``/mnt/flash/bgpcpp_config`` during
-    # BGP++ deployment so the conveyor qualifies the update-group feature
-    # alongside the baseline.
+    # Stage 1 — four runtime-balanced full-scale playbooks on each BAG.
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    # Stage 2 — one scale-and-characteristic workflow on each BAG.
+    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
+    BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
-    BAG012_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG,
-    BAG012_QUEUE_MEMORY_MONITOR_TEST_CONFIG,
-    # bag012.ash6 BGP++ Bounded ECMP Sets (update_group enabled) — converted
-    # from EB02-ARISTA_PERFORMANCE_SCALING_TEST_9_BOUNDED_ECMP_SETS. Device
-    # setup runs via netcastle's managed shell (no raw SSH).
-    BAG012_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     # BGP++ Update Group "new peer join" qualification (specs 2.4.1 + 2.4.2
     # + 2.4.3 combined into one TestConfig with 3 playbooks sharing the
     # 21-eBGP + 4-iBGP testbed). Ad-hoc; not yet wired into a conveyor stage
