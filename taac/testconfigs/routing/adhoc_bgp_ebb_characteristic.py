@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP++ EBB characteristic ad-hoc testconfigs (SC1 egress peer-scale + SC2 constant-storage ingress + SC3 transient-memory route-scale + SC4 transient-memory ingress-peer-scale).
+"""BGP++ EBB characteristic ad-hoc testconfigs (SC1/SC2/SC3/SC4/SC6/SC9).
 
 Re-homed here after D111520998 consolidated ``cicd_ebb_int_tc.py`` down to the
 8 conveyor-scheduled configs. The bag010 egress peer-scale (perf-scaling case1)
@@ -20,6 +20,7 @@ from taac.abstractions.physical_inventory import (
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
+    create_bgp_ebb_characteristic_route_churn_processing_test_config,
     create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_update_packing_test_config,
@@ -108,10 +109,30 @@ BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 )
 
 
+# ─── bag010.ash6 — SC6 Churn Processing P(N) (convergence vs route-scale) ─
+# Testbed-driven factory. Reuses the EB02 churn P(N) engine (iBGP-injection
+# IPv6-only, 100-route churn, sweep total route scale 5K→50K) with bag010 device
+# setup (interface-state nexthop gflag + Centralized Route Filter cleared). The
+# churn engine's built-in per-scale convergence gate is observe-first (generous
+# 700s budget); a queue-backpressure periodic task monitors egress-queue backlog
+# (permissive default, observe-only until calibrated). Update-group is enabled
+# via a post-replace config-patch task (the engine uses create_replace_bgp_peers_task,
+# not topology binding). The patch sets the global bgp_setting_config flag; the
+# persisted test peers are re-grouped on the daemon restart. Ad-hoc: resolvable via
+# --test-config but not scheduled on a conveyor node. The TestConfig.name is
+# ``BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP``.
+BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
+    create_bgp_ebb_characteristic_route_churn_processing_test_config(
+        BAG010_ASH6, enable_update_group=True
+    )
+)
+
+
 __all__ = [
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
     "BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
+    "BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG",
 ]

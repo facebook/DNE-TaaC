@@ -25,6 +25,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
 
@@ -135,6 +136,15 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # sender count grows. Update-group enabled. Ad-hoc; runnable via --test-config,
     # not yet wired into a conveyor node.
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    # bag010.ash6 SC6 churn processing P(N) (char-6) — convergence time vs route
+    # scale. Reuses the EB02 churn P(N) engine (iBGP-injection IPv6-only, 100-route
+    # churn, sweep total route scale 5K→50K) with bag010 device setup (nexthop gflag
+    # + CRF cleared). The per-scale convergence gate is observe-first (generous 700s
+    # budget); a queue-backpressure periodic task monitors egress-queue backlog
+    # (permissive default). Update-group enabled via post-replace config-patch task
+    # (global bgp_setting_config flag; persisted peers are re-grouped on restart).
+    # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
+    BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag011.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6

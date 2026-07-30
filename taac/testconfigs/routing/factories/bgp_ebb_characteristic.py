@@ -111,6 +111,7 @@ from taac.task_definitions import (
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_ingress_peer_scale_test_config,
     create_bgp_ebb_scaling_performance_test_config,
+    create_bgp_ebb_scaling_route_churn_prefix_test_config,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     _derive_test_config_name,
@@ -2363,6 +2364,86 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         log_collection_timeout=600,
         setup_tasks=setup_tasks,
         per_iteration_setup_steps_factory=factory,
+    )
+
+
+def create_bgp_ebb_characteristic_route_churn_processing_test_config(
+    testbed: PhysicalInventory,
+    enable_update_group: bool = False,
+) -> taac_types.TestConfig:
+    """SC6 churn-processing P(N) test config (testbed-driven).
+
+    SC6 = characteristic 6 (Churn Processing time P(N)): hold route churn fixed
+    at ~100 routes, sweep total route scale N, and verify BGP keeps up
+    (reconverge/processing ~independent of N). Reuses the existing EB02 churn
+    P(N) engine (``create_bgp_ebb_scaling_route_churn_prefix_test_config``) with
+    bag010 device setup: interface-state nexthop gflag + Centralized Route
+    Filter cleared. The churn engine is iBGP-injection IPv6-only; the iBGP route
+    pools already carry the acceptance community (65529:39744).
+
+    The per-scale convergence budget is generous (700s, matching the existing
+    postcheck) so the engine's built-in absolute gate is observe-first. A
+    queue-backpressure periodic task monitors egress-queue backlog (permissive
+    default, observe-only until calibrated).
+
+    Mirrors SC3/SC4 device provisioning: the name derives from
+    ``testbed.device_name`` as ``{DEVICE}_SC6_CHURN_PROCESSING_TEST`` + ``_UPDATE_GROUP``
+    when ``enable_update_group=True``.
+
+    Update-group enablement is via a post-replace config-patch task (the churn
+    factory uses ``create_replace_bgp_peers_task``, not topology binding). The
+    patch sets the global ``bgp_setting_config.enable_update_group`` flag; the
+    persisted test peers are re-grouped on the daemon restart.
+
+    Args:
+        testbed: PhysicalInventory with ixia_ports, bgpcpp_configerator_path,
+            dut_bgp_as.
+        enable_update_group: When True, patches the config to enable update-group
+            after peer replacement and includes a UG health check in the playbook
+            postchecks.
+    """
+    assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
+
+    device_name = testbed.device_name
+
+    name = f"{testbed.device_name.upper().replace('.', '_')}_SC6_CHURN_PROCESSING_TEST"
+    if enable_update_group:
+        name += "_UPDATE_GROUP"
+
+    extra_setup_tasks = [
+        create_configure_bgpcpp_startup_task(
+            hostname=device_name,
+            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
+            use_managed_shell=True,
+            set_outer_hostname=True,
+            ixia_needed=True,
+        ),
+        create_bgp_clear_route_filter_task(
+            hostname=device_name,
+            set_outer_hostname=True,
+            ixia_needed=True,
+        ),
+    ]
+
+    # Queue-backpressure monitoring is a generic bgpd health signal now bundled
+    # into create_standard_periodic_tasks (like CPU/memory), so the churn
+    # playbook picks it up automatically -- no per-test wiring needed here.
+    return create_bgp_ebb_scaling_route_churn_prefix_test_config(
+        testbed,
+        name=name,
+        extra_setup_tasks=extra_setup_tasks,
+        ebgp_peer_count=100,
+        ibgp_peer_count=100,
+        ebgp_remote_as=EBGP_REMOTE_AS,
+        ibgp_remote_as=IBGP_REMOTE_AS,
+        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
+        peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
+        prefix_configs=[(5000, 700), (10000, 700), (20000, 700), (50000, 700)],
+        churn_count=100,
+        max_convergence_time_seconds=700,
+        enable_update_group=enable_update_group,
     )
 
 

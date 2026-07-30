@@ -39,6 +39,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_rib_fib_consistency_check,
     create_bgp_session_establish_check,
     create_bgp_session_snapshot_check,
+    create_bgp_update_group_check,
     create_core_dumps_snapshot_check,
 )
 from taac.playbooks.playbook_definitions import (
@@ -117,6 +118,70 @@ _EB_FA_TRANSITED_COMMUNITY = "65529:39744"
 # ─── physical_inventory → DUT-wiring helpers hoisted to util/bgp_ebb_lab_wiring.py ───
 # to break a circular import with bgp_ebb_characteristic.py (see that file's
 # imports and util/bgp_ebb_lab_wiring.py docstring).
+
+
+def _ug_config_patch_setup_tasks(
+    device_name: str,
+    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
+) -> list:
+    """
+    Return the 4-task update-group config-patch setup block.
+
+    Appends to setup_tasks AFTER a `create_replace_bgp_peers_task` to patch the
+    persisted bgpcpp_config on-device (set `bgp_setting_config.enable_update_group=True`
+    + `update_group_config`), validate, and restart the daemon. The persisted peers
+    are re-grouped on the restart.
+
+    Single source of truth for the UG config-patch recipe; reused by the bounded-ECMP
+    and churn factories.
+
+    Args:
+        device_name: Hostname of the DUT.
+        update_group_config: Optional custom UG config dict. Defaults to
+            `UPDATE_GROUP_CONFIG`.
+
+    Returns:
+        List of 4 tasks: config-patch, validate, daemon disable, daemon enable.
+    """
+    ug_config = (
+        update_group_config if update_group_config is not None else UPDATE_GROUP_CONFIG
+    )
+    return [
+        create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[
+                'bash python3 -c "'
+                "import json; "
+                f"f=open('{_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
+                "s=c.setdefault('bgp_setting_config',{}); "
+                "s['enable_update_group']=True; "
+                f"s['update_group_config']={ug_config!r}; "
+                f"f=open('{_BGPCPP_CONFIG_PATH}','w'); "
+                "json.dump(c,f,indent=2); f.close(); "
+                "print('Patched bgp_setting_config update_group')"
+                '"',
+            ],
+            set_outer_hostname=True,
+            ixia_needed=True,
+        ),
+        create_validate_bgpcpp_config_on_device_task(
+            hostname=device_name,
+            config_path=_BGPCPP_CONFIG_PATH,
+            ixia_needed=True,
+        ),
+        create_arista_daemon_control_task(
+            hostname=device_name,
+            daemon_name="Bgp",
+            action="disable",
+            ixia_needed=True,
+        ),
+        create_arista_daemon_control_task(
+            hostname=device_name,
+            daemon_name="Bgp",
+            action="enable",
+            ixia_needed=True,
+        ),
+    ]
 
 
 # =============================================================================
@@ -1010,6 +1075,9 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
     ssh_password: str | None = None,
     peergroup_ebgp_v6: str = "EB-FA-V6",
     peergroup_ibgp_v6: str = "EB-EB-V6",
+    extra_setup_tasks: list | None = None,
+    enable_update_group: bool = False,
+    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> TestConfig:
     """BGP++ route-churn prefix-scaling TestConfig -- perf-scaling case 6 (prefix scaling).
 
@@ -1063,6 +1131,34 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
         ),
     ]
 
+    if extra_setup_tasks:
+        setup_tasks.extend(extra_setup_tasks)
+
+    if enable_update_group:
+        setup_tasks.extend(
+            _ug_config_patch_setup_tasks(device_name, update_group_config)
+        )
+
+    postchecks = [
+        create_bgp_session_establish_check(
+            expected_established_sessions_static=ibgp_peer_count + ebgp_peer_count,
+            check_id="startup_bgp_session_verification",
+        ),
+        create_bgp_rib_fib_consistency_check(),
+        create_bgp_convergence_check(
+            convergence_threshold=700,
+            check_id="postcheck_bgp_convergence_time",
+        ),
+    ]
+
+    if enable_update_group:
+        postchecks.append(
+            create_bgp_update_group_check(
+                expect_enabled=True,
+                peer_group_substrings=[peergroup_ebgp_v6, peergroup_ibgp_v6],
+            )
+        )
+
     return TestConfig(
         name=name,
         skip_ixia_protocol_verification=True,
@@ -1112,18 +1208,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
                     memory_terminate_on_error=False,
                 ),
                 prechecks=[],
-                postchecks=[
-                    create_bgp_session_establish_check(
-                        expected_established_sessions_static=ibgp_peer_count
-                        + ebgp_peer_count,
-                        check_id="startup_bgp_session_verification",
-                    ),
-                    create_bgp_rib_fib_consistency_check(),
-                    create_bgp_convergence_check(
-                        convergence_threshold=700,
-                        check_id="postcheck_bgp_convergence_time",
-                    ),
-                ],
+                postchecks=postchecks,
                 stages=[
                     create_steps_stage(
                         steps=[
@@ -1285,55 +1370,34 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
         )
 
         if enable_update_group:
-            ug_config = (
-                update_group_config
-                if update_group_config is not None
-                else UPDATE_GROUP_CONFIG
+            setup_tasks.extend(
+                _ug_config_patch_setup_tasks(device_name, update_group_config)
             )
+        else:
             setup_tasks.append(
-                create_run_commands_on_shell_task(
+                create_validate_bgpcpp_config_on_device_task(
                     hostname=device_name,
-                    cmds=[
-                        'bash python3 -c "'
-                        "import json; "
-                        f"f=open('{_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
-                        "s=c.setdefault('bgp_setting_config',{}); "
-                        "s['enable_update_group']=True; "
-                        f"s['update_group_config']={ug_config!r}; "
-                        f"f=open('{_BGPCPP_CONFIG_PATH}','w'); "
-                        "json.dump(c,f,indent=2); f.close(); "
-                        "print('Patched bgp_setting_config update_group')"
-                        '"',
-                    ],
-                    set_outer_hostname=True,
+                    config_path=_BGPCPP_CONFIG_PATH,
                     ixia_needed=True,
                 )
             )
 
-        setup_tasks.append(
-            create_validate_bgpcpp_config_on_device_task(
-                hostname=device_name,
-                config_path=_BGPCPP_CONFIG_PATH,
-                ixia_needed=True,
+            setup_tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name="Bgp",
+                    action="disable",
+                    ixia_needed=True,
+                )
             )
-        )
-
-        setup_tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name="Bgp",
-                action="disable",
-                ixia_needed=True,
+            setup_tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name="Bgp",
+                    action="enable",
+                    ixia_needed=True,
+                )
             )
-        )
-        setup_tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name="Bgp",
-                action="enable",
-                ixia_needed=True,
-            )
-        )
 
     if (
         ebgp_peer_count_v6,
