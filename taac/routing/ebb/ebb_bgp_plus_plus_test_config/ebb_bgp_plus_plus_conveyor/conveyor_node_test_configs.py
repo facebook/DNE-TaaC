@@ -62,6 +62,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
@@ -196,4 +197,12 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # stage (do NOT schedule until manually verified on the device). Select with
     # ``--regex 'bgp_ug_notification_isolation'``.
     BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
+    # BGP++ UG 2.5.1 Multiple Groups Formed for Different Outbound Policies on
+    # bag013.ash6 -- its own WITHOUT_OPEN_R + next-hop-self TestConfig on the
+    # standard EBB_FULL_SCALE topology (BGP-MON not tested). Verifies each
+    # peer-group x AFI is its own update group, no cross-AFI leak, and 4 groups
+    # total; all checks STRICT (the +N distribution is convergence-polled). Ad-hoc;
+    # NOT wired into a conveyor stage (do NOT schedule until manually verified on
+    # the device). Select with ``--regex 'bgp_ug_multiple_groups_outbound_policies'``.
+    BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
 ]

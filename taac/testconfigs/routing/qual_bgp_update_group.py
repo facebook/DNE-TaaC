@@ -31,6 +31,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc4_new_peer_join 
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc5_multigroup_formation import (
     create_bgp_ug_multigroup_formation_test_config,
+    create_bgp_ug_multiple_groups_outbound_policies_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc6_bit_alloc_group_stab_under_flap import (
     create_bgp_ug_bit_alloc_group_stab_under_flap_test_config,
@@ -85,7 +86,18 @@ EB03_LAB_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG = (
 # ─── Spec 2.4 New Peer Join ─────────────────────────────────────────────
 BGP_UG_NEW_PEER_JOIN_TEST_CONFIG = create_bgp_ug_new_peer_join_test_config(BAG012_ASH6)
 
-# ─── Spec 2.5 Multi-Group Formation (SKELETON) ──────────────────────────
+# ─── Spec 2.5 Multi-Group Formation ─────────────────────────────────────
+# 2.5.1 Multiple Groups Formed for Different Outbound Policies on bag013.ash6 --
+# its OWN WITHOUT_OPEN_R + next-hop-self TestConfig on the standard EBB_FULL_SCALE
+# topology (BGP-MON not tested -- struck from the source spec; monitor peers do not
+# establish on a conveyor node). Verifies each peer-group x AFI is its own update
+# group (EB-EB-V4/V6 iBGP, EB-FA-V4/V6 eBGP), no cross-AFI leak, and 4 groups total.
+# Select via ``--test-config BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST``. All checks
+# STRICT (the distribution receive is convergence-polled; HW-green 2026-07-30).
+BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG = (
+    create_bgp_ug_multiple_groups_outbound_policies_test_config(BAG013_ASH6)
+)
+# Umbrella skeleton retained (empty-playbook) until 2.5.2 replaces it.
 BGP_UG_MULTIGROUP_FORMATION_TEST_CONFIG = (
     create_bgp_ug_multigroup_formation_test_config(BAG013_ASH6)
 )
@@ -187,6 +199,7 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
     "BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",

@@ -769,6 +769,15 @@ def create_verify_bgp_sent_route_count_delta_step(
     min_baseline: int = 0,
     expected_fail: bool = False,
     expected_fail_reason: t.Optional[str] = None,
+    # Opt-in convergence polling (default None = one-shot read, byte-identical
+    # params). When ``convergence_hard_timeout_seconds`` is set, the step POLLS the
+    # per-peer delta until it satisfies the constraint and holds for
+    # ``convergence_stability_window_seconds``, up to the hard timeout -- instead of
+    # relying on a fixed pre-read settle step.
+    convergence_hard_timeout_seconds: t.Optional[float] = None,
+    convergence_poll_interval_seconds: t.Optional[float] = None,
+    convergence_stability_window_seconds: t.Optional[float] = None,
+    convergence_soft_threshold_seconds: t.Optional[float] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Verify each peer's ``postpolicy_sent_prefix_count`` moved by the expected
@@ -853,6 +862,22 @@ def create_verify_bgp_sent_route_count_delta_step(
         params["expected_fail"] = True
         if expected_fail_reason is not None:
             params["expected_fail_reason"] = expected_fail_reason
+    # Convergence-poll params serialize ONLY when polling is enabled, so
+    # non-polling callers keep byte-identical params (no golden churn).
+    if convergence_hard_timeout_seconds is not None:
+        params["convergence_hard_timeout_seconds"] = convergence_hard_timeout_seconds
+        if convergence_poll_interval_seconds is not None:
+            params["convergence_poll_interval_seconds"] = (
+                convergence_poll_interval_seconds
+            )
+        if convergence_stability_window_seconds is not None:
+            params["convergence_stability_window_seconds"] = (
+                convergence_stability_window_seconds
+            )
+        if convergence_soft_threshold_seconds is not None:
+            params["convergence_soft_threshold_seconds"] = (
+                convergence_soft_threshold_seconds
+            )
     return create_custom_step(params_dict=params, description=description)
 
 

@@ -760,6 +760,7 @@ def _edge_cases_prechecks(
     establish_retry_count=None,
     establish_retry_delay_seconds=None,
     establish_retry_delay_multiplier=None,
+    expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
 ):
     """Prechecks for the 2.9 edge-cases TestConfig.
 
@@ -780,6 +781,12 @@ def _edge_cases_prechecks(
     daemon on a fresh bring-up; and (b) the WITH_OPEN_R edge-case setups whose tail
     (Open/R route inject + the ``iptables`` EOS_BGP firewall re-open) finalizes BGP
     reachability only ~20s before prechecks run.
+
+    ``expected_group_count`` is the baseline update-group count the UG precheck
+    asserts (spec pre-condition 3). Defaults to ``_EXPECTED_UPDATE_GROUP_COUNT``
+    (4 -- the four AFI x layer groups) so every existing caller is byte-identical;
+    2.5.x multi-group-formation passes 5 (its config adds the BGP-MON add-path
+    group via ``include_bgp_mon=True``).
     """
     return [
         create_bgp_session_establish_check(
@@ -802,7 +809,7 @@ def _edge_cases_prechecks(
         # count returns to it.
         create_bgp_update_group_check(
             expect_enabled=True,
-            expected_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
+            expected_group_count=expected_group_count,
         ),
     ]
 
