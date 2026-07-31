@@ -6,7 +6,7 @@ The lifecycle layout contains two stages across four BAG devices. Stage 1
 partitions the canonical 16 full-scale Playbooks into four runtime-balanced
 groups. Stage 2 runs one scale-and-characteristic workflow per device. Every
 config explicitly uses standalone OpenR and update groups. Catalog governance
-lives in ``catalogs/routing/bgp_ebb_catalog.yaml``.
+lives in ``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml``.
 """
 
 from taac.abstractions.physical_inventory import (

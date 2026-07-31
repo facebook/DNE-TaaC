@@ -10,7 +10,7 @@ lifecycle binding module rather than in ``cicd_ebb_int_tc.py`` (which is now
 the scheduled-only source of truth).
 
 External consumers import from this member module directly; see
-``docs/routing/TESTCONFIGS.md``.
+``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

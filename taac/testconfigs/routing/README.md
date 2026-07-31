@@ -1,16 +1,20 @@
 # Routing TestConfigs
 
-The central routing TAAC guide is [docs/routing/README.md](../../docs/routing/README.md).
+The central routing TAAC guide is
+[README.md](../../../../routing_qualification/docs/taac/README.md).
 The planning-to-submission sequence is in
-[WORKFLOW.md](../../docs/routing/WORKFLOW.md), and topology/inventory planning
-is in [TESTBEDS.md](../../docs/routing/TESTBEDS.md).
-Normative TestConfig policy is in [TESTCONFIGS.md](../../docs/routing/TESTCONFIGS.md),
-and catalog maintenance is in [CATALOGS.md](../../docs/routing/CATALOGS.md).
+[WORKFLOW.md](../../../../routing_qualification/docs/taac/WORKFLOW.md), and
+topology/inventory planning is in
+[TESTBEDS.md](../../../../routing_qualification/docs/taac/TESTBEDS.md).
+Normative TestConfig policy is in
+[TESTCONFIGS.md](../../../../routing_qualification/docs/taac/TESTCONFIGS.md),
+and catalog maintenance is in
+[CATALOGS.md](../../../../routing_qualification/docs/taac/CATALOGS.md).
 
 `factories/` composes topology/capability envelopes. Files named `cicd_*.py`,
 `qual_*.py`, and `adhoc_*.py` are lifecycle binding modules that export
 TestConfig constants; they are not catalogs. Routing catalogs live in
-`../../catalogs/routing/`.
+`../../../../routing_qualification/catalogs/taac/`.
 
 Routing factory, selector, setup, and lifecycle-binding tests live in `tests/`
 with their own BUCK package.
@@ -25,6 +29,6 @@ differs. Current `playbooks_selected` behavior is not uniform; see the central
 guide before changing selectors.
 
 Before changing a cataloged factory or lifecycle binding, locate every affected
-catalog through `../../catalogs/registry.py`, re-evaluate Requirement Coverage
-and all remaining gaps, update the YAML in the same diff, regenerate Markdown,
-and validate it.
+catalog through `../../../../routing_qualification/catalogs/registry.py`,
+re-evaluate Requirement Coverage and all remaining gaps, update the YAML in the
+same diff, regenerate Markdown, and validate it.

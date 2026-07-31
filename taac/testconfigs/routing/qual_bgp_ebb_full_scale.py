@@ -15,7 +15,7 @@ the ``JSW002_M001_SNC1`` production physical_inventory (usage=adhoc) and lives i
 ``adhoc_bgp_ebb_full_scale.py``.
 
 External consumers import from this member module directly; see
-``docs/routing/TESTCONFIGS.md``.
+``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

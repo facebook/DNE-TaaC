@@ -10,7 +10,7 @@ verbatim via the factory ``name=`` kwarg so the golden manifest stays
 byte-wise identical.
 
 External consumers import from this member module directly; see
-``docs/routing/TESTCONFIGS.md``.
+``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (

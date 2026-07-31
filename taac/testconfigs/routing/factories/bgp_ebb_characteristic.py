@@ -28,7 +28,7 @@ call these helpers by name. The update-packing Playbook is centralized in
 ``playbooks/routing/bgp_ebb_playbooks.py``; the remaining legacy Playbook
 factories stay in ``playbook_definitions.py``.
 
-See ``docs/routing/TESTCONFIGS.md``.
+See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 import os

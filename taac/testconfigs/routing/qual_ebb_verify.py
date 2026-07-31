@@ -11,7 +11,7 @@ string is grandfathered from the legacy wrapper (note plural ``TEST_CONFIGS``
 suffix) so the golden manifest hash is byte-wise identical.
 
 External consumers import from this member module directly; see
-``docs/routing/TESTCONFIGS.md``.
+``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import FA001_UU001_QZD1

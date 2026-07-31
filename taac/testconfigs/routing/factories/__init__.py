@@ -8,7 +8,8 @@ binding modules in the parent package. Force-import domain modules so downstream
 ``import ...testconfigs.routing.factories`` reaches every factory (parallels
 the sibling ``playbooks/routing/__init__.py`` pattern).
 
-See ``../../../docs/routing/TESTCONFIGS.md`` for the factory contract.
+See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``
+for the factory contract.
 """
 
 from taac.testconfigs.routing.factories import (  # noqa: F401

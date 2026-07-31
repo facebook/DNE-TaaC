@@ -10,7 +10,7 @@ sourced from ``physical_inventory``. The ``name`` field is a required kwarg so t
 lifecycle binding preserves the legacy ``TestConfig.name`` verbatim and the
 golden manifest hash stays byte-identical.
 
-See ``docs/routing/TESTCONFIGS.md`` for the factory contract.
+See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md`` for the factory contract.
 """
 
 import json

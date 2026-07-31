@@ -19,7 +19,7 @@ The 3 lab-box siblings (eb01/eb03/eb04) live in
 ``qual_bgp_ebb_full_scale.py`` since they target ``qual``-usage physical inventories.
 
 External consumers import from this member module directly; see
-``docs/routing/TESTCONFIGS.md``.
+``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 from taac.abstractions.physical_inventory import (
