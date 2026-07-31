@@ -1503,6 +1503,15 @@ DSF_RDMA_IB_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
             regex="udp", query_type=ixia_types.QueryType.STACK_TYPE_ID
         ),
     ),
+    # RoCEv2/IB is Ether / IPv6 / UDP / IB-BTH. The IPv6 traffic-item template
+    # ships a default L4 TCP stack; remove it so the frame is exactly
+    # Ether/IP/UDP/IB (no stray TCP header under the BTH).
+    taac_types.PacketHeader(
+        query=ixia_types.Query(
+            regex="^tcp$", query_type=ixia_types.QueryType.STACK_TYPE_ID
+        ),
+        remove_from_stack=True,
+    ),
 ]
 
 LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = [
