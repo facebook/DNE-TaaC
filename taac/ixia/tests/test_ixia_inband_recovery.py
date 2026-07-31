@@ -3,9 +3,9 @@
 """Unit tests for the in-band IXIA 5xx auto-recovery wiring.
 
 Covers two seams:
-  1. `@external_api` decorator — on a 5xx from the wrapped RPC, emits an
-     `inband_502_observed` Scuba row, invokes `_attempt_inband_recovery`
-     (the existing CLI-tested path), and retries once if recovery succeeds.
+  1. `@external_api` decorator — emits an `inband_502_observed` Scuba row;
+     502/503 invoke `_attempt_inband_recovery` and retry once, while an
+     operation-scoped 504 propagates without an application-wide restart.
   2. `Ixia.ensure_ixia_alive` — between-playbook health gate; only fires
      recovery when health classifies as `API_DOWN_502` or `API_DOWN_OTHER`.
 
@@ -59,6 +59,10 @@ def _err_502() -> _FakeIxNetError:
     return _FakeIxNetError("HTTP 502 Bad Gateway from /api/v1/...")
 
 
+def _err_504() -> _FakeIxNetError:
+    return _FakeIxNetError("HTTP 504 Gateway Timeout from /api/v1/...")
+
+
 def _mkfn(name: str, **kwargs) -> MagicMock:
     """Build a MagicMock with `__name__` set (mocks don't supply __name__
     by default — `functools.wraps` and `func.__name__` would AttributeError).
@@ -104,7 +108,7 @@ class _RecoveryTestBase(unittest.TestCase):
 
 
 class ExternalApiDecoratorTest(_RecoveryTestBase):
-    """The @external_api decorator: thin try/retry around 5xx, otherwise no-op."""
+    """The @external_api decorator: observe 5xx and recover only 502/503."""
 
     def test_healthy_call_is_plain_passthrough(self):
         ix = self._make_ixia()
@@ -132,7 +136,7 @@ class ExternalApiDecoratorTest(_RecoveryTestBase):
             wrapped(ix)
         self.lib.restart_ixnetwork.assert_not_called()
 
-    def test_5xx_recovers_and_retries(self):
+    def test_502_recovers_and_retries(self):
         ix = self._make_ixia()
         fn = _mkfn(
             "stop_protocols",
@@ -152,7 +156,7 @@ class ExternalApiDecoratorTest(_RecoveryTestBase):
         self.assertEqual(kw["source"], "inband_api_call")
         self.assertEqual(kw["http_status"], 502)
 
-    def test_5xx_recovery_refused_reraises_original(self):
+    def test_502_recovery_refused_reraises_original(self):
         ix = self._make_ixia()
         fn = _mkfn("apply_changes", side_effect=_err_502())
         # restart_ixnetwork refuses (e.g. cooldown) — recovery returns False.
@@ -168,6 +172,21 @@ class ExternalApiDecoratorTest(_RecoveryTestBase):
         # Inband telemetry still fires (we want the underlying-502 rate
         # even when recovery is budget-blocked).
         self.lib.emit_inband_502_scuba.assert_called_once()
+
+    def test_operation_504_is_observed_without_restart(self):
+        ix = self._make_ixia()
+        fn = _mkfn("start_bgp_peers", side_effect=_err_504())
+        wrapped = external_api(fn)
+
+        with self.assertRaises(_FakeIxNetError):
+            wrapped(ix)
+
+        fn.assert_called_once_with(ix)
+        self.lib.restart_ixnetwork.assert_not_called()
+        self.lib.emit_inband_502_scuba.assert_called_once()
+        kw = self.lib.emit_inband_502_scuba.call_args.kwargs
+        self.assertEqual(kw["http_status"], 504)
+        self.assertIn("operation-scoped 504", ix.logger.warning.call_args.args[0])
 
     def test_retry_after_recovery_raises_session_gone_propagates(self):
         ix = self._make_ixia()
@@ -251,6 +270,20 @@ class EnsureIxiaAliveTest(_RecoveryTestBase):
         self.assertEqual(kw["source"], "between_playbook_gate")
         self.assertEqual(kw["op_name"], "ensure_ixia_alive")
 
+    def test_api_down_504_fires_recovery(self):
+        ix = self._make_ixia()
+        self.lib.classify_health.return_value = {
+            "status": _HealthStatus.API_DOWN_OTHER,
+            "sessions_endpoint": {"status_code": 504},
+        }
+        self.lib.restart_ixnetwork.return_value = {"success": True}
+
+        ix.ensure_ixia_alive(playbook_name="route_storm")
+
+        self.lib.restart_ixnetwork.assert_called_once()
+        kw = self.lib.emit_inband_502_scuba.call_args.kwargs
+        self.assertEqual(kw["http_status"], 504)
+
     def test_chassis_down_does_not_soft_restart(self):
         # CHASSIS_DOWN is a hardware issue — a Jetty restart won't fix it.
         ix = self._make_ixia()
@@ -315,3 +348,7 @@ class BudgetGatingTest(_RecoveryTestBase):
         self.assertEqual(wrapped(ix), "OK-after-retry")
         self.assertEqual(fn.call_count, 2)
         self.lib.restart_ixnetwork.assert_called_once()
+
+    def test_connect_time_504_remains_recovery_eligible(self):
+        ix = self._make_ixia()
+        self.assertTrue(ix._should_attempt_recovery(_err_504()))

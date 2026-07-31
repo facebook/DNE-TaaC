@@ -428,12 +428,16 @@ def external_api(func: t.Callable) -> t.Callable:
     """Marks a method that issues IxNetwork SDK RPCs to the chassis and routes
     it through the in-band 5xx recovery wrapper.
 
-    On a 5xx from the wrapped call, the wrapper emits a Scuba
+    On a 502/503 from the wrapped call, the wrapper emits a Scuba
     `inband_502_observed` row, invokes the already-tested-e2e recovery CLI
     (`ixia._attempt_inband_recovery` → `ixia_recovery_lib.restart_ixnetwork`),
-    and retries the RPC once if recovery succeeded. On the healthy path the
-    only overhead is one `try`/`except`; on the cooldown / refusal / failure
-    path the original 5xx propagates.
+    and retries the RPC once if recovery succeeded. A 504 is emitted but
+    propagated without an application-wide restart: it proves that one
+    operation exceeded the gateway deadline, not that the global API is down.
+    The between-playbook health gate still restarts when `/api/v1/sessions`
+    itself is unhealthy. On the healthy path the only overhead is one
+    `try`/`except`; on the cooldown / refusal / failure path the original 5xx
+    propagates.
 
     The recovery action's own cooldown (default 30 min, enforced inside
     `restart_ixnetwork`) is the global rate limit — no per-RPC budget is
@@ -458,7 +462,24 @@ def external_api(func: t.Callable) -> t.Callable:
             # the run — see Devmate review of D109398929 V1).
             if not self._is_recovery_eligible_5xx(exc):
                 raise
-            self._emit_inband_502(func.__name__, exc, source=_INBAND_SOURCE_API_CALL)
+            # Telemetry must never mask the original 5xx: a Scuba write
+            # failure here would otherwise replace the real operational
+            # error (e.g. the propagated 504) in the traceback.
+            try:
+                self._emit_inband_502(
+                    func.__name__, exc, source=_INBAND_SOURCE_API_CALL
+                )
+            except Exception:
+                self.logger.exception(
+                    f"{_YELLOW}[IXIA]{_RESET} failed to emit inband_502 "
+                    f"telemetry for {func.__name__}"
+                )
+            if self._extract_5xx_status(exc) == 504:
+                self.logger.warning(
+                    f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit an "
+                    "operation-scoped 504 — skipping application-wide recovery"
+                )
+                raise
             self.logger.warning(
                 f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit 5xx mid-test — "
                 f"invoking in-band recovery"
