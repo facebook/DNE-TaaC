@@ -14,10 +14,11 @@
 
 ```
                 FBOSS public Dockerfile
+                  at the pinned fboss rev
                         │
                         │  (auto-built if missing)
                         ▼
-                fboss-build-env:centos              (shared base, ~4 GB)
+                fboss-build-env:centos-<rev>         (shared base, ~4 GB)
                         │
                         ▼
                   Dockerfile.taac
@@ -27,6 +28,11 @@
                   fboss-taac
                   (vendor-shippable, ~1.3 GB)
 ```
+
+The base image tag carries the fboss rev it was built from, taken from
+`getdeps/manifests/fboss-thrift-defs` so one fboss commit supplies both the
+build environment and the thrift defs. Bumping that pin yields a new tag,
+which forces a base rebuild instead of silently reusing a stale image.
 
 The full build takes ~22 min cold (folly + fizz + wangle + mvfst + fbthrift compiled from source). Docker's layer cache makes subsequent rebuilds fast when only TAAC source changes.
 
@@ -54,12 +60,34 @@ Docker's layer cache keeps the heavy dep compile cached when only TAAC source ch
 | `requirements.txt` | Builder layers D–E + runtime COPYs | ~1-2 min |
 | `getdeps/manifests/*` or `scripts/setup_getdeps.sh` | Entire builder + runtime | ~22 min |
 | `docker/taac-entrypoint.sh` or `docker/taac-regen-thrift.sh` | Runtime `COPY . /taac` + `cp` layer | ~1 sec |
+| fboss pin in `getdeps/manifests/fboss-thrift-defs` | Base image tag changes → base + everything | ~28 min |
+| `--no-cache` | Base image + entire builder + runtime | ~28 min |
 
-## Deps and the fbthrift pin
+### Refreshing the base image
 
-The pinned rev in [`getdeps/manifests/fbthrift-python`](../getdeps/manifests/fbthrift-python) (`rev = <sha>`) is the single source of truth. `setup_getdeps.sh` clones the matching fbthrift tooling at that SHA so the build infrastructure stays in lockstep with the dep versions.
+`--no-cache` rebuilds the FBOSS base image as well as the TAAC layers. That
+is deliberate: the base is stage 2 of `Dockerfile.taac` (the shipped runtime),
+so its CentOS packages are part of what ships, and rebuilding is the only
+thing that refreshes them — `quay.io/centos/centos:stream9` and the base's
+`dnf install` lines are not pinned by anything here.
 
-**Bumping the pin:** edit the `rev = ...` line and commit. The next `build-taac-image.sh` run will rebuild the full dep tree.
+CI gets that refresh for free. Runners are ephemeral, so the base image is
+never present and is rebuilt from live repos on every run (~5.5 min of the
+~17 min build). Long-lived local machines do not, which is what `--no-cache`
+is for: without it, a locally built base can sit unchanged for months.
+
+Because the tag carries the fboss rev, each bump leaves the previous
+`fboss-build-env:centos-<oldrev>` (~4 GB) behind on long-lived machines and
+nothing prunes it. Clean up with `docker image rm fboss-build-env:centos-<oldrev>`,
+or `docker image ls fboss-build-env` to see what has accumulated.
+
+## Deps and the pins
+
+The pinned rev in [`getdeps/manifests/fbthrift-python`](../getdeps/manifests/fbthrift-python) (`rev = <sha>`) is the single source of truth for the dep tree. `setup_getdeps.sh` clones the matching fbthrift tooling at that SHA so the build infrastructure stays in lockstep with the dep versions. The fbcode family is pinned as one snapshot — see `scripts/pin_fbcode_snapshot.py --check`, which CI runs before the build.
+
+The fboss rev in [`getdeps/manifests/fboss-thrift-defs`](../getdeps/manifests/fboss-thrift-defs) does double duty: thrift defs, and the base image recipe.
+
+**Bumping either pin:** edit the `rev = ...` line and commit. The next `build-taac-image.sh` run rebuilds the dep tree; bumping the fboss rev also changes the base image tag and so rebuilds the base.
 
 ## In-container iteration
 

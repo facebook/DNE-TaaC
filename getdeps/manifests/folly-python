@@ -1,3 +1,7 @@
+# GENERATED FILE -- do not hand-edit; scripts/pin_fbcode_snapshot.py rewrites
+# the whole file (body from upstream, plus the rev), so local edits are lost.
+# Re-pin: ./scripts/pin_fbcode_snapshot.py --write <tag>
+# Snapshot: v2026.07.27.00 (upstream weekly release tag)
 [manifest]
 name = folly-python
 fbsource_path = fbcode/folly
@@ -6,7 +10,7 @@ shipit_fbcode_builder = true
 
 [git]
 repo_url = https://github.com/facebook/folly.git
-rev = 0985312ed8e707a75185ad96aa626c714e4fb7cd
+rev = 3a38b74989093f7c61932212bc494376011f086c
 
 [build]
 builder = cmake
@@ -23,7 +27,6 @@ boost-python
 libdwarf-python
 libevent-python
 libsodium
-double-conversion-python
 fast_float
 fmt-python
 lz4-python
