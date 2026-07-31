@@ -17,6 +17,44 @@ from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-expo
 )
 
 
+def _resolve_prefix_slots(
+    prefix_pool_obj: t.Any,
+    network_group_multiplier: int,
+    total_route_ranges: int,
+    prefix_start_index: int,
+    prefix_end_index: t.Optional[int],
+) -> t.Tuple[t.List[t.Tuple[int, int]], int]:
+    """Route-range slots to modify for a ``[start, end)`` per-peer prefix window.
+
+    Geometry-agnostic. Each peer advertises
+    ``prefixes_per_peer = network_group_multiplier * prefix_pool.NumberOfAddresses``
+    routes, and that product equals the configured per-peer prefix count in BOTH
+    IxNetwork geometries:
+      * flat (import_bgp_routes):      NetworkGroup.Multiplier = prefix_count, NumberOfAddresses = 1
+      * compact (create_bgp_prefixes): NetworkGroup.Multiplier = 1,            NumberOfAddresses = prefix_count
+    The per-route-range attribute multivalue (``Active`` / ``LocalPreference`` /
+    ``Origin`` / ...) spans every peer, i.e. ``total_route_ranges =
+    peers * prefixes_per_peer``, so we iterate the whole multivalue and keep only
+    within-peer indices in ``[prefix_start_index, prefix_end_index)``. Keying the
+    window off ``NetworkGroup.Multiplier`` alone -- and bounding the loop by the
+    pool-instance ``Count`` -- collapsed to 1 under compact geometry, advertising
+    ~0 routes ("Configured prefixes in range 0 - 1", P2441146392).
+
+    Returns ``(slots, resolved_end_index)`` where ``slots`` is a list of
+    ``(route_range_index, within_peer_index)`` pairs (the within-peer index lets
+    callers cycle per-slot values, e.g. Origin) and ``resolved_end_index`` is the
+    clamped end, for logging.
+    """
+    prefixes_per_peer = network_group_multiplier * prefix_pool_obj.NumberOfAddresses
+    end_idx = min(prefix_end_index or prefixes_per_peer, prefixes_per_peer)
+    slots = [
+        (i, i % prefixes_per_peer)
+        for i in range(total_route_ranges)
+        if prefix_start_index <= (i % prefixes_per_peer) < end_idx
+    ]
+    return slots, end_idx
+
+
 class IxiaEnableDisableBgpPrefixes(BaseTask):
     NAME = "ixia_enable_disable_bgp_prefixes"
 
@@ -73,14 +111,16 @@ class IxiaEnableDisableBgpPrefixes(BaseTask):
             network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
                 prefix_pool_obj
             ).Multiplier
-            prefix_pool_prefix_end_index = min(
-                prefix_end_index or network_group_multiplier, network_group_multiplier
-            )
             active_list = bgp_ip_route_property.Active.Values
-            for i in range(prefix_pool_obj.Count):
-                mod = i % network_group_multiplier
-                if mod >= prefix_start_index and mod < prefix_pool_prefix_end_index:
-                    active_list[i] = active_state
+            slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+                prefix_pool_obj,
+                network_group_multiplier,
+                len(active_list),
+                prefix_start_index,
+                prefix_end_index,
+            )
+            for i, _mod in slots:
+                active_list[i] = active_state
             bgp_ip_route_property.Active.ValueList(active_list)
             self.logger.info(
                 f"Configured prefixes in range {prefix_start_index} - {prefix_pool_prefix_end_index}"
@@ -156,15 +196,16 @@ class IxiaRandomizeBgpPrefixLocalPreference(BaseTask):
         network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
             prefix_pool_obj
         ).Multiplier
-        prefix_pool_prefix_end_index = min(
-            prefix_end_index or network_group_multiplier, network_group_multiplier
-        )
         local_preference_values = bgp_ip_route_property.LocalPreference.Values
-        for i in range(prefix_pool_obj.Count):
-            mod = i % network_group_multiplier
-            if mod >= prefix_start_index and mod < prefix_pool_prefix_end_index:
-                random_local_preference = random.randrange(start_value, end_value)
-                local_preference_values[i] = random_local_preference
+        slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+            prefix_pool_obj,
+            network_group_multiplier,
+            len(local_preference_values),
+            prefix_start_index,
+            prefix_end_index,
+        )
+        for i, _mod in slots:
+            local_preference_values[i] = random.randrange(start_value, end_value)
         bgp_ip_route_property.LocalPreference.ValueList(local_preference_values)
         self.logger.info(
             f"Configured local preference of prefixes in range {prefix_start_index} - {prefix_pool_prefix_end_index}"
@@ -214,24 +255,25 @@ class IxiaModifyBgpPrefixesOriginValue(BaseTask):
         network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
             prefix_pool_obj
         ).Multiplier
-        prefix_pool_prefix_end_index = min(
-            prefix_end_index or network_group_multiplier,
-            network_group_multiplier,
-        )
         origin_value_list = bgp_ip_route_property.Origin.Values
-        for i in range(prefix_pool_obj.Count):
-            mod = i % network_group_multiplier
-            if mod >= prefix_start_index and mod < prefix_pool_prefix_end_index:
-                if origin_values:
-                    # Cycle through supplied list -- gives spec-loyal per-slot
-                    # variety (e.g. ``["igp", "egp", "incomplete"]``) which
-                    # exercises the DUT's per-prefix Origin handling in the
-                    # heavy-attr storm.
-                    origin_value_list[i] = origin_values[
-                        (mod - prefix_start_index) % len(origin_values)
-                    ]
-                else:
-                    origin_value_list[i] = origin_value
+        slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+            prefix_pool_obj,
+            network_group_multiplier,
+            len(origin_value_list),
+            prefix_start_index,
+            prefix_end_index,
+        )
+        for i, mod in slots:
+            if origin_values:
+                # Cycle through supplied list -- gives spec-loyal per-slot
+                # variety (e.g. ``["igp", "egp", "incomplete"]``) which
+                # exercises the DUT's per-prefix Origin handling in the
+                # heavy-attr storm.
+                origin_value_list[i] = origin_values[
+                    (mod - prefix_start_index) % len(origin_values)
+                ]
+            else:
+                origin_value_list[i] = origin_value
         bgp_ip_route_property.Origin.ValueList(origin_value_list)
         applied = f"cycling {origin_values}" if origin_values else f"= {origin_value}"
         self.logger.info(
@@ -301,18 +343,19 @@ class IxiaModifyBgpPrefixesMedValue(BaseTask):
         network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
             prefix_pool_obj
         ).Multiplier
-        prefix_pool_prefix_end_index = min(
-            prefix_end_index or network_group_multiplier,
-            network_group_multiplier,
-        )
         med_value_list = bgp_ip_route_property.MultiExitDiscriminator.Values
-        for i in range(prefix_pool_obj.Count):
-            mod = i % network_group_multiplier
-            if mod >= prefix_start_index and mod < prefix_pool_prefix_end_index:
-                if med_value < 0:
-                    med_value_list[i] = random.randint(10, 100)
-                else:
-                    med_value_list[i] = med_value
+        slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+            prefix_pool_obj,
+            network_group_multiplier,
+            len(med_value_list),
+            prefix_start_index,
+            prefix_end_index,
+        )
+        for i, _mod in slots:
+            if med_value < 0:
+                med_value_list[i] = random.randint(10, 100)
+            else:
+                med_value_list[i] = med_value
         bgp_ip_route_property.MultiExitDiscriminator.ValueList(med_value_list)
         med_value_str = str(med_value) if med_value >= 0 else "randomly selected"
         self.logger.info(
@@ -974,15 +1017,17 @@ class IxiaSetBgpPrefixesLocalPreference(BaseTask):
         network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
             prefix_pool_obj
         ).Multiplier
-        prefix_pool_prefix_end_index = min(
-            prefix_end_index or network_group_multiplier, network_group_multiplier
-        )
 
         local_preference_values = bgp_ip_route_property.LocalPreference.Values
-        for i in range(prefix_pool_obj.Count):
-            mod = i % network_group_multiplier
-            if mod >= prefix_start_index and mod < prefix_pool_prefix_end_index:
-                local_preference_values[i] = local_pref_value
+        slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+            prefix_pool_obj,
+            network_group_multiplier,
+            len(local_preference_values),
+            prefix_start_index,
+            prefix_end_index,
+        )
+        for i, _mod in slots:
+            local_preference_values[i] = local_pref_value
 
         bgp_ip_route_property.LocalPreference.ValueList(local_preference_values)
 
