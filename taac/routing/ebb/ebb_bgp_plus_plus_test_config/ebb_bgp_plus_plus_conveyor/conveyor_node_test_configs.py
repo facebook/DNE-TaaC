@@ -64,6 +64,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     BGP_UG_BACKPRESSURE_TEST_CONFIG,
@@ -205,4 +206,13 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # NOT wired into a conveyor stage (do NOT schedule until manually verified on
     # the device). Select with ``--regex 'bgp_ug_multiple_groups_outbound_policies'``.
     BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
+    # BGP++ UG 2.5.2 Scale Withdraw: 10+ Peers in Same Group, Withdraw Routes on
+    # bag013.ash6 -- its own WITHOUT_OPEN_R + next-hop-self TestConfig on the
+    # standard EBB_FULL_SCALE topology (BGP-MON not tested). Advertises 1000 v6 eBGP
+    # routes to the large iBGP-v6 update group, then withdraws all 1000 at scale and
+    # asserts zero remain (no stale entries), no session flaps, and no crash; all
+    # checks STRICT (the received/removed PS deltas are convergence-polled). Ad-hoc;
+    # NOT wired into a conveyor stage (do NOT schedule until manually verified on the
+    # device). Select with ``--regex 'bgp_ug_scale_withdraw_10plus_peers'``.
+    BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG,
 ]

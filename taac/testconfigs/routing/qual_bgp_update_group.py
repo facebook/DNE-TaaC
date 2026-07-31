@@ -2,10 +2,12 @@
 # pyre-unsafe
 """BGP Update Group qualification lifecycle bindings.
 
-This module publishes TestConfig constants for sections 2.1 through 2.7 and
-2.9. Sections 2.2, 2.5, and 2.6 retain empty-playbook skeleton bindings pending
-implementation. See
-``factories/qual_bgp_update_group/tc{N}_*.py`` for per-section factories.
+Post-Wave-6 layout: sections 2.1 through 2.7 and the section-2.9 edge cases all
+have catalog constants here. Sections 2.2 and 2.6 are SKELETON — empty-playbook
+TestConfigs establishing the catalog surface pending implementation
+(2.5's umbrella skeleton was replaced by the implemented 2.5.1 + 2.5.2
+factories). See ``factories/qual_bgp_update_group/tc{N}_*.py`` for
+per-section factories.
 
 Grandfathered Python constant names (referenced from cconf and elsewhere)
 retained verbatim alongside the newer spec-anchored names.
@@ -30,8 +32,8 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc4_new_peer_join 
     create_bgp_ug_new_peer_join_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc5_multigroup_formation import (
-    create_bgp_ug_multigroup_formation_test_config,
     create_bgp_ug_multiple_groups_outbound_policies_test_config,
+    create_bgp_ug_scale_withdraw_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc6_bit_alloc_group_stab_under_flap import (
     create_bgp_ug_bit_alloc_group_stab_under_flap_test_config,
@@ -97,9 +99,16 @@ BGP_UG_NEW_PEER_JOIN_TEST_CONFIG = create_bgp_ug_new_peer_join_test_config(BAG01
 BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG = (
     create_bgp_ug_multiple_groups_outbound_policies_test_config(BAG013_ASH6)
 )
-# Umbrella skeleton retained (empty-playbook) until 2.5.2 replaces it.
-BGP_UG_MULTIGROUP_FORMATION_TEST_CONFIG = (
-    create_bgp_ug_multigroup_formation_test_config(BAG013_ASH6)
+# 2.5.2 Scale Withdraw: 10+ Peers in Same Group, Withdraw Routes on bag013.ash6 --
+# its OWN WITHOUT_OPEN_R + next-hop-self TestConfig on the standard EBB_FULL_SCALE
+# topology (BGP-MON not tested -- struck from the source spec; monitor peers do not
+# establish on the bag013 conveyor node). Advertises 1000 v6 eBGP routes to the large
+# iBGP-v6 update group, then withdraws all 1000 at scale and asserts zero remain
+# (no stale entries), no session flaps, and no crash. Select via
+# ``--test-config BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST``. All checks STRICT (the
+# received/removed PS deltas are convergence-polled; HW-green 2026-07-30).
+BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG = (
+    create_bgp_ug_scale_withdraw_test_config(BAG013_ASH6)
 )
 
 # ─── Spec 2.6 Bit Allocation Under Flaps (SKELETON) ─────────────────────
@@ -201,11 +210,11 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
     "BGP_UG_BIT_ALLOC_GROUP_STAB_UNDER_FLAP_TEST_CONFIG",
-    "BGP_UG_MULTIGROUP_FORMATION_TEST_CONFIG",
     "BGP_UG_NEW_PEER_JOIN_TEST_CONFIG",
     "BGP_UG_PEER_LIFECYCLE_TEST_CONFIG",
     "EB03_LAB_ASH6_BGP_TEST_UPDATE_GROUP_CONFIG",
