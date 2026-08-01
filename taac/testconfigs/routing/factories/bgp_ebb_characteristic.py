@@ -380,17 +380,6 @@ _CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES: list[str] = ["65529:39744"]
 # Matches SC2 / the legacy single-axis config.
 _CONSTANT_ATTR_MAX_COMMUNITIES_PER_ROUTE: int = 5
 
-# Interface-state nexthop-resolution gflag. This test runs WITHOUT_OPEN_R, so
-# recursive/loopback nexthops never resolve via the (dead) Open/R FIB stream;
-# the eBGP nexthop is directly connected and must resolve through NetlinkWrapper
-# instead. NetlinkWrapper only populates the nexthopCache from interface
-# link-state + prefix match when bgp_resolve_nexthops_from_interface_state is
-# set; with the default (legacy, ARP/ND-based) path the connected nexthop stayed
-# unresolved, so no path was ever selected and convergence completed vacuously.
-# Enabling the gflag in run_bgpcpp.sh makes egress routes actually resolve and
-# get selected.
-_NEXTHOP_IFACE_STATE_FLAG: str = "bgp_resolve_nexthops_from_interface_state"
-
 # ─── SC2 (char-2 Constant Storage, INGRESS-ONLY) ───────────────────────────
 # eBGP ingress peer count (IPv6-only), FIXED. No iBGP egress at all.
 _INGRESS_ATTR_EBGP_PEER_COUNT: int = 8
@@ -509,18 +498,7 @@ def test_config_constant_attribute_storage_route_sweep_on_eos(
         # secondary IPs (offset 10) rather than the default 16.
         v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
     )
-    # Enable interface-state nexthop resolution (WITHOUT_OPEN_R) and clear the
-    # baked-in route registry so the injected scale prefixes resolve and are
-    # accepted rather than denied.
-    setup_tasks.append(
-        create_configure_bgpcpp_startup_task(
-            hostname=device_name,
-            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
-            use_managed_shell=True,
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
+    # Clear the baked-in route registry so injected scale prefixes are accepted.
     setup_tasks.append(
         create_bgp_clear_route_filter_task(
             hostname=device_name,
@@ -1682,17 +1660,6 @@ _SC4_INGRESS_EBGP_PEER_COUNTS: list = [1, 2, 4, 8, 16]
 _SC4_FIXED_IBGP_PEER_COUNT: int = 500
 _SC4_PREFIX_COUNT: int = 50000
 
-# Interface-state nexthop-resolution gflag. This test runs WITHOUT_OPEN_R, so
-# recursive/loopback nexthops never resolve via the (dead) Open/R FIB stream;
-# the eBGP nexthop is directly connected and must resolve through NetlinkWrapper
-# instead. NetlinkWrapper only populates the nexthopCache from interface
-# link-state + prefix match when bgp_resolve_nexthops_from_interface_state is
-# set; with the default (legacy, ARP/ND-based) path the connected nexthop stayed
-# unresolved, so no path was ever selected and convergence completed vacuously.
-# Enabling the gflag in run_bgpcpp.sh makes egress routes actually resolve and
-# get selected.
-_NEXTHOP_IFACE_STATE_FLAG: str = "bgp_resolve_nexthops_from_interface_state"
-
 
 def _two_port_direct_ixia_connections(
     physical_inventory: PhysicalInventory,
@@ -1977,11 +1944,8 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
     )
-    # Clear the route_registry / CRF so the injected scale prefixes are ACCEPTED
-    # into the RIB. Deliberately DO NOT enable the interface-state nexthop gflag
-    # -> nexthops stay unresolvable -> routes received+accepted but never
-    # best-path/advertised (ingress-only). The varying-combinations step restarts
-    # Bgp up front, so the CRF-free state takes effect without an extra bounce.
+    # Clear the route_registry / CRF so injected scale prefixes are accepted.
+    # This scenario remains ingress-only because it has no iBGP egress peers.
     setup_tasks.append(
         create_bgp_clear_route_filter_task(
             device_name, set_outer_hostname=True, ixia_needed=True
@@ -2303,18 +2267,6 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
             ixia_needed=True,
         )
     )
-    # SC4 advertises resolvable routes, so enable the interface-state nexthop-
-    # resolution gflag (same as SC1) under WITHOUT_OPEN_R so the eBGP-learned
-    # prefixes resolve and get selected + advertised to the iBGP egress.
-    setup_tasks.append(
-        create_configure_bgpcpp_startup_task(
-            hostname=device_name,
-            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
-            use_managed_shell=True,
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
     # Scale prefixes are not in the device's baked-in route registry; clear the
     # Centralized Route Filter so inbound prefixes are not denied (the clear
     # persists across the per-stage Bgp restarts).
@@ -2411,13 +2363,6 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
         name += "_UPDATE_GROUP"
 
     extra_setup_tasks = [
-        create_configure_bgpcpp_startup_task(
-            hostname=device_name,
-            flags={_NEXTHOP_IFACE_STATE_FLAG: "true"},
-            use_managed_shell=True,
-            set_outer_hostname=True,
-            ixia_needed=True,
-        ),
         create_bgp_clear_route_filter_task(
             hostname=device_name,
             set_outer_hostname=True,

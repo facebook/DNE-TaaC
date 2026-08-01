@@ -1077,7 +1077,7 @@ def create_bgp_ug_staggered_startup_test_config(
     advertises each route with next-hop = the peer's own connected IP
     (``ebgp_next_hop_self`` / ``ibgp_next_hop_self``) and the DUT resolves it from
     interface state via the ``bgp_resolve_nexthops_from_interface_state`` bgpcpp
-    gflag (``resolve_nexthops_from_interface_state``) -- so the next-hops resolve and
+    gflag derived from no-OpenR mode, so the next-hops resolve and
     the DUT advertises with NO Open/R daemon (dropping the cores / ~118s route-inject
     / iptables settle-race the Open/R tail caused), HW-confirmed advertising the full
     RIB to every eBGP peer. It does not change the 4-update-group / eBGP+iBGP session
@@ -1148,7 +1148,6 @@ def create_bgp_ug_staggered_startup_test_config(
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        resolve_nexthops_from_interface_state=True,
         enable_update_group=True,
         # Dedicated unique-NLRI inject pools on plane-1's iBGP DC peers -- the
         # genuinely-new sources for the measurable injects the shared-CSV planes cannot
@@ -1278,7 +1277,6 @@ def create_bgp_ug_best_path_change_test_config(
         enable_update_group=True,
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        resolve_nexthops_from_interface_state=True,
         # Two competing eBGP v4 sets (10 peers each, carved off the eBGP v4 budget)
         # advertising the same 500 NLRI -- Set A long AS-PATH, Set B short.
         ebgp_v4_bestpath_set_peer_count=_BESTPATH_SET_PEER_COUNT,
@@ -1380,9 +1378,6 @@ def create_bgp_ug_cpu_quantification_test_config(
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        # Mandatory alongside next-hop-self on master's DICE builder (it raises
-        # ValueError if next_hop_self != resolve_nexthops_from_interface_state).
-        resolve_nexthops_from_interface_state=True,
         # Pre-staged community-variant churn pools (Option A): A/B/C over identical
         # NLRI per AFI, each tagged with a distinct build-time community (BgpPolicy
         # on the DICE PrefixAdvertisement); the churn rotates which is Active (no
@@ -1497,7 +1492,6 @@ def create_bgp_ug_notification_isolation_test_config(
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        resolve_nexthops_from_interface_state=True,
         enable_update_group=True,
         # Dedicated unique-NLRI inject pools staged on the eBGP device groups so
         # the DUT receives + re-advertises the 50 new routes/AFI to iBGP.

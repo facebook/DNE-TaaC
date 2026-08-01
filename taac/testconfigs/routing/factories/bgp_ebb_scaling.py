@@ -23,6 +23,9 @@ import os
 import typing as t
 from dataclasses import replace
 
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    get_bgpcpp_startup_tasks_for_openr_mode,
+)
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
@@ -1108,6 +1111,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
             ssh_user=ssh_user,
             ssh_password=ssh_password,
         ),
+        *get_bgpcpp_startup_tasks_for_openr_mode(device_name, OpenRMode.NONE),
         create_replace_bgp_peers_task(
             hostname=device_name,
             peer_configs=[

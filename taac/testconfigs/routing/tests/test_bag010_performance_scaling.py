@@ -11,6 +11,7 @@ from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
@@ -22,6 +23,16 @@ from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
 
 # The router_id splice fragment written into the in-shell bgpcpp_config merge.
 _ROUTER_ID_ASSIGN = "c['router_id']="
+
+
+def _task_json_params(task) -> dict:
+    json_params = task.params.json_params
+    if json_params is None:
+        raise AssertionError("task must have JSON parameters")
+    value = json.loads(json_params)
+    if not isinstance(value, dict):
+        raise AssertionError("task JSON parameters must be an object")
+    return value
 
 
 class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
@@ -102,7 +113,7 @@ class PerformanceScalingInterfaceIpCoverageTest(unittest.TestCase):
         for task in config.setup_tasks or []:
             if task.task_name != "interface_ip_configuration":
                 continue
-            params = json.loads(task.params.json_params)
+            params = _task_json_params(task)
             if params["interface"] == ibgp_iface:
                 counts.append(params["peer_count"])
         return counts
@@ -133,7 +144,7 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
         for task in config.setup_tasks or []:
             if task.task_name != "configure_bgpcpp_startup":
                 continue
-            params.append(json.loads(task.params.json_params))
+            params.append(_task_json_params(task))
         return params
 
     def test_nexthop_resolution_gflag_enabled_via_managed_shell(self) -> None:
@@ -157,6 +168,40 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
             "the nexthop-resolution gflag task must run over the managed shell "
             "(perf-scaling passes no SSH credentials)",
         )
+
+    def test_no_openr_ingress_only_config_uses_same_mode_invariant(self) -> None:
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            enable_update_group=True,
+        )
+        matching = [
+            params
+            for params in self._configure_startup_params(config)
+            if params.get("flags", {}).get("bgp_resolve_nexthops_from_interface_state")
+            == "true"
+        ]
+        self.assertEqual(1, len(matching))
+        self.assertTrue(matching[0].get("use_managed_shell"))
+
+        flag_indices = [
+            index
+            for index, task in enumerate(config.setup_tasks or [])
+            if task.task_name == "configure_bgpcpp_startup"
+            and _task_json_params(task)
+            .get("flags", {})
+            .get("bgp_resolve_nexthops_from_interface_state")
+            == "true"
+        ]
+        bgp_enable_indices = [
+            index
+            for index, task in enumerate(config.setup_tasks or [])
+            if task.task_name == "arista_daemon_control"
+            and _task_json_params(task).get("daemon_name") == "Bgp"
+            and _task_json_params(task).get("action") == "enable"
+        ]
+        self.assertEqual(1, len(flag_indices))
+        self.assertGreater(len(bgp_enable_indices), 0)
+        self.assertLess(flag_indices[0], bgp_enable_indices[0])
 
 
 class PerformanceScalingRouteFilterClearTest(unittest.TestCase):

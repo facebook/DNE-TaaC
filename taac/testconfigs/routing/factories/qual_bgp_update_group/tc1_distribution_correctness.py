@@ -132,18 +132,14 @@ def build_bag_conveyor_test_config(
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_prefix_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]]
     | None = None,
-    # Next-hop-self resolution knobs (opt-in). When set, IXIA advertises routes
+    # Next-hop-self knobs (opt-in). When set, IXIA advertises routes
     # with next-hop = the peer's connected IP (SAME_AS_LOCAL_IP) and the DUT
     # resolves them from interface state via the bgpcpp
     # ``bgp_resolve_nexthops_from_interface_state`` gflag -- letting the DUT
     # install + re-advertise routes under WITHOUT_OPEN_R (no Open/R daemon). The
-    # 2.9.1 best-path test enables all three so it can drive real eBGP->iBGP
-    # distribution without Open/R. All three must move together; setting the IXIA
-    # next-hop-self without the gflag (or vice versa) leaves the DUT unable to
-    # resolve. Default False on all -> byte-identical goldens for other callers.
+    # compiler derives the launcher option from no-OpenR mode.
     ebgp_next_hop_self: bool = False,
     ibgp_next_hop_self: bool = False,
-    resolve_nexthops_from_interface_state: bool = False,
     # Forwarded to create_ebb_scale_basic_port_configs: a genuinely-new inline v4
     # pool on plane-1's iBGP v4 DC peers (2.9.6 strict runtime-distribution inject).
     # None -> byte-identical for other callers.
@@ -195,8 +191,6 @@ def build_bag_conveyor_test_config(
     if ebgp_next_hop_self != ibgp_next_hop_self:
         raise ValueError("eBGP and iBGP next-hop-self intent must move together")
     next_hop_self = ebgp_next_hop_self
-    if next_hop_self != resolve_nexthops_from_interface_state:
-        raise ValueError("next-hop-self requires interface-state next-hop resolution")
 
     openr_mode = (
         OpenRMode.STANDALONE
@@ -208,7 +202,6 @@ def build_bag_conveyor_test_config(
         include_bgpmon=False,
         ebgp_graceful_restart=ebgp_graceful_restart,
         next_hop_self=next_hop_self,
-        resolve_nexthops_from_interface_state=(resolve_nexthops_from_interface_state),
         extra_prefix_sets=extra_prefix_sets,
         extra_advertisements=extra_prefix_advertisements,
     ).bind_to_inventory(
@@ -220,9 +213,6 @@ def build_bag_conveyor_test_config(
         device_config_override=RoutingDeviceConfig(
             openr_mode=openr_mode,
             update_group_enable=enable_update_group,
-            resolve_nexthops_from_interface_state=(
-                resolve_nexthops_from_interface_state
-            ),
         ),
     )
     compiled = bound.compile()

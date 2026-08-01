@@ -23,14 +23,17 @@ import shlex
 import typing as t
 
 from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    get_bgpcpp_startup_tasks_for_openr_mode,
     get_openr_standalone_setup_tasks,
 )
-from taac.abstractions.topology import OpenRStandaloneLink
+from taac.abstractions.topology import (
+    OpenRMode,
+    OpenRStandaloneLink,
+)
 from taac.constants import BgpPlusPlusProfile
 from taac.task_definitions import (
     create_arista_create_file_from_config_task,
     create_arista_daemon_control_task,
-    create_configure_bgpcpp_startup_task,
     create_deploy_tls_certs_task,
     create_interface_ip_cleanup_task,
     create_interface_ip_configuration_task,
@@ -81,6 +84,14 @@ from taac.test_as_a_config.types import Task
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
 RUN_BGPCPP_SCRIPT_PATH = "/usr/sbin/run_bgpcpp.sh"
+
+
+def _openr_mode_for_profile(profile: BgpPlusPlusProfile) -> OpenRMode:
+    return (
+        OpenRMode.STANDALONE
+        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+        else OpenRMode.NONE
+    )
 
 
 def _build_bgpcpp_logging_script(
@@ -1350,22 +1361,13 @@ def get_common_setup_tasks(
     ixia_interface_mimic_ibgp: str,
     bgpcpp_configerator_path: str,
     profile: BgpPlusPlusProfile,
+    openr_mode: OpenRMode | None = None,
     ixia_interface_mimic_bgp_mon: t.Optional[str] = None,
     include_bgp_mon: bool = True,
     openr_configerator_path: t.Optional[str] = None,
     openr_standalone_link: OpenRStandaloneLink | None = None,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
-    # When True, set the bgpcpp startup gflag
-    # ``bgp_resolve_nexthops_from_interface_state=true`` in run_bgpcpp.sh so the
-    # DUT resolves BGP next-hops from connected interface state instead of via
-    # Open/R / IGP. Pairs with ``ebgp_next_hop_self`` / ``ibgp_next_hop_self`` on
-    # the IXIA config (SAME_AS_LOCAL_IP): IXIA advertises next-hop = the peer's
-    # connected IP; this gflag lets the DUT install + re-advertise it under
-    # WITHOUT_OPEN_R. The flag task is inserted AFTER bgpcpp deployment and
-    # BEFORE the control-plane phase, so the control-plane Bgp restart picks it
-    # up. Default False -> no task appended -> byte-identical goldens.
-    resolve_nexthops_from_interface_state: bool = False,
     consolidate_acl_restart: bool = True,
 ) -> t.List[Task]:
     """
@@ -1434,17 +1436,16 @@ def get_common_setup_tasks(
     # 2b. Configure the RPM-owned launcher after image/config deployment and
     # before the control-plane phase. The subsequent Bgp restart starts DBG3.
     setup_tasks.append(create_ebb_bgpcpp_logging_setup_task(device_name))
-
-    if resolve_nexthops_from_interface_state:
-        setup_tasks.append(
-            create_configure_bgpcpp_startup_task(
-                hostname=device_name,
-                flags={"bgp_resolve_nexthops_from_interface_state": "true"},
-                use_managed_shell=True,
-                set_outer_hostname=True,
-                ixia_needed=True,
-            )
+    setup_tasks.extend(
+        get_bgpcpp_startup_tasks_for_openr_mode(
+            device_name,
+            (
+                openr_mode
+                if openr_mode is not None
+                else _openr_mode_for_profile(profile)
+            ),
         )
+    )
 
     # 3. Control plane (ACLs + daemons)
     setup_tasks.extend(
@@ -1554,6 +1555,7 @@ def get_update_packing_setup_tasks(
     router_id: t.Optional[str],
     bgpcpp_configerator_path: str,
     profile: BgpPlusPlusProfile,
+    openr_mode: OpenRMode | None = None,
     ebgp_peer_group_v6: str = "EB-FA-V6",
     ibgp_peer_group_v6: str = "EB-EB-V6",
     openr_configerator_path: t.Optional[str] = None,
@@ -1628,6 +1630,16 @@ def get_update_packing_setup_tasks(
     # Apply the standard TAAC EBB logging level before the control-plane Bgp
     # restart so the newly started process uses it for the full test.
     setup_tasks.append(create_ebb_bgpcpp_logging_setup_task(device_name))
+    setup_tasks.extend(
+        get_bgpcpp_startup_tasks_for_openr_mode(
+            device_name,
+            (
+                openr_mode
+                if openr_mode is not None
+                else _openr_mode_for_profile(profile)
+            ),
+        )
+    )
 
     # 3. Control plane (ACLs + daemons)
     setup_tasks.extend(

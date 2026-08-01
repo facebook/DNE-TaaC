@@ -458,8 +458,8 @@ def create_ebb_scale_basic_port_configs(
     ebgp_v4_extra_route_scales: list[taac_types.RouteScaleSpec] | None = None,
     # When True, advertise the eBGP routes with next-hop-self (the IXIA peer's own
     # connected address) so the DUT resolves them via the connected interface route
-    # -- no Open/R / IGP. Pair with ``resolve_nexthops_from_interface_state=True``
-    # on the setup tasks (sets the bgpcpp gflag). Default False keeps
+    # -- no Open/R / IGP. The EOS BGP++ setup derives the required gflag from
+    # no-OpenR mode. Default False keeps
     # PRESERVE_FROM_FILE, so existing callers are byte-identical.
     ebgp_next_hop_self: bool = False,
     # Same as ``ebgp_next_hop_self`` but for the iBGP DC routes -- makes the DUT

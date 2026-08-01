@@ -173,7 +173,6 @@ def create_bgp_ug_multiple_groups_outbound_policies_test_config(
         # precondition for the per-peer PS-gauge distribution checks.
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        resolve_nexthops_from_interface_state=True,
         # The genuinely-new v6 inject pool staged on the eBGP v6 device group so the
         # DUT receives + re-advertises the 100 new routes to the iBGP v6 group.
         extra_prefix_sets=(_MULTIGROUP_V6_INJECT_PREFIX_SET,),
@@ -280,7 +279,6 @@ def create_bgp_ug_scale_withdraw_test_config(
         # precondition for the per-peer PS-gauge distribution checks.
         ebgp_next_hop_self=True,
         ibgp_next_hop_self=True,
-        resolve_nexthops_from_interface_state=True,
         # The 1000-route v6 inject pool staged on the eBGP v6 device group so the DUT
         # receives + re-advertises the routes to the large iBGP v6 group,
         # then removes them on withdraw.

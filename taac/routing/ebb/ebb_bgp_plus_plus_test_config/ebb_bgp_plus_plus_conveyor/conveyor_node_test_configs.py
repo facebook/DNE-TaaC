@@ -120,8 +120,8 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
     # bag010.ash6 SC2 constant attribute storage (char-2, INGRESS-ONLY) — the
     # BAG012 varying-combinations engine made ingress-only + non-vacuous: 8 eBGP
-    # advertise 800K paths, accepted into RIB (route_registry cleared) but nexthop
-    # unresolvable (no egress); sweeps unique attribute combinations (100K→800K)
+    # advertise 800K paths accepted into RIB (route_registry cleared) with no
+    # egress peers; sweeps unique attribute combinations (100K→800K)
     # and gates memory constancy + a received-count acceptance gate. Ad-hoc;
     # runnable via --test-config, not yet wired into a conveyor node.
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,

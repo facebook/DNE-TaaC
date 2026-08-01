@@ -8,11 +8,11 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
-    _NEXTHOP_IFACE_STATE_FLAG,
     create_bgp_ebb_characteristic_route_churn_processing_test_config,
 )
 
 _SC6 = BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG
+_NEXTHOP_IFACE_STATE_FLAG = "bgp_resolve_nexthops_from_interface_state"
 
 
 def _task_names(config) -> list:
