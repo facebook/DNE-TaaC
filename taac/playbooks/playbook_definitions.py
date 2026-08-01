@@ -16907,6 +16907,128 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
     )
 
 
+def create_agent_warmboot_wedge_and_sw_agent_playbook(
+    iteration: int = 5,
+) -> Playbook:
+    """Build the `test_agent_warmboot_wedge_and_sw_agent` Playbook.
+
+    Each cycle warmboots `wedge_agent`, waits for the agent and bgpd to
+    reconverge, then warmboots `fboss_sw_agent` and waits for convergence
+    again. The convergence gate *between* the two restarts is the point of
+    this playbook: `TEST_SW_AGENT_AND_WEDGE_AGENT_RESTART_PLAYBOOK` fires both
+    restarts back to back with a single convergence at the end, so it never
+    exercises a second agent restart against a fully reconverged box.
+
+    Warmboot semantics: `SYSTEMCTL_RESTART` with no `create_cold_boot_file`.
+
+    The postcheck must be `AGENT_WARMBOOT_SERVICE_CHECK` (or another check
+    declaring the full cascade). Restarting wedge_agent also restarts bgpd
+    (`BindsTo`) plus fboss_sw_agent and fboss_hw_agent@0 (via the wedge_agent
+    unit's `ExecStop` hook), and `test_service_restart_dependency` enforces
+    fleet-wide that all four appear in `expected_restarted_services`.
+
+    Args:
+        iteration: Number of wedge_agent + fboss_sw_agent warmboot cycles.
+
+    Returns:
+        A `Playbook` named `test_agent_warmboot_wedge_and_sw_agent`.
+    """
+    return Playbook(
+        name="test_agent_warmboot_wedge_and_sw_agent",
+        stages=[
+            create_steps_stage(
+                iteration=iteration,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot wedge_agent",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description=(
+                            "Wait for the agent and bgpd to converge before "
+                            "restarting fboss_sw_agent"
+                        ),
+                    ),
+                    create_service_interruption_step(
+                        service=Service.FBOSS_SW_AGENT,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot fboss_sw_agent",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description=(
+                            "Wait for the agent and bgpd to converge before the "
+                            "next cycle"
+                        ),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def create_fboss_hw_agent_0_coldboot_playbook(
+    iteration: int = 15,
+) -> Playbook:
+    """Build the `test_fboss_hw_agent_0_coldboot` Playbook.
+
+    Repeats `iteration` coldboots of `fboss_hw_agent@0`, waiting for the agent
+    and bgpd to reconverge after each one before firing the next.
+
+    Coldboot is `SYSTEMCTL_RESTART` plus `create_cold_boot_file=True`, which
+    drops `/dev/shm/fboss/warm_boot/cold_boot_once_0`. The `_0` suffix is
+    hw_agent switch index 0, so this is the right cold-boot flag here.
+
+    `ServiceConvergenceStep` has no branch for `FBOSS_HW_AGENT_0` — passing
+    that service to the convergence step is a silent no-op. The gate therefore
+    uses `AGENT` (agent-configured) plus `BGP`, extending the `AGENT`-only gate
+    that `test_fboss_hw_agent_0_crash` already relies on.
+
+    The restart check monitors only `fboss_hw_agent@0`. Whether a hw_agent
+    coldboot also bounces `fboss_sw_agent` is not something the documented
+    wedge_agent cascade covers, so keeping the monitored set narrow avoids a
+    false failure in either direction.
+
+    Args:
+        iteration: Number of coldboot cycles. Default 15.
+
+    Returns:
+        A `Playbook` named `test_fboss_hw_agent_0_coldboot`.
+    """
+    return Playbook(
+        name="test_fboss_hw_agent_0_coldboot",
+        postchecks=[
+            create_ixia_packet_loss_check(clear_traffic_stats=True),
+            create_service_restart_health_check(
+                ["fboss_hw_agent@0"],
+                expected_restarted_services=["fboss_hw_agent@0"],
+            ),
+        ],
+        stages=[
+            create_steps_stage(
+                iteration=iteration,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.FBOSS_HW_AGENT_0,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        create_cold_boot_file=True,
+                        description="Coldboot fboss_hw_agent@0",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description=(
+                            "Wait for the agent and bgpd to converge before the "
+                            "next coldboot"
+                        ),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def create_fsdb_crash_playbook(iteration: int = 5) -> Playbook:
     """Build the `test_fsdb_crash` Playbook.
 

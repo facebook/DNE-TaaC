@@ -40,8 +40,10 @@ from taac.playbooks.playbook_definitions import (
     create_agent_coldboot_playbook,
     create_agent_crash_playbook,
     create_agent_warmboot_playbook,
+    create_agent_warmboot_wedge_and_sw_agent_playbook,
     create_bgpd_crash_playbook,
     create_bgpd_restart_playbook,
+    create_fboss_hw_agent_0_coldboot_playbook,
     create_fsdb_crash_playbook,
     create_fsdb_restart_playbook,
     create_openr_crash_playbook,
@@ -2907,6 +2909,12 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                         ),
                         create_qsfp_service_warmboot_and_tx_flap_playbook(
                             iteration=process_restart_iterations,
+                        ),
+                        create_agent_warmboot_wedge_and_sw_agent_playbook(
+                            iteration=process_restart_iterations,
+                        ),
+                        create_fboss_hw_agent_0_coldboot_playbook(
+                            iteration=15,
                         ),
                     ]
                 )
