@@ -12,7 +12,7 @@ The following tasks are included:
     - _get_bgpcpp_deployment_tasks: Deploy BGP++ configs, certs, daemons
     - _get_control_plane_tasks: ACLs + daemon enable
     - _get_full_scale_ip_config_tasks: Full-scale IP config (140 EBGP + 8 planes)
-    - _get_openr_setup_tasks: OpenR Port-Channel + route injection
+    - _get_legacy_openr_setup_tasks: Legacy profile-based OpenR delegation
     - _get_iptables_flush_tasks: Flush EOS_BGP iptables
 """
 
@@ -22,16 +22,11 @@ import json
 import shlex
 import typing as t
 
-from taac.abstractions.topology import (
-    OpenRStandaloneEndpoint,
-    OpenRStandaloneLink,
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    get_openr_standalone_setup_tasks,
 )
-from taac.constants import (
-    BgpPlusPlusProfile,
-    DEFAULT_OPENR_START_IPV4S,
-    DEFAULT_OPENR_START_IPV6S,
-    OpenRRouteAction,
-)
+from taac.abstractions.topology import OpenRStandaloneLink
+from taac.constants import BgpPlusPlusProfile
 from taac.task_definitions import (
     create_arista_create_file_from_config_task,
     create_arista_daemon_control_task,
@@ -39,7 +34,6 @@ from taac.task_definitions import (
     create_deploy_tls_certs_task,
     create_interface_ip_cleanup_task,
     create_interface_ip_configuration_task,
-    create_openr_route_action_task,
     create_run_commands_on_shell_task,
     create_set_bgp_setting_config_task,
     create_validate_bgpcpp_config_on_device_task,
@@ -690,69 +684,7 @@ def _get_full_scale_ip_config_tasks(
 # =============================================================================
 # Helper 5: OpenR setup tasks
 # =============================================================================
-def _openr_port_channel_command(
-    link: OpenRStandaloneLink,
-    endpoint: OpenRStandaloneEndpoint,
-    peer: OpenRStandaloneEndpoint,
-) -> str:
-    return (
-        "configure\n"
-        f"default interface {endpoint.member_interface}\n"
-        "!\n"
-        f"interface {link.interface_name}\n"
-        f"description OPENR_STANDALONE_TO_{peer.hostname}\n"
-        "load-interval 5\n"
-        "mtu 9192\n"
-        "no switchport\n"
-        f"ip address {endpoint.ipv4_cidr}\n"
-        f"ipv6 address {endpoint.ipv6_cidr}\n"
-        f"ipv6 address {endpoint.link_local_cidr} link-local\n"
-        "ipv6 nd ra disabled\n"
-        "!\n"
-        f"interface {endpoint.member_interface}\n"
-        "no shutdown\n"
-        "mtu 9000\n"
-        f"speed {link.speed}\n"
-        "no switchport\n"
-        "ipv6 enable\n"
-        "ipv6 address auto-config\n"
-        "ipv6 nd ra rx accept default-route\n"
-        f"channel-group {link.port_channel_id} mode active\n"
-        "end"
-    )
-
-
-def get_openr_standalone_setup_tasks(
-    link: OpenRStandaloneLink,
-) -> t.List[Task]:
-    return [
-        create_run_commands_on_shell_task(
-            hostname=endpoint.hostname,
-            cmds=[_openr_port_channel_command(link, endpoint, peer)],
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-        for endpoint, peer in (
-            (link.helper, link.owner),
-            (link.owner, link.helper),
-        )
-    ] + [
-        create_openr_route_action_task(
-            device_name=link.owner.hostname,
-            action=OpenRRouteAction.INJECT.value,
-            start_ipv4s=DEFAULT_OPENR_START_IPV4S,
-            start_ipv6s=DEFAULT_OPENR_START_IPV6S,
-            local_link=link.kv_link(link.owner),
-            other_link=link.kv_link(link.helper),
-            count=63,
-            step=2,
-            ixia_needed=True,
-            set_outer_hostname=True,
-        )
-    ]
-
-
-def _get_openr_setup_tasks(
+def _get_legacy_openr_setup_tasks(
     device_name: str,
     profile: BgpPlusPlusProfile,
     openr_standalone_link: OpenRStandaloneLink | None = None,
@@ -1494,7 +1426,7 @@ def get_common_setup_tasks(
 
     # 5. OpenR setup (conditional on profile)
     setup_tasks.extend(
-        _get_openr_setup_tasks(
+        _get_legacy_openr_setup_tasks(
             device_name=device_name,
             profile=profile,
             openr_standalone_link=openr_standalone_link,
@@ -1769,7 +1701,7 @@ def get_update_packing_setup_tasks(
 
     # 6. OpenR setup (conditional on profile)
     setup_tasks.extend(
-        _get_openr_setup_tasks(
+        _get_legacy_openr_setup_tasks(
             device_name=device_name,
             profile=profile,
             openr_standalone_link=openr_standalone_link,
