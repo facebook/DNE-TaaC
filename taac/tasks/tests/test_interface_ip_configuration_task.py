@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, call, MagicMock, patch
 
 from taac.tasks.interface_ip_configuration_task import (
     InterfaceIpConfigurationTask,
@@ -22,10 +22,98 @@ class InterfaceIpConfigurationTaskTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         self.logger = MagicMock()
+        self.shared_data = {}
         self.task = InterfaceIpConfigurationTask(
             hostname="bag010.ash6",
             logger=self.logger,
-            shared_data={},
+            shared_data=self.shared_data,
+        )
+
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{ARISTA_UTILS_PATH}.backup_config_exists", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_repeated_configuration_reuses_first_backup(
+        self,
+        mock_get_driver,
+        mock_backup_exists,
+        mock_save,
+        mock_configure,
+        mock_restore,
+    ) -> None:
+        mock_backup_exists.return_value = True
+        mock_save.return_value = "flash:first_backup"
+        params = {
+            "interface": "Ethernet3/36/2",
+            "ipv4_base_network": "10.163.28",
+            "peer_count": 1,
+            "address_families": ["ipv4"],
+            "clear_existing": True,
+        }
+
+        await self.task.run(params)
+        await self.task.run(params)
+
+        mock_save.assert_awaited_once()
+        mock_backup_exists.assert_awaited_once_with(
+            mock_get_driver.return_value, "flash:first_backup"
+        )
+        self.assertEqual(
+            "flash:first_backup",
+            self.shared_data["interface_ip_backup__Ethernet3/36/2"],
+        )
+        self.assertEqual(2, mock_configure.await_count)
+        mock_restore.assert_not_awaited()
+        self.assertEqual(
+            1,
+            self.logger.info.call_args_list.count(
+                call("  Stored backup reference: interface_ip_backup__Ethernet3/36/2")
+            ),
+        )
+        self.logger.info.assert_any_call("Reusing original backup: flash:first_backup")
+
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{ARISTA_UTILS_PATH}.backup_config_exists", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_stale_backup_reference_is_replaced(
+        self,
+        mock_get_driver,
+        mock_backup_exists,
+        mock_save,
+        mock_configure,
+        mock_restore,
+    ) -> None:
+        backup_key = "interface_ip_backup__Ethernet3/36/2"
+        self.shared_data[backup_key] = "flash:missing_backup"
+        mock_backup_exists.return_value = False
+        mock_save.return_value = "flash:replacement_backup"
+
+        await self.task.run(
+            {
+                "interface": "Ethernet3/36/2",
+                "ipv4_base_network": "10.163.28",
+                "peer_count": 1,
+                "address_families": ["ipv4"],
+                "clear_existing": True,
+            }
+        )
+
+        mock_backup_exists.assert_awaited_once_with(
+            mock_get_driver.return_value, "flash:missing_backup"
+        )
+        mock_save.assert_awaited_once()
+        self.assertEqual("flash:replacement_backup", self.shared_data[backup_key])
+        mock_configure.assert_awaited_once()
+        mock_restore.assert_not_awaited()
+        self.logger.warning.assert_called_once_with(
+            "Stored backup no longer exists; creating a new one: flash:missing_backup"
         )
 
     @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)

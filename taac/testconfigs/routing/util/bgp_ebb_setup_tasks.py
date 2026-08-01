@@ -71,8 +71,10 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IPV4_START_OFFSET,
     IXIA_IPV6_START_OFFSET,
     POST_ACL_RESTART_DAEMONS,
+    REQUIRE_THRIFT_ACL_FILES_CMD,
     UPDATE_GROUP_CONFIG,
     UPDATE_GROUP_VERIFICATION_CMD,
+    VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
 from pyre_extensions import none_throws
 from taac.test_as_a_config.types import Task
@@ -151,6 +153,7 @@ def create_ebb_bgpcpp_logging_setup_task(device_name: str) -> Task:
 # =============================================================================
 def _get_add_intern_userid_tasks(
     device_name: str,
+    require_all_files: bool = False,
 ) -> t.List[Task]:
     """
     Add intern userids to thrift ACL files on the device if not already present.
@@ -163,17 +166,33 @@ def _get_add_intern_userid_tasks(
 
     Args:
         device_name: Device hostname
+        require_all_files: Fail if any required Thrift ACL file is missing
 
     Returns:
         List of Task objects to add intern userids to ACL files
     """
+    commands = []
+    if require_all_files:
+        commands.append(REQUIRE_THRIFT_ACL_FILES_CMD)
+    commands.append(ADD_INTERN_USER_IDS_CMD)
     return [
         create_run_commands_on_shell_task(
             hostname=device_name,
-            cmds=[ADD_INTERN_USER_IDS_CMD],
+            cmds=commands,
             set_outer_hostname=True,
             ixia_needed=True,
         ),
+    ]
+
+
+def _get_verify_intern_userid_tasks(device_name: str) -> t.List[Task]:
+    return [
+        create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[VERIFY_THRIFT_ACL_USER_IDS_CMD],
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
     ]
 
 
@@ -441,6 +460,7 @@ def _get_control_plane_tasks(
     device_name: str,
     profile: BgpPlusPlusProfile,
     enable_update_group: bool = False,
+    consolidate_acl_restart: bool = True,
 ) -> t.List[Task]:
     """
     Apply control-plane ACLs and enable BGP++ daemons.
@@ -459,6 +479,11 @@ def _get_control_plane_tasks(
             where the bgpcpp_config patch never landed on disk and
             ``_UPDATE_GROUP`` test variants ran for hours measuring the
             NON-UG baseline while claiming UG coverage.
+        consolidate_acl_restart: When True, requires and patches all Thrift ACL
+            files before stopping the daemons, then performs one
+            reverse-stop/forward-start cycle and verifies that startup preserved
+            the patched user IDs. Pass False only to restore the legacy two-cycle
+            sequence.
 
     Returns:
         List of Task objects for ACLs and daemon enable
@@ -475,62 +500,75 @@ def _get_control_plane_tasks(
         )
     )
 
-    # Enable BGP++ daemons (shutdown first to pick up new configs). Open/R is
-    # only enabled for the WITH_OPEN_R profile; otherwise it is left disabled --
-    # no openr_config is deployed for WITHOUT_OPEN_R, so a config-less Open/R
-    # daemon only cores and validates nothing.
     enable_open_r = profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-    for daemon in BGPCPP_DAEMONS:
-        tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name=daemon,
-                action="disable",
-                ixia_needed=True,
+    if consolidate_acl_restart:
+        tasks.extend(
+            _get_add_intern_userid_tasks(
+                device_name=device_name,
+                require_all_files=True,
             )
         )
-        if daemon == "Openr" and not enable_open_r:
-            continue
-        tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name=daemon,
-                action="enable",
-                ixia_needed=True,
+        for daemon in reversed(BGPCPP_DAEMONS):
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="disable",
+                    ixia_needed=True,
+                )
             )
-        )
+        for daemon in BGPCPP_DAEMONS:
+            if daemon == "Openr" and not enable_open_r:
+                continue
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="enable",
+                    ixia_needed=True,
+                )
+            )
+        tasks.extend(_get_verify_intern_userid_tasks(device_name))
+    else:
+        # Explicit rollback path for the original two-cycle sequence.
+        for daemon in BGPCPP_DAEMONS:
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="disable",
+                    ixia_needed=True,
+                )
+            )
+            if daemon == "Openr" and not enable_open_r:
+                continue
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="enable",
+                    ixia_needed=True,
+                )
+            )
 
-    # Add intern userid to thrift ACL files AFTER daemon restart.
-    # Daemons may regenerate ACL files on startup, so UIDs must be
-    # injected after daemons are running.
-    tasks.extend(_get_add_intern_userid_tasks(device_name=device_name))
-
-    # Restart FibAgent, FibAgentBgp, and Bgp so they re-read the updated ACL
-    # files. These daemons load their thrift ACLs at startup and don't re-read
-    # on modification, so a restart is required for the new UIDs to take
-    # effect. Without restarting Bgp here, any later Thrift call against the
-    # Bgp daemon (e.g. ``getBgpSessions`` from ``BGP_SESSION_CHECK``) gets
-    # ``AuthorizationException: Authorization failed`` because Bgp's
-    # in-memory ACL still reflects the pre-injection ``Bgpd_lab.json``.
-    # Bgp is restarted LAST so it comes up after its FIB agents are ready (same
-    # FibAgentBgp-before-Bgp invariant as BGPCPP_DAEMONS; see T274256815).
-    for daemon in POST_ACL_RESTART_DAEMONS:
-        tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name=daemon,
-                action="disable",
-                ixia_needed=True,
+        tasks.extend(_get_add_intern_userid_tasks(device_name=device_name))
+        for daemon in POST_ACL_RESTART_DAEMONS:
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="disable",
+                    ixia_needed=True,
+                )
             )
-        )
-        tasks.append(
-            create_arista_daemon_control_task(
-                hostname=device_name,
-                daemon_name=daemon,
-                action="enable",
-                ixia_needed=True,
+            tasks.append(
+                create_arista_daemon_control_task(
+                    hostname=device_name,
+                    daemon_name=daemon,
+                    action="enable",
+                    ixia_needed=True,
+                )
             )
-        )
 
     # Verify ``update_group`` is actually active on the running BGP++
     # daemon. The Bgp daemon was just re-enabled above and has read
@@ -1328,6 +1366,7 @@ def get_common_setup_tasks(
     # BEFORE the control-plane phase, so the control-plane Bgp restart picks it
     # up. Default False -> no task appended -> byte-identical goldens.
     resolve_nexthops_from_interface_state: bool = False,
+    consolidate_acl_restart: bool = True,
 ) -> t.List[Task]:
     """
     Generate common setup tasks for a full-scale EBB BGP++ conveyor test config.
@@ -1342,6 +1381,9 @@ def get_common_setup_tasks(
             skipped entirely. Callers on 2-port physical inventories (or UG qualification
             tests that do not exercise BGP-MON) should pass False and omit
             ``ixia_interface_mimic_bgp_mon``.
+        consolidate_acl_restart: Use the verified one-cycle ACL and daemon
+            sequence by default. Pass False only to restore the original
+            two-cycle sequence.
     Returns:
         List of setup Task objects.
     """
@@ -1410,6 +1452,7 @@ def get_common_setup_tasks(
             device_name=device_name,
             profile=profile,
             enable_update_group=enable_update_group,
+            consolidate_acl_restart=consolidate_acl_restart,
         )
     )
 
@@ -1770,27 +1813,17 @@ def get_teardown_tasks(
     Returns:
         List of Task objects for test config teardown_tasks
     """
-    tasks = [
-        create_interface_ip_cleanup_task(
-            interfaces=[ixia_interface_mimic_ebgp],
-            restore_from_backup=True,
-            hostname=device_name,
-        ),
-        create_interface_ip_cleanup_task(
-            interfaces=[ixia_interface_mimic_ibgp],
-            restore_from_backup=True,
-            hostname=device_name,
-        ),
-    ]
+    interfaces = [ixia_interface_mimic_ebgp, ixia_interface_mimic_ibgp]
     if ixia_interface_mimic_bgp_mon is not None:
-        tasks.append(
-            create_interface_ip_cleanup_task(
-                interfaces=[ixia_interface_mimic_bgp_mon],
-                restore_from_backup=True,
-                hostname=device_name,
-            )
+        interfaces.append(ixia_interface_mimic_bgp_mon)
+    return [
+        create_interface_ip_cleanup_task(
+            interfaces=[interface],
+            restore_from_backup=True,
+            hostname=device_name,
         )
-    return tasks
+        for interface in reversed(interfaces)
+    ]
 
 
 # CPU stress constants and task factories are in task_definitions.py.

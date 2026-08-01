@@ -121,6 +121,31 @@ class InterfaceIpConfigurationTask(BaseTask):
 
         return addresses
 
+    async def _get_or_create_backup(self, driver: t.Any, interface: str) -> str:
+        backup_key = f"interface_ip_backup__{interface}"
+        backup_file = (
+            self._shared_data.get(backup_key) if self._shared_data is not None else None
+        )
+        if backup_file:
+            if await arista_utils.backup_config_exists(driver, backup_file):
+                self.logger.info(f"Reusing original backup: {backup_file}")
+                return backup_file
+            self.logger.warning(
+                f"Stored backup no longer exists; creating a new one: {backup_file}"
+            )
+
+        self.logger.info("Saving running config before making changes...")
+        backup_file = await arista_utils.save_running_config(
+            driver, backup_name=None, logger_instance=self.logger
+        )
+        self.logger.info(f"  Backup saved to: {backup_file}")
+        if self._shared_data is not None:
+            self._shared_data[backup_key] = backup_file
+            self.logger.info(f"  Stored backup reference: {backup_key}")
+        else:
+            self._data["backup_file"] = backup_file
+        return backup_file
+
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
         Configure secondary IP addresses on an interface.
@@ -143,9 +168,8 @@ class InterfaceIpConfigurationTask(BaseTask):
             ValueError: If required parameters are missing or configuration fails
 
         Note:
-            This task automatically saves a backup of the running config before making
-            changes. The backup file path is stored in self._data["backup_file"] and
-            can be used by cleanup tasks to restore the original configuration.
+            This task saves the first running-config backup for each interface. The
+            backup can be used by cleanup tasks to restore the original configuration.
         """
         # Extract parameters
         interface = params.get("interface")
@@ -168,22 +192,7 @@ class InterfaceIpConfigurationTask(BaseTask):
         # pyre-fixme[6]: For 1st argument expected `str` but got `Optional[str]`.
         driver = await async_get_device_driver(self.hostname)
 
-        # Always save running config before making changes (for safety)
-        self.logger.info("Saving running config before making changes...")
-        backup_file = await arista_utils.save_running_config(
-            driver, backup_name=None, logger_instance=self.logger
-        )
-        self.logger.info(f"  Backup saved to: {backup_file}")
-        # Store backup file in SHARED data (cross-task communication)
-        # Use _shared_data directly instead of _data for data that needs to be shared
-        if self._shared_data is not None:
-            # Store with a key that cleanup task can find
-            backup_key = f"interface_ip_backup__{interface}"
-            self._shared_data[backup_key] = backup_file
-            self.logger.info(f"  Stored backup reference: {backup_key}")
-        else:
-            # Fallback to local _data if no shared_data (shouldn't happen in framework)
-            self._data["backup_file"] = backup_file
+        backup_file = await self._get_or_create_backup(driver, interface)
 
         try:
             self.logger.info("=" * 80)

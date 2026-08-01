@@ -1422,6 +1422,19 @@ async def save_running_config(
         raise ValueError(error_msg) from e
 
 
+async def backup_config_exists(driver: t.Any, backup_file: str) -> bool:
+    """Return whether an EOS configuration backup still exists on the device."""
+    backup_path = backup_file
+    if backup_file.startswith("flash:"):
+        backup_path = f"/mnt/flash/{backup_file.removeprefix('flash:').lstrip('/')}"
+
+    sentinel = "__TAAC_BACKUP_EXISTS__"
+    output = await driver.async_run_cmd_on_shell(
+        f"bash test -f {shlex.quote(backup_path)} && echo {sentinel} || true"
+    )
+    return sentinel in (output or "")
+
+
 async def restore_running_config(
     driver: t.Any,
     backup_file: str,

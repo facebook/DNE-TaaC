@@ -16,6 +16,7 @@ Constants included:
 """
 
 import base64
+import shlex
 import typing as t
 
 from taac.constants import BgpPlusPlusProfile
@@ -234,6 +235,57 @@ _ADD_INTERN_USER_IDS_SCRIPT_B64 = base64.b64encode(
 ADD_INTERN_USER_IDS_CMD = (
     f"bash echo '{_ADD_INTERN_USER_IDS_SCRIPT_B64}' | base64 -d > "
     "/tmp/add_uids.py && sudo python3 /tmp/add_uids.py"
+)
+
+
+def _on_device_python_command(script: str) -> str:
+    encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
+
+
+_REQUIRE_THRIFT_ACL_FILES_SCRIPT = "\n".join(
+    [
+        "from pathlib import Path",
+        f"paths = {THRIFT_ACL_FILES!r}",
+        "missing = [path for path in paths if not Path(path).is_file()]",
+        "if missing:",
+        '    raise RuntimeError(f"missing required Thrift ACL files: {missing}")',
+        'print(f"Found required Thrift ACL files: {paths}")',
+        "",
+    ]
+)
+REQUIRE_THRIFT_ACL_FILES_CMD = _on_device_python_command(
+    _REQUIRE_THRIFT_ACL_FILES_SCRIPT
+)
+
+_VERIFY_THRIFT_ACL_USER_IDS_SCRIPT = "\n".join(
+    [
+        "import json",
+        "from pathlib import Path",
+        f"paths = {THRIFT_ACL_FILES!r}",
+        f"expected = set({INTERN_USER_IDS!r})",
+        "errors = []",
+        "for path in paths:",
+        "    permissions = json.loads(Path(path).read_text()).get('permissions', [])",
+        "    if not permissions:",
+        '        errors.append(f"{path}: no permissions")',
+        "        continue",
+        "    for index, permission in enumerate(permissions):",
+        "        actual = {",
+        "            entry.get('identity', {}).get('id_data')",
+        "            for entry in permission.get('entries', [])",
+        "        }",
+        "        missing = sorted(expected - actual)",
+        "        if missing:",
+        '            errors.append(f"{path}: permissions[{index}] missing {missing}")',
+        "if errors:",
+        '    raise RuntimeError("; ".join(errors))',
+        'print("Verified required user IDs in all Thrift ACL permissions")',
+        "",
+    ]
+)
+VERIFY_THRIFT_ACL_USER_IDS_CMD = _on_device_python_command(
+    _VERIFY_THRIFT_ACL_USER_IDS_SCRIPT
 )
 
 POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
