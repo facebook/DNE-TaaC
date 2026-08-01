@@ -4239,6 +4239,34 @@ def create_start_stop_bgp_peers_step(
     )
 
 
+def create_validated_bgp_session_oscillation_step(
+    device_name: str,
+    session_groups: t.Sequence[t.Mapping[str, t.Any]],
+    cycle_schedule: t.Sequence[t.Sequence[str]],
+    expected_established_sessions: int,
+    test_duration_seconds: int,
+    uptime_seconds: int,
+    downtime_seconds: int,
+    parent_prefixes_to_ignore: t.Sequence[str] = (),
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create a blocking session-oscillation workload with per-trigger checks."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_session_oscillation",
+            "hostname": device_name,
+            "session_groups": list(session_groups),
+            "cycle_schedule": [list(groups) for groups in cycle_schedule],
+            "expected_established_sessions": expected_established_sessions,
+            "test_duration_seconds": test_duration_seconds,
+            "uptime_seconds": uptime_seconds,
+            "downtime_seconds": downtime_seconds,
+            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+        },
+        description=description or "Run validated BGP session oscillations",
+    )
+
+
 def create_stop_bgp_keepalive_step(
     peer_regex: str,
     session_index: t.Optional[int] = None,

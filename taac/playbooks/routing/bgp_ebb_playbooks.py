@@ -26,7 +26,6 @@ from taac.stages.stage_definitions import (
     create_bgp_ebb_route_storm_stage,
     create_bgp_igp_instability_unresolvable_pnhs_stage,
     create_bgp_restart_test_stage,
-    create_bgp_session_oscillation_stage,
     create_cold_start_test_stage,
     create_fauu_drain_undrain_stage,
     create_longevity_churn_stage,
@@ -36,6 +35,7 @@ from taac.stages.stage_definitions import (
     create_route_oscillations_stage,
     create_route_registry_runtime_update_stage,
     create_steps_stage,
+    create_validated_ebgp_session_oscillation_stage,
 )
 from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
@@ -1415,7 +1415,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
 
     See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
-    Randomly disrupts subsets of eBGP sessions in cycles.
+    Deterministically rotates through eBGP session subsets in cycles.
     """
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
@@ -1453,7 +1453,8 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
             memory_terminate_on_error=memory_terminate_on_error,
         ),
         stages=[
-            create_bgp_session_oscillation_stage(
+            create_validated_ebgp_session_oscillation_stage(
+                device_name=device_name,
                 ipv4_peer_regex=ipv4_peer_regex,
                 ipv6_peer_regex=ipv6_peer_regex,
                 test_duration_seconds=test_duration_seconds,
@@ -1462,6 +1463,8 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
                 sessions_per_cycle=sessions_per_cycle,
                 ipv4_session_count=ipv4_session_count,
                 ipv6_session_count=ipv6_session_count,
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
             ),
         ],
     )

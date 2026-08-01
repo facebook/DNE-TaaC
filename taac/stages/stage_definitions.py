@@ -33,7 +33,7 @@ import json
 import random
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from taac.constants import (
     DEFAULT_LOCAL_LINK,
@@ -92,6 +92,7 @@ from taac.steps.step_definitions import (
     create_thread_cpu_monitoring_step,
     create_toggle_device_group_step,
     create_update_prefix_count_step,
+    create_validated_bgp_session_oscillation_step,
     create_validation_step,
     create_verify_bgp_update_send_quiet_step,
     create_verify_bgp_withdraw_send_quiet_step,
@@ -836,6 +837,57 @@ def create_cycle_based_session_disruption_stage(
     )
 
     return Stage(steps=steps)
+
+
+def create_validated_ebgp_session_oscillation_stage(
+    device_name: str,
+    ipv4_peer_regex: str,
+    ipv6_peer_regex: str,
+    ipv4_session_count: int,
+    ipv6_session_count: int,
+    expected_established_sessions: int,
+    test_duration_seconds: int = 1800,
+    uptime_seconds: int = 30,
+    downtime_seconds: int = 30,
+    sessions_per_cycle: int = 70,
+    parent_prefixes_to_ignore: Sequence[str] = (),
+) -> Stage:
+    """Create dual-stack eBGP oscillations with exact per-cycle validation."""
+    if sessions_per_cycle < 2:
+        raise ValueError(
+            "sessions_per_cycle must be at least 2 for dual-stack distribution"
+        )
+    ipv4_width = sessions_per_cycle // 2
+    ipv6_width = sessions_per_cycle - ipv4_width
+    groups = [
+        {
+            "name": "ebgp_ipv4",
+            "peer_regex": ipv4_peer_regex,
+            "session_count": ipv4_session_count,
+            "sessions_per_cycle": ipv4_width,
+        },
+        {
+            "name": "ebgp_ipv6",
+            "peer_regex": ipv6_peer_regex,
+            "session_count": ipv6_session_count,
+            "sessions_per_cycle": ipv6_width,
+        },
+    ]
+    return Stage(
+        steps=[
+            create_validated_bgp_session_oscillation_step(
+                device_name=device_name,
+                session_groups=groups,
+                cycle_schedule=[["ebgp_ipv4", "ebgp_ipv6"]],
+                expected_established_sessions=expected_established_sessions,
+                test_duration_seconds=test_duration_seconds,
+                uptime_seconds=uptime_seconds,
+                downtime_seconds=downtime_seconds,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                description="Run validated dual-stack eBGP session oscillations",
+            )
+        ]
+    )
 
 
 def create_plane_based_session_disruption_stage(
