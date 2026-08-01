@@ -24,7 +24,6 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
     create_bgp_ebb_route_storm_stage,
-    create_bgp_igp_instability_unresolvable_pnhs_stage,
     create_bgp_restart_test_stage,
     create_cold_start_test_stage,
     create_fauu_drain_undrain_stage,
@@ -34,6 +33,7 @@ from taac.stages.stage_definitions import (
     create_route_oscillations_stage,
     create_route_registry_runtime_update_stage,
     create_steps_stage,
+    create_validated_bgp_igp_instability_unresolvable_pnhs_stage,
     create_validated_bgp_route_oscillations_stage,
     create_validated_ebgp_route_oscillations_stage,
     create_validated_ebgp_session_oscillation_stage,
@@ -1383,10 +1383,16 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             memory_terminate_on_error=memory_terminate_on_error,
         ),
         stages=[
-            create_bgp_igp_instability_unresolvable_pnhs_stage(
+            create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
                 device_name=device_name,
                 start_ipv4s=start_ipv4s,
                 start_ipv6s=start_ipv6s,
+                restore_start_ipv4s=cleanup_start_ipv4s,
+                restore_start_ipv6s=cleanup_start_ipv6s,
+                local_link=local_link,
+                other_link=other_link,
+                count=count,
+                step=step_size,
             )
         ],
         cleanup_steps=[

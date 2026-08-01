@@ -94,6 +94,7 @@ from taac.steps.step_definitions import (
     create_update_prefix_count_step,
     create_validated_bgp_route_oscillation_step,
     create_validated_bgp_session_oscillation_step,
+    create_validated_igp_unresolvable_pnh_step,
     create_validation_step,
     create_verify_bgp_update_send_quiet_step,
     create_verify_bgp_withdraw_send_quiet_step,
@@ -1635,6 +1636,41 @@ def create_bgp_igp_instability_unresolvable_pnhs_stage(
         ),
     )
     return Stage(steps=steps)
+
+
+def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
+    device_name: str,
+    start_ipv4s: list[str],
+    start_ipv6s: list[str],
+    restore_start_ipv4s: list[str],
+    restore_start_ipv6s: list[str],
+    local_link: dict[str, Any],
+    other_link: dict[str, Any],
+    count: int = 63,
+    step: int = 2,
+    delete_count: int = 20,
+    update_timeout_seconds: int = 60,
+    stability_duration_seconds: int = 1800,
+) -> Stage:
+    """Create the failure-safe validated CICD-EBB-08 stage."""
+    return Stage(
+        steps=[
+            create_validated_igp_unresolvable_pnh_step(
+                device_name=device_name,
+                start_ipv4s=start_ipv4s,
+                start_ipv6s=start_ipv6s,
+                restore_start_ipv4s=restore_start_ipv4s,
+                restore_start_ipv6s=restore_start_ipv6s,
+                local_link=local_link,
+                other_link=other_link,
+                count=count,
+                step=step,
+                delete_count=delete_count,
+                update_timeout_seconds=update_timeout_seconds,
+                stability_duration_seconds=stability_duration_seconds,
+            )
+        ]
+    )
 
 
 def _create_route_oscillation_cycle_steps(

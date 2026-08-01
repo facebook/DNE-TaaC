@@ -4475,6 +4475,41 @@ def create_validated_igp_pnh_metric_oscillation_step(
     )
 
 
+def create_validated_igp_unresolvable_pnh_step(
+    device_name: str,
+    start_ipv4s: t.Sequence[str],
+    start_ipv6s: t.Sequence[str],
+    restore_start_ipv4s: t.Sequence[str],
+    restore_start_ipv6s: t.Sequence[str],
+    local_link: t.Mapping[str, t.Any],
+    other_link: t.Mapping[str, t.Any],
+    count: int,
+    step: int,
+    delete_count: int,
+    update_timeout_seconds: int,
+    stability_duration_seconds: int,
+) -> Step:
+    """Create a failure-safe, acknowledged unresolvable-PNH workflow."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_unresolvable_pnh",
+            "hostname": device_name,
+            "start_ipv4s": list(start_ipv4s),
+            "start_ipv6s": list(start_ipv6s),
+            "restore_start_ipv4s": list(restore_start_ipv4s),
+            "restore_start_ipv6s": list(restore_start_ipv6s),
+            "local_link": dict(local_link),
+            "other_link": dict(other_link),
+            "count": count,
+            "step": step,
+            "delete_count": delete_count,
+            "update_timeout_seconds": update_timeout_seconds,
+            "stability_duration_seconds": stability_duration_seconds,
+        },
+        description="Run validated unresolvable Open/R PNH workflow",
+    )
+
+
 def create_randomize_prefix_local_preference_step(
     prefix_pool_regex: str,
     prefix_start_index: int,

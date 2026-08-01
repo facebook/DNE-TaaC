@@ -93,7 +93,7 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             "count": 2,
             "step": 2,
             "expected_present": True,
-            "timeout_seconds": 0,
+            "timeout_seconds": 1,
         }
         targets = self.custom_step._openr_pnh_target_prefixes(params)
         routes = [
@@ -145,7 +145,7 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch.object(self.custom_step, "_monotonic_time", side_effect=[0, 0]),
+            patch.object(self.custom_step, "_monotonic_time", side_effect=[0, 0, 0, 0]),
             patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock) as sleep,
         ):
             await self.custom_step.verify_openr_pnh_route_state(params)
@@ -161,7 +161,7 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             "count": 1,
             "step": 2,
             "expected_present": False,
-            "timeout_seconds": 0,
+            "timeout_seconds": 1,
         }
         target = "20.164.28.10/32"
         helper_cls.return_value.get_routes = AsyncMock(
@@ -182,7 +182,7 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             await self.custom_step.verify_openr_pnh_route_state(params)
 
     @patch(f"{BASE_PATH}.BgpClientHelper")
-    async def test_bgp_update_timer_starts_before_trigger_validation(self, helper_cls):
+    async def test_bgp_update_trigger_records_counter_and_t0(self, helper_cls):
         key = "unit-trigger-timing"
         storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
         CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
@@ -210,7 +210,118 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
             )
 
         snapshot = CustomStep._convergence_data_storage[storage_key]
+        self.assertEqual(snapshot["counter_at_t0"], 11)
+        self.assertEqual(snapshot["first_update_elapsed_seconds"], 0)
+        self.assertTrue(snapshot["update_observed_by_t0"])
+
+    async def test_bgp_update_trigger_records_t0_before_counter_read(self):
+        key = "unit-trigger-rpc-latency"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
+        now = 100
+
+        async def read_counter(*_args, **_kwargs):
+            nonlocal now
+            now = 160
+            return 11
+
+        with (
+            patch.object(self.custom_step, "_monotonic_time", side_effect=lambda: now),
+            patch.object(
+                self.custom_step, "_read_bgp_counter", side_effect=read_counter
+            ),
+        ):
+            await self.custom_step.mark_bgp_update_trigger(
+                {"hostname": "bag011.ash6", "snapshot_key": key}
+            )
+
+        self.assertEqual(
+            100, CustomStep._convergence_data_storage[storage_key]["trigger_started_at"]
+        )
+
+    async def test_openr_pnh_route_read_has_hard_deadline(self):
+        params = {
+            "hostname": "bag011.ash6",
+            "start_ipv4s": ["20.164.28.10"],
+            "start_ipv6s": [],
+            "count": 1,
+            "step": 2,
+            "expected_present": True,
+            "timeout_seconds": 0.01,
+        }
+
+        async def hang(*_args):
+            await asyncio.Event().wait()
+
+        self.custom_step._read_openr_pnh_route_state = AsyncMock(side_effect=hang)
+
+        with self.assertRaisesRegex(
+            TestCaseFailure, "route-state read.*verification deadline"
+        ) as context:
+            await self.custom_step.verify_openr_pnh_route_state(params)
+
+        self.assertIsInstance(context.exception.__cause__, TimeoutError)
+
+    def test_bgp_update_window_warns_on_compatibility_fallback(self):
+        with (
+            patch.object(self.custom_step, "_monotonic_time", return_value=123),
+            patch.object(self.custom_step.logger, "warning") as warning,
+        ):
+            baseline, started_at, elapsed, observed = (
+                self.custom_step._initialize_bgp_update_send_window({"baseline": 10})
+            )
+
+        self.assertEqual(
+            (10, 123, None, False), (baseline, started_at, elapsed, observed)
+        )
+        warning.assert_called_once()
+        self.assertIn("metadata missing", warning.call_args.args[0])
+        self.assertIn("fallback", warning.call_args.args[0])
+
+    def test_bgp_update_window_rejects_partial_trigger_metadata(self):
+        for partial in (
+            {"baseline": 10, "counter_at_t0": 10},
+            {"baseline": 10, "trigger_started_at": 123},
+        ):
+            with self.subTest(partial=partial):
+                with self.assertRaisesRegex(
+                    TestCaseFailure,
+                    "counter_at_t0 and trigger_started_at together",
+                ):
+                    self.custom_step._initialize_bgp_update_send_window(partial)
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_bgp_update_trigger_times_post_t0_delta(self, helper_cls):
+        key = "unit-post-t0-update"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {"baseline": 10}
+        helper_cls.return_value.async_get_counter = AsyncMock(side_effect=[10, 11])
+
+        with patch.object(self.custom_step, "_monotonic_time", return_value=100):
+            await self.custom_step.mark_bgp_update_trigger(
+                {"hostname": "bag011.ash6", "snapshot_key": key}
+            )
+
+        with (
+            patch.object(
+                self.custom_step,
+                "_monotonic_time",
+                side_effect=[110, 110, 160],
+            ),
+            patch(f"{BASE_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.custom_step.wait_for_bgp_update_sent(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                    "timeout_seconds": 60,
+                }
+            )
+
+        snapshot = CustomStep._convergence_data_storage[storage_key]
+        self.assertEqual(snapshot["counter_at_t0"], 10)
         self.assertEqual(snapshot["first_update_elapsed_seconds"], 10)
+        self.assertFalse(snapshot["update_observed_by_t0"])
 
     @patch(f"{BASE_PATH}.BgpClientHelper")
     async def test_bgp_update_send_window_success_and_quiet(self, helper_cls):
@@ -430,6 +541,25 @@ class TestNdpClear(unittest.IsolatedAsyncioTestCase):
                     "snapshot_key": "unit-missing",
                 }
             )
+
+    @patch(f"{BASE_PATH}.BgpClientHelper")
+    async def test_mark_bgp_update_trigger_requires_snapshot_baseline(self, helper_cls):
+        key = "unit-missing-baseline"
+        storage_key = self.custom_step._bgp_update_send_window_key(key, "bag011.ash6")
+        CustomStep._convergence_data_storage[storage_key] = {}
+
+        with self.assertRaisesRegex(
+            TestCaseFailure,
+            "has no baseline; run snapshot_bgp_update_sent_counter first",
+        ):
+            await self.custom_step.mark_bgp_update_trigger(
+                {
+                    "hostname": "bag011.ash6",
+                    "snapshot_key": key,
+                }
+            )
+
+        helper_cls.assert_not_called()
 
     @patch(f"{BASE_PATH}.BgpClientHelper")
     async def test_bgp_counter_fetch_failure_is_actionable(self, helper_cls):
