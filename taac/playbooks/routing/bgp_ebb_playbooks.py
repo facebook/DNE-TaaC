@@ -49,6 +49,7 @@ from taac.steps.step_definitions import (
     create_route_registry_prefix_list_setup_steps,
     create_set_route_filter_step,
     create_snapshot_bgp_withdraw_sent_counter_step,
+    create_validated_igp_pnh_metric_oscillation_step,
     create_verify_bgp_withdraw_send_quiet_step,
 )
 from taac.task_definitions import (
@@ -644,18 +645,16 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
                         hostname=device_name,
                         snapshot_key="igp_pnh_metric_oscillation",
                     ),
-                    create_openr_route_action_step(
+                    create_validated_igp_pnh_metric_oscillation_step(
                         device_name=device_name,
                         start_ipv4s=start_ipv4s,
                         start_ipv6s=start_ipv6s,
                         local_link=local_link,
                         other_link=other_link,
-                        action=OpenRRouteAction.METRIC_OSCILLATION.value,
                         count=count,
                         step=step_size,
                         duration=duration,
                         frequency=frequency,
-                        description="Perform metric oscillation using Open/R configuration",
                     ),
                     create_verify_bgp_withdraw_send_quiet_step(
                         hostname=device_name,

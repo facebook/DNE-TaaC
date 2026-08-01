@@ -4446,6 +4446,35 @@ def create_validated_bgp_route_oscillation_step(
     )
 
 
+def create_validated_igp_pnh_metric_oscillation_step(
+    device_name: str,
+    start_ipv4s: t.Sequence[str],
+    start_ipv6s: t.Sequence[str],
+    local_link: t.Mapping[str, t.Any],
+    other_link: t.Mapping[str, t.Any],
+    count: int,
+    step: int,
+    duration: int,
+    frequency: int,
+) -> Step:
+    """Create acknowledged Open/R-to-BGP PNH metric oscillations."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_pnh_metric_oscillation",
+            "hostname": device_name,
+            "start_ipv4s": list(start_ipv4s),
+            "start_ipv6s": list(start_ipv6s),
+            "local_link": dict(local_link),
+            "other_link": dict(other_link),
+            "count": count,
+            "step": step,
+            "duration": duration,
+            "frequency": frequency,
+        },
+        description="Run acknowledged Open/R PNH metric oscillations",
+    )
+
+
 def create_randomize_prefix_local_preference_step(
     prefix_pool_regex: str,
     prefix_start_index: int,
