@@ -860,6 +860,7 @@ class TaacRunner:
                         test_case_results,
                         playbook.name,
                     )
+                _stage_exc: t.Optional[BaseException] = None
                 try:
                     for stage in stages:
                         self._current_stage = stage
@@ -927,6 +928,9 @@ class TaacRunner:
                                 test_case_results,
                                 test_case_name,
                             )
+                except BaseException as error:
+                    _stage_exc = error
+                    raise
                 finally:
                     # always run post-snapshot checks for observability, regardless of stage failures
                     with suppress_console_logs(self.logger):
@@ -985,6 +989,17 @@ class TaacRunner:
                             _teardown_exc = e
 
                     if _teardown_exc is not None:
+                        if _stage_exc is not None:
+                            message = "test case execution and teardown both failed"
+                            if isinstance(_stage_exc, Exception):
+                                raise ExceptionGroup(
+                                    message,
+                                    [_stage_exc, _teardown_exc],
+                                )
+                            raise BaseExceptionGroup(
+                                message,
+                                [_stage_exc, _teardown_exc],
+                            )
                         raise _teardown_exc
         except Exception as e:
             _run_exc = e

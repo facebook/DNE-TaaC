@@ -20,6 +20,10 @@ class ConvergenceOutcome(enum.Enum):
     NOT_CONVERGED = "NOT_CONVERGED"
 
 
+class FatalPredicateError(Exception):
+    """A predicate failure that the observer must propagate immediately."""
+
+
 @dataclasses.dataclass(frozen=True)
 class ConvergenceSample:
     """One predicate observation.
@@ -86,6 +90,7 @@ async def observe_convergence(
     measurement-only and returns ``CONVERGED`` without fabricating an SLA.
     Predicate exceptions and timeouts are retained and break stability-window
     continuity because convergence was not successfully observed during that poll.
+    ``FatalPredicateError`` is an explicit opt-in that propagates immediately.
     """
     _validate_parameters(
         soft_threshold_seconds=soft_threshold_seconds,
@@ -193,6 +198,8 @@ async def _invoke_predicate(
     try:
         return await asyncio.wait_for(predicate(), timeout=timeout_seconds), None
     except asyncio.CancelledError:
+        raise
+    except FatalPredicateError:
         raise
     except Exception as error:
         return None, error

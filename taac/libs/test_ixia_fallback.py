@@ -103,6 +103,35 @@ class TaacRunnerTimeWindowTest(unittest.TestCase):
         self.assertEqual("preserved", jq_vars["unrelated"])
 
 
+class TaacRunnerFailurePrecedenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_teardown_failure_keeps_stage_primary_first(self) -> None:
+        logger = logging.getLogger("taac-runner-failure-precedence-test")
+        logger.setLevel(logging.INFO)
+        runner = TaacRunner(_config(), logger=logger)
+        stage = taac_types.Stage(id="failing-stage")
+        playbook = taac_types.Playbook(name="failure-precedence", stages=[stage])
+        test_device = SimpleNamespace(name="dut1")
+        primary = RuntimeError("stage primary")
+        teardown = ValueError("strict teardown")
+
+        runner.test_summary = MagicMock()
+        runner.async_test_case_setUp = AsyncMock()
+        runner.initialize_and_setup_snapshot_checks = AsyncMock(return_value=[])
+        runner.inject_validation_stages = MagicMock(return_value=[stage])
+        runner.async_run_snapshot_checks = AsyncMock()
+        runner.async_run_stage = AsyncMock(side_effect=primary)
+        runner._log_post_test_results = AsyncMock()
+        runner.async_test_case_tearDown = AsyncMock(side_effect=teardown)
+        runner._publish_npi_result = AsyncMock()
+
+        with self.assertRaises(ExceptionGroup) as context:
+            await runner.run_test_case(playbook, test_device)
+
+        self.assertEqual((primary, teardown), context.exception.exceptions)
+        runner.async_test_case_tearDown.assert_awaited_once()
+        runner._publish_npi_result.assert_awaited_once()
+
+
 class IxiaCandidateTest(unittest.TestCase):
     def test_normalizes_fully_materialized_secondary(self) -> None:
         candidates = normalize_ixia_candidates(_config(_endpoint("eth1/1/1", "2/2")))

@@ -34,6 +34,7 @@ from taac.stages.stage_definitions import (
     create_route_oscillations_stage,
     create_route_registry_runtime_update_stage,
     create_steps_stage,
+    create_validated_ebgp_route_oscillations_stage,
     create_validated_ebgp_session_oscillation_stage,
     create_validated_plane_bgp_session_oscillation_stage,
 )
@@ -1152,12 +1153,13 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     memory_threshold: int = Gigabyte.GIG_5.value,
     cpu_util_terminate_on_error: bool = False,
     memory_terminate_on_error: bool = False,
-    prefix_pool_regex: str = ".*EBGP.*",
+    prefix_pool_regex: str = r"^PREFIX_POOL_IPV[46]_EBGP$",
     prefix_start_index: int = 0,
-    prefix_end_index: int = 500,
+    prefix_end_index: int = 750,
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
+    parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
@@ -1186,7 +1188,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             exclude_bgp_mon=exclude_bgp_mon,
-            snapshot_skip_uptime=True,
+            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
         ),
     )
     return Playbook(
@@ -1202,11 +1204,13 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             memory_terminate_on_error=memory_terminate_on_error,
         ),
         stages=[
-            create_route_oscillations_stage(
+            create_validated_ebgp_route_oscillations_stage(
                 device_name=device_name,
+                expected_established_sessions=expected_established_sessions,
                 prefix_pool_regex=prefix_pool_regex,
                 prefix_start_index=prefix_start_index,
                 prefix_end_index=prefix_end_index,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
             )
         ],
     )

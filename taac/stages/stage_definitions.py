@@ -92,6 +92,7 @@ from taac.steps.step_definitions import (
     create_thread_cpu_monitoring_step,
     create_toggle_device_group_step,
     create_update_prefix_count_step,
+    create_validated_bgp_route_oscillation_step,
     create_validated_bgp_session_oscillation_step,
     create_validation_step,
     create_verify_bgp_update_send_quiet_step,
@@ -1834,6 +1835,70 @@ def create_route_oscillations_stage(
             )
         )
     return Stage(steps=steps)
+
+
+def create_validated_bgp_route_oscillations_stage(
+    device_name: str,
+    expected_established_sessions: int,
+    prefix_pool_regex: str,
+    expected_prefix_pool_names: Sequence[str],
+    prefix_start_index: int = 0,
+    prefix_end_index: int = 750,
+    withdraw_time: int = 60,
+    readvertise_time: int = 60,
+    test_duration_seconds: int = 3600,
+    parent_prefixes_to_ignore: Sequence[str] = (),
+    description: str = "Run validated dual-stack BGP route oscillations",
+) -> Stage:
+    """Create BGP route oscillations with a verdict for every trigger."""
+    return Stage(
+        steps=[
+            create_validated_bgp_route_oscillation_step(
+                device_name=device_name,
+                prefix_pool_regex=prefix_pool_regex,
+                expected_prefix_pool_names=expected_prefix_pool_names,
+                expected_established_sessions=expected_established_sessions,
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                withdraw_time=withdraw_time,
+                readvertise_time=readvertise_time,
+                test_duration_seconds=test_duration_seconds,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                description=description,
+            )
+        ]
+    )
+
+
+def create_validated_ebgp_route_oscillations_stage(
+    device_name: str,
+    expected_established_sessions: int,
+    prefix_pool_regex: str = r"^PREFIX_POOL_IPV[46]_EBGP$",
+    expected_prefix_pool_names: Sequence[str] = (
+        "PREFIX_POOL_IPV4_EBGP",
+        "PREFIX_POOL_IPV6_EBGP",
+    ),
+    prefix_start_index: int = 0,
+    prefix_end_index: int = 750,
+    withdraw_time: int = 60,
+    readvertise_time: int = 60,
+    test_duration_seconds: int = 3600,
+    parent_prefixes_to_ignore: Sequence[str] = (),
+) -> Stage:
+    """Create validated eBGP route oscillations with canonical defaults."""
+    return create_validated_bgp_route_oscillations_stage(
+        device_name=device_name,
+        expected_established_sessions=expected_established_sessions,
+        prefix_pool_regex=prefix_pool_regex,
+        expected_prefix_pool_names=expected_prefix_pool_names,
+        prefix_start_index=prefix_start_index,
+        prefix_end_index=prefix_end_index,
+        withdraw_time=withdraw_time,
+        readvertise_time=readvertise_time,
+        test_duration_seconds=test_duration_seconds,
+        parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+        description="Run validated dual-stack eBGP route oscillations",
+    )
 
 
 def _create_local_pref_churn_cycle_steps(

@@ -8,6 +8,7 @@ import unittest
 from taac.health_checks.convergence_observer import (
     ConvergenceOutcome,
     ConvergenceSample,
+    FatalPredicateError,
     observe_convergence,
 )
 
@@ -297,6 +298,24 @@ class ConvergenceObserverTest(unittest.IsolatedAsyncioTestCase):
                 hard_timeout_seconds=2,
                 poll_interval_seconds=1,
             )
+
+    async def test_fatal_predicate_error_propagates(self) -> None:
+        calls = 0
+
+        async def predicate() -> ConvergenceSample:
+            nonlocal calls
+            calls += 1
+            raise FatalPredicateError("unrecoverable observation")
+
+        with self.assertRaisesRegex(FatalPredicateError, "unrecoverable observation"):
+            await observe_convergence(
+                predicate,
+                soft_threshold_seconds=1,
+                hard_timeout_seconds=2,
+                poll_interval_seconds=0.001,
+            )
+
+        self.assertEqual(1, calls)
 
     async def test_authoritative_predicate_time_controls_sla(self) -> None:
         clock = _FakeClock()

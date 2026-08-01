@@ -4414,6 +4414,38 @@ def create_advertise_withdraw_prefixes_step(
     )
 
 
+def create_validated_bgp_route_oscillation_step(
+    device_name: str,
+    prefix_pool_regex: str,
+    expected_prefix_pool_names: t.Sequence[str],
+    expected_established_sessions: int,
+    prefix_start_index: int,
+    prefix_end_index: int,
+    withdraw_time: int,
+    readvertise_time: int,
+    test_duration_seconds: int,
+    parent_prefixes_to_ignore: t.Sequence[str] = (),
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create route oscillations with IXIA, source, and exact-RIB verdicts."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_route_oscillation",
+            "hostname": device_name,
+            "prefix_pool_regex": prefix_pool_regex,
+            "expected_prefix_pool_names": list(expected_prefix_pool_names),
+            "expected_established_sessions": expected_established_sessions,
+            "prefix_start_index": prefix_start_index,
+            "prefix_end_index": prefix_end_index,
+            "withdraw_time": withdraw_time,
+            "readvertise_time": readvertise_time,
+            "test_duration_seconds": test_duration_seconds,
+            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+        },
+        description=description or "Run validated dual-stack BGP route oscillations",
+    )
+
+
 def create_randomize_prefix_local_preference_step(
     prefix_pool_regex: str,
     prefix_start_index: int,
