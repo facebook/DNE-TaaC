@@ -2483,6 +2483,8 @@ def create_ixia_device_group_toggle_step(
     enable: bool,
     device_group_name_regex: str,
     description: t.Optional[str] = None,
+    require_match: bool = False,
+    verify_readback: bool = False,
 ) -> Step:
     """
     Create a step to enable or disable IXIA device groups.
@@ -2491,6 +2493,8 @@ def create_ixia_device_group_toggle_step(
         enable: True to enable device groups, False to disable
         device_group_name_regex: Regex pattern to match device group names
         description: Custom description for the step
+        require_match: Fail when the regex selects no device groups
+        verify_readback: Re-read and verify every selected group's Enabled value
 
     Returns:
         Step object for IXIA device group toggle
@@ -2500,12 +2504,17 @@ def create_ixia_device_group_toggle_step(
         description = (
             f"{action} IXIA device groups matching '{device_group_name_regex}'"
         )
+    args_dict: t.Dict[str, t.Any] = {
+        "enable": enable,
+        "device_group_name_regex": device_group_name_regex,
+    }
+    if require_match:
+        args_dict["require_match"] = True
+    if verify_readback:
+        args_dict["verify_readback"] = True
     return create_ixia_api_step(
         api_name="toggle_device_groups",
-        args_dict={
-            "enable": enable,
-            "device_group_name_regex": device_group_name_regex,
-        },
+        args_dict=args_dict,
         description=description,
     )
 
@@ -4923,6 +4932,7 @@ def create_standard_setup_steps(
     enable_all_device_groups: bool = False,
     enable_bgp_daemon: bool = True,
     daemon_name: str = "Bgp",
+    validate_device_group_toggle: bool = False,
 ) -> t.List[Step]:
     """
     Create standard setup steps for BGP tests.
@@ -4933,6 +4943,8 @@ def create_standard_setup_steps(
         enable_all_device_groups: Whether to enable all Ixia device groups (takes precedence over disable)
         enable_bgp_daemon: Whether to enable BGP daemon
         daemon_name: Name of the daemon to enable
+        validate_device_group_toggle: Require a nonempty device-group match and
+            verify the Enabled readback after each IXIA toggle.
 
     Returns:
         List of standard setup steps
@@ -4945,6 +4957,8 @@ def create_standard_setup_steps(
                 enable=True,
                 device_group_name_regex=".*",
                 description="Enable all device groups for established sessions",
+                require_match=validate_device_group_toggle,
+                verify_readback=validate_device_group_toggle,
             )
         )
     elif disable_all_device_groups:
@@ -4953,6 +4967,8 @@ def create_standard_setup_steps(
                 enable=False,
                 device_group_name_regex=".*",
                 description="Disable all device groups",
+                require_match=validate_device_group_toggle,
+                verify_readback=validate_device_group_toggle,
             )
         )
 
@@ -4977,12 +4993,23 @@ def create_bgp_restart_setup_steps(
     parent_prefixes_to_ignore: t.Sequence[str] = (),
     readiness_hard_timeout_seconds: float = 600,
     readiness_poll_interval_seconds: float = 5,
+    validate_device_group_toggle: bool = False,
 ) -> t.List[Step]:
     """
     Create setup steps specifically for BGP restart tests.
 
     Args:
         device_name: Name of the device
+        start_with_active_peers: Enable all IXIA device groups and wait for BGP
+            readiness instead of beginning with device groups disabled.
+        expected_established_sessions: Exact established-session count required
+            when ``start_with_active_peers`` is enabled.
+        parent_prefixes_to_ignore: Parent prefixes excluded from BGP readiness
+            validation.
+        readiness_hard_timeout_seconds: Maximum time to wait for BGP readiness.
+        readiness_poll_interval_seconds: Interval between readiness checks.
+        validate_device_group_toggle: Require a nonempty device-group match and
+            verify the Enabled readback after each IXIA toggle.
 
     Returns:
         List of setup steps for BGP restart tests
@@ -4992,6 +5019,7 @@ def create_bgp_restart_setup_steps(
         disable_all_device_groups=not start_with_active_peers,
         enable_all_device_groups=start_with_active_peers,
         enable_bgp_daemon=True,
+        validate_device_group_toggle=validate_device_group_toggle,
     )
     if start_with_active_peers:
         if expected_established_sessions is None:

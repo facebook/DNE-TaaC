@@ -7,6 +7,7 @@ import functools
 import ipaddress
 import itertools
 import logging
+import operator
 import os
 import random
 import re
@@ -2979,6 +2980,48 @@ class Ixia:
                 f"{bgp_peer.Name}"
             )
 
+    @staticmethod
+    def _enabled_readback_matches(value: t.Any, enable: bool) -> bool:
+        if isinstance(value, str):
+            canonical = value.strip().lower()
+            return (
+                canonical in {"true", "enabled"}
+                if enable
+                else canonical in {"false", "disabled"}
+            )
+        if isinstance(value, bool):
+            return value == enable
+        try:
+            integer_value = operator.index(value)
+        except TypeError:
+            return False
+        return integer_value in {0, 1} and bool(integer_value) == enable
+
+    def _verify_device_group_enabled_readback(
+        self, device_groups: t.Sequence[t.Any], enable: bool
+    ) -> None:
+        mismatches = []
+        missing_readbacks = []
+        for device_group in device_groups:
+            values = tuple(device_group.Enabled.Values)
+            if not values:
+                missing_readbacks.append(str(device_group.Name))
+            elif any(
+                not self._enabled_readback_matches(value, enable) for value in values
+            ):
+                mismatches.append(
+                    f"{device_group.Name}={list(values)!r} (expected={enable!r})"
+                )
+        failures = []
+        if missing_readbacks:
+            failures.append(
+                "Enabled readback missing for " + ", ".join(missing_readbacks)
+            )
+        if mismatches:
+            failures.append("Enabled readback mismatch for " + ", ".join(mismatches))
+        if failures:
+            raise RuntimeError("toggle_device_groups: " + "; ".join(failures))
+
     @external_api
     def toggle_device_groups(
         self,
@@ -2987,29 +3030,41 @@ class Ixia:
         all_bgp_peers: bool = False,
         exception_device_groups: t.Optional[t.List[str]] = None,
         sleep_time_before_applying_change: int = 30,
+        require_match: bool = False,
+        verify_readback: bool = False,
     ) -> None:
-        if all_bgp_peers:
-            device_groups = self.find_device_groups(device_group_name_regex)
-            for device_group in device_groups:
-                # Skip if any exception matches
-                if exception_device_groups and any(
+        device_groups = self.find_device_groups(device_group_name_regex)
+        selected_device_groups = [
+            device_group
+            for device_group in device_groups
+            if not (
+                all_bgp_peers
+                and exception_device_groups
+                and any(
                     exception in device_group.Name
                     for exception in exception_device_groups
-                ):
-                    continue
-                self.logger.info(f"Applying enable={enable} to {device_group.Name}")
-                device_group.Enabled.Single(enable)
-        else:
-            device_groups = self.find_device_groups(device_group_name_regex)
-            for device_group in device_groups:
-                self.logger.info(f"Applying enable={enable} to {device_group.Name}")
-                device_group.Enabled.Single(enable)
+                )
+            )
+        ]
+        if require_match and not selected_device_groups:
+            raise ValueError(
+                "toggle_device_groups: regex "
+                f"{device_group_name_regex!r} selected no device groups"
+            )
+        for device_group in selected_device_groups:
+            self.logger.info(f"Applying enable={enable} to {device_group.Name}")
+            device_group.Enabled.Single(enable)
         self.logger.info(
             f"Waiting for {sleep_time_before_applying_change}s before applying change"
         )
         time.sleep(sleep_time_before_applying_change)
         self.apply_changes()
-        device_group_name = [device_group.Name for device_group in device_groups]
+        if verify_readback:
+            # Post-apply verification preserves the observed IXIA state for triage.
+            self._verify_device_group_enabled_readback(selected_device_groups, enable)
+        device_group_name = [
+            device_group.Name for device_group in selected_device_groups
+        ]
         self.logger.info(
             f"Successfully {'enabled' if enable else 'disabled'} device group {device_group_name}"
         )

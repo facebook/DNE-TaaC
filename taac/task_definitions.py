@@ -3233,8 +3233,8 @@ def create_bgp_queue_backpressure_poll_periodic_task(
         threshold: Max allowed queue-block delta over the run. Default `1000`
             (deliberately generous / observe-first until calibrated).
         interval: Polling interval in seconds. Default `10`.
-        terminate_on_error: If True, a threshold breach aborts the test.
-            Default False (observe-only).
+        terminate_on_error: If True, a threshold breach produces a blocking
+            final result. Default False records the breach as observation.
 
     Returns:
         A `PeriodicTask` named `"bgp_queue_backpressure_check"` wrapping
@@ -3252,6 +3252,7 @@ def create_bgp_queue_backpressure_poll_periodic_task(
                     {
                         "hostname": device_name,
                         "threshold": threshold,
+                        "fail_on_breach": terminate_on_error,
                     }
                 )
             )

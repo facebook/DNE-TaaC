@@ -298,7 +298,10 @@ def get_bgp_ebb_cold_start_playbook(
     )
     return Playbook(
         name="bgp_ebb_cold_start_playbook",
-        setup_steps=create_bgp_restart_setup_steps(device_name=device_name),
+        setup_steps=create_bgp_restart_setup_steps(
+            device_name=device_name,
+            validate_device_group_toggle=True,
+        ),
         prechecks=cold_start_checks.prechecks,
         postchecks=cold_start_checks.postchecks,
         snapshot_checks=cold_start_checks.snapshot_checks,

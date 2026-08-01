@@ -450,6 +450,8 @@ def create_cold_start_test_stage(
                 enable=True,
                 device_group_name_regex=device_group_regex,
                 description="Toggle all device groups back to active",
+                require_match=True,
+                verify_readback=True,
             ),
             # Step 6: Monitor thread CPU OR wait for convergence
             # If monitoring is enabled, it runs for the convergence duration

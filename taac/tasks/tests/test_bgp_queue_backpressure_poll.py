@@ -30,9 +30,7 @@ def _peer(adjr=0, send=0, adjr_dur=0, send_dur=0, buffered=0):
 
 class BgpQueueBackpressurePollTest(unittest.IsolatedAsyncioTestCase):
     """`BgpQueueBackpressurePoll` sums per-peer cumulative queue-block counters,
-    and its final check gates on the DELTA accrued over the run. The wrapping
-    PeriodicTask.terminate_on_error (from the factory) decides whether a FAIL
-    aborts the test; the handler itself only reports PASS/FAIL/SKIP/ERROR."""
+    and enforces the DELTA only when explicitly configured."""
 
     def setUp(self) -> None:
         self.logger = MagicMock()
@@ -77,7 +75,9 @@ class BgpQueueBackpressurePollTest(unittest.IsolatedAsyncioTestCase):
         assert result is not None
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
-    async def test_final_check_delta_exceeds_threshold_fail(self) -> None:
+    async def test_final_check_delta_exceeds_threshold_observes_by_default(
+        self,
+    ) -> None:
         self.task._params.update({"threshold": 10})
         self.task.add_data(
             {"total_queue_blocks": 0, "total_block_duration": 0}, timestamp=1000
@@ -88,6 +88,21 @@ class BgpQueueBackpressurePollTest(unittest.IsolatedAsyncioTestCase):
         result = await self.task.run_final_check()
         # run_final_check() is typed Optional; these paths always return a
         # result, so narrow it (pyre) and guard the .status access below.
+        assert result is not None
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("Observed non-blocking", result.message)
+
+    async def test_final_check_delta_exceeds_threshold_fails_when_blocking(
+        self,
+    ) -> None:
+        self.task._params.update({"threshold": 10, "fail_on_breach": True})
+        self.task.add_data(
+            {"total_queue_blocks": 0, "total_block_duration": 0}, timestamp=1000
+        )
+        self.task.add_data(
+            {"total_queue_blocks": 50, "total_block_duration": 5}, timestamp=1001
+        )
+        result = await self.task.run_final_check()
         assert result is not None
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
 
@@ -108,7 +123,3 @@ class BgpQueueBackpressurePollTest(unittest.IsolatedAsyncioTestCase):
         # result, so narrow it (pyre) and guard the .status access below.
         assert result is not None
         self.assertEqual(result.status, hc_types.HealthCheckStatus.ERROR)
-
-
-if __name__ == "__main__":
-    unittest.main()
