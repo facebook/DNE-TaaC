@@ -1090,6 +1090,8 @@ def generate_tornado_plane_definitions(
     Returns:
         List of plane definitions, each containing:
             - 'name': Human-readable plane name (e.g., "Tornado Plane 1 EB")
+            - 'plane_num': Tornado plane number
+            - 'role': Structured session role ("EB" or "MP")
             - 'ipv4_regex': Plane-specific IPv4 regex pattern
             - 'ipv6_regex': Plane-specific IPv6 regex pattern
             - 'ipv4_session_count': Number of IPv4 sessions (for cycle-based mode)
@@ -1126,6 +1128,8 @@ def generate_tornado_plane_definitions(
             plane_definitions.append(
                 {
                     "name": f"Tornado Plane {plane_num} EB",
+                    "plane_num": plane_num,
+                    "role": "EB",
                     "ipv4_regex": ipv4_eb_regex,
                     "ipv6_regex": ipv6_eb_regex,
                     "ipv4_session_count": ipv4_sessions_per_plane,
@@ -1145,6 +1149,8 @@ def generate_tornado_plane_definitions(
             plane_definitions.append(
                 {
                     "name": f"Tornado Plane {plane_num} MP",
+                    "plane_num": plane_num,
+                    "role": "MP",
                     "ipv4_regex": ipv4_mp_regex,
                     "ipv6_regex": ipv6_mp_regex,
                     "ipv4_session_count": ipv4_sessions_per_plane,
@@ -1397,6 +1403,110 @@ def create_plane_aware_bgp_session_oscillation_stage(
             uptime_seconds=uptime_seconds,
             downtime_seconds=downtime_seconds,
         )
+
+
+def create_validated_plane_bgp_session_oscillation_stage(
+    device_name: str,
+    ipv4_peer_regex: str,
+    ipv6_peer_regex: str,
+    ipv4_sessions_per_plane: int,
+    ipv6_sessions_per_plane: int,
+    expected_established_sessions: int,
+    test_duration_seconds: int = 1800,
+    uptime_seconds: int = 30,
+    downtime_seconds: int = 30,
+    sessions_per_cycle: int = 16,
+    tornado_planes: list[int] | None = None,
+    session_type: str = "both",
+    parent_prefixes_to_ignore: Sequence[str] = (),
+) -> Stage:
+    """Create plane/role-aware iBGP oscillations with trigger validation.
+
+    Args:
+        device_name: DUT whose iBGP sessions are validated.
+        ipv4_peer_regex: Base regex used to select IPv4 peers by plane and role.
+        ipv6_peer_regex: Base regex used to select IPv6 peers by plane and role.
+        ipv4_sessions_per_plane: Available IPv4 sessions for each plane and role.
+        ipv6_sessions_per_plane: Available IPv6 sessions for each plane and role.
+        expected_established_sessions: Required total established-session count.
+        test_duration_seconds: Nominal duration for the oscillation schedule.
+        uptime_seconds: Stable recovery interval required after each up transition.
+        downtime_seconds: Stable interval required after each down transition.
+        sessions_per_cycle: Total sessions targeted per scheduled dual-stack pair.
+            Half are assigned to IPv4, with any remainder assigned to IPv6.
+        tornado_planes: Plane numbers to schedule, or all four planes by default.
+        session_type: Plane roles to include: eb, mp, or both.
+        parent_prefixes_to_ignore: Peer addresses excluded from session snapshots.
+
+    Returns:
+        A stage containing one validated oscillation step with a round-robin
+        schedule of IPv4/IPv6 groups for each selected plane and role.
+
+    Raises:
+        ValueError: If no groups can be generated or the cycle width is invalid.
+    """
+    planes = tornado_planes if tornado_planes is not None else [1, 2, 3, 4]
+    definitions = generate_tornado_plane_definitions(
+        ipv4_peer_regex=ipv4_peer_regex,
+        ipv6_peer_regex=ipv6_peer_regex,
+        tornado_planes=planes,
+        session_type=session_type,
+        ipv4_sessions_per_plane=ipv4_sessions_per_plane,
+        ipv6_sessions_per_plane=ipv6_sessions_per_plane,
+    )
+    if not definitions:
+        raise ValueError(
+            "no plane definitions generated; verify tornado_planes and peer regexes"
+        )
+    if sessions_per_cycle < 2:
+        raise ValueError("sessions_per_cycle must be at least 2")
+    ipv4_width = sessions_per_cycle // 2
+    ipv6_width = sessions_per_cycle - ipv4_width
+    if ipv4_width > ipv4_sessions_per_plane or ipv6_width > ipv6_sessions_per_plane:
+        raise ValueError(
+            "sessions_per_cycle exceeds the available IPv4 or IPv6 sessions"
+        )
+    groups: list[dict[str, Any]] = []
+    schedule: list[list[str]] = []
+    for definition in definitions:
+        plane_num = int(definition["plane_num"])
+        role = str(definition["role"]).lower()
+        if role not in {"eb", "mp"}:
+            raise ValueError(f"unsupported plane definition role: {definition['role']}")
+        group_prefix = f"plane_{plane_num}_{role}"
+        v4_name, v6_name = f"{group_prefix}_ipv4", f"{group_prefix}_ipv6"
+        groups.extend(
+            [
+                {
+                    "name": v4_name,
+                    "peer_regex": definition["ipv4_regex"],
+                    "session_count": definition["ipv4_session_count"],
+                    "sessions_per_cycle": ipv4_width,
+                },
+                {
+                    "name": v6_name,
+                    "peer_regex": definition["ipv6_regex"],
+                    "session_count": definition["ipv6_session_count"],
+                    "sessions_per_cycle": ipv6_width,
+                },
+            ]
+        )
+        schedule.append([v4_name, v6_name])
+    return Stage(
+        steps=[
+            create_validated_bgp_session_oscillation_step(
+                device_name=device_name,
+                session_groups=groups,
+                cycle_schedule=schedule,
+                expected_established_sessions=expected_established_sessions,
+                test_duration_seconds=test_duration_seconds,
+                uptime_seconds=uptime_seconds,
+                downtime_seconds=downtime_seconds,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                description="Run validated per-plane iBGP session oscillations",
+            )
+        ]
+    )
 
 
 def create_bgp_igp_instability_unresolvable_pnhs_stage(

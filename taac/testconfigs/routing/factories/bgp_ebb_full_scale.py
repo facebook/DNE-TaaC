@@ -207,6 +207,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
+            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
         ),
         get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name=device_name,

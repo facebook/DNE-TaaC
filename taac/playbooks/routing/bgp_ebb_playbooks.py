@@ -30,12 +30,12 @@ from taac.stages.stage_definitions import (
     create_fauu_drain_undrain_stage,
     create_longevity_churn_stage,
     create_multipath_group_oscillation_stage,
-    create_plane_aware_bgp_session_oscillation_stage,
     create_plane_drain_undrain_stage,
     create_route_oscillations_stage,
     create_route_registry_runtime_update_stage,
     create_steps_stage,
     create_validated_ebgp_session_oscillation_stage,
+    create_validated_plane_bgp_session_oscillation_stage,
 )
 from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
@@ -1542,17 +1542,20 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             memory_terminate_on_error=memory_terminate_on_error,
         ),
         stages=[
-            create_plane_aware_bgp_session_oscillation_stage(
+            create_validated_plane_bgp_session_oscillation_stage(
+                device_name=device_name,
                 ipv4_peer_regex=ipv4_peer_regex,
                 ipv6_peer_regex=ipv6_peer_regex,
                 test_duration_seconds=test_duration_seconds,
                 uptime_seconds=uptime_seconds,
                 downtime_seconds=downtime_seconds,
-                sessions_per_plane=sessions_per_plane,
+                sessions_per_cycle=sessions_per_plane,
                 ipv4_sessions_per_plane=ipv4_sessions_per_plane,
                 ipv6_sessions_per_plane=ipv6_sessions_per_plane,
                 tornado_planes=tornado_planes,
                 session_type=session_type,
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
             ),
         ],
     )
