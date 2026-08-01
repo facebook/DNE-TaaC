@@ -2298,6 +2298,76 @@ def create_performance_scaling_egress_peer_sweep_playbook(
     )
 
 
+def create_transient_memory_ingress_peer_scale_playbook(
+    *,
+    device_name: str,
+    ixia_interface_mimic_ebgp: str,
+    ingress_peer_counts: list[int],
+    prefix_count_per_peer: int,
+    ibgp_peer_count: int,
+    address_families: list[str],
+    soak_seconds: int,
+    convergence_wait_seconds: int,
+    acceptance_gate_mode: str | None = None,
+    transient_gate_mode: str | None = None,
+    transient_ratio_tolerance: float = 2.0,
+) -> Playbook:
+    """Build SC4: transient memory vs eBGP INGRESS sender scale.
+
+    ONE Stage with ONE custom step -- the step owns the whole sweep (resize the
+    IXIA eBGP device group, restart protocols, measure, repeat), mirroring SC2's
+    shape. Keeping the sweep inside the step is what removes the per-Stage device
+    rescale (and its Bgp restart) entirely: the DUT is configured once with the
+    sweep-max peer set and only the IXIA multiplier changes per point.
+    """
+    return Playbook(
+        name="Transient_Memory_Ingress_Peer_Scale",
+        description=(
+            "SC4: transient (peak-stable) memory must stay ~flat as the eBGP "
+            "ingress sender count grows"
+        ),
+        # No snapshot checks: the device deliberately carries sweep-max eBGP peers
+        # while only the current point's subset is started, so a snapshot session
+        # check would flag the intentionally-idle senders. The custom step runs
+        # session (pinned to the exact expected count), RIB/FIB and core-dump
+        # checks per sweep point instead.
+        stages=[
+            create_steps_stage(
+                stage_id="ingress_peer_scale_sweep",
+                description=(
+                    f"Sweep eBGP ingress senders {ingress_peer_counts} at "
+                    f"{prefix_count_per_peer} prefixes each, {ibgp_peer_count} iBGP "
+                    "egress held constant"
+                ),
+                steps=[
+                    create_custom_step(
+                        {
+                            "custom_step_name": (
+                                "measure_transient_memory_ingress_peer_scale"
+                            ),
+                            "hostname": device_name,
+                            "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
+                            "ingress_peer_counts": ingress_peer_counts,
+                            "prefix_count_per_peer": prefix_count_per_peer,
+                            "ibgp_peer_count": ibgp_peer_count,
+                            "address_families": address_families,
+                            "soak_seconds": soak_seconds,
+                            "convergence_wait_seconds": convergence_wait_seconds,
+                            "acceptance_gate_mode": acceptance_gate_mode,
+                            "transient_gate_mode": transient_gate_mode,
+                            "transient_ratio_tolerance": transient_ratio_tolerance,
+                        },
+                        description=(
+                            f"Measure transient memory across ingress sender "
+                            f"counts {ingress_peer_counts}"
+                        ),
+                    ),
+                ],
+            )
+        ],
+    )
+
+
 def create_performance_scaling_ingress_peer_sweep_playbook(
     *,
     device_name: str,

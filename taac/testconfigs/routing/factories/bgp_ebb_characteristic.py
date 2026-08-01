@@ -74,6 +74,7 @@ from taac.playbooks.playbook_definitions import (
     build_case8_playbook,
     create_test_computational_load_for_bgp_plus_plus_playbook,
     create_test_constant_attribute_storage_playbook,
+    create_transient_memory_ingress_peer_scale_playbook,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_bounded_ecmp_sets_playbook,
@@ -1659,6 +1660,10 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
 _SC4_INGRESS_EBGP_PEER_COUNTS: list = [1, 2, 4, 8, 16]
 _SC4_FIXED_IBGP_PEER_COUNT: int = 500
 _SC4_PREFIX_COUNT: int = 50000
+# Per-sweep-point soak (steady-state mean window) and the ceiling on how long a
+# point may take to reach the full accepted+resolved route set.
+_SC4_SOAK_SECONDS: int = 120
+_SC4_CONVERGENCE_WAIT_SECONDS: int = 600
 
 
 def _two_port_direct_ixia_connections(
@@ -2225,15 +2230,24 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         bgp_asn=testbed.dut_bgp_as,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        # Ingress sweep: start at the first eBGP sender count; iBGP egress is the
-        # constant fan-out held across every Stage.
-        ebgp_peer_count=_SC4_INGRESS_EBGP_PEER_COUNTS[0],
+        # Write the peer list ONCE at the sweep MAX. The sweep resizes the IXIA
+        # eBGP device group rather than rescaling the device, so the configured
+        # peer set must be a superset of every sweep point -- otherwise senders
+        # above the initial count have no configured neighbour and can never
+        # establish (observed: at n=2 the gate saw expected 502 / found 501).
+        # Senders above the current point stay idle, which the exact-count
+        # session gate ignores.
+        ebgp_peer_count=max(_SC4_INGRESS_EBGP_PEER_COUNTS),
         ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
         ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
+        # v6-only ingress: a v4 parent network here writes a v4 eBGP peer to the
+        # device that the v6-only IXIA never answers, so it sits IDLE for the whole
+        # run (10.163.28.11), inflating the session total and polluting every
+        # non-established list.
+        ixia_ebgp_ic_parent_network_v4=None,
         # iBGP egress is v6-only (the per-iteration factory + IXIA side write 0 v4
         # iBGP peers). Passing a v4 network here would make get_update_packing lay
         # the iBGP interface DUAL-STACK -- 500 v6 + 500 v4 secondaries on one
@@ -2277,24 +2291,6 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
             ixia_needed=True,
         )
     )
-    factory = build_per_iteration_factory_ingress_v4_capable(
-        device_name=device_name,
-        router_id=testbed.router_id,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ebgp_v6_base=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ebgp_v4_base=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ibgp_v6_base=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ibgp_v4_base=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
-        peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
-        peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-        peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
-        ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
-        # v6-only egress: no v4 iBGP peers written to the device config.
-        ibgp_peer_count_v4=0,
-        v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
-    )
     return create_bgp_ebb_scaling_ingress_peer_scale_test_config(
         testbed,
         name=name,
@@ -2315,7 +2311,24 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
         log_collection_timeout=600,
         setup_tasks=setup_tasks,
-        per_iteration_setup_steps_factory=factory,
+        # The sweep lives inside the convergence custom step (it resizes the IXIA
+        # eBGP device group per point), so there are no per-Stage setup steps and
+        # therefore no per-Stage Bgp restart.
+        per_iteration_setup_steps_factory=None,
+        sweep_playbook=create_transient_memory_ingress_peer_scale_playbook(
+            device_name=device_name,
+            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+            ingress_peer_counts=_SC4_INGRESS_EBGP_PEER_COUNTS,
+            prefix_count_per_peer=_SC4_PREFIX_COUNT,
+            ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
+            address_families=["ipv6"],
+            soak_seconds=_SC4_SOAK_SECONDS,
+            convergence_wait_seconds=_SC4_CONVERGENCE_WAIT_SECONDS,
+            # Anti-vacuousness is hard from the start (mirrors SC2); the flatness
+            # claim stays observe-only until we have a calibrated 5-point dataset.
+            acceptance_gate_mode="blocking",
+            transient_gate_mode="permissive",
+        ),
     )
 
 

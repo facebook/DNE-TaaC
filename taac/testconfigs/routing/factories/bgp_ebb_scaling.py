@@ -334,6 +334,7 @@ def create_bgp_ebb_scaling_ingress_peer_scale_test_config(
     host_driver_args: dict[str, str] | None = None,
     oss_mock_device_data: dict[str, taac_types.MockDeviceInfo] | None = None,
     host_os_type_map: dict[str, taac_types.DeviceOsType] | None = None,
+    sweep_playbook: taac_types.Playbook | None = None,
 ) -> TestConfig:
     """BGP++ eBGP-INGRESS-sender sweep TestConfig -- SC4 (char-4).
 
@@ -423,8 +424,13 @@ def create_bgp_ebb_scaling_ingress_peer_scale_test_config(
             # DUT's EB-FA-IN inbound allowlist.
             ebgp_fixed_communities=[_EB_FA_TRANSITED_COMMUNITY],
         ),
+        # ``sweep_playbook`` lets the caller supply a Playbook that owns the sweep
+        # internally (one Stage, one custom step) instead of the per-Stage shape,
+        # which needs a device rescale -- and therefore a Bgp restart -- per point.
         playbooks=[
-            create_performance_scaling_ingress_peer_sweep_playbook(
+            sweep_playbook
+            if sweep_playbook is not None
+            else create_performance_scaling_ingress_peer_sweep_playbook(
                 device_name=device_name,
                 ingress_peer_counts=ingress_peer_counts,
                 prefix_count=prefix_count,
