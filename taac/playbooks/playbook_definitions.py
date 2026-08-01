@@ -16662,6 +16662,251 @@ def create_qsfp_service_crash_playbook(iteration: int = 5) -> Playbook:
     )
 
 
+def create_qsfp_service_warmboot_and_reset_playbook(
+    iteration: int = 5,
+    post_warmboot_wait_seconds: int = 300,
+    post_reset_settle_seconds: int = 300,
+) -> Playbook:
+    """Build the `test_qsfp_service_warmboot_and_reset` Playbook.
+
+    Each cycle warmboots `qsfp_service`, holds, then resets every transceiver
+    on the DUT via `wedge_qsfp_util --qsfp-reset`, exercising the optics
+    daemon's ability to re-discover and re-program modules that were reset out
+    from under it shortly after a warm boot.
+
+    `Service.QSFP_SERVICE` + `SYSTEMCTL_RESTART` is inherently a warm boot:
+    `create_cold_boot_file` only touches the wedge_agent path
+    (`/dev/shm/fboss/warm_boot/cold_boot_once_0`), never qsfp_service's own
+    `cold_boot_once_qsfp_service`.
+
+    The reset defaults to `RESET_THEN_CLEAR`, so it self-clears and needs no
+    paired enable step, but optics take several minutes to relink — hence the
+    settle and convergence before postchecks run.
+
+    Args:
+        iteration: Number of warmboot + reset cycles. Default 5.
+        post_warmboot_wait_seconds: Hold between the warmboot and the reset.
+        post_reset_settle_seconds: Hold after the reset for optics to relink.
+
+    Returns:
+        A `Playbook` named `test_qsfp_service_warmboot_and_reset`.
+    """
+    return Playbook(
+        name="test_qsfp_service_warmboot_and_reset",
+        postchecks=[
+            QSFP_SERVICE_RESTART_SERVICE_CHECK,
+            _unclean_exit_check(["qsfp_service"]),
+            create_port_state_check(),
+            create_port_transceiver_check(),
+        ],
+        stages=[
+            create_steps_stage(
+                iteration=iteration,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.QSFP_SERVICE,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot qsfp_service",
+                    ),
+                    create_longevity_step(
+                        duration=post_warmboot_wait_seconds,
+                        description=(
+                            f"Hold {post_warmboot_wait_seconds}s after the "
+                            "qsfp_service warmboot"
+                        ),
+                    ),
+                    create_interface_flap_step(
+                        enable=False,
+                        interface_flap_method=int(
+                            taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_RESET
+                        ),
+                        jq_params={"interfaces": '."{dut}".interfaces'},
+                        description=(
+                            "Reset all transceivers in one "
+                            "`wedge_qsfp_util --qsfp-reset` invocation"
+                        ),
+                    ),
+                    create_longevity_step(
+                        duration=post_reset_settle_seconds,
+                        description=(
+                            f"Settle {post_reset_settle_seconds}s for optics to "
+                            "relink after the reset"
+                        ),
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.QSFP_SERVICE, Service.AGENT, Service.BGP],
+                        description=(
+                            "Wait for qsfp_service, wedge_agent and bgpd to converge"
+                        ),
+                    ),
+                    create_longevity_step(duration=30),
+                ],
+            ),
+        ],
+    )
+
+
+def create_qsfp_service_warmboot_and_agent_coldboot_playbook(
+    iteration: int = 5,
+    post_warmboot_wait_seconds: int = 300,
+) -> Playbook:
+    """Build the `test_qsfp_service_warmboot_and_agent_coldboot` Playbook.
+
+    Each cycle warmboots `qsfp_service`, holds, then coldboots the FBOSS agent,
+    forcing the agent to rebuild hardware state from scratch against optics
+    that qsfp_service only just re-enumerated.
+
+    Coldboot is `SYSTEMCTL_RESTART` plus `create_cold_boot_file=True`, which
+    drops `/dev/shm/fboss/warm_boot/cold_boot_once_0` — the same idiom as
+    `create_agent_coldboot_playbook`. The agent restart cascades (BindsTo) to
+    bgpd / fboss_sw_agent / fboss_hw_agent@0 and takes openr down with it, so
+    all of those are declared as expected restarts.
+
+    Args:
+        iteration: Number of warmboot + coldboot cycles. Default 5.
+        post_warmboot_wait_seconds: Hold between the qsfp_service warmboot and
+            the agent coldboot.
+
+    Returns:
+        A `Playbook` named `test_qsfp_service_warmboot_and_agent_coldboot`.
+    """
+    return Playbook(
+        name="test_qsfp_service_warmboot_and_agent_coldboot",
+        postchecks=[
+            create_service_restart_health_check(
+                DEFAULT_SERVICE_NAMES,
+                expected_restarted_services=[
+                    "qsfp_service",
+                    "wedge_agent",
+                    "fboss_sw_agent",
+                    "fboss_hw_agent@0",
+                    "bgpd",
+                    "openr",
+                ],
+            ),
+        ],
+        stages=[
+            create_steps_stage(
+                iteration=iteration,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.QSFP_SERVICE,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot qsfp_service",
+                    ),
+                    create_longevity_step(
+                        duration=post_warmboot_wait_seconds,
+                        description=(
+                            f"Hold {post_warmboot_wait_seconds}s after the "
+                            "qsfp_service warmboot"
+                        ),
+                    ),
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        create_cold_boot_file=True,
+                        description="Coldboot the FBOSS agent",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Wait for wedge_agent and bgpd to converge",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def create_qsfp_service_warmboot_and_tx_flap_playbook(
+    iteration: int = 5,
+    post_warmboot_wait_seconds: int = 300,
+    tx_down_seconds: int = 30,
+    post_flap_settle_seconds: int = 300,
+) -> Playbook:
+    """Build the `test_qsfp_service_warmboot_and_tx_flap` Playbook.
+
+    Each cycle warmboots `qsfp_service`, holds, then flaps every transceiver's
+    laser off and back on via `wedge_qsfp_util --tx_disable` /
+    `--tx_enable`, exercising link re-establishment against an optics daemon
+    that recently warm-booted.
+
+    Unlike the `--qsfp-reset` variant, a TX flap needs an explicit paired
+    enable step — `--tx_disable` holds the laser off until something turns it
+    back on.
+
+    Args:
+        iteration: Number of warmboot + flap cycles. Default 5.
+        post_warmboot_wait_seconds: Hold between the warmboot and the flap.
+        tx_down_seconds: How long the lasers stay disabled.
+        post_flap_settle_seconds: Hold after re-enabling TX for links to recover.
+
+    Returns:
+        A `Playbook` named `test_qsfp_service_warmboot_and_tx_flap`.
+    """
+    return Playbook(
+        name="test_qsfp_service_warmboot_and_tx_flap",
+        postchecks=[
+            QSFP_SERVICE_RESTART_SERVICE_CHECK,
+            _unclean_exit_check(["qsfp_service"]),
+        ],
+        stages=[
+            create_steps_stage(
+                iteration=iteration,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.QSFP_SERVICE,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot qsfp_service",
+                    ),
+                    create_longevity_step(
+                        duration=post_warmboot_wait_seconds,
+                        description=(
+                            f"Hold {post_warmboot_wait_seconds}s after the "
+                            "qsfp_service warmboot"
+                        ),
+                    ),
+                    create_interface_flap_step(
+                        enable=False,
+                        interface_flap_method=int(
+                            taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
+                        ),
+                        delay=tx_down_seconds,
+                        jq_params={"interfaces": '."{dut}".interfaces'},
+                        description=(
+                            "Disable TX on all transceivers in one "
+                            "`wedge_qsfp_util --tx_disable` invocation"
+                        ),
+                    ),
+                    create_interface_flap_step(
+                        enable=True,
+                        interface_flap_method=int(
+                            taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
+                        ),
+                        jq_params={"interfaces": '."{dut}".interfaces'},
+                        description=(
+                            "Re-enable TX on all transceivers in one "
+                            "`wedge_qsfp_util --tx_enable` invocation"
+                        ),
+                    ),
+                    create_longevity_step(
+                        duration=post_flap_settle_seconds,
+                        description=(
+                            f"Settle {post_flap_settle_seconds}s for links to "
+                            "recover after the TX flap"
+                        ),
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.QSFP_SERVICE, Service.AGENT, Service.BGP],
+                        description=(
+                            "Wait for qsfp_service, wedge_agent and bgpd to converge"
+                        ),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def create_fsdb_crash_playbook(iteration: int = 5) -> Playbook:
     """Build the `test_fsdb_crash` Playbook.
 

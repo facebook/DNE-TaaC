@@ -48,6 +48,9 @@ from taac.playbooks.playbook_definitions import (
     create_openr_restart_playbook,
     create_qsfp_service_crash_playbook,
     create_qsfp_service_restart_playbook,
+    create_qsfp_service_warmboot_and_agent_coldboot_playbook,
+    create_qsfp_service_warmboot_and_reset_playbook,
+    create_qsfp_service_warmboot_and_tx_flap_playbook,
     TEST_AGENT_AND_BGPD_RESTART_PLAYBOOK,
     TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK,
     TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK,
@@ -2896,6 +2899,15 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                         TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK,
                         TEST_FSDB_AND_QSFP_SERVICE_RESTART_PLAYBOOK,
                         TEST_SW_AGENT_AND_WEDGE_AGENT_RESTART_PLAYBOOK,
+                        create_qsfp_service_warmboot_and_reset_playbook(
+                            iteration=process_restart_iterations,
+                        ),
+                        create_qsfp_service_warmboot_and_agent_coldboot_playbook(
+                            iteration=process_restart_iterations,
+                        ),
+                        create_qsfp_service_warmboot_and_tx_flap_playbook(
+                            iteration=process_restart_iterations,
+                        ),
                     ]
                 )
                 if pb.name not in (skip_playbooks or [])
