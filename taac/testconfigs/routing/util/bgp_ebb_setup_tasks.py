@@ -19,10 +19,10 @@ The following tasks are included:
 import base64
 import ipaddress
 import json
-import shlex
 import typing as t
 
 from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    create_bgpcpp_logging_setup_task,
     create_bgpcpp_peer_replacement_tasks,
     get_bgpcpp_startup_tasks_for_openr_mode,
     get_openr_standalone_setup_tasks,
@@ -85,71 +85,12 @@ from pyre_extensions import none_throws
 from taac.test_as_a_config.types import Task
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
-RUN_BGPCPP_SCRIPT_PATH = "/usr/sbin/run_bgpcpp.sh"
-
-
-def _build_bgpcpp_logging_script(
-    logging_config: str = EBB_BGPCPP_LOGGING_CONFIG,
-    script_path: str = RUN_BGPCPP_SCRIPT_PATH,
-) -> str:
-    if not logging_config or any(char in logging_config for char in "\x00\r\n"):
-        raise ValueError("logging_config must be a non-empty single-line value")
-
-    expected_assignment = f"LOGGING={shlex.quote(logging_config)}"
-    expected_assignment_bytes = expected_assignment.encode("utf-8")
-    return "\n".join(
-        [
-            "import os",
-            "import shutil",
-            "import tempfile",
-            "from pathlib import Path",
-            f"path = Path({script_path!r})",
-            "content = path.read_bytes()",
-            "lines = content.splitlines(keepends=True)",
-            'matches = [i for i, line in enumerate(lines) if line.startswith(b"LOGGING=")]',
-            "if len(matches) != 1:",
-            "    raise RuntimeError(",
-            '        f"expected exactly one LOGGING= assignment in {path}, "',
-            '        f"found {len(matches)}"',
-            "    )",
-            f"expected = {expected_assignment_bytes!r}",
-            "index = matches[0]",
-            'line_body = lines[index].rstrip(b"\\r\\n")',
-            "line_ending = lines[index][len(line_body):]",
-            "lines[index] = expected + line_ending",
-            'updated_content = b"".join(lines)',
-            "metadata = path.stat()",
-            'fd, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")',
-            "temporary_path = Path(temporary_name)",
-            "try:",
-            '    with os.fdopen(fd, "wb") as temporary_file:',
-            "        temporary_file.write(updated_content)",
-            "        temporary_file.flush()",
-            "        os.fsync(temporary_file.fileno())",
-            "    os.chown(temporary_path, metadata.st_uid, metadata.st_gid)",
-            "    shutil.copymode(path, temporary_path)",
-            "    os.replace(temporary_path, path)",
-            "finally:",
-            "    temporary_path.unlink(missing_ok=True)",
-            "if path.read_bytes() != updated_content:",
-            '    raise RuntimeError(f"failed to verify {expected!r} in {path}")',
-            "",
-        ]
-    )
-
-
-def _build_bgpcpp_logging_command() -> str:
-    script = _build_bgpcpp_logging_script()
-    encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    return f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
 
 
 def create_ebb_bgpcpp_logging_setup_task(device_name: str) -> Task:
-    return create_run_commands_on_shell_task(
+    return create_bgpcpp_logging_setup_task(
         hostname=device_name,
-        cmds=[_build_bgpcpp_logging_command()],
-        set_outer_hostname=True,
-        ixia_needed=True,
+        logging_config=EBB_BGPCPP_LOGGING_CONFIG,
     )
 
 
