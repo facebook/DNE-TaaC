@@ -5756,6 +5756,51 @@ class Ixia:
         )
         return peer_ip, dut_ip
 
+    def get_bgp_session_addresses_range(
+        self,
+        regex: str,
+        start_idx: int,
+        end_idx: int,
+        ignore_case: bool = False,
+    ) -> t.List[t.Tuple[str, str]]:
+        """Resolve ``(peer_ip, dut_ip)`` for an INCLUSIVE 1-based session index range.
+
+        A BATCHED form of ``get_bgp_session_addresses``: for the first BGP peer
+        (device group) whose name matches ``regex``, walk ``find_bgp_peers`` ONCE
+        (an expensive full device-group tree walk) and slice the peer's per-session
+        ``DutIp`` / ``Address`` Multivalue lists for ``[start_idx, end_idx]`` --
+        instead of re-walking the whole tree once per index (calling the single
+        accessor N times is O(N * whole_topology) and dominates a large-scale
+        membership check). Returns the pairs in ascending session order; each
+        ``peer_ip`` is the IXIA-side neighbor address, ``dut_ip`` the DUT-side
+        address the peer points at.
+        """
+        if start_idx < 1 or end_idx < start_idx:
+            raise ValueError(
+                f"require 1 <= start_idx <= end_idx; got [{start_idx}, {end_idx}]"
+            )
+        peers = self.find_bgp_peers(regex, ignore_case)
+        if not peers:
+            raise ValueError(f"No BGP peer matches regex {regex!r}")
+        peer = peers[0]
+        dut_ips = list(peer.DutIp.Values)
+        ip_stack = peer.parent
+        peer_ips = list(ip_stack.Address.Values)
+        if end_idx > len(dut_ips) or end_idx > len(peer_ips):
+            raise ValueError(
+                f"session range [{start_idx}, {end_idx}] out of range for peer "
+                f"{peer.Name!r}: {len(peer_ips)} session address(es), "
+                f"{len(dut_ips)} DUT IP(s)"
+            )
+        pairs = [
+            (peer_ips[i - 1], dut_ips[i - 1]) for i in range(start_idx, end_idx + 1)
+        ]
+        self.logger.info(
+            f"Resolved {len(pairs)} BGP session address(es) of {peer.Name!r} "
+            f"range [{start_idx}, {end_idx}] in ONE walk"
+        )
+        return pairs
+
     def find_bgp_ipv6_peer(self, port_identifier: str) -> t.Optional["BgpIpv6Peer"]:
         """Finds the BGP peer in the IXIA setup"""
         ipv6 = self.find_ipv6(port_identifier)

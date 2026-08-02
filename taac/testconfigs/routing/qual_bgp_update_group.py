@@ -3,11 +3,11 @@
 """BGP Update Group qualification lifecycle bindings.
 
 Post-Wave-6 layout: sections 2.1 through 2.7 and the section-2.9 edge cases all
-have catalog constants here. Sections 2.2 and 2.6 are SKELETON — empty-playbook
-TestConfigs establishing the catalog surface pending implementation
-(2.5's umbrella skeleton was replaced by the implemented 2.5.1 + 2.5.2
-factories). See ``factories/qual_bgp_update_group/tc{N}_*.py`` for
-per-section factories.
+have catalog constants here. Section 2.2 remains SKELETON — an empty-playbook
+TestConfig establishing the catalog surface pending implementation (2.5's
+umbrella skeleton was replaced by the implemented 2.5.1 + 2.5.2 factories, and
+2.6.1 Repeated Peer Flaps is now implemented). See
+``factories/qual_bgp_update_group/tc{N}_*.py`` for per-section factories.
 
 Grandfathered Python constant names (referenced from cconf and elsewhere)
 retained verbatim alongside the newer spec-anchored names.
@@ -111,8 +111,8 @@ BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG = (
     create_bgp_ug_scale_withdraw_test_config(BAG013_ASH6)
 )
 
-# ─── Spec 2.6 Bit Allocation Under Flaps (SKELETON) ─────────────────────
-BGP_UG_BIT_ALLOC_GROUP_STAB_UNDER_FLAP_TEST_CONFIG = (
+# ─── Spec 2.6.1 Repeated Peer Flaps — Group Remains Stable ───────────────
+BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG = (
     create_bgp_ug_bit_alloc_group_stab_under_flap_test_config(BAG013_ASH6)
 )
 
@@ -210,11 +210,11 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
-    "BGP_UG_BIT_ALLOC_GROUP_STAB_UNDER_FLAP_TEST_CONFIG",
     "BGP_UG_NEW_PEER_JOIN_TEST_CONFIG",
     "BGP_UG_PEER_LIFECYCLE_TEST_CONFIG",
     "EB03_LAB_ASH6_BGP_TEST_UPDATE_GROUP_CONFIG",

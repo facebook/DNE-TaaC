@@ -1064,6 +1064,113 @@ def create_verify_bgp_sent_route_counts_uniform_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def create_verify_bgp_update_group_member_addresses_step(
+    hostname: str,
+    ebgp_v4_peer_regex: str,
+    ebgp_v6_peer_regex: str,
+    ebgp_v4_peer_group: str,
+    ebgp_v6_peer_group: str,
+    flap_start_idx: int = 1,
+    flap_end_idx: int = 32,
+    expected_peer_state: str = "JOINED_RUNNING",
+    assert_bit_position_unique: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Verify the SPECIFIC flapped eBGP peers rejoined the CORRECT update group --
+    literal criterion-1 identity parity for spec 2.6.1.
+
+    Resolves the exact peer addresses of the flapped session range (``[flap_start_idx,
+    flap_end_idx]`` per AFI) at RUNTIME via ``get_bgp_session_addresses`` (never
+    re-derived arithmetically -- that is the start_index/DutIp offset bug), then
+    asserts each target peer is (a) a member of an update group whose
+    ``peer_group_name`` matches the expected eBGP peer-group (substring) AND whose
+    negotiated AFI matches, (b) ESTABLISHED (getBgpSessions), and (c) in
+    ``expected_peer_state`` (``peer_state_update_group``, default
+    ``JOINED_RUNNING``). Unlike the aggregate 140/AFI member-count proxy this
+    catches a duplicated / stale / wrong-identity member. Reports every violation
+    together; a vacuous run (0 resolved addresses) FAILS loudly.
+
+    Args:
+        hostname: Device hostname.
+        ebgp_v4_peer_regex / ebgp_v6_peer_regex: IXIA peer-name regexes for the
+            flapped eBGP device groups (per AFI).
+        ebgp_v4_peer_group / ebgp_v6_peer_group: expected update-group
+            ``peer_group_name`` (matched as a substring) per AFI.
+        flap_start_idx / flap_end_idx: inclusive 1-based session index range that
+            was flapped, per AFI (default 1..32). Must match the flap track.
+        expected_peer_state: required ``peer_state_update_group`` for every target
+            peer (default "JOINED_RUNNING").
+        assert_bit_position_unique: also assert each targeted eBGP update group
+            allocated a DISTINCT ``bit_position`` to its members (a direct-ish
+            bit-allocation signal). Skipped (warning, not failure) when
+            bit_position looks like a vacuous stub. Default False.
+        description: Optional custom description.
+    """
+    if description is None:
+        description = (
+            f"Verify flapped eBGP peers [{flap_start_idx}, {flap_end_idx}]/AFI "
+            f"rejoined the correct update group (v4 ~{ebgp_v4_peer_group!r}, v6 "
+            f"~{ebgp_v6_peer_group!r}) in {expected_peer_state} on {hostname}"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_update_group_member_addresses",
+        "hostname": hostname,
+        "ebgp_v4_peer_regex": ebgp_v4_peer_regex,
+        "ebgp_v6_peer_regex": ebgp_v6_peer_regex,
+        "ebgp_v4_peer_group": ebgp_v4_peer_group,
+        "ebgp_v6_peer_group": ebgp_v6_peer_group,
+        "flap_start_idx": flap_start_idx,
+        "flap_end_idx": flap_end_idx,
+        "expected_peer_state": expected_peer_state,
+    }
+    # Only serialize the bit-uniqueness opt-in when set, so existing callers /
+    # goldens stay byte-identical.
+    if assert_bit_position_unique:
+        params["assert_bit_position_unique"] = True
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_log_bgp_route_distribution_probe_step(
+    hostname: str,
+    label: str = "",
+    received_parent_prefixes: t.Optional[t.List[str]] = None,
+    sent_parent_prefixes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Diagnostic step (NEVER fails): log per-peer RECEIVED + SENT route counts.
+
+    For crit-2 distribution debugging -- logs, for the inject-SOURCE peers
+    (``received_parent_prefixes`` -> ``prepolicy_rcvd_prefix_count``) and the
+    re-advertise targets (``sent_parent_prefixes`` -> ``postpolicy_sent_prefix_count``),
+    each scope's peers/min/max/sum. Run before/after the inject and after the settle
+    to see whether the DUT received the inject and how the re-advertisement climbs,
+    disambiguating settle-too-short (sent climbs toward received) vs egress (received
+    > 0, sent stays 0) vs inject-not-received (received == 0). Pure logging; raises
+    nothing, so it never affects the run verdict.
+
+    Args:
+        hostname: Device hostname.
+        label: free-text marker for the log line (e.g. "after-settle").
+        received_parent_prefixes: peer-address subnets of the inject-source peers.
+        sent_parent_prefixes: peer-address subnets of the re-advertise targets.
+        description: Optional custom description.
+    """
+    if description is None:
+        description = (
+            f"Probe BGP route distribution ({label}) on {hostname}: received vs sent"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "log_bgp_route_distribution_probe",
+        "hostname": hostname,
+        "label": label,
+    }
+    if received_parent_prefixes is not None:
+        params["received_parent_prefixes"] = received_parent_prefixes
+    if sent_parent_prefixes is not None:
+        params["sent_parent_prefixes"] = sent_parent_prefixes
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_verify_bgp_notification_occurred_step(
     hostname: str,
     snapshot_key: str,

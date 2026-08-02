@@ -64,6 +64,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
@@ -215,4 +216,13 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # NOT wired into a conveyor stage (do NOT schedule until manually verified on the
     # device). Select with ``--regex 'bgp_ug_scale_withdraw_10plus_peers'``.
     BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG,
+    # BGP++ UG 2.6.1 Repeated Peer Flaps -- Group Remains Stable on bag013.ash6 --
+    # its own WITHOUT_OPEN_R + next-hop-self TestConfig. Rapidly flaps the SAME 32
+    # eBGP sessions/AFI x50 while churning routes from the remaining peers, then
+    # verifies the update group re-forms with all 140 members/AFI, distribution
+    # reaches every peer (incl the flapped 32) via a 200-route iBGP-side inject, no
+    # crash / no bit-allocation corruption (composite proxy), bounded VmHWM growth +
+    # load. Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually
+    # verified on the device). Select with ``--regex 'bgp_ug_repeated_peer_flaps'``.
+    BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG,
 ]
