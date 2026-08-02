@@ -881,6 +881,94 @@ def create_verify_bgp_sent_route_count_delta_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def create_snapshot_bgp_vmhwm_step(
+    hostname: str,
+    snapshot_key: str,
+    process_name: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Snapshot the BGP++ (``bgpcpp``) VmHWM (peak RSS) on the DUT, tagged with
+    ``snapshot_key`` for later look-up by ``create_verify_bgp_vmhwm_growth_step``.
+
+    This is the snapshot-before half of a whole-test memory-growth bracket: it
+    lets a long test snapshot VmHWM before an EMERGENT-length flap window and
+    verify the growth after, so the measurement auto-matches however long the
+    flap emergently runs -- unlike the fixed-duration spanning
+    ``bgp_vmhwm_growth_monitor``. Reuses the same bgpcpp VmHWM read primitive.
+
+    Args:
+        hostname: DUT hostname (bgpcpp source of truth).
+        snapshot_key: Unique key across the playbook; the matching verify step
+            must use the same string.
+        process_name: Optional BGP++ process name (default "bgpcpp").
+        description: Optional custom description.
+    """
+    if description is None:
+        description = (
+            f"Snapshot BGP++ VmHWM baseline on {hostname} (key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "snapshot_bgp_vmhwm",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+    }
+    if process_name is not None:
+        params["process_name"] = process_name
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_verify_bgp_vmhwm_growth_step(
+    hostname: str,
+    snapshot_key: str,
+    growth_threshold_bytes: int,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    process_name: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Verify the BGP++ (``bgpcpp``) VmHWM grew by less than
+    ``growth_threshold_bytes`` since the matching ``create_snapshot_bgp_vmhwm_step``
+    -- the verify-after half of a whole-test memory-growth bracket.
+
+    Same semantics as the spanning ``bgp_vmhwm_growth_monitor``: a DECREASE
+    (VmHWM went down => bgpcpp restarted) hard-fails ALWAYS; growth over the
+    threshold fails, unless ``expected_fail`` is set (then it logs a loud XFAIL
+    and the test continues); otherwise PASS.
+
+    Args:
+        hostname: DUT hostname (bgpcpp source of truth).
+        snapshot_key: Key from the matching snapshot step.
+        growth_threshold_bytes: Max allowed VmHWM growth (current - baseline)
+            in bytes (e.g. 500 * 1024**2 for "growth < 500 MB").
+        expected_fail: When True, an over-threshold growth is a KNOWN discrepancy
+            (XFAIL) -- logged loudly and marked, but the step does NOT raise (a
+            DECREASE still hard-fails). Default False.
+        expected_fail_reason: Reason surfaced in the XFAIL banner. Ignored unless
+            ``expected_fail`` is True.
+        process_name: Optional BGP++ process name (default "bgpcpp").
+        description: Optional custom description.
+    """
+    if description is None:
+        description = (
+            f"Verify BGP++ VmHWM growth < "
+            f"{growth_threshold_bytes / (1024 * 1024):.1f} MiB on {hostname} "
+            f"(key={snapshot_key})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_vmhwm_growth",
+        "hostname": hostname,
+        "snapshot_key": snapshot_key,
+        "growth_threshold_bytes": int(growth_threshold_bytes),
+    }
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    if process_name is not None:
+        params["process_name"] = process_name
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_verify_bgp_sent_route_counts_uniform_step(
     hostname: str,
     peer_addrs: t.Optional[t.List[str]] = None,
