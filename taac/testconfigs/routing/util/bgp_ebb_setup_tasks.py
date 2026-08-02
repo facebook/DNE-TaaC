@@ -23,8 +23,10 @@ import shlex
 import typing as t
 
 from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    create_bgpcpp_peer_replacement_tasks,
     get_bgpcpp_startup_tasks_for_openr_mode,
     get_openr_standalone_setup_tasks,
+    openr_mode_for_bgpcpp_profile,
 )
 from taac.abstractions.topology import (
     OpenRMode,
@@ -84,14 +86,6 @@ from taac.test_as_a_config.types import Task
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
 RUN_BGPCPP_SCRIPT_PATH = "/usr/sbin/run_bgpcpp.sh"
-
-
-def _openr_mode_for_profile(profile: BgpPlusPlusProfile) -> OpenRMode:
-    return (
-        OpenRMode.STANDALONE
-        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-        else OpenRMode.NONE
-    )
 
 
 def _build_bgpcpp_logging_script(
@@ -1442,7 +1436,7 @@ def get_common_setup_tasks(
             (
                 openr_mode
                 if openr_mode is not None
-                else _openr_mode_for_profile(profile)
+                else openr_mode_for_bgpcpp_profile(profile)
             ),
         )
     )
@@ -1567,6 +1561,8 @@ def get_update_packing_setup_tasks(
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     v4_peer_start_offset: int = 16,
+    bgpcpp_peers: t.Sequence[t.Mapping[str, t.Any]] | None = None,
+    interface_ip_tasks: t.Sequence[Task] | None = None,
 ) -> t.List[Task]:
     """
     Generate setup tasks for the BGP UPDATE packing validation conveyor test.
@@ -1636,7 +1632,7 @@ def get_update_packing_setup_tasks(
             (
                 openr_mode
                 if openr_mode is not None
-                else _openr_mode_for_profile(profile)
+                else openr_mode_for_bgpcpp_profile(profile)
             ),
         )
     )
@@ -1651,79 +1647,81 @@ def get_update_packing_setup_tasks(
     )
 
     # 4. Simplified IP configuration (IPv6 + optional IPv4)
-    ebgp_address_families = (
-        ["ipv6", "ipv4"] if ixia_ebgp_ic_parent_network_v4 is not None else ["ipv6"]
-    )
-    ibgp_address_families = (
-        ["ipv6", "ipv4"] if ixia_ibgp_ic_parent_network_v4 is not None else ["ipv6"]
-    )
-    setup_tasks.append(
-        create_interface_ip_configuration_task(
-            interface=ixia_interface_mimic_ebgp,
-            peer_count=ebgp_peer_count,
-            ipv4_base_network=ixia_ebgp_ic_parent_network_v4,
-            ipv6_base_network=ixia_ebgp_ic_parent_network_v6,
-            address_families=ebgp_address_families,
-            clear_existing=True,
-            ipv4_start_offset=IXIA_IPV4_START_OFFSET,
-            ipv6_start_offset=IXIA_IPV6_START_OFFSET,
-            hostname=device_name,
-            ixia_needed=True,
+    if interface_ip_tasks is not None:
+        setup_tasks.extend(interface_ip_tasks)
+    else:
+        ebgp_address_families = (
+            ["ipv6", "ipv4"] if ixia_ebgp_ic_parent_network_v4 is not None else ["ipv6"]
         )
-    )
-    setup_tasks.append(
-        create_interface_ip_configuration_task(
-            interface=ixia_interface_mimic_ibgp,
-            peer_count=ibgp_peer_count,
-            ipv4_base_network=ixia_ibgp_ic_parent_network_v4,
-            ipv6_base_network=ixia_ibgp_ic_parent_network_v6,
-            address_families=ibgp_address_families,
-            clear_existing=True,
-            ipv4_start_offset=IXIA_IPV4_START_OFFSET,
-            ipv6_start_offset=IXIA_IPV6_START_OFFSET,
-            hostname=device_name,
-            ixia_needed=True,
+        ibgp_address_families = (
+            ["ipv6", "ipv4"] if ixia_ibgp_ic_parent_network_v4 is not None else ["ipv6"]
         )
-    )
+        setup_tasks.append(
+            create_interface_ip_configuration_task(
+                interface=ixia_interface_mimic_ebgp,
+                peer_count=ebgp_peer_count,
+                ipv4_base_network=ixia_ebgp_ic_parent_network_v4,
+                ipv6_base_network=ixia_ebgp_ic_parent_network_v6,
+                address_families=ebgp_address_families,
+                clear_existing=True,
+                ipv4_start_offset=IXIA_IPV4_START_OFFSET,
+                ipv6_start_offset=IXIA_IPV6_START_OFFSET,
+                hostname=device_name,
+                ixia_needed=True,
+            )
+        )
+        setup_tasks.append(
+            create_interface_ip_configuration_task(
+                interface=ixia_interface_mimic_ibgp,
+                peer_count=ibgp_peer_count,
+                ipv4_base_network=ixia_ibgp_ic_parent_network_v4,
+                ipv6_base_network=ixia_ibgp_ic_parent_network_v6,
+                address_families=ibgp_address_families,
+                clear_existing=True,
+                ipv4_start_offset=IXIA_IPV4_START_OFFSET,
+                ipv6_start_offset=IXIA_IPV6_START_OFFSET,
+                hostname=device_name,
+                ixia_needed=True,
+            )
+        )
 
     # 5. Peer modification: update bgpcpp_config with IPv6 (+ optional IPv4) peers
-    ebgp_peers = _generate_ixia_v6_peer_entries_for_bgpcpp(
-        remote_as=ebgp_remote_as,
-        ixia_ipv6_base=ixia_ebgp_ic_parent_network_v6,
-        peer_count=ebgp_peer_count,
-        peer_group_v6=ebgp_peer_group_v6,
-    )
-    ibgp_peers = _generate_ixia_v6_peer_entries_for_bgpcpp(
-        remote_as=ibgp_remote_as,
-        ixia_ipv6_base=ixia_ibgp_ic_parent_network_v6,
-        peer_count=ibgp_peer_count,
-        peer_group_v6=ibgp_peer_group_v6,
-    )
-    all_peers = ebgp_peers + ibgp_peers
-    if ixia_ebgp_ic_parent_network_v4 is not None:
-        all_peers += _generate_ixia_v4_peer_entries_for_bgpcpp(
+    if bgpcpp_peers is not None:
+        all_peers = [dict(peer) for peer in bgpcpp_peers]
+    else:
+        ebgp_peers = _generate_ixia_v6_peer_entries_for_bgpcpp(
             remote_as=ebgp_remote_as,
-            ixia_ipv4_base=ixia_ebgp_ic_parent_network_v4,
+            ixia_ipv6_base=ixia_ebgp_ic_parent_network_v6,
             peer_count=ebgp_peer_count,
-            peer_group_v4=ebgp_peer_group_v4,
-            start_offset=v4_peer_start_offset,
+            peer_group_v6=ebgp_peer_group_v6,
         )
-    if ixia_ibgp_ic_parent_network_v4 is not None:
-        all_peers += _generate_ixia_v4_peer_entries_for_bgpcpp(
+        ibgp_peers = _generate_ixia_v6_peer_entries_for_bgpcpp(
             remote_as=ibgp_remote_as,
-            ixia_ipv4_base=ixia_ibgp_ic_parent_network_v4,
+            ixia_ipv6_base=ixia_ibgp_ic_parent_network_v6,
             peer_count=ibgp_peer_count,
-            peer_group_v4=ibgp_peer_group_v4,
-            start_offset=v4_peer_start_offset,
+            peer_group_v6=ibgp_peer_group_v6,
         )
-
-    from taac.testconfigs.routing.util.bgpcpp_peers_modification import (
-        _generate_bgpcpp_peers_modification_tasks,
-    )
+        all_peers = ebgp_peers + ibgp_peers
+        if ixia_ebgp_ic_parent_network_v4 is not None:
+            all_peers += _generate_ixia_v4_peer_entries_for_bgpcpp(
+                remote_as=ebgp_remote_as,
+                ixia_ipv4_base=ixia_ebgp_ic_parent_network_v4,
+                peer_count=ebgp_peer_count,
+                peer_group_v4=ebgp_peer_group_v4,
+                start_offset=v4_peer_start_offset,
+            )
+        if ixia_ibgp_ic_parent_network_v4 is not None:
+            all_peers += _generate_ixia_v4_peer_entries_for_bgpcpp(
+                remote_as=ibgp_remote_as,
+                ixia_ipv4_base=ixia_ibgp_ic_parent_network_v4,
+                peer_count=ibgp_peer_count,
+                peer_group_v4=ibgp_peer_group_v4,
+                start_offset=v4_peer_start_offset,
+            )
 
     setup_tasks.extend(
-        _generate_bgpcpp_peers_modification_tasks(
-            bgpcpp_device=device_name,
+        create_bgpcpp_peer_replacement_tasks(
+            hostname=device_name,
             router_id=router_id,
             peers=all_peers,
         )

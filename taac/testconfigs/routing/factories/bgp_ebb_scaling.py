@@ -1085,6 +1085,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
     peergroup_ebgp_v6: str = "EB-FA-V6",
     peergroup_ibgp_v6: str = "EB-EB-V6",
     extra_setup_tasks: list | None = None,
+    combine_nexthop_startup_flag: bool = False,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> TestConfig:
@@ -1113,11 +1114,23 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
             hostname=device_name,
             flags={
                 "agent_thrift_recv_timeout_ms": "160000",
+                **(
+                    {"bgp_resolve_nexthops_from_interface_state": "true"}
+                    if combine_nexthop_startup_flag
+                    else {}
+                ),
             },
             ssh_user=ssh_user,
             ssh_password=ssh_password,
         ),
-        *get_bgpcpp_startup_tasks_for_openr_mode(device_name, OpenRMode.NONE),
+        *(
+            []
+            if combine_nexthop_startup_flag
+            else get_bgpcpp_startup_tasks_for_openr_mode(
+                device_name,
+                OpenRMode.NONE,
+            )
+        ),
         create_replace_bgp_peers_task(
             hostname=device_name,
             peer_configs=[

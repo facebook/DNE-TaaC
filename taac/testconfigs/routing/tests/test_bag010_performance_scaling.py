@@ -16,6 +16,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
+    create_bgp_ebb_scaling_route_churn_prefix_test_config,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
@@ -99,12 +100,8 @@ class PerformanceScalingInterfaceIpCoverageTest(unittest.TestCase):
     """The iBGP interface must carry secondary source-IPs for the FULL sweep.
 
     The per-iteration rescale rewrites only the bgpcpp peer list, never the
-    interface IPs, and get_update_packing_setup_tasks lays them for just the
-    first stage (egress_peer_counts[0]=100). Without provisioning the max sweep
-    count up front, every peer beyond stage 1 has no local source address and
-    stays IDLE -- on bag010 that showed as established=202 at every stage with
-    IDLE=total-202 (P2415335739). The factory must re-lay the iBGP interface at
-    max(egress_peer_counts) so all stages establish.
+    interface IPs. The canonical interface plan must provision the maximum
+    resolved peer set once so every sweep stage can establish.
     """
 
     def _ibgp_interface_ip_peer_counts(self, config) -> list:
@@ -123,11 +120,11 @@ class PerformanceScalingInterfaceIpCoverageTest(unittest.TestCase):
             BAG010_ASH6
         )
         counts = self._ibgp_interface_ip_peer_counts(config)
-        self.assertIn(
-            max(EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS),
+        self.assertEqual(
+            [max(EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS)],
             counts,
-            "iBGP interface must be provisioned for the max sweep count so "
-            f"stages beyond the first establish; got peer_counts={counts}",
+            "the canonical interface plan must render the iBGP source-address "
+            f"set exactly once; got peer_counts={counts}",
         )
 
 
@@ -202,6 +199,23 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
         self.assertEqual(1, len(flag_indices))
         self.assertGreater(len(bgp_enable_indices), 0)
         self.assertLess(flag_indices[0], bgp_enable_indices[0])
+
+    def test_route_churn_combines_startup_flags_in_one_task(self) -> None:
+        config = create_bgp_ebb_scaling_route_churn_prefix_test_config(
+            BAG010_ASH6,
+            name="ROUTE_CHURN_COMBINED_STARTUP_FLAGS",
+            combine_nexthop_startup_flag=True,
+        )
+        params = self._configure_startup_params(config)
+
+        self.assertEqual(1, len(params))
+        self.assertEqual(
+            {
+                "agent_thrift_recv_timeout_ms": "160000",
+                "bgp_resolve_nexthops_from_interface_state": "true",
+            },
+            params[0]["flags"],
+        )
 
 
 class PerformanceScalingRouteFilterClearTest(unittest.TestCase):

@@ -95,6 +95,7 @@ EB02_ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN_TEST_CONFIG = (
     create_bgp_ebb_scaling_route_churn_prefix_test_config(
         EB02_LAB_ASH6,
         name="EB02-ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN",
+        combine_nexthop_startup_flag=True,
         soak_duration_seconds=180,
     )
 )

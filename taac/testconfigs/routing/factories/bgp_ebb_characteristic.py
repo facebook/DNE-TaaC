@@ -35,6 +35,9 @@ import os
 from dataclasses import replace
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    openr_mode_for_bgpcpp_profile,
+)
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
@@ -1692,14 +1695,6 @@ def _two_port_direct_ixia_connections(
     ]
 
 
-def _openr_mode_for_profile(profile: BgpPlusPlusProfile) -> OpenRMode:
-    return (
-        OpenRMode.STANDALONE
-        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-        else OpenRMode.NONE
-    )
-
-
 def create_bgp_ebb_update_packing_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
@@ -1745,7 +1740,7 @@ def create_bgp_ebb_update_packing_test_config(
         peer_groups=IPV6_UPDATE_PACKING_PEER_GROUPS,
         as_numbers=IPV6_UPDATE_PACKING_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
-            openr_mode=_openr_mode_for_profile(profile),
+            openr_mode=openr_mode_for_bgpcpp_profile(profile),
             update_group_enable=enable_update_group,
         ),
     )
@@ -2434,7 +2429,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         peer_groups=BOUNDED_ECMP_PEER_GROUPS,
         as_numbers=BOUNDED_ECMP_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
-            openr_mode=_openr_mode_for_profile(profile),
+            openr_mode=openr_mode_for_bgpcpp_profile(profile),
             update_group_enable=enable_update_group,
         ),
     )
