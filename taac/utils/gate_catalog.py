@@ -36,6 +36,15 @@ GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
+# SC4 -- transient-memory eBGP-INGRESS-sender-scale sweep test. SC4 must NOT
+# reuse the SC1 gate names: mode is keyed by gate name, so flipping an SC1 gate
+# after SC1 calibration would silently flip it for SC4 too, against a completely
+# different sweep (SC1 varies EGRESS peers at a fixed route set; SC4 varies
+# INGRESS senders, which scales the path count).
+GATE_SC4_CPU_STABLE = "sc4_cpu_stable"
+GATE_SC4_CPU_TRANSIENT = "sc4_cpu_transient"
+GATE_SC4_MEMORY_GROWTH = "sc4_memory_growth"
+GATE_SC4_MEMORY_TRANSIENT = "sc4_memory_transient"
 # SC3 -- transient-memory route-scale sweep test:
 GATE_SC3_MEMORY_DEDUP = "sc3_memory_dedup"
 GATE_SC3_MEMORY_TRANSIENT = "sc3_memory_transient"
@@ -70,6 +79,23 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     GATE_SC3_MEMORY_DEDUP: GATE_MODE_PERMISSIVE,
     # Transient (peak - stable) memory flatness across the route sweep -- observe.
     GATE_SC3_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
+    # Transient (peak - stable) memory flatness across the ingress-sender sweep.
+    # This IS the SC4 claim -- the convergence burst must not buffer per sender --
+    # and is the first of these to calibrate and flip. Observe until then.
+    GATE_SC4_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
+    # Stable memory across the ingress-sender sweep is a GROWTH gate, not a
+    # flatness one: n senders advertise the same prefixes, so the path count
+    # scales with n (50K -> 800K) and steady-state memory is expected to grow.
+    # What must hold is that it grows SUB-linearly (<= sqrt(k), k = path scale),
+    # i.e. paths share attribute storage. Observe until calibrated.
+    GATE_SC4_MEMORY_GROWTH: GATE_MODE_PERMISSIVE,
+    # Steady-state CPU across the ingress-sender sweep -- the egress fan-out is
+    # constant (25M sent at every point), so this should be flat. Observe.
+    GATE_SC4_CPU_STABLE: GATE_MODE_PERMISSIVE,
+    # Convergence-burst CPU across the ingress-sender sweep. Unlike SC1's, this
+    # one has no strong a-priori shape: absorbing 16x the paths may legitimately
+    # cost more CPU. Collect first, then decide flatness vs growth.
+    GATE_SC4_CPU_TRANSIENT: GATE_MODE_PERMISSIVE,
 }
 
 
