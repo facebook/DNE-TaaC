@@ -261,6 +261,19 @@ def _extra_formulaic_advertisement(
     )
 
 
+# The eBGP + iBGP-DC device groups declare a route-attribute schema (ebb_full_scale.py:
+# ("med", None), ("local_pref", 100), ("origin", "igp")) that the formulaic-route
+# validator (taac_ixia _prepare_formulaic_bgp_routes) requires on EVERY advertisement --
+# an empty schema fails SETUP with "missing route attribute 'med'". Every inline
+# inject/churn pool carries it (same values as the DG's base routes, so no behavior
+# change). Defined here (before the first pool) so all AFI pools can reference it.
+_EBB_MANDATORY_ROUTE_ATTRIBUTES = (
+    ("med", None),
+    ("local_pref", 100),
+    ("origin", "igp"),
+)
+
+
 _DUAL_STACK_SPARE_V4_INTENTS = (
     _extra_formulaic_advertisement(
         prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_A",
@@ -272,6 +285,7 @@ _DUAL_STACK_SPARE_V4_INTENTS = (
         prefix_count=_DUAL_STACK_SPARE_V4_STEP1_COUNT,
         network_group_index=1,
         communities=_DUAL_STACK_SPARE_V4_COMMUNITIES,
+        attributes=_EBB_MANDATORY_ROUTE_ATTRIBUTES,
     ),
     _extra_formulaic_advertisement(
         prefix_name="PREFIX_POOL_IPV4_EBGP_SPARE_B",
@@ -283,6 +297,7 @@ _DUAL_STACK_SPARE_V4_INTENTS = (
         prefix_count=_DUAL_STACK_SPARE_V4_STEP8_COUNT,
         network_group_index=2,
         communities=_DUAL_STACK_SPARE_V4_COMMUNITIES,
+        attributes=_EBB_MANDATORY_ROUTE_ATTRIBUTES,
     ),
 )
 # ─── Spec 2.9.1 Best-Path Change During Active Distribution ─────────────────
@@ -484,6 +499,7 @@ def _staggered_v4_inject_pool(
         prefix_count=count,
         network_group_index=network_group_index,
         communities=_STAGGERED_INJECT_COMMUNITIES,
+        attributes=_EBB_MANDATORY_ROUTE_ATTRIBUTES,
     )
 
 
@@ -523,6 +539,7 @@ _STAGGERED_V6_INTENTS = (
         prefix_count=_STAGGERED_FINAL_INJECT_COUNT,
         network_group_index=1,
         communities=_STAGGERED_INJECT_COMMUNITIES,
+        attributes=_EBB_MANDATORY_ROUTE_ATTRIBUTES,
     ),
 )
 
