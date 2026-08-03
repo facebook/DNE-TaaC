@@ -36,6 +36,14 @@ GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
+# SC5 -- maximally-packed UPDATE messages. Both gate the same custom step that
+# BAG012's update-packing test already drives; they were previously bare
+# `raise TestCaseFailure` calls, so the enforcement was real but invisible to
+# the registry. Registering them keeps the behaviour identical while making the
+# mode explicit and centrally controllable.
+GATE_SC5_UPDATE_PACKING = "sc5_update_packing"
+GATE_SC5_CAPTURE_INTEGRITY = "sc5_capture_integrity"
+GATE_SC5_ADVERTISED_NLRI = "sc5_advertised_nlri"
 # SC4 -- transient-memory eBGP-INGRESS-sender-scale sweep test. SC4 must NOT
 # reuse the SC1 gate names: mode is keyed by gate name, so flipping an SC1 gate
 # after SC1 calibration would silently flip it for SC4 too, against a completely
@@ -92,6 +100,20 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # Steady-state CPU across the ingress-sender sweep -- the egress fan-out is
     # constant (25M sent at every point), so this should be flat. Observe.
     GATE_SC4_CPU_STABLE: GATE_MODE_PERMISSIVE,
+    # Packing correctness: any non-last UPDATE in an attribute group below the
+    # packed-size floor is a real regression, not a tuning question -- blocking
+    # from the start (and already enforced as such before it was registered).
+    GATE_SC5_UPDATE_PACKING: GATE_MODE_BLOCKING,
+    # Anti-vacuousness for the same step: if the capture or parse produced
+    # errors, the packing verdict is meaningless and must not pass silently.
+    GATE_SC5_CAPTURE_INTEGRITY: GATE_MODE_BLOCKING,
+    # Anti-vacuousness: a run where the DUT advertised nothing satisfies "all
+    # non-last UPDATEs are packed" while checking nothing. Gate on ADVERTISED
+    # NLRI rather than UPDATE count -- UPDATE count falls as packing improves,
+    # so an UPDATE-count floor would fail a genuinely better-packing device.
+    # The floor is per-config (step default 0) so one device's calibration
+    # cannot gate another's. Blocking.
+    GATE_SC5_ADVERTISED_NLRI: GATE_MODE_BLOCKING,
     # Convergence-burst CPU across the ingress-sender sweep. Unlike SC1's, this
     # one has no strong a-priori shape: absorbing 16x the paths may legitimately
     # cost more CPU. Collect first, then decide flatness vs growth.

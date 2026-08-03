@@ -27,21 +27,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 )
 
 
-# ─── bag012.ash6 — Update Packing against ixia11 (Ethernet3/36) ───────────
-# Same test as BAG012_UPDATE_PACKING_TEST_CONFIG_UG, with a distinct name for
-# existing ad-hoc callers. Both configs use BAG012_ASH6's canonical ixia11 wiring.
-# ``name_override`` gives it a distinct TestConfig.name; without it the factory
-# would derive ``BAG012_UPDATE_PACKING_TEST_CONFIG_UG`` from the shared
-# device_name and collide with the scheduled config. Ad-hoc: select via
-# ``--test-config BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG``; not on the
-# dne_routing conveyor.
-BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config(
-    BAG012_ASH6,
-    enable_update_group=True,
-    name_override="BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
-)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # bag010.ash6 — SC1/SC2/SC3/SC4/SC6/SC9 characteristic tests (re-homed from
 # the retired bag010 bindings). Each factory derives TestConfig.name from
@@ -162,6 +147,47 @@ BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 )
 
 
+# ═══ SC5 · Maximally Packed UPDATE Messages (char-5) ═════════════════════════
+# Spec: https://docs.google.com/document/d/1lQeFLtIPaCgaOdjA7c70MHd8DiI1gMi5KnClF1lXUMY/edit?tab=t.uvwd2l8xgeen#heading=h.agv7zohsym3c
+#
+# When K UPDATEs carrying identical attributes are sent after a cold start, all
+# but the last must have no room left for additional NLRI -- packing is what
+# keeps convergence fast and the egress byte count down. The eBGP senders inject
+# a route set with identical attributes; the DUT re-advertises it to the single
+# iBGP peer, and every UPDATE the DUT emits is captured, grouped by normalized
+# attributes (sorted communities / ext-communities), and checked for maximal
+# fill.
+#
+#   IXIA eBGP x10 ══▶ bag010 (DUT) ══▶ iBGP x1  (capture + group UPDATEs)
+#
+# FIXED: 10 eBGP senders, 1 iBGP capture peer, 2 communities per route.
+# GATE (HARD): any non-last UPDATE in an attribute group below the packed-size
+# floor raises TestCaseFailure. This is the one SC whose headline metric already
+# gates blocking rather than observing.
+#
+# bag010 mirror of ``BAG012_UPDATE_PACKING_TEST_CONFIG_UG`` -- same factory,
+# same scale, same gate; only the physical inventory differs (bag010's 2-port
+# wiring: eBGP on ixia_ports[0], iBGP on ixia_ports[1]). Ad-hoc: resolvable via
+# ``--test-config``, not scheduled on a conveyor node.
+#
+# Known deviations from the spec, inherited from the BAG012 test: 10 senders x
+# 100K routes rather than the doc's 100 peers x 50K, and "no room for NLRI" is
+# approximated by a byte floor rather than a true max-fill check.
+BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
+    create_bgp_ebb_update_packing_test_config(
+        BAG010_ASH6,
+        enable_update_group=True,
+        name_override="BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP",
+        # Anti-vacuousness floor on ADVERTISED PREFIXES, calibrated on bag010
+        # (99,875 advertised). Deliberately not an UPDATE-count floor: UPDATE
+        # count falls as packing improves, so that would fail a better-packing
+        # device. Opt-in per config -- the step defaults to 0 so this bag010
+        # number cannot gate the CI-scheduled bag012 run, which is uncalibrated.
+        min_advertised_nlri=50000,
+    )
+)
+
+
 # ═══ SC6 · Churn Processing Independent of Route/Attribute Scale (char-6) ════
 # Spec: https://docs.google.com/document/d/1lQeFLtIPaCgaOdjA7c70MHd8DiI1gMi5KnClF1lXUMY/edit?tab=t.rkrbeqkkjqz3#heading=h.t1eoix5y3kfc
 #
@@ -193,10 +219,10 @@ BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
 
 
 __all__ = [
-    "BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG",
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
+    "BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG",
 ]

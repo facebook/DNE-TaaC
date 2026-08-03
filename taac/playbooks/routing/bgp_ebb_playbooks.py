@@ -1667,6 +1667,7 @@ def get_bgp_ebb_update_packing_playbook(
     ebgp_route_acceptance_communities: list[str] | None,
     capture_duration_seconds: int,
     min_packed_size: int,
+    min_advertised_nlri: int = 0,
     restart_bgp_for_complete_view: bool,
 ) -> Playbook:
     """Build CICD-EBB-18: UPDATE packing.
@@ -1704,6 +1705,7 @@ def get_bgp_ebb_update_packing_playbook(
                             ),
                             "capture_duration_seconds": capture_duration_seconds,
                             "min_packed_size": min_packed_size,
+                            "min_advertised_nlri": min_advertised_nlri,
                             "restart_bgp_for_complete_view": restart_bgp_for_complete_view,
                         },
                     ),

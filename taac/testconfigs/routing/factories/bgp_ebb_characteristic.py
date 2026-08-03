@@ -1700,6 +1700,7 @@ def create_bgp_ebb_update_packing_test_config(
     enable_update_group: bool = False,
     name_override: str | None = None,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    min_advertised_nlri: int = 0,
 ) -> taac_types.TestConfig:
     """BGP Update Packing conveyor test config.
 
@@ -1771,6 +1772,7 @@ def create_bgp_ebb_update_packing_test_config(
         ebgp_route_acceptance_communities=["65529:39744"],
         capture_duration_seconds=300,
         min_packed_size=4000,
+        min_advertised_nlri=min_advertised_nlri,
         restart_bgp_for_complete_view=True,
         # Conveyor-specific configuration
         setup_tasks=compiled.setup_tasks,
@@ -2718,6 +2720,7 @@ def test_config_bgp_update_packing_validation(
     # Test control
     capture_duration_seconds: int = 600,
     min_packed_size: int = 4000,
+    min_advertised_nlri: int = 0,
     restart_bgp_for_complete_view: bool = True,
     direct_ixia_connections: list | None = None,
     endpoints: list[Endpoint] | None = None,
@@ -3007,6 +3010,7 @@ def test_config_bgp_update_packing_validation(
                 ebgp_route_acceptance_communities=ebgp_route_acceptance_communities,
                 capture_duration_seconds=capture_duration_seconds,
                 min_packed_size=min_packed_size,
+                min_advertised_nlri=min_advertised_nlri,
                 restart_bgp_for_complete_view=restart_bgp_for_complete_view,
             ),
         ],

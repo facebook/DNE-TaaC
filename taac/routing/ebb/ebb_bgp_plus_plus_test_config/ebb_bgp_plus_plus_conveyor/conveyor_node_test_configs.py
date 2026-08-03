@@ -25,8 +25,8 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
-    BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
 )
 
 # Post-cleanup: only the 8 configs actually referenced by
@@ -115,10 +115,6 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # bag010.ash6 SC1 egress peer-scale sweep. Ad-hoc: resolvable via
     # --test-config, not wired into a conveyor node. UG-only (all SC run UG).
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
-    # bag012.ash6 Update Packing bound to ixia11 (Et3/36) instead of the
-    # conveyor's ixia03 (Et3/35). Ad-hoc: resolvable via --test-config, not
-    # scheduled on a conveyor node.
-    BAG012_UPDATE_PACKING_IXIA11_TEST_CONFIG_UG,
     # bag010.ash6 SC2 constant attribute storage (char-2, INGRESS-ONLY) — the
     # BAG012 varying-combinations engine made ingress-only + non-vacuous: 8 eBGP
     # advertise 800K paths accepted into RIB (route_registry cleared) with no
@@ -139,6 +135,15 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # sender count grows. Update-group enabled. Ad-hoc; runnable via --test-config,
     # not yet wired into a conveyor node.
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
+    # bag010.ash6 SC5 maximally-packed UPDATEs (char-5) — bag010 mirror of the
+    # BAG012 update-packing test: 10 eBGP senders inject a route set with
+    # identical attributes, 1 iBGP peer captures what the DUT re-advertises, and
+    # every UPDATE is grouped by normalized attributes and checked for maximal
+    # fill. Both gates (packing floor, capture/parse integrity) are BLOCKING --
+    # they were already enforced as bare raises before being registered.
+    # Update-group enabled. Ad-hoc; runnable via --test-config, not wired into a
+    # conveyor node.
+    BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     # bag010.ash6 SC6 churn processing P(N) (char-6) — convergence time vs route
     # scale. Reuses the EB02 churn P(N) engine (iBGP-injection IPv6-only, 100-route
     # churn, sweep total route scale 5K→50K) with bag010 device setup (nexthop gflag
