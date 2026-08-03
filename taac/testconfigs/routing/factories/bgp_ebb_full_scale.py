@@ -51,6 +51,9 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_route_registry_runtime_update_playbook,
     get_bgp_ebb_route_storm_playbook,
 )
+from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
+    build_bgp_ug_2_7_playbook,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     BGP_MON_PEER_COUNT,
     DEFAULT_PROFILE,
@@ -366,7 +369,13 @@ def _get_bgp_ebb_full_scale_playbooks(
     selected_tc7_playbooks: set[str],
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
-        return []
+        if "bgp_ug_bgp_daemon_restart" not in selected_tc7_playbooks:
+            return []
+        return [
+            build_bgp_ug_2_7_playbook(
+                "bgp_ug_bgp_daemon_restart", physical_inventory, bound
+            )
+        ]
 
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]

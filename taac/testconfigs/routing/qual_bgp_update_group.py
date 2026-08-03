@@ -19,6 +19,10 @@ from taac.abstractions.physical_inventory import (
     BAG013_ASH6,
     EB03_LAB_ASH6,
 )
+from taac.constants import BgpPlusPlusProfile
+from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
+    create_bgp_ebb_full_scale_test_config,
+)
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc1_distribution_correctness import (
     create_bgp_ug_distribution_correctness_test_config,
 )
@@ -117,6 +121,16 @@ BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG = (
 )
 
 # ─── Spec 2.7 Disruption and Recovery ───────────────────────────────────
+BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG = (
+    create_bgp_ebb_full_scale_test_config(
+        BAG012_ASH6,
+        name="BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST",
+        playbooks_selected=["bgp_ug_bgp_daemon_restart"],
+        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+        enable_update_group=True,
+    )
+)
+
 BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG = (
     create_bgp_ug_disruption_recovery_test_config(BAG013_ASH6)
 )
@@ -200,6 +214,7 @@ BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG = (
 
 
 __all__ = [
+    "BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG",
     "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",

@@ -412,6 +412,59 @@ def create_bgp_update_group_state_step(
     )
 
 
+_DEFAULT_MAX_HARDWARE_CURRENT_DELTA = 100
+_DEFAULT_MAX_HARDWARE_HIGH_WATERMARK_INCREASE = 100
+
+
+def create_hardware_capacity_delta_step(
+    device_name: str,
+    action: str,
+    state_key: str,
+    *,
+    max_current_delta: int = _DEFAULT_MAX_HARDWARE_CURRENT_DELTA,
+    max_high_watermark_increase: int = (_DEFAULT_MAX_HARDWARE_HIGH_WATERMARK_INCREASE),
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create a keyed capture, compare, or clear capacity-delta action."""
+    actions = {"capture", "compare", "clear"}
+    if action not in actions:
+        raise ValueError(
+            f"Unsupported hardware-capacity delta action {action!r}; "
+            f"expected one of {sorted(actions)}"
+        )
+    _validate_persisted_step_key("state_key", state_key)
+    payload: t.Dict[str, t.Any] = {
+        "custom_step_name": "hardware_capacity_delta",
+        "hostname": device_name,
+        "action": action,
+        "state_key": state_key,
+    }
+    thresholds = (
+        ("max_current_delta", max_current_delta),
+        ("max_high_watermark_increase", max_high_watermark_increase),
+    )
+    for name, value in thresholds:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    default_thresholds = {
+        "max_current_delta": _DEFAULT_MAX_HARDWARE_CURRENT_DELTA,
+        "max_high_watermark_increase": (_DEFAULT_MAX_HARDWARE_HIGH_WATERMARK_INCREASE),
+    }
+    if action != "compare" and any(
+        value != default_thresholds[name] for name, value in thresholds
+    ):
+        raise ValueError(
+            "hardware-capacity thresholds are supported only for compare actions"
+        )
+    if action == "compare":
+        for name, value in thresholds:
+            payload[name] = value
+    return create_custom_step(
+        params_dict=payload,
+        description=description or f"Hardware-capacity delta: {action}",
+    )
+
+
 def _validate_disruption_route_verifier(
     action: str,
     params: t.Mapping[str, t.Any],

@@ -57,6 +57,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
     BAG011_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG,
     BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
+    BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
     BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
@@ -104,6 +105,9 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # paired with --skip-teardown --skip-ixia-cleanup so the DUT + IXIA
     # session stay live for hands-on inspection. Ad-hoc; not in conveyor.
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
+    # Canonical BAG012 EBB full-scale Update Group 2.7 suite. Ad-hoc; not in
+    # conveyor stages.
+    BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
     # bag013.ash6 (ad-hoc, not in conveyor stages).
     # ``_UPDATE_GROUP`` variant adds the Update Group qualification 2.7.2
     # sustained-link-flap playbook (rotates flapping the 3 IXIA ports on
