@@ -44,6 +44,14 @@ GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
 GATE_SC5_UPDATE_PACKING = "sc5_update_packing"
 GATE_SC5_CAPTURE_INTEGRITY = "sc5_capture_integrity"
 GATE_SC5_ADVERTISED_NLRI = "sc5_advertised_nlri"
+# SC6 -- churn-processing P(N): a fixed 100-route churn is applied at each point
+# of a route-scale sweep, and processing must not degrade as the background
+# scale grows.
+GATE_SC6_ROUTE_SCALE = "sc6_route_scale"
+GATE_SC6_CHURN_MEASURED = "sc6_churn_measured"
+GATE_SC6_CHURN_LATENCY = "sc6_churn_latency"
+GATE_SC6_CHURN_PROCESSING = "sc6_churn_processing"
+GATE_SC6_QUEUE_BACKPRESSURE = "sc6_queue_backpressure"
 # SC4 -- transient-memory eBGP-INGRESS-sender-scale sweep test. SC4 must NOT
 # reuse the SC1 gate names: mode is keyed by gate name, so flipping an SC1 gate
 # after SC1 calibration would silently flip it for SC4 too, against a completely
@@ -114,6 +122,29 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # The floor is per-config (step default 0) so one device's calibration
     # cannot gate another's. Blocking.
     GATE_SC5_ADVERTISED_NLRI: GATE_MODE_BLOCKING,
+    # Anti-vacuousness on the SWEPT AXIS. Nothing else proves the background
+    # route scale actually changed between iterations: if a prefix-pool resize
+    # silently no-ops, every scale runs at the same load and P(N) comes back
+    # perfectly FLAT -- which reads as a pass. The test would confirm its own
+    # claim by never varying the variable. Calibration-free, so blocking.
+    GATE_SC6_ROUTE_SCALE: GATE_MODE_BLOCKING,
+    # Anti-vacuousness: the per-scale pass criterion is
+    # `convergence is None or convergence <= threshold`, so a scale whose
+    # capture produced NO measurement passes silently. Require a real
+    # measurement at every scale. Calibration-free -- blocking from the start.
+    GATE_SC6_CHURN_MEASURED: GATE_MODE_BLOCKING,
+    # Absolute ceiling on churn reconvergence. Churning 100 routes should take
+    # seconds; anything past ~10s is a red flag. Permissive for the first run
+    # only, to confirm the ceiling holds at the 50K background before enforcing.
+    GATE_SC6_CHURN_LATENCY: GATE_MODE_PERMISSIVE,
+    # THE SC6 claim: churn processing is ~independent of background route scale.
+    # Flatness of the per-scale reconvergence series. Permissive until
+    # calibrated.
+    GATE_SC6_CHURN_PROCESSING: GATE_MODE_PERMISSIVE,
+    # Egress-queue backpressure accumulated DURING each churn window. Gated on
+    # block DURATION, not block COUNT: count scales with work volume, duration
+    # is the health signal. Permissive until calibrated.
+    GATE_SC6_QUEUE_BACKPRESSURE: GATE_MODE_PERMISSIVE,
     # Convergence-burst CPU across the ingress-sender sweep. Unlike SC1's, this
     # one has no strong a-priori shape: absorbing 16x the paths may legitimately
     # cost more CPU. Collect first, then decide flatness vs growth.

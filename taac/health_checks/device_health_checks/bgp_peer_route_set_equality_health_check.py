@@ -19,15 +19,21 @@ ipv6 unicast neighbors <peer> advertised-routes | json`` -- on "BGP
 inactive" the arista path delegates back to thrift (the standard cross-OS
 fallback pattern in this codebase).
 
-KNOWN LIMITATION under BGP++ Update Group: ``getPostfilterAdvertisedNetworks``
-returns 0 prefixes for every peer when UG is enabled, because UG bypasses
-per-peer adj-RIB-out -- routes are sent collectively to the UG, not stored
-per-peer. Tracked: T271301144 (owner xiangxu1121, NO_PROGRESS). The stacked
-bag012 testconfig diff (D109339151) replaces this thrift call with a
-counter-based gauge (``TBgpSession.postpolicy_sent_prefix_count`` via
-``getBgpSessions``) which works correctly under UG. Until T271301144 lands,
-this HC is suitable only when UG is disabled OR when the caller knows the
-gauge-based replacement is in effect.
+Update Group is supported. This previously returned 0 prefixes for every peer
+when UG was enabled -- the per-peer show path looked entries up under the peer
+owner key while an in-sync peer's RIB-OUT entries live under the GROUP owner
+key. Fixed by D109395098 (``bcfe71f88827``, 2026-06-23), which routes the
+advertised branches of ``getNetworks`` through
+``AdjRibOutGroup::resolve{Lite,Path}EntriesForPeer(...)``: per prefix an in-sync
+peer now resolves to the shared group entry, a diverged/standalone peer to its
+own, and a post-detach entry the peer never saw to nothing.
+
+The fix is version-gated on the bgpd build, so a device running a bgpcpp older
+than 2026-06-23 will still report 0. Check with ``sh bgpcpp version`` on the DUT
+and confirm the fix is an ancestor of the reported revision. Where a build-
+independent signal is needed, ``TBgpSession.postpolicy_sent_prefix_count`` (via
+``getBgpSessions``) is a per-peer gauge that has always been UG-safe -- but it
+is only a count, whereas this API returns the actual prefix set.
 """
 
 import ipaddress

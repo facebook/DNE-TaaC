@@ -367,6 +367,13 @@ def test_config_constant_attribute_storage_on_eos(
 
 # eBGP = 2 (1 v4 + 1 v6), the ingress route source, FIXED. Even so the step's
 # per-AFI ``count//2`` split is exact (1 peer/AFI).
+# How long BGP++ waits for a FibAgentBgp thrift reply. The bgpd default is 45s
+# (``kFbossAgentRecvTimeout``), which is short for a full SyncFib at EBB scale --
+# programming ~95K routes has been measured at ~55s. Every other EBB scaling and
+# characteristic config already runs at this value; SC6 was the lone outlier
+# still on the default.
+_AGENT_THRIFT_RECV_TIMEOUT_MS: str = "160000"
+
 _CONSTANT_ATTR_EBGP_PEER_COUNT: int = 2
 # iBGP = 500 egress fan-out, FIXED (SC1-proven scale).
 _CONSTANT_ATTR_IBGP_PEER_COUNT: int = 500
@@ -1262,7 +1269,7 @@ def test_config_bgp_queue_memory_monitoring_with_route_scale(
             create_configure_bgpcpp_startup_task(
                 hostname=device_name,
                 flags={
-                    "agent_thrift_recv_timeout_ms": "160000",
+                    "agent_thrift_recv_timeout_ms": _AGENT_THRIFT_RECV_TIMEOUT_MS,
                 },
                 ssh_user=ssh_user,
                 ssh_password=ssh_password,
@@ -2343,26 +2350,27 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
     Filter cleared. The churn engine is iBGP-injection IPv6-only; the iBGP route
     pools already carry the acceptance community (65529:39744).
 
-    The per-scale convergence budget is generous (700s, matching the existing
-    postcheck) so the engine's built-in absolute gate is observe-first. A
-    queue-backpressure periodic task monitors egress-queue backlog (permissive
-    default, observe-only until calibrated).
+    The per-scale ceiling is 30s: a fixed 100-route churn should reconverge in
+    seconds, and the engine's previous 700s budget could only catch a total
+    hang, not the "P(N) grew with N" regression this characteristic exists to
+    detect. A queue-backpressure periodic task monitors egress-queue backlog
+    (permissive default, observe-only until calibrated).
 
     Mirrors SC3/SC4 device provisioning: the name derives from
     ``testbed.device_name`` as ``{DEVICE}_SC6_CHURN_PROCESSING_TEST`` + ``_UPDATE_GROUP``
     when ``enable_update_group=True``.
 
-    Update-group enablement is via a post-replace config-patch task (the churn
-    factory uses ``create_replace_bgp_peers_task``, not topology binding). The
-    patch sets the global ``bgp_setting_config.enable_update_group`` flag; the
-    persisted test peers are re-grouped on the daemon restart.
+    Provisioning uses the engine's ``use_managed_setup`` path -- the same shared
+    ``get_update_packing_setup_tasks`` recipe SC2/SC3/SC4 run. The engine's
+    default is raw SSH as ``admin``, which only exists on the ebXX lab boxes and
+    fails on a cicd/qual device like bag010. Update-group is folded into the
+    config that recipe deploys, rather than patched on afterwards.
 
     Args:
         testbed: PhysicalInventory with ixia_ports, bgpcpp_configerator_path,
             dut_bgp_as.
-        enable_update_group: When True, patches the config to enable update-group
-            after peer replacement and includes a UG health check in the playbook
-            postchecks.
+        enable_update_group: When True, deploys the config with update-group
+            enabled and includes a UG health check in the playbook postchecks.
     """
     assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
 
@@ -2373,6 +2381,23 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
         name += "_UPDATE_GROUP"
 
     extra_setup_tasks = [
+        # SC6 drives the largest full SyncFib of any config here (50K prefixes
+        # at the top of the sweep), and was the only one still on bgpd's 45s
+        # default FIB-agent receive timeout.
+        #
+        # ``restart_bgp`` is required, not incidental: the task edits
+        # ``run_bgpcpp.sh``, which bgpd only re-reads on start, and
+        # ``extra_setup_tasks`` are appended AFTER the managed recipe's final
+        # Bgp enable. Without the restart the flag would sit on disk unread --
+        # the step itself no longer cycles the daemon per scale.
+        create_configure_bgpcpp_startup_task(
+            hostname=device_name,
+            flags={
+                "agent_thrift_recv_timeout_ms": _AGENT_THRIFT_RECV_TIMEOUT_MS,
+            },
+            use_managed_shell=True,
+            restart_bgp=True,
+        ),
         create_bgp_clear_route_filter_task(
             hostname=device_name,
             set_outer_hostname=True,
@@ -2395,10 +2420,29 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
         ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-        prefix_configs=[(5000, 700), (10000, 700), (20000, 700), (50000, 700)],
+        # (route_scale, settle_seconds). The second element is only the wait
+        # for the background load to settle BEFORE churn is applied; it is not a
+        # gate. Churn reconvergence itself is gated by sc6_churn_latency.
+        prefix_configs=[(5000, 120), (10000, 120), (20000, 180), (50000, 300)],
         churn_count=100,
-        max_convergence_time_seconds=700,
+        # Per-phase ceiling. 700s was unusable as a gate -- it cannot separate
+        # "P(N) is flat" from "P(N) grew 100x", only a total hang. A fixed
+        # 100-route churn should reconverge in seconds.
+        max_convergence_time_seconds=30,
+        # Pure packet-capture window -- the step starts captures, triggers the
+        # churn, sleeps this long, then stops and tshark-analyses. The engine's
+        # 600s default is 20x the 30s hard-fail ceiling, so it is not just dead
+        # wall clock (2x600s per scale, 4 scales): convergence is measured as
+        # the SPAN of UPDATE frames in the window, so a long tail of near
+        # silence lets any unrelated late UPDATE inflate the result, and a 600s
+        # capture at 50K x 100 peers risks wrapping the IXIA capture buffer and
+        # losing the start of the burst. 60s = 2x the hard-fail ceiling.
+        soak_duration_seconds=60,
         enable_update_group=enable_update_group,
+        # bag010 is a cicd/qual device with no ``admin`` login, so the engine's
+        # default raw-SSH provisioning cannot reach it. Use the same managed
+        # recipe SC2/SC3/SC4 run here.
+        use_managed_setup=True,
     )
 
 
@@ -2509,7 +2553,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy(
             create_configure_bgpcpp_startup_task(
                 hostname=device_name,
                 flags={
-                    "agent_thrift_recv_timeout_ms": "160000",
+                    "agent_thrift_recv_timeout_ms": _AGENT_THRIFT_RECV_TIMEOUT_MS,
                 },
                 ssh_user=ssh_user,
                 ssh_password=ssh_password,
