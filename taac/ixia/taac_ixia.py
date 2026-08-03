@@ -346,7 +346,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 sample.addNormalValue("identifier", stat["identifier"])
                 sample.addNormalValue("view", stat["view"])
                 sample.addNormalValue("test_case_uuid", test_case_uuid)
-                if "packet_loss_duration" in stats:
+                if "packet_loss_duration" in stat:
                     sample.addDoubleValue(
                         "packet_loss_duration", stat["packet_loss_duration"]
                     )
