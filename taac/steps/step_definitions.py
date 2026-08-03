@@ -10367,3 +10367,80 @@ def create_fpf_continuous_collector_step(
         description=description
         or f"Continuous collector ({collection_duration_sec}s, {len(gtsws)} GTSWs, {len(hosts)} hosts)",
     )
+
+
+def create_rss_start_step(
+    device_name: str,
+    session_key: str,
+    interval_seconds: float = 3.0,
+    process_name: str = "bgpcpp",
+    baseline_settle_max_seconds: float = 90.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """START of an embeddable bgpcpp RSS delta bracket.
+
+    Drop this at a settled point before the phase you want to characterize and
+    pair it with ``create_rss_stop_step`` (same ``session_key``) after it. START
+    waits for RSS to plateau (so the baseline is a SETTLED footprint, not a
+    mid-startup snapshot), samples the baseline, and begins a background VmRSS
+    sampler that runs across the sequential steps in between (for the peak).
+    Reusable in ANY playbook.
+
+    Args:
+        device_name: DUT under test.
+        session_key: unique id tying this START to its matching STOP.
+        interval_seconds: background sampling interval (default 3.0s).
+        process_name: BGP++ process name (default "bgpcpp").
+        baseline_settle_max_seconds: cap on the plateau wait before baselining
+            (default 90.0); the wait ends early once RSS stops climbing.
+        description: optional step description override.
+    """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_rss_start",
+        "hostname": device_name,
+        "session_key": session_key,
+        "interval_seconds": interval_seconds,
+        "process_name": process_name,
+        "baseline_settle_max_seconds": baseline_settle_max_seconds,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=(
+            description or f"Start bgpcpp RSS delta sampling (session {session_key})"
+        ),
+    )
+
+
+def create_rss_stop_step(
+    session_key: str,
+    summary_jq_var: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """STOP of an embeddable bgpcpp RSS delta bracket.
+
+    Ends the sampler started by ``create_rss_start_step`` with the same
+    ``session_key``, samples the settled current RSS, computes growth over the
+    baseline and the peak VmRSS across the window, and stashes the summary into
+    ``summary_jq_var`` for the RSS_DELTA_CHECK postcheck to report/gate.
+
+    Args:
+        session_key: id matching the START step that began the bracket.
+        summary_jq_var: jq var to stash the {baseline, current, peak, growth}
+            summary into.
+        description: optional step description override.
+    """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_rss_stop",
+        "session_key": session_key,
+        "summary_jq_var": summary_jq_var,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=(
+            description
+            or f"Stop bgpcpp RSS delta sampling and emit growth/peak "
+            f"(session {session_key})"
+        ),
+    )

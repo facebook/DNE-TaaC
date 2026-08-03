@@ -1962,6 +1962,31 @@ def create_service_restart_check(
     )
 
 
+def create_rss_delta_observe_check(
+    summary_jq_var: str = "rss_delta_summary",
+    max_growth_pct: t.Optional[float] = None,
+    check_scope: t.Optional["hc_types.Scope"] = None,
+) -> PointInTimeHealthCheck:
+    """RSS_DELTA_CHECK — report the bgpcpp RSS delta bracket into the results table.
+
+    Reads the {baseline, current, peak, growth%} summary stashed as a jq var by
+    the START/STOP bracket (``summary_jq_var``) and reports it. Observe-only when
+    ``max_growth_pct`` is None (always PASS, value in the message); supply a
+    threshold to gate on steady-state growth over the in-run baseline.
+    """
+    json_payload: t.Dict[str, t.Any] = {}
+    if max_growth_pct is not None:
+        json_payload["max_growth_pct"] = max_growth_pct
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.RSS_DELTA_CHECK,
+        check_params=Params(
+            json_params=json.dumps(json_payload) if json_payload else None,
+            jq_params={"summary": f".{summary_jq_var}"},
+        ),
+        check_scope=check_scope,
+    )
+
+
 def create_systemctl_active_state_check(
     services: t.Optional[t.List["hc_types.Service"]] = None,
     services_json: t.Optional[t.List[str]] = None,

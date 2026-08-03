@@ -59,6 +59,7 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     CheckProfile,
     get_profile_checks,
     ProfileContext,
+    RssDeltaConfig,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
@@ -231,6 +232,7 @@ def get_bgp_ebb_cold_start_playbook(
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
+    enable_rss_delta_gate: bool = True,
 ) -> Playbook:
     """
     Build CICD-EBB-02: BGP cold start.
@@ -267,6 +269,10 @@ def get_bgp_ebb_cold_start_playbook(
         fail_on_eor_expired: Whether to fail if EOR expires (default: False)
         precheck_thresholds: Custom precheck thresholds (uses defaults if None)
         postcheck_thresholds: Custom postcheck thresholds (uses defaults if None)
+        enable_rss_delta_gate: Enable the observe-only RSS delta-from-baseline
+            characterization (RSS START/STOP bracket + RSS_DELTA_CHECK reader)
+            around convergence (default: True). Observe-only: reports settled
+            baseline/current/peak/growth into the results table, no threshold.
 
     Returns:
         Playbook configured for BGP cold start testing
@@ -297,8 +303,33 @@ def get_bgp_ebb_cold_start_playbook(
             expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
             fail_on_eor_expired=fail_on_eor_expired,
+            # Observe-only RSS-delta characterization postcheck (result lands in
+            # the POST-HEALTH CHECK RESULTS table): a self-soaking postcheck,
+            # observe-only (no threshold) for now.
+            rss_delta=(RssDeltaConfig() if enable_rss_delta_gate else None),
         ),
     )
+    stages = [
+        # enable_rss_delta_characterization=True brackets convergence with an
+        # embeddable bgpcpp RSS delta START/STOP pair (START before the toggle,
+        # STOP after Step 6). STOP stashes the RSS summary into a jq var that the
+        # RSS_DELTA_CHECK postcheck reports. Fully sequential; the thread monitor
+        # stays a separate step.
+        create_cold_start_test_stage(
+            device_name=device_name,
+            enable_thread_cpu_monitoring=enable_thread_cpu_monitoring,
+            thread_name_filter=thread_name_filter,
+            enable_offcpu_profiling=enable_offcpu_profiling,
+            thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
+            enable_perf_profiling=enable_perf_profiling,
+            enable_bgp_events=enable_bgp_events,
+            enable_socket_monitoring=enable_socket_monitoring,
+            adaptive_convergence=True,
+            expected_established_sessions=expected_established_sessions,
+            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            enable_rss_delta_characterization=enable_rss_delta_gate,
+        ),
+    ]
     return Playbook(
         name="bgp_ebb_cold_start_playbook",
         setup_steps=create_bgp_restart_setup_steps(
@@ -314,21 +345,7 @@ def get_bgp_ebb_cold_start_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_cold_start_test_stage(
-                device_name=device_name,
-                enable_thread_cpu_monitoring=enable_thread_cpu_monitoring,
-                thread_name_filter=thread_name_filter,
-                enable_offcpu_profiling=enable_offcpu_profiling,
-                thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
-                enable_perf_profiling=enable_perf_profiling,
-                enable_bgp_events=enable_bgp_events,
-                enable_socket_monitoring=enable_socket_monitoring,
-                adaptive_convergence=True,
-                expected_established_sessions=expected_established_sessions,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            ),
-        ],
+        stages=stages,
     )
 
 

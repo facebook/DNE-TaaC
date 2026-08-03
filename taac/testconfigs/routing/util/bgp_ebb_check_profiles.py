@@ -49,6 +49,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_snapshot_check,
     create_bgp_tcpdump_check,
     create_core_dumps_snapshot_check,
+    create_rss_delta_observe_check,
 )
 from taac.health_checks.retry_policy import get_retry_kwargs
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
@@ -99,6 +100,20 @@ class CheckProfile(enum.Enum):
     # Minimal-shape (accept the context for a uniform API, but ignore it):
     # bag012 perf-scaling, bounded-ECMP-sets (case9).
     PERF_SCALING_BOUNDED_ECMP = "perf_scaling_bounded_ecmp"
+
+
+@dataclasses.dataclass(frozen=True)
+class RssDeltaConfig:
+    """Per-test-case config for the bgpcpp RSS delta postcheck.
+
+    The measurement is collected by a START/STOP bracket in the stage; this
+    config drives the reporting/gating postcheck (RSS_DELTA_CHECK). Observe-only
+    while ``max_growth_pct`` is None (always PASS, value in the results table);
+    set it to gate on steady-state RSS growth over the in-run baseline.
+    """
+
+    summary_jq_var: str = "rss_delta_summary"
+    max_growth_pct: t.Optional[float] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,6 +171,9 @@ class ProfileContext:
     # Runtime-update: expected baseline eBGP route count for the route-count
     # verification precheck add-on (the only per-call variable in its params).
     route_count_expected: t.Optional[int] = None
+    # Opt-in observe-only RSS-delta characterization postcheck (result lands in
+    # the POST-HEALTH CHECK RESULTS table). None => not added.
+    rss_delta: t.Optional[RssDeltaConfig] = None
 
 
 class ProfileChecks(t.NamedTuple):
@@ -203,6 +221,23 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
     )
 
 
+def _append_characterization_postchecks(
+    postchecks: t.List[PointInTimeHealthCheck], ctx: ProfileContext
+) -> t.List[PointInTimeHealthCheck]:
+    """Append the opt-in observe-only characterization postchecks (RSS delta,
+    CPU percentile) when configured on the context. Both land in the results
+    table; observe-only unless their config carries a threshold.
+    """
+    if ctx.rss_delta is not None:
+        postchecks.append(
+            create_rss_delta_observe_check(
+                summary_jq_var=ctx.rss_delta.summary_jq_var,
+                max_growth_pct=ctx.rss_delta.max_growth_pct,
+            )
+        )
+    return postchecks
+
+
 def _cold_start(ctx: ProfileContext) -> ProfileChecks:
     """Full cold start: convergence ON, EOR tolerated (fail_on_eor_expired from
     the context, default False), full snapshot (flap + uptime checks ON).
@@ -216,18 +251,21 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         ),
-        postchecks=create_standard_postchecks(
-            postcheck_thresholds=ctx.postcheck_thresholds,
-            convergence_hard_timeout_seconds=(
-                _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
+        postchecks=_append_characterization_postchecks(
+            create_standard_postchecks(
+                postcheck_thresholds=ctx.postcheck_thresholds,
+                convergence_hard_timeout_seconds=(
+                    _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
+                ),
+                fail_on_eor_expired=ctx.fail_on_eor_expired,
+                expected_established_session_count=(
+                    ctx.expected_established_sessions or None
+                ),
+                expected_restarted_services=["Bgp"],
+                restart_start_time_jq_var="daemon_restart_time",
+                exclude_bgp_mon=ctx.exclude_bgp_mon,
             ),
-            fail_on_eor_expired=ctx.fail_on_eor_expired,
-            expected_established_session_count=(
-                ctx.expected_established_sessions or None
-            ),
-            expected_restarted_services=["Bgp"],
-            restart_start_time_jq_var="daemon_restart_time",
-            exclude_bgp_mon=ctx.exclude_bgp_mon,
+            ctx,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             expected_peer_identity=ctx.expected_peer_identity,

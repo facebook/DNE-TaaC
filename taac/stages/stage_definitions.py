@@ -77,6 +77,8 @@ from taac.steps.step_definitions import (
     create_register_speed_flip_patcher_step_v2,
     create_revert_route_storm_attributes_step,
     create_route_convergence_health_check_step,
+    create_rss_start_step,
+    create_rss_stop_step,
     create_run_task_step,
     create_service_convergence_step,
     create_service_interruption_step,
@@ -333,6 +335,8 @@ def create_cold_start_test_stage(
     convergence_soft_threshold_seconds: float = 600,
     convergence_hard_timeout_seconds: float = 1200,
     convergence_poll_interval_seconds: float = 5,
+    enable_rss_delta_characterization: bool = False,
+    rss_characterization_interval_seconds: float = 3.0,
 ) -> Stage:
     """
     Create a BGP cold start test stage.
@@ -373,9 +377,17 @@ def create_cold_start_test_stage(
                                 Generates latency reports and time histograms
                                 Thread-level profiling has 5-10% overhead
         enable_socket_monitoring: Enable socket monitoring (default: False)
+        enable_rss_delta_characterization: When True, bracket the convergence
+            with an embeddable bgpcpp RSS delta START/STOP pair: START just
+            before the toggle (baseline = pre-convergence idle RSS) and STOP
+            after Step 6 (current = post-convergence settled RSS; peak = max
+            during convergence). Reported by RSS_DELTA_CHECK. Default: False.
+        rss_characterization_interval_seconds: Background VmRSS sampling interval
+            (seconds) for the RSS START step (default: 3.0). Only used when
+            enable_rss_delta_characterization is True.
 
     Returns:
-        Stage object for BGP cold start test
+        Stage object for BGP cold start test.
 
     Note:
         When thread CPU monitoring is enabled, it runs for the entire convergence period
@@ -394,142 +406,176 @@ def create_cold_start_test_stage(
         raise ValueError(
             "expected_established_sessions is required for adaptive convergence"
         )
-    return Stage(
-        steps=[
-            # Step 1: Disable BGP daemon
-            create_daemon_control_step(
-                device_name=device_name,
-                daemon_name=daemon_name,
-                action="disable",
-                description=f"Disable {daemon_name} daemon",
+    # Sequential prefix: bring the daemon down and back up, then toggle the
+    # device groups (the cold-start convergence trigger). This must run once,
+    # before any convergence observer.
+    prefix_steps = [
+        # Step 1: Disable BGP daemon
+        create_daemon_control_step(
+            device_name=device_name,
+            daemon_name=daemon_name,
+            action="disable",
+            description=f"Disable {daemon_name} daemon",
+        ),
+        # Step 2: Sleep after disable
+        create_longevity_step(
+            duration=sleep_after_disable_seconds,
+            description=f"Sleep for {sleep_after_disable_seconds} seconds",
+        ),
+        # Step 3: Enable BGP daemon
+        create_daemon_control_step(
+            device_name=device_name,
+            daemon_name=daemon_name,
+            action="enable",
+            description=f"Enable {daemon_name} daemon",
+        ),
+        # Step 4: Record the daemon restart time for post-test restart detection.
+        Step(
+            name=StepName.CUSTOM_STEP,
+            description="Record daemon restart completion time",
+            step_params=Params(
+                json_params=json.dumps(
+                    {
+                        "custom_step_name": "record_jq_timestamp",
+                        "var_name": "daemon_restart_time",
+                    }
+                )
             ),
-            # Step 2: Sleep after disable
-            create_longevity_step(
-                duration=sleep_after_disable_seconds,
-                description=f"Sleep for {sleep_after_disable_seconds} seconds",
-            ),
-            # Step 3: Enable BGP daemon
-            create_daemon_control_step(
-                device_name=device_name,
-                daemon_name=daemon_name,
-                action="enable",
-                description=f"Enable {daemon_name} daemon",
-            ),
-            # Step 4: Record the daemon restart time for post-test restart detection.
-            Step(
-                name=StepName.CUSTOM_STEP,
-                description="Record daemon restart completion time",
-                step_params=Params(
-                    json_params=json.dumps(
-                        {
-                            "custom_step_name": "record_jq_timestamp",
-                            "var_name": "daemon_restart_time",
-                        }
-                    )
-                ),
-            ),
-            *(
-                []
-                if adaptive_convergence
-                else [
-                    create_longevity_step(
-                        duration=180,
-                        description="Wait for BGP convergence (180 seconds)",
-                    )
-                ]
-            ),
-            *(
+        ),
+        *(
+            []
+            if adaptive_convergence
+            else [
+                create_longevity_step(
+                    duration=180,
+                    description="Wait for BGP convergence (180 seconds)",
+                )
+            ]
+        ),
+        *(
+            [
+                create_record_jq_timestamp_step(
+                    var_name="convergence_trigger_time",
+                    description="Record IXIA peer-enable convergence trigger",
+                )
+            ]
+            if adaptive_convergence
+            else []
+        ),
+    ]
+    # Step 5: Toggle device groups (cold start trigger). Kept separate from the
+    # prefix so the optional RSS delta START can be inserted immediately
+    # before it -- the background sampler then brackets the whole convergence,
+    # including the portion that happens during the (multi-second) toggle.
+    toggle_step = create_ixia_device_group_toggle_step(
+        enable=True,
+        device_group_name_regex=device_group_regex,
+        description="Toggle all device groups back to active",
+        require_match=True,
+        verify_readback=True,
+    )
+    # Step 6: Monitor thread CPU OR wait for convergence.
+    # If monitoring is enabled, it runs for the convergence duration and
+    # captures CPU activity after the cold start trigger.
+    tail_steps = [
+        *(
+            [
+                create_thread_cpu_monitoring_step(
+                    device_name=device_name,
+                    duration_minutes=(
+                        (int(convergence_hard_timeout_seconds) + 59) // 60
+                        if adaptive_convergence
+                        else convergence_wait_seconds // 60
+                    ),
+                    thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
+                    thread_name_filter=thread_name_filter,
+                    enable_bgp_events=enable_bgp_events,
+                    enable_perf_profiling=enable_perf_profiling,
+                    enable_offcpu_profiling=enable_offcpu_profiling,
+                    enable_socket_monitoring=enable_socket_monitoring,
+                    convergence_soft_threshold_seconds=(
+                        convergence_soft_threshold_seconds
+                        if adaptive_convergence
+                        else None
+                    ),
+                    convergence_hard_timeout_seconds=(
+                        convergence_hard_timeout_seconds
+                        if adaptive_convergence
+                        else None
+                    ),
+                    convergence_poll_interval_seconds=(
+                        convergence_poll_interval_seconds
+                        if adaptive_convergence
+                        else None
+                    ),
+                    expected_established_sessions=(
+                        expected_established_sessions if adaptive_convergence else None
+                    ),
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                    convergence_trigger_time_jq_var=(
+                        "convergence_trigger_time" if adaptive_convergence else None
+                    ),
+                )
+            ]
+            if enable_thread_cpu_monitoring
+            else (
                 [
-                    create_record_jq_timestamp_step(
-                        var_name="convergence_trigger_time",
-                        description="Record IXIA peer-enable convergence trigger",
-                    )
-                ]
-                if adaptive_convergence
-                else []
-            ),
-            # Step 5: Toggle device groups (cold start trigger)
-            create_ixia_device_group_toggle_step(
-                enable=True,
-                device_group_name_regex=device_group_regex,
-                description="Toggle all device groups back to active",
-                require_match=True,
-                verify_readback=True,
-            ),
-            # Step 6: Monitor thread CPU OR wait for convergence
-            # If monitoring is enabled, it runs for the convergence duration
-            # and captures CPU activity after the cold start trigger
-            *(
-                [
-                    create_thread_cpu_monitoring_step(
+                    create_bgp_lifecycle_convergence_step(
                         device_name=device_name,
-                        duration_minutes=(
-                            (int(convergence_hard_timeout_seconds) + 59) // 60
-                            if adaptive_convergence
-                            else convergence_wait_seconds // 60
+                        expected_established_sessions=(
+                            expected_established_sessions or 0
                         ),
-                        thread_cpu_monitoring_interval_seconds=thread_cpu_monitoring_interval_seconds,
-                        thread_name_filter=thread_name_filter,
-                        enable_bgp_events=enable_bgp_events,
-                        enable_perf_profiling=enable_perf_profiling,
-                        enable_offcpu_profiling=enable_offcpu_profiling,
-                        enable_socket_monitoring=enable_socket_monitoring,
+                        parent_prefixes_to_ignore=(parent_prefixes_to_ignore or ()),
                         convergence_soft_threshold_seconds=(
                             convergence_soft_threshold_seconds
-                            if adaptive_convergence
-                            else None
                         ),
                         convergence_hard_timeout_seconds=(
                             convergence_hard_timeout_seconds
-                            if adaptive_convergence
-                            else None
                         ),
                         convergence_poll_interval_seconds=(
                             convergence_poll_interval_seconds
-                            if adaptive_convergence
-                            else None
-                        ),
-                        expected_established_sessions=(
-                            expected_established_sessions
-                            if adaptive_convergence
-                            else None
-                        ),
-                        parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-                        convergence_trigger_time_jq_var=(
-                            "convergence_trigger_time" if adaptive_convergence else None
                         ),
                     )
                 ]
-                if enable_thread_cpu_monitoring
-                else (
-                    [
-                        create_bgp_lifecycle_convergence_step(
-                            device_name=device_name,
-                            expected_established_sessions=(
-                                expected_established_sessions or 0
-                            ),
-                            parent_prefixes_to_ignore=(parent_prefixes_to_ignore or ()),
-                            convergence_soft_threshold_seconds=(
-                                convergence_soft_threshold_seconds
-                            ),
-                            convergence_hard_timeout_seconds=(
-                                convergence_hard_timeout_seconds
-                            ),
-                            convergence_poll_interval_seconds=(
-                                convergence_poll_interval_seconds
-                            ),
-                        )
-                    ]
-                    if adaptive_convergence
-                    else [
-                        create_longevity_step(
-                            duration=convergence_wait_seconds,
-                            description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
-                        ),
-                    ]
-                )
-            ),
-        ],
+                if adaptive_convergence
+                else [
+                    create_longevity_step(
+                        duration=convergence_wait_seconds,
+                        description=f"Wait for BGP convergence ({convergence_wait_seconds} seconds)",
+                    ),
+                ]
+            )
+        ),
+    ]
+    # RSS bracket: START pre-toggle (baseline = pre-convergence idle RSS), STOP
+    # after the convergence observer (current = post-convergence settled RSS;
+    # peak = max during convergence). Reported by RSS_DELTA_CHECK.
+    rss_start_steps = []
+    rss_stop_steps = []
+    if enable_rss_delta_characterization:
+        rss_session_key = f"cold_start_rss:{device_name}"
+        rss_start_steps = [
+            create_rss_start_step(
+                device_name=device_name,
+                session_key=rss_session_key,
+                interval_seconds=rss_characterization_interval_seconds,
+            )
+        ]
+        rss_stop_steps = [
+            create_rss_stop_step(
+                session_key=rss_session_key,
+                summary_jq_var="rss_delta_summary",
+            )
+        ]
+
+    return Stage(
+        steps=[
+            *prefix_steps,
+            *rss_start_steps,
+            toggle_step,
+            *tail_steps,
+            *rss_stop_steps,
+        ]
     )
 
 

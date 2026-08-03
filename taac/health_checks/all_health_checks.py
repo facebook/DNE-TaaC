@@ -125,6 +125,9 @@ from taac.health_checks.device_health_checks.port_state_health_check import (
 from taac.health_checks.device_health_checks.route_convergence_time_health_check import (
     RouteConvergenceTimeHealthCheck,
 )
+from taac.health_checks.device_health_checks.rss_delta_health_check import (
+    RssDeltaHealthCheck,
+)
 from taac.health_checks.device_health_checks.service_restart_health_check import (
     ServiceRestartHealthCheck,
 )
@@ -251,6 +254,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     QoSDscpTxQueueHealthCheck,
     BufferUtilizationHealthCheck,
     SystemCpuLoadAverageHealthCheck,
+    RssDeltaHealthCheck,
     BgpFibProgrammingCheck,
     PortSpeedHealthCheck,
     PortSpeedSnapshotHealthCheck,

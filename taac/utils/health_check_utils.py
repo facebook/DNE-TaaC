@@ -400,3 +400,80 @@ def generate_prefix_nh_list_map(
     )
 
     return result
+
+
+class RssDeltaFromBaselineResult(t.NamedTuple):
+    """Outcome of the delta-from-baseline steady-RSS gate (see
+    ``evaluate_rss_delta_from_baseline``). Every field is emitted on both pass
+    and fail so the baseline steady state is characterized run-over-run.
+    """
+
+    passed: bool
+    baseline_rss_bytes: int
+    current_rss_bytes: int
+    growth_pct: float
+    threshold_pct: float
+    message: str
+
+
+def evaluate_rss_delta_from_baseline(
+    baseline_rss_bytes: float,
+    current_rss_bytes: float,
+    max_growth_pct: float,
+) -> RssDeltaFromBaselineResult:
+    """Delta-from-baseline steady-RSS gate.
+
+    FAILs if the current steady RSS exceeds the in-run baseline steady RSS by
+    more than ``max_growth_pct`` percent. This catches the sub-ceiling regression
+    class (e.g. bgpd going 3 GB -> 6 GB) that an absolute ceiling (e.g. 10 GB)
+    silently passes -- the most impactful and most-missed regression.
+
+    ``growth_pct`` (and both RSS values) are returned so the caller can emit them
+    to the log/scuba on BOTH pass and fail: the baseline steady state then
+    becomes a tracked time series, so cross-version creep of the baseline itself
+    is visible/alertable outside the run.
+
+    A non-positive baseline is FAILed rather than silently passed -- a percentage
+    gate we cannot compute must not pass (no silent fallbacks).
+
+    Args:
+        baseline_rss_bytes: steady RSS captured at the in-run baseline point
+            (post-convergence, before the workload under test).
+        current_rss_bytes: steady RSS captured after the workload settles.
+        max_growth_pct: maximum permitted growth over baseline, in percent
+            (e.g. 20.0 == "no more than 20% above last-known-good").
+
+    Returns:
+        RssDeltaFromBaselineResult with ``passed``, the two RSS values, the
+        computed ``growth_pct``, the ``threshold_pct``, and a log-ready message.
+    """
+    if baseline_rss_bytes <= 0:
+        return RssDeltaFromBaselineResult(
+            passed=False,
+            baseline_rss_bytes=int(baseline_rss_bytes),
+            current_rss_bytes=int(current_rss_bytes),
+            growth_pct=float("inf"),
+            threshold_pct=max_growth_pct,
+            message=(
+                "RSS delta-from-baseline gate FAILED: invalid baseline "
+                f"{int(baseline_rss_bytes)} bytes (must be > 0); cannot compute "
+                "a percentage growth."
+            ),
+        )
+
+    growth_pct = (current_rss_bytes - baseline_rss_bytes) / baseline_rss_bytes * 100.0
+    passed = growth_pct <= max_growth_pct
+    message = (
+        f"RSS delta-from-baseline: baseline={int(baseline_rss_bytes)} bytes, "
+        f"current={int(current_rss_bytes)} bytes, growth={growth_pct:.2f}% "
+        f"(threshold {max_growth_pct:.2f}%) -- "
+        f"{'within limit' if passed else 'REGRESSION'}."
+    )
+    return RssDeltaFromBaselineResult(
+        passed=passed,
+        baseline_rss_bytes=int(baseline_rss_bytes),
+        current_rss_bytes=int(current_rss_bytes),
+        growth_pct=growth_pct,
+        threshold_pct=max_growth_pct,
+        message=message,
+    )
