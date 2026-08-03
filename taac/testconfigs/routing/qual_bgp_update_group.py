@@ -125,7 +125,10 @@ BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG = (
     create_bgp_ebb_full_scale_test_config(
         BAG012_ASH6,
         name="BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST",
-        playbooks_selected=["bgp_ug_bgp_daemon_restart"],
+        playbooks_selected=[
+            "bgp_ug_bgp_daemon_restart",
+            "bgp_ug_fibagent_restart",
+        ],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         enable_update_group=True,
     )

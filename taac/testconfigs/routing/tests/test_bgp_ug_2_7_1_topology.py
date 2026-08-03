@@ -49,7 +49,7 @@ def _route_specs(
                         route.network_group_index,
                         scale.prefix_count,
                         scale.starting_prefixes,
-                        tuple(scale.communities or ()),
+                        tuple(scale.bgp_communities or ()),
                     )
                 )
     return sorted(specs)
@@ -174,3 +174,49 @@ class BgpUg27SharedTopologyTest(TestCase):
         self.assertEqual(2**63 - 1, post_params["max_ecmp_level3"])
         self.assertEqual(100, post_params["watermark_delta_threshold"])
         self.assertFalse(post_params["check_watermarks"])
+
+    def test_fibagent_restart_uses_two_port_continuity_contract(self) -> None:
+        config = factory.create_bgp_ebb_full_scale_test_config(
+            BAG012_ASH6,
+            name="BAG012_UG_2_7_6_TEST",
+            playbooks_selected=["bgp_ug_fibagent_restart"],
+        )
+
+        self.assertEqual(
+            ["bgp_ug_fibagent_restart"],
+            [playbook.name for playbook in config.playbooks],
+        )
+        playbook = config.playbooks[0]
+        capture = json.loads(
+            none_throws(
+                none_throws(playbook.stages[0].steps[4].step_params).json_params
+            )
+        )
+        restart_tracks = none_throws(playbook.stages[1].concurrent_steps)
+        restart = json.loads(
+            none_throws(none_throws(restart_tracks[0].steps[1].step_params).json_params)
+        )
+        monitor = json.loads(
+            none_throws(none_throws(restart_tracks[1].steps[0].step_params).json_params)
+        )
+        self.assertEqual(4, capture["expected_group_count"])
+        self.assertEqual(1272, capture["expected_session_count"])
+        self.assertEqual("fibagent_restart", restart["action"])
+        self.assertTrue(restart["require_uptime_change"])
+        self.assertEqual("group_id", monitor["operational_continuity"])
+        self.assertEqual(4, monitor["expected_group_count"])
+        self.assertEqual(1272, monitor["expected_session_count"])
+        self.assertTrue(monitor["require_uniform_sent_route_counts"])
+        self.assertTrue(monitor["require_equal_sent_route_counts"])
+        self.assertEqual(
+            [
+                r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+                r"^PREFIX_POOL_IPV6_EBGP_UG_2_7_RUNTIME$",
+            ],
+            [
+                _task_params(step)["prefix_pool_regex"]
+                for step in playbook.stages[0].steps[:2]
+            ],
+        )
+        self.assertEqual(2, len(config.basic_port_configs or []))
+        self.assertEqual(18, len(_device_groups(config)))

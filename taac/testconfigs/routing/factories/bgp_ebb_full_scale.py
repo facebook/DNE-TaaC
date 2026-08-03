@@ -369,13 +369,20 @@ def _get_bgp_ebb_full_scale_playbooks(
     selected_tc7_playbooks: set[str],
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
-        if "bgp_ug_bgp_daemon_restart" not in selected_tc7_playbooks:
-            return []
-        return [
-            build_bgp_ug_2_7_playbook(
-                "bgp_ug_bgp_daemon_restart", physical_inventory, bound
+        playbooks = []
+        if "bgp_ug_bgp_daemon_restart" in selected_tc7_playbooks:
+            playbooks.append(
+                build_bgp_ug_2_7_playbook(
+                    "bgp_ug_bgp_daemon_restart", physical_inventory, bound
+                )
             )
-        ]
+        if "bgp_ug_fibagent_restart" in selected_tc7_playbooks:
+            playbooks.append(
+                build_bgp_ug_2_7_playbook(
+                    "bgp_ug_fibagent_restart", physical_inventory, bound
+                )
+            )
+        return playbooks
 
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]

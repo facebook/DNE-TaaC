@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BAG012 EBB full-scale binding for Update Group case 2.7.4."""
+"""BAG012 EBB full-scale bindings for Update Group cases 2.7.4 and 2.7.6."""
 
 import uuid
 
@@ -12,6 +12,9 @@ from taac.abstractions.topology import (
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.bgp_daemon_restart import (
     create_bgp_ug_bgp_daemon_restart_playbook,
     EXPECTED_SESSION_COUNT,
+)
+from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.fibagent_restart import (
+    create_bgp_ug_fibagent_restart_playbook,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
@@ -146,11 +149,34 @@ def _daemon_restart(
     )
 
 
+def _fibagent_restart(inventory: PhysicalInventory, bound: BoundTopology) -> Playbook:
+    playbook_name = "bgp_ug_fibagent_restart"
+    prechecks, postchecks, snapshots = _health_checks()
+    groups, counts, afis = _group_contract()
+    return create_bgp_ug_fibagent_restart_playbook(
+        device_name=inventory.device_name,
+        state_key=_case_key(inventory.device_name, playbook_name, "semantic-state"),
+        route_pool_regex_by_afi=_SHARED_RUNTIME_POOL_REGEX_BY_AFI,
+        ibgp_receiver_parent_prefixes_by_afi={
+            "ipv4": _host_prefixes(_ibgp_groups(bound, "v4")),
+            "ipv6": _host_prefixes(_ibgp_groups(bound, "v6")),
+        },
+        peer_group_substrings=groups,
+        expected_member_counts=counts,
+        expected_afi_by_substring=afis,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshots,
+    )
+
+
 def build_bgp_ug_2_7_playbook(
     playbook_name: str,
     inventory: PhysicalInventory,
     bound: BoundTopology,
 ) -> Playbook:
+    if playbook_name == "bgp_ug_fibagent_restart":
+        return _fibagent_restart(inventory, bound)
     if playbook_name != "bgp_ug_bgp_daemon_restart":
         raise ValueError(f"Unsupported TC7 playbook {playbook_name!r}")
     return _daemon_restart(inventory, bound)

@@ -341,9 +341,10 @@ def create_bgp_update_group_state_step(
     """Create a persisted semantic Update Group state step.
 
     Supported actions are ``capture``, ``compare``, ``monitor``,
-    ``formation_monitor``, and ``clear``. ``monitor`` requires ``case`` and
-    ``duration_seconds`` in ``action_params``. ``formation_monitor`` accepts
-    positive ``timeout_seconds`` and ``poll_interval_seconds``. Comparison
+    ``wait_monitor_armed``, ``formation_monitor``, and ``clear``. ``monitor``
+    requires ``case`` and ``duration_seconds`` in ``action_params``. Monitor
+    waits and formation actions accept positive ``timeout_seconds``; monitor and
+    formation actions accept positive ``poll_interval_seconds``. Comparison
     actions may select ``none``, ``group_id``, or ``group_id_and_generation``
     operational continuity.
     """
@@ -353,6 +354,7 @@ def create_bgp_update_group_state_step(
         "compare",
         "formation_monitor",
         "monitor",
+        "wait_monitor_armed",
     }
     if action not in actions:
         raise ValueError(
@@ -545,6 +547,58 @@ def _validate_disruption_route_verifier(
     )
 
 
+def _validate_sustained_disruption(action: str, params: t.Mapping[str, t.Any]) -> None:
+    tracks = params["port_tracks"]
+    track_roles = {
+        str(track.get("role", "")) for track in tracks if isinstance(track, t.Mapping)
+    }
+    required_roles = {"bgp_mon", "ebgp", "ibgp"}
+    if track_roles != required_roles or len(tracks) != len(required_roles):
+        raise ValueError(
+            "sustained_link_flap port_tracks must contain exactly one "
+            "ebgp, ibgp, and bgp_mon track"
+        )
+    for track in tracks:
+        _require_custom_action_params(
+            "BGP Update Group disruption port track",
+            action,
+            track,
+            ("interface", "target_peer_subnets"),
+        )
+    scenarios = params["heartbeat_scenarios"]
+    expected_down_roles = {
+        frozenset({"ebgp"}),
+        frozenset({"ibgp"}),
+        frozenset({"bgp_mon"}),
+        frozenset({"ebgp", "bgp_mon"}),
+        frozenset({"ibgp", "bgp_mon"}),
+    }
+    actual_down_roles = {
+        frozenset(scenario.get("down_roles", ()))
+        for scenario in scenarios
+        if isinstance(scenario, t.Mapping)
+    }
+    if actual_down_roles != expected_down_roles or len(scenarios) != len(
+        expected_down_roles
+    ):
+        raise ValueError(
+            "sustained_link_flap heartbeat_scenarios do not cover the "
+            "five required planned-down states"
+        )
+    for scenario in scenarios:
+        _require_custom_action_params(
+            "BGP Update Group disruption heartbeat",
+            action,
+            scenario,
+            (
+                "expected_receiver_count",
+                "expected_route_delta",
+                "receiver_parent_prefixes",
+                "source_prefix_pool_regexes",
+            ),
+        )
+
+
 def create_bgp_update_group_disruption_step(
     device_name: str,
     action: str,
@@ -554,6 +608,8 @@ def create_bgp_update_group_disruption_step(
 ) -> Step:
     """Create a verified Update Group disruption step.
 
+    ``fibagent_restart`` resolves and verifies the EOS L3 forwarding agent.
+    ``fibagent_active`` polls that same exact agent to ACTIVE without restarting it.
     ``link_flap_recovery`` requires exact full-scale peer and timer contracts.
     ``sustained_link_flap`` requires ``port_tracks`` and
     ``heartbeat_scenarios``. ``fixed_peer_flap`` requires ``peer_regex`` and
@@ -561,6 +617,8 @@ def create_bgp_update_group_disruption_step(
     receiver scope, receiver count, and expected route delta.
     """
     required_by_action = {
+        "fibagent_active": set(),
+        "fibagent_restart": set(),
         "link_flap_recovery": {
             "bgp_hold_timer_seconds",
             "expected_target_peer_count",
@@ -587,11 +645,14 @@ def create_bgp_update_group_disruption_step(
     if action == "fixed_peer_flap" and not params["peer_regex"]:
         raise ValueError("fixed_peer_flap peer_regex must be non-empty")
     for name in (
+        "active_timeout_seconds",
         "bgp_hold_timer_seconds",
         "down_seconds",
         "event_timeout_seconds",
         "expected_target_peer_count",
         "flap_count",
+        "poll_interval_seconds",
+        "restart_timeout_seconds",
         "restore_timeout_seconds",
         "route_verification_timeout_seconds",
         "transition_timeout_seconds",
@@ -611,58 +672,8 @@ def create_bgp_update_group_disruption_step(
         _validate_disruption_route_verifier(
             action, params, "first_down_prefix_pool_regexes"
         )
-    else:
-        tracks = params["port_tracks"]
-        track_roles = {
-            str(track.get("role", ""))
-            for track in tracks
-            if isinstance(track, t.Mapping)
-        }
-        required_roles = {"bgp_mon", "ebgp", "ibgp"}
-        if track_roles != required_roles or len(tracks) != len(required_roles):
-            raise ValueError(
-                "sustained_link_flap port_tracks must contain exactly one "
-                "ebgp, ibgp, and bgp_mon track"
-            )
-        for track in tracks:
-            _require_custom_action_params(
-                "BGP Update Group disruption port track",
-                action,
-                track,
-                ("interface", "target_peer_subnets"),
-            )
-        scenarios = params["heartbeat_scenarios"]
-        expected_down_roles = {
-            frozenset({"ebgp"}),
-            frozenset({"ibgp"}),
-            frozenset({"bgp_mon"}),
-            frozenset({"ebgp", "bgp_mon"}),
-            frozenset({"ibgp", "bgp_mon"}),
-        }
-        actual_down_roles = {
-            frozenset(scenario.get("down_roles", ()))
-            for scenario in scenarios
-            if isinstance(scenario, t.Mapping)
-        }
-        if actual_down_roles != expected_down_roles or len(scenarios) != len(
-            expected_down_roles
-        ):
-            raise ValueError(
-                "sustained_link_flap heartbeat_scenarios do not cover the "
-                "five required planned-down states"
-            )
-        for scenario in scenarios:
-            _require_custom_action_params(
-                "BGP Update Group disruption heartbeat",
-                action,
-                scenario,
-                (
-                    "expected_receiver_count",
-                    "expected_route_delta",
-                    "receiver_parent_prefixes",
-                    "source_prefix_pool_regexes",
-                ),
-            )
+    elif action == "sustained_link_flap":
+        _validate_sustained_disruption(action, params)
     payload = {
         "custom_step_name": "bgp_update_group_disruption",
         "hostname": device_name,
@@ -672,6 +683,48 @@ def create_bgp_update_group_disruption_step(
     return create_custom_step(
         params_dict=payload,
         description=description or f"BGP Update Group disruption: {action}",
+    )
+
+
+def create_verified_fibagent_restart_step(
+    device_name: str,
+    *,
+    restart_timeout_seconds: float = 300.0,
+    poll_interval_seconds: float = 1.0,
+    require_uptime_change: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create an EOS FibAgent restart with status-transition verification."""
+    if not isinstance(require_uptime_change, bool):
+        raise ValueError("require_uptime_change must be a boolean")
+    return create_bgp_update_group_disruption_step(
+        device_name,
+        "fibagent_restart",
+        action_params={
+            "restart_timeout_seconds": restart_timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+            "require_uptime_change": require_uptime_change,
+        },
+        description=description or "Restart and verify EOS FibAgent",
+    )
+
+
+def create_verify_fibagent_active_step(
+    device_name: str,
+    *,
+    active_timeout_seconds: float = 300.0,
+    poll_interval_seconds: float = 1.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Poll the one EOS L3 forwarding agent until it reports ACTIVE."""
+    return create_bgp_update_group_disruption_step(
+        device_name,
+        "fibagent_active",
+        action_params={
+            "active_timeout_seconds": active_timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+        description=description or "Verify EOS FibAgent is active",
     )
 
 

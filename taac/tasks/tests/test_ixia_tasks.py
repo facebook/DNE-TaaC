@@ -136,6 +136,9 @@ class FakeIpv4PrefixPool:
         self.BgpIPRouteProperty = SimpleNamespace(
             find=MagicMock(return_value=[self.route_property])
         )
+        self.BgpV6IPRouteProperty = SimpleNamespace(
+            find=MagicMock(return_value=[self.route_property])
+        )
 
     @property
     def NumberOfAddresses(self) -> int:
