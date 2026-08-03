@@ -4,6 +4,7 @@
 
 import json
 import typing as t
+from unittest import mock
 
 from later.unittest import TestCase
 from taac.abstractions.physical_inventory import BAG012_ASH6
@@ -13,6 +14,7 @@ from taac.testconfigs.routing.factories import (
 from pyre_extensions import none_throws
 from taac.health_check.health_check import types as hc_types
 
+_PLAYBOOK_NAME = "bgp_ug_link_flap_recovery"
 _RUNTIME_POOL_NAMES = {
     "PREFIX_POOL_IBGP_IPV4_UG_2_7_RUNTIME",
     "PREFIX_POOL_IBGP_IPV6_UG_2_7_RUNTIME",
@@ -76,6 +78,43 @@ def _task_params(step) -> dict:
 
 
 class BgpUg27SharedTopologyTest(TestCase):
+    def test_selected_link_flap_derives_exact_bag012_cohorts(self) -> None:
+        with mock.patch.object(
+            factory,
+            "create_bgp_ug_link_flap_recovery_playbook",
+            wraps=factory.create_bgp_ug_link_flap_recovery_playbook,
+        ) as playbook_factory:
+            config = factory.create_bgp_ebb_full_scale_test_config(
+                BAG012_ASH6,
+                name="BAG012_UG_2_7_1_TEST",
+                playbooks_selected=[_PLAYBOOK_NAME],
+            )
+
+        self.assertEqual(
+            [_PLAYBOOK_NAME], [playbook.name for playbook in config.playbooks]
+        )
+        playbook_factory.assert_called_once()
+        kwargs = playbook_factory.call_args.kwargs
+        self.assertEqual("bag012.ash6", kwargs["device_name"])
+        self.assertEqual("Ethernet3/36/1", kwargs["interface"])
+        self.assertEqual(280, len(set(kwargs["target_peer_subnets"])))
+        self.assertEqual(140, len(set(kwargs["recovered_ebgp_peer_addrs"])))
+        self.assertEqual(
+            {
+                "EB-FA-V4": "ipv4",
+                "EB-FA-V6": "ipv6",
+                "EB-EB-V4": "ipv4",
+                "EB-EB-V6": "ipv6",
+            },
+            kwargs["expected_afi_by_substring"],
+        )
+        self.assertFalse(
+            any(
+                check.check_id == "startup_hardware_capacity_baseline"
+                for check in kwargs["prechecks"]
+            )
+        )
+
     def test_runtime_prefix_index_must_stay_inside_canonical_inventory(self) -> None:
         for index in (-1, True, 750):
             with self.subTest(index=index):

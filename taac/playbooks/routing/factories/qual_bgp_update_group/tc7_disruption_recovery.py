@@ -2,7 +2,7 @@
 # pyre-unsafe
 """Spec 2.7 — Disruption and Recovery. UG qualification playbook factories.
 
-- 2.7.1 Link Flap: Update Group Recovery After Physical Link Bounces (SKELETON)
+- 2.7.1 Link Flap: Update Group Recovery After Physical Link Bounces (REAL)
 - 2.7.2 Sustained Link Flapping Across Multiple Ports (REAL)
 - 2.7.3 BGP Peer Flapping: Rapid Session Bounces Within Update Group (SKELETON)
 - 2.7.4 BGP Daemon Restart: Update Group Reconstruction (SKELETON)
@@ -16,6 +16,9 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_update_group_check,
     create_system_cpu_load_average_check,
 )
+from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.link_flap_recovery import (
+    create_bgp_ug_link_flap_recovery_playbook as create_bgp_ug_link_flap_recovery_playbook,
+)
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import create_custom_step
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
@@ -27,13 +30,6 @@ from taac.test_as_a_config.types import (
     PointInTimeHealthCheck,
     SnapshotHealthCheck,
 )
-
-
-def create_bgp_ug_link_flap_recovery_playbook() -> Playbook:
-    """Spec 2.7.1 — Link Flap: Update Group Recovery After Physical Link Bounces. SKELETON."""
-    raise NotImplementedError(
-        "Spec 2.7.1 (link_flap_recovery) playbook not yet implemented"
-    )
 
 
 def create_bgp_ug_sustained_link_flap_playbook(
@@ -121,3 +117,13 @@ def create_bgp_ug_fibagent_restart_playbook() -> Playbook:
     raise NotImplementedError(
         "Spec 2.7.6 (fibagent_restart) playbook not yet implemented"
     )
+
+
+__all__ = [
+    "create_bgp_ug_bgp_daemon_restart_playbook",
+    "create_bgp_ug_bgp_peer_flapping_playbook",
+    "create_bgp_ug_cold_start_playbook",
+    "create_bgp_ug_fibagent_restart_playbook",
+    "create_bgp_ug_link_flap_recovery_playbook",
+    "create_bgp_ug_sustained_link_flap_playbook",
+]

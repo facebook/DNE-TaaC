@@ -126,6 +126,7 @@ BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG = (
         BAG012_ASH6,
         name="BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST",
         playbooks_selected=[
+            "bgp_ug_link_flap_recovery",
             "bgp_ug_bgp_daemon_restart",
             "bgp_ug_fibagent_restart",
         ],

@@ -3,6 +3,7 @@
 """Factory for the EBB full-scale topology."""
 
 import ipaddress
+import uuid
 from collections import Counter
 
 from taac.abstractions.physical_inventory import PhysicalInventory
@@ -51,6 +52,9 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_route_registry_runtime_update_playbook,
     get_bgp_ebb_route_storm_playbook,
 )
+from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.link_flap_recovery import (
+    create_bgp_ug_link_flap_recovery_playbook,
+)
 from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
     build_bgp_ug_2_7_playbook,
 )
@@ -95,6 +99,7 @@ _TC7_PLAYBOOK_NAMES = (
     "bgp_ug_cold_start",
     "bgp_ug_fibagent_restart",
 )
+_TC7_LINK_FLAP_NAME = _TC7_PLAYBOOK_NAMES[0]
 _TC7_SHARED_IBGP_RUNTIME_POOL_V4 = "PREFIX_POOL_IBGP_IPV4_UG_2_7_RUNTIME"
 _TC7_SHARED_IBGP_RUNTIME_POOL_V6 = "PREFIX_POOL_IBGP_IPV6_UG_2_7_RUNTIME"
 _TC7_SHARED_EBGP_RUNTIME_POOL_V4 = "PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME"
@@ -334,6 +339,47 @@ def _tc7_health_checks() -> tuple[
     )
 
 
+def _ug_2_7_1_playbook(
+    physical_inventory: PhysicalInventory,
+    bound: BoundTopology,
+) -> Playbook:
+    ebgp_v6_peers = _required_peer_addresses(
+        [_required_bound_group(bound, "dg_ebgp_v6")],
+        EBGP_PEER_COUNT_V6,
+    )
+    ebgp_v4_peers = _required_peer_addresses(
+        [_required_bound_group(bound, "dg_ebgp_v4")],
+        EBGP_PEER_COUNT_V4,
+    )
+    ebgp_interface = _required_bound_group(bound, "dg_ebgp_v6").a_interface
+    if ebgp_interface is None:
+        raise ValueError("2.7.1 requires a resolved eBGP DUT interface")
+    peer_groups, member_counts, afis = _tc7_group_contract()
+    prechecks, postchecks, snapshot_checks = _tc7_health_checks()
+    return create_bgp_ug_link_flap_recovery_playbook(
+        device_name=physical_inventory.device_name,
+        interface=ebgp_interface,
+        target_peer_subnets=[
+            *(f"{address}/32" for address in ebgp_v4_peers),
+            *(f"{address}/128" for address in ebgp_v6_peers),
+        ],
+        route_pool_regexes=[rf"{_TC7_SHARED_IBGP_RUNTIME_POOL_V6}$"],
+        recovered_ebgp_peer_addrs=ebgp_v6_peers,
+        state_key=str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{physical_inventory.device_name}:{_TC7_LINK_FLAP_NAME}",
+            )
+        ),
+        peer_group_substrings=peer_groups,
+        expected_member_counts=member_counts,
+        expected_afi_by_substring=afis,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
 def _openr_owner_kv_link(physical_inventory: PhysicalInventory) -> dict:
     link = physical_inventory.openr_standalone_link
     if link is None:
@@ -370,6 +416,8 @@ def _get_bgp_ebb_full_scale_playbooks(
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
         playbooks = []
+        if _TC7_LINK_FLAP_NAME in selected_tc7_playbooks:
+            playbooks.append(_ug_2_7_1_playbook(physical_inventory, bound))
         if "bgp_ug_bgp_daemon_restart" in selected_tc7_playbooks:
             playbooks.append(
                 build_bgp_ug_2_7_playbook(
