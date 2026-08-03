@@ -2618,7 +2618,6 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy(
             ixia_ebgp_ic_parent_network_v4=ixia_ebgp_ic_parent_network_v4,
             ixia_ibgp_ic_parent_network_v6="",
             ixia_ibgp_ic_parent_network_v4="",
-            same_community=True,
         ),
         playbooks=[
             build_case8_playbook(

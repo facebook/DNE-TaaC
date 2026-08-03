@@ -106,7 +106,11 @@ class EbgpFlatImportPathTest(unittest.TestCase):
                 ixia_types.BgpNextHopModificationType.PRESERVE_FROM_FILE,
             )
 
-    def test_default_uses_csv_community_distribution(self) -> None:
+    def test_flat_path_uses_uniform_community_csv(self) -> None:
+        """The flat path attaches the UNIFORM community CSV. The diverse
+        per-route distribution was removed: unreachable from every production
+        caller, and it produced named-community collisions that obscured
+        acceptance failures."""
         configs = create_ebb_performance_scale_basic_port_configs(**_COMMON_KWARGS)
         community_cfgs = [
             attr
@@ -118,4 +122,4 @@ class EbgpFlatImportPathTest(unittest.TestCase):
         for c in community_cfgs:
             self.assertIsNone(c.value_lists)
             self.assertIsNotNone(c.file_path)
-            self.assertIn("communities", c.file_path)
+            self.assertIn("same_communities", c.file_path)

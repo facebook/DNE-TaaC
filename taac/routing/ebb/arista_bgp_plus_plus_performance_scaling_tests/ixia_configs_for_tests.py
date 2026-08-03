@@ -25,31 +25,27 @@ def get_bgp_route_file_path(base_filename: str) -> str:
     return f"performance_scaling_profiles/{base_filename}"
 
 
-def _ebgp_community_attribute_config(
-    same_community: bool,
-    ebgp_fixed_communities: list[str] | None,
-    is_v6: bool,
-) -> ixia_types.BgpAttributeConfig:
-    """Community attribute for the eBGP route import.
+def _ebgp_community_attribute_config(is_v6: bool) -> ixia_types.BgpAttributeConfig:
+    """Community attribute for the eBGP route import (flat CSV path only).
 
-    When ebgp_fixed_communities is set, attach exactly that inline community set
-    (no CSV) so every route carries only those communities -- used by the
-    peer-scale test to (a) pass the DUT's EB-FA-IN inbound community allowlist
-    and (b) avoid the confusing named-community collisions (e.g. DEFAULT_ROUTE)
-    that the diverse CSV distribution produces. When None, fall back to the
-    round-robin CSV distribution (unchanged for existing callers).
+    Attaches the UNIFORM community CSV: every route in the import carries the
+    same community set. Only the flat ``import_bgp_routes`` path reaches this --
+    the compact ``route_scales`` path sets communities directly on
+    ``RouteScale`` -- and its single caller (separable policy) wants uniform
+    communities.
+
+    Two branches were removed here as unreachable: an inline fixed-community
+    branch (every caller passing ``ebgp_fixed_communities`` also passes
+    ``ebgp_next_hop_self=True``, so it takes the compact path and never arrives)
+    and a DIVERSE per-route CSV branch that round-robined a different community
+    set onto each route. The diverse distribution was also actively harmful --
+    it produced named-community collisions (DEFAULT_ROUTE and friends) that made
+    perf-scaling acceptance failures much harder to read.
     """
-    if ebgp_fixed_communities is not None:
-        return ixia_types.BgpAttributeConfig(
-            attribute=ixia_types.BgpAttribute.COMMUNITIES,
-            value_lists=[ebgp_fixed_communities],
-            distribution_type=ixia_types.DistribitionType.ROUND_ROBIN,
-        )
     afi = "ipv6" if is_v6 else "ipv4"
-    suffix = "same_communities" if same_community else "communities"
     return ixia_types.BgpAttributeConfig(
         attribute=ixia_types.BgpAttribute.COMMUNITIES,
-        file_path=get_bgp_route_file_path(f"ebgp_{afi}_{suffix}_50k.csv"),
+        file_path=get_bgp_route_file_path(f"ebgp_{afi}_same_communities_50k.csv"),
         distribution_type=ixia_types.DistribitionType.ROUND_ROBIN,
     )
 
@@ -78,7 +74,6 @@ def _ebgp_ingress_bgp_config(
     ebgp_remote_as: int,
     ebgp_next_hop_self: bool,
     ebgp_fixed_communities: list[str] | None,
-    same_community: bool,
     ebgp_next_hop_mod: ixia_types.BgpNextHopModificationType,
     ebgp_set_next_hop: ixia_types.SetNextHopType | None,
     flat_end_index: int = 0,
@@ -137,9 +132,7 @@ def _ebgp_ingress_bgp_config(
             bgp_peer_type=ixia_types.BgpPeerType.EBGP,
             route_scales=[spec],
         )
-    community_config = _ebgp_community_attribute_config(
-        same_community, ebgp_fixed_communities, is_v6=is_v6
-    )
+    community_config = _ebgp_community_attribute_config(is_v6=is_v6)
     if is_v6:
         import_params = ixia_types.ImportBgpRoutesParams(
             prefix_pool_name=prefix_pool_name,
@@ -192,7 +185,6 @@ def create_ebb_performance_scale_basic_port_configs(
     ixia_ebgp_ic_parent_network_v4: str,
     ixia_ibgp_ic_parent_network_v6: str,
     ixia_ibgp_ic_parent_network_v4: str,
-    same_community: bool = False,
     # When True, advertise the eBGP routes with next-hop-self (the IXIA peer's own
     # connected address) so the DUT resolves them via the connected interface route
     # -- no Open/R / IGP. Default False keeps PRESERVE_FROM_FILE (the CSV-baked
@@ -227,7 +219,6 @@ def create_ebb_performance_scale_basic_port_configs(
         ixia_ebgp_ic_parent_network_v4: IPv4 network prefix for eBGP
         ixia_ibgp_ic_parent_network_v6: IPv6 network prefixes for iBGP DC planes
         ixia_ibgp_ic_parent_network_v4: IPv4 network prefixes for iBGP DC planes
-        same_community: Whether to use the same community for all prefixes
 
     Returns:
         List of BasicPortConfig objects for Ixia configuration
@@ -272,7 +263,6 @@ def create_ebb_performance_scale_basic_port_configs(
                         ebgp_remote_as=ebgp_remote_as,
                         ebgp_next_hop_self=ebgp_next_hop_self,
                         ebgp_fixed_communities=ebgp_fixed_communities,
-                        same_community=same_community,
                         ebgp_next_hop_mod=_ebgp_next_hop_mod,
                         ebgp_set_next_hop=_ebgp_set_next_hop,
                         flat_end_index=ebgp_peer_count_v6,
@@ -299,7 +289,6 @@ def create_ebb_performance_scale_basic_port_configs(
                         ebgp_remote_as=ebgp_remote_as,
                         ebgp_next_hop_self=ebgp_next_hop_self,
                         ebgp_fixed_communities=ebgp_fixed_communities,
-                        same_community=same_community,
                         ebgp_next_hop_mod=_ebgp_next_hop_mod,
                         ebgp_set_next_hop=_ebgp_set_next_hop,
                     ),
