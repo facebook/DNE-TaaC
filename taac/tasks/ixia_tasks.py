@@ -1,12 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 
+import asyncio
+import functools
 import ipaddress
 import json
 import random
+import threading
+import time
 import typing as t
 
-from neteng.fboss.switch_config.ttypes import PortSpeed
+from ixnetwork_restpy.errors import BadRequestError
+from neteng.fboss.switch_config.thrift_types import PortSpeed
 from taac.ixia.ixia import Ipv4PrefixPools
 from taac.tasks.base_task import BaseTask
 from taac.utils.common import get_default_bgp_configs
@@ -24,28 +29,39 @@ def _resolve_prefix_slots(
     prefix_start_index: int,
     prefix_end_index: t.Optional[int],
 ) -> t.Tuple[t.List[t.Tuple[int, int]], int]:
-    """Route-range slots to modify for a ``[start, end)`` per-peer prefix window.
+    """Route-property rows to modify for a ``[start, end)`` prefix window.
 
-    Geometry-agnostic. Each peer advertises
-    ``prefixes_per_peer = network_group_multiplier * prefix_pool.NumberOfAddresses``
-    routes, and that product equals the configured per-peer prefix count in BOTH
-    IxNetwork geometries:
-      * flat (import_bgp_routes):      NetworkGroup.Multiplier = prefix_count, NumberOfAddresses = 1
-      * compact (create_bgp_prefixes): NetworkGroup.Multiplier = 1,            NumberOfAddresses = prefix_count
-    The per-route-range attribute multivalue (``Active`` / ``LocalPreference`` /
-    ``Origin`` / ...) spans every peer, i.e. ``total_route_ranges =
-    peers * prefixes_per_peer``, so we iterate the whole multivalue and keep only
-    within-peer indices in ``[prefix_start_index, prefix_end_index)``. Keying the
-    window off ``NetworkGroup.Multiplier`` alone -- and bounding the loop by the
-    pool-instance ``Count`` -- collapsed to 1 under compact geometry, advertising
-    ~0 routes ("Configured prefixes in range 0 - 1", P2441146392).
+    A flat pool has one physical route-property row per logical prefix, so a
+    prefix subrange maps directly to the repeated per-peer row geometry. A
+    compact pool has one physical row per advertiser and stores the logical
+    prefix cardinality in ``NumberOfAddresses``. Its physical row cannot select
+    a logical-prefix subrange; callers must resize the pool and select all rows.
 
     Returns ``(slots, resolved_end_index)`` where ``slots`` is a list of
     ``(route_range_index, within_peer_index)`` pairs (the within-peer index lets
     callers cycle per-slot values, e.g. Origin) and ``resolved_end_index`` is the
     clamped end, for logging.
+
+    Raises ``ValueError`` when prefix geometry is non-positive or when a compact
+    pool is asked to select a partial logical-prefix range.
     """
-    prefixes_per_peer = network_group_multiplier * prefix_pool_obj.NumberOfAddresses
+    number_of_addresses = int(prefix_pool_obj.NumberOfAddresses)
+    prefixes_per_peer = network_group_multiplier * number_of_addresses
+    if prefixes_per_peer <= 0:
+        raise ValueError(
+            "prefixes_per_peer must be positive; verify network_group_multiplier "
+            "and NumberOfAddresses configuration"
+        )
+    if network_group_multiplier == 1 and number_of_addresses > 1:
+        if prefix_start_index != 0 or prefix_end_index not in {
+            None,
+            number_of_addresses,
+        }:
+            raise ValueError(
+                "IXIA compact prefix pool cannot select a partial logical-prefix "
+                "range; resize NumberOfAddresses and select the full pool"
+            )
+        return [(index, 0) for index in range(total_route_ranges)], number_of_addresses
     end_idx = min(prefix_end_index or prefixes_per_peer, prefixes_per_peer)
     slots = [
         (i, i % prefixes_per_peer)
@@ -55,25 +71,490 @@ def _resolve_prefix_slots(
     return slots, end_idx
 
 
+_IXIA_PREFIX_CONFIG_LOCK = threading.RLock()
+_IXIA_BUSY_OPERATION_RETRY_TIMEOUT_SECONDS = 300.0
+_IXIA_BUSY_OPERATION_RETRY_DELAY_SECONDS = 30.0
+
+
+def _is_ixia_busy_operation_error(error: Exception) -> bool:
+    message = str(error)
+    return (
+        isinstance(error, BadRequestError)
+        and "exec not allowed currently since an operation (" in message
+        and ") is in progress" in message
+    )
+
+
+def _retry_ixia_busy_operation(function):
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        deadline = time.monotonic() + _IXIA_BUSY_OPERATION_RETRY_TIMEOUT_SECONDS
+        attempt = 1
+        while True:
+            try:
+                return function(*args, **kwargs)
+            except BadRequestError as error:
+                if not _is_ixia_busy_operation_error(error):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                delay = min(_IXIA_BUSY_OPERATION_RETRY_DELAY_SECONDS, remaining)
+                task = args[0]
+                task.logger.warning(
+                    "IXIA chassis operation is busy; retrying prefix mutation "
+                    f"after {delay:.1f}s (attempt {attempt + 1}): {error}"
+                )
+                time.sleep(delay)
+                attempt += 1
+
+    return wrapper
+
+
+def _serialized_ixia_prefix_config(function):
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        with _IXIA_PREFIX_CONFIG_LOCK:
+            return function(*args, **kwargs)
+
+    return wrapper
+
+
 class IxiaEnableDisableBgpPrefixes(BaseTask):
     NAME = "ixia_enable_disable_bgp_prefixes"
+
+    @staticmethod
+    def _strict_active_bool(value: object, *, context: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "true":
+                return True
+            if normalized == "false":
+                return False
+        raise ValueError(
+            f"IXIA Active.Values {context} must be a strict true/false value, "
+            f"got {value!r}"
+        )
+
+    @classmethod
+    def _normalized_active_values(
+        cls, values: t.Iterable[object], *, context: str
+    ) -> list[bool]:
+        return [
+            cls._strict_active_bool(value, context=f"{context} index {index}")
+            for index, value in enumerate(values)
+        ]
+
+    @staticmethod
+    def _route_property(prefix_pool_obj: t.Any) -> t.Any:
+        properties = (
+            prefix_pool_obj.BgpIPRouteProperty.find()
+            if isinstance(prefix_pool_obj, Ipv4PrefixPools)
+            else prefix_pool_obj.BgpV6IPRouteProperty.find()
+        )
+        if len(properties) != 1:
+            raise ValueError(
+                f"IXIA prefix pool {prefix_pool_obj.Name!r} has "
+                f"{len(properties)} BGP route properties, expected 1"
+            )
+        return properties[0]
+
+    def _exact_prefix_pools(
+        self, prefix_pool_regex: str, expected_prefix_pool_count: int
+    ) -> list[t.Any]:
+        pools = list(
+            self.ixia.get_prefix_pools_by_regexes(prefix_pool_regex=prefix_pool_regex)
+        )
+        if not pools:
+            raise ValueError(
+                f"No IXIA prefix pools matched regex {prefix_pool_regex!r}"
+            )
+        if len(pools) != expected_prefix_pool_count:
+            raise ValueError(
+                f"IXIA prefix-pool regex {prefix_pool_regex!r} matched "
+                f"{len(pools)} pools, expected {expected_prefix_pool_count}: "
+                f"{[pool.Name for pool in pools]}"
+            )
+        return pools
+
+    def _fresh_active_values(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+    ) -> dict[str, list[bool]]:
+        return {
+            name: state["active"]
+            for name, state in self._fresh_pool_states(
+                prefix_pool_regex, expected_prefix_pool_count
+            ).items()
+        }
+
+    def _fresh_pool_states(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+    ) -> dict[str, dict[str, t.Any]]:
+        states: dict[str, dict[str, t.Any]] = {}
+        for pool in self._exact_prefix_pools(
+            prefix_pool_regex, expected_prefix_pool_count
+        ):
+            refresh_pool = getattr(pool, "refresh", None)
+            if callable(refresh_pool):
+                refresh_pool()
+            route_property = self._route_property(pool)
+            refresh_property = getattr(route_property, "refresh", None)
+            if callable(refresh_property):
+                refresh_property()
+            name = str(pool.Name)
+            states[name] = {
+                "active": self._normalized_active_values(
+                    route_property.Active.Values,
+                    context=f"readback for {name!r}",
+                ),
+                "number_of_addresses": (
+                    int(pool.NumberOfAddresses)
+                    if getattr(pool, "NumberOfAddresses", None) is not None
+                    else None
+                ),
+            }
+        return states
+
+    def _verify_fresh_active_values(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        expected_by_pool: t.Mapping[str, list[bool]],
+        expected_number_of_addresses: int | None = None,
+        expected_number_of_addresses_by_pool: t.Mapping[str, int] | None = None,
+    ) -> None:
+        if (
+            expected_number_of_addresses is not None
+            and expected_number_of_addresses_by_pool is not None
+        ):
+            raise ValueError(
+                "Specify one NumberOfAddresses readback expectation, not both"
+            )
+        observed_states = self._fresh_pool_states(
+            prefix_pool_regex, expected_prefix_pool_count
+        )
+        observed_by_pool = {
+            name: state["active"] for name, state in observed_states.items()
+        }
+        if observed_by_pool != expected_by_pool:
+            raise ValueError(
+                "IXIA prefix-pool Active.Values readback mismatch from fresh lookup: "
+                f"expected={dict(expected_by_pool)}, observed={observed_by_pool}"
+            )
+        if (
+            expected_number_of_addresses is not None
+            or expected_number_of_addresses_by_pool is not None
+        ):
+            observed_counts = {
+                name: state["number_of_addresses"]
+                for name, state in observed_states.items()
+            }
+            expected_counts = (
+                dict(expected_number_of_addresses_by_pool)
+                if expected_number_of_addresses_by_pool is not None
+                else dict.fromkeys(expected_by_pool, expected_number_of_addresses)
+            )
+            if observed_counts != expected_counts:
+                raise ValueError(
+                    "IXIA prefix-pool NumberOfAddresses readback mismatch from "
+                    f"fresh lookup: expected={expected_counts}, "
+                    f"observed={observed_counts}"
+                )
+
+    def _verify_fresh_inactive_values(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        expected_number_of_addresses: int,
+        expected_active_value_counts: t.Mapping[str, int] | None = None,
+    ) -> None:
+        observed_states = self._fresh_pool_states(
+            prefix_pool_regex, expected_prefix_pool_count
+        )
+        observed_counts = {
+            name: state["number_of_addresses"]
+            for name, state in observed_states.items()
+        }
+        expected_counts = dict.fromkeys(observed_states, expected_number_of_addresses)
+        if observed_counts != expected_counts:
+            raise ValueError(
+                "IXIA prefix-pool NumberOfAddresses readback mismatch from "
+                f"fresh lookup: expected={expected_counts}, "
+                f"observed={observed_counts}"
+            )
+        observed_active_value_counts: dict[str, int] = {}
+        for name, state in observed_states.items():
+            values = state["active"]
+            if not values:
+                raise ValueError(
+                    f"IXIA prefix pool {name!r} returned no fresh Active.Values"
+                )
+            if any(values):
+                raise ValueError(
+                    f"IXIA prefix pool {name!r} is not fully inactive after resize"
+                )
+            observed_active_value_counts[name] = len(values)
+        if (
+            expected_active_value_counts is not None
+            and observed_active_value_counts != expected_active_value_counts
+        ):
+            raise ValueError(
+                "IXIA prefix-pool Active.Values cardinality mismatch after resize: "
+                f"expected={dict(expected_active_value_counts)}, "
+                f"observed={observed_active_value_counts}"
+            )
+
+    def _write_all_fresh_active_values_inactive(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        expected_pool_names: t.Collection[str],
+    ) -> None:
+        pools = self._exact_prefix_pools(prefix_pool_regex, expected_prefix_pool_count)
+        if {str(pool.Name) for pool in pools} != set(expected_pool_names):
+            raise ValueError("IXIA prefix-pool set changed before full withdrawal")
+        for pool in pools:
+            refresh_pool = getattr(pool, "refresh", None)
+            if callable(refresh_pool):
+                refresh_pool()
+            route_property = self._route_property(pool)
+            refresh_property = getattr(route_property, "refresh", None)
+            if callable(refresh_property):
+                refresh_property()
+            values = self._normalized_active_values(
+                route_property.Active.Values,
+                context=f"full withdrawal for {pool.Name!r}",
+            )
+            if not values:
+                raise ValueError(
+                    f"IXIA prefix pool {pool.Name!r} returned no Active.Values"
+                )
+            route_property.Active.ValueList([False] * len(values))
+        self.ixia.apply_changes()
+
+    @staticmethod
+    def _run_cleanup_operations(
+        operations: t.Iterable[t.Callable[[], None]],
+    ) -> list[Exception]:
+        failures = []
+        for operation in operations:
+            try:
+                operation()
+            except Exception as error:
+                failures.append(error)
+        return failures
+
+    def _restore_safe_active_values(
+        self,
+        pools: t.Sequence[t.Any],
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        safe_values_by_pool: t.Mapping[str, list[bool]],
+        failures: list[Exception],
+    ) -> None:
+        operations: list[t.Callable[[], None]] = [
+            lambda pool=pool: self._route_property(pool).Active.ValueList(
+                safe_values_by_pool[str(pool.Name)]
+            )
+            for pool in pools
+        ]
+        failures.extend(self._run_cleanup_operations(operations))
+
+        def apply_and_verify() -> None:
+            self.ixia.apply_changes()
+            self._verify_fresh_active_values(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_values_by_pool,
+            )
+
+        failures.extend(self._run_cleanup_operations((apply_and_verify,)))
+
+    def _read_safe_active_value_count(
+        self,
+        pool: t.Any,
+        active_value_counts_by_pool: dict[str, int],
+    ) -> None:
+        route_property = self._route_property(pool)
+        current_values = self._normalized_active_values(
+            route_property.Active.Values,
+            context=f"fail-closed withdrawal for {pool.Name!r}",
+        )
+        route_property_count = int(route_property.Count)
+        if len(current_values) != route_property_count:
+            raise ValueError(
+                f"IXIA compact prefix pool {pool.Name!r} has "
+                f"{len(current_values)} Active.Values for route-property "
+                f"Count={route_property_count}"
+            )
+        active_value_counts_by_pool[str(pool.Name)] = route_property_count
+
+    def _resize_prefix_pools(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        target_number_of_addresses: int,
+        expected_pool_names: t.Collection[str] | None = None,
+    ) -> None:
+        pools = self._exact_prefix_pools(prefix_pool_regex, expected_prefix_pool_count)
+        if expected_pool_names is not None and {
+            str(pool.Name) for pool in pools
+        } != set(expected_pool_names):
+            raise ValueError("IXIA prefix-pool set changed before compact resize")
+        for pool in pools:
+            pool.NumberOfAddresses = target_number_of_addresses
+        self.ixia.apply_changes()
+
+    def _verify_safe_compact_capacity(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        safe_number_of_addresses: int,
+        active_value_counts_by_pool: t.Mapping[str, int],
+    ) -> None:
+        self._verify_fresh_inactive_values(
+            prefix_pool_regex,
+            expected_prefix_pool_count,
+            safe_number_of_addresses,
+            active_value_counts_by_pool or None,
+        )
+
+    def _restore_safe_compact_capacity(
+        self,
+        pools: t.Sequence[t.Any],
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        safe_values_by_pool: t.Mapping[str, list[bool]],
+        safe_number_of_addresses: int,
+        failures: list[Exception],
+    ) -> None:
+        active_value_counts_by_pool: dict[str, int] = {}
+        failures.extend(
+            self._run_cleanup_operations(
+                lambda pool=pool: self._read_safe_active_value_count(
+                    pool, active_value_counts_by_pool
+                )
+                for pool in pools
+            )
+        )
+
+        def withdraw_and_resize() -> None:
+            self._write_all_fresh_active_values_inactive(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_values_by_pool,
+            )
+            self._resize_prefix_pools(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_number_of_addresses,
+            )
+
+        def withdraw_and_verify() -> None:
+            self._write_all_fresh_active_values_inactive(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_values_by_pool,
+            )
+            self._verify_safe_compact_capacity(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_number_of_addresses,
+                active_value_counts_by_pool,
+            )
+
+        failures.extend(
+            self._run_cleanup_operations((withdraw_and_resize, withdraw_and_verify))
+        )
+
+    def _force_fail_closed_withdrawal(
+        self,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int,
+        safe_values_by_pool: t.Mapping[str, list[bool]],
+        safe_number_of_addresses: int | None = None,
+    ) -> None:
+        pools = self._exact_prefix_pools(prefix_pool_regex, expected_prefix_pool_count)
+        if {str(pool.Name) for pool in pools} != set(safe_values_by_pool):
+            raise ValueError(
+                "IXIA prefix-pool set changed during fail-closed withdrawal"
+            )
+        failures: list[Exception] = []
+        if safe_number_of_addresses is None:
+            self._restore_safe_active_values(
+                pools,
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_values_by_pool,
+                failures,
+            )
+        else:
+            self._restore_safe_compact_capacity(
+                pools,
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                safe_values_by_pool,
+                safe_number_of_addresses,
+                failures,
+            )
+        if failures:
+            raise ValueError(
+                f"IXIA fail-closed withdrawal had {len(failures)} failures"
+            ) from ExceptionGroup("IXIA fail-closed withdrawal failures", failures)
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         prefix_pool_regex = params["prefix_pool_regex"]
         prefix_start_index = params.get("prefix_start_index", 0)
         prefix_end_index = params.get("prefix_end_index")
-        enable = params["enable"]
-        self.configure_bgp_prefixes_active_state(
-            enable, prefix_pool_regex, prefix_start_index, prefix_end_index
+        expected_prefix_pool_count = params.get("expected_prefix_pool_count")
+        expected_number_of_addresses = params.get("expected_number_of_addresses")
+        target_number_of_addresses = params.get("target_number_of_addresses")
+        allowed_current_number_of_addresses = params.get(
+            "allowed_current_number_of_addresses"
         )
+        safe_number_of_addresses = params.get("safe_number_of_addresses")
+        runtime_route_operation = params.get("runtime_route_operation", False)
+        enable = params["enable"]
+        legacy_args = (
+            enable,
+            prefix_pool_regex,
+            prefix_start_index,
+            prefix_end_index,
+            expected_prefix_pool_count,
+        )
+        extended_values = (
+            expected_number_of_addresses,
+            target_number_of_addresses,
+            allowed_current_number_of_addresses,
+            safe_number_of_addresses,
+            runtime_route_operation,
+        )
+        has_extended_values = any(
+            value is not None for value in extended_values[:-1]
+        ) or bool(runtime_route_operation)
+        args = (*legacy_args, *extended_values) if has_extended_values else legacy_args
+        await asyncio.to_thread(self.configure_bgp_prefixes_active_state, *args)
 
-    @retryable(num_tries=2)
+    @_serialized_ixia_prefix_config
+    @_retry_ixia_busy_operation
     def configure_bgp_prefixes_active_state(
         self,
         active_state: bool,
         prefix_pool_regex: str,
         prefix_start_index: int = 0,
         prefix_end_index: t.Optional[int] = None,
+        expected_prefix_pool_count: t.Optional[int] = None,
+        expected_number_of_addresses: t.Optional[int] = None,
+        target_number_of_addresses: t.Optional[int] = None,
+        allowed_current_number_of_addresses: t.Optional[t.Sequence[int]] = None,
+        safe_number_of_addresses: t.Optional[int] = None,
+        runtime_route_operation: bool = False,
     ) -> None:
         """
         Advertise or withdraw BGP prefixes within a specified range for matching prefix pools.
@@ -98,35 +579,544 @@ class IxiaEnableDisableBgpPrefixes(BaseTask):
                 Defaults to 0.
             prefix_end_index: Ending index (exclusive) within the network group multiplier.
                 If None, uses the network group multiplier value (all remaining prefixes).
+            expected_prefix_pool_count: If set, require exactly this many matching
+                prefix pools. Must be a positive integer.
         """
-        prefix_pool_obj_list = self.ixia.get_prefix_pools_by_regexes(
-            prefix_pool_regex=prefix_pool_regex
+        allowed_counts = self._validate_prefix_mutation_inputs(
+            active_state=active_state,
+            prefix_start_index=prefix_start_index,
+            prefix_end_index=prefix_end_index,
+            expected_prefix_pool_count=expected_prefix_pool_count,
+            expected_number_of_addresses=expected_number_of_addresses,
+            target_number_of_addresses=target_number_of_addresses,
+            allowed_current_number_of_addresses=allowed_current_number_of_addresses,
+            safe_number_of_addresses=safe_number_of_addresses,
+            runtime_route_operation=runtime_route_operation,
         )
-        for prefix_pool_obj in prefix_pool_obj_list:
-            bgp_ip_route_property = (
-                (prefix_pool_obj.BgpIPRouteProperty.find())
-                if isinstance(prefix_pool_obj, Ipv4PrefixPools)
-                else prefix_pool_obj.BgpV6IPRouteProperty.find()
-            )[0]
+        mutation_plan, safe_values_by_pool, current_counts_by_pool, active_counts = (
+            self._build_prefix_mutation_plan(
+                active_state=active_state,
+                prefix_pool_regex=prefix_pool_regex,
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                expected_prefix_pool_count=expected_prefix_pool_count,
+                expected_number_of_addresses=expected_number_of_addresses,
+                target_number_of_addresses=target_number_of_addresses,
+                allowed_counts=allowed_counts,
+                safe_number_of_addresses=safe_number_of_addresses,
+            )
+        )
+        self._apply_prefix_mutation_plan(
+            active_state=active_state,
+            prefix_pool_regex=prefix_pool_regex,
+            prefix_start_index=prefix_start_index,
+            expected_prefix_pool_count=expected_prefix_pool_count,
+            expected_number_of_addresses=expected_number_of_addresses,
+            target_number_of_addresses=target_number_of_addresses,
+            safe_number_of_addresses=safe_number_of_addresses,
+            runtime_route_operation=runtime_route_operation,
+            mutation_plan=mutation_plan,
+            safe_values_by_pool=safe_values_by_pool,
+            current_counts_by_pool=current_counts_by_pool,
+            active_value_counts_by_pool=active_counts,
+        )
+
+    @staticmethod
+    def _validate_positive_optional_int(name: str, value: t.Any) -> None:
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(
+                f"{name} must be a positive non-bool integer, got {value!r}"
+            )
+
+    @staticmethod
+    def _validate_compact_resize_inputs(
+        *,
+        active_state: bool,
+        prefix_start_index: int,
+        prefix_end_index: int | None,
+        expected_prefix_pool_count: int | None,
+        allowed_counts: tuple[int, ...],
+        safe_number_of_addresses: int | None,
+    ) -> None:
+        if active_state:
+            raise ValueError("IXIA compact prefix-pool resize requires enable=False")
+        if prefix_start_index != 0 or prefix_end_index is not None:
+            raise ValueError(
+                "IXIA compact prefix-pool resize requires a full-pool withdrawal"
+            )
+        if expected_prefix_pool_count is None:
+            raise ValueError(
+                "IXIA compact prefix-pool resize requires exact pool cardinality"
+            )
+        if not allowed_counts:
+            raise ValueError(
+                "IXIA compact prefix-pool resize requires allowed current counts"
+            )
+        if safe_number_of_addresses is None:
+            raise ValueError(
+                "IXIA compact prefix-pool resize requires a fail-closed count"
+            )
+
+    @classmethod
+    def _validate_prefix_mutation_inputs(
+        cls,
+        *,
+        active_state: bool,
+        prefix_start_index: int,
+        prefix_end_index: int | None,
+        expected_prefix_pool_count: int | None,
+        expected_number_of_addresses: int | None,
+        target_number_of_addresses: int | None,
+        allowed_current_number_of_addresses: t.Sequence[int] | None,
+        safe_number_of_addresses: int | None,
+        runtime_route_operation: bool,
+    ) -> tuple[int, ...]:
+        cls._validate_positive_optional_int(
+            "expected_prefix_pool_count", expected_prefix_pool_count
+        )
+        for name, value in (
+            ("expected_number_of_addresses", expected_number_of_addresses),
+            ("target_number_of_addresses", target_number_of_addresses),
+            ("safe_number_of_addresses", safe_number_of_addresses),
+        ):
+            cls._validate_positive_optional_int(name, value)
+        allowed_counts = (
+            tuple(allowed_current_number_of_addresses)
+            if allowed_current_number_of_addresses is not None
+            else ()
+        )
+        if not isinstance(runtime_route_operation, bool):
+            raise ValueError(
+                "runtime_route_operation must be a boolean, got "
+                f"{runtime_route_operation!r}"
+            )
+        if runtime_route_operation and expected_prefix_pool_count != 1:
+            raise ValueError(
+                "IXIA runtime route operation requires exact pool cardinality 1"
+            )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in allowed_counts
+        ):
+            raise ValueError(
+                "allowed_current_number_of_addresses must contain only positive "
+                f"non-bool integers, got {allowed_counts!r}"
+            )
+        if target_number_of_addresses is not None:
+            cls._validate_compact_resize_inputs(
+                active_state=active_state,
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                expected_prefix_pool_count=expected_prefix_pool_count,
+                allowed_counts=allowed_counts,
+                safe_number_of_addresses=safe_number_of_addresses,
+            )
+        return allowed_counts
+
+    def _raise_resize_precondition(
+        self,
+        error: Exception,
+        *,
+        target_number_of_addresses: int | None,
+        prefix_pool_regex: str,
+        expected_prefix_pool_count: int | None,
+        safe_values_by_pool: t.Mapping[str, list[bool]],
+        safe_number_of_addresses: int | None,
+    ) -> t.NoReturn:
+        if target_number_of_addresses is None:
+            raise error
+        try:
+            self._force_fail_closed_withdrawal(
+                prefix_pool_regex,
+                t.cast(int, expected_prefix_pool_count),
+                safe_values_by_pool,
+                safe_number_of_addresses,
+            )
+        except Exception as cleanup_error:
+            raise ValueError(
+                "IXIA compact prefix-pool precondition and fail-closed "
+                f"restoration failed: precondition={error!r}, "
+                f"cleanup={cleanup_error!r}"
+            ) from ExceptionGroup(
+                "IXIA compact resize precondition and cleanup failures",
+                [error, cleanup_error],
+            )
+        raise error
+
+    @staticmethod
+    def _resolve_prefix_pool_current_count(
+        prefix_pool_obj: t.Any,
+        *,
+        network_group_multiplier: t.Any,
+        expected_number_of_addresses: int | None,
+        target_number_of_addresses: int | None,
+        allowed_counts: tuple[int, ...],
+        raise_precondition: t.Callable[[Exception], t.NoReturn],
+    ) -> int | None:
+        if target_number_of_addresses is not None:
+            if int(network_group_multiplier) != 1:
+                raise_precondition(
+                    ValueError(
+                        "IXIA compact prefix-pool resize requires NetworkGroup "
+                        f"Multiplier=1 for {prefix_pool_obj.Name!r}, got "
+                        f"{network_group_multiplier!r}"
+                    )
+                )
+            current_count = int(prefix_pool_obj.NumberOfAddresses)
+            if current_count not in allowed_counts:
+                raise_precondition(
+                    ValueError(
+                        f"IXIA prefix pool {prefix_pool_obj.Name!r} has "
+                        f"NumberOfAddresses={current_count}, expected one of "
+                        f"{allowed_counts!r}"
+                    )
+                )
+            return current_count
+        if (
+            expected_number_of_addresses is not None
+            and int(prefix_pool_obj.NumberOfAddresses) != expected_number_of_addresses
+        ):
+            raise ValueError(
+                f"IXIA prefix pool {prefix_pool_obj.Name!r} has "
+                f"NumberOfAddresses={prefix_pool_obj.NumberOfAddresses}, "
+                f"expected {expected_number_of_addresses}"
+            )
+        return None
+
+    def _prepare_prefix_active_values(
+        self,
+        prefix_pool_obj: t.Any,
+        route_property: t.Any,
+        current_count: int | None,
+        raise_precondition: t.Callable[[Exception], t.NoReturn],
+    ) -> tuple[list[bool], list[bool], int | None]:
+        try:
+            active_values = self._normalized_active_values(
+                route_property.Active.Values,
+                context=f"initial values for {prefix_pool_obj.Name!r}",
+            )
+        except Exception as error:
+            raise_precondition(error)
+        safe_values = list(active_values)
+        if current_count is None:
+            return active_values, safe_values, None
+        route_property_count = int(route_property.Count)
+        if not active_values or len(active_values) != route_property_count:
+            raise_precondition(
+                ValueError(
+                    f"IXIA compact prefix pool {prefix_pool_obj.Name!r} "
+                    f"has {len(active_values)} Active.Values for route-property "
+                    f"Count={route_property_count}"
+                )
+            )
+        return (
+            [False] * len(active_values),
+            [False] * len(safe_values),
+            route_property_count,
+        )
+
+    @staticmethod
+    def _resolve_active_slots(
+        prefix_pool_obj: t.Any,
+        network_group_multiplier: int,
+        active_value_count: int,
+        prefix_start_index: int,
+        prefix_end_index: int | None,
+        raise_precondition: t.Callable[[Exception], t.NoReturn],
+    ) -> tuple[list[tuple[int, int]], int]:
+        number_of_addresses = int(prefix_pool_obj.NumberOfAddresses)
+        if network_group_multiplier == 1 and number_of_addresses > 1:
+            if prefix_start_index != 0 or prefix_end_index not in {
+                None,
+                number_of_addresses,
+            }:
+                raise_precondition(
+                    ValueError(
+                        f"IXIA compact prefix pool {prefix_pool_obj.Name!r} "
+                        "cannot select a partial logical-prefix range; resize "
+                        "NumberOfAddresses and select the full pool"
+                    )
+                )
+            return list(enumerate([0] * active_value_count)), number_of_addresses
+        return _resolve_prefix_slots(
+            prefix_pool_obj,
+            network_group_multiplier,
+            active_value_count,
+            prefix_start_index,
+            prefix_end_index,
+        )
+
+    def _build_prefix_mutation_entry(
+        self,
+        prefix_pool_obj: t.Any,
+        *,
+        active_state: bool,
+        prefix_start_index: int,
+        prefix_end_index: int | None,
+        expected_number_of_addresses: int | None,
+        target_number_of_addresses: int | None,
+        allowed_counts: tuple[int, ...],
+        raise_precondition: t.Callable[[Exception], t.NoReturn],
+    ) -> tuple[
+        tuple[t.Any, t.Any, list[bool], int, tuple[int, ...]],
+        list[bool],
+        int | None,
+        int | None,
+    ]:
+        try:
+            route_property = self._route_property(prefix_pool_obj)
+        except Exception as error:
+            raise_precondition(error)
+        try:
             network_group_multiplier = self.ixia.map_prefix_pool_to_network_group(
                 prefix_pool_obj
             ).Multiplier
-            active_list = bgp_ip_route_property.Active.Values
-            slots, prefix_pool_prefix_end_index = _resolve_prefix_slots(
+        except Exception as error:
+            raise_precondition(error)
+        current_count = self._resolve_prefix_pool_current_count(
+            prefix_pool_obj,
+            network_group_multiplier=network_group_multiplier,
+            expected_number_of_addresses=expected_number_of_addresses,
+            target_number_of_addresses=target_number_of_addresses,
+            allowed_counts=allowed_counts,
+            raise_precondition=raise_precondition,
+        )
+        active_values, safe_values, active_value_count = (
+            self._prepare_prefix_active_values(
                 prefix_pool_obj,
-                network_group_multiplier,
-                len(active_list),
-                prefix_start_index,
-                prefix_end_index,
+                route_property,
+                current_count,
+                raise_precondition,
             )
-            for i, _mod in slots:
-                active_list[i] = active_state
-            bgp_ip_route_property.Active.ValueList(active_list)
+        )
+        if (
+            int(network_group_multiplier) == 1
+            and int(prefix_pool_obj.NumberOfAddresses) > 1
+            and (not active_values or len(active_values) != int(route_property.Count))
+        ):
+            raise_precondition(
+                ValueError(
+                    f"IXIA compact prefix pool {prefix_pool_obj.Name!r} has "
+                    f"{len(active_values)} Active.Values for route-property "
+                    f"Count={route_property.Count}"
+                )
+            )
+        slots, resolved_end_index = self._resolve_active_slots(
+            prefix_pool_obj,
+            int(network_group_multiplier),
+            len(active_values),
+            prefix_start_index,
+            prefix_end_index,
+            raise_precondition,
+        )
+        for index, _within_peer_index in slots:
+            active_values[index] = active_state
+            safe_values[index] = False
+        return (
+            (
+                prefix_pool_obj,
+                route_property,
+                active_values,
+                resolved_end_index,
+                tuple(index + 1 for index, _ in slots),
+            ),
+            safe_values,
+            current_count,
+            active_value_count,
+        )
+
+    def _build_prefix_mutation_plan(
+        self,
+        *,
+        active_state: bool,
+        prefix_pool_regex: str,
+        prefix_start_index: int,
+        prefix_end_index: int | None,
+        expected_prefix_pool_count: int | None,
+        expected_number_of_addresses: int | None,
+        target_number_of_addresses: int | None,
+        allowed_counts: tuple[int, ...],
+        safe_number_of_addresses: int | None,
+    ) -> tuple[
+        list[tuple[t.Any, t.Any, list[bool], int, tuple[int, ...]]],
+        dict[str, list[bool]],
+        dict[str, int],
+        dict[str, int],
+    ]:
+        pools = (
+            self._exact_prefix_pools(prefix_pool_regex, expected_prefix_pool_count)
+            if expected_prefix_pool_count is not None
+            else self.ixia.get_prefix_pools_by_regexes(
+                prefix_pool_regex=prefix_pool_regex
+            )
+        )
+        mutation_plan = []
+        safe_values_by_pool = (
+            {str(pool.Name): [] for pool in pools}
+            if target_number_of_addresses is not None
+            else {}
+        )
+        current_counts_by_pool = {}
+        active_value_counts_by_pool = {}
+
+        def raise_precondition(error: Exception) -> t.NoReturn:
+            self._raise_resize_precondition(
+                error,
+                target_number_of_addresses=target_number_of_addresses,
+                prefix_pool_regex=prefix_pool_regex,
+                expected_prefix_pool_count=expected_prefix_pool_count,
+                safe_values_by_pool=safe_values_by_pool,
+                safe_number_of_addresses=safe_number_of_addresses,
+            )
+
+        for pool in pools:
+            entry, safe_values, current_count, active_value_count = (
+                self._build_prefix_mutation_entry(
+                    pool,
+                    active_state=active_state,
+                    prefix_start_index=prefix_start_index,
+                    prefix_end_index=prefix_end_index,
+                    expected_number_of_addresses=expected_number_of_addresses,
+                    target_number_of_addresses=target_number_of_addresses,
+                    allowed_counts=allowed_counts,
+                    raise_precondition=raise_precondition,
+                )
+            )
+            name = str(pool.Name)
+            mutation_plan.append(entry)
+            safe_values_by_pool[name] = safe_values
+            if current_count is not None:
+                current_counts_by_pool[name] = current_count
+            if active_value_count is not None:
+                active_value_counts_by_pool[name] = active_value_count
+        return (
+            mutation_plan,
+            safe_values_by_pool,
+            current_counts_by_pool,
+            active_value_counts_by_pool,
+        )
+
+    def _write_prefix_mutation_plan(
+        self,
+        mutation_plan: t.Sequence[
+            tuple[t.Any, t.Any, list[bool], int, tuple[int, ...]]
+        ],
+        *,
+        prefix_start_index: int,
+        active_state: bool,
+    ) -> None:
+        for pool, route_property, values, end_index, _ in mutation_plan:
+            route_property.Active.ValueList(values)
             self.logger.info(
-                f"Configured prefixes in range {prefix_start_index} - {prefix_pool_prefix_end_index}"
-                f" active state to {active_state} for {prefix_pool_obj.Name}"
+                f"Configured prefixes in range {prefix_start_index} - "
+                f"{end_index} active state to {active_state} for {pool.Name}"
             )
         self.ixia.apply_changes()
+
+    def _apply_prefix_mutation_plan(
+        self,
+        *,
+        active_state: bool,
+        prefix_pool_regex: str,
+        prefix_start_index: int,
+        expected_prefix_pool_count: int | None,
+        expected_number_of_addresses: int | None,
+        target_number_of_addresses: int | None,
+        safe_number_of_addresses: int | None,
+        runtime_route_operation: bool,
+        mutation_plan: t.Sequence[
+            tuple[t.Any, t.Any, list[bool], int, tuple[int, ...]]
+        ],
+        safe_values_by_pool: t.Mapping[str, list[bool]],
+        current_counts_by_pool: t.Mapping[str, int],
+        active_value_counts_by_pool: t.Mapping[str, int],
+    ) -> None:
+        expected_values_by_pool = {
+            str(pool.Name): values for pool, _, values, _, _ in mutation_plan
+        }
+
+        def set_running(running: bool) -> None:
+            for _, route_property, _, _, indices in mutation_plan:
+                operation = route_property.Start if running else route_property.Stop
+                operation(SessionIndices=list(indices))
+
+        def mutate() -> None:
+            self._write_prefix_mutation_plan(
+                mutation_plan,
+                prefix_start_index=prefix_start_index,
+                active_state=active_state,
+            )
+
+        if expected_prefix_pool_count is None:
+            mutate()
+            return
+        try:
+            if runtime_route_operation:
+                set_running(False)
+            mutate()
+            self._verify_fresh_active_values(
+                prefix_pool_regex,
+                expected_prefix_pool_count,
+                expected_values_by_pool,
+                expected_number_of_addresses,
+                current_counts_by_pool
+                if target_number_of_addresses is not None
+                else None,
+            )
+            if target_number_of_addresses is not None:
+                self._resize_prefix_pools(
+                    prefix_pool_regex,
+                    expected_prefix_pool_count,
+                    target_number_of_addresses,
+                    expected_values_by_pool,
+                )
+                self._write_all_fresh_active_values_inactive(
+                    prefix_pool_regex,
+                    expected_prefix_pool_count,
+                    expected_values_by_pool,
+                )
+                self._verify_fresh_inactive_values(
+                    prefix_pool_regex,
+                    expected_prefix_pool_count,
+                    target_number_of_addresses,
+                    active_value_counts_by_pool,
+                )
+            if runtime_route_operation and active_state:
+                set_running(True)
+        except Exception as mutation_error:
+            cleanup_failures = self._run_cleanup_operations(
+                (lambda: set_running(False),) if runtime_route_operation else ()
+            )
+            cleanup_failures.extend(
+                self._run_cleanup_operations(
+                    (
+                        lambda: self._force_fail_closed_withdrawal(
+                            prefix_pool_regex,
+                            expected_prefix_pool_count,
+                            safe_values_by_pool,
+                            safe_number_of_addresses,
+                        ),
+                    )
+                )
+            )
+            if cleanup_failures:
+                cleanup_error = ExceptionGroup(
+                    "IXIA prefix mutation cleanup failures", cleanup_failures
+                )
+                raise ValueError(
+                    "IXIA prefix mutation and fail-closed withdrawal failed: "
+                    f"mutation={mutation_error!r}, cleanup={cleanup_error!r}"
+                ) from ExceptionGroup(
+                    "IXIA prefix mutation and cleanup failures",
+                    [mutation_error, cleanup_error],
+                )
+            raise
+        self.logger.info(
+            "Verified fresh Active.Values readback for "
+            f"{sorted(expected_values_by_pool)}"
+        )
 
 
 class IxiaRandomizeBgpPrefixLocalPreference(BaseTask):
@@ -920,8 +1910,9 @@ class ConfigureIxiaInterfaces(BaseTask):
                 configure_vlan_kwargs,
             )
             if speed_in_gbps and profile_id:
-                speed_name = PortSpeed._VALUES_TO_NAMES.get(speed_in_gbps * 1000)
-                if not speed_name:
+                try:
+                    speed_name = PortSpeed(speed_in_gbps * 1000).name
+                except ValueError:
                     self.logger.error(
                         f"Invalid speed {speed_in_gbps}. Skipping speed configuration."
                     )

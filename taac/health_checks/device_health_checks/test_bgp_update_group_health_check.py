@@ -5,6 +5,7 @@
 
 import json
 import unittest
+from enum import Enum
 from unittest.mock import AsyncMock, MagicMock
 
 from neteng.fboss.bgp_thrift.types import TBgpPeerState
@@ -51,6 +52,7 @@ def _make_group(
     group_state="READY",
     afi_ipv4_negotiated=None,
     afi_ipv6_negotiated=None,
+    out_delay_seconds=0,
 ):
     group = MagicMock()
     group.group_id = group_id
@@ -60,6 +62,7 @@ def _make_group(
     group.group_key = MagicMock()
     group.group_key.egress_policy_name = egress_policy_name
     group.group_key.peer_group_name = peer_group_name
+    group.group_key.out_delay_seconds = out_delay_seconds
     # Only pin the AFI flags when a test cares (dual-stack isolation tests);
     # otherwise leave the MagicMock defaults untouched.
     if afi_ipv4_negotiated is not None:
@@ -413,6 +416,75 @@ class TestBgpUpdateGroupHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("99", result.message)
 
+    # --- operational state (global across every returned group) ---
+
+    async def test_expected_group_states_idle_pass(self):
+        groups = _default_groups()
+        for group in groups:
+            group.group_state = "IDLE"
+        self._set_resp(groups)
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_group_states": ["IDLE"]},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_expected_group_states_normalizes_enum_values(self):
+        class GroupState(Enum):
+            IDLE = 1
+
+        groups = _default_groups()
+        for group in groups:
+            group.group_state = GroupState.IDLE
+        self._set_resp(groups)
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_group_states": ["idle"]},
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+
+    async def test_expected_group_states_rejects_malformed_contract(self):
+        groups = _default_groups()
+        self._set_resp(groups)
+        for value in ([], "IDLE", ["BROKEN"]):
+            with self.subTest(value=value):
+                result = await self.health_check._run(
+                    self.device,
+                    self.input,
+                    {"expected_group_states": value},
+                )
+
+                self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
+
+    async def test_expected_group_states_reject_non_idle_states_globally(self):
+        for state in ("READY", "WAITING", "UNINITIALIZED"):
+            with self.subTest(state=state):
+                groups = _default_groups()
+                for group in groups:
+                    group.group_state = "IDLE"
+                groups[-1].group_state = state
+                self._set_resp(groups)
+
+                result = await self.health_check._run(
+                    self.device,
+                    self.input,
+                    {
+                        "peer_group_substrings": [IBGP],
+                        "expected_group_states": ["IDLE"],
+                    },
+                )
+
+                self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+                self.assertIn("group_id=3", result.message)
+                self.assertIn(f"state='{state}'", result.message)
+                self.assertIn("['IDLE']", result.message)
+
     # --- empty peer groups (assertion 5) ---
 
     async def test_expect_empty_pass_when_no_established_members(self):
@@ -544,6 +616,179 @@ class TestBgpUpdateGroupHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
         self.assertIn("afis", result.message)
 
+    # --- IAR / exact out-delay assertion ---
+
+    async def test_iar_zero_passes_for_all_five_semantic_groups(self):
+        groups = _dual_stack_groups() + [
+            _make_group(
+                5,
+                [_make_peer("2401:db00::5", MON)],
+                peer_group_name=MON,
+            )
+        ]
+        self._set_resp(groups)
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "expected_out_delay_seconds_by_substring": {
+                    IBGP: 0,
+                    IBGP_V4: 0,
+                    EBGP: 0,
+                    EBGP_V4: 0,
+                    MON: 0,
+                }
+            },
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_iar_missing_out_delay_key_returns_fail(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=IBGP,
+                out_delay_seconds=None,
+            )
+        ]
+        self._set_resp(groups)
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {IBGP: 0}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("no valid out_delay_seconds key", result.message)
+
+    async def test_iar_nonzero_out_delay_returns_fail(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=IBGP,
+                out_delay_seconds=3,
+            )
+        ]
+        self._set_resp(groups)
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {IBGP: 0}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("out_delay_seconds=3", result.message)
+
+    async def test_iar_ambiguous_selector_returns_fail(self):
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {"EB-EB": 0}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("ambiguous", result.message)
+        self.assertIn(IBGP, result.message)
+        self.assertIn(IBGP_V4, result.message)
+
+    async def test_iar_missing_selector_returns_fail(self):
+        self._set_resp(_dual_stack_groups())
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {"NO-SUCH-PG": 0}},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("matches no update-group", result.message)
+
+    async def test_iar_empty_group_list_reports_selector_miss(self):
+        self._set_resp([])
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {IBGP: 0}},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("matches no update-group", result.message)
+        self.assertNotIn("missing or empty peer_group_name", result.message)
+
+    async def test_iar_all_missing_peer_group_names_returns_precise_failure(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=None,
+            )
+        ]
+        self._set_resp(groups)
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {IBGP: 0}},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("update groups [1]", result.message)
+        self.assertIn("missing or empty peer_group_name", result.message)
+        self.assertIn(
+            "No update groups matched any expected IAR selector", result.message
+        )
+        self.assertIn(f"expected selectors ['{IBGP}']", result.message)
+
+    async def test_iar_one_named_and_one_nameless_group_fails_closed(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=IBGP,
+            ),
+            _make_group(
+                2,
+                [_make_peer("2401:db00::2", IBGP)],
+                peer_group_name=None,
+            ),
+        ]
+        self._set_resp(groups)
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"expected_out_delay_seconds_by_substring": {IBGP: 0}},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("update groups [2]", result.message)
+        self.assertIn("missing or empty peer_group_name", result.message)
+
+    async def test_unset_iar_expectation_preserves_existing_behavior(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=IBGP,
+                out_delay_seconds=None,
+            )
+        ]
+        self._set_resp(groups)
+        result = await self.health_check._run(self.device, self.input, {})
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_nameless_group_without_iar_expectation_passes(self):
+        groups = [
+            _make_group(
+                1,
+                [_make_peer("2401:db00::1", IBGP)],
+                peer_group_name=None,
+            )
+        ]
+        self._set_resp(groups)
+
+        result = await self.health_check._run(self.device, self.input, {})
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
     # --- combined 2.1.1-style check ---
 
     async def test_full_initial_dump_pass(self):
@@ -622,6 +867,7 @@ class TestCreateBgpUpdateGroupCheck(unittest.TestCase):
         self.assertEqual(payload["peer_group_substrings"], [])
         self.assertEqual(payload["expected_member_counts"], {})
         self.assertEqual(payload["expected_policy_names"], {})
+        self.assertNotIn("expected_group_states", payload)
 
     def test_factory_serializes_params(self):
         check = create_bgp_update_group_check(
@@ -629,6 +875,7 @@ class TestCreateBgpUpdateGroupCheck(unittest.TestCase):
             expected_member_counts={IBGP: 2, MON: 1},
             expected_policy_names={IBGP: ["IBGP-V6-EGRESS"]},
             expected_group_count=3,
+            expected_group_states=["IDLE"],
             check_id="eb03_2_1_1",
         )
         self.assertEqual(check.check_id, "eb03_2_1_1")
@@ -637,6 +884,18 @@ class TestCreateBgpUpdateGroupCheck(unittest.TestCase):
         self.assertEqual(payload["expected_member_counts"], {IBGP: 2, MON: 1})
         self.assertEqual(payload["expected_policy_names"], {IBGP: ["IBGP-V6-EGRESS"]})
         self.assertEqual(payload["expected_group_count"], 3)
+        self.assertEqual(payload["expected_group_states"], ["IDLE"])
+
+    def test_factory_rejects_malformed_group_states(self):
+        for value in ([], "IDLE", ["BROKEN"]):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    create_bgp_update_group_check(expected_group_states=value)
+
+    def test_factory_omits_expected_group_states_when_unset(self):
+        check = create_bgp_update_group_check(peer_group_substrings=[IBGP])
+        payload = json.loads(check.check_params.json_params)
+        self.assertNotIn("expected_group_states", payload)
 
     def test_factory_omits_group_count_when_unset(self):
         check = create_bgp_update_group_check(peer_group_substrings=[IBGP])
@@ -669,6 +928,17 @@ class TestCreateBgpUpdateGroupCheck(unittest.TestCase):
         payload = json.loads(check.check_params.json_params)
         self.assertNotIn("expected_afi_by_substring", payload)
 
+    def test_factory_serializes_expected_out_delay_seconds_by_substring(self):
+        check = create_bgp_update_group_check(
+            expected_out_delay_seconds_by_substring={IBGP: 0, EBGP: 0}
+        )
+        payload = json.loads(check.check_params.json_params)
+        self.assertEqual(
+            payload["expected_out_delay_seconds_by_substring"],
+            {IBGP: 0, EBGP: 0},
+        )
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_factory_omits_out_delay_when_unset(self):
+        check = create_bgp_update_group_check(peer_group_substrings=[IBGP])
+        payload = json.loads(check.check_params.json_params)
+        self.assertNotIn("expected_out_delay_seconds_by_substring", payload)

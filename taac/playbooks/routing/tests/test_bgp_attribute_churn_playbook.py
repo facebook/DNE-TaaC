@@ -246,6 +246,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                bound=MagicMock(),
+                selected_tc7_playbooks=set(),
             )
 
         self.assertEqual(
@@ -304,6 +306,9 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 expected_ebgp_prefix_count,
                 topology_factory.call_args.kwargs["ebgp_prefix_count"],
             )
+            self.assertIsNone(
+                topology_factory.call_args.kwargs["ebgp_static_prefix_count"]
+            )
             self.assertEqual(
                 "STANDALONE",
                 topology_factory.call_args.kwargs["openr_mode"].name,
@@ -316,23 +321,36 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
             "bgp_ebb_full_scale._get_bgp_ebb_full_scale_playbooks"
         )
+        topology_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.ebb_full_scale_topology"
+        )
+        topology = MagicMock()
+        topology.bind_to_inventory.return_value = MagicMock()
+        available_names = (
+            "['bgp_ug_bgp_daemon_restart', 'bgp_ug_bgp_peer_flapping', "
+            "'bgp_ug_cold_start', 'bgp_ug_fibagent_restart', "
+            "'bgp_ug_link_flap_recovery', 'first', 'second', "
+            "'update_group_sustained_link_flap']"
+        )
 
         for selected, message in (
             (
                 ["unknown"],
                 "Unknown BGP EBB playbook selections: ['unknown']; "
-                "available: ['first', 'second']",
+                f"available: {available_names}",
             ),
             (
                 ["unknown", "also_unknown"],
                 "Unknown BGP EBB playbook selections: ['unknown', 'also_unknown']; "
-                "available: ['first', 'second']",
+                f"available: {available_names}",
             ),
             (["first", "first"], "Duplicate BGP EBB playbook selections: ['first']"),
         ):
             with (
                 self.subTest(selected=selected),
                 patch(target, return_value=available),
+                patch(topology_target, return_value=topology),
             ):
                 with self.assertRaises(ValueError) as context:
                     create_bgp_ebb_full_scale_test_config(

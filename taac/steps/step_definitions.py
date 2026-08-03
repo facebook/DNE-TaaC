@@ -11,9 +11,11 @@ import asyncio
 import ipaddress
 import itertools
 import json
+import math
 import os
 import time
 import typing as t
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -237,6 +239,386 @@ def create_custom_step(
         name=StepName.CUSTOM_STEP,
         step_params=Params(json_params=json.dumps(params_dict)),
         description=description,
+    )
+
+
+def create_bgp_agent_log_artifact_step(
+    device_name: str,
+    action: str,
+    state_key: str,
+    *,
+    case_id: str,
+) -> Step:
+    """Capture or publish durable EOS ``Bgp-<pid>`` evidence for one Playbook."""
+    if action not in {"capture", "publish"}:
+        raise ValueError(
+            f"BGP agent-log artifact action must be capture or publish, got {action!r}"
+        )
+    if not device_name or not state_key or not case_id:
+        raise ValueError(
+            "BGP agent-log artifact requires device_name, state_key, and case_id"
+        )
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_agent_log_artifact",
+            "hostname": device_name,
+            "action": action,
+            "state_key": state_key,
+        },
+        description=(f"{case_id} {action} time-bounded DUT Bgp-<pid> log evidence"),
+    )
+
+
+def _validate_persisted_step_key(name: str, value: str) -> None:
+    """Reject non-UUID keys before a persisted custom step reaches runtime."""
+    try:
+        uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a UUID string, got {value!r}") from error
+
+
+def _require_custom_action_params(
+    component: str,
+    action: str,
+    params: t.Mapping[str, t.Any],
+    required: t.Collection[str],
+) -> None:
+    missing = sorted(name for name in required if name not in params)
+    if missing:
+        raise ValueError(f"{component} action {action!r} requires {missing}")
+
+
+def _require_positive_custom_action_param(
+    component: str,
+    action: str,
+    params: t.Mapping[str, t.Any],
+    name: str,
+) -> None:
+    if name not in params:
+        return
+    value = params[name]
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = float("nan")
+    if (
+        isinstance(value, bool)
+        or not math.isfinite(numeric_value)
+        or numeric_value <= 0
+    ):
+        raise ValueError(
+            f"{component} action {action!r} requires {name} to be positive"
+        )
+
+
+def _require_nonnegative_custom_action_param(
+    component: str,
+    action: str,
+    params: t.Mapping[str, t.Any],
+    name: str,
+) -> None:
+    if name not in params:
+        return
+    value = params[name]
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = float("nan")
+    if isinstance(value, bool) or not math.isfinite(numeric_value) or numeric_value < 0:
+        raise ValueError(
+            f"{component} action {action!r} requires {name} to be non-negative"
+        )
+
+
+def create_bgp_update_group_state_step(
+    device_name: str,
+    action: str,
+    state_key: str,
+    *,
+    action_params: t.Optional[t.Mapping[str, t.Any]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create a persisted semantic Update Group state step.
+
+    Supported actions are ``capture``, ``compare``, ``monitor``,
+    ``formation_monitor``, and ``clear``. ``monitor`` requires ``case`` and
+    ``duration_seconds`` in ``action_params``. ``formation_monitor`` accepts
+    positive ``timeout_seconds`` and ``poll_interval_seconds``. Comparison
+    actions may select ``none``, ``group_id``, or ``group_id_and_generation``
+    operational continuity.
+    """
+    actions = {
+        "capture",
+        "clear",
+        "compare",
+        "formation_monitor",
+        "monitor",
+    }
+    if action not in actions:
+        raise ValueError(
+            f"Unsupported BGP Update Group state action {action!r}; "
+            f"expected one of {sorted(actions)}"
+        )
+    _validate_persisted_step_key("state_key", state_key)
+    params = dict(action_params or {})
+    if action == "monitor":
+        _require_custom_action_params(
+            "BGP Update Group state", action, params, ("case", "duration_seconds")
+        )
+        _require_positive_custom_action_param(
+            "BGP Update Group state", action, params, "duration_seconds"
+        )
+        cases = {
+            "fibagent_restart",
+            "link_down",
+            "peer_flap",
+            "recovery",
+            "strict",
+            "sustained_link_flap",
+        }
+        if params["case"] not in cases:
+            raise ValueError(f"monitor case must be one of {sorted(cases)}")
+    for name in ("expected_group_count", "expected_session_count"):
+        _require_positive_custom_action_param(
+            "BGP Update Group state", action, params, name
+        )
+    _require_positive_custom_action_param(
+        "BGP Update Group state", action, params, "poll_interval_seconds"
+    )
+    if action == "verify_zero":
+        _require_nonnegative_custom_action_param(
+            "BGP Update Group state", action, params, "timeout_seconds"
+        )
+    else:
+        _require_positive_custom_action_param(
+            "BGP Update Group state", action, params, "timeout_seconds"
+        )
+    continuity = str(params.get("operational_continuity", "none"))
+    continuity_modes = {"none", "group_id", "group_id_and_generation"}
+    if continuity not in continuity_modes:
+        raise ValueError(
+            f"operational_continuity must be one of {sorted(continuity_modes)}"
+        )
+    payload = {
+        "custom_step_name": "bgp_update_group_state",
+        "hostname": device_name,
+        "action": action,
+        "state_key": state_key,
+        **params,
+    }
+    return create_custom_step(
+        params_dict=payload,
+        description=description or f"BGP Update Group state: {action}",
+    )
+
+
+def _validate_disruption_route_verifier(
+    action: str,
+    params: t.Mapping[str, t.Any],
+    pool_param: str,
+) -> None:
+    if not params.get(pool_param):
+        raise ValueError(
+            f"BGP Update Group disruption action {action!r} requires non-empty "
+            f"{pool_param}"
+        )
+    if "verify_down_route_delta" in params and not isinstance(
+        params["verify_down_route_delta"], bool
+    ):
+        raise ValueError(
+            "BGP Update Group disruption verify_down_route_delta must be a boolean"
+        )
+    if action == "link_flap_recovery":
+        _require_custom_action_params(
+            "BGP Update Group disruption",
+            action,
+            params,
+            (
+                "recovered_receiver_parent_prefixes",
+                "expected_recovered_receiver_count",
+                "expected_route_delta",
+            ),
+        )
+        if not params["recovered_receiver_parent_prefixes"]:
+            raise ValueError(
+                "link_flap_recovery recovered_receiver_parent_prefixes must be "
+                "non-empty"
+            )
+        _require_positive_custom_action_param(
+            "BGP Update Group disruption",
+            action,
+            params,
+            "expected_recovered_receiver_count",
+        )
+        if not params.get("verify_down_route_delta", True):
+            return
+        _require_custom_action_params(
+            "BGP Update Group disruption",
+            action,
+            params,
+            (
+                "down_route_receiver_addresses",
+                "expected_down_receiver_count",
+                "expected_down_route_delta",
+                "expected_failed_ebgp_prefix_count",
+            ),
+        )
+        if not params["down_route_receiver_addresses"]:
+            raise ValueError(
+                "link_flap_recovery down_route_receiver_addresses must be non-empty"
+            )
+        _require_positive_custom_action_param(
+            "BGP Update Group disruption",
+            action,
+            params,
+            "expected_down_receiver_count",
+        )
+        _require_positive_custom_action_param(
+            "BGP Update Group disruption",
+            action,
+            params,
+            "expected_failed_ebgp_prefix_count",
+        )
+        return
+    _require_custom_action_params(
+        "BGP Update Group disruption",
+        action,
+        params,
+        (
+            "receiver_parent_prefixes",
+            "expected_receiver_count",
+            "expected_route_delta",
+        ),
+    )
+
+
+def create_bgp_update_group_disruption_step(
+    device_name: str,
+    action: str,
+    *,
+    action_params: t.Mapping[str, t.Any],
+    description: t.Optional[str] = None,
+) -> Step:
+    """Create a verified Update Group disruption step.
+
+    ``link_flap_recovery`` requires exact full-scale peer and timer contracts.
+    ``sustained_link_flap`` requires ``port_tracks`` and
+    ``heartbeat_scenarios``. ``fixed_peer_flap`` requires ``peer_regex`` and
+    deterministic ``seed``. Route-producing link/peer actions must also supply
+    receiver scope, receiver count, and expected route delta.
+    """
+    required_by_action = {
+        "link_flap_recovery": {
+            "bgp_hold_timer_seconds",
+            "expected_target_peer_count",
+            "interface",
+            "target_peer_subnets",
+        },
+        "sustained_link_flap": {"heartbeat_scenarios", "port_tracks"},
+        "fixed_peer_flap": {"peer_regex", "seed"},
+    }
+    if action not in required_by_action:
+        raise ValueError(
+            f"Unsupported BGP Update Group disruption action {action!r}; "
+            f"expected one of {sorted(required_by_action)}"
+        )
+    params = dict(action_params)
+    _require_custom_action_params(
+        "BGP Update Group disruption",
+        action,
+        params,
+        required_by_action[action],
+    )
+    if action == "link_flap_recovery" and not params["target_peer_subnets"]:
+        raise ValueError("link_flap_recovery target_peer_subnets must be non-empty")
+    if action == "fixed_peer_flap" and not params["peer_regex"]:
+        raise ValueError("fixed_peer_flap peer_regex must be non-empty")
+    for name in (
+        "bgp_hold_timer_seconds",
+        "down_seconds",
+        "event_timeout_seconds",
+        "expected_target_peer_count",
+        "flap_count",
+        "restore_timeout_seconds",
+        "route_verification_timeout_seconds",
+        "transition_timeout_seconds",
+        "up_seconds",
+    ):
+        _require_positive_custom_action_param(
+            "BGP Update Group disruption", action, params, name
+        )
+    if action == "fixed_peer_flap":
+        duration = int(params.get("duration_seconds", 1800))
+        if duration <= 0 or duration % 10:
+            raise ValueError(
+                "fixed_peer_flap duration_seconds must be positive and divisible by 10"
+            )
+        _validate_disruption_route_verifier(action, params, "churn_prefix_pool_regexes")
+    elif action == "link_flap_recovery":
+        _validate_disruption_route_verifier(
+            action, params, "first_down_prefix_pool_regexes"
+        )
+    else:
+        tracks = params["port_tracks"]
+        track_roles = {
+            str(track.get("role", ""))
+            for track in tracks
+            if isinstance(track, t.Mapping)
+        }
+        required_roles = {"bgp_mon", "ebgp", "ibgp"}
+        if track_roles != required_roles or len(tracks) != len(required_roles):
+            raise ValueError(
+                "sustained_link_flap port_tracks must contain exactly one "
+                "ebgp, ibgp, and bgp_mon track"
+            )
+        for track in tracks:
+            _require_custom_action_params(
+                "BGP Update Group disruption port track",
+                action,
+                track,
+                ("interface", "target_peer_subnets"),
+            )
+        scenarios = params["heartbeat_scenarios"]
+        expected_down_roles = {
+            frozenset({"ebgp"}),
+            frozenset({"ibgp"}),
+            frozenset({"bgp_mon"}),
+            frozenset({"ebgp", "bgp_mon"}),
+            frozenset({"ibgp", "bgp_mon"}),
+        }
+        actual_down_roles = {
+            frozenset(scenario.get("down_roles", ()))
+            for scenario in scenarios
+            if isinstance(scenario, t.Mapping)
+        }
+        if actual_down_roles != expected_down_roles or len(scenarios) != len(
+            expected_down_roles
+        ):
+            raise ValueError(
+                "sustained_link_flap heartbeat_scenarios do not cover the "
+                "five required planned-down states"
+            )
+        for scenario in scenarios:
+            _require_custom_action_params(
+                "BGP Update Group disruption heartbeat",
+                action,
+                scenario,
+                (
+                    "expected_receiver_count",
+                    "expected_route_delta",
+                    "receiver_parent_prefixes",
+                    "source_prefix_pool_regexes",
+                ),
+            )
+    payload = {
+        "custom_step_name": "bgp_update_group_disruption",
+        "hostname": device_name,
+        "action": action,
+        **params,
+    }
+    return create_custom_step(
+        params_dict=payload,
+        description=description or f"BGP Update Group disruption: {action}",
     )
 
 
@@ -757,6 +1139,79 @@ def create_verify_bgp_peer_advertised_as_path_converged_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def _describe_bgp_sent_route_count_delta(
+    *,
+    hostname: str,
+    snapshot_key: str,
+    min_delta: int,
+    max_delta: t.Optional[int],
+    tolerance: int,
+    peer_addrs: t.Optional[t.List[str]],
+    peer_group_filter: t.Optional[str],
+    peer_parent_prefixes: t.Optional[t.List[str]],
+) -> str:
+    bound = (
+        f"in [{min_delta}, {max_delta}]" if max_delta is not None else f">= {min_delta}"
+    )
+    if peer_parent_prefixes:
+        scope = f"peers under {peer_parent_prefixes}"
+    elif peer_group_filter:
+        scope = f"peer-group ~{peer_group_filter!r}"
+    else:
+        scope = f"{len(peer_addrs or [])} peer(s)"
+    return (
+        f"Verify BGP sent-count delta {bound} on {scope} on {hostname} "
+        f"(key={snapshot_key}, tol={tolerance})"
+    )
+
+
+def _add_bgp_sent_route_delta_optional_params(
+    params: t.Dict[str, t.Any],
+    *,
+    peer_addrs: t.Optional[t.List[str]],
+    peer_group_filter: t.Optional[str],
+    peer_parent_prefixes: t.Optional[t.List[str]],
+    max_delta: t.Optional[int],
+    min_baseline: int,
+    expected_fail: bool,
+    expected_fail_reason: t.Optional[str],
+) -> None:
+    if peer_addrs is not None:
+        params["peer_addrs"] = list(peer_addrs)
+    if peer_group_filter is not None:
+        params["peer_group_filter"] = peer_group_filter
+    if peer_parent_prefixes is not None:
+        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
+    if max_delta is not None:
+        params["max_delta"] = max_delta
+    if min_baseline:
+        params["min_baseline"] = min_baseline
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+
+
+def _add_bgp_sent_route_delta_convergence_params(
+    params: t.Dict[str, t.Any],
+    *,
+    hard_timeout_seconds: t.Optional[float],
+    poll_interval_seconds: t.Optional[float],
+    stability_window_seconds: t.Optional[float],
+    soft_threshold_seconds: t.Optional[float],
+) -> None:
+    if hard_timeout_seconds is None:
+        return
+    params["convergence_hard_timeout_seconds"] = hard_timeout_seconds
+    for name, value in (
+        ("convergence_poll_interval_seconds", poll_interval_seconds),
+        ("convergence_stability_window_seconds", stability_window_seconds),
+        ("convergence_soft_threshold_seconds", soft_threshold_seconds),
+    ):
+        if value is not None:
+            params[name] = value
+
+
 def create_verify_bgp_sent_route_count_delta_step(
     hostname: str,
     snapshot_key: str,
@@ -779,6 +1234,7 @@ def create_verify_bgp_sent_route_count_delta_step(
     convergence_stability_window_seconds: t.Optional[float] = None,
     convergence_soft_threshold_seconds: t.Optional[float] = None,
     description: t.Optional[str] = None,
+    convergence_trigger_time_jq_var: t.Optional[str] = None,
 ) -> Step:
     """Verify each peer's ``postpolicy_sent_prefix_count`` moved by the expected
     delta since the matching ``create_snapshot_bgp_sent_route_counts_step`` step:
@@ -825,21 +1281,15 @@ def create_verify_bgp_sent_route_count_delta_step(
             "peer_group_filter, or peer_parent_prefixes"
         )
     if description is None:
-        _bound = (
-            f"in [{min_delta}, {max_delta}]"
-            if max_delta is not None
-            else f">= {min_delta}"
-        )
-        _who = (
-            f"peers under {peer_parent_prefixes}"
-            if peer_parent_prefixes
-            else f"peer-group ~{peer_group_filter!r}"
-            if peer_group_filter
-            else f"{len(peer_addrs or [])} peer(s)"
-        )
-        description = (
-            f"Verify BGP sent-count delta {_bound} on {_who} on {hostname} "
-            f"(key={snapshot_key}, tol={tolerance})"
+        description = _describe_bgp_sent_route_count_delta(
+            hostname=hostname,
+            snapshot_key=snapshot_key,
+            min_delta=min_delta,
+            max_delta=max_delta,
+            tolerance=tolerance,
+            peer_addrs=peer_addrs,
+            peer_group_filter=peer_group_filter,
+            peer_parent_prefixes=peer_parent_prefixes,
         )
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "verify_bgp_sent_route_count_delta",
@@ -848,36 +1298,42 @@ def create_verify_bgp_sent_route_count_delta_step(
         "min_delta": min_delta,
         "tolerance": tolerance,
     }
-    if peer_addrs is not None:
-        params["peer_addrs"] = list(peer_addrs)
-    if peer_group_filter is not None:
-        params["peer_group_filter"] = peer_group_filter
-    if peer_parent_prefixes is not None:
-        params["peer_parent_prefixes"] = list(peer_parent_prefixes)
-    if max_delta is not None:
-        params["max_delta"] = max_delta
-    if min_baseline:
-        params["min_baseline"] = min_baseline
-    if expected_fail:
-        params["expected_fail"] = True
-        if expected_fail_reason is not None:
-            params["expected_fail_reason"] = expected_fail_reason
-    # Convergence-poll params serialize ONLY when polling is enabled, so
-    # non-polling callers keep byte-identical params (no golden churn).
-    if convergence_hard_timeout_seconds is not None:
-        params["convergence_hard_timeout_seconds"] = convergence_hard_timeout_seconds
-        if convergence_poll_interval_seconds is not None:
-            params["convergence_poll_interval_seconds"] = (
-                convergence_poll_interval_seconds
+    _add_bgp_sent_route_delta_optional_params(
+        params,
+        peer_addrs=peer_addrs,
+        peer_group_filter=peer_group_filter,
+        peer_parent_prefixes=peer_parent_prefixes,
+        max_delta=max_delta,
+        min_baseline=min_baseline,
+        expected_fail=expected_fail,
+        expected_fail_reason=expected_fail_reason,
+    )
+    _add_bgp_sent_route_delta_convergence_params(
+        params,
+        hard_timeout_seconds=convergence_hard_timeout_seconds,
+        poll_interval_seconds=convergence_poll_interval_seconds,
+        stability_window_seconds=convergence_stability_window_seconds,
+        soft_threshold_seconds=convergence_soft_threshold_seconds,
+    )
+    if convergence_trigger_time_jq_var is not None:
+        if convergence_hard_timeout_seconds is None:
+            raise ValueError(
+                "convergence_trigger_time_jq_var requires convergence polling"
             )
-        if convergence_stability_window_seconds is not None:
-            params["convergence_stability_window_seconds"] = (
-                convergence_stability_window_seconds
-            )
-        if convergence_soft_threshold_seconds is not None:
-            params["convergence_soft_threshold_seconds"] = (
-                convergence_soft_threshold_seconds
-            )
+        if not convergence_trigger_time_jq_var:
+            raise ValueError("convergence_trigger_time_jq_var must be non-empty")
+        return Step(
+            name=StepName.CUSTOM_STEP,
+            step_params=Params(
+                json_params=json.dumps(params),
+                jq_params={
+                    "convergence_trigger_time_seconds": (
+                        f".{convergence_trigger_time_jq_var}"
+                    )
+                },
+            ),
+            description=description,
+        )
     return create_custom_step(params_dict=params, description=description)
 
 
@@ -2504,6 +2960,7 @@ def create_bgp_lifecycle_convergence_step(
     *,
     require_initialized: bool = True,
     convergence_soft_threshold_seconds: float | None = None,
+    convergence_trigger_time_jq_var: str | None = None,
     description: str = "Observe exact BGP lifecycle convergence",
 ) -> Step:
     params: t.Dict[str, t.Any] = {
@@ -2518,6 +2975,21 @@ def create_bgp_lifecycle_convergence_step(
     if convergence_soft_threshold_seconds is not None:
         params["convergence_soft_threshold_seconds"] = (
             convergence_soft_threshold_seconds
+        )
+    if convergence_trigger_time_jq_var is not None:
+        if not convergence_trigger_time_jq_var:
+            raise ValueError("convergence_trigger_time_jq_var must be non-empty")
+        return Step(
+            name=StepName.CUSTOM_STEP,
+            description=description,
+            step_params=Params(
+                json_params=json.dumps(params),
+                jq_params={
+                    "convergence_trigger_time_seconds": (
+                        f".{convergence_trigger_time_jq_var}"
+                    )
+                },
+            ),
         )
     return create_custom_step(params_dict=params, description=description)
 
@@ -4574,6 +5046,9 @@ def create_advertise_withdraw_prefixes_step(
     prefix_start_index: int,
     prefix_end_index: t.Optional[int] = None,
     description: t.Optional[str] = None,
+    expected_prefix_pool_count: t.Optional[int] = None,
+    expected_number_of_addresses: t.Optional[int] = None,
+    runtime_route_operation: bool = False,
 ) -> Step:
     """
     Create a step to advertise or withdraw BGP prefixes from matching prefix pools.
@@ -4584,6 +5059,10 @@ def create_advertise_withdraw_prefixes_step(
         prefix_start_index: Starting index (inclusive) in the prefix range
         prefix_end_index: Ending index in the prefix range. If None, uses the network group multiplier value (all remaining prefixes).
         description: Custom description for the step
+        expected_prefix_pool_count: Exact number of matching IXIA prefix pools.
+        expected_number_of_addresses: Exact compact-pool route capacity.
+        runtime_route_operation: Stop/start the selected physical route-property
+            rows around the Active mutation. Requires exactly one matched pool.
 
     Returns:
         Step object for BGP prefix advertisement/withdrawal
@@ -4600,6 +5079,12 @@ def create_advertise_withdraw_prefixes_step(
     }
     if prefix_end_index is not None:
         params_dicts["prefix_end_index"] = prefix_end_index
+    if expected_prefix_pool_count is not None:
+        params_dicts["expected_prefix_pool_count"] = expected_prefix_pool_count
+    if expected_number_of_addresses is not None:
+        params_dicts["expected_number_of_addresses"] = expected_number_of_addresses
+    if runtime_route_operation:
+        params_dicts["runtime_route_operation"] = True
 
     return create_run_task_step(
         task_name="ixia_enable_disable_bgp_prefixes",
@@ -4702,6 +5187,36 @@ def create_validated_igp_unresolvable_pnh_step(
             "stability_duration_seconds": stability_duration_seconds,
         },
         description="Run validated unresolvable Open/R PNH workflow",
+    )
+
+
+def create_prepare_compact_bgp_prefix_pool_step(
+    *,
+    device_name: str,
+    prefix_pool_regex: str,
+    target_number_of_addresses: int,
+    allowed_current_number_of_addresses: t.Sequence[int],
+    safe_number_of_addresses: int,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Withdraw, resize, and freshly verify one compact BGP prefix pool."""
+    return create_run_task_step(
+        task_name="ixia_enable_disable_bgp_prefixes",
+        params_dict={
+            "hostname": device_name,
+            "enable": False,
+            "prefix_pool_regex": prefix_pool_regex,
+            "prefix_start_index": 0,
+            "expected_prefix_pool_count": 1,
+            "target_number_of_addresses": target_number_of_addresses,
+            "allowed_current_number_of_addresses": list(
+                allowed_current_number_of_addresses
+            ),
+            "safe_number_of_addresses": safe_number_of_addresses,
+            "runtime_route_operation": True,
+        },
+        description=description or "Prepare compact BGP prefix pool",
+        ixia_needed=True,
     )
 
 

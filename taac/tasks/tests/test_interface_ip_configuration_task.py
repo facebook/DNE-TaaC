@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, call, MagicMock, patch
 
 from taac.tasks.interface_ip_configuration_task import (
+    InterfaceIpCleanupTask,
     InterfaceIpConfigurationTask,
 )
 
@@ -114,6 +115,112 @@ class InterfaceIpConfigurationTaskTest(unittest.IsolatedAsyncioTestCase):
         mock_restore.assert_not_awaited()
         self.logger.warning.assert_called_once_with(
             "Stored backup no longer exists; creating a new one: flash:missing_backup"
+        )
+
+    @patch(f"{ARISTA_UTILS_PATH}.delete_backup_config", new_callable=AsyncMock)
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{ARISTA_UTILS_PATH}.backup_config_exists", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_repeated_interface_configuration_cleanup_restores_original_backup(
+        self,
+        mock_get_driver,
+        mock_backup_exists,
+        mock_save,
+        mock_configure,
+        mock_restore,
+        mock_delete,
+    ) -> None:
+        mock_backup_exists.return_value = True
+        mock_save.return_value = "flash:original_config"
+        params = {
+            "interface": "Ethernet3/36/2",
+            "ipv6_base_network": "2401:db00:e50d:11:9",
+            "peer_count": 2,
+            "address_families": ["ipv6"],
+            "clear_existing": True,
+        }
+
+        await self.task.run(params)
+        params["clear_existing"] = False
+        second_task = InterfaceIpConfigurationTask(
+            hostname="bag010.ash6",
+            logger=self.logger,
+            shared_data=self.shared_data,
+        )
+        await second_task.run(params)
+
+        cleanup_task = InterfaceIpCleanupTask(
+            hostname="bag010.ash6",
+            logger=self.logger,
+            shared_data=self.shared_data,
+        )
+        await cleanup_task.run(
+            {
+                "interfaces": ["Ethernet3/36/2"],
+                "restore_from_backup": True,
+                "delete_backup": True,
+            }
+        )
+
+        mock_save.assert_awaited_once()
+        self.assertEqual(2, mock_configure.await_count)
+        mock_restore.assert_awaited_once_with(
+            mock_get_driver.return_value,
+            "flash:original_config",
+            self.logger,
+        )
+        mock_delete.assert_awaited_once_with(
+            mock_get_driver.return_value,
+            "flash:original_config",
+            self.logger,
+        )
+        self.assertNotIn("interface_ip_backup__Ethernet3/36/2", self.shared_data)
+
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{ARISTA_UTILS_PATH}.backup_config_exists", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_repeated_interface_failure_restores_original_backup(
+        self,
+        mock_get_driver,
+        mock_backup_exists,
+        mock_save,
+        mock_configure,
+        mock_restore,
+    ) -> None:
+        mock_backup_exists.return_value = True
+        mock_save.return_value = "flash:original_config"
+        mock_configure.side_effect = [None, RuntimeError("configuration failed")]
+        params = {
+            "interface": "Ethernet3/36/2",
+            "ipv6_base_network": "2401:db00:e50d:11:9",
+            "peer_count": 2,
+            "address_families": ["ipv6"],
+            "clear_existing": True,
+        }
+
+        await self.task.run(params)
+        params["clear_existing"] = False
+        second_task = InterfaceIpConfigurationTask(
+            hostname="bag010.ash6",
+            logger=self.logger,
+            shared_data=self.shared_data,
+        )
+        with self.assertRaisesRegex(RuntimeError, "configuration failed"):
+            await second_task.run(params)
+
+        mock_save.assert_awaited_once()
+        mock_restore.assert_awaited_once_with(
+            mock_get_driver.return_value,
+            "flash:original_config",
+            self.logger,
         )
 
     @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)

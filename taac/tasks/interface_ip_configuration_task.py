@@ -25,15 +25,15 @@ class InterfaceIpConfigurationTask(BaseTask):
     500+ IBGP peers), where manual IP configuration is error-prone.
 
     The task:
-    1. Saves running config backup (always, for safety)
+    1. Saves or reuses the interface's original running config backup
     2. Clears existing IP addresses on the interface (optional)
     3. Generates secondary IP addresses based on peer count
     4. Applies configuration using Arista driver
     5. Validates configuration succeeded
     6. Auto-restores backup on failure
 
-    The backup is automatic and always happens to protect device configuration.
-    The backup file is stored in task data and can be used by cleanup tasks.
+    The first task for an interface saves the backup; repeated tasks reuse that
+    original snapshot. The backup file is stored in task data for cleanup tasks.
 
     Example Usage:
         In test config setup_tasks:
@@ -350,6 +350,7 @@ class InterfaceIpCleanupTask(BaseTask):
 
             # Look for backup in shared data first, then fall back to local _data
             backup_file = None
+            backup_key = None
             if self._shared_data is not None:
                 backup_key = f"interface_ip_backup__{interface}"
                 backup_file = self._shared_data.get(backup_key)
@@ -389,6 +390,8 @@ class InterfaceIpCleanupTask(BaseTask):
                         driver, backup_file, self.logger
                     )
                     self.logger.info(f"✓ Deleted backup file: {backup_file}")
+                    if self._shared_data is not None and backup_key is not None:
+                        self._shared_data.pop(backup_key, None)
 
                 self.logger.info("=" * 80)
                 return

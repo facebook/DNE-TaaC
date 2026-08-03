@@ -126,5 +126,26 @@ class CommonHealthChecksBgpConvergenceTest(unittest.TestCase):
         self.assertFalse(any(c.check_id == self.PRECHECK_ID for c in checks))
 
 
+class CommonHealthChecksHardwareCapacityTest(unittest.TestCase):
+    PRECHECK_ID = "startup_hardware_capacity_baseline"
+
+    def test_hardware_capacity_precheck_is_enabled_by_default(self):
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+        )
+
+        self.assertEqual(1, sum(c.check_id == self.PRECHECK_ID for c in checks))
+
+    def test_hardware_capacity_precheck_can_be_omitted(self):
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+            check_hardware_capacity=False,
+        )
+
+        self.assertFalse(any(c.check_id == self.PRECHECK_ID for c in checks))
+
+
 if __name__ == "__main__":
     unittest.main()

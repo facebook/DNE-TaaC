@@ -61,7 +61,6 @@ from taac.utils.oss_taac_constants import (
     IxiaSessionUnavailableError,
 )
 from taac.utils.oss_taac_lib_utils import (
-    await_sync,
     memoize_forever,
     none_throws,
     retryable,
@@ -5715,6 +5714,173 @@ class Ixia:
             )
         return bgp_peers
 
+    @staticmethod
+    def _validate_bgp_session_address_range(
+        session_start_index: int,
+        session_count: int,
+    ) -> None:
+        for name, value in (
+            ("session_start_index", session_start_index),
+            ("session_count", session_count),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer; got {value!r}")
+
+    @staticmethod
+    def _bgp_session_addresses_for_peer(
+        peer: t.Any,
+        session_start_index: int,
+        session_count: int,
+    ) -> t.List[t.Tuple[str, str]]:
+        peer_ips = list(peer.parent.Address.Values)
+        dut_ips = list(peer.DutIp.Values)
+        start = session_start_index - 1
+        stop = start + session_count
+        if stop > len(peer_ips) or stop > len(dut_ips):
+            end_index = session_start_index + session_count - 1
+            raise ValueError(
+                f"Session range {session_start_index}-{end_index} is out of range for "
+                f"peer {peer.Name!r}: {len(peer_ips)} peer address(es), "
+                f"{len(dut_ips)} DUT IP(s)"
+            )
+        addresses = list(zip(peer_ips[start:stop], dut_ips[start:stop]))
+        return [(str(peer_ip), str(dut_ip)) for peer_ip, dut_ip in addresses]
+
+    def get_bgp_session_addresses_bulk(
+        self,
+        regex: str,
+        session_start_index: int,
+        session_count: int,
+        ignore_case: bool = False,
+    ) -> t.List[t.Tuple[str, str]]:
+        """Resolve one contiguous session range with a single topology scan."""
+        self._validate_bgp_session_address_range(
+            session_start_index,
+            session_count,
+        )
+        peers = self.find_bgp_peers(regex, ignore_case)
+        if len(peers) != 1:
+            raise ValueError(
+                f"Expected exactly one BGP peer matching {regex!r}; got "
+                f"{[peer.Name for peer in peers]!r}"
+            )
+        peer = peers[0]
+        addresses = self._bgp_session_addresses_for_peer(
+            peer,
+            session_start_index,
+            session_count,
+        )
+        self.logger.info(
+            f"Resolved {len(addresses)} BGP sessions for {peer.Name!r} "
+            f"starting at index {session_start_index}"
+        )
+        return addresses
+
+    @classmethod
+    def _validated_bgp_session_address_request(
+        cls,
+        request: t.Any,
+        context: str,
+        flags: int,
+    ) -> t.Tuple[str, re.Pattern[str], int, int]:
+        if not isinstance(request, tuple) or len(request) != 3:
+            raise ValueError(
+                f"BGP session address {context} must be a "
+                "(regex, session_start_index, session_count) tuple"
+            )
+        regex, session_start_index, session_count = request
+        if not isinstance(regex, str) or not regex:
+            raise ValueError(
+                f"BGP session address {context} has invalid regex {regex!r}"
+            )
+        try:
+            pattern = re.compile(regex, flags)
+        except re.error as error:
+            raise ValueError(
+                f"BGP session address {context} has invalid regex {regex!r}: {error}"
+            ) from error
+        try:
+            cls._validate_bgp_session_address_range(
+                session_start_index,
+                session_count,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"BGP session address {context} for {regex!r}: {error}"
+            ) from error
+        return regex, pattern, session_start_index, session_count
+
+    @staticmethod
+    def _exact_bgp_peer_for_address_request(
+        peers: t.Sequence[t.Any],
+        regex: str,
+        pattern: re.Pattern[str],
+        context: str,
+    ) -> t.Any:
+        matches = [peer for peer in peers if pattern.search(peer.Name)]
+        if len(matches) != 1:
+            raise ValueError(
+                f"BGP session address {context} expected exactly one BGP peer "
+                f"matching {regex!r}; got {[peer.Name for peer in matches]!r}"
+            )
+        return matches[0]
+
+    def get_bgp_session_address_ranges(
+        self,
+        requests: t.Sequence[t.Tuple[str, int, int]],
+        ignore_case: bool = False,
+        *,
+        request_label: str = "requests",
+    ) -> t.List[t.List[t.Tuple[str, str]]]:
+        """Resolve ordered peer session ranges with one topology scan."""
+        if not requests:
+            raise ValueError("BGP session address requests must not be empty")
+        if not request_label:
+            raise ValueError("BGP session address request_label must not be empty")
+        flags = re.IGNORECASE if ignore_case else 0
+        validated_requests = [
+            (
+                f"{request_label}[{index}]",
+                *self._validated_bgp_session_address_request(
+                    request,
+                    f"{request_label}[{index}]",
+                    flags,
+                ),
+            )
+            for index, request in enumerate(requests)
+        ]
+        peers = self.find_bgp_peers()
+        resolved: t.List[t.List[t.Tuple[str, str]]] = []
+        for (
+            context,
+            regex,
+            pattern,
+            session_start_index,
+            session_count,
+        ) in validated_requests:
+            peer = self._exact_bgp_peer_for_address_request(
+                peers,
+                regex,
+                pattern,
+                context,
+            )
+            try:
+                addresses = self._bgp_session_addresses_for_peer(
+                    peer,
+                    session_start_index,
+                    session_count,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"BGP session address {context} for {regex!r}: {error}"
+                ) from error
+            resolved.append(addresses)
+            self.logger.info(
+                f"Resolved {len(addresses)} BGP sessions for {peer.Name!r} "
+                f"starting at index {session_start_index}"
+            )
+        return resolved
+
     def get_bgp_session_addresses(
         self, regex: str, session_idx: int, ignore_case: bool = False
     ) -> t.Tuple[str, str]:
@@ -8837,70 +9003,41 @@ class Ixia:
                 )
         traffic_item_obj.Generate()
 
-    @external_api
-    def start_packet_capture(
-        self,
-        hostname: str,
-        interface: str,
-        capture_filter: str = "tcp port 179",
-        control_plane: bool = True,
-    ) -> str:
-        """
-        Start packet capture on IXIA port.
+    @staticmethod
+    def _validate_control_buffer_percent(control_buffer_percent: int) -> None:
+        if (
+            not isinstance(control_buffer_percent, int)
+            or isinstance(control_buffer_percent, bool)
+            or not 5 <= control_buffer_percent <= 70
+        ):
+            raise ValueError(
+                "control_buffer_percent must be an integer from 5 through 70; "
+                f"got {control_buffer_percent!r}"
+            )
 
-        This method starts packet capture on the specified IXIA port, which is much
-        more reliable than using tcpdump on the device for BGP message analysis.
-
-        Note: The capture is performed at the wire level (all traffic), and filtering
-        is done during tshark analysis. This approach is more reliable than hardware-level
-        BPF filtering and ensures complete packet capture.
-
-        Args:
-            hostname: Device hostname (e.g., "eb04.lab.ash6")
-            interface: Interface name (e.g., "Ethernet3/1/1")
-            capture_filter: Informational - describes what will be filtered during
-                          tshark analysis (default: "tcp port 179" for BGP)
-            control_plane: If True, capture control plane traffic (BGP, protocols).
-                          If False, capture data plane traffic (user traffic flows).
-                          Default: True (for BGP control plane capture)
-
-        Returns:
-            str: Vport href for later reference
-
-        Raises:
-            ValueError: If port not found or capture cannot be started
-
-        Example:
-            >>> # Capture BGP control plane traffic (default)
-            >>> ixia = Ixia(...)
-            >>> vport_href = ixia.start_packet_capture(
-            ...     hostname="eb04.lab.ash6",
-            ...     interface="Ethernet3/1/1"
-            ... )
-
-            >>> # Capture data plane traffic
-            >>> vport_href = ixia.start_packet_capture(
-            ...     hostname="eb04.lab.ash6",
-            ...     interface="Ethernet3/1/1",
-            ...     capture_filter="",
-            ...     control_plane=False
-            ... )
-        """
-        # Get port identifier
+    def _packet_capture_vport(
+        self, hostname: str, interface: str
+    ) -> t.Tuple["Vport", str]:
         port_identifier = self.get_port_identifier(f"{hostname}:{interface}")
-
-        # Get vport for this port
         desired_vport_name: str = DESIRED_VPORT_NAME.format(
             port_identifier=port_identifier
         )
         vport: "Vport" = self.ixnetwork.Vport.find(Name=desired_vport_name)
-
         if not vport:
             raise ValueError(
                 f"Vport not found for {port_identifier}. "
                 f"Ensure port is configured in test."
             )
+        return vport, desired_vport_name
 
+    def _configure_packet_capture_vport(
+        self,
+        vport: "Vport",
+        desired_vport_name: str,
+        capture_filter: str,
+        control_plane: bool,
+        control_buffer_percent: int,
+    ) -> None:
         self.logger.info(f"Starting packet capture on IXIA port: {desired_vport_name}")
         self.logger.info(
             f"  Capture type: {'Control plane' if control_plane else 'Data plane'}"
@@ -8908,76 +9045,78 @@ class Ixia:
         self.logger.info(
             f"  Will filter for: {capture_filter} (during tshark analysis)"
         )
-
-        # Enable packet capture
+        vport.RxMode = "capture"
+        capture = vport.Capture
+        if control_plane:
+            capture.SoftwareEnabled = True
+            capture.HardwareEnabled = False
+            capture.ControlBufferBehaviour = "bufferLiveNonCircular"
+            capture.ControlBufferSize = control_buffer_percent
+            capture.ControlInterfaceType = "specificInterface"
+            capture.CaptureMode = "captureContinuousMode"
+        else:
+            capture.HardwareEnabled = True
+            capture.SoftwareEnabled = False
+        capture.SliceSize = 65535
         try:
-            # Set capture mode to enable packet capture on this vport
-            # RxMode options: "capture", "captureAndMeasure", "measure"
-            vport.RxMode = "capture"
+            if hasattr(vport, "ClearStats"):
+                vport.ClearStats()  # type: ignore
+        except Exception as clear_error:
+            self.logger.warning(f"Could not clear previous capture data: {clear_error}")
 
-            # Configure capture settings based on IXIA RestPy API
-            capture = vport.Capture
-
-            if control_plane:
-                # For control plane traffic (BGP, protocols), use SOFTWARE capture
-                # Control plane protocols run on the IXIA CPU, not in hardware
-                self.logger.info("  Configuring SOFTWARE capture (control plane)")
-                capture.SoftwareEnabled = True
-                capture.HardwareEnabled = False
-
-                # Set control capture buffer settings
-                capture.ControlBufferBehaviour = "bufferLiveNonCircular"
-                capture.ControlBufferSize = 30  # MB
-                # Use "specificInterface" to capture only from this vport's interface
-                # Using "anyInterface" causes all vports to capture from all interfaces
-                capture.ControlInterfaceType = "specificInterface"
-
-                # Set capture mode for continuous capture
-                capture.CaptureMode = "captureContinuousMode"
-
-                # Set slice size to capture full packets (important for protocol analysis)
-                capture.SliceSize = 65535
-            else:
-                # For data plane traffic (user traffic flows), use HARDWARE capture
-                # Hardware capture is for wire-rate packet capture of data plane traffic
-                self.logger.info("  Configuring HARDWARE capture (data plane)")
-                capture.HardwareEnabled = True
-                capture.SoftwareEnabled = False
-
-                # Hardware capture settings
-                capture.SliceSize = 65535  # Full packet capture
-
-            # Clear any previous capture data to ensure fresh capture
-            try:
-                self.logger.info("  Clearing previous capture data...")
-                # pyre-fixme[16]: Only UhdVport has ClearStats, not IxnVport
-                if hasattr(vport, "ClearStats"):
-                    vport.ClearStats()  # type: ignore
-            except Exception as clear_error:
-                self.logger.warning(
-                    f"  Could not clear previous capture data: {clear_error}"
+    @external_api
+    def start_packet_captures(
+        self,
+        hostname: str,
+        interfaces: t.Sequence[str],
+        capture_filter: str = "tcp port 179",
+        control_plane: bool = True,
+        control_buffer_percent: int = 30,
+    ) -> t.Dict[str, str]:
+        """Configure every requested vport, then start session capture once."""
+        self._validate_control_buffer_percent(control_buffer_percent)
+        requested = list(interfaces)
+        if not requested or any(not interface for interface in requested):
+            raise ValueError("interfaces must be a non-empty sequence of names")
+        if len(requested) != len(set(requested)):
+            raise ValueError("interfaces must not contain duplicates")
+        vport_hrefs: t.Dict[str, str] = {}
+        try:
+            for interface in requested:
+                vport, vport_name = self._packet_capture_vport(hostname, interface)
+                self._configure_packet_capture_vport(
+                    vport,
+                    vport_name,
+                    capture_filter,
+                    control_plane,
+                    control_buffer_percent,
                 )
-                # Continue anyway - this is not critical
-
-            # Note: We capture control plane traffic (BGP on TCP 179).
-            # The tshark command uses: -Y 'bgp.type == 2' to filter BGP UPDATE messages.
-
-            # Start capture at session level (IxNetwork API pattern)
-            # This triggers capture on vports with RxMode="capture"
+                vport_hrefs[interface] = vport.href
             self.ixnetwork.StartCapture()
+            self._capture_stopped = False
+            self.logger.info(f"Packet capture started on {len(vport_hrefs)} vports")
+            return vport_hrefs
+        except Exception as error:
+            self.logger.error(f"Failed to start packet capture: {error}")
+            raise ValueError(f"Failed to start packet capture: {error}") from error
 
-            self.logger.info(f"✓ Packet capture started on {desired_vport_name}")
-            self.logger.info(
-                "  (Capturing all traffic - will filter with tshark later)"
-            )
-
-            return vport.href
-
-        except Exception as e:
-            self.logger.error(
-                f"✗ Failed to start packet capture on {desired_vport_name}: {e}"
-            )
-            raise ValueError(f"Failed to start packet capture: {e}")
+    @external_api
+    def start_packet_capture(
+        self,
+        hostname: str,
+        interface: str,
+        capture_filter: str = "tcp port 179",
+        control_plane: bool = True,
+        control_buffer_percent: int = 30,
+    ) -> str:
+        """Start capture on one vport through the session-safe batch API."""
+        return self.start_packet_captures(
+            hostname=hostname,
+            interfaces=[interface],
+            capture_filter=capture_filter,
+            control_plane=control_plane,
+            control_buffer_percent=control_buffer_percent,
+        )[interface]
 
     @external_api
     def stop_packet_capture(
@@ -9040,6 +9179,104 @@ class Ixia:
         except Exception as e:
             self.logger.error(f"✗ Failed to stop packet capture: {e}")
             raise ValueError(f"Failed to stop packet capture: {e}")
+
+    def _capture_vports_by_interface(
+        self, vport_hrefs: t.Mapping[str, str]
+    ) -> t.Dict[str, "Vport"]:
+        if not vport_hrefs or any(
+            not interface or not href for interface, href in vport_hrefs.items()
+        ):
+            raise ValueError("vport_hrefs must be a non-empty interface/href mapping")
+        vports_by_href = {vport.href: vport for vport in self.ixnetwork.Vport.find()}
+        missing = {
+            interface: href
+            for interface, href in vport_hrefs.items()
+            if href not in vports_by_href
+        }
+        if missing:
+            raise ValueError(f"Could not find capture vports {missing!r}")
+        return {
+            interface: vports_by_href[href] for interface, href in vport_hrefs.items()
+        }
+
+    @external_api
+    def verify_packet_captures_active(self, vport_hrefs: t.Mapping[str, str]) -> None:
+        """Fail unless software control capture is still running on every vport."""
+        try:
+            vports = self._capture_vports_by_interface(vport_hrefs)
+            inactive = {}
+            for interface, vport in vports.items():
+                capture = vport.Capture
+                status = {
+                    "is_capture_running": bool(capture.IsCaptureRunning),
+                    "is_control_capture_running": bool(capture.IsControlCaptureRunning),
+                    "control_capture_state": str(capture.ControlCaptureState),
+                }
+                if not all(
+                    status[field]
+                    for field in (
+                        "is_capture_running",
+                        "is_control_capture_running",
+                    )
+                ):
+                    inactive[interface] = status
+            if self._capture_stopped or inactive:
+                raise ValueError(
+                    "Packet capture is not active on every requested vport: "
+                    f"stop_latch={self._capture_stopped}, inactive={inactive!r}"
+                )
+        except Exception as error:
+            if isinstance(error, ValueError) and str(error).startswith(
+                "Packet capture is not active"
+            ):
+                raise
+            raise ValueError(
+                f"Failed to verify active packet captures: {error}"
+            ) from error
+
+    @staticmethod
+    def _capture_file_for_vport(saved_files: t.Sequence[str], vport: "Vport") -> str:
+        normalized_name = vport.Name.replace(":", "-").replace("/", "-").upper()
+        matches = [
+            path
+            for path in saved_files
+            if normalized_name in path.rsplit("/", 1)[-1].upper()
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected exactly one saved capture for {vport.Name}; "
+                f"matches={matches!r}, available={list(saved_files)!r}"
+            )
+        return matches[0]
+
+    @external_api
+    def save_packet_captures(
+        self,
+        vport_hrefs: t.Mapping[str, str],
+        capture_name: str,
+    ) -> t.Dict[str, str]:
+        """Save all active captures once and map each file to its exact vport."""
+        if not capture_name or re.search(r"[^A-Za-z0-9_.-]", capture_name):
+            raise ValueError(
+                "capture_name must contain only letters, numbers, dots, dashes, "
+                "and underscores"
+            )
+        try:
+            vports = self._capture_vports_by_interface(vport_hrefs)
+            saved_files = self.ixnetwork.SaveCaptureFiles(capture_name)
+            if not saved_files:
+                raise ValueError("No capture files were saved")
+            result = {
+                interface: self._capture_file_for_vport(saved_files, vport)
+                for interface, vport in vports.items()
+            }
+            if len(set(result.values())) != len(result):
+                raise ValueError(f"Saved capture files are not unique: {result!r}")
+            self.logger.info(f"Saved {len(result)} capture files in one batch")
+            return result
+        except Exception as error:
+            self.logger.error(f"Failed to batch-save captures: {error}")
+            raise ValueError(f"Failed to batch-save captures: {error}") from error
 
     @external_api
     def save_capture_to_pcap(

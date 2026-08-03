@@ -792,7 +792,9 @@ def create_bgp_update_group_check(
     expect_enabled: bool = True,
     expect_empty_peer_groups: t.Optional[t.List[str]] = None,
     expected_afi_by_substring: t.Optional[t.Dict[str, str]] = None,
+    expected_out_delay_seconds_by_substring: t.Optional[t.Dict[str, int]] = None,
     check_id: t.Optional[str] = None,
+    expected_group_states: t.Optional[t.List[str]] = None,
 ) -> PointInTimeHealthCheck:
     """Create a point-in-time BGP++ Update Group check.
 
@@ -838,11 +840,35 @@ def create_bgp_update_group_check(
             spec 2.9.4): IPv4 and IPv6 peers must be in separate, AFI-pure update
             groups, e.g. ``{"EB-EB-V4": "ipv4", "EB-EB-V6": "ipv6"}``. A group
             negotiating BOTH AFIs (or the wrong one) is a leak and FAILs.
+        expected_out_delay_seconds_by_substring: Optional substring -> exact
+            expected ``TUpdateGroupKey.out_delay_seconds``. Every selector must
+            resolve to exactly one authoritative peer-group name and every
+            update group for that name must match. Pass zero to assert IAR
+            (Immediate Advertisement of Routes).
         check_id: Optional unique identifier for the check.
+        expected_group_states: Optional operational states allowed for every
+            update group on the device. This assertion is global rather than
+            peer-group scoped; pass ``["IDLE"]`` for a converged steady-state
+            gate.
 
     Returns:
         A `PointInTimeHealthCheck` with `name=BGP_UPDATE_GROUP_CHECK`.
     """
+    known_group_states = {"UNINITIALIZED", "IDLE", "READY", "WAITING"}
+    normalized_group_states: t.List[str] | None = None
+    if expected_group_states is not None:
+        if not isinstance(expected_group_states, list) or not expected_group_states:
+            raise ValueError("expected_group_states must be a non-empty list")
+        normalized_group_states = [
+            str(getattr(state, "name", state) or "").rsplit(".", 1)[-1].upper()
+            for state in expected_group_states
+        ]
+        unknown_group_states = set(normalized_group_states) - known_group_states
+        if unknown_group_states:
+            raise ValueError(
+                "expected_group_states contains unknown states "
+                f"{sorted(unknown_group_states)}"
+            )
     params: t.Dict[str, t.Any] = {
         "peer_group_substrings": peer_group_substrings or [],
         "expected_member_counts": expected_member_counts or {},
@@ -856,6 +882,12 @@ def create_bgp_update_group_check(
         params["expect_empty_peer_groups"] = expect_empty_peer_groups
     if expected_afi_by_substring:
         params["expected_afi_by_substring"] = expected_afi_by_substring
+    if expected_out_delay_seconds_by_substring:
+        params["expected_out_delay_seconds_by_substring"] = (
+            expected_out_delay_seconds_by_substring
+        )
+    if normalized_group_states is not None:
+        params["expected_group_states"] = normalized_group_states
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.BGP_UPDATE_GROUP_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -1007,6 +1039,8 @@ def create_bgp_received_route_community_check(
 def create_hardware_capacity_check(
     fec_threshold: t.Optional[t.Any] = None,
     ecmp_threshold: t.Optional[t.Any] = None,
+    fec_high_watermark_threshold: t.Optional[t.Any] = None,
+    ecmp_high_watermark_threshold: t.Optional[t.Any] = None,
     max_ecmp_level1: t.Optional[t.Any] = None,
     max_ecmp_level2: t.Optional[t.Any] = None,
     max_ecmp_level3: t.Optional[t.Any] = None,
@@ -1024,6 +1058,8 @@ def create_hardware_capacity_check(
     Args:
         fec_threshold: Maximum allowed FEC (next-hop FEC entry) utilization.
         ecmp_threshold: Maximum allowed ECMP-group utilization.
+        fec_high_watermark_threshold: Maximum allowed absolute FEC high watermark.
+        ecmp_high_watermark_threshold: Maximum allowed absolute ECMP high watermark.
         max_ecmp_level1: Maximum allowed level-1 (primary) ECMP-member count.
         max_ecmp_level2: Maximum allowed level-2 (hierarchical) ECMP-member count.
         max_ecmp_level3: Maximum allowed level-3 (deep hierarchical) ECMP-member count.
@@ -1045,6 +1081,10 @@ def create_hardware_capacity_check(
         "watermark_delta_threshold": watermark_delta_threshold,
         "check_watermarks": check_watermarks,
     }
+    if fec_high_watermark_threshold is not None:
+        payload["fec_high_watermark_threshold"] = fec_high_watermark_threshold
+    if ecmp_high_watermark_threshold is not None:
+        payload["ecmp_high_watermark_threshold"] = ecmp_high_watermark_threshold
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.HARDWARE_CAPACITY_CHECK,
         check_params=Params(json_params=json.dumps(payload)),

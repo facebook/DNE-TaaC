@@ -54,6 +54,8 @@ class HardwareCapacityThresholds:
         max_ecmp_level3: int = ARISTA_DEFAULT_MAX_ECMP_LEVEL3,
         watermark_delta_threshold: int = ARISTA_DEFAULT_WATERMARK_DELTA_THRESHOLD,
         check_watermarks: bool = ARISTA_DEFAULT_CHECK_WATERMARKS,
+        fec_high_watermark_threshold: int | None = None,
+        ecmp_high_watermark_threshold: int | None = None,
     ):
         self.fec_threshold = fec_threshold
         self.ecmp_threshold = ecmp_threshold
@@ -62,28 +64,41 @@ class HardwareCapacityThresholds:
         self.max_ecmp_level3 = max_ecmp_level3
         self.watermark_delta_threshold = watermark_delta_threshold
         self.check_watermarks = check_watermarks
+        self.fec_high_watermark_threshold = fec_high_watermark_threshold
+        self.ecmp_high_watermark_threshold = ecmp_high_watermark_threshold
 
     @classmethod
     def from_dict(cls, params: t.Dict[str, t.Any]) -> "HardwareCapacityThresholds":
         """Create HardwareCapacityThresholds from a parameter dictionary"""
+
+        def value_or_default(name: str, default: t.Any) -> t.Any:
+            value = params.get(name)
+            return default if value is None else value
+
         return cls(
-            fec_threshold=params.get("fec_threshold", ARISTA_DEFAULT_FEC_THRESHOLD),
-            ecmp_threshold=params.get("ecmp_threshold", ARISTA_DEFAULT_ECMP_THRESHOLD),
-            max_ecmp_level1=params.get(
+            fec_threshold=value_or_default(
+                "fec_threshold", ARISTA_DEFAULT_FEC_THRESHOLD
+            ),
+            ecmp_threshold=value_or_default(
+                "ecmp_threshold", ARISTA_DEFAULT_ECMP_THRESHOLD
+            ),
+            max_ecmp_level1=value_or_default(
                 "max_ecmp_level1", ARISTA_DEFAULT_MAX_ECMP_LEVEL1
             ),
-            max_ecmp_level2=params.get(
+            max_ecmp_level2=value_or_default(
                 "max_ecmp_level2", ARISTA_DEFAULT_MAX_ECMP_LEVEL2
             ),
-            max_ecmp_level3=params.get(
+            max_ecmp_level3=value_or_default(
                 "max_ecmp_level3", ARISTA_DEFAULT_MAX_ECMP_LEVEL3
             ),
-            watermark_delta_threshold=params.get(
+            watermark_delta_threshold=value_or_default(
                 "watermark_delta_threshold", ARISTA_DEFAULT_WATERMARK_DELTA_THRESHOLD
             ),
-            check_watermarks=params.get(
+            check_watermarks=value_or_default(
                 "check_watermarks", ARISTA_DEFAULT_CHECK_WATERMARKS
             ),
+            fec_high_watermark_threshold=params.get("fec_high_watermark_threshold"),
+            ecmp_high_watermark_threshold=params.get("ecmp_high_watermark_threshold"),
         )
 
 
@@ -105,6 +120,16 @@ class HardwareCapacityResult:
         if self.warnings:
             message += "\n\nWarnings:\n" + "\n".join(self.warnings)
         return message
+
+
+def _parse_capacity_row(line: str) -> tuple[str, int, int, int] | None:
+    columns = line.split()
+    if len(columns) < 8:
+        return None
+    try:
+        return columns[0].lower(), int(columns[2]), int(columns[6]), int(columns[7])
+    except (ValueError, IndexError):
+        return None
 
 
 async def get_hardware_capacity_data(driver) -> HardwareCapacityData:
@@ -138,32 +163,23 @@ async def get_hardware_capacity_data(driver) -> HardwareCapacityData:
     # Split response into lines and process each line
     lines = response.strip().split("\n")
 
+    parsed_resources: set[str] = set()
     for line in lines:
         line = line.strip()
         if not line:
             continue
 
-        # Simple parsing based on actual format:
-        # [0]Table [1]Feature/Chip [2]Used [3]Used% [4]Free [5]Committed [6]Max [7]High_watermark
-        columns = line.split()
-
-        if len(columns) < 8:
+        parsed = _parse_capacity_row(line)
+        if parsed is None:
             continue
-
-        resource_name = columns[0].lower()
-
-        try:
-            used = int(columns[2])  # Used Entries
-            max_val = int(columns[6])  # Max Entries
-            high_watermark = int(columns[7])  # High Watermark
-        except (ValueError, IndexError):
-            continue
+        resource_name, used, max_val, high_watermark = parsed
 
         # Parse entries based on resource name
         if resource_name == "fec":
             capacity_data.fec_used = used
             capacity_data.fec_max = max_val
             capacity_data.fec_high_watermark = high_watermark
+            parsed_resources.add("fec")
         elif resource_name == "ecmplevel1":
             capacity_data.ecmp_level1_used = max(capacity_data.ecmp_level1_used, used)
         elif resource_name == "ecmplevel2":
@@ -174,6 +190,14 @@ async def get_hardware_capacity_data(driver) -> HardwareCapacityData:
             capacity_data.ecmp_used = used
             capacity_data.ecmp_max = max_val
             capacity_data.ecmp_high_watermark = high_watermark
+            parsed_resources.add("ecmp")
+
+    missing_resources = {"fec", "ecmp"} - parsed_resources
+    if missing_resources:
+        raise ValueError(
+            "Hardware capacity output did not contain parseable rows for: "
+            f"{', '.join(sorted(missing_resources))}"
+        )
 
     LOGGER.debug("Parsed capacity data: %s", capacity_data)
     return capacity_data
@@ -206,6 +230,26 @@ def validate_hardware_capacity(
     if capacity_data.ecmp_used > thresholds.ecmp_threshold:
         errors.append(
             f"ECMP usage ({capacity_data.ecmp_used}) exceeds threshold ({thresholds.ecmp_threshold})"
+        )
+
+    if (
+        thresholds.fec_high_watermark_threshold is not None
+        and capacity_data.fec_high_watermark > thresholds.fec_high_watermark_threshold
+    ):
+        errors.append(
+            "FEC high watermark "
+            f"({capacity_data.fec_high_watermark}) exceeds threshold "
+            f"({thresholds.fec_high_watermark_threshold})"
+        )
+
+    if (
+        thresholds.ecmp_high_watermark_threshold is not None
+        and capacity_data.ecmp_high_watermark > thresholds.ecmp_high_watermark_threshold
+    ):
+        errors.append(
+            "ECMP high watermark "
+            f"({capacity_data.ecmp_high_watermark}) exceeds threshold "
+            f"({thresholds.ecmp_high_watermark_threshold})"
         )
 
     # Check ECMP level constraints

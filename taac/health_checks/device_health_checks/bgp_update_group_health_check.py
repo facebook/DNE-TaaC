@@ -13,6 +13,78 @@ from taac.health_checks.abstract_health_check import (
 from taac.health_check.health_check import types as hc_types
 
 
+_KNOWN_GROUP_STATES = frozenset({"UNINITIALIZED", "IDLE", "READY", "WAITING"})
+
+
+def _group_state_name(value: t.Any) -> str:
+    raw = getattr(value, "name", value)
+    return str(raw or "").rsplit(".", 1)[-1].upper()
+
+
+def _validate_out_delay_expectations(
+    hostname: str,
+    groups: t.Iterable[t.Any],
+    expected_by_substring: t.Mapping[str, int],
+) -> list[str]:
+    groups_by_peer_group: dict[str, list[t.Any]] = {}
+    missing_peer_group_name_ids: list[t.Any] = []
+    for group in groups:
+        group_key = getattr(group, "group_key", None)
+        if group_key is None:
+            missing_peer_group_name_ids.append(getattr(group, "group_id", None))
+            continue
+        peer_group_name = getattr(group_key, "peer_group_name", None)
+        if isinstance(peer_group_name, str) and peer_group_name:
+            groups_by_peer_group.setdefault(peer_group_name, []).append(group)
+        else:
+            missing_peer_group_name_ids.append(getattr(group, "group_id", None))
+
+    failures: list[str] = []
+    if expected_by_substring and missing_peer_group_name_ids:
+        failures.append(
+            f"Cannot validate IAR out_delay_seconds on {hostname}: update groups "
+            f"{missing_peer_group_name_ids} have missing or empty peer_group_name."
+        )
+        if not groups_by_peer_group:
+            failures.append(
+                f"No update groups matched any expected IAR selector on {hostname}; "
+                f"expected selectors {sorted(expected_by_substring)}."
+            )
+            return failures
+    observed_names = sorted(groups_by_peer_group)
+    for substring, expected_seconds in sorted(expected_by_substring.items()):
+        matching_names = [name for name in observed_names if substring in name]
+        if not matching_names:
+            failures.append(
+                f"IAR selector '{substring}' matches no update-group "
+                f"peer_group_name on {hostname}; observed {observed_names}."
+            )
+            continue
+        if len(matching_names) != 1:
+            failures.append(
+                f"IAR selector '{substring}' is ambiguous on {hostname}; it "
+                f"matches peer_group_names {matching_names}."
+            )
+            continue
+
+        peer_group_name = matching_names[0]
+        for group in groups_by_peer_group[peer_group_name]:
+            actual_seconds = getattr(group.group_key, "out_delay_seconds", None)
+            if isinstance(actual_seconds, bool) or not isinstance(actual_seconds, int):
+                failures.append(
+                    f"Peer-group '{peer_group_name}' update group {group.group_id} "
+                    f"has no valid out_delay_seconds key on {hostname}; expected "
+                    f"{expected_seconds}."
+                )
+            elif actual_seconds != expected_seconds:
+                failures.append(
+                    f"Peer-group '{peer_group_name}' update group {group.group_id} "
+                    f"has out_delay_seconds={actual_seconds} on {hostname}; "
+                    f"expected {expected_seconds}."
+                )
+    return failures
+
+
 class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
     """
     Verify BGP++ Update Group membership, size, and policy.
@@ -60,6 +132,10 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         peer-group, ``{"EB-FA-V6": ["A", "B"]}`` for one with two.
       - ``expected_group_count`` (optional int): if set, asserts the total
         number of update groups on the device equals this value.
+      - ``expected_group_states`` (list[str], default omitted): when set,
+        asserts every update group on the device is in one of these operational
+        states. This is intentionally global rather than peer-group scoped so
+        an unhealthy unselected group cannot escape the check.
       - ``expected_afi_by_substring`` (dict[str, str], default {}): substring ->
         ``"ipv4"`` | ``"ipv6"``; asserts every update group the peer-group maps
         to negotiates ONLY that address family. Directly verifies dual-stack
@@ -68,6 +144,11 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         ``afi_ipv6_negotiated``), so a v4 route operation can never be
         distributed through the v6 group. A group negotiating BOTH AFIs (or the
         wrong one) is a leak and FAILs.
+      - ``expected_out_delay_seconds_by_substring`` (dict[str, int], default
+        {}): substring -> expected out-delay seconds. Each selector must match
+        exactly one authoritative ``group_key.peer_group_name`` and every
+        update group for that peer-group must carry the exact value. IAR
+        (Immediate Advertisement of Routes) requires zero.
 
     All configured assertions are evaluated in a single run; every failure is
     collected and reported together (the check does NOT stop at the first
@@ -95,8 +176,36 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         expected_member_counts = check_params.get("expected_member_counts") or {}
         expected_policy_names = check_params.get("expected_policy_names") or {}
         expected_group_count = check_params.get("expected_group_count")
+        raw_expected_group_states = check_params.get("expected_group_states")
+        if "expected_group_states" in check_params and (
+            not isinstance(raw_expected_group_states, list)
+            or not raw_expected_group_states
+        ):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=(
+                    "expected_group_states must be a non-empty list of known "
+                    f"Update Group states; got {raw_expected_group_states!r}"
+                ),
+            )
+        expected_group_states = {
+            _group_state_name(state) for state in (raw_expected_group_states or ())
+        }
+        unknown_expected_states = expected_group_states - _KNOWN_GROUP_STATES
+        if unknown_expected_states:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=(
+                    "expected_group_states contains unknown states "
+                    f"{sorted(unknown_expected_states)}; expected one of "
+                    f"{sorted(_KNOWN_GROUP_STATES)}"
+                ),
+            )
         expect_empty_peer_groups = check_params.get("expect_empty_peer_groups") or []
         expected_afi_by_substring = check_params.get("expected_afi_by_substring") or {}
+        expected_out_delay_seconds_by_substring = (
+            check_params.get("expected_out_delay_seconds_by_substring") or {}
+        )
 
         try:
             # pyrefly: ignore [missing-attribute]
@@ -146,6 +255,28 @@ class BgpUpdateGroupHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
 
         groups = resp.update_groups or []
         id_to_group = {group.group_id: group for group in groups}
+        failures.extend(
+            _validate_out_delay_expectations(
+                hostname,
+                groups,
+                expected_out_delay_seconds_by_substring,
+            )
+        )
+        if expected_group_states:
+            unexpected_group_states = []
+            for group in groups:
+                raw_state = getattr(group, "group_state", None)
+                state = _group_state_name(raw_state) or "<missing>"
+                if state not in expected_group_states:
+                    unexpected_group_states.append(
+                        f"group_id={getattr(group, 'group_id', None)!r} state={state!r}"
+                    )
+            if unexpected_group_states:
+                failures.append(
+                    f"Update groups on {hostname} have unexpected operational "
+                    f"states: {', '.join(unexpected_group_states)}; expected every "
+                    f"group state to be one of {sorted(expected_group_states)}."
+                )
 
         def _group_afi(gid: int) -> str:
             """Address family an update group negotiates, from its

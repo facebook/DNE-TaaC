@@ -113,6 +113,7 @@ def create_standard_prechecks(
     cpu_baseline: float = 4.0,
     check_ibgp_pnh: bool = False,
     check_bgp_convergence: bool = True,
+    check_hardware_capacity: bool = True,
     rp_file_path: str | None = None,
     bgp_session_retry_count: int = _BGP_SESSION_RETRY_COUNT,
     bgp_session_retry_delay_seconds: float = _BGP_SESSION_RETRY_DELAY_SECONDS,
@@ -140,6 +141,9 @@ def create_standard_prechecks(
             within the convergence threshold (self-waits up to it). The strict
             canonical-sequence and EOR-timer-expiry assertions are temporarily
             disabled pending the BGP++ cold-start EOR-timer fix.
+        check_hardware_capacity: Add the startup FEC/ECMP capacity gate.
+            Defaults to True for existing EBB callers. Set False when the
+            qualification case does not define hardware-capacity preconditions.
         rp_file_path: Path to routing policy file (optional)
         bgp_session_retry_count: Number of retries for the BGP session
             establish check on FAIL (default 3). Retries the full
@@ -224,18 +228,21 @@ def create_standard_prechecks(
             expected_graceful_restart_enabled=False,
             check_id="startup_bgp_graceful_restart_disabled_check_v4",
         ),
-        # Pre-condition 4: Collect H/W utilisation and verify thresholds
-        create_hardware_capacity_check(
-            fec_threshold=precheck_thresholds.fec_threshold,
-            ecmp_threshold=precheck_thresholds.ecmp_threshold,
-            max_ecmp_level1=precheck_thresholds.max_ecmp_level1,
-            max_ecmp_level2=precheck_thresholds.max_ecmp_level2,
-            max_ecmp_level3=precheck_thresholds.max_ecmp_level3,
-            watermark_delta_threshold=precheck_thresholds.watermark_delta_threshold,
-            check_watermarks=precheck_thresholds.check_watermarks,
-            check_id="startup_hardware_capacity_baseline",
-        ),
     ]
+
+    if check_hardware_capacity:
+        prechecks.append(
+            create_hardware_capacity_check(
+                fec_threshold=precheck_thresholds.fec_threshold,
+                ecmp_threshold=precheck_thresholds.ecmp_threshold,
+                max_ecmp_level1=precheck_thresholds.max_ecmp_level1,
+                max_ecmp_level2=precheck_thresholds.max_ecmp_level2,
+                max_ecmp_level3=precheck_thresholds.max_ecmp_level3,
+                watermark_delta_threshold=precheck_thresholds.watermark_delta_threshold,
+                check_watermarks=precheck_thresholds.check_watermarks,
+                check_id="startup_hardware_capacity_baseline",
+            )
+        )
 
     # Pre-condition 5: BGP++ initialization-events convergence — assert the
     # device reached INITIALIZED within the threshold. Self-waits up to the

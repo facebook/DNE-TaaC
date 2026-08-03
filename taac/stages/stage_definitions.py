@@ -3945,6 +3945,25 @@ def create_steps_stage(
     return Stage(**kwargs)
 
 
+def create_concurrent_steps_stage(
+    step_tracks: list[list[Step]],
+    *,
+    description: str | None = None,
+    stage_id: str | None = None,
+) -> Stage:
+    """Create a concurrent stage from non-empty sequential step tracks."""
+    if len(step_tracks) < 2 or any(not track for track in step_tracks):
+        raise ValueError(
+            "create_concurrent_steps_stage requires at least two non-empty tracks"
+        )
+    return create_steps_stage(
+        concurrent=True,
+        concurrent_steps=[ConcurrentStep(steps=track) for track in step_tracks],
+        description=description,
+        stage_id=stage_id,
+    )
+
+
 def create_longevity_stage(
     duration: int = 60,
     stage_id: str | None = None,
