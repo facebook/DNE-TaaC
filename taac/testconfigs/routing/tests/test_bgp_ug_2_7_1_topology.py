@@ -64,6 +64,22 @@ def _runtime_route_specs(
     return [spec for spec in specs if case is None or case in spec[1]]
 
 
+def _runtime_route_geometries(config) -> dict[str, tuple[int, int]]:
+    geometries = {}
+    for group in _device_groups(config):
+        for bgp_config in (group.v4_bgp_config, group.v6_bgp_config):
+            if bgp_config is None:
+                continue
+            for route in bgp_config.route_scales or []:
+                scale = route.v4_route_scale or route.v6_route_scale
+                if scale is not None and scale.prefix_name in _RUNTIME_POOL_NAMES:
+                    geometries[scale.prefix_name] = (
+                        scale.multiplier,
+                        scale.prefix_count,
+                    )
+    return geometries
+
+
 def _hardware_capacity_checks(checks) -> list:
     return [
         check
@@ -129,6 +145,18 @@ class BgpUg27SharedTopologyTest(TestCase):
         )
 
         self.assertEqual([], _runtime_route_specs(config))
+
+    def test_runtime_route_pools_remain_compact(self) -> None:
+        config = factory.create_bgp_ebb_full_scale_test_config(
+            BAG012_ASH6,
+            name="BAG012_UG_2_7_1_TEST",
+            playbooks_selected=[_PLAYBOOK_NAME],
+        )
+
+        self.assertEqual(
+            {pool_name: (1, 100) for pool_name in _RUNTIME_POOL_NAMES},
+            _runtime_route_geometries(config),
+        )
 
     def test_bgp_restart_uses_two_port_all_peer_stability_contract(self) -> None:
         config = factory.create_bgp_ebb_full_scale_test_config(

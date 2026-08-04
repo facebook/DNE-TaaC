@@ -840,7 +840,12 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                     f"{mutation['peer_count']}, got {device_group.Multiplier}"
                 )
             prefix = mutation["prefix"]
-            flatten_prefix_pool = bool(prefix["excluded_indices"])
+            # Payloads serialized before this flag was introduced retain compact
+            # geometry unless sparse membership already requires flattening.
+            flatten_prefix_pool = bool(
+                mutation.get("flat_prefix_geometry", False)
+                or prefix["excluded_indices"]
+            )
             prefixes_per_peer = mutation["prefixes_per_peer"]
             if flatten_prefix_pool:
                 compact_geometry = (
@@ -853,7 +858,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 )
                 if not compact_geometry and not flat_geometry:
                     raise ValueError(
-                        f"sparse prefix geometry mismatch for {key!r}: expected "
+                        f"flat prefix geometry mismatch for {key!r}: expected "
                         f"(network group, pool)=((1, {prefixes_per_peer}) or "
                         f"({prefixes_per_peer}, 1)), got "
                         f"({network_group.Multiplier}, "
@@ -988,7 +993,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self,
         mutations: t.List[t.Dict[str, t.Any]],
     ) -> None:
-        """Apply compact sparse-prefix and external-next-hop route intent."""
+        """Apply formulaic route intent using each mutation's requested geometry."""
         prepared = self._prepare_formulaic_bgp_routes(mutations)
         if not prepared:
             return

@@ -241,6 +241,56 @@ class FormulaicBgpRoutesTest(unittest.TestCase):
             prepared[0][3],
         )
 
+    def test_prepare_dense_shared_route_uses_requested_flat_geometry(self) -> None:
+        device_group = _LifecycleObject(multiplier=2)
+        network_group = _LifecycleObject(multiplier=1)
+        harness = _Harness((device_group, network_group, _Pool(), object()))
+        mutation = {
+            **_mutation({"med": 0, "local_pref": 100, "origin": "igp"}),
+            "peer_count": 2,
+            "flat_prefix_geometry": True,
+        }
+
+        prepared = harness._prepare_formulaic_bgp_routes([mutation])
+
+        self.assertEqual(
+            ["11.0.0.0", "11.0.1.0"] * 2,
+            prepared[0][2],
+        )
+        self.assertIsNone(prepared[0][3])
+
+    def test_dense_route_without_flat_request_stays_compact(self) -> None:
+        device_group = _LifecycleObject(multiplier=1)
+        network_group = _LifecycleObject(multiplier=1)
+        harness = _Harness((device_group, network_group, _Pool(), object()))
+
+        prepared = harness._prepare_formulaic_bgp_routes(
+            [_mutation({"med": 0, "local_pref": 100, "origin": "igp"})]
+        )
+
+        self.assertIsNone(prepared[0][2])
+        self.assertIsNone(prepared[0][3])
+
+    def test_dense_route_flattening_is_idempotent(self) -> None:
+        device_group = _LifecycleObject(multiplier=2)
+        network_group = _LifecycleObject(multiplier=1)
+        pool = _Pool()
+        route = mock.MagicMock()
+        harness = _Harness((device_group, network_group, pool, route))
+        mutation = {
+            **_mutation({"med": 0, "local_pref": 100, "origin": "igp"}),
+            "peer_count": 2,
+            "flat_prefix_geometry": True,
+        }
+
+        with mock.patch.object(harness, "apply_changes"):
+            harness.configure_formulaic_bgp_routes([mutation])
+            harness.configure_formulaic_bgp_routes([mutation])
+
+        self.assertEqual(2, network_group.Multiplier)
+        self.assertEqual(1, pool.NumberOfAddresses)
+        pool.NetworkAddress.ValueList.assert_called_with(["11.0.0.0", "11.0.1.0"] * 2)
+
     def test_sparse_route_flattening_is_idempotent(self) -> None:
         device_group = _LifecycleObject(multiplier=2)
         network_group = _LifecycleObject(multiplier=1)
