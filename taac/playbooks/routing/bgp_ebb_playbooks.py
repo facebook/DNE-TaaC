@@ -57,6 +57,7 @@ from taac.task_definitions import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     CheckProfile,
+    CpuCharacterizationConfig,
     get_profile_checks,
     ProfileContext,
     RssDeltaConfig,
@@ -303,18 +304,20 @@ def get_bgp_ebb_cold_start_playbook(
             expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
             fail_on_eor_expired=fail_on_eor_expired,
-            # Observe-only RSS-delta characterization postcheck (result lands in
-            # the POST-HEALTH CHECK RESULTS table): a self-soaking postcheck,
-            # observe-only (no threshold) for now.
+            # Observe-only characterization postchecks (results land in the
+            # POST-HEALTH CHECK RESULTS table). CPU percentile is reported from
+            # the stage START/STOP collector's stashed summary; RSS delta is a
+            # self-soaking postcheck. Both observe-only (no threshold) for now.
+            cpu_characterization=CpuCharacterizationConfig(),
             rss_delta=(RssDeltaConfig() if enable_rss_delta_gate else None),
         ),
     )
     stages = [
-        # enable_rss_delta_characterization=True brackets convergence with an
-        # embeddable bgpcpp RSS delta START/STOP pair (START before the toggle,
-        # STOP after Step 6). STOP stashes the RSS summary into a jq var that the
-        # RSS_DELTA_CHECK postcheck reports. Fully sequential; the thread monitor
-        # stays a separate step.
+        # enable_cpu_percentile_characterization=True brackets the convergence
+        # with an embeddable bgpcpp CPU percentile START/STOP pair (START before
+        # the toggle, STOP after Step 6). STOP stashes the percentile summary into
+        # a jq var that the CPU_PERCENTILE_CHECK postcheck reports. Fully
+        # sequential; the thread monitor stays a separate step.
         create_cold_start_test_stage(
             device_name=device_name,
             enable_thread_cpu_monitoring=enable_thread_cpu_monitoring,
@@ -327,6 +330,7 @@ def get_bgp_ebb_cold_start_playbook(
             adaptive_convergence=True,
             expected_established_sessions=expected_established_sessions,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            enable_cpu_percentile_characterization=True,
             enable_rss_delta_characterization=enable_rss_delta_gate,
         ),
     ]

@@ -477,3 +477,105 @@ def evaluate_rss_delta_from_baseline(
         threshold_pct=max_growth_pct,
         message=message,
     )
+
+
+class CpuPercentileTransientResult(t.NamedTuple):
+    """Result of the percentile-based transient CPU gate (see
+    ``evaluate_cpu_percentile_transient``)."""
+
+    passed: bool
+    percentile: float
+    value_pct: float
+    threshold_pct: float
+    peak_pct: float
+    n_samples: int
+    message: str
+
+
+def _percentile(samples: t.Sequence[float], pct: float) -> float:
+    """Linear-interpolated ``pct``-th percentile of ``samples`` (numpy 'linear'
+    method), dependency-free and deterministic.
+
+    ``pct`` is in [0, 100]. Raises ValueError on an empty sample set -- a
+    percentile we cannot compute must be surfaced, never silently defaulted.
+    """
+    if not samples:
+        raise ValueError("cannot take a percentile of an empty sample set")
+    if not 0.0 <= pct <= 100.0:
+        raise ValueError(f"percentile must be in [0, 100], got {pct}")
+    ordered = sorted(samples)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    # Rank position on [0, n-1] and interpolate between the bracketing samples.
+    rank = (len(ordered) - 1) * (pct / 100.0)
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return float(ordered[int(rank)])
+    return ordered[low] * (high - rank) + ordered[high] * (rank - low)
+
+
+def evaluate_cpu_percentile_transient(
+    cpu_samples: t.Sequence[float],
+    percentile: float,
+    threshold_pct: float,
+) -> CpuPercentileTransientResult:
+    """Gate the transient CPU signal on a PERCENTILE of the sample set rather
+    than the single-sample running max.
+
+    The transient CPU characterization today is ``peak = running max`` over the
+    convergence window. A running max is a single sample: one momentary ~100%
+    spike (bgpd briefly pegs a core during EOR/RIB compute) trips the gate even
+    when CPU is otherwise fine -- a false positive -- while a coarse sample
+    interval can also miss short real bursts between samples. Taking p95/p99
+    instead de-flakes the signal: a lone outlier sample cannot move a high
+    percentile, but a SUSTAINED burst (many high samples) still does. This is
+    only meaningful over a densely-sampled window, so the convergence-window
+    sampling rate must be raised alongside using this gate.
+
+    The ``peak`` (max) is returned alongside the percentile so the single-sample
+    transient stays visible for comparison in the always-emitted log line.
+
+    Args:
+        cpu_samples: CPU% samples over the window, in any order.
+        percentile: the percentile to gate on (e.g. 95.0 or 99.0).
+        threshold_pct: max permitted percentile CPU%, inclusive. FAILs if the
+            percentile exceeds it.
+
+    Returns:
+        CpuPercentileTransientResult with ``passed``, the computed percentile
+        ``value_pct``, the ``peak_pct``, ``threshold_pct``, ``n_samples``, and a
+        log-ready ``message``.
+    """
+    n = len(cpu_samples)
+    if n == 0:
+        # A gate we cannot measure must FAIL loudly, never silently pass.
+        return CpuPercentileTransientResult(
+            passed=False,
+            percentile=percentile,
+            value_pct=float("inf"),
+            threshold_pct=threshold_pct,
+            peak_pct=float("inf"),
+            n_samples=0,
+            message=(
+                "CPU percentile-transient gate FAILED: no CPU samples collected; "
+                "cannot compute a percentile."
+            ),
+        )
+    value = _percentile(cpu_samples, percentile)
+    peak = float(max(cpu_samples))
+    passed = value <= threshold_pct
+    message = (
+        f"CPU percentile-transient: p{percentile:g}={value:.1f}% "
+        f"(peak={peak:.1f}%, n={n}) vs threshold {threshold_pct:.1f}% -- "
+        f"{'within limit' if passed else 'EXCEEDED'}."
+    )
+    return CpuPercentileTransientResult(
+        passed=passed,
+        percentile=percentile,
+        value_pct=value,
+        threshold_pct=threshold_pct,
+        peak_pct=peak,
+        n_samples=n,
+        message=message,
+    )

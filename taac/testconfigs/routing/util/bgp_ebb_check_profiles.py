@@ -49,6 +49,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_snapshot_check,
     create_bgp_tcpdump_check,
     create_core_dumps_snapshot_check,
+    create_cpu_percentile_observe_check,
     create_rss_delta_observe_check,
 )
 from taac.health_checks.retry_policy import get_retry_kwargs
@@ -100,6 +101,21 @@ class CheckProfile(enum.Enum):
     # Minimal-shape (accept the context for a uniform API, but ignore it):
     # bag012 perf-scaling, bounded-ECMP-sets (case9).
     PERF_SCALING_BOUNDED_ECMP = "perf_scaling_bounded_ecmp"
+
+
+@dataclasses.dataclass(frozen=True)
+class CpuCharacterizationConfig:
+    """Per-test-case config for the bgpcpp CPU percentile postcheck.
+
+    The measurement is collected by a START/STOP bracket in the stage; this
+    config drives the reporting/gating postcheck (CPU_PERCENTILE_CHECK).
+    Observe-only while ``gate_threshold_pct`` is None (always PASS, value in the
+    results table); set it to gate on the raw ``gate_percentile``.
+    """
+
+    summary_jq_var: str = "cpu_percentile_summary"
+    gate_percentile: float = 95.0
+    gate_threshold_pct: t.Optional[float] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -171,8 +187,10 @@ class ProfileContext:
     # Runtime-update: expected baseline eBGP route count for the route-count
     # verification precheck add-on (the only per-call variable in its params).
     route_count_expected: t.Optional[int] = None
-    # Opt-in observe-only RSS-delta characterization postcheck (result lands in
-    # the POST-HEALTH CHECK RESULTS table). None => not added.
+    # Opt-in observe-only characterization postchecks (results land in the
+    # POST-HEALTH CHECK RESULTS table). CPU needs the stage START/STOP collector;
+    # RSS is self-soaking (postcheck only). None => not added.
+    cpu_characterization: t.Optional[CpuCharacterizationConfig] = None
     rss_delta: t.Optional[RssDeltaConfig] = None
 
 
@@ -233,6 +251,14 @@ def _append_characterization_postchecks(
             create_rss_delta_observe_check(
                 summary_jq_var=ctx.rss_delta.summary_jq_var,
                 max_growth_pct=ctx.rss_delta.max_growth_pct,
+            )
+        )
+    if ctx.cpu_characterization is not None:
+        postchecks.append(
+            create_cpu_percentile_observe_check(
+                summary_jq_var=ctx.cpu_characterization.summary_jq_var,
+                gate_percentile=ctx.cpu_characterization.gate_percentile,
+                gate_threshold_pct=ctx.cpu_characterization.gate_threshold_pct,
             )
         )
     return postchecks

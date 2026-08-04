@@ -10513,3 +10513,95 @@ def create_rss_stop_step(
             f"(session {session_key})"
         ),
     )
+
+
+def create_cpu_percentile_start_step(
+    device_name: str,
+    session_key: str,
+    interval_seconds: float = 2.0,
+    process_name: str = "bgpcpp",
+    description: t.Optional[str] = None,
+) -> Step:
+    """START of an embeddable bgpcpp CPU percentile bracket.
+
+    Drop this before the phase you want to characterize and pair it with
+    ``create_cpu_percentile_stop_step`` (same ``session_key``) after it. START
+    begins a background ``/proc/<pid>/stat`` sampler that keeps running across
+    the sequential steps in between, so the window is exactly START..STOP -- no
+    ConcurrentStep needed. Reusable in ANY playbook (convergence, churn, mass
+    advertisement, steady state).
+
+    Args:
+        device_name: DUT under test.
+        session_key: unique id tying this START to its matching STOP.
+        interval_seconds: sampling interval (default 2.0s).
+        process_name: BGP++ process name (default "bgpcpp").
+        description: optional step description override.
+    """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_cpu_percentile_start",
+        "hostname": device_name,
+        "session_key": session_key,
+        "interval_seconds": interval_seconds,
+        "process_name": process_name,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=(
+            description
+            or f"Start bgpcpp CPU percentile sampling (session {session_key})"
+        ),
+    )
+
+
+def create_cpu_percentile_stop_step(
+    session_key: str,
+    percentiles: t.Optional[t.Sequence[float]] = None,
+    threshold_pct: float = 40.0,
+    normalize_per_core: bool = True,
+    gate: bool = False,
+    gate_percentile: float = 95.0,
+    gate_threshold_pct: t.Optional[float] = None,
+    summary_jq_var: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """STOP of an embeddable bgpcpp CPU percentile bracket.
+
+    Ends the sampler started by ``create_cpu_percentile_start_step`` with the
+    same ``session_key`` and emits the percentile distribution (p70/p80/p95/p99,
+    raw summed + per-core) over the START..STOP window. Log-only unless ``gate``
+    is set.
+
+    Args:
+        session_key: id matching the START step that began the bracket.
+        percentiles: percentiles to emit (default [70, 80, 95, 99]).
+        threshold_pct: informational threshold shown in the log line.
+        normalize_per_core: also emit a per-core (/nproc) view (default True).
+        gate: fail the test if the gated percentile is exceeded (default False).
+        gate_percentile: percentile to gate on when gating (default 95.0).
+        gate_threshold_pct: gate threshold (defaults to ``threshold_pct``).
+        description: optional step description override.
+    """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_cpu_percentile_stop",
+        "session_key": session_key,
+        "percentiles": list(percentiles) if percentiles else [70.0, 80.0, 95.0, 99.0],
+        "threshold_pct": threshold_pct,
+        "normalize_per_core": normalize_per_core,
+        "gate": gate,
+        "gate_percentile": gate_percentile,
+        "gate_threshold_pct": (
+            gate_threshold_pct if gate_threshold_pct is not None else threshold_pct
+        ),
+        "summary_jq_var": summary_jq_var,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=(
+            description
+            or f"Stop bgpcpp CPU percentile sampling and emit percentiles "
+            f"(session {session_key})"
+        ),
+    )

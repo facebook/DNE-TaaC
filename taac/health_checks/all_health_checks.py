@@ -56,6 +56,9 @@ from taac.health_checks.device_health_checks.bgp_update_group_health_check impor
 from taac.health_checks.device_health_checks.clear_counters_health_check import (
     ClearCountersHealthCheck,
 )
+from taac.health_checks.device_health_checks.cpu_percentile_health_check import (
+    CpuPercentileHealthCheck,
+)
 from taac.health_checks.device_health_checks.device_core_dumps_health_check import (
     DeviceCoreDumpsHealthCheck,
 )
@@ -254,6 +257,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     QoSDscpTxQueueHealthCheck,
     BufferUtilizationHealthCheck,
     SystemCpuLoadAverageHealthCheck,
+    CpuPercentileHealthCheck,
     RssDeltaHealthCheck,
     BgpFibProgrammingCheck,
     PortSpeedHealthCheck,

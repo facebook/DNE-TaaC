@@ -59,6 +59,8 @@ from taac.steps.step_definitions import (
     create_configure_prefix_length_step,
     create_configure_random_mask_step,
     create_consolidated_convergence_report_step,
+    create_cpu_percentile_start_step,
+    create_cpu_percentile_stop_step,
     create_daemon_control_step,
     create_drain_convergence_verification_step,
     create_interface_flap_step,
@@ -335,6 +337,8 @@ def create_cold_start_test_stage(
     convergence_soft_threshold_seconds: float = 600,
     convergence_hard_timeout_seconds: float = 1200,
     convergence_poll_interval_seconds: float = 5,
+    enable_cpu_percentile_characterization: bool = False,
+    cpu_characterization_interval_seconds: float = 2.0,
     enable_rss_delta_characterization: bool = False,
     rss_characterization_interval_seconds: float = 3.0,
 ) -> Stage:
@@ -377,6 +381,16 @@ def create_cold_start_test_stage(
                                 Generates latency reports and time histograms
                                 Thread-level profiling has 5-10% overhead
         enable_socket_monitoring: Enable socket monitoring (default: False)
+        enable_cpu_percentile_characterization: When True, bracket the
+            convergence window with an embeddable bgpcpp CPU percentile
+            START/STOP pair: START is inserted just before the cold-start toggle
+            and STOP just after Step 6, so its background /proc sampler overlaps
+            the entire convergence (including the portion during the toggle) and
+            emits p70/p80/p95/p99 (raw + per-core). Fully sequential; the thread
+            monitor stays a separate step. Default: False.
+        cpu_characterization_interval_seconds: Sampling interval (seconds) for
+            the CPU percentile START step (default: 2.0). Only used when
+            enable_cpu_percentile_characterization is True.
         enable_rss_delta_characterization: When True, bracket the convergence
             with an embeddable bgpcpp RSS delta START/STOP pair: START just
             before the toggle (baseline = pre-convergence idle RSS) and STOP
@@ -464,9 +478,11 @@ def create_cold_start_test_stage(
         ),
     ]
     # Step 5: Toggle device groups (cold start trigger). Kept separate from the
-    # prefix so the optional RSS delta START can be inserted immediately
-    # before it -- the background sampler then brackets the whole convergence,
-    # including the portion that happens during the (multi-second) toggle.
+    # prefix so the optional RSS-delta and CPU percentile START brackets can be
+    # inserted immediately before it (rss_start_steps then cpu_start_steps in the
+    # steps list below) -- the background samplers then bracket the whole
+    # convergence, including the portion that happens during the (multi-second)
+    # toggle.
     toggle_step = create_ixia_device_group_toggle_step(
         enable=True,
         device_group_name_regex=device_group_regex,
@@ -547,6 +563,31 @@ def create_cold_start_test_stage(
             )
         ),
     ]
+    # Optional embeddable CPU percentile bracket. START goes right before the
+    # toggle so its background sampler covers the entire convergence (including
+    # during the toggle); STOP goes after Step 6, which blocks until convergence
+    # completes -- so the window is exactly the convergence phase. Fully
+    # sequential; the thread monitor stays a separate step.
+    cpu_start_steps = []
+    cpu_stop_steps = []
+    if enable_cpu_percentile_characterization:
+        session_key = f"cold_start_convergence:{device_name}"
+        cpu_start_steps = [
+            create_cpu_percentile_start_step(
+                device_name=device_name,
+                session_key=session_key,
+                interval_seconds=cpu_characterization_interval_seconds,
+            )
+        ]
+        # jq-safe var name (no dots/colons) so a postcheck CPU_PERCENTILE_CHECK
+        # can read the stashed summary via jq_params.
+        cpu_stop_steps = [
+            create_cpu_percentile_stop_step(
+                session_key=session_key,
+                summary_jq_var="cpu_percentile_summary",
+            )
+        ]
+
     # RSS bracket: START pre-toggle (baseline = pre-convergence idle RSS), STOP
     # after the convergence observer (current = post-convergence settled RSS;
     # peak = max during convergence). Reported by RSS_DELTA_CHECK.
@@ -572,8 +613,10 @@ def create_cold_start_test_stage(
         steps=[
             *prefix_steps,
             *rss_start_steps,
+            *cpu_start_steps,
             toggle_step,
             *tail_steps,
+            *cpu_stop_steps,
             *rss_stop_steps,
         ]
     )

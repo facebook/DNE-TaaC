@@ -1962,6 +1962,37 @@ def create_service_restart_check(
     )
 
 
+def create_cpu_percentile_observe_check(
+    summary_jq_var: str = "cpu_percentile_summary",
+    gate_percentile: float = 95.0,
+    gate_threshold_pct: t.Optional[float] = None,
+    check_scope: t.Optional["hc_types.Scope"] = None,
+) -> PointInTimeHealthCheck:
+    """CPU_PERCENTILE_CHECK — report bgpcpp CPU percentiles into the results table.
+
+    Reads the percentile summary stashed as a jq var by the START/STOP collector
+    (``summary_jq_var``) and reports it. Observe-only when ``gate_threshold_pct``
+    is None (always PASS, value in the message); supply a threshold to gate on
+    the raw ``gate_percentile``.
+
+    Args:
+        summary_jq_var: jq var holding the percentile summary dict from STOP.
+        gate_percentile: raw percentile to gate on when a threshold is set.
+        gate_threshold_pct: gate threshold; None => observe-only.
+    """
+    json_payload: t.Dict[str, t.Any] = {"gate_percentile": gate_percentile}
+    if gate_threshold_pct is not None:
+        json_payload["gate_threshold_pct"] = gate_threshold_pct
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.CPU_PERCENTILE_CHECK,
+        check_params=Params(
+            json_params=json.dumps(json_payload),
+            jq_params={"summary": f".{summary_jq_var}"},
+        ),
+        check_scope=check_scope,
+    )
+
+
 def create_rss_delta_observe_check(
     summary_jq_var: str = "rss_delta_summary",
     max_growth_pct: t.Optional[float] = None,
