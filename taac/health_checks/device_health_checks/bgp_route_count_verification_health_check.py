@@ -20,6 +20,7 @@ from taac.health_checks.abstract_health_check import (
 from taac.utils.bgp_route_count_utils import (
     filter_bgp_sessions,
     get_route_counts_for_peers,
+    select_peer_addresses_by_exact_peer_group,
     validate_all_peer_route_counts,
     validate_direction,
     validate_policy_type,
@@ -47,6 +48,17 @@ class BgpRouteCountVerificationHealthCheck(
         "EOS",
     ]
 
+    @staticmethod
+    def _validate_peer_selectors(
+        descriptions_to_ignore: t.Sequence[str],
+        descriptions_to_check: t.Sequence[str],
+        exact_peer_group_names: t.Sequence[str],
+    ) -> None:
+        if exact_peer_group_names and (descriptions_to_ignore or descriptions_to_check):
+            raise ValueError(
+                "description filters and exact_peer_group_names are mutually exclusive"
+            )
+
     async def _run(
         self,
         obj: TestDevice,
@@ -62,6 +74,7 @@ class BgpRouteCountVerificationHealthCheck(
             check_params: Dictionary containing:
                 - descriptions_to_ignore: List of description substrings to ignore peers by (optional)
                 - descriptions_to_check: List of description substrings to check peers by (optional)
+                - exact_peer_group_names: Exact BGP peer-group names to check (optional)
                 - direction: "received" or "advertised" (optional, defaults to "received")
                 - policy_type: "pre_policy" or "post_policy" (optional, defaults to "pre_policy")
                     - pre_policy: Uses getPrefilterReceivedNetworks/getPrefilterAdvertisedNetworks
@@ -80,22 +93,20 @@ class BgpRouteCountVerificationHealthCheck(
         # Extract parameters
         descriptions_to_ignore = check_params.get("descriptions_to_ignore", [])
         descriptions_to_check = check_params.get("descriptions_to_check", [])
+        exact_peer_group_names = check_params.get("exact_peer_group_names", [])
         direction = check_params.get("direction", "received")
         policy_type = check_params.get("policy_type", "pre_policy")
         expected_count = check_params.get("expected_count")
         min_count = check_params.get("min_count")
         max_count = check_params.get("max_count")
 
-        # Validate direction and policy_type
         try:
-            validate_direction(direction)
-        except ValueError as e:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.FAIL,
-                message=str(e),
+            self._validate_peer_selectors(
+                descriptions_to_ignore,
+                descriptions_to_check,
+                exact_peer_group_names,
             )
-
-        try:
+            validate_direction(direction)
             validate_policy_type(policy_type)
         except ValueError as e:
             return hc_types.HealthCheckResult(
@@ -122,6 +133,11 @@ class BgpRouteCountVerificationHealthCheck(
         )
 
         try:
+            peer_addresses_to_check = await self._resolve_peer_group_addresses(
+                hostname,
+                exact_peer_group_names,
+            )
+
             # Get all BGP sessions
             # pyrefly: ignore [missing-attribute]
             bgp_sessions = await self.driver.async_get_bgp_sessions()
@@ -134,7 +150,12 @@ class BgpRouteCountVerificationHealthCheck(
                 bgp_sessions=bgp_sessions,
                 descriptions_to_ignore=descriptions_to_ignore,
                 descriptions_to_check=descriptions_to_check,
+                peer_addresses_to_check=peer_addresses_to_check,
             )
+            if peer_addresses_to_check is not None and not peers_to_check:
+                raise RuntimeError(
+                    "No established peers matched the selected exact peer groups"
+                )
 
             self.logger.info(
                 f"Checking {len(peers_to_check)} peers after filtering on {hostname}"
@@ -210,6 +231,30 @@ class BgpRouteCountVerificationHealthCheck(
                 message=f"Failed to verify BGP route counts on {hostname}: {str(e)}",
             )
 
+    async def _resolve_peer_group_addresses(
+        self,
+        hostname: str,
+        exact_peer_group_names: t.Sequence[str],
+    ) -> t.Optional[t.Set[str]]:
+        if not exact_peer_group_names:
+            return None
+
+        # pyrefly: ignore [missing-attribute]
+        update_groups = await self.driver.async_get_update_group_info()
+        selected, observed = select_peer_addresses_by_exact_peer_group(
+            update_groups,
+            exact_peer_group_names,
+        )
+        missing = set(exact_peer_group_names) - observed
+        if missing or not selected:
+            raise RuntimeError(
+                f"Exact BGP peer-group selection failed on {hostname}: "
+                f"requested={sorted(set(exact_peer_group_names))}, "
+                f"missing={sorted(missing)}, observed={sorted(observed)}, "
+                f"selected_peers={len(selected)}"
+            )
+        return selected
+
     async def _run_arista(
         self,
         obj: TestDevice,
@@ -233,6 +278,7 @@ class BgpRouteCountVerificationHealthCheck(
                 - max_count: Maximum expected routes per peer (optional)
                 - descriptions_to_check: List of peer descriptions to filter on (optional)
                 - descriptions_to_ignore: List of peer descriptions to ignore (optional)
+                - exact_peer_group_names: Exact BGP peer-group names to check (optional)
         """
         hostname = obj.name
         address_family = check_params.get("address_family", "ipv6")
@@ -241,6 +287,19 @@ class BgpRouteCountVerificationHealthCheck(
         max_count = check_params.get("max_count")
         descriptions_to_check = check_params.get("descriptions_to_check", [])
         descriptions_to_ignore = check_params.get("descriptions_to_ignore", [])
+        exact_peer_group_names = check_params.get("exact_peer_group_names", [])
+
+        try:
+            self._validate_peer_selectors(
+                descriptions_to_ignore,
+                descriptions_to_check,
+                exact_peer_group_names,
+            )
+        except ValueError as e:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=f"Invalid peer selector on {hostname}: {e}",
+            )
 
         try:
             if expected_count is not None:
@@ -252,7 +311,7 @@ class BgpRouteCountVerificationHealthCheck(
         except (ValueError, TypeError) as e:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
-                message=f"Invalid count parameter on {hostname}: {e}",
+                message=f"Invalid route-count parameters on {hostname}: {e}",
             )
 
         self.logger.info(
@@ -267,6 +326,10 @@ class BgpRouteCountVerificationHealthCheck(
 
             # pyrefly: ignore [missing-attribute]
             result = await self.driver.async_execute_show_json_on_shell(cmd)
+            peer_addresses_to_check = await self._resolve_peer_group_addresses(
+                hostname,
+                exact_peer_group_names,
+            )
             peers = result.get("vrfs", {}).get("default", {}).get("peers", {})
 
             if not peers:
@@ -278,6 +341,11 @@ class BgpRouteCountVerificationHealthCheck(
             # Filter peers by description
             filtered_peers = {}
             for peer_ip, peer_info in peers.items():
+                if (
+                    peer_addresses_to_check is not None
+                    and peer_ip not in peer_addresses_to_check
+                ):
+                    continue
                 desc = peer_info.get("description", "")
                 if descriptions_to_ignore and any(
                     ignore in desc for ignore in descriptions_to_ignore
@@ -289,12 +357,17 @@ class BgpRouteCountVerificationHealthCheck(
                     continue
                 filtered_peers[peer_ip] = peer_info
 
+            if peer_addresses_to_check is not None and not filtered_peers:
+                raise RuntimeError(
+                    "No established peers matched the selected exact peer groups"
+                )
             if not filtered_peers:
                 return hc_types.HealthCheckResult(
                     status=hc_types.HealthCheckStatus.FAIL,
                     message=(
                         f"No peers matched filter on {hostname}. "
-                        f"descriptions_to_check={descriptions_to_check}"
+                        f"descriptions_to_check={descriptions_to_check}, "
+                        f"exact_peer_group_names={exact_peer_group_names}"
                     ),
                 )
 

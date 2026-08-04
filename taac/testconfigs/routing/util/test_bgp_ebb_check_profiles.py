@@ -499,8 +499,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             + [
                 create_bgp_route_count_verification_check(
                     json_params={
-                        "descriptions_to_ignore": ["IBGP"],
-                        "descriptions_to_check": ["EBGP"],
+                        "exact_peer_group_names": ["EB-FA-V6", "EB-FA-V4"],
                         "direction": "received",
                         "expected_count": 650,
                         "policy_type": "post_policy",

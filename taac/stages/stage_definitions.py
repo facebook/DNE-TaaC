@@ -3597,6 +3597,7 @@ def create_route_registry_runtime_update_stage(
     convergence_poll_interval_seconds: float | None = None,
     expanded_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
     baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
+    exact_peer_group_names: list[str] | None = None,
 ) -> Stage:
     """
     Create a test stage to verify route registry runtime update behavior for prefix-lists.
@@ -3613,7 +3614,10 @@ def create_route_registry_runtime_update_stage(
 
     Args:
         device_name: Name of the device under test
-        ebgp_peer_description: Description substring to match EBGP peers (default: "EBGP")
+        ebgp_peer_description: Legacy description substring used only when
+            exact_peer_group_names is not provided
+        exact_peer_group_names: Exact BGP peer-group names that replace the
+            description selector when provided
         prefix_pool_regex: Regex pattern to match prefix pool names (default: ".*EBGP.*")
         prefix_start_index: Starting index for the additional prefixes (default: 0)
         prefix_end_index: Ending index for the additional prefixes (default: 100)
@@ -3643,6 +3647,12 @@ def create_route_registry_runtime_update_stage(
         )
     convergence_enabled = all(value is not None for value in convergence_params)
     added_route_count = baseline_route_count + (prefix_end_index - prefix_start_index)
+    descriptions_to_check = None if exact_peer_group_names else [ebgp_peer_description]
+    peer_scope = (
+        ", ".join(exact_peer_group_names)
+        if exact_peer_group_names
+        else ebgp_peer_description
+    )
     steps = []
 
     # Step 1: Start advertising additional prefixes (per-AFI) from FAUU to DUT
@@ -3663,10 +3673,11 @@ def create_route_registry_runtime_update_stage(
     steps.append(
         create_verify_received_routes_step(
             device_name=device_name,
-            descriptions_to_check=[ebgp_peer_description],
+            descriptions_to_check=descriptions_to_check,
+            exact_peer_group_names=exact_peer_group_names,
             expected_count=(baseline_route_count if convergence_enabled else None),
             max_count=(None if convergence_enabled else baseline_route_count),
-            description=f"Verify {prefix_end_index - prefix_start_index} additional prefixes are denied by prefix-list on {ebgp_peer_description} peers",
+            description=f"Verify {prefix_end_index - prefix_start_index} additional prefixes are denied by prefix-list on {peer_scope} peers",
         ),
     )
 
@@ -3683,7 +3694,8 @@ def create_route_registry_runtime_update_stage(
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
-                descriptions_to_check=[ebgp_peer_description],
+                descriptions_to_check=descriptions_to_check,
+                exact_peer_group_names=exact_peer_group_names,
                 expected_count=added_route_count,
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
@@ -3696,7 +3708,8 @@ def create_route_registry_runtime_update_stage(
     steps.append(
         create_verify_received_routes_step(
             device_name=device_name,
-            descriptions_to_check=[ebgp_peer_description],
+            descriptions_to_check=descriptions_to_check,
+            exact_peer_group_names=exact_peer_group_names,
             expected_count=added_route_count,
             stability_duration_seconds=soak_time_seconds,
             stability_hard_timeout_seconds=soak_time_seconds + 30,
@@ -3712,9 +3725,10 @@ def create_route_registry_runtime_update_stage(
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
-                descriptions_to_check=[ebgp_peer_description],
+                descriptions_to_check=descriptions_to_check,
+                exact_peer_group_names=exact_peer_group_names,
                 expected_count=added_route_count,
-                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were accepted after adding to prefix-list on {ebgp_peer_description} peers",
+                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were accepted after adding to prefix-list on {peer_scope} peers",
             ),
         )
 
@@ -3731,7 +3745,8 @@ def create_route_registry_runtime_update_stage(
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
-                descriptions_to_check=[ebgp_peer_description],
+                descriptions_to_check=descriptions_to_check,
+                exact_peer_group_names=exact_peer_group_names,
                 expected_count=baseline_route_count,
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
@@ -3744,7 +3759,8 @@ def create_route_registry_runtime_update_stage(
     steps.append(
         create_verify_received_routes_step(
             device_name=device_name,
-            descriptions_to_check=[ebgp_peer_description],
+            descriptions_to_check=descriptions_to_check,
+            exact_peer_group_names=exact_peer_group_names,
             expected_count=baseline_route_count,
             stability_duration_seconds=soak_time_seconds,
             stability_hard_timeout_seconds=soak_time_seconds + 30,
@@ -3760,9 +3776,10 @@ def create_route_registry_runtime_update_stage(
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
-                descriptions_to_check=[ebgp_peer_description],
+                descriptions_to_check=descriptions_to_check,
+                exact_peer_group_names=exact_peer_group_names,
                 expected_count=baseline_route_count,
-                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were denied after removing from prefix-list on {ebgp_peer_description} peers",
+                description=f"Verify {prefix_end_index - prefix_start_index} prefixes were denied after removing from prefix-list on {peer_scope} peers",
             ),
         )
 

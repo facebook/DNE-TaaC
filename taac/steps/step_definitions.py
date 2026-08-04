@@ -4827,6 +4827,30 @@ def _validated_route_stability_params(
     }
 
 
+def _received_routes_step_description(
+    *,
+    device_name: str,
+    expected_count: t.Optional[int],
+    min_count: t.Optional[int],
+    max_count: t.Optional[int],
+    descriptions_to_check: t.Optional[t.List[str]],
+    exact_peer_group_names: t.Optional[t.List[str]],
+) -> str:
+    peer_filter = ""
+    if exact_peer_group_names:
+        peer_filter = f" from exact peer groups {exact_peer_group_names}"
+    elif descriptions_to_check:
+        peer_filter = f" from peers matching {descriptions_to_check}"
+
+    if expected_count is not None:
+        return f"Verify {device_name} receives exactly {expected_count} routes{peer_filter}"
+    if max_count is not None:
+        return f"Verify {device_name} receives at most {max_count} routes{peer_filter}"
+    if min_count is not None:
+        return f"Verify {device_name} receives at least {min_count} routes{peer_filter}"
+    return f"Check received routes count on {device_name}{peer_filter}"
+
+
 def create_verify_received_routes_step(
     device_name: str,
     expected_count: t.Optional[int] = None,
@@ -4843,6 +4867,7 @@ def create_verify_received_routes_step(
     stability_duration_seconds: t.Optional[float] = None,
     stability_hard_timeout_seconds: t.Optional[float] = None,
     stability_poll_interval_seconds: t.Optional[float] = None,
+    exact_peer_group_names: t.Optional[t.List[str]] = None,
 ) -> Step:
     """
     Create a step to verify BGP received routes count from peers.
@@ -4858,6 +4883,7 @@ def create_verify_received_routes_step(
         max_count: Maximum expected routes (optional)
         descriptions_to_check: List of description substrings to match peers (optional)
         descriptions_to_ignore: List of description substrings to ignore peers (optional)
+        exact_peer_group_names: Exact BGP peer-group names to match (optional)
         direction: "received" or "advertised" (default: "received")
         policy_type: "pre_policy" or "post_policy" (default: "post_policy")
         description: Custom description for the step
@@ -4871,20 +4897,19 @@ def create_verify_received_routes_step(
     Returns:
         Step object for verifying BGP received routes count
     """
+    if exact_peer_group_names and (descriptions_to_check or descriptions_to_ignore):
+        raise ValueError(
+            "description filters and exact_peer_group_names are mutually exclusive"
+        )
     if description is None:
-        peer_filter = ""
-        if descriptions_to_check:
-            peer_filter = f" from peers matching {descriptions_to_check}"
-        if expected_count is not None:
-            description = f"Verify {device_name} receives exactly {expected_count} routes{peer_filter}"
-        elif max_count is not None:
-            description = (
-                f"Verify {device_name} receives at most {max_count} routes{peer_filter}"
-            )
-        elif min_count is not None:
-            description = f"Verify {device_name} receives at least {min_count} routes{peer_filter}"
-        else:
-            description = f"Check received routes count on {device_name}{peer_filter}"
+        description = _received_routes_step_description(
+            device_name=device_name,
+            expected_count=expected_count,
+            min_count=min_count,
+            max_count=max_count,
+            descriptions_to_check=descriptions_to_check,
+            exact_peer_group_names=exact_peer_group_names,
+        )
 
     params_dict: t.Dict[str, t.Any] = {
         "hostname": device_name,
@@ -4897,6 +4922,9 @@ def create_verify_received_routes_step(
 
     if descriptions_to_ignore is not None:
         params_dict["descriptions_to_ignore"] = descriptions_to_ignore
+
+    if exact_peer_group_names is not None:
+        params_dict["exact_peer_group_names"] = exact_peer_group_names
 
     if expected_count is not None:
         params_dict["expected_count"] = expected_count
@@ -6110,6 +6138,7 @@ def create_route_registry_prefix_list_setup_steps(
     convergence_soft_threshold_seconds: float | None = None,
     convergence_hard_timeout_seconds: float | None = None,
     convergence_poll_interval_seconds: float | None = None,
+    exact_peer_group_names: t.Optional[t.List[str]] = None,
 ) -> t.List[Step]:
     """
     Create setup steps for BGP route registry prefix list runtime update testing.
@@ -6121,6 +6150,7 @@ def create_route_registry_prefix_list_setup_steps(
 
     Args:
         device_name: Name of the device
+        exact_peer_group_names: Exact BGP peer-group names for route verification
         convergence_wait_seconds: Time to wait for BGP convergence (default: 5 minutes)
         prefix_start_index: First runtime-update prefix index (inclusive)
         prefix_end_index: Last runtime-update prefix index (exclusive)
@@ -6187,7 +6217,8 @@ def create_route_registry_prefix_list_setup_steps(
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
-                descriptions_to_check=["EBGP"],
+                descriptions_to_check=(None if exact_peer_group_names else ["EBGP"]),
+                exact_peer_group_names=exact_peer_group_names,
                 expected_count=expected_route_count,
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),

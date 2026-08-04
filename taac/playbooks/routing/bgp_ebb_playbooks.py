@@ -61,6 +61,7 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     get_profile_checks,
     ProfileContext,
     RssDeltaConfig,
+    RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
@@ -743,7 +744,8 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         memory_threshold: Memory threshold in bytes (default: 5GB)
         cpu_util_terminate_on_error: Terminate test on CPU threshold breach
         memory_terminate_on_error: Terminate test on memory threshold breach
-        ebgp_peer_description: Description substring to match EBGP peers (default: "EBGP")
+        ebgp_peer_description: Deprecated compatibility parameter; ignored
+            because CICD-EBB-12 is locked to exact EB-FA peer-group names
         prefix_pool_regex: Regex to match prefix pool names (default: ".*EBGP.*")
         soak_time_seconds: Soak duration for BGP stability (default: 600s)
         expected_route_count: Expected baseline eBGP route count (default: 750)
@@ -781,6 +783,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         name="bgp_ebb_route_registry_runtime_update_playbook",
         setup_steps=create_route_registry_prefix_list_setup_steps(
             device_name=device_name,
+            exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
             prefix_start_index=runtime_prefix_start_index,
             prefix_end_index=runtime_prefix_end_index,
             baseline_policy_path=baseline_policy_path,
@@ -801,7 +804,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         stages=[
             create_route_registry_runtime_update_stage(
                 device_name=device_name,
-                ebgp_peer_description=ebgp_peer_description,
+                exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
                 prefix_pool_regex=prefix_pool_regex,
                 prefix_start_index=runtime_prefix_start_index,
                 prefix_end_index=runtime_prefix_end_index,

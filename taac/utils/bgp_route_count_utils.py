@@ -133,6 +133,7 @@ def filter_bgp_sessions(
     bgp_sessions: t.Sequence[TBgpSession],
     descriptions_to_ignore: t.Optional[t.List[str]] = None,
     descriptions_to_check: t.Optional[t.List[str]] = None,
+    peer_addresses_to_check: t.Optional[t.AbstractSet[str]] = None,
 ) -> t.List[str]:
     """
     Filter BGP sessions by description and return peer IPs of ESTABLISHED sessions.
@@ -141,6 +142,7 @@ def filter_bgp_sessions(
         bgp_sessions: Sequence of BGP sessions to filter
         descriptions_to_ignore: List of description substrings to ignore peers by (optional)
         descriptions_to_check: List of description substrings to check peers by (optional)
+        peer_addresses_to_check: Exact peer addresses to check (optional)
 
     Returns:
         List of peer IP addresses that passed the filter
@@ -151,6 +153,12 @@ def filter_bgp_sessions(
     peers_to_check = []
     for session in bgp_sessions:
         peer_ip = str(session.peer_addr)
+
+        if (
+            peer_addresses_to_check is not None
+            and peer_ip not in peer_addresses_to_check
+        ):
+            continue
 
         # Check if peer should be ignored by description
         if descriptions_to_ignore:
@@ -178,6 +186,40 @@ def filter_bgp_sessions(
         peers_to_check.append(peer_ip)
 
     return peers_to_check
+
+
+def select_peer_addresses_by_exact_peer_group(
+    update_group_response: t.Any,
+    peer_group_names: t.Sequence[str],
+) -> t.Tuple[t.Set[str], t.Set[str]]:
+    """Resolve exact peer-group names to peer addresses from update-group state.
+
+    A peer group can span multiple update groups, so addresses are accumulated
+    across every group whose authoritative key is an exact name match.
+
+    Returns:
+        Selected peer addresses and all observed non-empty peer-group names.
+    """
+    requested_names = set(peer_group_names)
+    selected_addresses: t.Set[str] = set()
+    observed_names: t.Set[str] = set()
+
+    for group in getattr(update_group_response, "update_groups", None) or []:
+        group_key = getattr(group, "group_key", None)
+        peer_group_name = str(
+            getattr(group_key, "peer_group_name", "") if group_key else ""
+        )
+        if peer_group_name:
+            observed_names.add(peer_group_name)
+        if peer_group_name not in requested_names:
+            continue
+        selected_addresses.update(
+            str(peer.peer_addr)
+            for peer in (getattr(group, "peers", None) or [])
+            if getattr(peer, "peer_addr", None)
+        )
+
+    return selected_addresses, observed_names
 
 
 async def get_route_count_for_peer(

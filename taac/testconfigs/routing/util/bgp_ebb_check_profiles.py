@@ -62,6 +62,7 @@ from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCheck
 
 _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS = 1200
+RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES = ("EB-FA-V6", "EB-FA-V4")
 
 
 class CheckProfile(enum.Enum):
@@ -471,8 +472,9 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
         + [
             create_bgp_route_count_verification_check(
                 json_params={
-                    "descriptions_to_ignore": ["IBGP"],
-                    "descriptions_to_check": ["EBGP"],
+                    "exact_peer_group_names": [
+                        *RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
+                    ],
                     "direction": "received",
                     "expected_count": ctx.route_count_expected,
                     "policy_type": "post_policy",
