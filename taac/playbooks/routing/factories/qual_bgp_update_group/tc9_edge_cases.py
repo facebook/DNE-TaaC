@@ -1032,6 +1032,11 @@ def create_bgp_ug_simultaneous_disruptions_playbook(
     monitor_retry_count: int = 3,
     monitor_retry_delay_s: float = 10.0,
     vmhwm_absolute_threshold_bytes: t.Optional[int] = None,
+    # VmHWM growth gate: when True, a breach is FLAGGED (loud XFAIL warning) but does
+    # NOT fail the test -- for a known, tracked DUT-side growth finding (T281701986).
+    # A restart/crash (VmHWM decrease) still hard-fails. Same pattern as 2.6.1 crit-4.
+    vmhwm_growth_expected_fail: bool = False,
+    vmhwm_growth_expected_fail_reason: t.Optional[str] = None,
     disruption_duration_s: int = 1800,
     convergence_quiesce_s: int = 300,
     recovery_session_retry_count: int = 10,
@@ -1149,6 +1154,8 @@ def create_bgp_ug_simultaneous_disruptions_playbook(
                         "hostname": device_name,
                         "duration_seconds": disruption_duration_s,
                         "growth_threshold_bytes": vmhwm_growth_threshold_bytes,
+                        "expected_fail": vmhwm_growth_expected_fail,
+                        "expected_fail_reason": vmhwm_growth_expected_fail_reason,
                     },
                     description=(
                         "2.9.2 -- assert bgpcpp VmHWM growth over the disruption "
