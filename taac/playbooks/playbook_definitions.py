@@ -11095,12 +11095,26 @@ def gen_snake_longevity_playbook(
     duration: int,
     prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    collect_port_state: bool = True,
+    poll_interval: int = 5,
+    fail_on_flap: bool = True,
 ):
     return taac_types.Playbook(
         name=name,
         prechecks=prechecks or [],
         postchecks=postchecks or [],
-        stages=[create_steps_stage(steps=[create_longevity_step(duration=duration)])],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_longevity_step(
+                        duration=duration,
+                        collect_port_state=collect_port_state,
+                        poll_interval=poll_interval,
+                        fail_on_flap=fail_on_flap,
+                    )
+                ]
+            )
+        ],
     )
 
 

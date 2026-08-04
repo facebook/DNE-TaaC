@@ -1688,10 +1688,12 @@ class Ixia:
         protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
 
         protocols_summary.CheckCondition(
-            "Sessions Not Started", StatViewAssistant.EQUAL, 0
+            "Sessions Not Started", StatViewAssistant.EQUAL, 0, Timeout=300
         )
 
-        protocols_summary.CheckCondition("Sessions Down", StatViewAssistant.EQUAL, 0)
+        protocols_summary.CheckCondition(
+            "Sessions Down", StatViewAssistant.EQUAL, 0, Timeout=300
+        )
 
         self.logger.info(
             "[GLOBAL] Successfully verified the operational status of all "

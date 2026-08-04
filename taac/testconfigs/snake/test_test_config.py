@@ -562,10 +562,24 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
         ),
     ],
     hostname="fboss159.99.ash6",
-    # DR4 gearbox optics at 400B frames have a derated usable rate: 45% is the effective
-    # "line rate" for this optic/frame-size. 50% over-drives the gearbox -> shortfall shows
-    # up as ~10% packet loss. 45% is the lossless operating point for the qual.
+    # 45% is the qualified lossless operating point for these DR4 gearbox optics at 400B
+    # frames. Repeatable 0% loss requires all three of: the FIXED 400B frame (below),
+    # isolating the dangling eth1/1/5 tap out of snake VLAN 2004 (configerator
+    # fboss159_99_ash6 fix — removes a flood sink), and a warmed snake (MACs learned so
+    # traffic is unicast, not flooded). With those in place, 45% is lossless; lower rates
+    # do NOT help the residual loss (it was flood/convergence, not a congestion cap).
     line_rate=45,
+    # Pin a FIXED 400B frame — the qualified DR4-gearbox operating point. Without an
+    # explicit setting, frame_size_settings=None lets IXIA fall back to a small
+    # control-plane frame size (UseControlPlaneFrameSize=True), whose ~6x higher packet
+    # rate at 45% line rate overruns the gearbox pipeline (which is pps-limited) and
+    # tail-drops ~46% of frames as ingress discards distributed around the loop
+    # (Input Discards >> 0, Input Errors = 0 — congestion, not optics). Pinning 400B
+    # restores the lossless packet rate characterized in the June baseline.
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.FIXED,
+        fixed_size=400,
+    ),
     # Use only the two clean IXIA endpoints; ignore the dangling eth1/1/5, eth1/64/5 taps.
     ixia_ports=["eth1/1/1", "eth1/64/1"],
     # LLDP_CHECK enabled: D109171150 (eth1/34<->eth1/35 lane-swap) has LANDED, so the
@@ -579,13 +593,19 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # in-flight frames fully drain on this 96-hop snake before the loss measurement.
     packet_loss_sleep_time=30,
     # Enabled: Phase 1 (test_one_min_longevity) + Phase 3 (link-event/lane re-sync) +
-    # Phase 4 (service resilience). Skipped for now: Phase 2 longevity (10m/1h/72h),
-    # Phase 5 system reboots, Phase 6 transceiver/fiber removal.
-    # fsdb restart/crash are skipped: fsdb is not deployed/running on this manually
-    # brought-up box (no fsdb.service unit/package), so those tests have no target and
-    # time out waiting for fsdb thrift (an environment gap, not a DR4/recovery bug).
+    # Enabled: Phase 3 (link-event) + Phase 4 (service resilience) — "all non-longevity"
+    # that can run on this box. Skipped, with reason:
+    #  * test_ten_min_longevity: ENABLED as a steady-state soak with the port-state
+    #    collector (gen_snake_longevity_playbook collect_port_state=True). It polls every
+    #    port every 5s for 10 min and FAILS on any flap — surfacing the spontaneous
+    #    ~60s gearbox link flaps (T283020514) instead of riding through them.
+    #  * remaining longevity (1m/1h/72h): out of scope for this run.
+    #  * fsdb restart/crash: fsdb is not deployed on this manually brought-up box (no
+    #    fsdb.service), so they time out on fsdb-thrift — an environment gap, not a bug.
+    #  * transceiver/fiber removal: require physical optic/fiber manipulation at the rack.
+    #  * system reboots (bmc/userver): run separately/last (heavy; box is hand-deployed).
     playbooks_to_skip=[
-        "test_ten_min_longevity",
+        "test_one_min_longevity",
         "test_one_hour_longevity",
         "test_72hr_longevity",
         "test_snake_system_reboot_bmc_full",

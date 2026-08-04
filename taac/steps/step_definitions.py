@@ -135,6 +135,8 @@ from taac.steps.step import (  # oss-rewrite (force ShipIt re-export to taac.* r
 )
 from taac.tasks.utils import run_task
 from taac.utils.common import (
+    async_everpaste_str,
+    async_get_fburl,
     async_write_test_result,
     run_in_thread,
 )
@@ -3428,6 +3430,9 @@ def create_longevity_step(
     duration: int,
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
+    collect_port_state: bool = False,
+    poll_interval: int = 5,
+    fail_on_flap: bool = True,
 ) -> Step:
     """
     Create a longevity step that waits for a specified duration.
@@ -3436,6 +3441,16 @@ def create_longevity_step(
         duration: Duration in seconds to wait
         description: Custom description for the step
         step_id: Optional step ID
+        collect_port_state: When True, poll every port's operational state for
+            the hold window (same source as PORT_STATE_CHECK), record per-poll
+            up/down snapshots + transitions, and everpaste the full JSONL. Use
+            for steady-state soaks where spontaneous link flaps must be caught
+            rather than silently ridden through.
+        poll_interval: Seconds between port-state polls (only used when
+            collect_port_state is True).
+        fail_on_flap: When collecting port state, fail the step if any monitored
+            interface flaps during the hold. A steady-state longevity hold
+            should see zero flaps, so any flap is a real defect.
 
     Returns:
         Step object for longevity/wait
@@ -3443,6 +3458,10 @@ def create_longevity_step(
     params_dict: t.Dict[str, t.Any] = {"duration": duration}
     if description:
         params_dict["description"] = description
+    if collect_port_state:
+        params_dict["collect_port_state"] = True
+        params_dict["poll_interval"] = poll_interval
+        params_dict["fail_on_flap"] = fail_on_flap
     return Step(
         name=StepName.LONGEVITY_STEP,
         step_params=Params(json_params=json.dumps(params_dict)),
@@ -8064,6 +8083,12 @@ class LongevityStep(StepBase[taac_types.BaseInput]):
     ):
         duration = params["duration"]
         label = params.get("description", "LONGEVITY_STEP")
+        if params.get("collect_port_state"):
+            await self._run_with_port_state_collection(duration, label, params)
+        else:
+            await self._sleep_longevity(duration, label)
+
+    async def _sleep_longevity(self, duration: int, label: str) -> None:
         total_min = duration // 60
         total_sec = duration % 60
         total_str = f"{total_min}m {total_sec}s" if total_min else f"{total_sec}s"
@@ -8084,6 +8109,139 @@ class LongevityStep(StepBase[taac_types.BaseInput]):
             )
         elapsed = time.time() - start_time
         self.logger.info(f"[Wait] {label} — complete ({elapsed:.1f}s)")
+
+    async def _run_with_port_state_collection(
+        self,
+        duration: int,
+        label: str,
+        params: t.Dict[str, t.Any],
+    ) -> None:
+        """Hold for `duration` while polling every port's operational state.
+
+        Same data source as PORT_STATE_CHECK
+        (`driver.async_get_all_interfaces_operational_status()` ->
+        `getAllPortInfo()` -> `operState`). Records a per-poll up/down snapshot
+        + transitions, everpastes the full JSONL for offline analysis, and — for
+        a steady-state hold where no port should ever bounce — fails the step if
+        any monitored interface flaps (opt out with `fail_on_flap=False`). This
+        surfaces spontaneous link flaps that a plain wait would silently ride
+        through.
+        """
+        poll_interval = max(1, int(params.get("poll_interval", 5)))
+        fail_on_flap = params.get("fail_on_flap", True)
+        total_min = duration // 60
+        self.logger.info(
+            f"[PortStateCollector] {label} — holding {total_min}m "
+            f"({duration}s), polling all ports every {poll_interval}s"
+        )
+
+        start_time = time.time()
+        prev: t.Optional[t.Dict[str, bool]] = None
+        master: t.List[str] = []
+        rows: t.List[t.Dict[str, t.Any]] = []
+        flap_counts: t.Dict[str, int] = {}
+        ever_down: t.Set[str] = set()
+        max_down = 0
+        max_down_ts = ""
+        poll_errors = 0
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= duration:
+                break
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                oper = await self.driver.async_get_all_interfaces_operational_status()
+            except Exception as e:  # keep polling through transient agent errors
+                poll_errors += 1
+                self.logger.warning(f"[PortStateCollector] {ts} poll error: {e}")
+                await asyncio.sleep(poll_interval)
+                continue
+
+            if not master:
+                master = sorted(oper.keys())
+                rows.append(
+                    {
+                        "header": True,
+                        "device": self.hostname,
+                        "interval_s": poll_interval,
+                        "n_monitored": len(master),
+                        "interfaces": master,
+                        "started": ts,
+                    }
+                )
+
+            cur = {intf: bool(oper.get(intf, False)) for intf in master}
+            down = [intf for intf in master if not cur[intf]]
+            changed = (
+                []
+                if prev is None
+                else [
+                    {"if": intf, "to": ("UP" if cur[intf] else "DOWN")}
+                    for intf in master
+                    if prev.get(intf) != cur[intf]
+                ]
+            )
+            for c in changed:
+                if c["to"] == "DOWN":
+                    flap_counts[c["if"]] = flap_counts.get(c["if"], 0) + 1
+                    ever_down.add(c["if"])
+            if len(down) > max_down:
+                max_down = len(down)
+                max_down_ts = ts
+
+            rows.append(
+                {
+                    "ts": ts,
+                    "up_count": len(master) - len(down),
+                    "down_count": len(down),
+                    "down": down,
+                    "blob": "".join("1" if cur[intf] else "0" for intf in master),
+                    "changed": changed,
+                }
+            )
+            if changed:
+                chg = ", ".join(f"{c['if']}->{c['to']}" for c in changed)
+                self.logger.info(
+                    f"[PortStateCollector] {ts} up={len(master) - len(down)} "
+                    f"down={len(down)} | changes: {chg}"
+                )
+            prev = cur
+            await asyncio.sleep(
+                min(poll_interval, max(0, duration - (time.time() - start_time)))
+            )
+
+        n_polls = sum(1 for r in rows if not r.get("header"))
+        total_flaps = sum(flap_counts.values())
+        self.logger.info(
+            f"[PortStateCollector] {label} — complete: {n_polls} polls over "
+            f"{time.time() - start_time:.0f}s, monitored {len(master)} ports, "
+            f"{poll_errors} poll errors"
+        )
+        self.logger.info(
+            f"[PortStateCollector] flap summary: {len(ever_down)} interface(s) "
+            f"flapped, {total_flaps} total down-transitions, "
+            f"max {max_down} down at once (at {max_down_ts or 'n/a'})"
+        )
+        if flap_counts:
+            ranked = sorted(flap_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            self.logger.info(
+                "[PortStateCollector] per-interface flap counts (down-transitions): "
+                + ", ".join(f"{intf}={cnt}" for intf, cnt in ranked)
+            )
+        try:
+            blob = "\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
+            fburl = await async_get_fburl(await async_everpaste_str(blob))
+            self.logger.info(f"[PortStateCollector] full JSONL: {fburl}")
+        except Exception as e:
+            self.logger.warning(f"[PortStateCollector] failed to everpaste JSONL: {e}")
+
+        if fail_on_flap and ever_down:
+            self.add_failure(
+                f"{len(ever_down)} interface(s) flapped during '{label}' "
+                f"({total_flaps} down-transitions): " + ", ".join(sorted(ever_down))
+            )
+            self.raise_failure_if_exists()
 
 
 class RunSSHCmdStep(StepBase[taac_types.BaseInput]):
