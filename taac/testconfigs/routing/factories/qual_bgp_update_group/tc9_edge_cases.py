@@ -838,7 +838,11 @@ def create_bgp_ug_edge_cases_test_config(
 
     Bundles the WITHOUT_OPEN_R section-2.9 edge-case playbooks on the shared
     EBB-scale bag conveyor logical_topology. ``enable_update_group=True`` is baked in
-    (UG MUST be on for these specs). Wires the 2.9.7 empty-group playbook; the
+    (UG MUST be on for these specs), and the WITHOUT_OPEN_R + next-hop-self quartet
+    (D113330327) is applied so the DUT resolves next-hops from interface state and
+    re-advertises the step-3 iBGP inject -- the precondition for the step-10 on-the-wire
+    distribution check (matches 2.9.1/2.9.3/2.9.6/2.9.8). Wires the 2.9.7 empty-group
+    playbook; the
     remaining WITHOUT_OPEN_R sub-specs are added to ``playbooks`` as they are
     implemented. (2.9.4 dual-stack isolation is its own WITH_OPEN_R TestConfig,
     ``create_bgp_ug_dual_stack_isolation_test_config``.)
@@ -883,7 +887,16 @@ def create_bgp_ug_edge_cases_test_config(
         physical_inventory,
         name="BAG011_ASH6_BGP_UG_EDGE_CASES_TEST",
         playbooks=[empty_group_playbook],
+        # WITHOUT_OPEN_R + next-hop-self (D113330327): IXIA advertises next-hop = the
+        # peer's connected IP and the DUT resolves it from interface state via the
+        # bgpcpp gflag -- so the next-hops resolve and the DUT re-advertises the step-3
+        # iBGP inject with no Open/R daemon (the precondition for the step-10 on-the-wire
+        # distribution/dump). Without this the DUT could not resolve next-hops and
+        # re-advertised nothing, so the dump was empty. Matches the
+        # 2.9.1/2.9.3/2.9.6/2.9.8 pattern.
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        ebgp_next_hop_self=True,
+        ibgp_next_hop_self=True,
         enable_update_group=True,
     )
 
