@@ -5,6 +5,7 @@
 - 2.4.1 New Peer Joins, Receives Full Sync, Then a Peer Goes Down (REAL)
 - 2.4.2 New Peer Joins, Then Routes Are Withdrawn (REAL)
 - 2.4.3 New Peer Joins, Then Attribute Change on Existing Routes (REAL)
+- 2.4.4 New Peer Added Dynamically via addPeer API (REAL)
 """
 
 import typing as t
@@ -14,19 +15,27 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_received_route_community_check,
     create_bgp_route_count_verification_check,
     create_bgp_session_establish_check,
+    create_bgp_session_snapshot_check,
     create_bgp_stale_route_check,
     create_bgp_update_group_check,
     create_service_restart_check,
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
+    create_add_bgp_peers_step,
     create_advertise_withdraw_prefixes_step,
     create_custom_step,
+    create_del_bgp_peers_step,
     create_ixia_api_step,
     create_longevity_step,
+    create_snapshot_bgp_sent_route_counts_step,
     create_start_stop_bgp_peers_step,
     create_tcpdump_step,
     create_validation_step,
+    create_verify_bgp_advertised_nlris_step,
+    create_verify_bgp_peers_joined_running_step,
+    create_verify_bgp_sent_route_count_delta_step,
+    create_verify_bgp_sent_route_counts_uniform_step,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     BGP_STANDARD_POSTCHECKS,
@@ -674,6 +683,461 @@ def create_bgp_ug_new_peer_join_attribute_change_playbook(
                     "sender (mid-sync attribute mutation trigger)"
                 ),
             ),
+        ],
+        "cleanup_steps": cleanup_steps,
+        "prechecks": prechecks,
+        "postchecks": postchecks,
+        "snapshot_checks": snapshot_checks,
+    }
+    if setup_steps is not None:
+        kwargs["setup_steps"] = setup_steps
+    return Playbook(**kwargs)
+
+
+def create_bgp_ug_add_peer_dynamic_playbook(
+    device_name: str,
+    control_peer_addrs: t.List[str],
+    spare_peer_addr: str,
+    spare_local_addr: str,
+    spare_remote_as: int,
+    spare_peer_regex: str,
+    b_var2_peer_regex: str,
+    b_var2_route_count: int,
+    spare_peer_group_name: str = "EB-FA-V6",
+    spare_egress_policy_name: t.Optional[str] = None,
+    ug_peer_group_substring: str = "EB-FA-V6",
+    expected_update_group_count: int = 2,
+    held_member_peer_regex: t.Optional[str] = None,
+    held_member_peer_addr: t.Optional[str] = None,
+    ixia_ebgp_capture_interface: t.Optional[str] = None,
+    dump_capture_duration_s: int = 180,
+    setup_convergence_s: int = 30,
+    spare_absent_settle_s: int = 30,
+    post_add_convergence_s: int = 60,
+    post_inject_convergence_s: int = 30,
+    setup_steps: t.Optional[t.List[Step]] = None,
+    prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+) -> Playbook:
+    """Build the BGP++ Update Group qualification 2.4.4 playbook
+    (New Peer Added Dynamically via the addPeer control-plane API).
+
+    Design (causal proof that ``addPeers`` created the peer):
+
+    * The spare eBGP peer (``spare_peer_addr``) is ABSENT from the DUT's static
+      bgpcpp config at baseline -- its interface /127 and IXIA session are
+      provisioned by the topology, but no DUT BGP *neighbor* exists.
+    * Stage A: record the group dump count ``M`` on the existing EB-FA-V6
+      members, then bring the spare's IXIA session UP and assert it is NOT
+      Established (the DUT has no neighbor, so no session forms).
+    * Stage B: call ``addPeers`` for the spare, then assert it establishes,
+      lands in the SAME EB-FA-V6 update group (JOINED_RUNNING), the group is
+      intact, its sent-route count is uniform-and-non-zero with the existing
+      members, AND its per-peer advertised-NLRI set is byte-identical to the
+      members' (i.e. it received the full ``M``-prefix dump -- identical dump
+      ⇒ same update group).
+    * Stage C: inject 50 more prefixes from an existing iBGP source (DG_B_VAR2)
+      and assert the spare AND all existing members receive them (+N delta).
+    * Cleanup: ``delPeers`` the spare, bring its IXIA session + the inject source
+      back DOWN, and assert the spare left cleanly.
+
+    Distribution is verified two ways, both scoped to the existing members + the
+    spare: (1) the ``postpolicy_sent_prefix_count`` PS gauge (portable
+    count-parity baseline) and (2) per-peer advertised-NLRI identity via
+    ``getPostfilterAdvertisedNetworks`` -- the adj-RIB-out reads populate under
+    Update Group on the fixed bag013 binary (T271301144 / T281417842, proven by
+    2.5.x + 2.9.7), so the literal NLRI-set identity check is meaningful here.
+    """
+    members_and_spare = list(control_peer_addrs) + [spare_peer_addr]
+
+    baseline_record_steps = [
+        # Pre-condition 3 / step 1 say CONFIRM, not just record: the DUT must
+        # already be distributing the same non-zero dump M to every existing
+        # member before the spare is introduced. Snapshotting alone would defer
+        # the only uniformity assertion to Stage B, where it also covers the
+        # spare -- so a pre-broken baseline would surface there and read as an
+        # addPeers failure, which is precisely the thing this test isolates.
+        create_verify_bgp_sent_route_counts_uniform_step(
+            hostname=device_name,
+            peer_addrs=list(control_peer_addrs),
+            min_count=1,
+            max_spread=0,
+            description=(
+                "Stage A spec gate (2.4.4): every existing EB-FA-V6 member is "
+                "already receiving the SAME non-zero group dump M before the "
+                "spare is introduced (pre-condition 3 / step 1)"
+            ),
+        ),
+        create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key="ug_2_4_4_baseline",
+            peer_addrs=list(control_peer_addrs),
+            description=(
+                "Stage A (2.4.4): record baseline group dump M on the existing "
+                "EB-FA-V6 members (sent-count snapshot)"
+            ),
+        ),
+        create_start_stop_bgp_peers_step(
+            peer_regex=spare_peer_regex,
+            start=True,
+            start_idx=1,
+            end_idx=1,
+            description=(
+                "Stage A (2.4.4): bring the SPARE IXIA session UP -- the DUT has "
+                "NO neighbor for it yet (absent from the static bgpcpp config)"
+            ),
+        ),
+        create_longevity_step(
+            duration=spare_absent_settle_s,
+            description=(
+                f"Stage A (2.4.4): settle {spare_absent_settle_s}s -- the DUT "
+                "ignores the spare's TCP SYNs (no neighbor configured)"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=[
+                create_bgp_session_establish_check(
+                    ignore_all_prefixes_except=[spare_peer_addr],
+                    expected_established_sessions=0,
+                )
+            ],
+            description=(
+                "Stage A spec gate (2.4.4): spare is NOT Established with its IXIA "
+                "session UP -- proves the later addPeers call is what creates it"
+            ),
+        ),
+    ]
+
+    add_peer_steps = [
+        create_add_bgp_peers_step(
+            hostname=device_name,
+            peer_addr=spare_peer_addr,
+            local_addr=spare_local_addr,
+            remote_as=spare_remote_as,
+            peer_group_name=spare_peer_group_name,
+            # Default None = inherit the peer-group's policy, which is what
+            # spec step 3 asks for. Kept as an opt-in escape hatch only.
+            egress_policy_name=spare_egress_policy_name,
+            description=(
+                "Stage B (2.4.4): addPeers -- dynamically create the spare "
+                "neighbor via the TBgpService.addPeers control-plane RPC "
+                "(peer-group EB-FA-V6, inheriting its egress policy)"
+            ),
+        ),
+        create_longevity_step(
+            duration=post_add_convergence_s,
+            description=(
+                f"Stage B (2.4.4): settle {post_add_convergence_s}s for the spare "
+                "to establish and receive the full UG dump"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=[
+                create_bgp_session_establish_check(
+                    ignore_all_prefixes_except=[spare_peer_addr],
+                ),
+                # expected_group_count is the LOAD-BEARING half of spec
+                # criterion 2: the spare must join the EXISTING EB-FA-V6 group,
+                # so the total group count must be UNCHANGED from baseline. The
+                # membership/NLRI gates below cannot catch a split -- a peer in
+                # its own group still reports JOINED_RUNNING and can still hold
+                # an identical prefix set -- and the peer-group check tolerates
+                # a peer-group spanning multiple update groups by design.
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    peer_group_substrings=[ug_peer_group_substring],
+                    expected_group_count=expected_update_group_count,
+                ),
+            ],
+            description=(
+                "Stage B verify (2.4.4): spare Established + EB-FA-V6 update "
+                "group intact + total group count UNCHANGED (no new/orphaned "
+                "group -- spec criterion 2)"
+            ),
+        ),
+        create_verify_bgp_peers_joined_running_step(
+            hostname=device_name,
+            peer_addrs=[spare_peer_addr],
+            description=(
+                "Stage B spec gate (2.4.4): spare is JOINED_RUNNING in the "
+                "EB-FA-V6 update group (same existing group, not a new one)"
+            ),
+        ),
+        create_verify_bgp_sent_route_counts_uniform_step(
+            hostname=device_name,
+            peer_addrs=members_and_spare,
+            min_count=1,
+            max_spread=0,
+            description=(
+                "Stage B spec gate (2.4.4): spare received the full M-prefix dump "
+                "-- its sent-count is non-zero and identical to the existing "
+                "EB-FA-V6 members (count-parity baseline)"
+            ),
+        ),
+        create_verify_bgp_advertised_nlris_step(
+            hostname=device_name,
+            # /128 of each tracked member + the spare -- scopes the identity
+            # assertion to EXACTLY members_and_spare (same scope as the count
+            # check above), so it never sweeps in the held/disp eBGP groups that
+            # share the ug_ebgp_v6 parent network.
+            peer_parent_prefixes=[f"{addr}/128" for addr in members_and_spare],
+            min_count=1,
+            require_identical=True,
+            description=(
+                "Stage B spec gate (2.4.4): the spare's per-peer advertised-NLRI "
+                "set (getPostfilterAdvertisedNetworks, populated under UG on the "
+                "fixed bag013 binary) is IDENTICAL to the existing EB-FA-V6 "
+                "members' -- literal full-dump parity, and identical dump ⇒ same "
+                "update group (spec step 7 / criteria 2+3)"
+            ),
+        ),
+    ]
+
+    inject_steps = [
+        create_snapshot_bgp_sent_route_counts_step(
+            hostname=device_name,
+            snapshot_key="ug_2_4_4_pre_inject",
+            peer_addrs=members_and_spare,
+            description=(
+                "Stage C (2.4.4): snapshot sent-count on members + spare before "
+                "the runtime inject"
+            ),
+        ),
+        create_start_stop_bgp_peers_step(
+            peer_regex=b_var2_peer_regex,
+            start=True,
+            start_idx=1,
+            end_idx=1,
+            description=(
+                f"Stage C (2.4.4): bring DG_B_VAR2 UP -- inject "
+                f"{b_var2_route_count} more prefixes from an existing iBGP source"
+            ),
+        ),
+        create_longevity_step(
+            duration=post_inject_convergence_s,
+            description=(
+                f"Stage C (2.4.4): settle {post_inject_convergence_s}s for the "
+                "inject to propagate via the UG"
+            ),
+        ),
+        create_verify_bgp_sent_route_count_delta_step(
+            hostname=device_name,
+            snapshot_key="ug_2_4_4_pre_inject",
+            min_delta=b_var2_route_count,
+            max_delta=b_var2_route_count,
+            peer_addrs=members_and_spare,
+            description=(
+                f"Stage C spec gate (2.4.4): spare AND all existing members "
+                f"received the +{b_var2_route_count} runtime inject"
+            ),
+        ),
+    ]
+
+    # Stage D (OPT-IN, spec step 7 / criterion 3): prove the spare's dump carries
+    # the same PATH ATTRIBUTES as a statically-configured member's, not just the
+    # same prefixes. Needs an on-wire capture -- getPostfilterAdvertisedNetworks
+    # is prefix-level. Runs LAST so the flap it performs cannot perturb the
+    # Stage A/B/C assertions, and it compares against HELD (admin-DOWN at
+    # baseline) so no ESTABLISHED member is disturbed.
+    dump_compare_stages = []
+    if ixia_ebgp_capture_interface and held_member_peer_regex:
+        dump_compare_stages.append(
+            create_steps_stage(
+                steps=[
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "test_bgp_add_peer_dump_compare",
+                            "hostname": device_name,
+                            "ixia_capture_interface": ixia_ebgp_capture_interface,
+                            "spare_peer_regex": spare_peer_regex,
+                            "member_peer_regex": held_member_peer_regex,
+                            "capture_duration_seconds": dump_capture_duration_s,
+                        },
+                        description=(
+                            "Stage D spec gate (2.4.4): the addPeers-created "
+                            "spare and a statically-configured member of the "
+                            "same update group receive IDENTICAL initial dumps "
+                            "-- NLRI AND path attributes (criterion 3)"
+                        ),
+                    )
+                ],
+                description=(
+                    "Stage D (2.4.4): on-wire initial-dump attribute parity, "
+                    "spare vs static member"
+                ),
+            )
+        )
+
+    cleanup_steps = [
+        create_del_bgp_peers_step(
+            hostname=device_name,
+            peer_addrs=[spare_peer_addr],
+            description=(
+                "Cleanup (2.4.4): delPeers -- remove the dynamically-added spare "
+                "neighbor (restore static-config baseline)"
+            ),
+        ),
+        create_start_stop_bgp_peers_step(
+            peer_regex=spare_peer_regex,
+            start=False,
+            start_idx=1,
+            end_idx=1,
+            description="Cleanup (2.4.4): bring the SPARE IXIA session DOWN",
+        ),
+        create_start_stop_bgp_peers_step(
+            peer_regex=b_var2_peer_regex,
+            start=False,
+            start_idx=1,
+            end_idx=1,
+            description="Cleanup (2.4.4): bring DG_B_VAR2 back DOWN",
+        ),
+        # Stage D flapped HELD UP to get a second initial dump to compare
+        # against. Put it back to its admin-DOWN baseline so the testbed is left
+        # as it was found -- otherwise a subsequent --skip-setup-tasks rerun
+        # starts with an extra established member.
+        *(
+            [
+                create_start_stop_bgp_peers_step(
+                    peer_regex=held_member_peer_regex,
+                    start=False,
+                    start_idx=1,
+                    end_idx=1,
+                    description=(
+                        "Cleanup (2.4.4): return HELD to admin-DOWN (Stage D "
+                        "brought it up for the dump comparison)"
+                    ),
+                )
+            ]
+            if dump_compare_stages and held_member_peer_regex
+            else []
+        ),
+        create_longevity_step(
+            duration=setup_convergence_s,
+            description=(
+                f"Cleanup (2.4.4): settle {setup_convergence_s}s for baseline "
+                "state to converge"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=[
+                create_bgp_session_establish_check(
+                    ignore_all_prefixes_except=[spare_peer_addr],
+                    expected_established_sessions=0,
+                ),
+                # Spec step 9 wants "no stale routes" AFTER delPeers. The
+                # postcheck copy of this check cannot cover that: post-test
+                # checks run BEFORE cleanup_steps, so only this one observes the
+                # post-removal state.
+                create_bgp_stale_route_check(),
+                # And the group count must return to baseline -- the removed
+                # peer must not leave an orphaned group behind.
+                create_bgp_update_group_check(
+                    expect_enabled=True,
+                    peer_group_substrings=[ug_peer_group_substring],
+                    expected_group_count=expected_update_group_count,
+                ),
+            ],
+            description=(
+                "Cleanup verify (2.4.4): spare left cleanly after delPeers -- "
+                "no lingering session, no stale routes, group count back to "
+                "baseline (spec step 9)"
+            ),
+        ),
+    ]
+
+    # NB every same-name check below carries an explicit ``check_id``. Without
+    # one, ``TaacRunner.get_checks_to_run`` collapses checks into a
+    # ``{check.name: check}`` dict (``override_duplicate_checks`` defaults True)
+    # and only the LAST BGP_SESSION_ESTABLISH_CHECK survives -- silently dropping
+    # the control-peer assertion. Checks that carry a check_id bypass that dict.
+    if prechecks is None:
+        prechecks = [
+            # Pin the BASELINE group count so the Stage B "unchanged" assertion
+            # is anchored to a verified starting point rather than an assumption.
+            create_bgp_update_group_check(
+                expect_enabled=True,
+                peer_group_substrings=[ug_peer_group_substring],
+                expected_group_count=expected_update_group_count,
+            ),
+            create_bgp_session_establish_check(
+                check_id="ug_2_4_4_pre_controls",
+                ignore_all_prefixes_except=list(control_peer_addrs),
+            ),
+            create_bgp_session_establish_check(
+                check_id="ug_2_4_4_pre_spare",
+                ignore_all_prefixes_except=[spare_peer_addr],
+                expected_established_sessions=0,
+            ),
+        ]
+    if postchecks is None:
+        postchecks = [
+            create_bgp_session_establish_check(
+                check_id="ug_2_4_4_post_controls",
+                ignore_all_prefixes_except=list(control_peer_addrs),
+            ),
+            # The spare is STILL Established here: post-test checks run BEFORE
+            # ``cleanup_steps`` (which is where delPeers + spare-session-down
+            # live), so the dynamically added peer must still be up. Asserting
+            # that is strictly stronger than asserting it is gone -- it proves
+            # the added peer survived the Stage C runtime inject.
+            create_bgp_session_establish_check(
+                check_id="ug_2_4_4_post_spare",
+                ignore_all_prefixes_except=[spare_peer_addr],
+                expected_established_sessions=1,
+            ),
+            create_service_restart_check(
+                services=["Bgp"],
+                daemons=["FibBgpGrpc"],
+            ),
+            create_bgp_stale_route_check(),
+        ]
+    if snapshot_checks is None:
+        snapshot_checks = list(BGP_STANDARD_SNAPSHOT_CHECKS) + [
+            # Spec criterion 5: existing members must be UNDISTURBED -- no
+            # session flaps. The standard list (core dumps + peer-route
+            # snapshot) catches route churn but not a member that flapped and
+            # re-established mid-test: it would still be Established at the end
+            # with the same route counts. This snapshot's flap/uptime checks are
+            # on by default. The spare is excluded because it legitimately
+            # appears (addPeers) and disappears (delPeers) during the test.
+            create_bgp_session_snapshot_check(
+                # The spare legitimately appears (addPeers) and departs
+                # (delPeers). HELD is excluded only when Stage D runs, since
+                # that stage brings it up from admin-DOWN -- also not churn.
+                parent_prefixes_to_ignore=(
+                    [f"{spare_peer_addr}/128"]
+                    + (
+                        [f"{held_member_peer_addr}/128"]
+                        if dump_compare_stages and held_member_peer_addr
+                        else []
+                    )
+                ),
+            ),
+        ]
+
+    kwargs = {
+        "name": "bgp_ug_add_peer_dynamic",
+        "stages": [
+            create_steps_stage(
+                steps=baseline_record_steps,
+                description=(
+                    "Stage A (2.4.4): record M + bring spare IXIA UP, prove NOT "
+                    "Established (no DUT neighbor)"
+                ),
+            ),
+            create_steps_stage(
+                steps=add_peer_steps,
+                description=(
+                    "Stage B (2.4.4): addPeers -> establish + join EB-FA-V6 UG + "
+                    "full-dump parity"
+                ),
+            ),
+            create_steps_stage(
+                steps=inject_steps,
+                description="Stage C (2.4.4): runtime inject 50 -> spare + members",
+            ),
+            *dump_compare_stages,
         ],
         "cleanup_steps": cleanup_steps,
         "prechecks": prechecks,

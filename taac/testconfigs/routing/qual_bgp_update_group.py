@@ -33,6 +33,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc3_backpressure i
     create_bgp_ug_backpressure_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc4_new_peer_join import (
+    create_bgp_ug_add_peer_dynamic_test_config,
     create_bgp_ug_new_peer_join_test_config,
 )
 from taac.testconfigs.routing.factories.qual_bgp_update_group.tc5_multigroup_formation import (
@@ -91,6 +92,19 @@ EB03_LAB_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG = (
 
 # ─── Spec 2.4 New Peer Join ─────────────────────────────────────────────
 BGP_UG_NEW_PEER_JOIN_TEST_CONFIG = create_bgp_ug_new_peer_join_test_config(BAG012_ASH6)
+
+# 2.4.4 New Peer Added Dynamically via addPeer API on bag013.ash6 -- its OWN
+# TestConfig on the shared UG_NEW_PEER_JOIN topology (which now carries a spare
+# eBGP group whose DUT BGP neighbor is ABSENT from the static bgpcpp config; its
+# /127 interface IP + IXIA session are still provisioned). The playbook brings
+# the spare's IXIA session UP and asserts it is NOT Established (no DUT neighbor
+# -- proving addPeers is causal), calls addPeers, asserts the spare establishes +
+# joins the SAME EB-FA-V6 update group + receives the full dump, injects 50 more
+# prefixes (spare + members get them), then delPeers cleanup. Select via
+# ``--test-config BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST``.
+BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG = (
+    create_bgp_ug_add_peer_dynamic_test_config(BAG013_ASH6)
+)
 
 # ─── Spec 2.5 Multi-Group Formation ─────────────────────────────────────
 # 2.5.1 Multiple Groups Formed for Different Outbound Policies on bag013.ash6 --
@@ -221,6 +235,7 @@ BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG = (
 
 __all__ = [
     "BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",

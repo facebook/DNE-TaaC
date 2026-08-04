@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.ug_new_peer_join import (
+    UG_ADD_PEER_DYNAMIC,
     UG_NEW_PEER_JOIN,
     UG_NEW_PEER_JOIN_AS_NUMBERS,
     UG_NEW_PEER_JOIN_PARENT_NETWORKS,
@@ -23,6 +24,7 @@ from taac.abstractions.topology import (
     BoundTopology,
 )
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc4_new_peer_join import (
+    create_bgp_ug_add_peer_dynamic_playbook,
     create_bgp_ug_new_peer_join_attribute_change_playbook,
     create_bgp_ug_new_peer_join_full_sync_resilience_playbook,
     create_bgp_ug_new_peer_join_routes_withdrawn_playbook,
@@ -62,6 +64,14 @@ class _UgNewPeerJoinSelectors:
     held_back_peer_regex: str
     disp_peer_addrs: list[str]
     disp_peer_regex: str
+    # Spare eBGP receiver for spec 2.4.4 -- ``spare_peer_addr`` is the IXIA-side
+    # peer address, ``spare_local_addr`` the DUT-side /127 interface address.
+    # OPTIONAL: only UG_ADD_PEER_DYNAMIC carries a spare group; on the shared
+    # UG_NEW_PEER_JOIN (2.4.1/2.4.2/2.4.3) these stay None.
+    spare_peer_addr: str | None
+    spare_local_addr: str | None
+    spare_peer_regex: str | None
+    spare_remote_as: int | None
     b_keep_peer_addr: str
     b_keep_peer_regex: str
     b_keep_route_count: int
@@ -89,6 +99,24 @@ def _required_bound_group(
             f"found {[group.name for group in matches]}"
         )
     return matches[0]
+
+
+def _optional_bound_group(
+    bound: BoundTopology,
+    role: str,
+) -> BoundDeviceGroup | None:
+    """Return the single device group for ``role``, or None when absent.
+
+    Used for the optional spec-2.4.4 spare group so the shared selector builder
+    works for BOTH UG_NEW_PEER_JOIN (no spare) and UG_ADD_PEER_DYNAMIC (spare).
+    """
+    matches = [group for group in bound.device_groups if group.role == role]
+    if len(matches) > 1:
+        raise ValueError(
+            f"UG new-peer-join allows at most one {role!r} device group; "
+            f"found {[group.name for group in matches]}"
+        )
+    return matches[0] if matches else None
 
 
 def _required_peer_addresses(group: BoundDeviceGroup) -> list[str]:
@@ -131,6 +159,8 @@ def _selectors_from_bound(bound: BoundTopology) -> _UgNewPeerJoinSelectors:
     ctrl = _required_bound_group(bound, "ebgp_ug_ctrl")
     held = _required_bound_group(bound, "ebgp_ug_held")
     disp = _required_bound_group(bound, "ebgp_ug_disp")
+    # Optional spare (spec 2.4.4): present only on UG_ADD_PEER_DYNAMIC.
+    spare = _optional_bound_group(bound, "ebgp_ug_spare")
     keep = _required_bound_group(bound, "ibgp_ug_keep_initial")
     keep_mutated = _required_bound_group(bound, "ibgp_ug_keep_mutated")
     var1 = _required_bound_group(bound, "ibgp_ug_var1")
@@ -160,6 +190,28 @@ def _selectors_from_bound(bound: BoundTopology) -> _UgNewPeerJoinSelectors:
     peer_group = ctrl.peer_group
     if not isinstance(peer_group, BgpPeerGroup):
         raise ValueError("UG new-peer-join control peers require a resolved peer group")
+    # Resolve the spare's IXIA z_ip + DUT a_ip only when the spare group is
+    # present (UG_ADD_PEER_DYNAMIC); on UG_NEW_PEER_JOIN these stay None.
+    spare_peer_addr: str | None = None
+    spare_local_addr: str | None = None
+    spare_peer_regex: str | None = None
+    spare_remote_as: int | None = None
+    if spare is not None:
+        spare_peer_addrs = _required_peer_addresses(spare)
+        if not spare.a_ips:
+            raise ValueError(
+                f"UG new-peer-join spare group {spare.name!r} requires a resolved "
+                "DUT interface address (a_ips)"
+            )
+        if spare.remote_asn is None:
+            raise ValueError(
+                f"UG new-peer-join spare group {spare.name!r} requires a resolved "
+                "remote ASN"
+            )
+        spare_peer_addr = spare_peer_addrs[0]
+        spare_local_addr = spare.a_ips[0]
+        spare_peer_regex = _required_ixia_tag(spare)
+        spare_remote_as = spare.remote_asn
     held_peer_addrs = _required_peer_addresses(held)
     keep_peer_addrs = _required_peer_addresses(keep)
     keep_mutated_peer_addrs = _required_peer_addresses(keep_mutated)
@@ -174,6 +226,10 @@ def _selectors_from_bound(bound: BoundTopology) -> _UgNewPeerJoinSelectors:
         held_back_peer_regex=_required_ixia_tag(held),
         disp_peer_addrs=_required_peer_addresses(disp),
         disp_peer_regex=_required_ixia_tag(disp),
+        spare_peer_addr=spare_peer_addr,
+        spare_local_addr=spare_local_addr,
+        spare_peer_regex=spare_peer_regex,
+        spare_remote_as=spare_remote_as,
         b_keep_peer_addr=keep_peer_addrs[0],
         b_keep_peer_regex=_required_ixia_tag(keep),
         b_keep_route_count=keep_route_count,
@@ -361,6 +417,64 @@ def _pb_2_4_3(
     )
 
 
+def _pb_2_4_4(
+    device_name: str,
+    selectors: _UgNewPeerJoinSelectors,
+    ebgp_capture_interface: str,
+) -> taac_types.Playbook:
+    # The spare selectors are Optional on the shared dataclass; 2.4.4 requires
+    # them (bind UG_ADD_PEER_DYNAMIC, which carries the spare group).
+    if (
+        selectors.spare_peer_addr is None
+        or selectors.spare_local_addr is None
+        or selectors.spare_peer_regex is None
+        or selectors.spare_remote_as is None
+    ):
+        raise ValueError(
+            "create_bgp_ug_add_peer_dynamic requires a bound spare eBGP group; "
+            "bind UG_ADD_PEER_DYNAMIC (not UG_NEW_PEER_JOIN)"
+        )
+    # Baseline: HELD down, VAR1/VAR2 sessions down (KEEP_INITIAL up => M=300),
+    # plus the SPARE IXIA session brought admin-DOWN so Stage A genuinely brings
+    # it UP before addPeers (the causal-proof design).
+    setup_steps = _baseline_steps(bring_var1_up=False, selectors=selectors) + [
+        create_start_stop_bgp_peers_step(
+            peer_regex=selectors.spare_peer_regex,
+            start=False,
+            start_idx=1,
+            end_idx=1,
+            description="UG baseline (2.4.4): bring SPARE IXIA session admin-DOWN",
+        ),
+    ]
+    return create_bgp_ug_add_peer_dynamic_playbook(
+        device_name=device_name,
+        control_peer_addrs=selectors.control_peer_addrs,
+        spare_peer_addr=selectors.spare_peer_addr,
+        spare_local_addr=selectors.spare_local_addr,
+        spare_remote_as=selectors.spare_remote_as,
+        spare_peer_regex=selectors.spare_peer_regex,
+        b_var2_peer_regex=selectors.b_var2_peer_regex,
+        b_var2_route_count=selectors.b_var2_route_count,
+        spare_peer_group_name=selectors.ug_peer_group_substring,
+        # NOTE: no explicit egress policy -- spec step 3 says the new peer
+        # "inherits policy from" the existing peer-group (EB-FA-V6). A per-peer
+        # policy override was only ever a (wrong) hypothesis for the
+        # INTERNAL_ERROR, and it is the prime suspect for the update-group
+        # split seen on 2026-08-03 (2 groups -> 3 after addPeers), since group
+        # keying can distinguish a peer-level override from an inherited
+        # group-level policy even when the NAME matches.
+        ug_peer_group_substring=selectors.ug_peer_group_substring,
+        # Stage D (spec step 7 / criterion 3): on-wire attribute parity between
+        # the addPeers-created spare and HELD -- a statically-configured member
+        # of the same update group that is admin-DOWN at baseline, so bringing
+        # it up disturbs no established member.
+        held_member_peer_regex=selectors.held_back_peer_regex,
+        held_member_peer_addr=selectors.held_back_peer_addr,
+        ixia_ebgp_capture_interface=ebgp_capture_interface,
+        setup_steps=setup_steps,
+    )
+
+
 def create_bgp_ug_new_peer_join_test_config(
     physical_inventory: PhysicalInventory,
 ) -> taac_types.TestConfig:
@@ -413,6 +527,68 @@ def create_bgp_ug_new_peer_join_test_config(
     )
 
 
+def create_bgp_ug_add_peer_dynamic_test_config(
+    physical_inventory: PhysicalInventory,
+) -> taac_types.TestConfig:
+    """Build the BGP++ UG spec 2.4.4 (New Peer Added Dynamically via addPeer
+    API) config from typed topology intent.
+
+    Binds the DEDICATED ``UG_ADD_PEER_DYNAMIC`` topology (NOT the shared
+    UG_NEW_PEER_JOIN, which stays byte-identical to master so the bag012
+    2.4.1/2.4.2/2.4.3 config's golden is untouched). UG_ADD_PEER_DYNAMIC is
+    UG_NEW_PEER_JOIN plus one spare eBGP device group (``ebgp_ug_spare``) whose
+    DUT /127 interface IP + IXIA session are provisioned like the other eBGP
+    groups, but whose DUT BGP *neighbor* is ABSENT from the static bgpcpp config
+    (``bgpcpp_configerator_path``). The 2.4.4 playbook creates that neighbor at
+    runtime via the addPeers RPC. Unlike 2.4.1/2.4.2/2.4.3 (bag012), this variant
+    targets bag013 (the qual conveyor device), which relies on the device-default
+    BGP router-id. It shares the ug_new_peer_join compiler handler + binding
+    constants (port map / parent networks / peer groups / AS numbers).
+    """
+    if physical_inventory.dut_bgp_as is None:
+        raise ValueError("PhysicalInventory must have dut_bgp_as set")
+    if physical_inventory.bgpcpp_configerator_path is None:
+        raise ValueError(
+            "PhysicalInventory must have bgpcpp_configerator_path set for BGP++ deployment"
+        )
+    if len(physical_inventory.ixia_ports) < 2:
+        raise ValueError("PhysicalInventory must have >= 2 IXIA ports (eBGP + iBGP)")
+
+    bound = UG_ADD_PEER_DYNAMIC.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=UG_NEW_PEER_JOIN_PORT_MAP,
+        parent_networks=UG_NEW_PEER_JOIN_PARENT_NETWORKS,
+        peer_groups=UG_NEW_PEER_JOIN_PEER_GROUPS,
+        as_numbers=UG_NEW_PEER_JOIN_AS_NUMBERS,
+    )
+    selectors = _selectors_from_bound(bound)
+    compiled = bound.compile()
+
+    return taac_types.TestConfig(
+        name="BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST",
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=[
+            _pb_2_4_4(
+                physical_inventory.device_name,
+                selectors,
+                # eBGP vport: UG_NEW_PEER_JOIN_PORT_MAP maps "ebgp" -> port 0
+                # (2.1.1/2.9.7 capture the iBGP vport, index 1 -- 2.4.4's peers
+                # are eBGP).
+                ebgp_capture_interface=physical_inventory.ixia_ports[0][0],
+            ),
+        ],
+    )
+
+
 __all__ = [
+    "create_bgp_ug_add_peer_dynamic_test_config",
     "create_bgp_ug_new_peer_join_test_config",
 ]

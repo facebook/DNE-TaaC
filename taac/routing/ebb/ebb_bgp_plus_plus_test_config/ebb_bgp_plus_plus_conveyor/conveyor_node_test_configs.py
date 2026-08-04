@@ -55,6 +55,7 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
 # testconfigs/routing/qual_bgp_update_group.py; import via that path.
 from taac.testconfigs.routing.qual_bgp_update_group import (
     BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
     BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
@@ -235,4 +236,14 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # load. Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually
     # verified on the device). Select with ``--regex 'bgp_ug_repeated_peer_flaps'``.
     BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG,
+    # BGP++ UG 2.4.4 New Peer Added Dynamically via addPeer API on bag013.ash6 --
+    # its own TestConfig on the shared UG_NEW_PEER_JOIN topology (which now carries a
+    # spare eBGP group whose DUT neighbor is absent from the static bgpcpp config; its
+    # /127 interface IP + IXIA session are still provisioned). Brings the spare IXIA
+    # session UP + asserts NOT Established (no DUT neighbor -- proving addPeers is
+    # causal), calls addPeers, asserts it establishes + joins the EB-FA-V6 update
+    # group + gets the full dump, injects 50 more prefixes, then delPeers cleanup.
+    # Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually verified
+    # on the device). Select with ``--regex 'bgp_ug_add_peer_dynamic'``.
+    BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG,
 ]

@@ -1955,6 +1955,88 @@ def create_verify_bgp_peers_joined_running_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def create_add_bgp_peers_step(
+    hostname: str,
+    peer_addr: str,
+    local_addr: str,
+    remote_as: int,
+    peer_group_name: str,
+    egress_policy_name: t.Optional[str] = None,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Dynamically add a BGP peer to the DUT at runtime via the ``addPeers``
+    control-plane thrift RPC (``TBgpService.addPeers``). Backs UG spec 2.4.4 --
+    the peer is ABSENT from the static bgpcpp config, so this call is what
+    causally creates it; it should then establish and join the existing
+    ``peer_group_name`` update group and receive the full route dump.
+
+    Args:
+        hostname: DUT hostname (bgpcpp source of truth).
+        peer_addr: New peer's IXIA-side address (``BgpPeer.peer_addr``).
+        local_addr: DUT-side /127 interface address (``BgpPeer.local_addr``).
+        remote_as: Peer's 4-byte remote ASN (``BgpPeer.remote_as_4_byte``).
+        peer_group_name: Existing update-group peer-group to join (e.g.
+            ``"EB-FA-V6"``).
+        egress_policy_name: Optional explicit egress policy; omit to inherit the
+            peer-group's policy.
+        expected_fail / expected_fail_reason: XFAIL escape hatch.
+        description: Optional custom description.
+    """
+    if description is None:
+        description = (
+            f"addPeers: dynamically add peer {peer_addr} (local {local_addr}, "
+            f"AS {remote_as}) to {peer_group_name} on {hostname}"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "add_bgp_peers",
+        "hostname": hostname,
+        "peer_addr": peer_addr,
+        "local_addr": local_addr,
+        "remote_as": remote_as,
+        "peer_group_name": peer_group_name,
+    }
+    if egress_policy_name is not None:
+        params["egress_policy_name"] = egress_policy_name
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_del_bgp_peers_step(
+    hostname: str,
+    peer_addrs: t.List[str],
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Remove dynamically-added BGP peers from the DUT via the ``delPeers``
+    control-plane thrift RPC. The cleanup half of ``create_add_bgp_peers_step``
+    (UG spec 2.4.4) -- restores the DUT to its static-config baseline.
+
+    Args:
+        hostname: DUT hostname.
+        peer_addrs: Peer addresses to remove.
+        expected_fail / expected_fail_reason: XFAIL escape hatch.
+        description: Optional custom description.
+    """
+    if description is None:
+        description = f"delPeers: remove {len(peer_addrs)} peer(s) from {hostname}"
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "del_bgp_peers",
+        "hostname": hostname,
+        "peer_addrs": list(peer_addrs),
+    }
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_snapshot_ixia_bgp_rx_stats_step(
     hostname: str,
     interface: str,
