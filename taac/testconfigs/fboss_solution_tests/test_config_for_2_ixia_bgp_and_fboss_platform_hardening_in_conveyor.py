@@ -36,6 +36,12 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.packet_headers import BGP_CP_TRAFFIC_PACKET_HEADERS
 from taac.playbooks.playbook_definitions import (
     build_2_ixia_hardening_playbook,
+    create_hardening_of_arp_overload_10x_with_table_clear_playbook,
+    create_hardening_of_arp_overload_with_agent_churn_playbook,
+    create_hardening_of_mac_overload_with_agent_churn_playbook,
+    create_hardening_of_ndp_overload_10x_with_table_clear_playbook,
+    create_hardening_of_ndp_overload_with_agent_churn_playbook,
+    WEDGE_AGENT_BINDS_TO_CASCADE,
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
@@ -920,6 +926,19 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             threshold=400.0, start_time_jq_var="test_case_start_time"
         ),
         create_service_restart_check(),
+    ]
+    # Variant for playbooks that restart wedge_agent by design: the bare
+    # TC-level SERVICE_RESTART_CHECK would flag the intentional restart and its
+    # systemd cascade as a failure.
+    _tc_postchecks_agent_restart = [
+        (
+            create_service_restart_check(
+                expected_restarted_services=WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
+            )
+            if check.name == hc_types.CheckName.SERVICE_RESTART_CHECK
+            else check
+        )
+        for check in _tc_postchecks
     ]
     _tc_snapshot_checks = [
         create_core_dumps_snapshot_check(),
@@ -1972,6 +1991,68 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     ),
                 ]
                 + _tc_postchecks,
+            ),
+            # UTP L2M_002 / L2M_003 / L2M_005 / L2M_006 / L2M_009 — the three
+            # overload playbooks above, extended with the wedge_agent-churn and
+            # table-clear disruption tails. L2M_008 (clear MAC table) is not
+            # implemented: FBOSS has no MAC-flush CLI or thrift API.
+            create_hardening_of_ndp_overload_with_agent_churn_playbook(
+                device_name=device_name,
+                downlink_iface=ixia_downlink_interface,
+                uplink_iface=ixia_uplink_interface,
+                good_ndp_entries_downlink=good_ndp_entries_downlink,
+                good_ndp_entries_uplink=good_ndp_entries_uplink,
+                rogue_ndp_entries=rogue_ndp_entries,
+                ndp_entry_limit=ndp_entry_limit,
+                prechecks=_tc_prechecks,
+                snapshot_checks=_tc_snapshot_checks,
+                extra_postchecks=_tc_postchecks_agent_restart,
+            ),
+            create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
+                device_name=device_name,
+                downlink_iface=ixia_downlink_interface,
+                uplink_iface=ixia_uplink_interface,
+                good_ndp_entries_downlink=good_ndp_entries_downlink,
+                good_ndp_entries_uplink=good_ndp_entries_uplink,
+                ndp_entry_limit=ndp_entry_limit,
+                prechecks=_tc_prechecks,
+                snapshot_checks=_tc_snapshot_checks,
+                extra_postchecks=_tc_postchecks,
+            ),
+            create_hardening_of_arp_overload_with_agent_churn_playbook(
+                device_name=device_name,
+                downlink_iface=ixia_downlink_interface,
+                uplink_iface=ixia_uplink_interface,
+                good_arp_entries=good_arp_entries,
+                rogue_arp_entries=rogue_arp_entries,
+                arp_entry_limit=arp_entry_limit,
+                prechecks=_tc_prechecks,
+                snapshot_checks=_tc_snapshot_checks,
+                extra_postchecks=_tc_postchecks_agent_restart,
+            ),
+            create_hardening_of_arp_overload_10x_with_table_clear_playbook(
+                device_name=device_name,
+                downlink_iface=ixia_downlink_interface,
+                uplink_iface=ixia_uplink_interface,
+                good_arp_entries=good_arp_entries,
+                arp_entry_limit=arp_entry_limit,
+                prechecks=_tc_prechecks,
+                snapshot_checks=_tc_snapshot_checks,
+                extra_postchecks=_tc_postchecks,
+            ),
+            create_hardening_of_mac_overload_with_agent_churn_playbook(
+                device_name=device_name,
+                downlink_iface=ixia_downlink_interface,
+                uplink_iface=ixia_uplink_interface,
+                good_mac_entry_count=good_mac_entry_count,
+                rogue_mac_entry_count=rogue_mac_entry_count,
+                good_ndp_entries_uplink=good_ndp_entries_uplink,
+                good_ndp_entries_downlink=good_ndp_entries_downlink,
+                good_arp_entries=good_arp_entries,
+                mac_entry_limit=mac_entry_limit,
+                prechecks=_tc_prechecks,
+                snapshot_checks=_tc_snapshot_checks,
+                extra_postchecks=_tc_postchecks_agent_restart,
             ),
             build_2_ixia_hardening_playbook(
                 name="test_agent_warmboot",

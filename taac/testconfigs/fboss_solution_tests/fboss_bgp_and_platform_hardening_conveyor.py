@@ -46,6 +46,11 @@ from taac.playbooks.playbook_definitions import (
     create_fboss_hw_agent_0_coldboot_playbook,
     create_fsdb_crash_playbook,
     create_fsdb_restart_playbook,
+    create_hardening_of_arp_overload_10x_with_table_clear_playbook,
+    create_hardening_of_arp_overload_with_agent_churn_playbook,
+    create_hardening_of_mac_overload_with_agent_churn_playbook,
+    create_hardening_of_ndp_overload_10x_with_table_clear_playbook,
+    create_hardening_of_ndp_overload_with_agent_churn_playbook,
     create_openr_crash_playbook,
     create_openr_restart_playbook,
     create_qsfp_service_crash_playbook,
@@ -2659,6 +2664,54 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                                     ),
                                 ),
                             ],
+                        ),
+                        # UTP L2M_002 / L2M_003 / L2M_005 / L2M_006 / L2M_009 —
+                        # the overload playbooks above, extended with the
+                        # wedge_agent-churn and table-clear disruption tails.
+                        # L2M_008 (clear MAC table) is not implemented: FBOSS
+                        # has no MAC-flush CLI or thrift API to trigger it.
+                        create_hardening_of_ndp_overload_with_agent_churn_playbook(
+                            device_name=device_name,
+                            downlink_iface=ixia_downlink_interface,
+                            uplink_iface=ixia_uplink_interface,
+                            good_ndp_entries_downlink=good_ndp_entries_downlink,
+                            good_ndp_entries_uplink=good_ndp_entries_uplink,
+                            rogue_ndp_entries=rogue_ndp_entries,
+                            ndp_entry_limit=ndp_entry_limit,
+                        ),
+                        create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
+                            device_name=device_name,
+                            downlink_iface=ixia_downlink_interface,
+                            uplink_iface=ixia_uplink_interface,
+                            good_ndp_entries_downlink=good_ndp_entries_downlink,
+                            good_ndp_entries_uplink=good_ndp_entries_uplink,
+                            ndp_entry_limit=ndp_entry_limit,
+                        ),
+                        create_hardening_of_arp_overload_with_agent_churn_playbook(
+                            device_name=device_name,
+                            downlink_iface=ixia_downlink_interface,
+                            uplink_iface=ixia_uplink_interface,
+                            good_arp_entries=good_arp_entries,
+                            rogue_arp_entries=rogue_arp_entries,
+                            arp_entry_limit=arp_entry_limit,
+                        ),
+                        create_hardening_of_arp_overload_10x_with_table_clear_playbook(
+                            device_name=device_name,
+                            downlink_iface=ixia_downlink_interface,
+                            uplink_iface=ixia_uplink_interface,
+                            good_arp_entries=good_arp_entries,
+                            arp_entry_limit=arp_entry_limit,
+                        ),
+                        create_hardening_of_mac_overload_with_agent_churn_playbook(
+                            device_name=device_name,
+                            downlink_iface=ixia_downlink_interface,
+                            uplink_iface=ixia_uplink_interface,
+                            good_mac_entry_count=good_mac_entry_count,
+                            rogue_mac_entry_count=rogue_mac_entry_count,
+                            good_ndp_entries_uplink=good_ndp_entries_uplink,
+                            good_ndp_entries_downlink=good_ndp_entries_downlink,
+                            good_arp_entries=good_arp_entries,
+                            mac_entry_limit=mac_entry_limit,
                         ),
                         create_agent_warmboot_playbook(
                             iteration=wedge_agent_restart_no_of_interations,

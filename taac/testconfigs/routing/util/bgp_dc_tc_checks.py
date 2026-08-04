@@ -39,6 +39,15 @@ from taac.health_check.health_check import types as hc_types
 # bgpd / fboss_sw_agent / fboss_hw_agent@0 and brings openr down with it.
 _PLAYBOOK_EXPECTED_RESTARTED_SERVICES = {
     "test_agent_restart": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
+    # The L2 overload agent-churn playbooks (UTP L2M_002 / L2M_005 / L2M_009)
+    # restart wedge_agent every 5 minutes and then coldboot it, so they take
+    # the same allowlist as `test_agent_restart`.
+    "test_hardening_of_ndp_overload_with_agent_churn": WEDGE_AGENT_BINDS_TO_CASCADE
+    + ["openr"],
+    "test_hardening_of_arp_overload_with_agent_churn": WEDGE_AGENT_BINDS_TO_CASCADE
+    + ["openr"],
+    "test_hardening_of_mac_overload_with_agent_churn": WEDGE_AGENT_BINDS_TO_CASCADE
+    + ["openr"],
 }
 
 

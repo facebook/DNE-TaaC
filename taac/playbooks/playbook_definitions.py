@@ -117,6 +117,7 @@ from taac.steps.step_definitions import (
     COLD_START_PREFIX_OSCILLATIONS,
     CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
+    create_clear_traffic_stats_step,
     create_custom_step,
     create_drain_undrain_step,
     create_ecmp_member_static_route_step,
@@ -7418,6 +7419,520 @@ def create_hardening_of_mac_overload_entries_playbook(
     )
 
 
+# ---------------------------------------------------------------------------
+# L2 overload hardening — agent-churn and table-clear variants
+# ---------------------------------------------------------------------------
+# These extend the three plain `create_hardening_of_*_overload_entries_playbook`
+# factories above with the disruption tails from UTP L2_MISC (L2M_002, L2M_003,
+# L2M_005, L2M_006, L2M_009).
+#
+# Same good/rogue shape as the plain variants: the *good* uplink+downlink
+# entries are what the DUT must keep serving (postcheck lower bound), the
+# *rogue* entries are the flood the DUT must clamp at the soft limit (postcheck
+# upper bound). Rogue entries are the SAME downlink device group / traffic item
+# re-scaled, so restoring the good value in `cleanup_steps` is what removes
+# them — there is no separate rogue object to tear down.
+#
+# The MAC table-clear case (L2M_008) is intentionally NOT implemented: FBOSS
+# exposes `fboss2 clear ndp` and `fboss2 clear arp` but has no MAC-flush
+# command or thrift API, so there is no way to express the trigger today.
+#
+# Unlike the plain overload factories above, these take `downlink_iface` /
+# `uplink_iface` as the DUT spells them (e.g. `eth1/63/1`): the port names are
+# needed verbatim by the interface-flap steps and are upper-cased internally
+# for the IXIA device-group regexes.
+
+# Default overload target for the "10x the max value" cases: ten times the
+# platform soft limit. Callers can dial this down per-platform — a 10x NDP
+# device-group multiplier is a large IXIA config change and takes minutes to
+# apply on some chassis.
+L2_OVERLOAD_10X_MULTIPLIER: int = 10
+
+
+def _configure_ndp_entries_step(iface: str, prefix_count: int) -> Step:
+    """Set the NDP (v6) device-group multiplier on `iface` to `prefix_count`.
+
+    `iface` is the DUT-side port name; IXIA device groups are named with the
+    upper-cased port, hence the fold here.
+    """
+    return create_ixia_api_step(
+        api_name="configure_ipv6_entries",
+        args_dict={
+            "device_group_regex": f".*{iface.upper()}.*",
+            "prefix_count": prefix_count,
+            "toggle_all_ipv6_ipv4_only_protocol": True,
+        },
+    )
+
+
+def _configure_arp_entries_step(iface: str, prefix_count: int) -> Step:
+    """Set the ARP (v4) device-group multiplier on `iface` to `prefix_count`."""
+    return create_ixia_api_step(
+        api_name="configure_ipv4_entries",
+        args_dict={
+            "device_group_regex": f".*{iface.upper()}.*",
+            "prefix_count": prefix_count,
+            "toggle_all_ipv6_ipv4_only_protocol": True,
+        },
+    )
+
+
+def _configure_rogue_src_mac_step(
+    src_mac_entry_count: int,
+    rogue_traffic_item_regex: str,
+) -> Step:
+    """Set the source-MAC count on the rogue L2 traffic item.
+
+    Matched by regex rather than by exact name because the single-DUT conveyor
+    prefixes its traffic items with the device name while the 2-IXIA conveyor
+    does not. The pattern must not also match `GOOD_BUT_LOSSY_NDP_TRAFFIC` —
+    clamping the good item would drop the MAC postcheck below its lower bound.
+    """
+    return create_ixia_api_step(
+        api_name="configure_traffic_item_src_mac_entry_count",
+        args_dict={
+            "src_mac_entry_count": src_mac_entry_count,
+            "traffic_item_regex": rogue_traffic_item_regex,
+        },
+    )
+
+
+def _l2_overload_agent_churn_stages(
+    label: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    restart_period_s: int,
+    restart_duration_s: int,
+    flap_iterations: int,
+    flap_down_duration_s: int,
+    flap_recovery_duration_s: int,
+    coldboot_iterations: int,
+    coldboot_recovery_duration_s: int,
+    settle_duration_s: int,
+) -> list[Stage]:
+    """Disruption tail shared by the three agent-churn overload playbooks.
+
+    Ordering is the UTP wording — continuous wedge_agent restarts, then
+    interface flaps, then coldboots — and is deliberately escalating: each
+    phase forces the neighbor/MAC tables to rebuild from a colder starting
+    point than the previous one, while the DUT is still held over its L2
+    threshold by the rogue entries.
+
+    Args:
+        label: Short family tag (``ndp`` / ``arp`` / ``mac``) used to keep
+            stage ids unique and readable across the conveyor.
+        downlink_iface / uplink_iface: DUT-side IXIA-facing port names to flap
+            (as the DUT spells them, e.g. ``eth1/63/1``).
+        restart_period_s: Cadence of the `systemctl restart wedge_agent`
+            trigger. UTP asks for every 5 minutes.
+        restart_duration_s: Total restart window; iterations =
+            restart_duration_s // restart_period_s.
+        flap_iterations: Number of down/up cycles on both IXIA-facing ports.
+        flap_down_duration_s / flap_recovery_duration_s: Hold times either
+            side of the flap.
+        coldboot_iterations: Number of `create_cold_boot_file` agent restarts.
+        coldboot_recovery_duration_s: Settle time after each coldboot, on top
+            of the AGENT/BGP convergence wait.
+        settle_duration_s: Clean measurement window after the counters are
+            zeroed, sized so the packet-loss postchecks see only steady state.
+    """
+    flap_interfaces = [downlink_iface, uplink_iface]
+    flap_method = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
+    return [
+        *_build_periodic_restart_stages(
+            service=Service.AGENT,
+            service_label="wedge_agent",
+            period_s=restart_period_s,
+            total_duration_s=restart_duration_s,
+        ),
+        create_steps_stage(
+            stage_id=f"{label}_overload_interface_flaps",
+            iteration=flap_iterations,
+            steps=[
+                create_interface_flap_step(
+                    enable=False,
+                    interfaces=flap_interfaces,
+                    interface_flap_method=flap_method,
+                    description="Disable both IXIA-facing ports",
+                ),
+                create_longevity_step(duration=flap_down_duration_s),
+                create_interface_flap_step(
+                    enable=True,
+                    interfaces=flap_interfaces,
+                    interface_flap_method=flap_method,
+                    description="Re-enable both IXIA-facing ports",
+                ),
+                create_longevity_step(duration=flap_recovery_duration_s),
+            ],
+        ),
+        create_steps_stage(
+            stage_id=f"{label}_overload_coldboots",
+            iteration=coldboot_iterations,
+            steps=[
+                create_service_interruption_step(
+                    service=Service.AGENT,
+                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                    create_cold_boot_file=True,
+                    description="wedge_agent coldboot",
+                ),
+                create_service_convergence_step(
+                    services=[Service.AGENT, Service.BGP],
+                ),
+                create_longevity_step(duration=coldboot_recovery_duration_s),
+            ],
+        ),
+        # The loss postchecks demand zero loss on the directional traffic
+        # items, which the flaps and coldboots necessarily break. Zero the
+        # counters once the last disruption is done so the checks measure the
+        # recovered steady state rather than the disruption itself.
+        create_steps_stage(
+            stage_id=f"{label}_overload_post_churn_settle",
+            steps=[
+                create_clear_traffic_stats_step(),
+                create_longevity_step(duration=settle_duration_s),
+            ],
+        ),
+    ]
+
+
+def create_hardening_of_ndp_overload_with_agent_churn_playbook(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_ndp_entries_downlink: int,
+    good_ndp_entries_uplink: int,
+    rogue_ndp_entries: int,
+    ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    restart_period_s: int = 300,
+    restart_duration_s: int = 1800,
+    flap_iterations: int = 3,
+    coldboot_iterations: int = 2,
+    prechecks: t.Optional[list] = None,
+    extra_postchecks: t.Optional[list] = None,
+    snapshot_checks: t.Optional[list] = None,
+) -> Playbook:
+    """UTP L2M_002 — NDP past threshold, then wedge_agent churn / flaps / coldboots."""
+    return Playbook(
+        name="test_hardening_of_ndp_overload_with_agent_churn",
+        prechecks=prechecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=[
+            _configure_ndp_entries_step(downlink_iface, good_ndp_entries_downlink),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="ndp_overload_inject",
+                steps=[
+                    # Ensuring the protocol is up
+                    _configure_ndp_entries_step(
+                        downlink_iface, good_ndp_entries_downlink
+                    ),
+                    _configure_ndp_entries_step(uplink_iface, good_ndp_entries_uplink),
+                    # Now overshoot the rogue entries
+                    _configure_ndp_entries_step(downlink_iface, rogue_ndp_entries),
+                    create_longevity_step(duration=300),
+                ],
+            ),
+            *_l2_overload_agent_churn_stages(
+                label="ndp",
+                downlink_iface=downlink_iface,
+                uplink_iface=uplink_iface,
+                restart_period_s=restart_period_s,
+                restart_duration_s=restart_duration_s,
+                flap_iterations=flap_iterations,
+                flap_down_duration_s=30,
+                flap_recovery_duration_s=180,
+                coldboot_iterations=coldboot_iterations,
+                coldboot_recovery_duration_s=180,
+                settle_duration_s=180,
+            ),
+        ],
+        postchecks=[
+            create_l2_entry_threshold_check(
+                ndp_entry_upper_lower_threshold=(
+                    ndp_entry_limit,
+                    good_ndp_entries_uplink + good_ndp_entries_downlink,
+                ),
+            ),
+            AGENT_WARMBOOT_SERVICE_CHECK,
+            get_ixia_healthcheck_stable_state(device_name),
+        ]
+        + (extra_postchecks or []),
+    )
+
+
+def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_ndp_entries_downlink: int,
+    good_ndp_entries_uplink: int,
+    rogue_ndp_entries_10x: t.Optional[int] = None,
+    ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    prechecks: t.Optional[list] = None,
+    extra_postchecks: t.Optional[list] = None,
+    snapshot_checks: t.Optional[list] = None,
+) -> Playbook:
+    """UTP L2M_003 — drive NDP to 10x the limit, flush the table, re-verify.
+
+    The postcheck after the flush is the point of the test: the lower bound
+    proves the good neighbors re-resolved once the table was wiped, and the
+    upper bound proves the rogue flood did not refill past the soft limit
+    during re-learn.
+    """
+    rogue_ndp_entries_10x = (
+        rogue_ndp_entries_10x
+        if rogue_ndp_entries_10x is not None
+        else L2_OVERLOAD_10X_MULTIPLIER * ndp_entry_limit
+    )
+    return Playbook(
+        name="test_hardening_of_ndp_overload_10x_with_table_clear",
+        prechecks=prechecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=[
+            _configure_ndp_entries_step(downlink_iface, good_ndp_entries_downlink),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="ndp_overload_10x_inject",
+                steps=[
+                    # Ensuring the protocol is up
+                    _configure_ndp_entries_step(
+                        downlink_iface, good_ndp_entries_downlink
+                    ),
+                    _configure_ndp_entries_step(uplink_iface, good_ndp_entries_uplink),
+                    # Now overshoot the rogue entries to 10x the table limit
+                    _configure_ndp_entries_step(downlink_iface, rogue_ndp_entries_10x),
+                    create_longevity_step(duration=600),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="ndp_table_clear_and_relearn",
+                steps=[
+                    create_run_ssh_command_step(
+                        cmd="fboss2 clear ndp",
+                        description="Flush the NDP table while overloaded",
+                    ),
+                    create_longevity_step(duration=300),
+                    create_clear_traffic_stats_step(),
+                    create_longevity_step(duration=120),
+                ],
+            ),
+        ],
+        postchecks=[
+            create_l2_entry_threshold_check(
+                ndp_entry_upper_lower_threshold=(
+                    ndp_entry_limit,
+                    good_ndp_entries_uplink + good_ndp_entries_downlink,
+                ),
+            ),
+            get_ixia_healthcheck_stable_state(device_name),
+        ]
+        + (extra_postchecks or []),
+    )
+
+
+def create_hardening_of_arp_overload_with_agent_churn_playbook(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_arp_entries: int,
+    rogue_arp_entries: int,
+    arp_entry_limit: int = ARP_SOFT_LIMIT,
+    restart_period_s: int = 300,
+    restart_duration_s: int = 1800,
+    flap_iterations: int = 3,
+    coldboot_iterations: int = 2,
+    prechecks: t.Optional[list] = None,
+    extra_postchecks: t.Optional[list] = None,
+    snapshot_checks: t.Optional[list] = None,
+) -> Playbook:
+    """UTP L2M_005 — ARP past threshold, then wedge_agent churn / flaps / coldboots.
+
+    Mirrors the plain ARP overload playbook: the good ARP entries live on the
+    uplink and the downlink carries a single entry until the rogue flood is
+    applied to it.
+    """
+    return Playbook(
+        name="test_hardening_of_arp_overload_with_agent_churn",
+        prechecks=prechecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=[
+            _configure_arp_entries_step(downlink_iface, 1),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="arp_overload_inject",
+                steps=[
+                    _configure_arp_entries_step(downlink_iface, 1),
+                    _configure_arp_entries_step(uplink_iface, good_arp_entries),
+                    # Now overshoot the rogue entries
+                    _configure_arp_entries_step(downlink_iface, rogue_arp_entries),
+                    create_longevity_step(duration=300),
+                ],
+            ),
+            *_l2_overload_agent_churn_stages(
+                label="arp",
+                downlink_iface=downlink_iface,
+                uplink_iface=uplink_iface,
+                restart_period_s=restart_period_s,
+                restart_duration_s=restart_duration_s,
+                flap_iterations=flap_iterations,
+                flap_down_duration_s=30,
+                flap_recovery_duration_s=180,
+                coldboot_iterations=coldboot_iterations,
+                coldboot_recovery_duration_s=180,
+                settle_duration_s=180,
+            ),
+        ],
+        postchecks=[
+            create_l2_entry_threshold_check(
+                arp_entry_upper_lower_threshold=(
+                    arp_entry_limit,
+                    good_arp_entries,
+                ),
+            ),
+            AGENT_WARMBOOT_SERVICE_CHECK,
+            get_ixia_healthcheck_stable_state(device_name),
+        ]
+        + (extra_postchecks or []),
+    )
+
+
+def create_hardening_of_arp_overload_10x_with_table_clear_playbook(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_arp_entries: int,
+    rogue_arp_entries_10x: t.Optional[int] = None,
+    arp_entry_limit: int = ARP_SOFT_LIMIT,
+    prechecks: t.Optional[list] = None,
+    extra_postchecks: t.Optional[list] = None,
+    snapshot_checks: t.Optional[list] = None,
+) -> Playbook:
+    """UTP L2M_006 — drive ARP to 10x the limit, flush the table, re-verify."""
+    rogue_arp_entries_10x = (
+        rogue_arp_entries_10x
+        if rogue_arp_entries_10x is not None
+        else L2_OVERLOAD_10X_MULTIPLIER * arp_entry_limit
+    )
+    return Playbook(
+        name="test_hardening_of_arp_overload_10x_with_table_clear",
+        prechecks=prechecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=[
+            _configure_arp_entries_step(downlink_iface, 1),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="arp_overload_10x_inject",
+                steps=[
+                    _configure_arp_entries_step(downlink_iface, 1),
+                    _configure_arp_entries_step(uplink_iface, good_arp_entries),
+                    # Now overshoot the rogue entries to 10x the table limit
+                    _configure_arp_entries_step(downlink_iface, rogue_arp_entries_10x),
+                    create_longevity_step(duration=600),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="arp_table_clear_and_relearn",
+                steps=[
+                    create_run_ssh_command_step(
+                        cmd="fboss2 clear arp",
+                        description="Flush the ARP table while overloaded",
+                    ),
+                    create_longevity_step(duration=300),
+                    create_clear_traffic_stats_step(),
+                    create_longevity_step(duration=120),
+                ],
+            ),
+        ],
+        postchecks=[
+            create_l2_entry_threshold_check(
+                arp_entry_upper_lower_threshold=(
+                    arp_entry_limit,
+                    good_arp_entries,
+                ),
+            ),
+            get_ixia_healthcheck_stable_state(device_name),
+        ]
+        + (extra_postchecks or []),
+    )
+
+
+def create_hardening_of_mac_overload_with_agent_churn_playbook(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_mac_entry_count: int,
+    rogue_mac_entry_count: int,
+    good_ndp_entries_uplink: int,
+    good_ndp_entries_downlink: int,
+    good_arp_entries: int,
+    mac_entry_limit: int = MAC_SOFT_LIMIT,
+    rogue_traffic_item_regex: str = ".*LOSSY_ROGUE_NDP_TRAFFIC.*",
+    restart_period_s: int = 300,
+    restart_duration_s: int = 1800,
+    flap_iterations: int = 3,
+    coldboot_iterations: int = 2,
+    prechecks: t.Optional[list] = None,
+    extra_postchecks: t.Optional[list] = None,
+    snapshot_checks: t.Optional[list] = None,
+) -> Playbook:
+    """UTP L2M_009 — MAC past threshold, then wedge_agent churn / flaps / coldboots.
+
+    The MAC lower bound counts the L2 entries created by every good NDP and
+    ARP neighbor as well as the good source MACs, because all of them are
+    learned on the same downlink.
+    """
+    return Playbook(
+        name="test_hardening_of_mac_overload_with_agent_churn",
+        prechecks=prechecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=[
+            _configure_rogue_src_mac_step(1, rogue_traffic_item_regex),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="mac_overload_inject",
+                steps=[
+                    _configure_rogue_src_mac_step(
+                        rogue_mac_entry_count, rogue_traffic_item_regex
+                    ),
+                    create_longevity_step(duration=300),
+                ],
+            ),
+            *_l2_overload_agent_churn_stages(
+                label="mac",
+                downlink_iface=downlink_iface,
+                uplink_iface=uplink_iface,
+                restart_period_s=restart_period_s,
+                restart_duration_s=restart_duration_s,
+                flap_iterations=flap_iterations,
+                flap_down_duration_s=30,
+                flap_recovery_duration_s=180,
+                coldboot_iterations=coldboot_iterations,
+                coldboot_recovery_duration_s=180,
+                settle_duration_s=180,
+            ),
+        ],
+        postchecks=[
+            create_l2_entry_threshold_check(
+                mac_entry_upper_lower_threshold=(
+                    mac_entry_limit,
+                    good_mac_entry_count
+                    + good_ndp_entries_uplink
+                    + good_ndp_entries_downlink
+                    + good_arp_entries,
+                ),
+            ),
+            AGENT_WARMBOOT_SERVICE_CHECK,
+            get_ixia_healthcheck_stable_state(device_name),
+        ]
+        + (extra_postchecks or []),
+    )
+
+
 def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
     """Platform hardening playbook: BGP malformed packet handling test."""
     return Playbook(
@@ -11972,7 +12487,6 @@ from taac.steps.step_definitions import (
     create_bgp_service_convergence_step,
     create_bgp_service_crash_step,
     create_bgp_service_restart_step,
-    create_clear_traffic_stats_step,
     create_cte_ucmp_drain_undrain_step,
     create_cte_ucmp_interface_flap_step as _cte_create_interface_flap_step,
     create_disable_dc_vip_step,
