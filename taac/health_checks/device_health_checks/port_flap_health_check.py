@@ -135,15 +135,59 @@ class PortFlapHealthCheck(
 
         Args:
             ports_to_ignore: Optional list of port names to exclude from flap detection
+            only_topology_interfaces: when True, restrict the check to the device's
+                topology interfaces (the snake data ports from the landed static
+                topology) — ignores mgmt/uplink ports not under test.
         """
         # Get optional list of ports to ignore from check params
         ports_to_ignore = json.loads(check_params.get("ports_to_ignore", "[]"))
+
+        # Optionally scope to the snake topology interfaces only. `obj.interfaces`
+        # is populated from the landed static topology (the snake portmap), so this
+        # restricts the flap verdict to the cabled snake pairs under test.
+        # Parse like `ports_to_ignore` (tolerate string-encoded config values) so a
+        # literal "false" does not read as truthy.
+        _raw_scope = check_params.get("only_topology_interfaces", False)
+        only_topology_interfaces = (
+            _raw_scope
+            if isinstance(_raw_scope, bool)
+            else str(_raw_scope).strip().lower() == "true"
+        )
+        topology_ifaces = (
+            {interface.interface_name for interface in obj.interfaces}
+            if only_topology_interfaces
+            else None
+        )
 
         # Find ports that had flaps during the test
         flapped_ports = []
 
         # Check all ports that exist in both snapshots
         all_ports = set(pre_snapshot.data.keys()) | set(post_snapshot.data.keys())
+        if topology_ifaces is not None:
+            # Fail loudly on an empty in-scope set (rather than a silent PASS that
+            # masks flaps), distinguishing the two ways it can happen so the caller
+            # knows which to fix.
+            if not topology_ifaces:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"PortFlapHealthCheck on {obj.name}: only_topology_interfaces=True "
+                        f"but obj.interfaces is empty — no snake/topology ports to check. "
+                        f"Cannot validate flaps, refusing a false PASS."
+                    ),
+                )
+            all_ports &= topology_ifaces
+            if not all_ports:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"PortFlapHealthCheck on {obj.name}: only_topology_interfaces=True "
+                        f"but none of the {len(topology_ifaces)} topology interface(s) "
+                        f"matched any measured port — cannot validate flaps, refusing a "
+                        f"false PASS. topology_interfaces={sorted(topology_ifaces)}"
+                    ),
+                )
 
         for port_name in all_ports:
             if port_name in ports_to_ignore:
