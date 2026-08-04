@@ -1733,6 +1733,75 @@ def create_log_bgp_route_distribution_probe_step(
     return create_custom_step(params_dict=params, description=description)
 
 
+def create_verify_bgp_advertised_nlris_step(
+    hostname: str,
+    peer_parent_prefixes: t.List[str],
+    min_count: int = 1,
+    require_identical: bool = True,
+    expected_prefixes: t.Optional[t.List[str]] = None,
+    max_concurrency: int = 20,
+    tolerance: int = 0,
+    expected_fail: bool = False,
+    expected_fail_reason: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Verify per-peer ADVERTISED NLRIs across every peer under
+    ``peer_parent_prefixes``: each advertises >= ``min_count`` NLRIs and (default)
+    all advertise the IDENTICAL set -- the Update Group guarantee, checked on ALL
+    members via ``getPostfilterAdvertisedNetworks`` rather than a two-peer on-wire
+    dump. Reads the per-peer post-policy adj-RIB-out (populated under UG on the
+    fixed binary, T271301144/T281417842).
+
+    Args:
+        hostname: Device hostname (bgpcpp source of truth).
+        peer_parent_prefixes: Subnets; every session whose peer address is inside
+            one is checked (they should all belong to ONE update group for the
+            identity assertion to be meaningful). A selector matching 0 sessions
+            fails loudly (no vacuous pass).
+        min_count: NON-ZERO floor -- each peer must advertise at least this many
+            NLRIs (default 1; catches a peer that received nothing).
+        require_identical: assert every peer advertises the identical NLRI set
+            (default True -- the UG guarantee).
+        expected_prefixes: optional CIDR list; each peer's set must contain all of
+            them.
+        max_concurrency: bound on concurrent per-peer reads (default 20).
+        tolerance: peers allowed to violate before the step fails (default 0).
+        expected_fail: mark XFAIL (logged loudly + non-fatal) for a documented
+            external uncertainty; warns if it unexpectedly passes. Default False.
+        expected_fail_reason: reason surfaced in the XFAIL banner.
+        description: optional custom description.
+    """
+    if not peer_parent_prefixes:
+        raise ValueError(
+            "create_verify_bgp_advertised_nlris_step: peer_parent_prefixes is required"
+        )
+    if description is None:
+        description = (
+            f"Verify per-peer advertised NLRIs (identical={require_identical}, "
+            f">= {min_count}) for peers under {peer_parent_prefixes} on {hostname} "
+            f"(tol={tolerance})"
+        )
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "verify_bgp_advertised_nlris",
+        "hostname": hostname,
+        "peer_parent_prefixes": list(peer_parent_prefixes),
+        "min_count": min_count,
+        "require_identical": require_identical,
+        "tolerance": tolerance,
+    }
+    if expected_prefixes is not None:
+        params["expected_prefixes"] = list(expected_prefixes)
+    # Only serialize non-default max_concurrency so existing/typical callers stay
+    # byte-identical (no golden churn from the tuning knob).
+    if max_concurrency != 20:
+        params["max_concurrency"] = max_concurrency
+    if expected_fail:
+        params["expected_fail"] = True
+        if expected_fail_reason is not None:
+            params["expected_fail_reason"] = expected_fail_reason
+    return create_custom_step(params_dict=params, description=description)
+
+
 def create_verify_bgp_notification_occurred_step(
     hostname: str,
     snapshot_key: str,
