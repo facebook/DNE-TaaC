@@ -43,6 +43,7 @@ from taac.steps.step_definitions import (
     create_start_stop_bgp_peers_step,
     create_stop_bgp_keepalive_step,
     create_validation_step,
+    create_verify_bgp_advertised_nlris_step,
     create_verify_bgp_dut_best_path_as_path_converged_step,
     create_verify_bgp_notification_occurred_step,
     create_verify_bgp_peer_advertised_as_path_converged_step,
@@ -131,10 +132,12 @@ def create_bgp_ug_empty_group_playbook(
     # prefix pool. None -> skip the injection.
     ibgp_inject_pool_regex: t.Optional[str] = None,
     inject_route_count: int = 100,
-    # Spec step 10 (full initial dump + distribution on recovery): the UG-immune
-    # tcpdump dump-compare. Needed because adj-RIB-out is vacuous under UG on
-    # bag011 (postpolicy_sent_prefix_count reads 0, T271301144), so per-peer
-    # distribution can only be verified on the wire. All three required to run.
+    # Spec step 10 (full initial dump + distribution on recovery): the on-wire
+    # tcpdump dump-compare -- the only view that proves identical path ATTRIBUTES
+    # (the thrift NLRI view via ``recovery_ibgp_ug_parent_prefixes`` is
+    # prefix-level). All three required to run. (Pre-fix binary read
+    # postpolicy_sent_prefix_count = 0 under UG, T271301144, so the wire dump was
+    # once the ONLY per-peer signal; the fixed binary populates the thrift views.)
     ibgp_dump_capture_interface: t.Optional[str] = None,
     ibgp_dump_peer_regex: t.Optional[str] = None,
     ibgp_dump_session_indices: t.Optional[t.List[int]] = None,
@@ -167,6 +170,12 @@ def create_bgp_ug_empty_group_playbook(
     # Reads /proc/<pid>/status on Arista (the standard memory check only samples
     # RSS deltas there and cannot assert an absolute peak). None -> skip.
     vmhwm_threshold_bytes: t.Optional[int] = None,
+    # Spec step 10 ("all peers received full initial dump + distribution works"):
+    # the iBGP update group's peers. When set, after recovery converges, assert
+    # every peer has a NON-ZERO UNIFORM sent-count AND all advertise the IDENTICAL
+    # NLRI set -- extends the two-peer dump-compare to ALL members. None -> only the
+    # two-peer wire dump-compare runs. Scope to ONE update group (so identity holds).
+    recovery_ibgp_ug_parent_prefixes: t.Optional[t.List[str]] = None,
 ) -> Playbook:
     """Build the BGP++ Update Group qualification 2.9.7 playbook
     (Empty Group — Last Peer Goes Down Without Detached Peers).
@@ -219,15 +228,26 @@ def create_bgp_ug_empty_group_playbook(
          convergence budget rather than at this mid-test point.
 
     Spec step 3 (``ibgp_inject_pool_regex``): between stages 1 and 2, inject
-    ``inject_route_count`` iBGP routes (withdraw then re-advertise) and re-check
-    the iBGP update group -- verifies iBGP keeps functioning while the eBGP group
-    is empty. Spec step 10 (``ibgp_dump_*``): a final tcpdump dump-compare that
-    asserts two iBGP peers in one update group receive identical UPDATEs -- the
-    only UG-immune per-peer distribution check (adj-RIB-out is vacuous under UG
-    per T271301144; the sent-prefix gauge read 0 on bag011). It cold-starts ONLY
-    the iBGP sink peers (``flap_peer_regex`` = the dump peer set) so the eBGP
-    route sources stay up and the DUT still holds the routes to dump; it flaps
-    those peers, so it runs LAST. Both are skipped if their params are omitted.
+    ``inject_route_count`` iBGP routes (withdraw then re-advertise) as CHURN and
+    re-check the iBGP update group -- verifies the iBGP UG keeps functioning while
+    the eBGP group is empty. Per-member distribution is NOT asserted at step 3: with
+    the eBGP group empty the DUT has nothing to distribute to the other iBGP peers
+    (no eBGP-origin routes, and member-originated iBGP routes are not re-advertised
+    within the group), so every other iBGP peer legitimately receives 0. Distribution
+    is verified at step 10 instead. Spec step 10: two complementary views --
+    (a) when ``recovery_ibgp_ug_parent_prefixes`` is set, an ALL-members thrift
+    view after recovery (every iBGP peer non-zero + uniform sent-count AND
+    identical advertised NLRIs), and (b) the ``ibgp_dump_*`` tcpdump dump-compare
+    asserting two iBGP peers in one update group receive identical UPDATEs on the
+    wire -- the only view that also proves identical path ATTRIBUTES (the thrift
+    NLRI view is prefix-level). The dump-compare cold-starts ONLY the iBGP sink
+    peers (``flap_peer_regex`` = the dump peer set) so the eBGP route sources stay
+    up and the DUT still holds the routes to dump; it flaps those peers, so it
+    runs LAST (after the all-members view). All are skipped if their params are
+    omitted. (The per-peer thrift views read the PS gauge +
+    getPostfilterAdvertisedNetworks, populated under UG on the fixed binary --
+    T271301144/T281417842; the earlier "vacuous/gauge reads 0" was the pre-fix
+    binary, which is why distribution used to be wire-only.)
 
     ``bgp_mon_ignore_prefixes`` (if the testbed has BGP-MON peers configured
     on the device that IXIA does not emulate) is threaded into the session
@@ -286,63 +306,76 @@ def create_bgp_ug_empty_group_playbook(
         ),
     ]
 
-    # --- Spec step 3: verify the iBGP update group keeps functioning while the
-    # eBGP group is empty. Inject (withdraw then re-advertise) iBGP routes, then
-    # re-check the iBGP UG + no crash. Per-peer distribution is NOT asserted here
-    # -- under UG on bag011 the adj-RIB-out gauge reads 0 (T271301144), so
-    # distribution is verified on the wire by step 10 (which cold-starts BGP and
-    # therefore cannot run during the eBGP-empty window). ---
+    # --- Spec step 3: verify the iBGP update group keeps FUNCTIONING while the eBGP
+    # group is empty. Inject (withdraw then re-advertise) iBGP routes as CHURN, then
+    # re-check the iBGP UG is still formed + no crash. Per-member distribution is NOT
+    # asserted at step 3: with eBGP empty the DUT has no eBGP-origin routes to
+    # distribute and does not re-advertise member-originated iBGP routes within the
+    # group (no RR fan-out for that path), so every other iBGP peer legitimately
+    # receives 0 (HW 2026-08-01: all 434 sinks = 0). Distribution is verified at
+    # step 10 (post-recovery, eBGP-origin -> iBGP, where it genuinely happens). ---
     step3_stage = None
     if ibgp_inject_pool_regex is not None:
-        step3_stage = create_steps_stage(
-            steps=[
-                create_advertise_withdraw_prefixes_step(
-                    device_name=device_name,
-                    advertise=False,
-                    prefix_pool_regex=ibgp_inject_pool_regex,
-                    prefix_start_index=0,
-                    prefix_end_index=inject_route_count,
-                    description=(
-                        f"2.9.7 step 3 -- withdraw {inject_route_count} iBGP "
-                        "routes while the eBGP group is empty"
+        step3_steps: t.List[Step] = [
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=False,
+                prefix_pool_regex=ibgp_inject_pool_regex,
+                prefix_start_index=0,
+                prefix_end_index=inject_route_count,
+                description=(
+                    f"2.9.7 step 3 -- withdraw {inject_route_count} iBGP "
+                    "routes while the eBGP group is empty"
+                ),
+            ),
+            create_longevity_step(
+                duration=settle_after_flap_s,
+                description="2.9.7 step 3 -- settle after withdraw",
+            ),
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=True,
+                prefix_pool_regex=ibgp_inject_pool_regex,
+                prefix_start_index=0,
+                prefix_end_index=inject_route_count,
+                description=(
+                    f"2.9.7 step 3 -- inject (re-advertise) "
+                    f"{inject_route_count} iBGP routes"
+                ),
+            ),
+            create_longevity_step(
+                duration=settle_after_flap_s,
+                description="2.9.7 step 3 -- settle after inject",
+            ),
+        ]
+        # NOTE: step 3's "verify distribution within the iBGP group" is NOT asserted
+        # here. At step 3 the eBGP group is empty, so the DUT has no eBGP-origin
+        # routes to distribute AND it does not re-advertise member-originated iBGP
+        # routes to the other iBGP peers (no route-reflector fan-out for that path) --
+        # so every other iBGP peer legitimately receives 0 at this point (HW
+        # 2026-08-01: all 434 sink peers = 0). The inject here therefore serves as
+        # CHURN that verifies the iBGP UG keeps FUNCTIONING while the eBGP group is
+        # empty (group stays formed, route churn accepted, no crash). Actual
+        # per-member distribution is verified at step 10 (post-recovery, eBGP-origin
+        # -> iBGP, where distribution genuinely happens).
+        step3_steps.append(
+            create_validation_step(
+                point_in_time_checks=[
+                    *_no_crash_checks(),
+                    create_bgp_update_group_check(
+                        expect_enabled=True,
+                        peer_group_substrings=[ibgp_v6_peer_group],
+                        check_id="empty_group_step3_ibgp_functions",
                     ),
+                ],
+                description=(
+                    "2.9.7 step 3 -- iBGP update group continues to function "
+                    "under eBGP-empty (route churn accepted, group formed, "
+                    "no crash)"
                 ),
-                create_longevity_step(
-                    duration=settle_after_flap_s,
-                    description="2.9.7 step 3 -- settle after withdraw",
-                ),
-                create_advertise_withdraw_prefixes_step(
-                    device_name=device_name,
-                    advertise=True,
-                    prefix_pool_regex=ibgp_inject_pool_regex,
-                    prefix_start_index=0,
-                    prefix_end_index=inject_route_count,
-                    description=(
-                        f"2.9.7 step 3 -- inject (re-advertise) "
-                        f"{inject_route_count} iBGP routes"
-                    ),
-                ),
-                create_longevity_step(
-                    duration=settle_after_flap_s,
-                    description="2.9.7 step 3 -- settle after inject",
-                ),
-                create_validation_step(
-                    point_in_time_checks=[
-                        *_no_crash_checks(),
-                        create_bgp_update_group_check(
-                            expect_enabled=True,
-                            peer_group_substrings=[ibgp_v6_peer_group],
-                            check_id="empty_group_step3_ibgp_functions",
-                        ),
-                    ],
-                    description=(
-                        "2.9.7 step 3 -- iBGP update group continues to function "
-                        "under eBGP-empty (route churn accepted, group formed, "
-                        "no crash)"
-                    ),
-                ),
-            ],
+            )
         )
+        step3_stage = create_steps_stage(steps=step3_steps)
 
     # --- Spec step 10: verify all peers received the full initial dump + route
     # distribution on recovery. The tcpdump dump-compare cold-starts BGP and
@@ -417,6 +450,42 @@ def create_bgp_ug_empty_group_playbook(
                 ),
             ),
         ]
+
+    # --- Spec step 10 (all-peers view): after recovery converges, assert every
+    # peer in the iBGP update group received the full re-synced distribution -- a
+    # NON-ZERO UNIFORM sent-count AND an IDENTICAL per-peer advertised NLRI set
+    # across ALL members (the thrift all-peers analog of the two-peer wire
+    # dump-compare, which only samples a pair). Runs AFTER recovery converges and
+    # BEFORE step 10's dump-compare (which cold-starts/flaps the sink peers).
+    # UG-safe reads on the fixed binary (T271301144/T281417842). ---
+    recovery_dist_stage = None
+    if recovery_ibgp_ug_parent_prefixes is not None:
+        recovery_dist_stage = create_steps_stage(
+            steps=[
+                create_verify_bgp_sent_route_counts_uniform_step(
+                    hostname=device_name,
+                    peer_parent_prefixes=recovery_ibgp_ug_parent_prefixes,
+                    min_count=1,
+                    max_spread=0,
+                    description=(
+                        "2.9.7 step 10 -- every iBGP peer has a NON-ZERO, UNIFORM "
+                        "sent-count after recovery (all members received the full "
+                        "dump)"
+                    ),
+                ),
+                create_verify_bgp_advertised_nlris_step(
+                    hostname=device_name,
+                    peer_parent_prefixes=recovery_ibgp_ug_parent_prefixes,
+                    min_count=1,
+                    require_identical=True,
+                    description=(
+                        "2.9.7 step 10 -- every iBGP peer advertises the IDENTICAL "
+                        "post-recovery NLRI set (UG distribution correct, all "
+                        "members)"
+                    ),
+                ),
+            ],
+        )
 
     stages = [
         # 1. Empty the eBGP update group.
@@ -558,6 +627,10 @@ def create_bgp_ug_empty_group_playbook(
     # soak); step 10 runs last (after recovery, since it cold-starts BGP).
     if step3_stage is not None:
         stages.insert(1, step3_stage)
+    # All-peers distribution view runs after recovery (last base stage) and before
+    # the dump-compare, which flaps the sink peers.
+    if recovery_dist_stage is not None:
+        stages.append(recovery_dist_stage)
     if step10_stage is not None:
         stages.append(step10_stage)
 

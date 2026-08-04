@@ -870,6 +870,10 @@ def create_bgp_ug_edge_cases_test_config(
         ibgp_dump_capture_interface=physical_inventory.ixia_ports[1][0],
         ibgp_dump_peer_regex=_IBGP_DUMP_PEER_REGEX,
         ibgp_dump_session_indices=_IBGP_DUMP_SESSION_INDICES,
+        # Spec step 10 (all-members view): after recovery, assert every iBGP peer
+        # has a non-zero uniform sent-count + identical advertised NLRIs -- extends
+        # the two-peer wire dump-compare to ALL members of the iBGP update group.
+        recovery_ibgp_ug_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
         # Assert the update-group count returns to baseline on recovery (spec:
         # groups re-created correctly, no stale/orphaned groups).
         expected_recovered_group_count=_EXPECTED_UPDATE_GROUP_COUNT,
