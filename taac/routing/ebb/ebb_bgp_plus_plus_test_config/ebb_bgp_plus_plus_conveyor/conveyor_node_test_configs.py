@@ -54,19 +54,19 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
 # manifest is byte-wise identical) now live in
 # testconfigs/routing/qual_bgp_update_group.py; import via that path.
 from taac.testconfigs.routing.qual_bgp_update_group import (
-    BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
-    BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
     BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
     BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG,
+    BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG,
     BGP_UG_BACKPRESSURE_TEST_CONFIG,
@@ -164,17 +164,18 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # schedule until manually verified on the device). Select a scenario with
     # ``--regex 'bgp_ug_<usecase>'``.
     BAG013_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG,
-    # BGP++ UG 2.9.2 Simultaneous Disruptions on bag011.ash6 -- its own WITH_OPEN_R
+    # BGP++ UG 2.9.2 Simultaneous Disruptions on bag013.ash6 -- its own WITH_OPEN_R
     # TestConfig (the IGP-instability track needs a running Open/R daemon). 30-min
     # run. Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually
     # verified on the device).
-    BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
-    # BGP++ UG 2.9.4 Dual-Stack Isolation on bag011.ash6 -- its own WITH_OPEN_R
+    BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG,
+    # BGP++ UG 2.9.4 Dual-Stack Isolation on bag013.ash6 -- its own WITH_OPEN_R
     # TestConfig (per-AFI PS-gauge distribution needs Open/R-resolved next-hops so
-    # the DUT advertises). The IPv6 distribution checks fail by design on bag011
-    # today (bgpcpp IPv6 next-hop-resolution defect). Ad-hoc; NOT wired into a
-    # conveyor stage (do NOT schedule until manually verified on the device).
-    BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
+    # the DUT advertises). The IPv6 distribution checks failed on the old bag011
+    # binary (bgpcpp IPv6 next-hop defect); bag013's fixed binary should clear them.
+    # Ad-hoc; NOT wired into a conveyor stage (do NOT schedule until manually
+    # verified on the device).
+    BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG,
     # BGP++ UG 2.9.6 Staggered Peer Startup on bag013.ash6 -- its own WITHOUT_OPEN_R
     # TestConfig using the next-hop-self resolution infra (D113330327) so the iBGP
     # next-hops resolve and the DUT advertises with no Open/R daemon. Distribution is

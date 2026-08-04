@@ -925,10 +925,10 @@ def create_bgp_ug_dual_stack_isolation_test_config(
     only adds the Open/R daemon, Port-Channel, and injected baseline routes.
 
     KNOWN SIGNAL: the IPv6 distribution checks (spec steps 5 and the v6 half of
-    step 8) FAIL on bag011 today -- a bgpcpp IPv6 connected-next-hop-resolution
-    defect keeps iBGP v6 PS at 0 (tracking-doc appendix Part B). That failure is
-    the intended surfacing of the defect, not a test bug; the v4 distribution and
-    all isolation checks pass, and the whole test passes once the defect is fixed.
+    step 8) FAILED on the old bag011 binary -- a bgpcpp IPv6 connected-next-hop
+    -resolution defect kept iBGP v6 PS at 0 (tracking-doc appendix Part B). bag013
+    runs the fixed binary, so v6 should now advertise and the whole test pass;
+    confirm on the bag013 HW run (drop this note once v6 is green).
     """
     bgp_mon_ignore_prefixes = [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
     dual_stack_isolation_playbook = create_bgp_ug_dual_stack_isolation_playbook(
@@ -941,7 +941,7 @@ def create_bgp_ug_dual_stack_isolation_test_config(
         # enumeration): EB-EB-V4 / EB-EB-V6.
         # Scope the per-AFI PS distribution checks to the iBGP peers by peer
         # ADDRESS subnet (session.peer_group is not the AFI peer-group name on
-        # bag011 -- the update-group object has EB-EB-V4 but the session field
+        # bag013 -- the update-group object has EB-EB-V4 but the session field
         # does not). The v4 plane /16s and v6 plane /80s are AFI-specific.
         ibgp_v4_peer_parent_prefixes=_IBGP_V4_PARENT_PREFIXES,
         ibgp_v6_peer_parent_prefixes=_IBGP_V6_PARENT_PREFIXES,
@@ -956,7 +956,7 @@ def create_bgp_ug_dual_stack_isolation_test_config(
 
     return build_bag_conveyor_test_config(
         physical_inventory,
-        name="BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST",
+        name="BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST",
         playbooks=[dual_stack_isolation_playbook],
         # WITH_OPEN_R so the iBGP next-hops resolve and the DUT advertises --
         # the precondition for the per-AFI PS distribution checks.
@@ -1012,7 +1012,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
     ] + bgp_mon_ignore_prefixes
 
     if smoke:
-        name = "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_SMOKE"
+        name = "BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_SMOKE"
         disruption_duration_s = 180
         convergence_quiesce_s = 60
         route_churn_interval_s = 30
@@ -1021,7 +1021,7 @@ def create_bgp_ug_simultaneous_disruptions_test_config(
         monitor_interval_s = 60
         igp_frequency_s = 30
     else:
-        name = "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST"
+        name = "BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST"
         disruption_duration_s = 1800
         convergence_quiesce_s = 300
         route_churn_interval_s = 60

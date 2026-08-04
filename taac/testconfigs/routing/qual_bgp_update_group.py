@@ -151,20 +151,22 @@ BAG013_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG = create_bgp_ug_edge_cases_test_config
 # distribution checks read the PS gauge, non-zero only once Open/R resolves the
 # iBGP next-hops so the DUT advertises), separate from the WITHOUT_OPEN_R
 # edge-cases bundle. Select via
-# ``--test-config BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST``. The IPv6
-# distribution checks fail on bag011 today by design (bgpcpp v6 next-hop defect).
-BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG = (
-    create_bgp_ug_dual_stack_isolation_test_config(BAG011_ASH6)
+# ``--test-config BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST``. The IPv6
+# distribution checks surfaced a bgpcpp v6 next-hop defect on the old bag011
+# binary (iBGP v6 PS stuck at 0); bag013 runs the fixed binary, so v6 should now
+# advertise -- confirm on the bag013 HW run.
+BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG = (
+    create_bgp_ug_dual_stack_isolation_test_config(BAG013_ASH6)
 )
 
 # Spec 2.9.2 Simultaneous Disruptions -- its OWN WITH_OPEN_R TestConfig (the
 # IGP-instability track needs a running Open/R daemon + injected baseline routes),
 # separate from the WITHOUT_OPEN_R edge-cases bundle. Select via
-# ``--test-config BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST``. (The factory
+# ``--test-config BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST``. (The factory
 # also accepts ``smoke=True`` for a short, ad-hoc machinery-validation variant --
 # not committed as a lifecycle constant to keep the golden/registry surface minimal.)
-BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG = (
-    create_bgp_ug_simultaneous_disruptions_test_config(BAG011_ASH6)
+BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG = (
+    create_bgp_ug_simultaneous_disruptions_test_config(BAG013_ASH6)
 )
 
 # Spec 2.9.6 Staggered Peer Startup on bag013 -- its OWN WITHOUT_OPEN_R TestConfig
@@ -221,16 +223,16 @@ __all__ = [
     "BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_ON_TEST_CONFIG",
-    "BAG011_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
-    "BAG011_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
     "BAG013_ASH6_BGP_UG_BEST_PATH_CHANGE_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_DUAL_STACK_ISOLATION_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_EDGE_CASES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_MULTIPLE_GROUPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_REPEATED_PEER_FLAPS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SCALE_WITHDRAW_TEST_CONFIG",
+    "BAG013_ASH6_BGP_UG_SIMULTANEOUS_DISRUPTIONS_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_STAGGERED_STARTUP_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
