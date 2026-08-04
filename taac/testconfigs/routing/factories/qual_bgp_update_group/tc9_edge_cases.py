@@ -15,8 +15,8 @@ checks read the PS gauge, which is only non-zero when Open/R resolves the
 iBGP next-hops so the DUT actually advertises). Spec 2.9.5 is excluded
 (struck through in the plan).
 
-Target physical inventories: BAG011_ASH6 for the edge-cases bundle (2.9.7) /
-2.9.4 / 2.9.2, and BAG013_ASH6 for 2.9.6 staggered-startup (both EBB conveyor
+Target physical inventories: BAG013_ASH6 for the edge-cases bundle (2.9.7) and
+2.9.6 staggered-startup, and BAG011_ASH6 for 2.9.4 / 2.9.2 (all EBB conveyor
 nodes). Reuses the shared ``build_bag_conveyor_test_config`` builder from tc1
 for the full-scale
 topology (140 eBGP + ~500 iBGP, ``include_bgp_mon=False`` — UG qualification
@@ -91,7 +91,7 @@ from taac.test_as_a_config import types as taac_types
 
 
 # =============================================================================
-# BGP UG edge cases (spec 2.9) — bag011 conveyor logical_topology.
+# BGP UG edge cases (spec 2.9) — bag conveyor logical_topology.
 # =============================================================================
 
 # BGP-peer-name regexes that select every eBGP / iBGP peer built by
@@ -163,7 +163,7 @@ _EBGP_PREFIX_POOL_REGEX = r"PREFIX_POOL_IPV[46]_EBGP$"
 
 # Spec pre-condition 3 ("record update group count") + pass-criteria "groups
 # re-created correctly" / "no stale group entries". The EBB-scale UG topology
-# on bag011 forms exactly 4 update groups at steady state (v6/v4 x eBGP/iBGP);
+# forms exactly 4 update groups at steady state (v6/v4 x eBGP/iBGP);
 # observed on hardware (baseline 4 -> 2 when eBGP empties -> 0 all-empty -> 4 on
 # recovery). Asserted at the baseline precheck (records the baseline) and again
 # on recovery (must return to baseline -- a higher count would mean a stale
@@ -881,7 +881,7 @@ def create_bgp_ug_edge_cases_test_config(
         # -up alone does not re-send them), so the DUT relearns its eBGP RIB and
         # can redistribute to iBGP for the step-10 dump + full route re-sync.
         ebgp_prefix_pool_regex=_EBGP_PREFIX_POOL_REGEX,
-        # Spec pass-criterion "VmHWM below 10 GB" -- bag011 is Arista, where the
+        # Spec pass-criterion "VmHWM below 10 GB" -- bag013 is Arista, where the
         # standard memory postcheck can only sample RSS deltas; this reads
         # bgpcpp /proc VmHWM directly and asserts the 10 GiB ceiling.
         vmhwm_threshold_bytes=Gigabyte.GIG_10.value,
@@ -889,7 +889,7 @@ def create_bgp_ug_edge_cases_test_config(
 
     return build_bag_conveyor_test_config(
         physical_inventory,
-        name="BAG011_ASH6_BGP_UG_EDGE_CASES_TEST",
+        name="BAG013_ASH6_BGP_UG_EDGE_CASES_TEST",
         playbooks=[empty_group_playbook],
         # WITHOUT_OPEN_R + next-hop-self (D113330327): IXIA advertises next-hop = the
         # peer's connected IP and the DUT resolves it from interface state via the

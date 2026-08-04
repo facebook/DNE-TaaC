@@ -657,7 +657,7 @@ def create_bgp_ug_empty_group_playbook(
 
     return Playbook(
         # Generic, DUT-agnostic name -- device scope lives in the surrounding
-        # TestConfig (e.g. ``BAG011_ASH6_BGP_UG_EDGE_CASES_TEST``).
+        # TestConfig (e.g. ``BAG013_ASH6_BGP_UG_EDGE_CASES_TEST``).
         name="bgp_ug_empty_group",
         stages=stages,
         prechecks=prechecks,
