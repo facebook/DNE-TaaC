@@ -23,9 +23,6 @@ import os
 import typing as t
 from dataclasses import replace
 
-from taac.abstractions.eos_bgpcpp_setup_tasks import (
-    get_bgpcpp_startup_tasks_for_openr_mode,
-)
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
@@ -122,74 +119,6 @@ _EB_FA_TRANSITED_COMMUNITY = "65529:39744"
 # ─── physical_inventory → DUT-wiring helpers hoisted to util/bgp_ebb_lab_wiring.py ───
 # to break a circular import with bgp_ebb_characteristic.py (see that file's
 # imports and util/bgp_ebb_lab_wiring.py docstring).
-
-
-def _legacy_ssh_route_churn_setup_tasks(
-    *,
-    device_name: str,
-    ebgp_peer_count: int,
-    ibgp_peer_count: int,
-    ebgp_remote_as: int,
-    ibgp_remote_as: int,
-    ixia_ebgp_ic_parent_network_v6: str,
-    ixia_ibgp_ic_parent_network_v6: str,
-    peergroup_ebgp_v6: str,
-    peergroup_ibgp_v6: str,
-    combine_nexthop_startup_flag: bool,
-    ssh_user: str,
-    ssh_password: str,
-) -> list:
-    """Legacy raw-SSH provisioning for the route-churn engine (EB02 lab only).
-
-    Both ``configure_bgpcpp_startup`` (no ``use_managed_shell``) and
-    ``replace_bgp_peers`` reach the device over raw SSH as ``ssh_user``. That
-    only works on the ``ebXX.lab.ash6`` boxes; see
-    ``_managed_route_churn_setup_tasks`` for the conveyor-safe path.
-    """
-    return [
-        create_configure_bgpcpp_startup_task(
-            hostname=device_name,
-            flags={
-                "agent_thrift_recv_timeout_ms": "160000",
-                **(
-                    {"bgp_resolve_nexthops_from_interface_state": "true"}
-                    if combine_nexthop_startup_flag
-                    else {}
-                ),
-            },
-            ssh_user=ssh_user,
-            ssh_password=ssh_password,
-        ),
-        *(
-            []
-            if combine_nexthop_startup_flag
-            else get_bgpcpp_startup_tasks_for_openr_mode(
-                device_name,
-                OpenRMode.NONE,
-            )
-        ),
-        create_replace_bgp_peers_task(
-            hostname=device_name,
-            peer_configs=[
-                {
-                    "peer_group_name": peergroup_ebgp_v6,
-                    "remote_as": ebgp_remote_as,
-                    "base_network": ixia_ebgp_ic_parent_network_v6,
-                    "is_v6": True,
-                    "peer_count": ebgp_peer_count,
-                    "start_offset": 16,
-                },
-                {
-                    "peer_group_name": peergroup_ibgp_v6,
-                    "remote_as": ibgp_remote_as,
-                    "base_network": ixia_ibgp_ic_parent_network_v6,
-                    "is_v6": True,
-                    "peer_count": ibgp_peer_count,
-                    "start_offset": 16,
-                },
-            ],
-        ),
-    ]
 
 
 def _managed_route_churn_setup_tasks(
@@ -1209,34 +1138,22 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
     churn_count: int = 100,
     soak_duration_seconds: int = 600,
     max_convergence_time_seconds: int = 300,
-    ssh_user: str = "admin",
-    ssh_password: str | None = None,
     peergroup_ebgp_v6: str = "EB-FA-V6",
     peergroup_ibgp_v6: str = "EB-EB-V6",
     extra_setup_tasks: list | None = None,
-    combine_nexthop_startup_flag: bool = False,
     enable_update_group: bool = False,
     update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
-    use_managed_setup: bool = False,
 ) -> TestConfig:
     """BGP++ route-churn prefix-scaling TestConfig -- perf-scaling case 6 (prefix scaling).
 
-    Byte-wise identical to the legacy
-    ``test_config_performance_scaling_case6.test_config_for_route_churn_prefix_scaling``.
-
-    Args:
-        use_managed_setup: Provision the DUT through the shared managed recipe
-            (``get_update_packing_setup_tasks``) instead of the legacy raw-SSH
-            tasks. Required on conveyor devices: the raw-SSH branch defaults to
-            the ``admin``/``dnepit`` credential, which exists only on the
-            ``ebXX.lab.ash6`` lab boxes, so on a ``cicd``/``qual`` device it
-            fails setup with ``Permission denied (publickey,password)``. Left
-            False so the EB02 lab caller keeps its existing behaviour.
+    Provisioning goes through ``get_update_packing_setup_tasks``, the same shared
+    recipe SC2/SC3/SC4 use. There is deliberately no raw-SSH alternative: the
+    previous one defaulted to the ``admin``/``dnepit`` credential, which exists
+    only on the ``ebXX.lab.ash6`` lab boxes, so it silently failed on any
+    ``cicd``/``qual`` device with ``Permission denied (publickey,password)``.
     """
     if prefix_configs is None:
         prefix_configs = [(5000, 600)]
-    if ssh_password is None:
-        ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
 
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
@@ -1248,47 +1165,24 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
 
     max_prefix_count = max(pc for pc, _ in prefix_configs)
 
-    if use_managed_setup:
-        setup_tasks = _managed_route_churn_setup_tasks(
-            physical_inventory=physical_inventory,
-            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            ebgp_peer_count=ebgp_peer_count,
-            ibgp_peer_count=ibgp_peer_count,
-            ebgp_remote_as=ebgp_remote_as,
-            ibgp_remote_as=ibgp_remote_as,
-            ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
-            ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
-            peergroup_ebgp_v6=peergroup_ebgp_v6,
-            peergroup_ibgp_v6=peergroup_ibgp_v6,
-            enable_update_group=enable_update_group,
-            update_group_config=update_group_config,
-        )
-    else:
-        setup_tasks = _legacy_ssh_route_churn_setup_tasks(
-            device_name=device_name,
-            ebgp_peer_count=ebgp_peer_count,
-            ibgp_peer_count=ibgp_peer_count,
-            ebgp_remote_as=ebgp_remote_as,
-            ibgp_remote_as=ibgp_remote_as,
-            ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
-            ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
-            peergroup_ebgp_v6=peergroup_ebgp_v6,
-            peergroup_ibgp_v6=peergroup_ibgp_v6,
-            combine_nexthop_startup_flag=combine_nexthop_startup_flag,
-            ssh_user=ssh_user,
-            ssh_password=ssh_password,
-        )
+    setup_tasks = _managed_route_churn_setup_tasks(
+        physical_inventory=physical_inventory,
+        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+        ebgp_peer_count=ebgp_peer_count,
+        ibgp_peer_count=ibgp_peer_count,
+        ebgp_remote_as=ebgp_remote_as,
+        ibgp_remote_as=ibgp_remote_as,
+        ixia_ebgp_ic_parent_network_v6=ixia_ebgp_ic_parent_network_v6,
+        ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
+        peergroup_ebgp_v6=peergroup_ebgp_v6,
+        peergroup_ibgp_v6=peergroup_ibgp_v6,
+        enable_update_group=enable_update_group,
+        update_group_config=update_group_config,
+    )
 
     if extra_setup_tasks:
         setup_tasks.extend(extra_setup_tasks)
-
-    # The managed recipe applies update-group as part of the config it deploys,
-    # so patching again here would double-apply it.
-    if enable_update_group and not use_managed_setup:
-        setup_tasks.extend(
-            _ug_config_patch_setup_tasks(device_name, update_group_config)
-        )
 
     postchecks = [
         create_bgp_session_establish_check(

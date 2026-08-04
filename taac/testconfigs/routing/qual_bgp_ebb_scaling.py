@@ -24,7 +24,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_bounded_ecmp_sets_test_config,
     create_bgp_ebb_scaling_performance_test_config,
-    create_bgp_ebb_scaling_route_churn_prefix_test_config,
     create_bgp_ebb_scaling_transient_memory_peer_scale_test_config,
     create_bgp_ebb_scaling_transient_memory_route_scale_test_config,
 )
@@ -86,17 +85,6 @@ EB02_ARISTA_PERFORMANCE_SCALING_TEST_4_PEER_SCALE_TEST_CONFIG = (
     create_bgp_ebb_scaling_transient_memory_peer_scale_test_config(
         EB02_LAB_ASH6,
         name="EB02-ARISTA_PERFORMANCE_SCALING_TEST_4_PEER_SCALE",
-    )
-)
-
-
-# ─── EB02 -- perf-scaling case 6: route churn prefix scaling ──────────────
-EB02_ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN_TEST_CONFIG = (
-    create_bgp_ebb_scaling_route_churn_prefix_test_config(
-        EB02_LAB_ASH6,
-        name="EB02-ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN",
-        combine_nexthop_startup_flag=True,
-        soak_duration_seconds=180,
     )
 )
 
@@ -181,7 +169,6 @@ __all__ = [
     "EB02_ARISTA_PERFORMANCE_SCALING_TEST_1_800_IBGP_PEERS_TEST_CONFIG",
     "EB02_ARISTA_PERFORMANCE_SCALING_TEST_3_ROUTE_SCALE_TEST_CONFIG",
     "EB02_ARISTA_PERFORMANCE_SCALING_TEST_4_PEER_SCALE_TEST_CONFIG",
-    "EB02_ARISTA_PERFORMANCE_SCALING_TEST_6_ROUTE_CHURN_TEST_CONFIG",
     "EB02_ARISTA_PERFORMANCE_SCALING_TEST_9_BOUNDED_ECMP_SETS_TEST_CONFIG",
     "EB03_ARISTA_PERFORMANCE_SCALING_TEST_2_TEST_CONFIG",
 ]

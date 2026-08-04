@@ -16,7 +16,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
-    create_bgp_ebb_scaling_route_churn_prefix_test_config,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
@@ -199,23 +198,6 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
         self.assertEqual(1, len(flag_indices))
         self.assertGreater(len(bgp_enable_indices), 0)
         self.assertLess(flag_indices[0], bgp_enable_indices[0])
-
-    def test_route_churn_combines_startup_flags_in_one_task(self) -> None:
-        config = create_bgp_ebb_scaling_route_churn_prefix_test_config(
-            BAG010_ASH6,
-            name="ROUTE_CHURN_COMBINED_STARTUP_FLAGS",
-            combine_nexthop_startup_flag=True,
-        )
-        params = self._configure_startup_params(config)
-
-        self.assertEqual(1, len(params))
-        self.assertEqual(
-            {
-                "agent_thrift_recv_timeout_ms": "160000",
-                "bgp_resolve_nexthops_from_interface_state": "true",
-            },
-            params[0]["flags"],
-        )
 
 
 class PerformanceScalingRouteFilterClearTest(unittest.TestCase):

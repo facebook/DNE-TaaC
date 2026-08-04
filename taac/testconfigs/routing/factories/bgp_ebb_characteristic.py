@@ -2360,10 +2360,8 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
     ``testbed.device_name`` as ``{DEVICE}_SC6_CHURN_PROCESSING_TEST`` + ``_UPDATE_GROUP``
     when ``enable_update_group=True``.
 
-    Provisioning uses the engine's ``use_managed_setup`` path -- the same shared
-    ``get_update_packing_setup_tasks`` recipe SC2/SC3/SC4 run. The engine's
-    default is raw SSH as ``admin``, which only exists on the ebXX lab boxes and
-    fails on a cicd/qual device like bag010. Update-group is folded into the
+    Provisioning goes through the engine's ``get_update_packing_setup_tasks``
+    recipe -- the same one SC2/SC3/SC4 run. Update-group is folded into the
     config that recipe deploys, rather than patched on afterwards.
 
     Args:
@@ -2439,10 +2437,6 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
         # losing the start of the burst. 60s = 2x the hard-fail ceiling.
         soak_duration_seconds=60,
         enable_update_group=enable_update_group,
-        # bag010 is a cicd/qual device with no ``admin`` login, so the engine's
-        # default raw-SSH provisioning cannot reach it. Use the same managed
-        # recipe SC2/SC3/SC4 run here.
-        use_managed_setup=True,
     )
 
 
