@@ -1,26 +1,32 @@
 # Derived image: TAAC built and installed, packaged for vendor consumption.
 #
 # Multi-stage build:
-#   Stage 1 (builder): FROM fboss-build-env:centos
+#   Stage 1 (builder): FROM ${BASE_IMAGE}
 #       Full getdeps source build of fbthrift-python + fboss-thrift-defs +
 #       transitive deps (~20 min cold), then TAAC itself. Prune for runtime.
 #
-#   Stage 2 (runtime): FROM fboss-build-env:centos
+#   Stage 2 (runtime): FROM ${BASE_IMAGE}
 #       Single ABI surface across build and run: no risk of glibc /
 #       libstdc++ drift. Selective COPY --from=builder pulls in the
 #       trimmed install tree and the Python site-packages.
 #
-# Usage:
-#   docker build -f docker/Dockerfile.taac -t fboss-taac .
+# Usage (build via the script; it supplies BASE_IMAGE):
+#   ./docker/build-taac-image.sh
 #   docker run --rm fboss-taac python3 -c \
 #       'import taac.libs.taac_runner; print("ok")'
 #
 # Override TAAC_OSS (default 1) at run time via -e TAAC_OSS=0.
 
+# Base image tag, carrying the fboss rev it was built from. Supplied by
+# build-taac-image.sh from the pin in getdeps/manifests/fboss-thrift-defs.
+# Default is a nonexistent image on purpose: Docker's linter wants one, and a
+# bare `docker build` should fail loudly rather than reuse a stale base.
+ARG BASE_IMAGE=run-docker-build-taac-image-sh-instead
+
 # =====================================================================
 # Stage 1: builder — deps + TAAC in one pass
 # =====================================================================
-FROM fboss-build-env:centos AS builder
+FROM ${BASE_IMAGE} AS builder
 
 # Optional cap on build parallelism. Empty = let each tool default to
 # nproc. Set via `docker build --build-arg NUM_JOBS=N` (or pass
@@ -112,7 +118,7 @@ RUN find /scratch/installed \
 # =====================================================================
 # Stage 2: runtime
 # =====================================================================
-FROM fboss-build-env:centos AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 COPY --from=builder /scratch/installed /scratch/installed
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages

@@ -1,0 +1,44 @@
+# GENERATED FILE -- do not hand-edit; scripts/pin_fbcode_snapshot.py rewrites
+# the whole file (body from upstream, plus the rev), so local edits are lost.
+# Re-pin: ./scripts/pin_fbcode_snapshot.py --write <tag>
+# Snapshot: v2026.07.27.00 (upstream weekly release tag)
+[manifest]
+name = mvfst-python
+fbsource_path = fbcode/quic
+shipit_project = mvfst
+shipit_fbcode_builder = true
+
+[git]
+repo_url = https://github.com/facebook/mvfst.git
+rev = 60f627255356ae51c8bc1bbd7f3c1e1a61480bcb
+
+[build]
+builder = cmake
+subdir = .
+
+[build.not(os=linux)]
+builder = nop
+
+[cmake.defines.test=on]
+BUILD_TESTS = ON
+
+[cmake.defines.all(os=windows, test=on)]
+BUILD_TESTS = OFF
+
+[cmake.defines.test=off]
+BUILD_TESTS = OFF
+
+[cmake.defines.os=linux]
+CMAKE_POSITION_INDEPENDENT_CODE = ON
+BUILD_SHARED_LIBS = ON
+
+[dependencies]
+folly-python
+fizz-python
+
+[dependencies.all(test=on, not(os=windows))]
+googletest
+
+[shipit.pathmap]
+fbcode/quic/public_root = .
+fbcode/quic = quic

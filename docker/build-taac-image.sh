@@ -7,8 +7,13 @@
 # Usage:
 #   ./docker/build-taac-image.sh                       # default tag, default parallelism
 #   ./docker/build-taac-image.sh --tag my-taac:v1      # custom tag
-#   ./docker/build-taac-image.sh --no-cache            # skip Docker layer cache
+#   ./docker/build-taac-image.sh --no-cache            # rebuild everything, base included
 #   ./docker/build-taac-image.sh --num-jobs 4          # cap getdeps parallelism
+#
+# --no-cache rebuilds the FBOSS base image too, not just the TAAC layers.
+# That adds ~5.5 min but is the only way to refresh the base's CentOS
+# packages, which ship as part of the runtime stage. CI gets this for free:
+# runners are ephemeral, so the base is absent and rebuilt every run.
 #
 # Parallelism note: the fbthrift / cc1plus compile phase is the main
 # memory hog (~5 GiB per worker). On memory-constrained hosts (<~6 GiB
@@ -65,20 +70,58 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FBOSS_IMAGE_SRC="${FBOSS_IMAGE_SRC:-$HOME/.taac-fboss-image-src}"
 FBOSS_PUBLIC_URL="https://github.com/facebook/fboss.git"
-BASE_IMAGE="fboss-build-env:centos"
 
-# Build the FBOSS base image if missing.
-if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-    echo "Base image $BASE_IMAGE not found — building..."
+# Reuse the fboss pin from the fboss-thrift-defs manifest as the base image
+# recipe: one fboss commit supplies both the build environment and the thrift
+# defs, and there is a single place to bump. An unpinned clone would rebuild
+# the base from whatever fboss main happened to be that day.
+FBOSS_REV=$(grep -E '^rev[[:space:]]*=' "$REPO_ROOT/getdeps/manifests/fboss-thrift-defs" \
+    | head -1 | awk -F'=' '{print $2}' | tr -d ' ')
+if [[ -z "$FBOSS_REV" ]]; then
+    echo "ERROR: could not parse fboss rev from getdeps/manifests/fboss-thrift-defs" >&2
+    exit 1
+fi
+
+# Tag carries the rev, so bumping the pin produces a different tag and the
+# `docker image inspect` guard below misses -- forcing a rebuild instead of
+# silently reusing a base image built from an older fboss.
+BASE_IMAGE="fboss-build-env:centos-${FBOSS_REV:0:12}"
+
+# Build the FBOSS base image when it is missing, or unconditionally under
+# --no-cache. The base is also stage 2 of Dockerfile.taac (the shipped
+# runtime), so its system packages are part of what we ship: rebuilding
+# re-runs `FROM quay.io/centos/centos:stream9` and the base image's own dnf
+# installs against live repos, which is how those packages get refreshed.
+# Nothing else in this repo pins or refreshes them.
+BASE_REASON=""
+if [[ "$NO_CACHE" -eq 1 ]]; then
+    BASE_REASON="--no-cache requested"
+elif ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+    BASE_REASON="not present locally"
+fi
+
+if [[ -n "$BASE_REASON" ]]; then
+    echo "Building base image $BASE_IMAGE ($BASE_REASON; slow, ~4 GB)..."
+    # Fetch the pinned rev specifically; unlike a bare clone this also
+    # re-points an existing checkout when the pin moves.
     if [[ ! -d "$FBOSS_IMAGE_SRC/.git" ]]; then
-        echo "Cloning $FBOSS_PUBLIC_URL into $FBOSS_IMAGE_SRC (shallow) ..."
-        git clone --depth=1 "$FBOSS_PUBLIC_URL" "$FBOSS_IMAGE_SRC"
+        echo "Initializing $FBOSS_IMAGE_SRC ..."
+        git init -q "$FBOSS_IMAGE_SRC"
+    fi
+    echo "Fetching fboss $FBOSS_REV (shallow) ..."
+    git -C "$FBOSS_IMAGE_SRC" fetch --depth 1 "$FBOSS_PUBLIC_URL" "$FBOSS_REV"
+    # -f: this is a managed cache dir, not a working checkout; a
+    # stray edit there should not wedge the build.
+    git -C "$FBOSS_IMAGE_SRC" checkout -qf FETCH_HEAD
+    BASE_BUILD_ARGS=()
+    if [[ "$NO_CACHE" -eq 1 ]]; then
+        BASE_BUILD_ARGS+=(--no-cache)
     fi
     # USE_CLANG=false: on CentOS, this makes glog and friends link
     # against system libunwind.so.8 instead of LLVM's libunwind.so.1,
     # which isn't on the runtime search path and breaks auditwheel
     # during fbthrift-python wheel repair.
-    docker build --build-arg USE_CLANG=false \
+    docker build "${BASE_BUILD_ARGS[@]}" --build-arg USE_CLANG=false \
         -t "$BASE_IMAGE" \
         -f "$FBOSS_IMAGE_SRC/fboss/oss/docker/Dockerfile" \
         "$FBOSS_IMAGE_SRC"
@@ -96,9 +139,10 @@ if [[ -n "$NUM_JOBS" ]]; then
     echo "Capping getdeps parallelism at $NUM_JOBS"
 fi
 
-echo "Building $TAG from docker/Dockerfile.taac ..."
+echo "Building $TAG from docker/Dockerfile.taac (base: $BASE_IMAGE) ..."
 docker build \
     "${DOCKER_BUILD_ARGS[@]}" \
+    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     -f "$REPO_ROOT/docker/Dockerfile.taac" \
     -t "$TAG" \
     "$REPO_ROOT"
