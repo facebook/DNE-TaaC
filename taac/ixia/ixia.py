@@ -16,6 +16,7 @@ import time
 import typing as t
 import warnings
 from collections import defaultdict, namedtuple
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from ipaddress import ip_address, IPv6Address
 
@@ -49,6 +50,7 @@ from ixnetwork_restpy.assistants.sessions.sessionassistant import (
 from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
+from ixnetwork_restpy.errors import IxNetworkError as IxnIxNetworkError
 from ixnetwork_restpy.files import Files
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
@@ -65,6 +67,7 @@ from taac.utils.oss_taac_lib_utils import (
     retryable,
     to_fb_uqdn,
 )
+from requests.exceptions import RequestException, Timeout as RequestsTimeout
 
 # The monorepo ships these constants at neteng.test_infra.ixia.ixnetwork_restpy.constants;
 # in OSS we vendor a copy alongside this module.
@@ -114,6 +117,7 @@ from uhd_restpy.assistants.sessions.sessionassistant import (
 from uhd_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as UhdStatViewAssistant,
 )
+from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
 
 
 warnings.filterwarnings(action="ignore", category=ResourceWarning)
@@ -602,6 +606,20 @@ class IxiaSetupError(Exception):
     pass
 
 
+class IxiaOperationTimeoutError(TimeoutError):
+    def __init__(self, message: str, *, deadline_expired: bool = False) -> None:
+        super().__init__(message)
+        self.deadline_expired = deadline_expired
+
+
+class IxiaOperationStateError(RuntimeError):
+    pass
+
+
+class IxiaSessionQuarantinedError(RuntimeError):
+    pass
+
+
 class NetworkGroupNotFoundError(Exception):
     pass
 
@@ -836,6 +854,8 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
 
 
 class Ixia:
+    OPERATION_TIMEOUT_ERROR = IxiaOperationTimeoutError
+
     def __init__(
         self,
         ixia_config: t.Optional[ixia_types.IxiaConfig] = None,
@@ -1018,6 +1038,13 @@ class Ixia:
         # was running when a 5xx fired. Optional — emitter tolerates None.
         self._current_playbook_name: t.Optional[str] = None
         self._current_testconfig_name: t.Optional[str] = None
+        self._request_deadline_state = threading.local()
+        self._request_deadline_wrapper_lock = threading.Lock()
+        self._bounded_apply_lock = threading.RLock()
+        self._deadline_wrapped_transport: t.Optional[t.Any] = None
+        self._deadline_request_wrapper: t.Optional[t.Any] = None
+        self._session_quarantine_reason: t.Optional[str] = None
+        self._quarantined_session_identity: t.Optional[t.Tuple[str, int]] = None
 
     @staticmethod
     def get_formatted_ip_address(ixia_server_ip: str) -> str:
@@ -1111,8 +1138,9 @@ class Ixia:
         SessionAssistant = (
             UhdSessionAssistant if self.is_uhd_chassis else IxnSessionAssistant
         )
+        replacement_session: t.Optional[object] = None
         try:
-            self.session = SessionAssistant(
+            replacement_session = SessionAssistant(
                 # pyrefly: ignore [bad-argument-type]
                 IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
                 RestPort=None,
@@ -1140,7 +1168,7 @@ class Ixia:
                 f"{_GREEN}[IXIA]{_RESET} Recovery succeeded — retrying SessionAssistant"
             )
             try:
-                self.session = SessionAssistant(
+                replacement_session = SessionAssistant(
                     # pyrefly: ignore [bad-argument-type]
                     IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
                     RestPort=None,
@@ -1156,13 +1184,34 @@ class Ixia:
             except Exception as retry_exc:
                 self._raise_session_unavailable(retry_exc)
 
-        # Re-populating the Session ID and Name if a new one was created
-        # as the user left them to default input as None
+        if replacement_session is None:
+            raise IxiaSessionUnavailableError(
+                "SessionAssistant did not return a replacement session"
+            )
         was_new_session = not self.session_id
-        if not self.session_id:
-            self.session_id = self.session.Session.Id
-        if not self.session_name:
-            self.session_name = self.session.Session.Name
+        replacement_session = t.cast(t.Any, replacement_session)
+        replacement_identity = self._remote_session_identity(replacement_session)
+        if replacement_identity is None:
+            raise IxiaSessionUnavailableError(
+                "SessionAssistant returned a session without a stable remote identity"
+            )
+        _chassis, replacement_session_id = replacement_identity
+        replacement_session_name = str(replacement_session.Session.Name)
+
+        with self._bounded_apply_lock:
+            with self._request_deadline_wrapper_lock:
+                self._install_request_deadline_wrapper_locked(replacement_session)
+                self.session = replacement_session
+                self.session_id = replacement_session_id
+                self.session_name = replacement_session_name
+                self.ixnetwork = replacement_session.Ixnetwork
+                if (
+                    self._session_quarantine_reason is not None
+                    and self._quarantined_session_identity is not None
+                    and replacement_identity != self._quarantined_session_identity
+                ):
+                    self._session_quarantine_reason = None
+                    self._quarantined_session_identity = None
 
         action = "Created new" if was_new_session else "Reusing existing"
         self.logger.info(
@@ -1171,7 +1220,219 @@ class Ixia:
             f"Name: {_YELLOW}{self.session_name}{_RESET}"
         )
 
-        self.ixnetwork = self.session.Ixnetwork
+        if self.session_quarantined:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} Remote session remains quarantined "
+                f"after reconnect: {replacement_identity}"
+            )
+
+    def _remote_session_identity(
+        self, session: t.Optional[t.Any] = None
+    ) -> t.Optional[t.Tuple[str, int]]:
+        assistant = session if session is not None else self.session
+        try:
+            remote_session = assistant.Session
+            return (
+                str(self.primary_chassis_ip),
+                int(remote_session.Id),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _install_request_deadline_wrapper(self) -> None:
+        with self._request_deadline_wrapper_lock:
+            self._install_request_deadline_wrapper_locked(self.session)
+
+    def _install_request_deadline_wrapper_locked(self, session: t.Any) -> None:
+        transport = session.TestPlatform._connection._session
+        current_request = transport.request
+        if getattr(
+            self, "_deadline_wrapped_transport", None
+        ) is transport and current_request is getattr(
+            self, "_deadline_request_wrapper", None
+        ):
+            return
+        deadline_state = self._request_deadline_state
+
+        @functools.wraps(current_request)
+        def request_with_deadline(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            deadline = getattr(deadline_state, "deadline", None)
+            if deadline is None:
+                return current_request(*args, **kwargs)
+            remaining = deadline - time.monotonic()
+            phase = getattr(deadline_state, "phase", "IXIA operation")
+            if remaining <= 0:
+                raise IxiaOperationTimeoutError(
+                    f"{phase} request deadline expired",
+                    deadline_expired=True,
+                )
+            existing_timeout = kwargs.get("timeout")
+            if isinstance(existing_timeout, tuple):
+                # Requests interprets this tuple as independent connect/read
+                # caps, so preserve each caller value while capping both.
+                kwargs["timeout"] = tuple(
+                    remaining if value is None else min(value, remaining)
+                    for value in existing_timeout
+                )
+            elif existing_timeout is None:
+                kwargs["timeout"] = remaining
+            else:
+                kwargs["timeout"] = min(existing_timeout, remaining)
+            try:
+                return current_request(*args, **kwargs)
+            except IxiaOperationTimeoutError:
+                raise
+            except (TimeoutError, RequestsTimeout) as error:
+                raise IxiaOperationTimeoutError(
+                    f"{phase} transport request timed out",
+                    deadline_expired=time.monotonic() >= deadline,
+                ) from error
+
+        transport.request = request_with_deadline
+        self._deadline_wrapped_transport = transport
+        self._deadline_request_wrapper = request_with_deadline
+
+    def request_deadline(
+        self, timeout_seconds: float, phase: str
+    ) -> AbstractContextManager[None]:
+        return self._request_deadline_scope(
+            timeout_seconds, phase, inherit_parent_deadline=True
+        )
+
+    def _independent_request_deadline(
+        self, timeout_seconds: float, phase: str
+    ) -> AbstractContextManager[None]:
+        return self._request_deadline_scope(
+            timeout_seconds, phase, inherit_parent_deadline=False
+        )
+
+    @contextmanager
+    def _request_deadline_scope(
+        self,
+        timeout_seconds: float,
+        phase: str,
+        *,
+        inherit_parent_deadline: bool,
+    ) -> t.Iterator[None]:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._install_request_deadline_wrapper()
+        state = self._request_deadline_state
+        previous_deadline = getattr(state, "deadline", None)
+        previous_phase = getattr(state, "phase", None)
+        requested_deadline = time.monotonic() + timeout_seconds
+        inherit_parent = (
+            inherit_parent_deadline
+            and previous_deadline is not None
+            and previous_deadline <= requested_deadline
+        )
+        if inherit_parent:
+            state.deadline = previous_deadline
+            state.phase = previous_phase or phase
+        else:
+            state.deadline = requested_deadline
+            state.phase = phase
+        try:
+            yield
+        finally:
+            if previous_deadline is None:
+                if hasattr(state, "deadline"):
+                    del state.deadline
+            else:
+                state.deadline = previous_deadline
+            if previous_phase is None:
+                if hasattr(state, "phase"):
+                    del state.phase
+            else:
+                state.phase = previous_phase
+
+    @property
+    def session_quarantined(self) -> bool:
+        with self._bounded_apply_lock:
+            return self._session_quarantine_reason is not None
+
+    def assert_session_not_quarantined(self) -> None:
+        with self._bounded_apply_lock:
+            reason = self._session_quarantine_reason
+        if reason is not None:
+            raise IxiaSessionQuarantinedError(
+                f"IXIA session is quarantined after an ambiguous operation: {reason}"
+            )
+
+    def _quarantine_session(self, reason: str) -> None:
+        with self._bounded_apply_lock:
+            self._session_quarantine_reason = reason
+            self._quarantined_session_identity = self._remote_session_identity()
+
+    def _abort_apply_on_the_fly(self, timeout_seconds: float) -> Exception | None:
+        try:
+            with self._independent_request_deadline(
+                timeout_seconds, "AbortApplyOnTheFly"
+            ):
+                self.ixnetwork.Globals.Topology.AbortApplyOnTheFly()
+        except (
+            IxiaOperationTimeoutError,
+            IxnIxNetworkError,
+            UhdIxNetworkError,
+            RequestException,
+        ) as error:
+            return error
+        except Exception as error:
+            reason = (
+                "ApplyOnTheFly timed out and AbortApplyOnTheFly raised an "
+                f"unexpected error: {type(error).__name__}: {error}"
+            )
+            self._quarantine_session(reason)
+            self.logger.exception(reason)
+            raise
+        return None
+
+    def apply_changes_bounded(
+        self,
+        timeout_seconds: float,
+        *,
+        abort_timeout_seconds: float = 10.0,
+        sleep_timer: int = 0,
+    ) -> None:
+        """Apply pending topology changes without retrying an ambiguous timeout."""
+        if abort_timeout_seconds <= 0:
+            raise ValueError("abort_timeout_seconds must be positive")
+        with self._bounded_apply_lock:
+            self.assert_session_not_quarantined()
+            with self.request_deadline(timeout_seconds, "ApplyOnTheFly"):
+                try:
+                    self.ixnetwork.Globals.Topology.ApplyOnTheFly()
+                except IxiaOperationTimeoutError as error:
+                    abort_error = self._abort_apply_on_the_fly(abort_timeout_seconds)
+                    if abort_error is None:
+                        error.add_note(
+                            "AbortApplyOnTheFly acknowledged by the IXIA server"
+                        )
+                    else:
+                        reason = (
+                            f"ApplyOnTheFly timed out and abort failed: "
+                            f"{type(abort_error).__name__}: {abort_error}"
+                        )
+                        self._quarantine_session(reason)
+                        error.add_note(reason)
+                        self.logger.error(reason)
+                    raise
+                if sleep_timer:
+                    deadline = getattr(self._request_deadline_state, "deadline", None)
+                    if deadline is None:
+                        raise IxiaOperationStateError(
+                            "ApplyOnTheFly operation deadline state is missing"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if sleep_timer + 1.0 > remaining:
+                        raise IxiaOperationTimeoutError(
+                            "ApplyOnTheFly sleep leaves insufficient operation "
+                            "deadline margin"
+                        )
+                    time.sleep(sleep_timer)
+            self.logger.debug(
+                "[GLOBAL] Successfully applied bounded changes on the fly"
+            )
 
     @staticmethod
     def _raise_session_unavailable(exc: Exception) -> t.NoReturn:
