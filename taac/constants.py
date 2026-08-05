@@ -27,6 +27,49 @@ DNE_LOG_DIR: str = "/var/facebook/dne"
 RSYSLOG_AGENT_FILE: str = "/etc/rsyslog.d/00-agent-log.conf"
 FBOSS_LOG_DIR: str = "/var/facebook/logs/fboss"
 
+# Single source of truth for the systemd `BindsTo` cascade that fires when
+# wedge_agent is restarted. In practice the observable effect is that
+# `bgpd` restarts alongside wedge_agent — bgpd's RIB state depends on
+# wedge_agent for FIB programming, so cascading restart is correct
+# (Pavan-confirmed by-design, T274731352 closed 2026-06-11). The
+# `fboss_sw_agent` and `fboss_hw_agent@0` ALSO cascade on a wedge_agent
+# restart, via the wedge_agent unit's hand-coded
+# `ExecStop=pre_wedge_agent_shut_runner.par` hook (NOT via a passive
+# systemd BindsTo directive — those two daemons have only
+# `After=wedge_agent.service` and no propagation directive on the live
+# DUT; the script explicitly tears them down). Pavan confirmed this is
+# by-design — see T275672046 for the unit-file evidence and the open
+# FBOSS investigation into whether the ExecStop teardown is still
+# required, and T274731352 (closed by-design) for the original ack.
+#
+# Net: the full cascade set has FOUR members. The name
+# `WEDGE_AGENT_BINDS_TO_CASCADE` is retained for backward compatibility
+# even though only `bgpd` is strictly a BindsTo binder — the constant's
+# semantic is "every daemon that restarts when wedge_agent restarts",
+# regardless of the cascade mechanism.
+#
+# Any TAAC playbook that intentionally restarts wedge_agent AND has a
+# SERVICE_RESTART_CHECK postcheck monitoring wedge_agent must include this
+# full list in the check's `expected_restarted_services` — otherwise the
+# postcheck false-fails the by-design cascade. The
+# `test_service_restart_dependency` invariant test enforces this fleet-wide;
+# if the cascade set ever changes, update it in ONE place here and every
+# dependent playbook stays correct.
+#
+# Lives in `constants.py` (not `playbooks/playbook_definitions.py`) on
+# purpose: `testconfigs/routing/util/bgp_dc_tc_checks.py` needs it, and
+# importing it from `playbook_definitions` created a load-time cycle
+# (playbook_definitions -> testconfigs.routing.util -> bgp_dc_tc_checks ->
+# playbook_definitions, which is only partially initialized at that point).
+# `constants.py` imports no TAAC modules, so it is always a safe host.
+# `playbook_definitions` re-exports the name for backward compatibility.
+WEDGE_AGENT_BINDS_TO_CASCADE: list[str] = [
+    "wedge_agent",
+    "bgpd",
+    "fboss_sw_agent",
+    "fboss_hw_agent@0",
+]
+
 TEST_AS_A_CONFIG_NAME: str = "taac"
 
 TAAC_HEALTH_CHECK_SCUBA_TABLE = "taac_health_checks"

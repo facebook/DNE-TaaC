@@ -22,6 +22,10 @@ from taac.constants import (
     Gigabyte,
     MAC_SOFT_LIMIT,
     NDP_SOFT_LIMIT,
+    # Re-exported (see below) for backward compatibility. Canonical home is
+    # `constants.py` so `testconfigs/routing/util/bgp_dc_tc_checks.py` can
+    # import it without creating a load-time cycle back into this module.
+    WEDGE_AGENT_BINDS_TO_CASCADE,
 )
 from taac.health_checks.constants import (
     _get_services_excluding,
@@ -1456,40 +1460,14 @@ def create_thft_baseline_playbook(
 #   - both proceed in parallel for the entire test_duration_s window
 # =============================================================================
 
-# Single source of truth for the systemd `BindsTo` cascade that fires when
-# wedge_agent is restarted. In practice the observable effect is that
-# `bgpd` restarts alongside wedge_agent — bgpd's RIB state depends on
-# wedge_agent for FIB programming, so cascading restart is correct
-# (Pavan-confirmed by-design, T274731352 closed 2026-06-11). The
-# `fboss_sw_agent` and `fboss_hw_agent@0` ALSO cascade on a wedge_agent
-# restart, via the wedge_agent unit's hand-coded
-# `ExecStop=pre_wedge_agent_shut_runner.par` hook (NOT via a passive
-# systemd BindsTo directive — those two daemons have only
-# `After=wedge_agent.service` and no propagation directive on the live
-# DUT; the script explicitly tears them down). Pavan confirmed this is
-# by-design — see T275672046 for the unit-file evidence and the open
-# FBOSS investigation into whether the ExecStop teardown is still
-# required, and T274731352 (closed by-design) for the original ack.
-#
-# Net: the full cascade set has FOUR members. The name
-# `WEDGE_AGENT_BINDS_TO_CASCADE` is retained for backward compatibility
-# even though only `bgpd` is strictly a BindsTo binder — the constant's
-# semantic is "every daemon that restarts when wedge_agent restarts",
-# regardless of the cascade mechanism.
-#
-# Any TAAC playbook that intentionally restarts wedge_agent AND has a
-# SERVICE_RESTART_CHECK postcheck monitoring wedge_agent must include
-# this full list in the check's `expected_restarted_services` — otherwise
-# the postcheck false-fails the by-design cascade. The
-# `test_service_restart_dependency` invariant test enforces this
-# fleet-wide; if the cascade set ever changes here, update this constant
-# in ONE place and every dependent playbook stays correct.
-WEDGE_AGENT_BINDS_TO_CASCADE: list[str] = [
-    "wedge_agent",
-    "bgpd",
-    "fboss_sw_agent",
-    "fboss_hw_agent@0",
-]
+# `WEDGE_AGENT_BINDS_TO_CASCADE` now lives in `taac/constants.py` and is
+# imported at the top of this module, which re-exports it here so existing
+# `from playbook_definitions import WEDGE_AGENT_BINDS_TO_CASCADE` consumers
+# keep working. It was moved to break a load-time circular import:
+# playbook_definitions -> testconfigs.routing.util (package __init__) ->
+# bgp_dc_tc_checks -> playbook_definitions (partially initialized, since the
+# constant sat ~1400 lines below the import that triggered the re-entry).
+# See `constants.py` for the full cascade rationale and task references.
 
 # Map of (playbook_number, name_suffix, Service enum, friendly_name).
 # These are the 4 daemons listed in `service_restart_check`'s default

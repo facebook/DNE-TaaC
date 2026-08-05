@@ -14,6 +14,7 @@ Contents:
 - ``build_bgp_dc_tc_postchecks`` — standard BGP DC TestConfig postchecks list.
 """
 
+from taac.constants import WEDGE_AGENT_BINDS_TO_CASCADE
 from taac.health_checks.healthcheck_definitions import (
     create_cpu_utilization_check,
     create_device_core_dumps_check,
@@ -22,9 +23,6 @@ from taac.health_checks.healthcheck_definitions import (
     create_service_restart_check,
     create_systemctl_active_state_check,
     create_unclean_exit_check,
-)
-from taac.playbooks.playbook_definitions import (
-    WEDGE_AGENT_BINDS_TO_CASCADE,
 )
 from taac.testconfigs.routing.util.bgp_dc_healthchecks import (
     BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
