@@ -4,11 +4,35 @@ import ipaddress
 import math
 import os
 import random
+import re
 import socket
 import time
 import typing as t
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+# systemd ``Result`` values that mean the unit's last run terminated abnormally.
+# Kept in sync with ``SystemdStateCollector.UNCLEAN_SYSTEMD_RESULTS``; duplicated
+# here so this module doesn't need to import from ``taac.libs.collectors``.
+_UNCLEAN_JOURNAL_RESULTS: t.FrozenSet[str] = frozenset(
+    {"core-dump", "signal", "watchdog", "timeout", "oom-kill"}
+)
+
+# Matches systemd's ``Failed with result '<reason>'`` message across the
+# ``--output=short-iso`` and default output formats:
+#   2026-08-04T02:15:32-0700 dut1 systemd[1]: fboss_sw_agent.service: Failed with result 'signal'.
+#   Aug 04 02:15:32 dut1 systemd[1]: fboss_sw_agent.service: Failed with result 'signal'.
+#
+# Requires the ``systemd[<pid>]:`` process prefix so a monitored daemon's own
+# stdout can't false-match. Without this anchor a log line like
+# ``... dut1 bgpd[123]: peer log: sys.service: Failed with result 'core-dump'``
+# would be attributed to a phantom ``sys`` unit. Unit names are captured up to
+# ``.service:`` so instance units (``fboss_hw_agent@0.service``) parse.
+_JOURNAL_FAILED_LINE = re.compile(
+    r"systemd\[\d+\]:\s+"
+    r"(?P<svc>[A-Za-z0-9_.@\-]+?)\.service:\s+"
+    r"Failed with result '(?P<reason>[^']+)'"
+)
 
 from taac.health_checks.constants import (
     CORE_DUMP_IGNORE_WORDS,
@@ -204,6 +228,70 @@ def format_timestamp(timestamp: t.Union[int, float, str]) -> str:
         Human-readable timestamp string in format "YYYY-MM-DD HH:MM:SS"
     """
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(timestamp)))
+
+
+async def async_query_journalctl_unclean_exits(
+    driver: t.Any,
+    services: t.Sequence[str],
+    window_start: float,
+    window_end: float,
+) -> t.Dict[str, t.List[t.Tuple[str, str]]]:
+    """Return ``{service: [(timestamp, reason), ...]}`` for units where
+    journalctl reports a ``Failed with result '<reason>'`` message between
+    ``window_start`` and ``window_end`` (unix timestamps). ``reason`` is one
+    of core-dump / signal / watchdog / timeout / oom-kill — matches
+    ``SystemdStateCollector.UNCLEAN_SYSTEMD_RESULTS``.
+
+    Complements the collector's periodic ``Result`` sampling: an unclean exit
+    that completes and is auto-restarted between two poll intervals slips
+    through the sampler but persists in the journal. This is a one-shot
+    postcheck SSH read, not a poll — cheap enough to run alongside every
+    ``UncleanExitHealthCheck``.
+
+    On SSH error, empty output, or no matches, returns ``{}``. Callers should
+    treat this as an additional signal on top of the collector's samples, not
+    a replacement.
+    """
+    if not services:
+        return {}
+    services_set = set(services)
+    unit_args = " ".join(f"-u {s}.service" for s in services)
+    # journalctl ``--since=@<epoch>`` / ``--until=@<epoch>`` are numeric
+    # timestamps. ``--until`` is inclusive to the second; add 1 so a Failed
+    # message logged AT window_end still lands inside the query.
+    cmd = (
+        f"journalctl {unit_args} "
+        f"--since=@{int(window_start)} --until=@{int(window_end) + 1} "
+        f"--no-pager --output=short-iso"
+    )
+    try:
+        output = await driver.async_run_cmd_on_shell(cmd) or ""
+    except Exception:
+        return {}
+    result: t.Dict[str, t.List[t.Tuple[str, str]]] = {}
+    for line in output.splitlines():
+        m = _JOURNAL_FAILED_LINE.search(line)
+        if not m:
+            continue
+        reason = m.group("reason")
+        if reason not in _UNCLEAN_JOURNAL_RESULTS:
+            continue
+        svc = m.group("svc")
+        # Belt-and-suspenders on top of the ``systemd[<pid>]:`` regex
+        # anchor: if a match somehow leaks through for a unit that isn't
+        # in the caller's requested set (a related instance unit systemd
+        # pulled in by ``Wants=``, an accidentally-broad regex match on a
+        # future systemd version), don't attribute it to the check.
+        if svc not in services_set:
+            continue
+        # The line typically starts with an ISO timestamp; grab the first
+        # whitespace-separated token as the timestamp string. If the line is
+        # exotic (e.g. no timestamp), fall back to the whole line so nothing
+        # is silently dropped.
+        first_tok = line.split(" ", 1)[0] if line else ""
+        timestamp = first_tok or line
+        result.setdefault(svc, []).append((timestamp, reason))
+    return result
 
 
 def collector_window_start(
