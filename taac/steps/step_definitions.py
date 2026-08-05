@@ -343,11 +343,11 @@ def create_bgp_update_group_state_step(
     """Create a persisted semantic Update Group state step.
 
     Supported actions are ``capture``, ``compare``, ``monitor``,
-    ``wait_monitor_armed``, ``formation_monitor``, ``verify_zero``, and ``clear``.
-    ``monitor`` requires
-    ``case`` and ``duration_seconds`` in ``action_params``. ``formation_monitor``
-    and monitor waits accept positive ``timeout_seconds``; monitor and formation
-    actions accept positive ``poll_interval_seconds``.
+    ``wait_monitor_armed``, ``formation_monitor``,
+    ``wait_formation_monitor_armed``, ``verify_zero``, and ``clear``.
+    ``monitor`` requires ``case`` and ``duration_seconds`` in ``action_params``.
+    Monitor-wait and formation actions accept positive ``timeout_seconds``;
+    monitor and formation actions accept positive ``poll_interval_seconds``.
     ``verify_zero`` takes one sample when ``timeout_seconds`` is omitted or zero;
     a positive timeout enables polling at ``poll_interval_seconds``, while a
     negative timeout is invalid. Its expected configured-session count must be
@@ -361,8 +361,9 @@ def create_bgp_update_group_state_step(
         "compare",
         "formation_monitor",
         "monitor",
-        "wait_monitor_armed",
         "verify_zero",
+        "wait_monitor_armed",
+        "wait_formation_monitor_armed",
     }
     if action not in actions:
         raise ValueError(

@@ -98,7 +98,6 @@ _TC7_EXPECTED_SESSION_COUNT = 1272
 _TC7_PLAYBOOK_NAMES = (
     "bgp_ug_link_flap_recovery",
     "update_group_sustained_link_flap",
-    "bgp_ug_bgp_peer_flapping",
     "bgp_ug_bgp_daemon_restart",
     "bgp_ug_cold_start",
     "bgp_ug_fibagent_restart",
@@ -637,6 +636,12 @@ def _get_bgp_ebb_full_scale_playbooks(
             )
         if "update_group_sustained_link_flap" in selected_tc7_playbooks:
             playbooks.append(_ug_2_7_2_playbook(physical_inventory, bound))
+        if "bgp_ug_cold_start" in selected_tc7_playbooks:
+            playbooks.append(
+                build_bgp_ug_2_7_playbook(
+                    "bgp_ug_cold_start", physical_inventory, bound
+                )
+            )
         return playbooks
 
     device_name = physical_inventory.device_name

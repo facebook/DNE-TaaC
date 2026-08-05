@@ -10,11 +10,15 @@ from later.unittest import TestCase
 from taac.steps.step_definitions import (
     _validate_sustained_checkpoints,
     _validate_sustained_heartbeats,
+    create_advertise_withdraw_prefixes_step,
+    create_bgp_agent_log_artifact_step,
     create_bgp_lifecycle_convergence_step,
     create_bgp_update_group_disruption_step,
     create_bgp_update_group_physical_restore_step,
     create_bgp_update_group_state_step,
+    create_hardware_capacity_delta_step,
     create_ixia_device_group_toggle_step,
+    create_prepare_compact_bgp_prefix_pool_step,
     create_verified_fibagent_restart_step,
     create_verify_bgp_sent_route_count_delta_step,
     create_verify_fibagent_active_step,
@@ -164,6 +168,32 @@ class BgpUpdateGroupRecoveryStepDefinitionsTest(TestCase):
             none_throws(bounded.step_params).jq_params,
         )
 
+    def test_bgp_agent_log_artifact_serializes_owned_lifecycle(self) -> None:
+        step = create_bgp_agent_log_artifact_step(
+            "bag012.ash6",
+            "capture",
+            "case-2.7.4",
+            case_id="2.7.4",
+        )
+        params = json.loads(none_throws(none_throws(step.step_params).json_params))
+
+        self.assertEqual("bgp_agent_log_artifact", params["custom_step_name"])
+        self.assertEqual("bag012.ash6", params["hostname"])
+        self.assertEqual("capture", params["action"])
+        self.assertEqual("case-2.7.4", params["state_key"])
+        self.assertIn("Bgp-<pid>", none_throws(step.description))
+
+    def test_bgp_agent_log_artifact_rejects_invalid_inputs(self) -> None:
+        for action in ("", "clear"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(ValueError, "capture or publish"):
+                    create_bgp_agent_log_artifact_step(
+                        "bag012.ash6",
+                        action,
+                        "case-2.7.4",
+                        case_id="2.7.4",
+                    )
+
     def test_sustained_heartbeat_requires_explicit_down_roles(self) -> None:
         for scenario in ({"verification_mode": "route"}, {"down_roles": 1}, 1):
             with self.subTest(scenario=scenario):
@@ -239,6 +269,97 @@ class BgpUpdateGroupRecoveryStepDefinitionsTest(TestCase):
                     }
                 )
 
+    def test_compact_pool_prepare_serializes_safe_resize_contract(self) -> None:
+        step = create_prepare_compact_bgp_prefix_pool_step(
+            device_name="bag012.ash6",
+            prefix_pool_regex=r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+            target_number_of_addresses=20,
+            allowed_current_number_of_addresses=(100,),
+            safe_number_of_addresses=100,
+        )
+        task = json.loads(none_throws(step.input_json))["task"]
+        params = json.loads(task["params"]["json_params"])
+
+        self.assertEqual("ixia_enable_disable_bgp_prefixes", task["task_name"])
+        self.assertFalse(params["enable"])
+        self.assertEqual(0, params["prefix_start_index"])
+        self.assertNotIn("prefix_end_index", params)
+        self.assertEqual(20, params["target_number_of_addresses"])
+        self.assertEqual([100], params["allowed_current_number_of_addresses"])
+        self.assertEqual(100, params["safe_number_of_addresses"])
+        self.assertTrue(params["runtime_route_operation"])
+
+    def test_runtime_route_operation_is_opt_in(self) -> None:
+        legacy = create_advertise_withdraw_prefixes_step(
+            "bag012.ash6",
+            True,
+            r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+            0,
+            expected_prefix_pool_count=1,
+        )
+        runtime = create_advertise_withdraw_prefixes_step(
+            "bag012.ash6",
+            True,
+            r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+            0,
+            expected_prefix_pool_count=1,
+            runtime_route_operation=True,
+        )
+
+        legacy_task = json.loads(none_throws(legacy.input_json))["task"]
+        runtime_task = json.loads(none_throws(runtime.input_json))["task"]
+        legacy_params = json.loads(legacy_task["params"]["json_params"])
+        runtime_params = json.loads(runtime_task["params"]["json_params"])
+
+        self.assertNotIn("runtime_route_operation", legacy_params)
+        self.assertTrue(runtime_params["runtime_route_operation"])
+
+    def test_hardware_capacity_delta_serializes_compare_contract(self) -> None:
+        state_key = str(uuid.uuid4())
+        step = create_hardware_capacity_delta_step(
+            "bag012.ash6",
+            "compare",
+            state_key,
+        )
+        params = json.loads(none_throws(none_throws(step.step_params).json_params))
+
+        self.assertEqual("hardware_capacity_delta", params["custom_step_name"])
+        self.assertEqual("bag012.ash6", params["hostname"])
+        self.assertEqual(state_key, params["state_key"])
+        self.assertEqual(100, params["max_current_delta"])
+        self.assertEqual(100, params["max_high_watermark_increase"])
+
+    def test_hardware_capacity_delta_rejects_bad_key_and_threshold(self) -> None:
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            create_hardware_capacity_delta_step("bag012.ash6", "capture", "bad")
+        for value in (True, -1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    create_hardware_capacity_delta_step(
+                        "bag012.ash6",
+                        "compare",
+                        str(uuid.uuid4()),
+                        max_current_delta=value,
+                    )
+
+    def test_hardware_capacity_delta_rejects_noncompare_thresholds(self) -> None:
+        for action in ("capture", "clear"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(ValueError, "only for compare"):
+                    create_hardware_capacity_delta_step(
+                        "bag012.ash6",
+                        action,
+                        str(uuid.uuid4()),
+                        max_current_delta=99,
+                    )
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    create_hardware_capacity_delta_step(
+                        "bag012.ash6",
+                        action,
+                        str(uuid.uuid4()),
+                        max_high_watermark_increase=True,
+                    )
+
     def test_device_group_toggle_serializes_exact_match_count(self) -> None:
         step = create_ixia_device_group_toggle_step(
             False,
@@ -303,6 +424,18 @@ class BgpUpdateGroupRecoveryStepDefinitionsTest(TestCase):
                     str(uuid.uuid4()),
                     action_params={"expected_configured_session_count": value},
                 )
+
+    def test_formation_arming_barrier_is_serialized(self) -> None:
+        step = create_bgp_update_group_state_step(
+            "bag012.ash6",
+            "wait_formation_monitor_armed",
+            str(uuid.uuid4()),
+            action_params={"timeout_seconds": 60},
+        )
+        params = json.loads(none_throws(none_throws(step.step_params).json_params))
+
+        self.assertEqual("wait_formation_monitor_armed", params["action"])
+        self.assertEqual(60, params["timeout_seconds"])
 
     def test_monitor_arming_barrier_is_serialized(self) -> None:
         step = create_bgp_update_group_state_step(
