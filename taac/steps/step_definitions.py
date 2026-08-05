@@ -343,17 +343,12 @@ def create_bgp_update_group_state_step(
     """Create a persisted semantic Update Group state step.
 
     Supported actions are ``capture``, ``compare``, ``monitor``,
-    ``wait_monitor_armed``, ``formation_monitor``,
-    ``wait_formation_monitor_armed``, ``verify_zero``, and ``clear``.
-    ``monitor`` requires ``case`` and ``duration_seconds`` in ``action_params``.
-    Monitor-wait and formation actions accept positive ``timeout_seconds``;
-    monitor and formation actions accept positive ``poll_interval_seconds``.
-    ``verify_zero`` takes one sample when ``timeout_seconds`` is omitted or zero;
-    a positive timeout enables polling at ``poll_interval_seconds``, while a
-    negative timeout is invalid. Its expected configured-session count must be
-    a positive integer when supplied.
-    Comparison actions may select ``none``, ``group_id``, or
-    ``group_id_and_generation`` operational continuity.
+    ``wait_monitor_armed``, ``formation_monitor``, and ``clear``. ``monitor``
+    requires ``case`` and ``duration_seconds`` in ``action_params``. Monitor
+    waits and formation actions accept positive ``timeout_seconds``; monitor and
+    formation actions accept positive ``poll_interval_seconds``. Comparison
+    actions may select ``none``, ``group_id``, or ``group_id_and_generation``
+    operational continuity.
     """
     actions = {
         "capture",
@@ -361,9 +356,7 @@ def create_bgp_update_group_state_step(
         "compare",
         "formation_monitor",
         "monitor",
-        "verify_zero",
         "wait_monitor_armed",
-        "wait_formation_monitor_armed",
     }
     if action not in actions:
         raise ValueError(
@@ -389,17 +382,6 @@ def create_bgp_update_group_state_step(
         }
         if params["case"] not in cases:
             raise ValueError(f"monitor case must be one of {sorted(cases)}")
-    expected_configured = params.get("expected_configured_session_count")
-    if expected_configured is not None and (
-        isinstance(expected_configured, bool)
-        or not isinstance(expected_configured, int)
-        or expected_configured <= 0
-    ):
-        raise ValueError(
-            "BGP Update Group state action "
-            f"{action!r} requires expected_configured_session_count to be a "
-            "positive integer"
-        )
     for name in ("expected_group_count", "expected_session_count"):
         _require_positive_custom_action_param(
             "BGP Update Group state", action, params, name
@@ -567,28 +549,16 @@ def _validate_disruption_route_verifier(
     )
 
 
-def _validate_fixed_peer_disruption(action: str, params: t.Mapping[str, t.Any]) -> None:
-    if not params["peer_regex"]:
-        raise ValueError("fixed_peer_flap peer_regex must be non-empty")
-    duration = int(params.get("duration_seconds", 1800))
-    if duration <= 0 or duration % 10:
-        raise ValueError(
-            "fixed_peer_flap duration_seconds must be positive and divisible by 10"
-        )
-    _validate_disruption_route_verifier(action, params, "churn_prefix_pool_regexes")
-
-
-def _validate_disruption_tracks(
-    action: str, params: t.Mapping[str, t.Any]
-) -> tuple[t.Mapping[str, t.Any], ...]:
-    tracks = tuple(params["port_tracks"])
-    roles = {
+def _validate_sustained_disruption(action: str, params: t.Mapping[str, t.Any]) -> None:
+    tracks = params["port_tracks"]
+    track_roles = {
         str(track.get("role", "")) for track in tracks if isinstance(track, t.Mapping)
     }
-    required_roles = {"ebgp", "ibgp"}
-    if roles != required_roles or len(tracks) != len(required_roles):
+    required_roles = {"bgp_mon", "ebgp", "ibgp"}
+    if track_roles != required_roles or len(tracks) != len(required_roles):
         raise ValueError(
-            f"{action} port_tracks must contain exactly one ebgp and ibgp track"
+            "sustained_link_flap port_tracks must contain exactly one "
+            "ebgp, ibgp, and bgp_mon track"
         )
     for track in tracks:
         _require_custom_action_params(
@@ -597,104 +567,38 @@ def _validate_disruption_tracks(
             track,
             ("interface", "target_peer_subnets"),
         )
-    return tracks
-
-
-def _validate_sustained_heartbeats(action: str, params: t.Mapping[str, t.Any]) -> None:
-    scenarios = tuple(params["heartbeat_scenarios"])
-    validated_scenarios: list[tuple[t.Mapping[str, t.Any], t.Any]] = []
-    for index, scenario in enumerate(scenarios):
-        if not isinstance(scenario, t.Mapping) or "down_roles" not in scenario:
-            raise ValueError(
-                f"sustained_link_flap heartbeat_scenarios[{index}] must be a "
-                "mapping with explicit down_roles"
-            )
-        down_roles = scenario["down_roles"]
-        if not isinstance(down_roles, (list, tuple, set, frozenset)):
-            raise ValueError(
-                f"sustained_link_flap heartbeat_scenarios[{index}] must be a "
-                "mapping with collection-valued down_roles"
-            )
-        validated_scenarios.append((scenario, down_roles))
-    expected = {
-        frozenset(),
+    scenarios = params["heartbeat_scenarios"]
+    expected_down_roles = {
         frozenset({"ebgp"}),
         frozenset({"ibgp"}),
-        frozenset({"ebgp", "ibgp"}),
+        frozenset({"bgp_mon"}),
+        frozenset({"ebgp", "bgp_mon"}),
+        frozenset({"ibgp", "bgp_mon"}),
     }
-    actual = {frozenset(down_roles) for _, down_roles in validated_scenarios}
-    if actual != expected or len(scenarios) != len(expected):
-        raise ValueError(
-            "sustained_link_flap heartbeat_scenarios must cover full-up and "
-            "all three required planned-down states"
-        )
-    for scenario, raw_down_roles in validated_scenarios:
-        down_roles = frozenset(raw_down_roles)
-        expected_mode = "route" if not down_roles else "structural"
-        if scenario.get("verification_mode") != expected_mode:
-            raise ValueError(
-                f"sustained_link_flap state {sorted(down_roles)} requires "
-                f"verification_mode={expected_mode!r}"
-            )
-        if expected_mode == "structural":
-            if scenario.get("legs") or not scenario.get("structural_reason"):
-                raise ValueError(
-                    "sustained_link_flap structural states require a reason and "
-                    "cannot contain route legs"
-                )
-            continue
-        legs = tuple(scenario.get("legs", ()))
-        if len(legs) != 4:
-            raise ValueError(
-                "sustained_link_flap full-up route state requires four legs"
-            )
-        for leg in legs:
-            _require_custom_action_params(
-                "BGP Update Group disruption heartbeat leg",
-                action,
-                leg,
-                (
-                    "expected_receiver_count",
-                    "expected_route_delta",
-                    "receiver_parent_prefixes",
-                    "source_prefix_pool_regexes",
-                ),
-            )
-
-
-def _validate_sustained_checkpoints(params: t.Mapping[str, t.Any]) -> None:
-    required_roles = {"ebgp", "ibgp"}
-    group_counts = params.get(
-        "checkpoint_group_counts_by_role",
-        {"ebgp": 2, "ibgp": 2},
-    )
-    valid_counts = set(group_counts) == required_roles and all(
-        isinstance(count, int) and not isinstance(count, bool) and count > 0
-        for count in group_counts.values()
-    )
-    if not valid_counts:
-        raise ValueError(
-            "checkpoint_group_counts_by_role must contain positive integer "
-            "counts for ebgp and ibgp"
-        )
-    expected_groups = params.get("checkpoint_expected_group_count", 4)
-    if (
-        not isinstance(expected_groups, int)
-        or isinstance(expected_groups, bool)
-        or expected_groups <= 0
-        or sum(group_counts.values()) != expected_groups
+    actual_down_roles = {
+        frozenset(scenario.get("down_roles", ()))
+        for scenario in scenarios
+        if isinstance(scenario, t.Mapping)
+    }
+    if actual_down_roles != expected_down_roles or len(scenarios) != len(
+        expected_down_roles
     ):
         raise ValueError(
-            "checkpoint_expected_group_count must be a positive integer equal "
-            "to the per-role checkpoint group-count sum"
+            "sustained_link_flap heartbeat_scenarios do not cover the "
+            "five required planned-down states"
         )
-    expected_sessions = params.get("checkpoint_expected_session_count", 1272)
-    if (
-        not isinstance(expected_sessions, int)
-        or isinstance(expected_sessions, bool)
-        or expected_sessions <= 0
-    ):
-        raise ValueError("checkpoint_expected_session_count must be a positive integer")
+    for scenario in scenarios:
+        _require_custom_action_params(
+            "BGP Update Group disruption heartbeat",
+            action,
+            scenario,
+            (
+                "expected_receiver_count",
+                "expected_route_delta",
+                "receiver_parent_prefixes",
+                "source_prefix_pool_regexes",
+            ),
+        )
 
 
 def create_bgp_update_group_disruption_step(
@@ -709,9 +613,6 @@ def create_bgp_update_group_disruption_step(
     ``fibagent_restart`` resolves and verifies the EOS L3 forwarding agent.
     ``fibagent_active`` polls that same exact agent to ACTIVE without restarting it.
     ``link_flap_recovery`` requires exact full-scale peer and timer contracts.
-    ``restore_physical_links`` requires the two BAG012 ``port_tracks``.
-    ``sustained_checkpoint_probe`` reads the exact sustained-checkpoint contract
-    without mutating either physical link.
     ``sustained_link_flap`` requires ``port_tracks`` and
     ``heartbeat_scenarios``. ``fixed_peer_flap`` requires ``peer_regex`` and
     deterministic ``seed``. Route-producing link/peer actions must also supply
@@ -726,8 +627,6 @@ def create_bgp_update_group_disruption_step(
             "interface",
             "target_peer_subnets",
         },
-        "restore_physical_links": {"port_tracks"},
-        "sustained_checkpoint_probe": {"port_tracks"},
         "sustained_link_flap": {"heartbeat_scenarios", "port_tracks"},
         "fixed_peer_flap": {"peer_regex", "seed"},
     }
@@ -745,16 +644,16 @@ def create_bgp_update_group_disruption_step(
     )
     if action == "link_flap_recovery" and not params["target_peer_subnets"]:
         raise ValueError("link_flap_recovery target_peer_subnets must be non-empty")
+    if action == "fixed_peer_flap" and not params["peer_regex"]:
+        raise ValueError("fixed_peer_flap peer_regex must be non-empty")
     for name in (
         "active_timeout_seconds",
         "bgp_hold_timer_seconds",
-        "checkpoint_transition_timeout_seconds",
         "down_seconds",
         "event_timeout_seconds",
         "expected_target_peer_count",
         "flap_count",
         "poll_interval_seconds",
-        "probe_iterations",
         "restart_timeout_seconds",
         "restore_timeout_seconds",
         "route_verification_timeout_seconds",
@@ -765,21 +664,18 @@ def create_bgp_update_group_disruption_step(
             "BGP Update Group disruption", action, params, name
         )
     if action == "fixed_peer_flap":
-        _validate_fixed_peer_disruption(action, params)
+        duration = int(params.get("duration_seconds", 1800))
+        if duration <= 0 or duration % 10:
+            raise ValueError(
+                "fixed_peer_flap duration_seconds must be positive and divisible by 10"
+            )
+        _validate_disruption_route_verifier(action, params, "churn_prefix_pool_regexes")
     elif action == "link_flap_recovery":
         _validate_disruption_route_verifier(
             action, params, "first_down_prefix_pool_regexes"
         )
-    elif action in {
-        "restore_physical_links",
-        "sustained_checkpoint_probe",
-        "sustained_link_flap",
-    }:
-        _validate_disruption_tracks(action, params)
-        if action == "sustained_link_flap":
-            _validate_sustained_heartbeats(action, params)
-        if action in {"sustained_checkpoint_probe", "sustained_link_flap"}:
-            _validate_sustained_checkpoints(params)
+    elif action == "sustained_link_flap":
+        _validate_sustained_disruption(action, params)
     payload = {
         "custom_step_name": "bgp_update_group_disruption",
         "hostname": device_name,
@@ -831,25 +727,6 @@ def create_verify_fibagent_active_step(
             "poll_interval_seconds": poll_interval_seconds,
         },
         description=description or "Verify EOS FibAgent is active",
-    )
-
-
-def create_bgp_update_group_physical_restore_step(
-    device_name: str,
-    port_tracks: t.Sequence[t.Mapping[str, t.Any]],
-    *,
-    transition_timeout_seconds: float = 600.0,
-    description: t.Optional[str] = None,
-) -> Step:
-    """Restore both BAG012 IXIA links and prove full BGP/UG recovery."""
-    return create_bgp_update_group_disruption_step(
-        device_name,
-        "restore_physical_links",
-        action_params={
-            "port_tracks": list(port_tracks),
-            "transition_timeout_seconds": transition_timeout_seconds,
-        },
-        description=description or "Restore and verify all IXIA physical links",
     )
 
 
@@ -3534,8 +3411,6 @@ def create_ixia_device_group_toggle_step(
     description: t.Optional[str] = None,
     require_match: bool = False,
     verify_readback: bool = False,
-    *,
-    expected_match_count: t.Optional[int] = None,
 ) -> Step:
     """
     Create a step to enable or disable IXIA device groups.
@@ -3543,7 +3418,6 @@ def create_ixia_device_group_toggle_step(
     Args:
         enable: True to enable device groups, False to disable
         device_group_name_regex: Regex pattern to match device group names
-        expected_match_count: Exact number of device groups the regex must match
         description: Custom description for the step
         require_match: Fail when the regex selects no device groups
         verify_readback: Re-read and verify every selected group's Enabled value
@@ -3551,12 +3425,6 @@ def create_ixia_device_group_toggle_step(
     Returns:
         Step object for IXIA device group toggle
     """
-    if expected_match_count is not None and (
-        isinstance(expected_match_count, bool)
-        or not isinstance(expected_match_count, int)
-        or expected_match_count < 0
-    ):
-        raise ValueError("expected_match_count must be a non-negative integer")
     if description is None:
         action = "Enable" if enable else "Disable"
         description = (
@@ -3570,8 +3438,6 @@ def create_ixia_device_group_toggle_step(
         args_dict["require_match"] = True
     if verify_readback:
         args_dict["verify_readback"] = True
-    if expected_match_count is not None:
-        args_dict["expected_match_count"] = expected_match_count
     return create_ixia_api_step(
         api_name="toggle_device_groups",
         args_dict=args_dict,

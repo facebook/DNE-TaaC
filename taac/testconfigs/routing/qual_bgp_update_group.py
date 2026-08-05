@@ -141,10 +141,8 @@ BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG = (
         name="BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST",
         playbooks_selected=[
             "bgp_ug_link_flap_recovery",
-            "update_group_sustained_link_flap",
             "bgp_ug_bgp_daemon_restart",
             "bgp_ug_fibagent_restart",
-            "bgp_ug_cold_start",
         ],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         enable_update_group=True,
