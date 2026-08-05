@@ -16,7 +16,6 @@ import time
 import typing as t
 import warnings
 from collections import defaultdict, namedtuple
-from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from ipaddress import ip_address, IPv6Address
 
@@ -50,7 +49,6 @@ from ixnetwork_restpy.assistants.sessions.sessionassistant import (
 from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
-from ixnetwork_restpy.errors import IxNetworkError as IxnIxNetworkError
 from ixnetwork_restpy.files import Files
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
@@ -67,7 +65,6 @@ from taac.utils.oss_taac_lib_utils import (
     retryable,
     to_fb_uqdn,
 )
-from requests.exceptions import RequestException, Timeout as RequestsTimeout
 
 # The monorepo ships these constants at neteng.test_infra.ixia.ixnetwork_restpy.constants;
 # in OSS we vendor a copy alongside this module.
@@ -117,11 +114,289 @@ from uhd_restpy.assistants.sessions.sessionassistant import (
 from uhd_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as UhdStatViewAssistant,
 )
-from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
 
 
 warnings.filterwarnings(action="ignore", category=ResourceWarning)
 warnings.filterwarnings(action="ignore", category=DeprecationWarning)
+
+
+def _normalize_ixia_boolean(value: t.Any) -> t.Optional[bool]:
+    """Return accepted IXIA boolean encodings, or None to fail readback closed."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    rendered = str(value).strip().lower()
+    if rendered in {"true", "1", "1.0"}:
+        return True
+    if rendered in {"false", "0", "0.0"}:
+        return False
+    try:
+        integer_value = operator.index(value)
+    except TypeError:
+        return None
+    return bool(integer_value) if integer_value in {0, 1} else None
+
+
+def _device_group_readback_mismatches(
+    device_groups: t.Iterable[t.Any], enable: bool
+) -> t.List[t.Tuple[str, t.Tuple[t.Any, ...]]]:
+    mismatched = []
+    for device_group in device_groups:
+        values = tuple(device_group.Enabled.Values)
+        normalized = tuple(_normalize_ixia_boolean(value) for value in values)
+        if not values or any(value is not enable for value in normalized):
+            mismatched.append((device_group.Name, values))
+    return mismatched
+
+
+def _format_device_group_failures(
+    failures: t.Sequence[tuple[str, Exception]],
+) -> str:
+    return "; ".join(f"{name}: {error!r}" for name, error in failures)
+
+
+def _snapshot_device_group_values(
+    device_groups: t.Sequence[t.Any], enable: bool
+) -> list[tuple[t.Any, tuple[t.Any, ...]]]:
+    snapshots: list[tuple[t.Any, tuple[t.Any, ...]]] = []
+    snapshot_failures: list[tuple[str, Exception]] = []
+    for device_group in device_groups:
+        try:
+            snapshots.append((device_group, tuple(device_group.Enabled.Values)))
+        except Exception as error:
+            snapshot_failures.append((str(device_group.Name), error))
+    if snapshot_failures:
+        raise ValueError(
+            "toggle_device_groups: could not snapshot Enabled values before "
+            f"staging enable={enable}: "
+            f"{_format_device_group_failures(snapshot_failures)}"
+        ) from ExceptionGroup(
+            "IXIA device-group Enabled snapshot failures",
+            [error for _, error in snapshot_failures],
+        )
+    return snapshots
+
+
+def _set_device_group_values(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    enable: bool,
+    operation_logger: logging.Logger,
+) -> list[tuple[str, Exception]]:
+    failures = []
+    for device_group, _original_values in snapshots:
+        operation_logger.info(f"Applying enable={enable} to {device_group.Name}")
+        try:
+            device_group.Enabled.Single(enable)
+        except Exception as error:
+            failures.append((str(device_group.Name), error))
+    return failures
+
+
+class _DeviceGroupRollbackResult(t.NamedTuple):
+    restored_names: tuple[str, ...]
+    failures: tuple[tuple[str, Exception], ...]
+
+
+def _rollback_device_group_values(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+) -> _DeviceGroupRollbackResult:
+    """Best-effort restore every group after a staging failure.
+
+    Every caller must inspect ``failures``. A non-empty result means rollback
+    was incomplete and the IxNetwork configuration model remains partially
+    staged because ValueList has no stronger recovery primitive. The caller
+    must abort the operation without applying changes and require a session
+    reset, reload, or explicit restore before any later ``apply_changes`` call.
+    ``restored_names`` is returned so the resulting error can distinguish
+    successfully restored groups from groups requiring operator recovery.
+    """
+    restored_names = []
+    failures = []
+    for device_group, original_values in snapshots:
+        name = str(device_group.Name)
+        try:
+            device_group.Enabled.ValueList(list(original_values))
+        except Exception as error:
+            failures.append((name, error))
+        else:
+            restored_names.append(name)
+    return _DeviceGroupRollbackResult(tuple(restored_names), tuple(failures))
+
+
+def _raise_device_group_staging_failures(
+    enable: bool,
+    setter_failures: t.Sequence[tuple[str, Exception]],
+    rollback_restored_names: t.Sequence[str],
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    details = "setter failures: " + _format_device_group_failures(setter_failures)
+    if rollback_failures:
+        details += "; rollback failures: " + _format_device_group_failures(
+            rollback_failures
+        )
+        details += (
+            "; restored groups: "
+            f"{list(rollback_restored_names)!r}; IxNetwork configuration may "
+            "remain partially staged; reset, reload, or restore it before any "
+            "later apply"
+        )
+    raise ValueError(
+        f"toggle_device_groups: enable={enable} staging failed; chassis apply "
+        f"was skipped; {details}"
+    ) from ExceptionGroup(
+        "IXIA device-group staging and rollback failures",
+        [error for _, error in (*setter_failures, *rollback_failures)],
+    )
+
+
+def _stage_device_group_toggle(
+    device_groups: t.Sequence[t.Any],
+    enable: bool,
+    operation_logger: logging.Logger,
+) -> list[tuple[t.Any, tuple[t.Any, ...]]]:
+    snapshots = _snapshot_device_group_values(device_groups, enable)
+    setter_failures = _set_device_group_values(snapshots, enable, operation_logger)
+    if not setter_failures:
+        return snapshots
+
+    rollback = _rollback_device_group_values(snapshots)
+    _raise_device_group_staging_failures(
+        enable,
+        setter_failures,
+        rollback.restored_names,
+        rollback.failures,
+    )
+
+
+def _device_group_snapshot_readback_failures(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+) -> list[tuple[str, Exception]]:
+    failures = []
+    for device_group, expected_values in snapshots:
+        name = str(device_group.Name)
+        try:
+            observed_values = tuple(device_group.Enabled.Values)
+        except Exception as error:
+            failures.append((name, error))
+            continue
+        if observed_values != expected_values:
+            failures.append(
+                (
+                    name,
+                    ValueError(
+                        f"{name} expected original Values={expected_values!r}, "
+                        f"observed={observed_values!r}"
+                    ),
+                )
+            )
+    return failures
+
+
+def _rollback_applied_device_group_toggle(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    apply_changes: t.Callable[[], None],
+    raise_failure: t.Callable[
+        [t.Sequence[tuple[str, Exception]]],
+        t.NoReturn,
+    ],
+) -> t.NoReturn:
+    """Roll back an applied mutation and force its caller to raise the result."""
+    rollback = _rollback_device_group_values(snapshots)
+    failures = [(f"restore {name}", error) for name, error in rollback.failures]
+    try:
+        apply_changes()
+    except Exception as error:
+        failures.append(("apply_changes", error))
+    failures.extend(
+        (f"readback {name}", error)
+        for name, error in _device_group_snapshot_readback_failures(snapshots)
+    )
+    raise_failure(tuple(failures))
+    raise AssertionError("device-group rollback failure handler returned")
+
+
+def _raise_device_group_readback_failure(
+    enable: bool,
+    mismatched: t.Sequence[tuple[str, tuple[t.Any, ...]]],
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    message = f"toggle_device_groups: enable={enable} readback failed for {mismatched}"
+    if not rollback_failures:
+        raise ValueError(f"{message}; restored exact original Values")
+    raise ValueError(
+        f"{message}; rollback failures: "
+        f"{_format_device_group_failures(rollback_failures)}"
+    ) from ExceptionGroup(
+        "IXIA device-group post-apply rollback failures",
+        [error for _, error in rollback_failures],
+    )
+
+
+def _raise_device_group_primary_failure(
+    enable: bool,
+    context: str,
+    primary_error: Exception,
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    failures = [(context, primary_error), *rollback_failures]
+    rollback_status = (
+        "rollback failures: " + _format_device_group_failures(rollback_failures)
+        if rollback_failures
+        else "restored exact original Values"
+    )
+    raise ValueError(
+        f"toggle_device_groups: enable={enable} {context} failed: "
+        f"{primary_error!r}; {rollback_status}"
+    ) from ExceptionGroup(
+        "IXIA device-group mutation and rollback failures",
+        [error for _, error in failures],
+    )
+
+
+def _apply_and_verify_device_group_toggle(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    device_groups: t.Sequence[t.Any],
+    enable: bool,
+    apply_changes: t.Callable[[], None],
+) -> None:
+    try:
+        apply_changes()
+    except Exception as error:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_primary_failure,
+                enable,
+                "desired apply",
+                error,
+            ),
+        )
+    try:
+        mismatched = _device_group_readback_mismatches(device_groups, enable)
+    except Exception as error:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_primary_failure,
+                enable,
+                "desired-state readback",
+                error,
+            ),
+        )
+    if mismatched:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_readback_failure,
+                enable,
+                mismatched,
+            ),
+        )
+
 
 from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
     BgpIpv6Peer as IxnBgpIpv6Peer,
@@ -324,20 +599,6 @@ class InvalidInputError(Exception):
 
 
 class IxiaSetupError(Exception):
-    pass
-
-
-class IxiaOperationTimeoutError(TimeoutError):
-    def __init__(self, message: str, *, deadline_expired: bool = False) -> None:
-        super().__init__(message)
-        self.deadline_expired = deadline_expired
-
-
-class IxiaOperationStateError(RuntimeError):
-    pass
-
-
-class IxiaSessionQuarantinedError(RuntimeError):
     pass
 
 
@@ -575,8 +836,6 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
 
 
 class Ixia:
-    OPERATION_TIMEOUT_ERROR = IxiaOperationTimeoutError
-
     def __init__(
         self,
         ixia_config: t.Optional[ixia_types.IxiaConfig] = None,
@@ -759,13 +1018,6 @@ class Ixia:
         # was running when a 5xx fired. Optional — emitter tolerates None.
         self._current_playbook_name: t.Optional[str] = None
         self._current_testconfig_name: t.Optional[str] = None
-        self._request_deadline_state = threading.local()
-        self._request_deadline_wrapper_lock = threading.Lock()
-        self._bounded_apply_lock = threading.RLock()
-        self._deadline_wrapped_transport: t.Optional[t.Any] = None
-        self._deadline_request_wrapper: t.Optional[t.Any] = None
-        self._session_quarantine_reason: t.Optional[str] = None
-        self._quarantined_session_identity: t.Optional[t.Tuple[str, int]] = None
 
     @staticmethod
     def get_formatted_ip_address(ixia_server_ip: str) -> str:
@@ -859,9 +1111,8 @@ class Ixia:
         SessionAssistant = (
             UhdSessionAssistant if self.is_uhd_chassis else IxnSessionAssistant
         )
-        replacement_session: t.Optional[object] = None
         try:
-            replacement_session = SessionAssistant(
+            self.session = SessionAssistant(
                 # pyrefly: ignore [bad-argument-type]
                 IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
                 RestPort=None,
@@ -889,7 +1140,7 @@ class Ixia:
                 f"{_GREEN}[IXIA]{_RESET} Recovery succeeded — retrying SessionAssistant"
             )
             try:
-                replacement_session = SessionAssistant(
+                self.session = SessionAssistant(
                     # pyrefly: ignore [bad-argument-type]
                     IpAddress=Ixia.get_formatted_ip_address(self.primary_chassis_ip),
                     RestPort=None,
@@ -905,34 +1156,13 @@ class Ixia:
             except Exception as retry_exc:
                 self._raise_session_unavailable(retry_exc)
 
-        if replacement_session is None:
-            raise IxiaSessionUnavailableError(
-                "SessionAssistant did not return a replacement session"
-            )
+        # Re-populating the Session ID and Name if a new one was created
+        # as the user left them to default input as None
         was_new_session = not self.session_id
-        replacement_session = t.cast(t.Any, replacement_session)
-        replacement_identity = self._remote_session_identity(replacement_session)
-        if replacement_identity is None:
-            raise IxiaSessionUnavailableError(
-                "SessionAssistant returned a session without a stable remote identity"
-            )
-        _chassis, replacement_session_id = replacement_identity
-        replacement_session_name = str(replacement_session.Session.Name)
-
-        with self._bounded_apply_lock:
-            with self._request_deadline_wrapper_lock:
-                self._install_request_deadline_wrapper_locked(replacement_session)
-                self.session = replacement_session
-                self.session_id = replacement_session_id
-                self.session_name = replacement_session_name
-                self.ixnetwork = replacement_session.Ixnetwork
-                if (
-                    self._session_quarantine_reason is not None
-                    and self._quarantined_session_identity is not None
-                    and replacement_identity != self._quarantined_session_identity
-                ):
-                    self._session_quarantine_reason = None
-                    self._quarantined_session_identity = None
+        if not self.session_id:
+            self.session_id = self.session.Session.Id
+        if not self.session_name:
+            self.session_name = self.session.Session.Name
 
         action = "Created new" if was_new_session else "Reusing existing"
         self.logger.info(
@@ -941,219 +1171,7 @@ class Ixia:
             f"Name: {_YELLOW}{self.session_name}{_RESET}"
         )
 
-        if self.session_quarantined:
-            self.logger.warning(
-                f"{_YELLOW}[IXIA]{_RESET} Remote session remains quarantined "
-                f"after reconnect: {replacement_identity}"
-            )
-
-    def _remote_session_identity(
-        self, session: t.Optional[t.Any] = None
-    ) -> t.Optional[t.Tuple[str, int]]:
-        assistant = session if session is not None else self.session
-        try:
-            remote_session = assistant.Session
-            return (
-                str(self.primary_chassis_ip),
-                int(remote_session.Id),
-            )
-        except (AttributeError, TypeError, ValueError):
-            return None
-
-    def _install_request_deadline_wrapper(self) -> None:
-        with self._request_deadline_wrapper_lock:
-            self._install_request_deadline_wrapper_locked(self.session)
-
-    def _install_request_deadline_wrapper_locked(self, session: t.Any) -> None:
-        transport = session.TestPlatform._connection._session
-        current_request = transport.request
-        if getattr(
-            self, "_deadline_wrapped_transport", None
-        ) is transport and current_request is getattr(
-            self, "_deadline_request_wrapper", None
-        ):
-            return
-        deadline_state = self._request_deadline_state
-
-        @functools.wraps(current_request)
-        def request_with_deadline(*args: t.Any, **kwargs: t.Any) -> t.Any:
-            deadline = getattr(deadline_state, "deadline", None)
-            if deadline is None:
-                return current_request(*args, **kwargs)
-            remaining = deadline - time.monotonic()
-            phase = getattr(deadline_state, "phase", "IXIA operation")
-            if remaining <= 0:
-                raise IxiaOperationTimeoutError(
-                    f"{phase} request deadline expired",
-                    deadline_expired=True,
-                )
-            existing_timeout = kwargs.get("timeout")
-            if isinstance(existing_timeout, tuple):
-                # Requests interprets this tuple as independent connect/read
-                # caps, so preserve each caller value while capping both.
-                kwargs["timeout"] = tuple(
-                    remaining if value is None else min(value, remaining)
-                    for value in existing_timeout
-                )
-            elif existing_timeout is None:
-                kwargs["timeout"] = remaining
-            else:
-                kwargs["timeout"] = min(existing_timeout, remaining)
-            try:
-                return current_request(*args, **kwargs)
-            except IxiaOperationTimeoutError:
-                raise
-            except (TimeoutError, RequestsTimeout) as error:
-                raise IxiaOperationTimeoutError(
-                    f"{phase} transport request timed out",
-                    deadline_expired=time.monotonic() >= deadline,
-                ) from error
-
-        transport.request = request_with_deadline
-        self._deadline_wrapped_transport = transport
-        self._deadline_request_wrapper = request_with_deadline
-
-    def request_deadline(
-        self, timeout_seconds: float, phase: str
-    ) -> AbstractContextManager[None]:
-        return self._request_deadline_scope(
-            timeout_seconds, phase, inherit_parent_deadline=True
-        )
-
-    def _independent_request_deadline(
-        self, timeout_seconds: float, phase: str
-    ) -> AbstractContextManager[None]:
-        return self._request_deadline_scope(
-            timeout_seconds, phase, inherit_parent_deadline=False
-        )
-
-    @contextmanager
-    def _request_deadline_scope(
-        self,
-        timeout_seconds: float,
-        phase: str,
-        *,
-        inherit_parent_deadline: bool,
-    ) -> t.Iterator[None]:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        self._install_request_deadline_wrapper()
-        state = self._request_deadline_state
-        previous_deadline = getattr(state, "deadline", None)
-        previous_phase = getattr(state, "phase", None)
-        requested_deadline = time.monotonic() + timeout_seconds
-        inherit_parent = (
-            inherit_parent_deadline
-            and previous_deadline is not None
-            and previous_deadline <= requested_deadline
-        )
-        if inherit_parent:
-            state.deadline = previous_deadline
-            state.phase = previous_phase or phase
-        else:
-            state.deadline = requested_deadline
-            state.phase = phase
-        try:
-            yield
-        finally:
-            if previous_deadline is None:
-                if hasattr(state, "deadline"):
-                    del state.deadline
-            else:
-                state.deadline = previous_deadline
-            if previous_phase is None:
-                if hasattr(state, "phase"):
-                    del state.phase
-            else:
-                state.phase = previous_phase
-
-    @property
-    def session_quarantined(self) -> bool:
-        with self._bounded_apply_lock:
-            return self._session_quarantine_reason is not None
-
-    def assert_session_not_quarantined(self) -> None:
-        with self._bounded_apply_lock:
-            reason = self._session_quarantine_reason
-        if reason is not None:
-            raise IxiaSessionQuarantinedError(
-                f"IXIA session is quarantined after an ambiguous operation: {reason}"
-            )
-
-    def _quarantine_session(self, reason: str) -> None:
-        with self._bounded_apply_lock:
-            self._session_quarantine_reason = reason
-            self._quarantined_session_identity = self._remote_session_identity()
-
-    def _abort_apply_on_the_fly(self, timeout_seconds: float) -> Exception | None:
-        try:
-            with self._independent_request_deadline(
-                timeout_seconds, "AbortApplyOnTheFly"
-            ):
-                self.ixnetwork.Globals.Topology.AbortApplyOnTheFly()
-        except (
-            IxiaOperationTimeoutError,
-            IxnIxNetworkError,
-            UhdIxNetworkError,
-            RequestException,
-        ) as error:
-            return error
-        except Exception as error:
-            reason = (
-                "ApplyOnTheFly timed out and AbortApplyOnTheFly raised an "
-                f"unexpected error: {type(error).__name__}: {error}"
-            )
-            self._quarantine_session(reason)
-            self.logger.exception(reason)
-            raise
-        return None
-
-    def apply_changes_bounded(
-        self,
-        timeout_seconds: float,
-        *,
-        abort_timeout_seconds: float = 10.0,
-        sleep_timer: int = 0,
-    ) -> None:
-        """Apply pending topology changes without retrying an ambiguous timeout."""
-        if abort_timeout_seconds <= 0:
-            raise ValueError("abort_timeout_seconds must be positive")
-        with self._bounded_apply_lock:
-            self.assert_session_not_quarantined()
-            with self.request_deadline(timeout_seconds, "ApplyOnTheFly"):
-                try:
-                    self.ixnetwork.Globals.Topology.ApplyOnTheFly()
-                except IxiaOperationTimeoutError as error:
-                    abort_error = self._abort_apply_on_the_fly(abort_timeout_seconds)
-                    if abort_error is None:
-                        error.add_note(
-                            "AbortApplyOnTheFly acknowledged by the IXIA server"
-                        )
-                    else:
-                        reason = (
-                            f"ApplyOnTheFly timed out and abort failed: "
-                            f"{type(abort_error).__name__}: {abort_error}"
-                        )
-                        self._quarantine_session(reason)
-                        error.add_note(reason)
-                        self.logger.error(reason)
-                    raise
-                if sleep_timer:
-                    deadline = getattr(self._request_deadline_state, "deadline", None)
-                    if deadline is None:
-                        raise IxiaOperationStateError(
-                            "ApplyOnTheFly operation deadline state is missing"
-                        )
-                    remaining = deadline - time.monotonic()
-                    if sleep_timer + 1.0 > remaining:
-                        raise IxiaOperationTimeoutError(
-                            "ApplyOnTheFly sleep leaves insufficient operation "
-                            "deadline margin"
-                        )
-                    time.sleep(sleep_timer)
-            self.logger.debug(
-                "[GLOBAL] Successfully applied bounded changes on the fly"
-            )
+        self.ixnetwork = self.session.Ixnetwork
 
     @staticmethod
     def _raise_session_unavailable(exc: Exception) -> t.NoReturn:
@@ -3293,8 +3311,17 @@ class Ixia:
         sleep_time_before_applying_change: int = 30,
         require_match: bool = False,
         verify_readback: bool = False,
+        expected_match_count: t.Optional[int] = None,
     ) -> None:
-        device_groups = self.find_device_groups(device_group_name_regex)
+        if expected_match_count is not None and (
+            isinstance(expected_match_count, bool)
+            or not isinstance(expected_match_count, int)
+            or expected_match_count < 0
+        ):
+            raise ValueError("expected_match_count must be a non-negative integer")
+        if exception_device_groups and not all_bgp_peers:
+            raise ValueError("exception_device_groups requires all_bgp_peers=True")
+        device_groups = list(self.find_device_groups(device_group_name_regex))
         selected_device_groups = [
             device_group
             for device_group in device_groups
@@ -3312,14 +3339,29 @@ class Ixia:
                 "toggle_device_groups: regex "
                 f"{device_group_name_regex!r} selected no device groups"
             )
-        for device_group in selected_device_groups:
-            self.logger.info(f"Applying enable={enable} to {device_group.Name}")
-            device_group.Enabled.Single(enable)
+        if (
+            expected_match_count is not None
+            and len(selected_device_groups) != expected_match_count
+        ):
+            raise ValueError(
+                f"toggle_device_groups: regex {device_group_name_regex!r} matched "
+                f"{len(selected_device_groups)} device groups after exclusions; "
+                f"expected {expected_match_count}: "
+                f"{[group.Name for group in selected_device_groups]}"
+            )
+        snapshots = _stage_device_group_toggle(
+            selected_device_groups, enable, self.logger
+        )
         self.logger.info(
             f"Waiting for {sleep_time_before_applying_change}s before applying change"
         )
         time.sleep(sleep_time_before_applying_change)
-        self.apply_changes()
+        _apply_and_verify_device_group_toggle(
+            snapshots,
+            selected_device_groups,
+            enable,
+            self.apply_changes,
+        )
         if verify_readback:
             # Post-apply verification preserves the observed IXIA state for triage.
             self._verify_device_group_enabled_readback(selected_device_groups, enable)
