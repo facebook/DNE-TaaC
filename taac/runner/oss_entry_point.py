@@ -166,8 +166,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    # Set OSS mode environment variable
-    os.environ["TAAC_OSS"] = "1"
+    # NOTE: OSS mode is NOT established here — it is set in this package's
+    # `__init__` (`taac/runner/__init__.py`), which runs before the
+    # module-scope `taac.*` imports above. `taac.utils.oss_taac_lib_utils`
+    # reads TAAC_OSS at import time, so assigning it at this point would be
+    # too late to have any effect. Do not re-add an assignment here.
 
     # Parse arguments
     args = parse_args(argv)

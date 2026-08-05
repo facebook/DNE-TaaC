@@ -17,7 +17,26 @@ Main Components:
 - oss_test_executor.py: Test execution + retry logic
 - oss_exceptions.py: OSS-specific exception classes
 - oss_exception_classifier.py: Maps exceptions → OSSTestStatus + infra/user split
+
+OSS mode is established HERE, not in ``oss_entry_point.main()``.
+``taac.utils.oss_taac_lib_utils`` evaluates ``TAAC_OSS`` at IMPORT time and
+uses it to decide whether to import the Meta-internal ``neteng.netcastle``
+logger. ``oss_entry_point`` imports the TAAC runtime at module scope, so by
+the time ``main()`` ran the flag had already been read — assigning it there
+was too late, and a real OSS container (no ``neteng`` package) died with
+``ModuleNotFoundError: No module named 'neteng'``. It only appeared to work
+because the container entrypoint and the customer both exported
+``TAAC_OSS=1`` beforehand.
+
+This package's ``__init__`` executes before any ``taac.*`` runtime module is
+imported, which makes it the earliest correct place. ``setdefault`` (rather
+than an unconditional assignment) preserves the documented ``-e TAAC_OSS=0``
+override, matching ``docker/taac-entrypoint.sh``.
 """
+
+import os
+
+os.environ.setdefault("TAAC_OSS", "1")
 
 __all__ = [
     "oss_entry_point",

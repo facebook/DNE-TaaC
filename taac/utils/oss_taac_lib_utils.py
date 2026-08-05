@@ -48,6 +48,18 @@ LOGGER = logging.getLogger(__name__)
 FB_FQDN_SUFFIX = ".tfbnw.net"
 FB_FQDN_FACEBOOK_SUFFIX = ".facebook.com"
 
+# Environment variable controlling OSS mode.
+#
+# Defined at the TOP of the module because it gates behaviour used further
+# down (`to_fb_fqdn`, `internal_only`) as well as the Meta-internal logger
+# import near the bottom. NOTE: this is evaluated at IMPORT time, so
+# `TAAC_OSS` must already be set in the environment before the first
+# `taac.*` import — see `taac/runner/__init__.py`, which establishes it for
+# the OSS entry point, and `docker/taac-entrypoint.sh`, which defaults it to
+# 1 in the container. Assigning `os.environ["TAAC_OSS"]` after this module
+# has been imported has no effect on the value below.
+TAAC_OSS: bool = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
 # =============================================================================
 # none_throws - from libfb.py.pyre
 # =============================================================================
@@ -515,20 +527,44 @@ def to_fb_fqdn(hostname: str) -> str:
     """
     Convert a hostname to fully qualified domain name (FQDN) format.
 
-    Appends '.tfbnw.net' if not already present, matching Meta's
-    internal FQDN format used by SMC and other services.
+    Appends '.tfbnw.net' to a bare Meta hostname, matching the internal FQDN
+    format used by SMC and other services.
+
+    Values that are NOT bare Meta hostnames are returned unchanged:
+
+    * IP literals (v4 and v6) — a DNS suffix on an address is meaningless and
+      makes the endpoint unroutable (``192.0.2.10`` -> ``192.0.2.10.tfbnw.net``).
+    * Names already carrying a Meta suffix — including ``.facebook.com``, which
+      previously got double-suffixed into ``...facebook.com.tfbnw.net``. Some
+      lab devices only resolve under ``.facebook.com`` (e.g.
+      ``fboss159.99.ash6.tfbnw.net`` is NXDOMAIN while
+      ``fboss159.99.ash6.facebook.com`` resolves), so appending is wrong there.
+    * Anything supplied in OSS mode — an external deployment owns its own
+      naming, and a Meta-internal suffix would make a perfectly valid FQDN
+      unresolvable (``switch.example.com`` -> ``switch.example.com.tfbnw.net``).
 
     Args:
         hostname: Hostname to convert
 
     Returns:
-        FQDN version of the hostname
+        FQDN version of the hostname, or the input unchanged when appending
+        a Meta suffix would corrupt it.
 
     Example:
         to_fb_fqdn("fsw002.p006.f01.qzd1")  # "fsw002.p006.f01.qzd1.tfbnw.net"
-        to_fb_fqdn("fsw002.p006.f01.qzd1.tfbnw.net")  # "fsw002.p006.f01.qzd1.tfbnw.net"
+        to_fb_fqdn("fsw002.p006.f01.qzd1.tfbnw.net")  # unchanged
+        to_fb_fqdn("fboss159.99.ash6.facebook.com")   # unchanged
+        to_fb_fqdn("192.0.2.10")                      # unchanged
+        to_fb_fqdn("2001:db8::1")                     # unchanged
     """
-    if hostname.endswith(FB_FQDN_SUFFIX):
+    # An IP literal is not a hostname; suffixing it corrupts the endpoint.
+    if string_is_ip(hostname):
+        return hostname
+    # Already fully qualified under a Meta domain.
+    if hostname.endswith(FB_FQDN_SUFFIX) or hostname.endswith(FB_FQDN_FACEBOOK_SUFFIX):
+        return hostname
+    # In OSS mode the caller owns naming; never graft on a Meta-internal suffix.
+    if TAAC_OSS:
         return hostname
     return hostname + FB_FQDN_SUFFIX
 
@@ -732,10 +768,8 @@ def memoize_timed_herd(
 # ConsoleFileLogger - Compatibility layer for neteng.netcastle.logger
 # =============================================================================
 
-# Environment variable to control OSS mode
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
-
-# Only import Meta-internal logger when not in OSS mode
+# `TAAC_OSS` is defined at the top of this module (it gates behaviour above
+# this point too). Only import the Meta-internal logger when not in OSS mode.
 if not TAAC_OSS:
     from neteng.netcastle.logger import (  # pyre-ignore[21]
         ConsoleFileLogger,
