@@ -43,8 +43,8 @@ class BgpIgpPnhMetricOscillationPlaybookTest(unittest.TestCase):
         )
 
         self.assertEqual(1, len(playbook.stages))
-        self.assertEqual(3, len(playbook.stages[0].steps))
-        payload = _step_payload(playbook.stages[0].steps[1])
+        self.assertEqual(1, len(playbook.stages[0].steps))
+        payload = _step_payload(playbook.stages[0].steps[0])
         self.assertEqual("bgp_igp_pnh_metric_oscillation", payload["custom_step_name"])
         self.assertEqual(63, payload["count"])
         self.assertEqual(2, payload["step"])

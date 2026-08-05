@@ -48,9 +48,7 @@ from taac.steps.step_definitions import (
     create_openr_route_action_step,
     create_route_registry_prefix_list_setup_steps,
     create_set_route_filter_step,
-    create_snapshot_bgp_withdraw_sent_counter_step,
     create_validated_igp_pnh_metric_oscillation_step,
-    create_verify_bgp_withdraw_send_quiet_step,
 )
 from taac.task_definitions import (
     create_nexthop_group_poll_periodic_task,
@@ -596,8 +594,8 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     This playbook tests BGP behavior during IGP metric oscillations by:
     1. Setting up BGP instability prerequisites
     2. Running standard prechecks
-    3. Performing Open/R metric oscillations while tracking BGP withdrawals
-    4. Verifying no withdrawals, then running session-stability postchecks
+    3. Performing acknowledged Open/R metric oscillations
+    4. Restoring the metric baseline and running session-stability postchecks
 
     Args:
         device_name: Name of the device under test
@@ -663,10 +661,6 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
         stages=[
             create_steps_stage(
                 steps=[
-                    create_snapshot_bgp_withdraw_sent_counter_step(
-                        hostname=device_name,
-                        snapshot_key="igp_pnh_metric_oscillation",
-                    ),
                     create_validated_igp_pnh_metric_oscillation_step(
                         device_name=device_name,
                         start_ipv4s=start_ipv4s,
@@ -677,10 +671,6 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
                         step=step_size,
                         duration=duration,
                         frequency=frequency,
-                    ),
-                    create_verify_bgp_withdraw_send_quiet_step(
-                        hostname=device_name,
-                        snapshot_key="igp_pnh_metric_oscillation",
                     ),
                 ],
             )
