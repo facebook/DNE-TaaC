@@ -18,25 +18,13 @@ def _ixia() -> tuple[Ixia, MagicMock]:
     return ixia, apply_changes
 
 
-def _device_group(
-    name: str,
-    enabled_values: list[object],
-    *,
-    apply: bool = True,
-) -> SimpleNamespace:
-    enabled = SimpleNamespace(
-        Values=enabled_values,
-        Single=MagicMock(),
-    )
-    enabled.ValueList = MagicMock(
-        side_effect=lambda values: setattr(enabled, "Values", list(values))
-    )
-    enabled.Single.side_effect = lambda value: (
-        setattr(enabled, "Values", [value]) if apply else None
-    )
+def _device_group(name: str, enabled_values: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
         Name=name,
-        Enabled=enabled,
+        Enabled=SimpleNamespace(
+            Values=enabled_values,
+            Single=MagicMock(),
+        ),
     )
 
 
@@ -70,9 +58,9 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_validated_toggle_accepts_exact_readback(self, sleep: MagicMock) -> None:
         groups = [
-            _device_group("v4", ["true"], apply=False),
-            _device_group("v6", [True, True], apply=False),
-            _device_group("numeric", [1], apply=False),
+            _device_group("v4", ["Enabled"]),
+            _device_group("v6", [True, True]),
+            _device_group("numeric", [1]),
         ]
         self.ixia.find_device_groups = MagicMock(return_value=groups)
 
@@ -93,7 +81,7 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
     def test_validated_toggle_accepts_integer_like_readback(
         self, sleep: MagicMock
     ) -> None:
-        group = _device_group("numeric", [_IntegerLikeReadback(1)], apply=False)
+        group = _device_group("numeric", [_IntegerLikeReadback(1)])
         self.ixia.find_device_groups = MagicMock(return_value=[group])
 
         self.ixia.toggle_device_groups(
@@ -110,12 +98,10 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_validated_toggle_rejects_stale_readback(self, sleep: MagicMock) -> None:
-        group = _device_group("v4", [False], apply=False)
+        group = _device_group("v4", [False])
         self.ixia.find_device_groups = MagicMock(return_value=[group])
 
-        with self.assertRaisesRegex(
-            ValueError, "readback failed.*v4.*False.*restored exact original Values"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "Enabled readback mismatch"):
             self.ixia.toggle_device_groups(
                 enable=True,
                 device_group_name_regex=".*",
@@ -125,17 +111,14 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
             )
 
         sleep.assert_called_once_with(0)
-        self.assertEqual(2, self.apply_changes.call_count)
-        group.Enabled.ValueList.assert_called_once_with([False])
+        self.apply_changes.assert_called_once_with()
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_validated_toggle_rejects_missing_readback(self, sleep: MagicMock) -> None:
-        group = _device_group("v4", [], apply=False)
+        group = _device_group("v4", [])
         self.ixia.find_device_groups = MagicMock(return_value=[group])
 
-        with self.assertRaisesRegex(
-            ValueError, "readback failed.*v4.*restored exact original Values"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "readback missing"):
             self.ixia.toggle_device_groups(
                 enable=True,
                 device_group_name_regex=".*",
@@ -145,20 +128,19 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
             )
 
         sleep.assert_called_once_with(0)
-        self.assertEqual(2, self.apply_changes.call_count)
-        group.Enabled.ValueList.assert_called_once_with([])
+        self.apply_changes.assert_called_once_with()
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_validated_toggle_reports_all_readback_failures(
         self, sleep: MagicMock
     ) -> None:
         groups = [
-            _device_group("missing", [], apply=False),
-            _device_group("stale", [False], apply=False),
+            _device_group("missing", []),
+            _device_group("stale", [False]),
         ]
         self.ixia.find_device_groups = MagicMock(return_value=groups)
 
-        with self.assertRaises(ValueError) as context:
+        with self.assertRaises(RuntimeError) as context:
             self.ixia.toggle_device_groups(
                 enable=True,
                 device_group_name_regex=".*",
@@ -167,11 +149,10 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
                 sleep_time_before_applying_change=0,
             )
 
-        self.assertIn("('missing', ())", str(context.exception))
-        self.assertIn("('stale', (False,))", str(context.exception))
-        self.assertIn("restored exact original Values", str(context.exception))
+        self.assertIn("readback missing for missing", str(context.exception))
+        self.assertIn("readback mismatch for stale", str(context.exception))
         sleep.assert_called_once_with(0)
-        self.assertEqual(2, self.apply_changes.call_count)
+        self.apply_changes.assert_called_once_with()
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_toggle_ignores_exceptions_when_not_all_bgp_peers(
@@ -181,20 +162,16 @@ class ToggleDeviceGroupsTest(unittest.TestCase):
         selected = _device_group("v6", [False])
         self.ixia.find_device_groups = MagicMock(return_value=[skipped, selected])
 
-        with self.assertRaisesRegex(
-            ValueError, "exception_device_groups requires all_bgp_peers=True"
-        ):
-            self.ixia.toggle_device_groups(
-                enable=True,
-                device_group_name_regex=".*",
-                exception_device_groups=["skip"],
-                sleep_time_before_applying_change=0,
-            )
+        self.ixia.toggle_device_groups(
+            enable=True,
+            device_group_name_regex=".*",
+            exception_device_groups=["skip"],
+            sleep_time_before_applying_change=0,
+        )
 
-        skipped.Enabled.Single.assert_not_called()
-        selected.Enabled.Single.assert_not_called()
-        sleep.assert_not_called()
-        self.apply_changes.assert_not_called()
+        skipped.Enabled.Single.assert_called_once_with(True)
+        selected.Enabled.Single.assert_called_once_with(True)
+        sleep.assert_called_once_with(0)
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_toggle_filters_exceptions_for_all_bgp_peers(

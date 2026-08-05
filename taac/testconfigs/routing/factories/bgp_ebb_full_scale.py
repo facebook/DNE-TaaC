@@ -3,7 +3,6 @@
 """Factory for the EBB full-scale topology."""
 
 import ipaddress
-import typing as t
 import uuid
 from collections import Counter
 
@@ -56,9 +55,6 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.link_flap_recovery import (
     create_bgp_ug_link_flap_recovery_playbook,
 )
-from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.sustained_link_flap import (
-    create_bgp_ug_sustained_link_flap_playbook,
-)
 from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
     build_bgp_ug_2_7_playbook,
 )
@@ -98,6 +94,7 @@ _TC7_EXPECTED_SESSION_COUNT = 1272
 _TC7_PLAYBOOK_NAMES = (
     "bgp_ug_link_flap_recovery",
     "update_group_sustained_link_flap",
+    "bgp_ug_bgp_peer_flapping",
     "bgp_ug_bgp_daemon_restart",
     "bgp_ug_cold_start",
     "bgp_ug_fibagent_restart",
@@ -108,41 +105,6 @@ _TC7_SHARED_IBGP_RUNTIME_POOL_V6 = "PREFIX_POOL_IBGP_IPV6_UG_2_7_RUNTIME"
 _TC7_SHARED_EBGP_RUNTIME_POOL_V4 = "PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME"
 _TC7_SHARED_EBGP_RUNTIME_POOL_V6 = "PREFIX_POOL_IPV6_EBGP_UG_2_7_RUNTIME"
 _RuntimeRouteSpec = tuple[str, str, str, str, str, int, int]
-_UG_2_7_2_IBGP_POOLS = (
-    rf"^{_TC7_SHARED_IBGP_RUNTIME_POOL_V4}$",
-    rf"^{_TC7_SHARED_IBGP_RUNTIME_POOL_V6}$",
-)
-_UG_2_7_2_EBGP_POOLS = (
-    rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V4}$",
-    rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V6}$",
-)
-
-
-class _Ug272PeerCohorts(t.NamedTuple):
-    ibgp_v4: tuple[str, ...]
-    ibgp_v6: tuple[str, ...]
-    ebgp_v4: tuple[str, ...]
-    ebgp_v6: tuple[str, ...]
-
-
-class _Ug272PortTrack(t.TypedDict):
-    role: str
-    interface: str | None
-    target_peer_subnets: list[str]
-
-
-class _Ug272RouteLeg(t.TypedDict):
-    source_prefix_pool_regexes: list[str]
-    receiver_parent_prefixes: list[str]
-    expected_receiver_count: int
-    expected_route_delta: int
-
-
-class _Ug272HeartbeatScenario(t.TypedDict, total=False):
-    down_roles: list[str]
-    verification_mode: str
-    legs: list[_Ug272RouteLeg]
-    structural_reason: str
 
 
 def _prefix_at_index(prefix_set: PrefixSet, index: int) -> str:
@@ -377,172 +339,6 @@ def _tc7_health_checks() -> tuple[
     )
 
 
-def _bound_groups(
-    bound: BoundTopology, names: t.Iterable[str]
-) -> list[BoundDeviceGroup]:
-    return [_required_bound_group(bound, name) for name in names]
-
-
-def _ibgp_group_names(afi: str) -> list[str]:
-    return [
-        f"dg_ibgp_{afi}_{fabric}_p{plane}"
-        for fabric in ("dc", "mp")
-        for plane in range(1, 5)
-    ]
-
-
-def _host_prefixes(addresses: t.Iterable[str]) -> list[str]:
-    return [f"{address}/{'128' if ':' in address else '32'}" for address in addresses]
-
-
-def _ug_2_7_2_peer_cohorts(bound: BoundTopology) -> _Ug272PeerCohorts:
-    def peers(group_names: list[str], expected_count: int) -> tuple[str, ...]:
-        return tuple(
-            sorted(
-                _required_peer_addresses(
-                    _bound_groups(bound, group_names), expected_count
-                )
-            )
-        )
-
-    return _Ug272PeerCohorts(
-        ibgp_v4=peers(_ibgp_group_names("v4"), 496),
-        ibgp_v6=peers(_ibgp_group_names("v6"), 496),
-        ebgp_v4=peers(["dg_ebgp_v4"], 140),
-        ebgp_v6=peers(["dg_ebgp_v6"], 140),
-    )
-
-
-def _ug_2_7_2_port_tracks(
-    bound: BoundTopology, peers: _Ug272PeerCohorts
-) -> list[_Ug272PortTrack]:
-    tracks: list[_Ug272PortTrack] = [
-        {
-            "role": "ebgp",
-            "interface": _required_bound_group(bound, "dg_ebgp_v6").a_interface,
-            "target_peer_subnets": _host_prefixes([*peers.ebgp_v4, *peers.ebgp_v6]),
-        },
-        {
-            "role": "ibgp",
-            "interface": _required_bound_group(bound, "dg_ibgp_v6_dc_p1").a_interface,
-            "target_peer_subnets": _host_prefixes([*peers.ibgp_v4, *peers.ibgp_v6]),
-        },
-    ]
-    if any(not track["interface"] for track in tracks):
-        raise ValueError("2.7.2 requires both resolved BAG012 interfaces")
-    return tracks
-
-
-def _ug_2_7_2_route_leg(
-    source_pools: t.Sequence[str],
-    receivers: t.Iterable[str],
-    receiver_count: int,
-    route_delta: int,
-) -> _Ug272RouteLeg:
-    return {
-        "source_prefix_pool_regexes": list(source_pools),
-        "receiver_parent_prefixes": _host_prefixes(receivers),
-        "expected_receiver_count": receiver_count,
-        "expected_route_delta": route_delta,
-    }
-
-
-def _ug_2_7_2_route_scenarios(
-    peers: _Ug272PeerCohorts,
-) -> list[_Ug272HeartbeatScenario]:
-    return [
-        {
-            "down_roles": [],
-            "verification_mode": "route",
-            "legs": [
-                _ug_2_7_2_route_leg(
-                    [_UG_2_7_2_EBGP_POOLS[0]],
-                    peers.ibgp_v4,
-                    496,
-                    1,
-                ),
-                _ug_2_7_2_route_leg(
-                    [_UG_2_7_2_EBGP_POOLS[1]],
-                    peers.ibgp_v6,
-                    496,
-                    1,
-                ),
-                _ug_2_7_2_route_leg(
-                    [_UG_2_7_2_IBGP_POOLS[0]],
-                    peers.ebgp_v4,
-                    140,
-                    1,
-                ),
-                _ug_2_7_2_route_leg(
-                    [_UG_2_7_2_IBGP_POOLS[1]],
-                    peers.ebgp_v6,
-                    140,
-                    1,
-                ),
-            ],
-        },
-    ]
-
-
-def _ug_2_7_2_structural_scenario(
-    down_roles: list[str], reason: str
-) -> _Ug272HeartbeatScenario:
-    return {
-        "down_roles": down_roles,
-        "verification_mode": "structural",
-        "structural_reason": reason,
-    }
-
-
-def _ug_2_7_2_heartbeat_scenarios(
-    peers: _Ug272PeerCohorts,
-) -> list[_Ug272HeartbeatScenario]:
-    structural = _ug_2_7_2_structural_scenario
-    return [
-        *_ug_2_7_2_route_scenarios(peers),
-        structural(
-            ["ebgp"],
-            "only-iBGP-active:iBGP-split-horizon-has-no-independent-pair",
-        ),
-        structural(
-            ["ibgp"],
-            "only-eBGP-active:same-AS-loop-prevention-has-no-independent-pair",
-        ),
-        structural(
-            ["ebgp", "ibgp"],
-            "all-links-down:no-active-source-or-receiver",
-        ),
-    ]
-
-
-def _ug_2_7_2_playbook(
-    physical_inventory: PhysicalInventory,
-    bound: BoundTopology,
-) -> Playbook:
-    peers = _ug_2_7_2_peer_cohorts(bound)
-    port_tracks = _ug_2_7_2_port_tracks(bound, peers)
-    heartbeats = _ug_2_7_2_heartbeat_scenarios(peers)
-    peer_groups, member_counts, afis = _tc7_group_contract()
-    prechecks, postchecks, snapshot_checks = _tc7_health_checks()
-    return create_bgp_ug_sustained_link_flap_playbook(
-        device_name=physical_inventory.device_name,
-        port_tracks=port_tracks,
-        heartbeat_scenarios=heartbeats,
-        state_key=str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{physical_inventory.device_name}:update_group_sustained_link_flap",
-            )
-        ),
-        peer_group_substrings=peer_groups,
-        expected_member_counts=member_counts,
-        expected_afi_by_substring=afis,
-        prechecks=prechecks,
-        postchecks=postchecks,
-        snapshot_checks=snapshot_checks,
-    )
-
-
 def _ug_2_7_1_playbook(
     physical_inventory: PhysicalInventory,
     bound: BoundTopology,
@@ -632,14 +428,6 @@ def _get_bgp_ebb_full_scale_playbooks(
             playbooks.append(
                 build_bgp_ug_2_7_playbook(
                     "bgp_ug_fibagent_restart", physical_inventory, bound
-                )
-            )
-        if "update_group_sustained_link_flap" in selected_tc7_playbooks:
-            playbooks.append(_ug_2_7_2_playbook(physical_inventory, bound))
-        if "bgp_ug_cold_start" in selected_tc7_playbooks:
-            playbooks.append(
-                build_bgp_ug_2_7_playbook(
-                    "bgp_ug_cold_start", physical_inventory, bound
                 )
             )
         return playbooks
