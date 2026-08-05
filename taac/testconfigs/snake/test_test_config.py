@@ -622,6 +622,58 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
 )
 
 
+ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G = gen_snake_test_config(
+    name="ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss335776657.ash6:eth1/1/1",
+            destination="fboss335776657.ash6:eth1/64/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss335776657.ash6",
+    line_rate=99,
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
+    ),
+    playbooks_to_skip=[
+        "test_snake_fsdb_restart",
+        "test_snake_fsdb_crash",
+    ],
+    iteration=10,
+    include_link_flap_longevity=True,
+)
+
+
+ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G = gen_snake_test_config(
+    name="ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss336803613.ash6:eth1/1/1",
+            destination="fboss336803613.ash6:eth1/64/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss336803613.ash6",
+    line_rate=99,
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
+    ),
+    playbooks_to_skip=[
+        "test_snake_fsdb_restart",
+        "test_snake_fsdb_crash",
+    ],
+    iteration=10,
+    include_link_flap_longevity=True,
+)
+
+
 SNAKE_TEST_CONFIGS = [
     MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX,
     MINIPACK3_STANDALONE_TEST_CONFIG,
@@ -637,4 +689,6 @@ SNAKE_TEST_CONFIGS = [
     KODIAK3_STANDALONE_TEST_CONFIG_400G_200G,
     KODIAK3_STANDALONE_TEST_CONFIG_200G,
     KODIAK3_STANDALONE_TEST_CONFIG_ZR4_800G,
+    ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G,
+    ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G,
 ]
