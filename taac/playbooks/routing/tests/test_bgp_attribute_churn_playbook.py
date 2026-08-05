@@ -18,6 +18,7 @@ from taac.steps.step_definitions import (
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _get_bgp_ebb_full_scale_playbooks,
+    _TC7_PLAYBOOK_NAMES,
     create_bgp_ebb_full_scale_test_config,
 )
 from taac.test_as_a_config import types as taac_types
@@ -327,12 +328,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         )
         topology = MagicMock()
         topology.bind_to_inventory.return_value = MagicMock()
-        available_names = (
-            "['bgp_ug_bgp_daemon_restart', 'bgp_ug_bgp_peer_flapping', "
-            "'bgp_ug_cold_start', 'bgp_ug_fibagent_restart', "
-            "'bgp_ug_link_flap_recovery', 'first', 'second', "
-            "'update_group_sustained_link_flap']"
-        )
+        available_names = str(sorted(set(_TC7_PLAYBOOK_NAMES) | {"first", "second"}))
 
         for selected, message in (
             (
