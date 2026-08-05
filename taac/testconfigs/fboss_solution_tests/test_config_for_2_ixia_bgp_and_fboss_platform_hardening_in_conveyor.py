@@ -36,11 +36,18 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.packet_headers import BGP_CP_TRAFFIC_PACKET_HEADERS
 from taac.playbooks.playbook_definitions import (
     build_2_ixia_hardening_playbook,
+    create_bgp_longevity_bgpd_crash_playbook,
+    create_bgp_longevity_local_pref_churn_playbook,
+    create_bgp_longevity_ndp_device_group_toggle_playbook,
     create_hardening_of_arp_overload_10x_with_table_clear_playbook,
     create_hardening_of_arp_overload_with_agent_churn_playbook,
     create_hardening_of_mac_overload_with_agent_churn_playbook,
     create_hardening_of_ndp_overload_10x_with_table_clear_playbook,
     create_hardening_of_ndp_overload_with_agent_churn_playbook,
+    create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook,
+    create_ucmp_disabled_half_uplinks_flap_playbook,
+    create_ucmp_disabled_n_minus_1_uplinks_flap_playbook,
+    create_ucmp_disabled_single_uplink_flap_playbook,
     WEDGE_AGENT_BINDS_TO_CASCADE,
 )
 from taac.stages.stage_definitions import create_steps_stage
@@ -802,6 +809,20 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     ecmp_member_limit=11500,
     ecmp_member_test_member_limit=11950,
     ecmp_member_test_group_limit=1300,
+    uplink_interfaces_to_flap=None,
+    nbr_device_name=None,
+    nbr_interfaces_to_flap=None,
+    uplink_flap_iterations=50,
+    uplink_flap_interval_s=30,
+    uplink_flap_settle_s=30,
+    include_bgp_longevity_playbooks=False,
+    bgp_longevity_prefix_pool_regex=".*",
+    bgp_longevity_local_pref_cycles=30,
+    bgp_longevity_bgpd_crash_iterations=5,
+    bgp_longevity_ndp_device_group_regex="D3",
+    bgp_longevity_ndp_uptime_s=900,
+    bgp_longevity_ndp_downtime_s=120,
+    bgp_longevity_ndp_total_duration_s=3600,
 ):
     """Build the BGP/FBOSS platform-hardening conveyor TestConfig for two IXIA chassis.
 
@@ -852,6 +873,16 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         v6_downlink_prefix: Prefix string roots used to construct test prefixes.
         ecmp_member_limit / ecmp_member_test_member_limit / ecmp_member_test_group_limit:
             ECMP member sizing parameters for the dedicated ECMP test phase.
+        uplink_interfaces_to_flap: DUT uplink ports for the UCMP-disabled port-flap
+            playbooks (TC1 single / TC2 N/2 / TC3 N-1). Left unset on callers that
+            do not want those playbooks, which keeps their playbook list unchanged.
+        nbr_device_name / nbr_interfaces_to_flap: Neighbor hostname and its
+            index-aligned far-end ports, enabling the TC4 DUT+NBR simultaneous
+            flap. ``nbr_interfaces_to_flap[i]`` must be the far end of
+            ``uplink_interfaces_to_flap[i]``.
+        uplink_flap_iterations / uplink_flap_interval_s / uplink_flap_settle_s:
+            Flap cycles per playbook, seconds between interface operations, and
+            the post-recovery settle window before the zero-loss assertion.
 
     Returns:
         TestConfig: The two-IXIA-chassis hardening conveyor TestConfig.
@@ -944,6 +975,129 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         create_core_dumps_snapshot_check(),
     ]
 
+    # UCMP-disabled uplink port-flap playbooks. The down-stage check records loss
+    # while the ports are down (tolerant, so a clean ECMP re-hash does not fail
+    # it); stats are then cleared so the up-stage check can assert zero loss on
+    # the recovered path alone.
+    _uplink_flap_traffic_items = [
+        "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+        "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+    ]
+    _flap_down_stage_checks = [
+        create_ixia_packet_loss_check(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=_uplink_flap_traffic_items,
+                    str_value="100",
+                    expect_packet_loss=False,
+                ),
+            ],
+            clear_traffic_stats=False,
+        ),
+    ]
+    _flap_up_stage_checks = [
+        create_ixia_packet_loss_check(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=_uplink_flap_traffic_items,
+                    str_value="0",
+                    expect_packet_loss=False,
+                ),
+            ],
+            clear_traffic_stats=False,
+        ),
+    ]
+    _flap_playbook_kwargs = {
+        "iterations": uplink_flap_iterations,
+        "flap_interval_s": uplink_flap_interval_s,
+        "post_enable_settle_s": uplink_flap_settle_s,
+        "down_stage_checks": _flap_down_stage_checks,
+        "up_stage_checks": _flap_up_stage_checks,
+        "prechecks": _tc_prechecks,
+        "postchecks": _tc_postchecks,
+        "snapshot_checks": _tc_snapshot_checks,
+    }
+    _uplink_flap_playbooks = []
+    if uplink_interfaces_to_flap:
+        _uplink_flap_playbooks.append(
+            create_ucmp_disabled_single_uplink_flap_playbook(
+                single_interface_to_flap=uplink_interfaces_to_flap[0],
+                **_flap_playbook_kwargs,
+            )
+        )
+    if uplink_interfaces_to_flap and len(uplink_interfaces_to_flap) >= 2:
+        _uplink_flap_playbooks.extend(
+            [
+                create_ucmp_disabled_half_uplinks_flap_playbook(
+                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    **_flap_playbook_kwargs,
+                ),
+                create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
+                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    **_flap_playbook_kwargs,
+                ),
+                # Same N-1 shape driven through the optics instead of the ASIC,
+                # so the three flap mechanisms are comparable on one port set.
+                create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
+                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    interface_flap_method=taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_POWER,
+                    playbook_name="test_flap_n_minus_1_uplink_ports_qsfp_low_power",
+                    **_flap_playbook_kwargs,
+                ),
+                create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
+                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    interface_flap_method=taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX,
+                    playbook_name="test_flap_n_minus_1_uplink_ports_qsfp_tx_disable",
+                    **_flap_playbook_kwargs,
+                ),
+            ]
+        )
+        if nbr_device_name and nbr_interfaces_to_flap:
+            _uplink_flap_playbooks.append(
+                create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
+                    dut_device_name=device_name,
+                    nbr_device_name=nbr_device_name,
+                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    nbr_interfaces_to_flap=nbr_interfaces_to_flap,
+                    **_flap_playbook_kwargs,
+                )
+            )
+
+    _bgp_longevity_playbooks = []
+    if include_bgp_longevity_playbooks:
+        _bgp_longevity_playbooks = [
+            create_bgp_longevity_local_pref_churn_playbook(
+                prefix_pool_regex=bgp_longevity_prefix_pool_regex,
+                cycles=bgp_longevity_local_pref_cycles,
+                prechecks=_tc_prechecks,
+                postchecks=_tc_postchecks,
+                snapshot_checks=_tc_snapshot_checks,
+            ),
+            create_bgp_longevity_bgpd_crash_playbook(
+                iterations=bgp_longevity_bgpd_crash_iterations,
+                prechecks=_tc_prechecks,
+                postchecks=_tc_postchecks,
+                snapshot_checks=_tc_snapshot_checks,
+            ),
+            create_bgp_longevity_ndp_device_group_toggle_playbook(
+                device_group_name_regex=bgp_longevity_ndp_device_group_regex,
+                uptime_s=bgp_longevity_ndp_uptime_s,
+                downtime_s=bgp_longevity_ndp_downtime_s,
+                total_duration_s=bgp_longevity_ndp_total_duration_s,
+                prechecks=_tc_prechecks,
+                postchecks=_tc_postchecks,
+                snapshot_checks=_tc_snapshot_checks,
+            ),
+        ]
+
+    # TC4 drives thrift flaps on the neighbor, so it needs its own Endpoint for
+    # the runner to build a driver for it.
+    _nbr_endpoints = (
+        [taac_types.Endpoint(name=nbr_device_name)]
+        if nbr_device_name and nbr_interfaces_to_flap and uplink_interfaces_to_flap
+        else []
+    )
+
     return TestConfig(
         name=test_config_name,
         ixia_protocol_verification_timeout=1200,  # todo remove this (should be 300)
@@ -959,11 +1113,12 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 ],
                 dut=True,
                 mac_address=local_mac_address,
-                direct_ixia_connections=direct_ixia_connections
-                if direct_ixia_connections
-                else [],
+                direct_ixia_connections=(
+                    direct_ixia_connections if direct_ixia_connections else []
+                ),
             ),
-        ],
+        ]
+        + _nbr_endpoints,
         setup_tasks=[
             create_coop_unregister_patchers_task(device_name),
             # Task(
@@ -2472,7 +2627,9 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 ]
                 + _tc_postchecks,
             ),
-        ],
+        ]
+        + _uplink_flap_playbooks
+        + _bgp_longevity_playbooks,
     )
 
 
@@ -2541,9 +2698,9 @@ def test_config_for_1_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 ],
                 dut=True,
                 mac_address=local_mac_address,
-                direct_ixia_connections=direct_ixia_connections
-                if direct_ixia_connections
-                else [],
+                direct_ixia_connections=(
+                    direct_ixia_connections if direct_ixia_connections else []
+                ),
             ),
         ],
         setup_tasks=[

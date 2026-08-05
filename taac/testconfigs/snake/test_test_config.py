@@ -30,6 +30,7 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.playbooks.playbook_definitions import (
     gen_common_hcs,
     gen_snake_playbooks,
+    SNAKE_BENCHMARK_PACKET_SIZES,
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
@@ -85,6 +86,47 @@ def gen_basic_traffic_item_configs(
     return basic_traffic_item_configs
 
 
+def gen_benchmark_traffic_item_configs(
+    snake_configs: t.List[taac_types.SnakeConfig],
+    packet_sizes: t.List[int],
+    line_rate: int = 100,
+) -> t.Tuple[t.List[taac_types.BasicTrafficItemConfig], t.Dict[int, str]]:
+    """Build one FIXED-frame-size traffic item per benchmark packet size.
+
+    IXIA frame size is pinned on the traffic item when the config is built,
+    so a packet-size sweep needs one traffic item per size rather than a
+    runtime resize. Each item is named ``SNAKE_BENCHMARK_<size>B`` and the
+    returned map feeds ``gen_snake_playbooks`` so every benchmark playbook
+    starts only its own size.
+
+    Args:
+        snake_configs: Loop topology entries; each contributes one traffic
+            item per packet size.
+        packet_sizes: Frame sizes in bytes.
+        line_rate: Per-traffic-item line rate as a percentage.
+
+    Returns:
+        ``(traffic_item_configs, {packet_size: traffic_item_name})``.
+    """
+    traffic_item_configs: t.List[taac_types.BasicTrafficItemConfig] = []
+    name_by_packet_size: t.Dict[int, str] = {}
+    for packet_size in packet_sizes:
+        traffic_item_name = f"SNAKE_BENCHMARK_{packet_size}B"
+        name_by_packet_size[packet_size] = traffic_item_name
+        traffic_item_configs.extend(
+            gen_basic_traffic_item_configs(
+                snake_configs,
+                line_rate,
+                name=traffic_item_name,
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.FIXED,
+                    fixed_size=packet_size,
+                ),
+            )
+        )
+    return traffic_item_configs, name_by_packet_size
+
+
 def gen_snake_test_config(
     name: str,
     hostname: str,
@@ -102,6 +144,9 @@ def gen_snake_test_config(
     ixia_ports: t.Optional[t.List[str]] = None,
     precheck_packet_loss_clear_stats: bool = False,
     packet_loss_sleep_time: int = 10,
+    include_benchmark: bool = False,
+    benchmark_packet_sizes: t.Optional[t.List[int]] = None,
+    benchmark_line_rate: int = 100,
 ) -> taac_types.TestConfig:
     """Build a single-DUT snake/loopback ``TestConfig``.
 
@@ -165,6 +210,22 @@ def gen_snake_test_config(
     basic_traffic_item_configs = gen_basic_traffic_item_configs(
         snake_configs, line_rate, traffic_item_name, frame_size_settings
     )
+
+    # Benchmark sweep: one extra FIXED-frame-size traffic item per packet size.
+    # They are configured but not started by the standard playbooks — each
+    # benchmark playbook selects its own via `traffic_items_to_start`.
+    benchmark_name_by_packet_size = None
+    if include_benchmark:
+        benchmark_traffic_item_configs, benchmark_name_by_packet_size = (
+            gen_benchmark_traffic_item_configs(
+                snake_configs,
+                benchmark_packet_sizes or SNAKE_BENCHMARK_PACKET_SIZES,
+                benchmark_line_rate,
+            )
+        )
+        basic_traffic_item_configs = (
+            basic_traffic_item_configs + benchmark_traffic_item_configs
+        )
 
     common_hcs = gen_common_hcs(skip_lldp_check)
 
@@ -245,6 +306,7 @@ def gen_snake_test_config(
             common_prechecks=common_prechecks,
             common_postchecks=common_postchecks,
             manual_test_interfaces=manual_test_interfaces,
+            benchmark_traffic_item_name_by_packet_size=benchmark_name_by_packet_size,
         ),
         # Opt out of the two-tier IXIA topology cache (default-on per D107780401).
         # Snake tests do single-DUT loopback bring-up that exercises
@@ -674,9 +736,33 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G = gen_snake_test_config(
 )
 
 
+# Throughput benchmark: the 10-point packet-size sweep at 100% line rate, 12
+# mins per size (~2h). Kept as its own TestConfig rather than folded into
+# MINIPACK3_STANDALONE so the standard snake suites keep their current runtime;
+# the long soak playbooks are skipped here since the benchmark is the point.
+MINIPACK3_STANDALONE_BENCHMARK_TEST_CONFIG = gen_snake_test_config(
+    name="MINIPACK3_STANDALONE_BENCHMARK",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss123.99.snc1:eth9/15/1",
+            destination="fboss123.99.snc1:eth2/1/1",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss123.99.snc1",
+    include_benchmark=True,
+    playbooks_to_skip=[
+        "test_one_hour_longevity",
+        "test_72hr_longevity",
+    ],
+)
+
 SNAKE_TEST_CONFIGS = [
     MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX,
     MINIPACK3_STANDALONE_TEST_CONFIG,
+    MINIPACK3_STANDALONE_BENCHMARK_TEST_CONFIG,
     MINIPACK3_STANDALONE_TEST_CONFIG_100G,
     MINIPACK3_STANDALONE_TEST_CONFIG_200G,
     MINIPACK3_STANDALONE_TEST_CONFIG_400G,

@@ -131,7 +131,9 @@ from taac.steps.step_definitions import (
     create_register_patcher_step,
     create_run_ssh_command_step,
     create_run_task_step,
+    create_randomize_prefix_local_preference_step,
     create_service_convergence_step,
+    create_set_bgp_prefixes_local_preference_step,
     create_service_interruption_step,
     create_service_restart_steps,
     create_start_traffic_step,
@@ -6001,6 +6003,728 @@ def build_qzd_playbook(
 
 
 # =============================================================================
+# UCMP-disabled uplink port-flap playbooks (hardening conveyor)
+# TC1 single port / TC2 N/2 ports / TC3 N-1 ports / TC4 DUT N/2 + NBR N/2
+# =============================================================================
+
+DEFAULT_UPLINK_FLAP_ITERATIONS = 50
+DEFAULT_UPLINK_FLAP_INTERVAL_S = 30
+DEFAULT_UPLINK_FLAP_SETTLE_S = 30
+DEFAULT_UPLINK_FLAP_METHOD = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
+
+# How each flap method reads in the playbook description / trailing NOTE. Mirrors
+# the dispatch in `InterfaceFlapStep` (steps/step_definitions.py).
+_UPLINK_FLAP_METHOD_LABELS = {
+    taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE: "thrift",
+    taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX: (
+        "wedge_qsfp_util -tx_disable/-tx_enable"
+    ),
+    taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_POWER: (
+        "wedge_qsfp_util -set_low_power/-clear_low_power"
+    ),
+    taac_types.InterfaceFlapMethod.SSH_PORT_STATE_CHANGE: "ssh",
+    taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_RESET: "wedge_qsfp_util --qsfp-reset",
+}
+
+
+def _uplink_flap_note(
+    interface_flap_method: taac_types.InterfaceFlapMethod,
+    flap_interval_s: int,
+) -> str:
+    """Trailing NOTE appended to every uplink-flap playbook description."""
+    label = _UPLINK_FLAP_METHOD_LABELS.get(
+        interface_flap_method, interface_flap_method.name
+    )
+    return (
+        f"NOTE: with UCMP disabled, all port flaps via {label}. "
+        f"interface flaps between {flap_interval_s}s"
+    )
+
+
+def _build_uplink_flap_cycle_steps(
+    interfaces_to_flap: list[str],
+    flap_interval_s: int,
+    down_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
+    device_name: str | None = None,
+    verify_port_state: bool = True,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+) -> list[Step]:
+    """Build one disable -> verify-down -> enable -> verify-up flap cycle.
+
+    ``interface_flap_method`` selects how the bounce is driven — thrift port-state
+    change, ``wedge_qsfp_util -tx_disable/-tx_enable``, or
+    ``wedge_qsfp_util -set_low_power/-clear_low_power``. ``flap_interval_s`` is
+    handed to the flap step as its inter-operation delay, so successive port
+    operations are spaced by that many seconds regardless of method.
+
+    Two levels of IXIA validation bracket the cycle. While the ports are down the
+    ``down_stage_checks`` run and the traffic stats are then cleared, so the
+    ``up_stage_checks`` that run after recovery measure only the post-enable window
+    and can assert zero loss without the down-window drops leaking in.
+
+    Args:
+        interfaces_to_flap: Interfaces bounced together in this cycle.
+        flap_interval_s: Seconds between interface operations.
+        down_stage_checks: Checks evaluated while the ports are down.
+        up_stage_checks: Checks evaluated after the ports recover.
+        post_enable_settle_s: Seconds to let traffic re-settle after enable before
+            the ``up_stage_checks`` measure.
+        device_name: Device to flap on; ``None`` targets the DUT.
+        verify_port_state: Whether to assert operational state after each
+            transition. Disabled for remote-device legs, where
+            ``create_verify_port_operational_state_step`` cannot be retargeted.
+        interface_flap_method: Mechanism used to bounce the ports.
+
+    Returns:
+        The ordered Steps for a single flap cycle.
+    """
+    method_label = _UPLINK_FLAP_METHOD_LABELS.get(
+        interface_flap_method, interface_flap_method.name
+    )
+    steps = [
+        create_interface_flap_step(
+            enable=False,
+            interfaces=interfaces_to_flap,
+            interface_flap_method=interface_flap_method,
+            delay=flap_interval_s,
+            device_name=device_name,
+            description=(
+                f"Disable {len(interfaces_to_flap)} port(s) via {method_label} "
+                f"on {device_name or 'DUT'}"
+            ),
+        ),
+    ]
+    if verify_port_state:
+        steps.append(
+            create_verify_port_operational_state_step(
+                interfaces=interfaces_to_flap,
+                operational_state=False,
+                description="Verify the flapped port(s) went DOWN",
+            )
+        )
+    if down_stage_checks:
+        steps.append(
+            create_validation_step(
+                point_in_time_checks=down_stage_checks,
+                description="Measure IXIA loss while the port(s) are DOWN",
+            )
+        )
+    if up_stage_checks:
+        # Clear while still down so the post-recovery measurement window starts
+        # clean; the up-stage check would otherwise re-count the down-window drops.
+        steps.append(
+            create_ixia_api_step(
+                api_name="clear_traffic_stats",
+                args_dict={},
+                description="Clear IXIA traffic stats before re-enabling port(s)",
+            )
+        )
+    steps.append(
+        create_interface_flap_step(
+            enable=True,
+            interfaces=interfaces_to_flap,
+            interface_flap_method=interface_flap_method,
+            delay=flap_interval_s,
+            device_name=device_name,
+            description=(
+                f"Enable {len(interfaces_to_flap)} port(s) via {method_label} "
+                f"on {device_name or 'DUT'}"
+            ),
+        )
+    )
+    if verify_port_state:
+        steps.append(
+            create_verify_port_operational_state_step(
+                interfaces=interfaces_to_flap,
+                operational_state=True,
+                description="Verify the flapped port(s) recovered UP",
+            )
+        )
+    if up_stage_checks:
+        steps.append(
+            create_longevity_step(
+                duration=post_enable_settle_s,
+                description="Let traffic re-settle after port recovery",
+            )
+        )
+        steps.append(
+            create_validation_step(
+                point_in_time_checks=up_stage_checks,
+                description="Assert zero IXIA loss on the recovered port(s)",
+            )
+        )
+    return steps
+
+
+def _build_uplink_flap_playbook(
+    playbook_name: str,
+    interfaces_to_flap: list[str],
+    description: str,
+    iterations: int,
+    flap_interval_s: int,
+    down_stage_checks: list[PointInTimeHealthCheck] | None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None,
+    post_enable_settle_s: int,
+    prechecks: list[PointInTimeHealthCheck] | None,
+    postchecks: list[PointInTimeHealthCheck] | None,
+    snapshot_checks: list[SnapshotHealthCheck] | None,
+    traffic_items_to_start: list[str] | None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+) -> Playbook:
+    """Wrap a single-device flap cycle in an iterating Stage plus playbook checks."""
+    return build_2_ixia_hardening_playbook(
+        name=playbook_name,
+        description=(
+            f"{description} "
+            f"{_uplink_flap_note(interface_flap_method, flap_interval_s)}"
+        ),
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        stages=[
+            create_steps_stage(
+                iteration=iterations,
+                steps=_build_uplink_flap_cycle_steps(
+                    interfaces_to_flap=interfaces_to_flap,
+                    flap_interval_s=flap_interval_s,
+                    down_stage_checks=down_stage_checks,
+                    up_stage_checks=up_stage_checks,
+                    post_enable_settle_s=post_enable_settle_s,
+                    interface_flap_method=interface_flap_method,
+                ),
+            )
+        ],
+    )
+
+
+def create_ucmp_disabled_single_uplink_flap_playbook(
+    single_interface_to_flap: str,
+    iterations: int = DEFAULT_UPLINK_FLAP_ITERATIONS,
+    flap_interval_s: int = DEFAULT_UPLINK_FLAP_INTERVAL_S,
+    post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
+    down_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+    playbook_name: str = "test_flap_1_uplink_port",
+) -> Playbook:
+    """TC1 — flap a single uplink port ``iterations`` times on the DUT.
+
+    Args:
+        single_interface_to_flap: The one uplink port to bounce.
+        iterations: Flap cycles (Stage-level, so playbook checks run once).
+        flap_interval_s: Seconds between interface operations.
+        post_enable_settle_s: Settle window before the zero-loss assertion.
+        down_stage_checks / up_stage_checks: IXIA validation while down / after
+            recovery. See ``_build_uplink_flap_cycle_steps``.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The TC1 playbook.
+    """
+    return _build_uplink_flap_playbook(
+        playbook_name=playbook_name,
+        interfaces_to_flap=[single_interface_to_flap],
+        description=(
+            f"With UCMP disabled - flap 1 uplink port ({single_interface_to_flap}) "
+            f"{iterations} times on DUT."
+        ),
+        iterations=iterations,
+        flap_interval_s=flap_interval_s,
+        down_stage_checks=down_stage_checks,
+        up_stage_checks=up_stage_checks,
+        post_enable_settle_s=post_enable_settle_s,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        interface_flap_method=interface_flap_method,
+    )
+
+
+def create_ucmp_disabled_half_uplinks_flap_playbook(
+    uplink_interfaces_to_flap: list[str],
+    iterations: int = DEFAULT_UPLINK_FLAP_ITERATIONS,
+    flap_interval_s: int = DEFAULT_UPLINK_FLAP_INTERVAL_S,
+    post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
+    down_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+    playbook_name: str = "test_flap_half_uplink_ports",
+) -> Playbook:
+    """TC2 — flap N/2 uplink ports ``iterations`` times on the DUT.
+
+    Args:
+        uplink_interfaces_to_flap: The full uplink set; the first ``N // 2`` are
+            flapped together each cycle.
+        iterations / flap_interval_s / post_enable_settle_s: Cycle shape.
+        down_stage_checks / up_stage_checks: IXIA validation while down / after
+            recovery.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The TC2 playbook.
+
+    Raises:
+        ValueError: If fewer than two uplinks are supplied, since N // 2 would be
+            empty and the playbook would flap nothing.
+    """
+    if len(uplink_interfaces_to_flap) < 2:
+        raise ValueError(
+            "create_ucmp_disabled_half_uplinks_flap_playbook needs >= 2 uplinks, "
+            f"got {uplink_interfaces_to_flap}"
+        )
+    half = uplink_interfaces_to_flap[: len(uplink_interfaces_to_flap) // 2]
+    return _build_uplink_flap_playbook(
+        playbook_name=playbook_name,
+        interfaces_to_flap=half,
+        description=(
+            f"With UCMP disabled - flap N/2 uplink ports ({len(half)} of "
+            f"{len(uplink_interfaces_to_flap)}) {iterations} times on DUT."
+        ),
+        iterations=iterations,
+        flap_interval_s=flap_interval_s,
+        down_stage_checks=down_stage_checks,
+        up_stage_checks=up_stage_checks,
+        post_enable_settle_s=post_enable_settle_s,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        interface_flap_method=interface_flap_method,
+    )
+
+
+def create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
+    uplink_interfaces_to_flap: list[str],
+    iterations: int = DEFAULT_UPLINK_FLAP_ITERATIONS,
+    flap_interval_s: int = DEFAULT_UPLINK_FLAP_INTERVAL_S,
+    post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
+    down_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+    playbook_name: str = "test_flap_n_minus_1_uplink_ports",
+) -> Playbook:
+    """TC3 — flap N-1 uplink ports ``iterations`` times on the DUT.
+
+    Leaves exactly one uplink standing, so the DUT is driven to minimum uplink
+    capacity on every cycle.
+
+    Args:
+        uplink_interfaces_to_flap: The full uplink set; all but the last are
+            flapped together each cycle.
+        iterations / flap_interval_s / post_enable_settle_s: Cycle shape.
+        down_stage_checks / up_stage_checks: IXIA validation while down / after
+            recovery.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The TC3 playbook.
+
+    Raises:
+        ValueError: If fewer than two uplinks are supplied.
+    """
+    if len(uplink_interfaces_to_flap) < 2:
+        raise ValueError(
+            "create_ucmp_disabled_n_minus_1_uplinks_flap_playbook needs >= 2 "
+            f"uplinks, got {uplink_interfaces_to_flap}"
+        )
+    n_minus_1 = uplink_interfaces_to_flap[:-1]
+    return _build_uplink_flap_playbook(
+        playbook_name=playbook_name,
+        interfaces_to_flap=n_minus_1,
+        description=(
+            f"With UCMP disabled - flap N-1 uplink ports ({len(n_minus_1)} of "
+            f"{len(uplink_interfaces_to_flap)}) {iterations} times on DUT."
+        ),
+        iterations=iterations,
+        flap_interval_s=flap_interval_s,
+        down_stage_checks=down_stage_checks,
+        up_stage_checks=up_stage_checks,
+        post_enable_settle_s=post_enable_settle_s,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        interface_flap_method=interface_flap_method,
+    )
+
+
+def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
+    dut_device_name: str,
+    nbr_device_name: str,
+    uplink_interfaces_to_flap: list[str],
+    nbr_interfaces_to_flap: list[str],
+    iterations: int = DEFAULT_UPLINK_FLAP_ITERATIONS,
+    flap_interval_s: int = DEFAULT_UPLINK_FLAP_INTERVAL_S,
+    post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
+    down_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    up_stage_checks: list[PointInTimeHealthCheck] | None = None,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+    playbook_name: str = "test_flap_half_uplinks_dut_and_half_nbr",
+) -> Playbook:
+    """TC4 — flap N/2 uplinks on the DUT while the NBR flaps the remaining N/2.
+
+    The two interface lists must be index-aligned: position ``i`` in
+    ``uplink_interfaces_to_flap`` and position ``i`` in ``nbr_interfaces_to_flap``
+    are the two ends of the same physical link. The DUT drives the first half and
+    the neighbor drives the complementary half, so every link in the bundle is
+    bounced each cycle but from opposite ends.
+
+    Both legs run in a concurrent Stage so the two sides flap simultaneously
+    rather than in the runner's sequential per-device order. Port-state
+    verification runs on the DUT leg only —
+    ``create_verify_port_operational_state_step`` has no device targeting.
+
+    Args:
+        dut_device_name: DUT hostname (drives the first N/2).
+        nbr_device_name: Neighbor hostname (drives the remaining N/2). Must be an
+            Endpoint on the TestConfig or the runner cannot build its driver.
+        uplink_interfaces_to_flap: DUT-side ports, index-aligned with the NBR list.
+        nbr_interfaces_to_flap: NBR-side ports, index-aligned with the DUT list.
+        iterations / flap_interval_s / post_enable_settle_s: Cycle shape.
+        down_stage_checks / up_stage_checks: IXIA validation while down / after
+            recovery. Attached to the DUT leg so they are evaluated once.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The TC4 playbook.
+
+    Raises:
+        ValueError: If the two lists differ in length or hold fewer than two links.
+    """
+    if len(uplink_interfaces_to_flap) != len(nbr_interfaces_to_flap):
+        raise ValueError(
+            "DUT and NBR interface lists must be index-aligned per link, got "
+            f"{len(uplink_interfaces_to_flap)} DUT vs "
+            f"{len(nbr_interfaces_to_flap)} NBR interfaces"
+        )
+    if len(uplink_interfaces_to_flap) < 2:
+        raise ValueError(
+            "create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook needs >= 2 "
+            f"links, got {uplink_interfaces_to_flap}"
+        )
+    split = len(uplink_interfaces_to_flap) // 2
+    dut_half = uplink_interfaces_to_flap[:split]
+    nbr_half = nbr_interfaces_to_flap[split:]
+    return build_2_ixia_hardening_playbook(
+        name=playbook_name,
+        description=(
+            f"With UCMP disabled - flap N/2 uplink ports ({len(dut_half)}) "
+            f"{iterations} times on DUT and simultaneously flap remaining N/2 "
+            f"ports ({len(nbr_half)}) from NBR side ({nbr_device_name}). "
+            f"{_uplink_flap_note(interface_flap_method, flap_interval_s)}"
+        ),
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        stages=[
+            create_steps_stage(
+                iteration=iterations,
+                concurrent=True,
+                concurrent_steps=[
+                    taac_types.ConcurrentStep(
+                        steps=_build_uplink_flap_cycle_steps(
+                            interfaces_to_flap=dut_half,
+                            flap_interval_s=flap_interval_s,
+                            down_stage_checks=down_stage_checks,
+                            up_stage_checks=up_stage_checks,
+                            post_enable_settle_s=post_enable_settle_s,
+                            device_name=dut_device_name,
+                            interface_flap_method=interface_flap_method,
+                        )
+                    ),
+                    taac_types.ConcurrentStep(
+                        steps=_build_uplink_flap_cycle_steps(
+                            interfaces_to_flap=nbr_half,
+                            flap_interval_s=flap_interval_s,
+                            post_enable_settle_s=post_enable_settle_s,
+                            device_name=nbr_device_name,
+                            verify_port_state=False,
+                            interface_flap_method=interface_flap_method,
+                        )
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+# =============================================================================
+# BGP longevity playbooks (hardening conveyor)
+# best-path churn / bgpd crash / NDP device-group shutdown-enable
+# =============================================================================
+
+DEFAULT_BGP_LONGEVITY_LOCAL_PREF = 100
+
+
+def create_bgp_longevity_local_pref_churn_playbook(
+    prefix_pool_regex: str,
+    cycles: int = 30,
+    churn_interval_s: int = 60,
+    randomize_low: int = 10,
+    randomize_high: int = 101,
+    baseline_local_pref: int = DEFAULT_BGP_LONGEVITY_LOCAL_PREF,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    playbook_name: str = "test_bgp_longevity_local_pref_churn",
+) -> Playbook:
+    """BGP longevity — drive frequent best-path computation via local-pref churn.
+
+    Each cycle randomizes the local preference of the monitored prefixes, soaks,
+    then slams them all back to ``baseline_local_pref``. Both transitions change
+    the winning path for a large slice of the RIB, so bgpd re-runs best-path
+    selection continuously for the life of the playbook. Local preference is
+    restored on cleanup so a failure mid-run does not leave the pool skewed.
+
+    Args:
+        prefix_pool_regex: Regex matching the IXIA prefix pools to churn.
+        cycles: Randomize/reset cycles (Stage-level, so checks run once).
+        churn_interval_s: Soak between each local-pref write.
+        randomize_low / randomize_high: Random local-pref range (high exclusive).
+        baseline_local_pref: Value the pool is reset to each cycle and on cleanup.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The local-pref churn longevity playbook.
+    """
+    revert_step = create_set_bgp_prefixes_local_preference_step(
+        prefix_pool_regex=prefix_pool_regex,
+        local_pref_value=baseline_local_pref,
+        description=(
+            f"Restore local preference {baseline_local_pref} on {prefix_pool_regex}"
+        ),
+    )
+    return build_2_ixia_hardening_playbook(
+        name=playbook_name,
+        description=(
+            "BGP longevity testing: trigger frequent best-path computation by "
+            f"churning the local preference of the monitored prefixes over {cycles} "
+            f"cycles ({churn_interval_s}s apart)."
+        ),
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        cleanup_steps=[revert_step],
+        stages=[
+            create_steps_stage(
+                iteration=cycles,
+                steps=[
+                    create_randomize_prefix_local_preference_step(
+                        prefix_pool_regex=prefix_pool_regex,
+                        prefix_start_index=0,
+                        start_value=randomize_low,
+                        end_value=randomize_high,
+                    ),
+                    create_longevity_step(
+                        duration=churn_interval_s,
+                        description="Let bgpd re-run best-path after the churn",
+                    ),
+                    revert_step,
+                    create_longevity_step(
+                        duration=churn_interval_s,
+                        description="Let bgpd re-converge on the baseline path",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def create_bgp_longevity_bgpd_crash_playbook(
+    iterations: int = 5,
+    recovery_wait_s: int = 120,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    playbook_name: str = "test_bgp_longevity_bgpd_crash",
+) -> Playbook:
+    """BGP longevity — crash bgpd and watch the forwarding stack's response.
+
+    Uses ``ServiceInterruptionTrigger.CRASH`` rather than a systemctl restart:
+    the point is an ungraceful death, so bgpd gets no chance to close sessions
+    or checkpoint, and the agent / FSDB / qsfp_service reaction is what is under
+    test. The convergence step waits on AGENT and BGP together so a crash that
+    takes the agent with it fails here rather than silently downstream.
+
+    Args:
+        iterations: Crash/recover cycles.
+        recovery_wait_s: Soak after convergence before the next crash.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks. The
+            BGP convergence, RIB/FIB consistency and service-restart checks are
+            appended to ``postchecks``.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The bgpd-crash longevity playbook.
+    """
+    return build_2_ixia_hardening_playbook(
+        name=playbook_name,
+        description=(
+            f"BGP longevity testing: simulate a BGP crash ({iterations}x) and "
+            "observe the response/impact on the agent and other forwarding "
+            "stack services."
+        ),
+        prechecks=prechecks,
+        postchecks=[
+            create_bgp_convergence_check(),
+            create_bgp_rib_fib_consistency_check(),
+            create_service_restart_check(),
+        ]
+        + (postchecks or []),
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        stages=[
+            create_steps_stage(
+                iteration=iterations,
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.BGP,
+                        trigger=ServiceInterruptionTrigger.CRASH,
+                        description="Crash bgpd (ungraceful, no session teardown)",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Wait for agent + bgpd to return to configured",
+                    ),
+                    create_longevity_step(
+                        duration=recovery_wait_s,
+                        description="Soak after bgpd recovery",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def create_bgp_longevity_ndp_device_group_toggle_playbook(
+    device_group_name_regex: str,
+    uptime_s: int = 900,
+    downtime_s: int = 120,
+    total_duration_s: int = 3600,
+    prechecks: list[PointInTimeHealthCheck] | None = None,
+    postchecks: list[PointInTimeHealthCheck] | None = None,
+    snapshot_checks: list[SnapshotHealthCheck] | None = None,
+    traffic_items_to_start: list[str] | None = None,
+    playbook_name: str = "test_bgp_longevity_ndp_device_group_toggle",
+) -> Playbook:
+    """BGP longevity — shut and re-enable the NDP IPv6 device group on a duty cycle.
+
+    Toggling the device group tears down and re-establishes every IPv6 neighbor
+    in it at once, so the DUT sees a bulk NDP withdraw/relearn (3K+ entries at
+    the scales this runs at) plus the BGP churn that follows the neighbor loss.
+    The cycle count is derived from ``total_duration_s`` and truncates rather
+    than overrunning the requested window.
+
+    The group is left enabled on cleanup — the stage ends in the down half of
+    the duty cycle, and leaving it shut would poison every later playbook.
+
+    Args:
+        device_group_name_regex: IXIA device-group regex for the NDP group
+            (IXIA names groups ``D<device_group_index + 1>``).
+        uptime_s: Seconds the group stays enabled per cycle.
+        downtime_s: Seconds the group stays shut per cycle.
+        total_duration_s: Target wall-clock for the whole playbook.
+        prechecks / postchecks / snapshot_checks: Playbook-level checks.
+        traffic_items_to_start: IXIA traffic items to run for this playbook.
+        playbook_name: Test-case id used by ``--regex`` selection.
+
+    Returns:
+        The NDP device-group toggle longevity playbook.
+
+    Raises:
+        ValueError: If the duty cycle is longer than the requested total, which
+            would yield zero cycles and a playbook that does nothing.
+    """
+    cycle_s = uptime_s + downtime_s
+    cycles = total_duration_s // cycle_s
+    if cycles < 1:
+        raise ValueError(
+            f"uptime_s + downtime_s ({cycle_s}s) exceeds total_duration_s "
+            f"({total_duration_s}s); no full cycle would run"
+        )
+    enable_step = create_ixia_api_step(
+        api_name="toggle_device_groups",
+        args_dict={"enable": True, "device_group_name_regex": device_group_name_regex},
+        description=f"Enable NDP device group {device_group_name_regex}",
+    )
+    return build_2_ixia_hardening_playbook(
+        name=playbook_name,
+        description=(
+            "BGP longevity testing: shutdown and enable the IPv6 NDP device "
+            f"group. Uptime {uptime_s // 60} minutes, downtime "
+            f"{downtime_s // 60} minutes, repeated {cycles}x for "
+            f"~{(cycles * cycle_s) // 60} minutes."
+        ),
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        cleanup_steps=[enable_step],
+        stages=[
+            create_steps_stage(
+                iteration=cycles,
+                steps=[
+                    enable_step,
+                    create_longevity_step(
+                        duration=uptime_s,
+                        description=f"NDP device group up for {uptime_s}s",
+                    ),
+                    create_ixia_api_step(
+                        api_name="toggle_device_groups",
+                        args_dict={
+                            "enable": False,
+                            "device_group_name_regex": device_group_name_regex,
+                        },
+                        description=(
+                            f"Shut down NDP device group {device_group_name_regex}"
+                        ),
+                    ),
+                    create_longevity_step(
+                        duration=downtime_s,
+                        description=f"NDP device group down for {downtime_s}s",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+# =============================================================================
 # Port-Channel (LAG) playbooks + helpers
 # (migrated from playbooks/helpers/portchannel_playbooks.py in Phase 4 v2)
 # =============================================================================
@@ -11807,6 +12531,93 @@ def gen_snake_fiber_removal_playbook(
     )
 
 
+# Frame sizes swept by the snake throughput benchmark, in bytes. 9124 is the
+# largest size in the requested sweep and sits under the 9216 jumbo MTU.
+SNAKE_BENCHMARK_PACKET_SIZES = [
+    64,
+    192,
+    320,
+    640,
+    1280,
+    2560,
+    5120,
+    6400,
+    8320,
+    9124,
+]
+SNAKE_BENCHMARK_DURATION_S = 12 * 60
+
+
+def gen_snake_benchmark_playbooks(
+    traffic_item_name_by_packet_size: t.Dict[int, str],
+    duration_s: int = SNAKE_BENCHMARK_DURATION_S,
+    prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+) -> t.List[taac_types.Playbook]:
+    """One throughput-benchmark playbook per packet size.
+
+    Each playbook starts only its own fixed-frame-size traffic item, clears the
+    IXIA counters, soaks for ``duration_s``, then measures loss and rate. Sizes
+    run as separate playbooks rather than stages of one playbook because IXIA
+    frame size is fixed on the traffic item at config-build time — there is no
+    runtime "change frame size" step — so the sweep is expressed as one traffic
+    item per size, selected via ``traffic_items_to_start``.
+
+    Args:
+        traffic_item_name_by_packet_size: Frame size (bytes) -> the name of the
+            traffic item configured with that fixed frame size. Build it with
+            ``gen_benchmark_traffic_item_configs`` in the snake TestConfig so
+            the names line up.
+        duration_s: Soak per packet size (default 12 minutes).
+        prechecks: Playbook prechecks, typically ``gen_common_hcs`` output.
+        postchecks: Playbook postchecks; the loss + rate checks are appended.
+
+    Returns:
+        One Playbook per entry, ordered by ascending packet size.
+    """
+    playbooks: t.List[taac_types.Playbook] = []
+    for packet_size in sorted(traffic_item_name_by_packet_size):
+        traffic_item_name = traffic_item_name_by_packet_size[packet_size]
+        playbooks.append(
+            taac_types.Playbook(
+                name=f"test_snake_benchmark_{packet_size}b",
+                description=(
+                    f"Benchmark test: {packet_size} byte frames at 100% line rate "
+                    f"for {duration_s // 60} mins."
+                ),
+                prechecks=prechecks or [],
+                postchecks=(postchecks or [])
+                + [
+                    create_ixia_packet_loss_check(clear_traffic_stats=False),
+                    create_ixia_traffic_rate_check(),
+                ],
+                traffic_items_to_start=[traffic_item_name],
+                stages=[
+                    create_steps_stage(
+                        steps=[
+                            create_ixia_api_step(
+                                api_name="clear_traffic_stats",
+                                args_dict={},
+                                description=(
+                                    "Clear IXIA stats so the benchmark window "
+                                    "excludes traffic-start transients"
+                                ),
+                            ),
+                            create_longevity_step(
+                                duration=duration_s,
+                                description=(
+                                    f"Soak {packet_size}B frames for "
+                                    f"{duration_s}s at line rate"
+                                ),
+                            ),
+                        ]
+                    )
+                ],
+            )
+        )
+    return playbooks
+
+
 def gen_snake_playbooks(
     hostname: str,
     iteration: int,
@@ -11815,6 +12626,8 @@ def gen_snake_playbooks(
     common_prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     common_postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
+    benchmark_traffic_item_name_by_packet_size: t.Optional[t.Dict[int, str]] = None,
+    benchmark_duration_s: int = SNAKE_BENCHMARK_DURATION_S,
 ) -> t.List[taac_types.Playbook]:
     _prechecks = common_prechecks or []
     _postchecks = common_postchecks or []
@@ -12463,6 +13276,16 @@ def gen_snake_playbooks(
                     postchecks=_postchecks,
                 ),
             ]
+        )
+
+    if benchmark_traffic_item_name_by_packet_size:
+        playbooks.extend(
+            gen_snake_benchmark_playbooks(
+                traffic_item_name_by_packet_size=benchmark_traffic_item_name_by_packet_size,
+                duration_s=benchmark_duration_s,
+                prechecks=_prechecks,
+                postchecks=_postchecks,
+            )
         )
 
     if playbooks_to_skip:
