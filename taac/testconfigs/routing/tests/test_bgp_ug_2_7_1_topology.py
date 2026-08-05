@@ -93,6 +93,10 @@ def _task_params(step) -> dict:
     return json.loads(task["params"]["json_params"])
 
 
+def _setup_task_params(task) -> dict:
+    return json.loads(none_throws(none_throws(task.params).json_params))
+
+
 class BgpUg27SharedTopologyTest(TestCase):
     def test_selected_link_flap_derives_exact_bag012_cohorts(self) -> None:
         with mock.patch.object(
@@ -287,3 +291,96 @@ class BgpUg27SharedTopologyTest(TestCase):
         )
         self.assertEqual(2, len(config.basic_port_configs or []))
         self.assertEqual(18, len(_device_groups(config)))
+
+    def test_sustained_flap_derives_exact_bag012_heartbeat_matrix(self) -> None:
+        config = factory.create_bgp_ebb_full_scale_test_config(
+            BAG012_ASH6,
+            name="BAG012_UG_2_7_2_TEST",
+            playbooks_selected=["update_group_sustained_link_flap"],
+        )
+        self.assertEqual(
+            ["update_group_sustained_link_flap"],
+            [playbook.name for playbook in config.playbooks],
+        )
+        disruption = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[1].steps[0].step_params
+                ).json_params
+            )
+        )
+        self.assertEqual(
+            ["Ethernet3/36/1", "Ethernet3/36/2"],
+            [track["interface"] for track in disruption["port_tracks"]],
+        )
+        self.assertEqual(["IDLE"], disruption["expected_recovered_group_states"])
+        self.assertEqual(4, disruption["expected_recovered_group_count"])
+        self.assertEqual(600, disruption["recovered_group_state_timeout_seconds"])
+        self.assertEqual(1, disruption["recovered_group_state_poll_interval_seconds"])
+        self.assertEqual(
+            [140, 140, 496, 496],
+            sorted(
+                leg["expected_receiver_count"]
+                for scenario in disruption["heartbeat_scenarios"]
+                for leg in scenario.get("legs", [])
+            ),
+        )
+        self.assertEqual(
+            4,
+            len(
+                {
+                    regex
+                    for scenario in disruption["heartbeat_scenarios"]
+                    for leg in scenario.get("legs", [])
+                    for regex in leg["source_prefix_pool_regexes"]
+                }
+            ),
+        )
+        self.assertEqual(
+            [
+                "route",
+                "structural",
+                "structural",
+                "structural",
+            ],
+            [
+                scenario["verification_mode"]
+                for scenario in disruption["heartbeat_scenarios"]
+            ],
+        )
+        self.assertEqual(
+            [
+                [],
+                ["ebgp"],
+                ["ibgp"],
+                ["ebgp", "ibgp"],
+            ],
+            [scenario["down_roles"] for scenario in disruption["heartbeat_scenarios"]],
+        )
+        route_legs = disruption["heartbeat_scenarios"][0]["legs"]
+        self.assertEqual(
+            [
+                r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+                r"^PREFIX_POOL_IPV6_EBGP_UG_2_7_RUNTIME$",
+                r"^PREFIX_POOL_IBGP_IPV4_UG_2_7_RUNTIME$",
+                r"^PREFIX_POOL_IBGP_IPV6_UG_2_7_RUNTIME$",
+            ],
+            [leg["source_prefix_pool_regexes"][0] for leg in route_legs],
+        )
+        self.assertEqual(4, disruption["checkpoint_expected_group_count"])
+        self.assertEqual(1272, disruption["checkpoint_expected_session_count"])
+        self.assertEqual(
+            {"ebgp": 2, "ibgp": 2},
+            disruption["checkpoint_group_counts_by_role"],
+        )
+        self.assertNotIn("expected_ingress_policy_by_role", disruption)
+        self.assertEqual(4, len(_runtime_route_specs(config)))
+        self.assertFalse(
+            any(
+                "BGP-MON" in json.dumps(_setup_task_params(task), sort_keys=True)
+                for task in config.setup_tasks or []
+                if task.params is not None and task.params.json_params is not None
+            )
+        )
+        self.assertEqual([], _hardware_capacity_checks(config.playbooks[0].prechecks))
+        self.assertEqual([], _hardware_capacity_checks(config.playbooks[0].postchecks))

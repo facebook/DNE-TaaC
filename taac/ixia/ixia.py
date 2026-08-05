@@ -119,6 +119,285 @@ from uhd_restpy.assistants.statistics.statviewassistant import (
 warnings.filterwarnings(action="ignore", category=ResourceWarning)
 warnings.filterwarnings(action="ignore", category=DeprecationWarning)
 
+
+def _normalize_ixia_boolean(value: t.Any) -> t.Optional[bool]:
+    """Return accepted IXIA boolean encodings, or None to fail readback closed."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    rendered = str(value).strip().lower()
+    if rendered in {"true", "1", "1.0"}:
+        return True
+    if rendered in {"false", "0", "0.0"}:
+        return False
+    try:
+        integer_value = operator.index(value)
+    except TypeError:
+        return None
+    return bool(integer_value) if integer_value in {0, 1} else None
+
+
+def _device_group_readback_mismatches(
+    device_groups: t.Iterable[t.Any], enable: bool
+) -> t.List[t.Tuple[str, t.Tuple[t.Any, ...]]]:
+    mismatched = []
+    for device_group in device_groups:
+        values = tuple(device_group.Enabled.Values)
+        normalized = tuple(_normalize_ixia_boolean(value) for value in values)
+        if not values or any(value is not enable for value in normalized):
+            mismatched.append((device_group.Name, values))
+    return mismatched
+
+
+def _format_device_group_failures(
+    failures: t.Sequence[tuple[str, Exception]],
+) -> str:
+    return "; ".join(f"{name}: {error!r}" for name, error in failures)
+
+
+def _snapshot_device_group_values(
+    device_groups: t.Sequence[t.Any], enable: bool
+) -> list[tuple[t.Any, tuple[t.Any, ...]]]:
+    snapshots: list[tuple[t.Any, tuple[t.Any, ...]]] = []
+    snapshot_failures: list[tuple[str, Exception]] = []
+    for device_group in device_groups:
+        try:
+            snapshots.append((device_group, tuple(device_group.Enabled.Values)))
+        except Exception as error:
+            snapshot_failures.append((str(device_group.Name), error))
+    if snapshot_failures:
+        raise ValueError(
+            "toggle_device_groups: could not snapshot Enabled values before "
+            f"staging enable={enable}: "
+            f"{_format_device_group_failures(snapshot_failures)}"
+        ) from ExceptionGroup(
+            "IXIA device-group Enabled snapshot failures",
+            [error for _, error in snapshot_failures],
+        )
+    return snapshots
+
+
+def _set_device_group_values(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    enable: bool,
+    operation_logger: logging.Logger,
+) -> list[tuple[str, Exception]]:
+    failures = []
+    for device_group, _original_values in snapshots:
+        operation_logger.info(f"Applying enable={enable} to {device_group.Name}")
+        try:
+            device_group.Enabled.Single(enable)
+        except Exception as error:
+            failures.append((str(device_group.Name), error))
+    return failures
+
+
+class _DeviceGroupRollbackResult(t.NamedTuple):
+    restored_names: tuple[str, ...]
+    failures: tuple[tuple[str, Exception], ...]
+
+
+def _rollback_device_group_values(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+) -> _DeviceGroupRollbackResult:
+    """Best-effort restore every group after a staging failure.
+
+    Every caller must inspect ``failures``. A non-empty result means rollback
+    was incomplete and the IxNetwork configuration model remains partially
+    staged because ValueList has no stronger recovery primitive. The caller
+    must abort the operation without applying changes and require a session
+    reset, reload, or explicit restore before any later ``apply_changes`` call.
+    ``restored_names`` is returned so the resulting error can distinguish
+    successfully restored groups from groups requiring operator recovery.
+    """
+    restored_names = []
+    failures = []
+    for device_group, original_values in snapshots:
+        name = str(device_group.Name)
+        try:
+            device_group.Enabled.ValueList(list(original_values))
+        except Exception as error:
+            failures.append((name, error))
+        else:
+            restored_names.append(name)
+    return _DeviceGroupRollbackResult(tuple(restored_names), tuple(failures))
+
+
+def _raise_device_group_staging_failures(
+    enable: bool,
+    setter_failures: t.Sequence[tuple[str, Exception]],
+    rollback_restored_names: t.Sequence[str],
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    details = "setter failures: " + _format_device_group_failures(setter_failures)
+    if rollback_failures:
+        details += "; rollback failures: " + _format_device_group_failures(
+            rollback_failures
+        )
+        details += (
+            "; restored groups: "
+            f"{list(rollback_restored_names)!r}; IxNetwork configuration may "
+            "remain partially staged; reset, reload, or restore it before any "
+            "later apply"
+        )
+    raise ValueError(
+        f"toggle_device_groups: enable={enable} staging failed; chassis apply "
+        f"was skipped; {details}"
+    ) from ExceptionGroup(
+        "IXIA device-group staging and rollback failures",
+        [error for _, error in (*setter_failures, *rollback_failures)],
+    )
+
+
+def _stage_device_group_toggle(
+    device_groups: t.Sequence[t.Any],
+    enable: bool,
+    operation_logger: logging.Logger,
+) -> list[tuple[t.Any, tuple[t.Any, ...]]]:
+    snapshots = _snapshot_device_group_values(device_groups, enable)
+    setter_failures = _set_device_group_values(snapshots, enable, operation_logger)
+    if not setter_failures:
+        return snapshots
+
+    rollback = _rollback_device_group_values(snapshots)
+    _raise_device_group_staging_failures(
+        enable,
+        setter_failures,
+        rollback.restored_names,
+        rollback.failures,
+    )
+
+
+def _device_group_snapshot_readback_failures(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+) -> list[tuple[str, Exception]]:
+    failures = []
+    for device_group, expected_values in snapshots:
+        name = str(device_group.Name)
+        try:
+            observed_values = tuple(device_group.Enabled.Values)
+        except Exception as error:
+            failures.append((name, error))
+            continue
+        if observed_values != expected_values:
+            failures.append(
+                (
+                    name,
+                    ValueError(
+                        f"{name} expected original Values={expected_values!r}, "
+                        f"observed={observed_values!r}"
+                    ),
+                )
+            )
+    return failures
+
+
+def _rollback_applied_device_group_toggle(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    apply_changes: t.Callable[[], None],
+    raise_failure: t.Callable[
+        [t.Sequence[tuple[str, Exception]]],
+        t.NoReturn,
+    ],
+) -> t.NoReturn:
+    """Roll back an applied mutation and force its caller to raise the result."""
+    rollback = _rollback_device_group_values(snapshots)
+    failures = [(f"restore {name}", error) for name, error in rollback.failures]
+    try:
+        apply_changes()
+    except Exception as error:
+        failures.append(("apply_changes", error))
+    failures.extend(
+        (f"readback {name}", error)
+        for name, error in _device_group_snapshot_readback_failures(snapshots)
+    )
+    raise_failure(tuple(failures))
+    raise AssertionError("device-group rollback failure handler returned")
+
+
+def _raise_device_group_readback_failure(
+    enable: bool,
+    mismatched: t.Sequence[tuple[str, tuple[t.Any, ...]]],
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    message = f"toggle_device_groups: enable={enable} readback failed for {mismatched}"
+    if not rollback_failures:
+        raise ValueError(f"{message}; restored exact original Values")
+    raise ValueError(
+        f"{message}; rollback failures: "
+        f"{_format_device_group_failures(rollback_failures)}"
+    ) from ExceptionGroup(
+        "IXIA device-group post-apply rollback failures",
+        [error for _, error in rollback_failures],
+    )
+
+
+def _raise_device_group_primary_failure(
+    enable: bool,
+    context: str,
+    primary_error: Exception,
+    rollback_failures: t.Sequence[tuple[str, Exception]],
+) -> t.NoReturn:
+    failures = [(context, primary_error), *rollback_failures]
+    rollback_status = (
+        "rollback failures: " + _format_device_group_failures(rollback_failures)
+        if rollback_failures
+        else "restored exact original Values"
+    )
+    raise ValueError(
+        f"toggle_device_groups: enable={enable} {context} failed: "
+        f"{primary_error!r}; {rollback_status}"
+    ) from ExceptionGroup(
+        "IXIA device-group mutation and rollback failures",
+        [error for _, error in failures],
+    )
+
+
+def _apply_and_verify_device_group_toggle(
+    snapshots: t.Sequence[tuple[t.Any, tuple[t.Any, ...]]],
+    device_groups: t.Sequence[t.Any],
+    enable: bool,
+    apply_changes: t.Callable[[], None],
+) -> None:
+    try:
+        apply_changes()
+    except Exception as error:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_primary_failure,
+                enable,
+                "desired apply",
+                error,
+            ),
+        )
+    try:
+        mismatched = _device_group_readback_mismatches(device_groups, enable)
+    except Exception as error:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_primary_failure,
+                enable,
+                "desired-state readback",
+                error,
+            ),
+        )
+    if mismatched:
+        _rollback_applied_device_group_toggle(
+            snapshots,
+            apply_changes,
+            functools.partial(
+                _raise_device_group_readback_failure,
+                enable,
+                mismatched,
+            ),
+        )
+
+
 from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
     BgpIpv6Peer as IxnBgpIpv6Peer,
 )
@@ -3032,8 +3311,17 @@ class Ixia:
         sleep_time_before_applying_change: int = 30,
         require_match: bool = False,
         verify_readback: bool = False,
+        expected_match_count: t.Optional[int] = None,
     ) -> None:
-        device_groups = self.find_device_groups(device_group_name_regex)
+        if expected_match_count is not None and (
+            isinstance(expected_match_count, bool)
+            or not isinstance(expected_match_count, int)
+            or expected_match_count < 0
+        ):
+            raise ValueError("expected_match_count must be a non-negative integer")
+        if exception_device_groups and not all_bgp_peers:
+            raise ValueError("exception_device_groups requires all_bgp_peers=True")
+        device_groups = list(self.find_device_groups(device_group_name_regex))
         selected_device_groups = [
             device_group
             for device_group in device_groups
@@ -3051,14 +3339,29 @@ class Ixia:
                 "toggle_device_groups: regex "
                 f"{device_group_name_regex!r} selected no device groups"
             )
-        for device_group in selected_device_groups:
-            self.logger.info(f"Applying enable={enable} to {device_group.Name}")
-            device_group.Enabled.Single(enable)
+        if (
+            expected_match_count is not None
+            and len(selected_device_groups) != expected_match_count
+        ):
+            raise ValueError(
+                f"toggle_device_groups: regex {device_group_name_regex!r} matched "
+                f"{len(selected_device_groups)} device groups after exclusions; "
+                f"expected {expected_match_count}: "
+                f"{[group.Name for group in selected_device_groups]}"
+            )
+        snapshots = _stage_device_group_toggle(
+            selected_device_groups, enable, self.logger
+        )
         self.logger.info(
             f"Waiting for {sleep_time_before_applying_change}s before applying change"
         )
         time.sleep(sleep_time_before_applying_change)
-        self.apply_changes()
+        _apply_and_verify_device_group_toggle(
+            snapshots,
+            selected_device_groups,
+            enable,
+            self.apply_changes,
+        )
         if verify_readback:
             # Post-apply verification preserves the observed IXIA state for triage.
             self._verify_device_group_enabled_readback(selected_device_groups, enable)
