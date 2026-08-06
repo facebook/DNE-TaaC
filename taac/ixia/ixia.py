@@ -2714,7 +2714,10 @@ class Ixia:
                 append_to_query=packet_header.append_to_query,
             )
             if packet_header.remove_from_stack:
-                stack.Remove()
+                # An unmatched find() yields an empty Stack, not None, and any
+                # attribute access on it (Remove reads .href) raises NotFoundError.
+                if stack:
+                    stack.Remove()
                 continue
             if not packet_header.fields:
                 continue
