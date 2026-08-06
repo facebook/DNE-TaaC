@@ -48,6 +48,7 @@ from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
     create_bgp_attribute_churn_step,
     create_bgp_lifecycle_convergence_step,
+    create_bgp_longevity_community_churn_step,
     create_bgp_prefixes_med_value_step,
     create_bgp_route_storm_step,
     create_change_as_path_length_step,
@@ -81,7 +82,6 @@ from taac.steps.step_definitions import (
     create_route_convergence_health_check_step,
     create_rss_start_step,
     create_rss_stop_step,
-    create_run_task_step,
     create_service_convergence_step,
     create_service_interruption_step,
     create_set_bgp_prefixes_local_preference_step,
@@ -4561,71 +4561,37 @@ def create_route_storm_stage(
 # In-stage churn for the BGP longevity soak. Replaces the old playbook-level
 # `periodic_tasks` churn model so churn ends WITH the stage (before post-checks)
 # instead of running until teardown and racing the post-soak consistency checks.
-_LONGEVITY_CHURN_PREFIX_REGEX = ".*IBGP.*PLANE_4.*"
-_LONGEVITY_CHURN_COMMUNITY_COUNT = 5
 _LONGEVITY_CHURN_INTERVAL_SECONDS = 60
 _LONGEVITY_QUIESCE_SECONDS = 300
+_LONGEVITY_CHURN_PREFIX_REGEX = ".*IBGP.*PLANE_4.*"
+_LONGEVITY_CHURN_COMMUNITY_COUNT = 5
 
 
 def create_longevity_churn_stage(
     test_duration_seconds: int,
-    community_prefix_regex: str = _LONGEVITY_CHURN_PREFIX_REGEX,
-    community_count: int = _LONGEVITY_CHURN_COMMUNITY_COUNT,
+    *,
     churn_interval_seconds: int = _LONGEVITY_CHURN_INTERVAL_SECONDS,
     quiesce_seconds: int = _LONGEVITY_QUIESCE_SECONDS,
+    community_prefix_regex: str = _LONGEVITY_CHURN_PREFIX_REGEX,
+    community_count: int = _LONGEVITY_CHURN_COMMUNITY_COUNT,
 ) -> Stage:
-    """
-    Create the BGP longevity soak stage: in-stage community churn for
-    ``test_duration_seconds``, then a quiesce window.
-
-    Each churn iteration adds then removes communities on
-    ``community_prefix_regex`` (so the RIB returns to baseline), then waits
-    ``churn_interval_seconds`` -- replicating the old background
-    ``community_add_remove`` periodic task, but bounded to this stage so churn
-    stops before the post-checks. After the loop, a final ``quiesce_seconds``
-    wait lets the device fully converge before the post-soak consistency /
-    session checks run (the old background model let churn race those checks).
-    """
-    steps: list[Step] = []
-    iterations = test_duration_seconds // churn_interval_seconds
-    for _ in range(iterations):
-        steps.append(
-            create_run_task_step(
-                task_name="ixia_modify_communities",
-                params_dict={
-                    "prefix_pool_regex": community_prefix_regex,
-                    "count": community_count,
-                    "to_add": True,
-                },
-                description=f"Add communities on {community_prefix_regex} (count={community_count})",
-                ixia_needed=True,
-            )
-        )
-        steps.append(
-            create_run_task_step(
-                task_name="ixia_modify_communities",
-                params_dict={
-                    "prefix_pool_regex": community_prefix_regex,
-                    "count": community_count,
-                    "to_add": False,
-                },
-                description=f"Remove communities on {community_prefix_regex} (count={community_count})",
-                ixia_needed=True,
-            )
-        )
-        steps.append(
+    """Create wall-clock churn followed by quiescence and postchecks."""
+    return create_steps_stage(
+        steps=[
+            create_bgp_longevity_community_churn_step(
+                duration_seconds=test_duration_seconds,
+                cadence_seconds=churn_interval_seconds,
+                prefix_pool_regex=community_prefix_regex,
+                community_count=community_count,
+            ),
             create_longevity_step(
-                duration=churn_interval_seconds,
-                description=f"Soak {churn_interval_seconds}s between churn cycles",
-            )
-        )
-    steps.append(
-        create_longevity_step(
-            duration=quiesce_seconds,
-            description=f"Quiesce {quiesce_seconds}s after churn before post-checks",
-        )
+                duration=quiesce_seconds,
+                description=(
+                    f"Quiesce {quiesce_seconds}s after churn before postchecks"
+                ),
+            ),
+        ]
     )
-    return create_steps_stage(steps=steps)
 
 
 # =============================================================================

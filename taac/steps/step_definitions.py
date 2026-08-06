@@ -986,6 +986,38 @@ def create_bgp_attribute_churn_step(
     )
 
 
+def create_bgp_longevity_community_churn_step(
+    *,
+    duration_seconds: int,
+    cadence_seconds: int,
+    prefix_pool_regex: str = ".*IBGP.*PLANE_4.*",
+    community_count: int = 5,
+    description: str | None = None,
+) -> Step:
+    """Create wall-clock bounded CICD-EBB-15 community churn."""
+    if prefix_pool_regex != ".*IBGP.*PLANE_4.*":
+        raise ValueError(
+            "prefix_pool_regex must select the topology-authored EBB Plane-4 iBGP pools"
+        )
+    numeric = (duration_seconds, cadence_seconds, community_count)
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in numeric
+    ):
+        raise ValueError("community-churn parameters must be positive integers")
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "bgp_longevity_community_churn",
+        "prefix_pool_regex": prefix_pool_regex,
+        "community_count": community_count,
+        "duration_seconds": duration_seconds,
+        "cadence_seconds": cadence_seconds,
+    }
+    return create_custom_step(
+        params_dict=params,
+        description=description or "Run wall-clock bounded longevity community churn",
+    )
+
+
 def create_bgp_route_storm_step(
     *,
     hostname: str,

@@ -1101,7 +1101,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
 
 def get_bgp_ebb_longevity_playbook(
     device_name: str,
-    duration: int = 86400,
+    duration: int,
     community_churn_frequency: int = 60,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
@@ -1120,7 +1120,7 @@ def get_bgp_ebb_longevity_playbook(
 
     Args:
         device_name: Target device hostname
-        duration: Soak duration in seconds (default: 86400 = 24 hours)
+        duration: Soak duration in seconds
         community_churn_frequency: Seconds between community add/remove cycles
         postcheck_thresholds: Hardware capacity thresholds for postchecks
         exclude_bgp_mon: Exclude BGP MON peers from session / snapshot checks

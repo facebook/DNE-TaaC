@@ -124,6 +124,9 @@ _EBB_IBGP_ROUTE_ATTRIBUTES = RouteAttributePool(
         )
     ),
 )
+EBB_LONGEVITY_COMMUNITY_BASELINE_COUNT = len(
+    _EBB_IBGP_ROUTE_ATTRIBUTES.community_rows[0]
+)
 _EBB_ATTRIBUTE_CHURN_BASELINE = (
     ("med", 200),
     ("local_pref", 100),
@@ -981,6 +984,9 @@ __all__ = (
     "EBB_FULL_SCALE_PORT_MAP",
     "EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON",
     "EBB_FULL_SCALE_WITH_BGPMON",
+    "EBB_IBGP_V4_PREFIX_SET",
+    "EBB_IBGP_V6_PREFIX_SET",
+    "EBB_LONGEVITY_COMMUNITY_BASELINE_COUNT",
     "EBB_PARENT_NETWORKS",
     "EBB_PEER_GROUPS",
     "EBB_PREFIX_SETS",
@@ -988,7 +994,5 @@ __all__ = (
     "EBGP_V6_PEER_GROUP",
     "IBGP_V4_PEER_GROUP",
     "IBGP_V6_PEER_GROUP",
-    "EBB_IBGP_V4_PREFIX_SET",
-    "EBB_IBGP_V6_PREFIX_SET",
     "ebb_full_scale_topology",
 )
