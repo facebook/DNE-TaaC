@@ -1081,6 +1081,7 @@ class FbpkgPackageName(Enum):
     AGENT_CSCO = "neteng.fboss.wedge_agent_csco"
     BGP = "neteng.fboss.wedge_bgpd"
     QSFP_SERVICE = "neteng.fboss.qsfp_service"
+    QSFP_SERVICE_FIRMWARE = "neteng.fboss.qsfp_service.firmware"
     OPENR = "openr"
     FSDB = "neteng.fboss.fsdb"
 
