@@ -16,7 +16,10 @@ regex ``--regex 'bgp_ug_repeated_peer_flaps'``).
 """
 
 from taac.abstractions.physical_inventory import PhysicalInventory
-from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
+from taac.constants import (  # oss-rewrite-touch
+    BgpPlusPlusProfile,
+    Gigabyte,
+)
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc6_bit_alloc_group_stab_under_flap import (
     create_bgp_ug_repeated_peer_flaps_group_stable_playbook,
 )

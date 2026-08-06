@@ -30,7 +30,10 @@ from neteng.netcastle.logger import get_root_logger
 from taac.internal.driver.fboss_switch_internal import (
     FbossSwitchInternal,
 )
-from neteng.test_infra.dne.taac.libs.fpf.fpf_bgp_rib import _count_matching, get_bgp_rib
+from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
+    _count_matching,
+    get_bgp_rib,
+)
 from taac.libs.fpf.fpf_fsdb_ribmap import get_fsdb_rib_map
 from taac.libs.fpf.fpf_hrt_bulk_tracker import (
     count_failed_per_lane,

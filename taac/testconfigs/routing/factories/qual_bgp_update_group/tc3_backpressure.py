@@ -14,7 +14,10 @@ from taac.abstractions.topologies.ug_backpressure import (
     UG_BACKPRESSURE_PEER_GROUPS,
     UG_BACKPRESSURE_PORT_MAP,
 )
-from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
+from taac.constants import (  # oss-rewrite-touch
+    BgpPlusPlusProfile,
+    Gigabyte,
+)
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc3_backpressure import (
     create_bgp_ug_backpressure_all_peers_block_down_recover_playbook,
     create_bgp_ug_backpressure_fast_peers_not_held_back_playbook,

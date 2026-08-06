@@ -26,7 +26,9 @@ from taac.testconfigs.fboss_solution_tests.speed_flip_test_configs import (
     build_subsume_churn_test_config,
     Circuit,
 )
-from neteng.test_infra.dne.taac.testconfigs.npi import w800_constants as w800
+from taac.testconfigs.npi import (  # oss-rewrite-touch
+    w800_constants as w800,
+)
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_npi_cpu_queue_test_config,
 )

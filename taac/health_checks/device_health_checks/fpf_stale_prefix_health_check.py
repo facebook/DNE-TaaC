@@ -9,7 +9,10 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
-from neteng.test_infra.dne.taac.libs.fpf.fpf_bgp_rib import _count_matching, get_bgp_rib
+from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
+    _count_matching,
+    get_bgp_rib,
+)
 from taac.health_check.health_check import types as hc_types
 
 
