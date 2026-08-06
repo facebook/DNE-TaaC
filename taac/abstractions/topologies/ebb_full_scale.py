@@ -291,15 +291,38 @@ def _explicit_next_hop(start: str, count: int, parent_network: str) -> NextHopIn
     )
 
 
+def _sequential_explicit_next_hop(
+    start: str,
+    count: int,
+    parent_network: str,
+) -> NextHopIntent:
+    first = ipaddress.ip_address(start)
+    return NextHopIntent(
+        mode=NextHopMode.EXPLICIT,
+        distribution=NextHopDistribution.PER_PEER,
+        explicit_source=ExplicitNextHopSource(
+            addresses=tuple(
+                str(type(first)(int(first) + 2 * index)) for index in range(count)
+            ),
+            parent_network=parent_network,
+        ),
+        description="legacy per-peer EBB next hops",
+    )
+
+
 def _ebb_next_hop(
     device_group: DeviceGroupSpec,
     openr_mode: OpenRMode,
 ) -> NextHopIntent:
-    """Build route next hops aligned with the standalone OpenR KV injection."""
+    """Build next hops aligned with legacy route assets and OpenR injection."""
     openr_enabled = openr_mode is OpenRMode.STANDALONE
     if device_group.name == "dg_ebgp_v4":
         return (
-            _formulaic_next_hop("10.163.28.11", "10.163.28.0/23")
+            _sequential_explicit_next_hop(
+                "10.163.28.11",
+                device_group.peer_count,
+                "10.163.28.0/23",
+            )
             if openr_enabled
             else _explicit_next_hop(
                 "10.163.28.10",
@@ -309,7 +332,11 @@ def _ebb_next_hop(
         )
     if device_group.name == "dg_ebgp_v6":
         return (
-            _formulaic_next_hop("2401:db00:e50d:11:8::11", "2401:db00:e50d:11:8::/80")
+            _sequential_explicit_next_hop(
+                "2401:db00:e50d:11:8::11",
+                device_group.peer_count,
+                "2401:db00:e50d:11:8::/80",
+            )
             if openr_enabled
             else _explicit_next_hop(
                 "2401:db00:e50d:11:8::10",
