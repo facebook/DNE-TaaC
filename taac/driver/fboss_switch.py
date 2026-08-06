@@ -70,6 +70,10 @@ if not TAAC_OSS:
     from fboss.fb_thrift_clients import FbossAgentClient
 
 
+from neteng.fboss.bgp.client.canonical_rib_py3 import (
+    get_rib_entries,
+    get_rib_subprefixes,
+)
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService
@@ -1613,7 +1617,7 @@ class FbossSwitch(AbstractSwitch):
         Count number of ipv6 entries in BGP RIB
         """
         async with await self._get_bgp_client() as bgp_client:
-            rib_entries = await bgp_client.getRibEntries(TBgpAfi.AFI_IPV6)
+            rib_entries = await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV6)
         return len(rib_entries)
 
     async def async_get_bgp_rib_entries(self) -> List[TRibEntry]:
@@ -1623,8 +1627,8 @@ class FbossSwitch(AbstractSwitch):
         """
         rib_entries = []
         async with await self._get_bgp_client() as bgp_client:
-            rib_entries.extend(await bgp_client.getRibEntries(TBgpAfi.AFI_IPV6))
-            rib_entries.extend(await bgp_client.getRibEntries(TBgpAfi.AFI_IPV4))
+            rib_entries.extend(await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV6))
+            rib_entries.extend(await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV4))
         return rib_entries
 
     @async_retryable(retries=3, sleep_time=1, exceptions=(Exception,))
@@ -3835,11 +3839,9 @@ class FbossSwitch(AbstractSwitch):
         This structure is seen in `fbgf bgp_thrift.thrift` - https://fburl.com/phabricator/0gxnbgz
         """
         async with await self._get_bgp_client() as bgp_client:
-            # pyre-fixme[58]: `+` is not supported for operand types
-            #  `Sequence[TRibEntry]` and `Sequence[TRibEntry]`.
-            rib_entries = await bgp_client.getRibEntries(
-                TBgpAfi.AFI_IPV6
-            ) + await bgp_client.getRibEntries(TBgpAfi.AFI_IPV4)
+            rib_entries = await get_rib_entries(
+                bgp_client, TBgpAfi.AFI_IPV6
+            ) + await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV4)
         rib_table_count = len(rib_entries)
         self.logger.info(f"Rib table count: {rib_table_count}")
         return rib_table_count
@@ -4372,7 +4374,9 @@ class FbossSwitch(AbstractSwitch):
                 dt = datetime.datetime.fromtimestamp(timestamp)
 
                 try:
-                    total_sub_prefixes = await bgp_client.getRibSubprefixes(prefix)
+                    total_sub_prefixes = await get_rib_subprefixes(
+                        bgp_client, prefix
+                    )
                     results[str(dt)] = len(total_sub_prefixes)
                 except Exception as e:
                     # Log or handle the exception
