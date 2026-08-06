@@ -5379,10 +5379,15 @@ def create_start_stop_bgp_peers_step(
     Args:
         peer_regex: Regex matching the IXIA BGP peer (group) name.
         start: True to start sessions, False to stop them.
-        start_idx: Index of the first session in the range (inclusive).
-        end_idx: Index of the last session in the range (inclusive).
+        start_idx: Index of the first session in the range (inclusive,
+            1-based). Must be >= 1; see the index-base note below.
+        end_idx: Index of the last session in the range (inclusive, 1-based).
         description: Custom description for the step. If omitted, a
             default is generated counting the affected sessions.
+
+    Index base: IXIA ``SessionIndices`` are 1-based. Passing a 0-based range
+    wedges the IxNetwork session (later 504 Gateway Timeout on
+    ``operations/select``), so ``start_bgp_peers`` rejects ``start_idx < 1``.
 
     Returns:
         A `Step` with `step_name=StepName.INVOKE_IXIA_API_STEP` calling

@@ -3399,10 +3399,39 @@ class Ixia:
         session_start_idx: int = 1,
         session_end_idx: t.Optional[int] = None,
     ) -> None:
+        """Start or stop a contiguous range of emulated BGP sessions.
+
+        Args:
+            start: True to Start the selected sessions, False to Stop them.
+            regex: Regex matched against the BGP peer ``.Name``. Mutually
+                exclusive with the vport/device-group selectors.
+            ignore_case: Case-insensitive name match.
+            vport_idx: Vport index, when selecting by position instead of name.
+            device_group_idx: Device-group index within ``vport_idx``.
+            session_start_idx: First session index (inclusive, 1-based).
+            session_end_idx: Last session index (inclusive, 1-based). Defaults
+                per peer to that peer's own ``Count``.
+
+        IXIA ``SessionIndices`` are 1-based; index 0 is not a valid session.
+        A range starting at 0 leaves an IxNetwork-internal lock unreleased,
+        stalling the session so that the next substantial operation against it
+        hangs to the 600s gateway ceiling and returns 504 Gateway Timeout. It
+        is rejected here rather than sent to the chassis.
+        """
         assert regex or (
             device_group_idx and vport_idx,
             "Either regex or vport_idx and network_group_idx is required",
         )
+        if session_start_idx < 1:
+            raise ValueError(
+                "start_bgp_peers: session_start_idx must be >= 1 (IXIA "
+                f"SessionIndices are 1-based), got {session_start_idx}"
+            )
+        if session_end_idx is not None and session_end_idx < session_start_idx:
+            raise ValueError(
+                "start_bgp_peers: session_end_idx must be >= session_start_idx, "
+                f"got [{session_start_idx}:{session_end_idx}]"
+            )
         if regex:
             bgp_peers = self.find_bgp_peers(regex, ignore_case)
         else:
@@ -4230,6 +4259,20 @@ class Ixia:
         session_start_idx: int = 1,
         session_end_idx: t.Optional[int] = None,
     ) -> None:
+        # IXIA SessionIndices are 1-based; a range starting at 0 wedges the
+        # IxNetwork session (later 504 on operations/select). A range starting
+        # below 1, and an inverted one, are both rejected before the mutation
+        # rather than sent. Mirrors start_bgp_peers, which has the detail.
+        if session_start_idx < 1:
+            raise ValueError(
+                "configure_bgp_prefixes: session_start_idx must be >= 1 (IXIA "
+                f"SessionIndices are 1-based), got {session_start_idx}"
+            )
+        if session_end_idx is not None and session_end_idx < session_start_idx:
+            raise ValueError(
+                "configure_bgp_prefixes: session_end_idx must be >= "
+                f"session_start_idx, got [{session_start_idx}:{session_end_idx}]"
+            )
         prefix_pools = self.get_prefix_pools_by_regexes(
             network_group_regex, prefix_pool_regex
         )
@@ -4240,14 +4283,21 @@ class Ixia:
                     if isinstance(prefix_pool, Ipv4PrefixPools)
                     else prefix_pool.BgpV6IPRouteProperty.find()
                 )[0]
-                session_end_idx = session_end_idx or bgp_ip_route_property.Count
+                # Resolved per pool: assigning back to session_end_idx would
+                # pin every later pool to the first pool's Count, silently
+                # applying the wrong range across a multi-pool regex match.
+                pool_end_idx = (
+                    session_end_idx
+                    if session_end_idx is not None
+                    else bgp_ip_route_property.Count
+                )
                 if enable:
                     bgp_ip_route_property.Start(
-                        SessionIndices=f"{session_start_idx}-{session_end_idx}"
+                        SessionIndices=f"{session_start_idx}-{pool_end_idx}"
                     )
                 else:
                     bgp_ip_route_property.Stop(
-                        SessionIndices=f"{session_start_idx}-{session_end_idx}"
+                        SessionIndices=f"{session_start_idx}-{pool_end_idx}"
                     )
             if prefix_count:
                 prefix_pool.NumberOfAddresses = prefix_count
