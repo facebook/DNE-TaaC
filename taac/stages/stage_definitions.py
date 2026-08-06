@@ -2244,7 +2244,6 @@ def create_bgp_ebb_attribute_churn_stage(
     *,
     hostname: str,
     prefix_pool_names: dict[str, dict[str, str]],
-    observer_peer_parent_prefix: str,
     peer_count_per_plane: int,
     selected_block_count_per_afi: int,
     samples_per_block: int,
@@ -2266,7 +2265,6 @@ def create_bgp_ebb_attribute_churn_stage(
             create_bgp_attribute_churn_step(
                 hostname=hostname,
                 prefix_pool_names=prefix_pool_names,
-                observer_peer_parent_prefix=observer_peer_parent_prefix,
                 peer_count_per_plane=peer_count_per_plane,
                 selected_block_count_per_afi=selected_block_count_per_afi,
                 samples_per_block=samples_per_block,
@@ -2431,7 +2429,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     prefix_start_index: int = 0,
     prefix_end_index: int | None = 96,
     tcp_dump_capture_interface_ebgp: str | None = None,
-    tcp_dump_capture_interface_bgpmon: str = "any",
+    tcp_dump_capture_interface_bgpmon: str | None = None,
     tcp_dump_capture_interface_ibgp: str | None = None,
     soak_time_seconds: int = 1800,
 ) -> Stage:
@@ -2451,11 +2449,10 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     10. Soak for specified duration after undrain
     11. Save IXIA packet capture for undrain phase
     12. Verify undrain convergence inline (max 5 minutes)
-    13. Generate consolidated convergence report from all PCAP files
+    13. Generate consolidated convergence report from the core PCAP files
 
-    Captures on up to 3 interfaces:
+    Captures on two core interfaces:
     - bgp_fauu_drain_ebgp.pcap / bgp_fauu_undrain_ebgp.pcap (eBGP SOURCE - where attributes originate)
-    - bgp_fauu_drain_bgpmon.pcap / bgp_fauu_undrain_bgpmon.pcap (BGP monitor - observer)
     - bgp_fauu_drain_ibgp.pcap / bgp_fauu_undrain_ibgp.pcap (iBGP RECEIVER - attribute propagation)
 
     Args:
@@ -2464,7 +2461,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         prefix_start_index: Starting index within the network group multiplier.
         prefix_end_index: Ending index within the network group multiplier. If None, use all.
         tcp_dump_capture_interface_ebgp: Optional interface for IXIA packet capture on eBGP (SOURCE) (default: None)
-        tcp_dump_capture_interface_bgpmon: Interface for IXIA packet capture on BGP monitor (default: "any")
+        tcp_dump_capture_interface_bgpmon: Legacy auxiliary interface input; accepted but intentionally excluded from the stage
         tcp_dump_capture_interface_ibgp: Optional interface for IXIA packet capture on iBGP (RECEIVER) (default: None)
         soak_time_seconds: Soak duration after drain and undrain (default: 1800 / 30 minutes)
 
@@ -2479,7 +2476,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             prefix_start_index=0,
             prefix_end_index=96,
             tcp_dump_capture_interface_ebgp="Ethernet1",  # eBGP interface (SOURCE)
-            tcp_dump_capture_interface_bgpmon="Ethernet2",  # BGP monitor interface
             tcp_dump_capture_interface_ibgp="Ethernet3",  # iBGP interface (RECEIVER)
         )
     """
@@ -2496,17 +2492,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 description="Start IXIA packet capture for drain phase (eBGP SOURCE)",
             ),
         )
-
-    # Step 2: Start IXIA packet capture on BGP monitor interface for drain
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="start",
-            capture_id="fauu_drain_bgpmon",
-            description="Start IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
 
     # Step 3: Start IXIA packet capture on iBGP interface for drain (if provided)
     if tcp_dump_capture_interface_ibgp:
@@ -2568,17 +2553,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 9: Stop IXIA packet capture for drain phase (BGP monitor)
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="stop",
-            capture_id="fauu_drain_bgpmon",
-            description="Stop IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
-
     # Step 10: Stop IXIA packet capture for drain phase (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2604,18 +2578,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 12: Save IXIA packet capture for drain phase (BGP monitor)
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="save",
-            pcap_filename="bgp_fauu_drain_bgpmon.pcap",
-            capture_id="fauu_drain_bgpmon",
-            description="Save IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
-
     # Step 13: Save IXIA packet capture for drain phase (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2640,16 +2602,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 15: Verify drain convergence (BGP monitor)
-    steps.append(
-        create_drain_convergence_verification_step(
-            pcap_filename="bgp_fauu_drain_bgpmon.pcap",
-            max_convergence_time_seconds=300,  # 5 minutes for FAUU
-            expected_as_path_asn=None,  # No AS_PATH check since we removed prepend
-            phase="drain (BGP monitor)",
-        ),
-    )
-
     # Step 16: Verify drain convergence (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2662,7 +2614,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 16A: Generate consolidated drain convergence report
-    pcap_files_drain = {"bgp_monitor": "bgp_fauu_drain_bgpmon.pcap"}
+    pcap_files_drain: dict[str, str] = {}
     if tcp_dump_capture_interface_ebgp:
         pcap_files_drain["ebgp_source"] = "bgp_fauu_drain_ebgp.pcap"
     if tcp_dump_capture_interface_ibgp:
@@ -2687,17 +2639,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 description="Start IXIA packet capture for undrain phase (eBGP SOURCE)",
             ),
         )
-
-    # Step 18: Start new IXIA packet capture for undrain phase (BGP monitor)
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="start",
-            capture_id="fauu_undrain_bgpmon",
-            description="Start IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
 
     # Step 19: Start new IXIA packet capture for undrain phase (iBGP)
     if tcp_dump_capture_interface_ibgp:
@@ -2761,17 +2702,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 25: Stop IXIA packet capture for undrain phase (BGP monitor)
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="stop",
-            capture_id="fauu_undrain_bgpmon",
-            description="Stop IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
-
     # Step 26: Stop IXIA packet capture for undrain phase (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2797,18 +2727,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 28: Save IXIA packet capture for undrain phase (BGP monitor)
-    steps.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="save",
-            pcap_filename="bgp_fauu_undrain_bgpmon.pcap",
-            capture_id="fauu_undrain_bgpmon",
-            description="Save IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
-
     # Step 29: Save IXIA packet capture for undrain phase (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2833,16 +2751,6 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 31: Verify undrain convergence (BGP monitor)
-    steps.append(
-        create_drain_convergence_verification_step(
-            pcap_filename="bgp_fauu_undrain_bgpmon.pcap",
-            max_convergence_time_seconds=300,  # 5 minutes for FAUU
-            expected_as_path_asn=65099,  # Should NOT contain 65099 after undrain
-            phase="undrain (BGP monitor)",
-        ),
-    )
-
     # Step 32: Verify undrain convergence (iBGP)
     if tcp_dump_capture_interface_ibgp:
         steps.append(
@@ -2855,7 +2763,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 32A: Generate consolidated undrain convergence report
-    pcap_files_undrain = {"bgp_monitor": "bgp_fauu_undrain_bgpmon.pcap"}
+    pcap_files_undrain: dict[str, str] = {}
     if tcp_dump_capture_interface_ebgp:
         pcap_files_undrain["ebgp_source"] = "bgp_fauu_undrain_ebgp.pcap"
     if tcp_dump_capture_interface_ibgp:
@@ -2877,7 +2785,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     prefix_pool_regex: str = ".*IBGP.*PLANE_1.*",
     prefix_start_index: int = 0,
     prefix_end_index: int | None = None,
-    tcp_dump_capture_interface_bgpmon: str = "any",
+    tcp_dump_capture_interface_bgpmon: str | None = None,
     tcp_dump_capture_interface_ebgp: str | None = None,
     tcp_dump_capture_interface_ibgp: str | None = None,
     soak_time_seconds: int = 1800,
@@ -2889,22 +2797,20 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     changing BGP attributes on prefixes for a specific plane. The test captures
     BGP updates during both drain and undrain phases to verify proper convergence.
 
-    Three-interface capture strategy:
+    Capture strategy for the two core interfaces:
     1. iBGP Plane interface (SOURCE): Captures drain updates being SENT with modified attributes
        - This is the reference point for when drain actually starts/completes
-    2. BGP Monitor interface: Captures when BGP++ receives and processes the updates
-       - Measures BGP++ processing latency (source → BGP monitor)
-    3. eBGP interface (FA-UU): Captures when best-path changes are advertised externally
+    2. eBGP interface (FA-UU): Captures when best-path changes are advertised externally
        - Measures end-to-end convergence including path selection
 
     The test sequence:
-    1. Start IXIA packet capture on all three interfaces for drain phase
+    1. Start IXIA packet capture on all configured interfaces for drain phase
     2. Drain: Change origin attribute to incomplete for specified prefixes
     3. Drain: Prepend AS_PATH with ASN 65099
     4. Soak for specified duration after drain
-    5. Save IXIA packet captures for drain phase (all interfaces)
+    5. Save IXIA packet captures for drain phase (all configured interfaces)
     6. Verify drain convergence inline (max 10 minutes)
-    7. Start IXIA packet capture on all three interfaces for undrain phase
+    7. Start IXIA packet capture on all configured interfaces for undrain phase
     8. Undrain: Revert origin attribute for specified prefixes
     9. Undrain: Remove AS_PATH prepend
     10. Soak for specified duration after undrain
@@ -2916,7 +2822,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         prefix_pool_regex: Regex pattern to match prefix pool names (default: ".*IBGP.*PLANE_1.*")
         prefix_start_index: Starting index within the network group multiplier (default: 0)
         prefix_end_index: Ending index within the network group multiplier. If None, use all (default: None)
-        tcp_dump_capture_interface_bgpmon: Interface for IXIA packet capture on BGP monitor (default: "any")
+        tcp_dump_capture_interface_bgpmon: Legacy auxiliary interface input; accepted but intentionally excluded from the stage
         tcp_dump_capture_interface_ebgp: Optional interface for IXIA packet capture on eBGP (FA-UU) to verify best-path changes (default: None)
         tcp_dump_capture_interface_ibgp: Optional interface for IXIA packet capture on iBGP Plane (SOURCE) to measure drain start/end reference point (default: None)
         soak_time_seconds: Soak duration after drain and undrain operations (default: 1800 / 30 minutes)
@@ -2935,23 +2841,11 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         stage = create_plane_drain_undrain_stage(
             device_name="rsw1ag.p001.f01.atn1",
             prefix_pool_regex=".*IBGP.*PLANE_1.*",
-            tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,   # BGP monitor
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,        # eBGP to FA-UU
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,        # iBGP Plane (source)
         )
     """
     steps_pre_drain = []
-
-    # Step 1: Start IXIA packet capture on BGP monitor interface for drain
-    steps_pre_drain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="start",
-            capture_id="plane_drain_bgpmon",
-            description="Start IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
 
     # Step 1B: Start IXIA packet capture on eBGP interface for drain (if provided)
     if tcp_dump_capture_interface_ebgp:
@@ -3033,17 +2927,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         ),
     )
 
-    # Step 4: Stop IXIA packet capture for drain phase (BGP monitor)
-    steps_after_drain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="stop",
-            capture_id="plane_drain_bgpmon",
-            description="Stop IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
-
     # Step 4B: Stop IXIA packet capture for drain phase (eBGP)
     if tcp_dump_capture_interface_ebgp:
         steps_after_drain.append(
@@ -3067,18 +2950,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
                 description="Stop IXIA packet capture for drain phase (iBGP Plane - SOURCE)",
             ),
         )
-
-    # Step 5: Save IXIA packet capture for drain phase (BGP monitor)
-    steps_after_drain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="save",
-            pcap_filename="bgp_plane_drain_bgpmon.pcap",
-            capture_id="plane_drain_bgpmon",
-            description="Save IXIA packet capture for drain phase (BGP monitor)",
-        ),
-    )
 
     # Step 5B: Save IXIA packet capture for drain phase (eBGP)
     if tcp_dump_capture_interface_ebgp:
@@ -3117,16 +2988,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 5B: Verify drain convergence (BGP monitor)
-    steps_after_drain.append(
-        create_drain_convergence_verification_step(
-            pcap_filename="bgp_plane_drain_bgpmon.pcap",
-            max_convergence_time_seconds=600,  # 10 minutes for Plane
-            expected_as_path_asn=None,  # No AS_PATH check since we removed prepend
-            phase="drain (BGP monitor)",
-        ),
-    )
-
     # Step 5C: Verify drain convergence (eBGP to FA-UU)
     if tcp_dump_capture_interface_ebgp:
         steps_after_drain.append(
@@ -3139,7 +3000,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 5D: Generate consolidated drain convergence report
-    pcap_files_drain = {"bgp_monitor": "bgp_plane_drain_bgpmon.pcap"}
+    pcap_files_drain: dict[str, str] = {}
     if tcp_dump_capture_interface_ibgp:
         pcap_files_drain["ibgp_source"] = "bgp_plane_drain_ibgp_source.pcap"
     if tcp_dump_capture_interface_ebgp:
@@ -3162,17 +3023,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     # ===== UNDRAIN SECTION =====
     # Stage 4: Pre-undrain setup (packet captures)
     steps_pre_undrain = []
-
-    # Step 6: Start new IXIA packet capture for undrain phase (BGP monitor)
-    steps_pre_undrain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="start",
-            capture_id="plane_undrain_bgpmon",
-            description="Start IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
 
     # Step 6B: Start new IXIA packet capture for undrain phase (eBGP)
     if tcp_dump_capture_interface_ebgp:
@@ -3258,17 +3108,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         ),
     )
 
-    # Step 9: Stop IXIA packet capture for undrain phase (BGP monitor)
-    steps_post_undrain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="stop",
-            capture_id="plane_undrain_bgpmon",
-            description="Stop IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
-
     # Step 9B: Stop IXIA packet capture for undrain phase (eBGP)
     if tcp_dump_capture_interface_ebgp:
         steps_post_undrain.append(
@@ -3292,18 +3131,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
                 description="Stop IXIA packet capture for undrain phase (iBGP Plane - SOURCE)",
             ),
         )
-
-    # Step 10: Save IXIA packet capture for undrain phase (BGP monitor)
-    steps_post_undrain.append(
-        create_ixia_packet_capture_step(
-            device_name=device_name,
-            interface=tcp_dump_capture_interface_bgpmon,
-            mode="save",
-            pcap_filename="bgp_plane_undrain_bgpmon.pcap",
-            capture_id="plane_undrain_bgpmon",
-            description="Save IXIA packet capture for undrain phase (BGP monitor)",
-        ),
-    )
 
     # Step 10B: Save IXIA packet capture for undrain phase (eBGP)
     if tcp_dump_capture_interface_ebgp:
@@ -3342,16 +3169,6 @@ def create_plane_drain_undrain_stage(  # noqa: C901
             ),
         )
 
-    # Step 10B: Verify undrain convergence (BGP monitor)
-    steps_post_undrain.append(
-        create_drain_convergence_verification_step(
-            pcap_filename="bgp_plane_undrain_bgpmon.pcap",
-            max_convergence_time_seconds=600,  # 10 minutes for Plane
-            expected_as_path_asn=65099,  # Should NOT contain 65099 after undrain
-            phase="undrain (BGP monitor)",
-        ),
-    )
-
     # Step 10C: Verify undrain convergence (eBGP to FA-UU)
     if tcp_dump_capture_interface_ebgp:
         steps_post_undrain.append(
@@ -3364,7 +3181,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 10D: Generate consolidated undrain convergence report
-    pcap_files_undrain = {"bgp_monitor": "bgp_plane_undrain_bgpmon.pcap"}
+    pcap_files_undrain: dict[str, str] = {}
     if tcp_dump_capture_interface_ibgp:
         pcap_files_undrain["ibgp_source"] = "bgp_plane_undrain_ibgp_source.pcap"
     if tcp_dump_capture_interface_ebgp:

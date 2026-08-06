@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_attribute_churn_playbook,
+    get_bgp_ebb_fauu_drain_undrain_playbook,
+    get_bgp_ebb_plane_drain_undrain_playbook,
 )
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
@@ -67,7 +69,6 @@ def _locked_step_kwargs() -> dict:
     return {
         "hostname": "dut.example.com",
         "prefix_pool_names": EXPECTED_POOLS,
-        "observer_peer_parent_prefix": "2401:db00:e50d:22:a::/80",
         "peer_count_per_plane": 62,
         "selected_block_count_per_afi": 7,
         "samples_per_block": 2,
@@ -95,7 +96,138 @@ def _step_payload(step: taac_types.Step) -> dict:
     return json.loads(json_params)
 
 
+def _sequential_steps(playbook: taac_types.Playbook) -> list[taac_types.Step]:
+    return [step for stage in playbook.stages for step in stage.steps]
+
+
+def _serialized_stage_steps(playbook: taac_types.Playbook) -> str:
+    serialized: list[str] = []
+    for step in _sequential_steps(playbook):
+        if step.description:
+            serialized.append(step.description)
+        if step.input_json:
+            serialized.append(step.input_json)
+        if step.step_params and step.step_params.json_params:
+            serialized.append(step.step_params.json_params)
+    return "\n".join(serialized)
+
+
+def _convergence_contract(
+    playbook: taac_types.Playbook,
+) -> tuple[set[str], dict[str, set[str]]]:
+    verifier_pcaps: set[str] = set()
+    report_interfaces: dict[str, set[str]] = {}
+    for step in _sequential_steps(playbook):
+        if step.name != taac_types.StepName.CUSTOM_STEP or step.step_params is None:
+            continue
+        payload = _step_payload(step)
+        if payload.get("custom_step_name") == "verify_drain_convergence":
+            verifier_pcaps.add(payload["pcap_filename"])
+        if (
+            payload.get("custom_step_name")
+            == "generate_consolidated_convergence_report"
+        ):
+            report_interfaces[payload["phase"]] = set(payload["pcap_files"])
+    return verifier_pcaps, report_interfaces
+
+
 class BgpAttributeChurnPlaybookTest(unittest.TestCase):
+    def test_drain_playbooks_keep_core_verdicts_without_auxiliary_monitor(
+        self,
+    ) -> None:
+        playbooks = (
+            (
+                get_bgp_ebb_fauu_drain_undrain_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    tcp_dump_capture_interface_ebgp="Ethernet1",
+                    tcp_dump_capture_interface_ibgp="Ethernet2",
+                ),
+                {
+                    "bgp_fauu_drain_ebgp.pcap",
+                    "bgp_fauu_drain_ibgp.pcap",
+                    "bgp_fauu_undrain_ebgp.pcap",
+                    "bgp_fauu_undrain_ibgp.pcap",
+                },
+                {"ebgp_source", "ibgp_receiver"},
+            ),
+            (
+                get_bgp_ebb_plane_drain_undrain_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    tcp_dump_capture_interface_ebgp="Ethernet1",
+                    tcp_dump_capture_interface_ibgp="Ethernet2",
+                ),
+                {
+                    "bgp_plane_drain_ebgp.pcap",
+                    "bgp_plane_drain_ibgp_source.pcap",
+                    "bgp_plane_undrain_ebgp.pcap",
+                    "bgp_plane_undrain_ibgp_source.pcap",
+                },
+                {"ebgp", "ibgp_source"},
+            ),
+        )
+
+        for playbook, expected_pcaps, expected_interfaces in playbooks:
+            with self.subTest(playbook=playbook.name):
+                verifier_pcaps, report_interfaces = _convergence_contract(playbook)
+                self.assertEqual(expected_pcaps, verifier_pcaps)
+                self.assertEqual(
+                    {"drain": expected_interfaces, "undrain": expected_interfaces},
+                    report_interfaces,
+                )
+                self.assertNotIn("bgpmon", _serialized_stage_steps(playbook).casefold())
+
+    def test_drain_playbooks_ignore_auxiliary_monitor_when_available(self) -> None:
+        playbooks = (
+            (
+                get_bgp_ebb_fauu_drain_undrain_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    tcp_dump_capture_interface_ebgp="Ethernet1",
+                    tcp_dump_capture_interface_ibgp="Ethernet2",
+                    tcp_dump_capture_interface_bgpmon="Ethernet3",
+                ),
+                {
+                    "bgp_fauu_drain_ebgp.pcap",
+                    "bgp_fauu_drain_ibgp.pcap",
+                    "bgp_fauu_undrain_ebgp.pcap",
+                    "bgp_fauu_undrain_ibgp.pcap",
+                },
+                {"ebgp_source", "ibgp_receiver"},
+            ),
+            (
+                get_bgp_ebb_plane_drain_undrain_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    tcp_dump_capture_interface_ebgp="Ethernet1",
+                    tcp_dump_capture_interface_ibgp="Ethernet2",
+                    tcp_dump_capture_interface_bgpmon="Ethernet3",
+                ),
+                {
+                    "bgp_plane_drain_ebgp.pcap",
+                    "bgp_plane_drain_ibgp_source.pcap",
+                    "bgp_plane_undrain_ebgp.pcap",
+                    "bgp_plane_undrain_ibgp_source.pcap",
+                },
+                {"ebgp", "ibgp_source"},
+            ),
+        )
+
+        for playbook, expected_pcaps, expected_interfaces in playbooks:
+            with self.subTest(playbook=playbook.name):
+                verifier_pcaps, report_interfaces = _convergence_contract(playbook)
+                self.assertEqual(expected_pcaps, verifier_pcaps)
+                self.assertEqual(
+                    {"drain": expected_interfaces, "undrain": expected_interfaces},
+                    report_interfaces,
+                )
+                self.assertNotIn("bgpmon", _serialized_stage_steps(playbook).casefold())
+
     def test_step_factory_serializes_locked_contract(self) -> None:
         step = create_bgp_attribute_churn_step(**_locked_step_kwargs())
 
@@ -163,7 +295,6 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v6="IBGP_V6",
             peergroup_ibgp_v4="IBGP_V4",
             total_session_count=1272,
-            observer_peer_parent_prefix="2401:db00:e50d:22:a::/80",
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         )
 
@@ -224,16 +355,15 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 peergroup_ibgp_v6="IBGP_V6",
                 peergroup_ibgp_v4="IBGP_V4",
                 total_session_count=1272,
-                observer_peer_parent_prefix="2401:db00:e50d:22:a::/80",
                 profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
             )
 
         self.assertTrue(get_checks.call_args.args[1].check_ibgp_pnh)
 
-    def test_full_scale_factory_passes_bgp_mon_parent(self) -> None:
+    def test_full_scale_factory_does_not_require_observer_parent(self) -> None:
         inventory = MagicMock()
         inventory.device_name = "dut.example.com"
-        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"], ["Ethernet3"]]
+        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
         inventory.openr_standalone_link.owner = "owner"
         inventory.openr_standalone_link.helper = "helper"
         inventory.openr_standalone_link.kv_link.return_value = {}
@@ -251,10 +381,55 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 selected_tc7_playbooks=set(),
             )
 
-        self.assertEqual(
-            "2401:db00:e50d:22:a::/80",
-            playbook_factory.call_args.kwargs["observer_peer_parent_prefix"],
+        self.assertNotIn(
+            "observer_peer_parent_prefix", playbook_factory.call_args.kwargs
         )
+
+    def test_full_scale_factory_wires_optional_bgp_monitor_port(self) -> None:
+        fauu_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.get_bgp_ebb_fauu_drain_undrain_playbook"
+        )
+        plane_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.get_bgp_ebb_plane_drain_undrain_playbook"
+        )
+
+        for ports in (
+            ["Ethernet1", "Ethernet2"],
+            ["Ethernet1", "Ethernet2", "Ethernet3"],
+        ):
+            inventory = MagicMock()
+            inventory.device_name = "dut.example.com"
+            inventory.ixia_ports = [[port] for port in ports]
+            inventory.openr_standalone_link.owner = "owner"
+            inventory.openr_standalone_link.helper = "helper"
+            inventory.openr_standalone_link.kv_link.return_value = {}
+            with (
+                self.subTest(port_count=len(ports)),
+                patch(fauu_target, return_value=MagicMock()) as fauu_factory,
+                patch(plane_target, return_value=MagicMock()) as plane_factory,
+            ):
+                _get_bgp_ebb_full_scale_playbooks(
+                    inventory,
+                    BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                    bound=MagicMock(),
+                    selected_tc7_playbooks=set(),
+                )
+
+                for factory in (fauu_factory, plane_factory):
+                    self.assertEqual(
+                        "Ethernet1",
+                        factory.call_args.kwargs["tcp_dump_capture_interface_ebgp"],
+                    )
+                    self.assertEqual(
+                        "Ethernet2",
+                        factory.call_args.kwargs["tcp_dump_capture_interface_ibgp"],
+                    )
+                    self.assertNotIn(
+                        "tcp_dump_capture_interface_bgpmon",
+                        factory.call_args.kwargs,
+                    )
 
     def test_full_scale_factory_enables_churn_baseline_only_when_selected(
         self,
@@ -314,6 +489,49 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 "STANDALONE",
                 topology_factory.call_args.kwargs["openr_mode"].name,
             )
+
+    def test_full_scale_factory_makes_auxiliary_observers_inventory_optional(
+        self,
+    ) -> None:
+        compiled = SimpleNamespace(
+            endpoints=[],
+            host_os_type_map={},
+            setup_tasks=[],
+            teardown_tasks=[],
+            basic_port_configs=[],
+        )
+        topology_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.ebb_full_scale_topology"
+        )
+        playbooks_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale._get_bgp_ebb_full_scale_playbooks"
+        )
+
+        for port_count, expected_auxiliary_observers in ((2, False), (3, True)):
+            inventory = MagicMock()
+            inventory.ixia_ports = [
+                [f"Ethernet{index}", f"1/{index}"] for index in range(1, port_count + 1)
+            ]
+            available = [taac_types.Playbook(name="bgp_ebb_attribute_churn_playbook")]
+            with (
+                self.subTest(port_count=port_count),
+                patch(playbooks_target, return_value=available),
+                patch(topology_target) as topology_factory,
+            ):
+                topology_factory.return_value.bind_to_inventory.return_value.compile.return_value = compiled
+                create_bgp_ebb_full_scale_test_config(
+                    inventory,
+                    name="test",
+                    playbooks_selected=["bgp_ebb_attribute_churn_playbook"],
+                    profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                )
+
+                self.assertEqual(
+                    expected_auxiliary_observers,
+                    topology_factory.call_args.kwargs["include_bgpmon"],
+                )
 
     def test_full_scale_factory_rejects_invalid_playbook_selections(self) -> None:
         inventory = MagicMock()

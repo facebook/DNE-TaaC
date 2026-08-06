@@ -357,7 +357,6 @@ def get_bgp_ebb_attribute_churn_playbook(
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
     total_session_count: int,
-    observer_peer_parent_prefix: str,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
@@ -368,8 +367,8 @@ def get_bgp_ebb_attribute_churn_playbook(
     Drives deterministic local-pref, MED, origin, and AS-path transitions on
     seven dual-stack plane-1 peer blocks. Planes 2-4 provide controlled
     comparison paths. Every transition is verified through IXIA readback,
-    exact DUT RIB state, session counters, and the BGP-MON observer before all
-    mutated state is restored.
+    exact DUT RIB state, and selected source-session receive counters before
+    all mutated state is restored.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -378,8 +377,6 @@ def get_bgp_ebb_attribute_churn_playbook(
         peergroup_ibgp_v4: IBGP IPv4 peer-group name on the DUT.
         total_session_count: Total expected established BGP sessions used
             by precheck/postcheck health checks.
-        observer_peer_parent_prefix: Parent prefix selecting the BGP-MON
-            sessions used as the outbound UPDATE observer.
         profile: `BgpPlusPlusProfile` enum value; enables the IBGP-PNH
             precheck when the OpenR variant is selected.
 
@@ -431,7 +428,6 @@ def get_bgp_ebb_attribute_churn_playbook(
                         "4": "PREFIX_POOL_IBGP_IPV6_PLANE_4_REMOTE_EB",
                     },
                 },
-                observer_peer_parent_prefix=observer_peer_parent_prefix,
                 peer_count_per_plane=62,
                 selected_block_count_per_afi=7,
                 samples_per_block=2,
@@ -958,7 +954,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
     prefix_pool_regex: str = ".*EBGP.*",
     prefix_end_index: int = 96,
     tcp_dump_capture_interface_ebgp: str = "",
-    tcp_dump_capture_interface_bgpmon: str = "",
+    tcp_dump_capture_interface_bgpmon: str | None = None,
     tcp_dump_capture_interface_ibgp: str = "",
     soak_time_seconds: int = 300,
     exclude_bgp_mon: bool = True,
@@ -984,7 +980,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
         prefix_pool_regex: Regex to match eBGP prefix pools (default: ".*EBGP.*")
         prefix_end_index: Ending prefix index (default: 96)
         tcp_dump_capture_interface_ebgp: eBGP interface for PCAP capture
-        tcp_dump_capture_interface_bgpmon: BGP MON interface for PCAP capture
+        tcp_dump_capture_interface_bgpmon: Legacy auxiliary interface input; accepted but ignored
         tcp_dump_capture_interface_ibgp: iBGP interface for PCAP capture
         soak_time_seconds: Soak time in seconds (default: 300)
 
@@ -1019,7 +1015,6 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
                 prefix_pool_regex=prefix_pool_regex,
                 prefix_end_index=prefix_end_index,
                 tcp_dump_capture_interface_ebgp=tcp_dump_capture_interface_ebgp,
-                tcp_dump_capture_interface_bgpmon=tcp_dump_capture_interface_bgpmon,
                 tcp_dump_capture_interface_ibgp=tcp_dump_capture_interface_ibgp,
                 soak_time_seconds=soak_time_seconds,
             )
@@ -1038,7 +1033,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
     memory_terminate_on_error: bool = False,
     prefix_pool_regex: str = ".*IBGP.*PLANE_.*",
     tcp_dump_capture_interface_ebgp: str = "",
-    tcp_dump_capture_interface_bgpmon: str = "",
+    tcp_dump_capture_interface_bgpmon: str | None = None,
     tcp_dump_capture_interface_ibgp: str = "",
     soak_time_seconds: int = 1200,
     exclude_bgp_mon: bool = True,
@@ -1063,7 +1058,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
         memory_terminate_on_error: Terminate test on memory threshold breach
         prefix_pool_regex: Regex to match iBGP prefix pools (default: ".*IBGP.*PLANE_.*")
         tcp_dump_capture_interface_ebgp: eBGP interface for PCAP capture
-        tcp_dump_capture_interface_bgpmon: BGP MON interface for PCAP capture
+        tcp_dump_capture_interface_bgpmon: Legacy auxiliary interface input; accepted but ignored
         tcp_dump_capture_interface_ibgp: iBGP interface for PCAP capture
         soak_time_seconds: Soak time in seconds (default: 1200)
 
@@ -1096,7 +1091,6 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
             *create_plane_drain_undrain_stage(
                 device_name=device_name,
                 prefix_pool_regex=prefix_pool_regex,
-                tcp_dump_capture_interface_bgpmon=tcp_dump_capture_interface_bgpmon,
                 tcp_dump_capture_interface_ebgp=tcp_dump_capture_interface_ebgp,
                 tcp_dump_capture_interface_ibgp=tcp_dump_capture_interface_ibgp,
                 soak_time_seconds=soak_time_seconds,

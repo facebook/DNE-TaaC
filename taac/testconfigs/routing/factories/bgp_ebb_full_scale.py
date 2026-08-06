@@ -63,7 +63,6 @@ from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
     build_bgp_ug_2_7_playbook,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    BGP_MON_PEER_COUNT,
     DEFAULT_PROFILE,
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
@@ -599,16 +598,14 @@ def _openr_helper_kv_link(physical_inventory: PhysicalInventory) -> dict:
 
 
 def _expected_established_session_count() -> int:
-    total_session_count = (
+    return (
         EBGP_PEER_COUNT_V6
         + EBGP_PEER_COUNT_V4
-        + BGP_MON_PEER_COUNT
         + IBGP_PEER_SCALE_PER_PLANE * 4
         + IBGP_PEER_SCALE_PER_PLANE * 4
         + IBGP_PEER_SCALE_PER_PLANE * 4
         + IBGP_PEER_SCALE_PER_PLANE * 4
     )
-    return total_session_count - BGP_MON_PEER_COUNT
 
 
 def _get_bgp_ebb_full_scale_playbooks(
@@ -647,7 +644,6 @@ def _get_bgp_ebb_full_scale_playbooks(
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
-    ixia_interface_mimic_bgp_mon = physical_inventory.ixia_ports[2][0]
     session_count = _expected_established_session_count()
     expected_peer_identity = build_expected_peer_identity()
     local_link = _openr_owner_kv_link(physical_inventory)
@@ -659,7 +655,6 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
-            observer_peer_parent_prefix=f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80",
             profile=profile,
         ),
         get_bgp_ebb_route_storm_playbook(
@@ -702,7 +697,6 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
-            tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
         ),
         get_bgp_ebb_plane_drain_undrain_playbook(
@@ -712,7 +706,6 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
-            tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
         ),
         get_bgp_ebb_longevity_playbook(
@@ -833,9 +826,12 @@ def create_bgp_ebb_full_scale_test_config(
     runtime_prefix_sets, runtime_advertisements = _tc7_runtime_intents(
         selected_tc7_playbooks
     )
+    include_auxiliary_observers = (
+        not selected_tc7_playbooks and len(physical_inventory.ixia_ports) > 2
+    )
     topology = ebb_full_scale_topology(
         openr_mode=openr_mode,
-        include_bgpmon=not selected_tc7_playbooks,
+        include_bgpmon=include_auxiliary_observers,
         ebgp_graceful_restart=not selected_tc7_playbooks,
         enable_attribute_churn=enable_attribute_churn,
         ebgp_prefix_count=(
@@ -850,9 +846,9 @@ def create_bgp_ebb_full_scale_test_config(
     bound = topology.bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=(
-            EBB_FULL_SCALE_PORT_MAP
-            if selected_tc7_playbooks
-            else EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON
+            EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON
+            if include_auxiliary_observers
+            else EBB_FULL_SCALE_PORT_MAP
         ),
         parent_networks=EBB_PARENT_NETWORKS,
         peer_groups=EBB_PEER_GROUPS,

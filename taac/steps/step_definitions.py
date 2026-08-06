@@ -935,7 +935,6 @@ def create_bgp_attribute_churn_step(
     *,
     hostname: str,
     prefix_pool_names: t.Mapping[str, t.Mapping[str, str]],
-    observer_peer_parent_prefix: str,
     peer_count_per_plane: int,
     selected_block_count_per_afi: int,
     samples_per_block: int,
@@ -968,8 +967,8 @@ def create_bgp_attribute_churn_step(
         "quiet_window_seconds": quiet_window_seconds,
         "max_lookup_concurrency": max_lookup_concurrency,
     }
-    if not hostname or not observer_peer_parent_prefix:
-        raise ValueError("hostname and observer_peer_parent_prefix must be non-empty")
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
     _validate_bgp_attribute_churn_geometry(numeric_params)
 
     params: t.Dict[str, t.Any] = {
@@ -978,7 +977,6 @@ def create_bgp_attribute_churn_step(
         "prefix_pool_names": _normalize_bgp_attribute_churn_pool_names(
             prefix_pool_names
         ),
-        "observer_peer_parent_prefix": observer_peer_parent_prefix,
         "attribute_matrix": _normalize_bgp_attribute_churn_matrix(attribute_matrix),
         **numeric_params,
     }
