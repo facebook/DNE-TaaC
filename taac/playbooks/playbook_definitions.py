@@ -12273,6 +12273,349 @@ def create_ecmp_only_members_playbooks(
 
 
 # =============================================================================
+# KO3 ECMP-ONLY: cyclic-disruption longevity playbooks.
+#
+# Two hour-long stability tests that share one skeleton — baseline, then a
+# repeated disruption cycle, then a stabilization window — and differ only in
+# what the cycle body does:
+#
+#   1. NDP flap        — port of IcePack/TH6 `case_21_ndp_flap` (TC#230).
+#                        Toggles the `NDP_SUPPORTING_NEXTHOP` device group.
+#   2. Cold start      — port of IcePack/TH6 `case_23_cold_start_cycle`
+#                        (TC#232). Stops and restarts ALL IXIA protocols, so
+#                        the DUT withdraws and re-programs 100% of its ECMP
+#                        group + member resources every cycle.
+#
+# Both source cases are written against "DLB resources"; on a platform with no
+# DLB that maps to the FIRST set of ECMP group resources — the Main in-budget
+# class (`MAIN_ECMP_RESOURCE` device group / `MAIN_ECMP_PREFIXES` network
+# group), CSV-shaped to fill the GROUP table. Rouge (the second/overflow set)
+# is disabled throughout both.
+#
+# NOTE: the cold-start cycle is IXIA-protocol cold start, NOT the DUT agent
+# coldboot that the `*_Coldboot` playbooks above perform. Those restart the
+# agent with a cold-boot file while IXIA protocols stay up; this one leaves the
+# agent alone and takes the control plane away underneath it. Different
+# disruption vector, different failure mode.
+#
+# Differences from the IcePack cases, and why:
+#   - IcePack runs ONE cycle inside a 120 s window. These run continuously for
+#     an hour, which is what the KO3 cases ask for.
+#   - IcePack grades loss over a post-recovery window. Here the loss window is
+#     bounded to the disruption loop (clear-stats step before the loop +
+#     `clear_traffic_stats=False` on the postcheck), so the threshold grades
+#     stability DURING the disruption rather than after it.
+# =============================================================================
+def create_ecmp_only_longevity_playbooks(
+    source_interface: str,
+    asic: EcmpAsic = EcmpAsic.G200,
+    main_csv_path: str | None = None,
+    main_pool_name: str = "MAIN_ECMP_PREFIXES",
+    ndp_flap_iterations: int = 60,
+    ndp_down_seconds: int = 30,
+    ndp_up_seconds: int = 30,
+    ndp_loss_threshold: str = "5.0",
+    cold_start_iterations: int = 13,
+    protocol_stop_settle_seconds: int = 30,
+    protocol_down_seconds: int = 120,
+    protocol_restart_settle_seconds: int = 120,
+    cold_start_loss_margin_pct: float = 10.0,
+    stabilization_seconds: int = 300,
+) -> list[Playbook]:
+    """KO3 ECMP-ONLY cyclic-disruption longevity playbooks (2 playbooks).
+
+    ``main_csv_path`` is the GROUP-table CSV (768 groups @ ~17-18 width),
+    injected into ``main_pool_name`` before traffic starts, exactly as the
+    Group/Member utilization playbooks do. Rouge stays disabled, so both
+    playbooks run against a full in-budget ECMP group table only.
+
+    **NDP flap** — ``ndp_flap_iterations`` cycles of (disable NDP device group,
+    hold ``ndp_down_seconds``, re-enable, hold ``ndp_up_seconds``). Defaults
+    give 60 flaps on a 1-minute period = one hour.
+
+    **Cold start** — ``cold_start_iterations`` cycles of (StopAllProtocols,
+    hold ``protocol_down_seconds``, StartAllProtocols, settle
+    ``protocol_restart_settle_seconds``). Defaults give 13 cycles of
+    30 + 120 + 120 = 270 s ~= 58.5 min.
+
+    Loss thresholds are graded over the disruption loop, so they must account
+    for the outage each test deliberately creates:
+
+    - ``ndp_loss_threshold`` defaults to the IcePack precedent (5.0%), but that
+      number was set for a SINGLE 30 s flap. If the FBOSS NDP cache does not
+      survive the down window, loss becomes duty-cycle-dominated — re-tune
+      after the first KO3 hardware run.
+    - The cold-start threshold is DERIVED, not guessed: protocols are down for
+      a known fraction of the loop, so the floor is arithmetic. The threshold
+      is that floor plus ``cold_start_loss_margin_pct``, which catches a device
+      that stops recovering (loss climbs toward 100%) without failing on the
+      designed outage.
+    """
+    profile = ECMP_RESOURCE_PROFILES[asic]
+    main_traffic = f"{source_interface.upper().replace('/', '_')}_TO_MAIN_ECMP_TRAFFIC"
+    rouge_traffic = f"{source_interface.upper().replace('/', '_')}_TO_ROUGE_TRAFFIC"
+
+    # The NDP pool is sized from the profile, so the recovery floor is too.
+    # 90% of the pool tolerates a few stragglers still re-resolving when the
+    # postcheck samples, without letting a wholesale failure to recover pass.
+    ndp_entry_floor = int(profile.ndp_pool_multiplier * 0.9)
+
+    # Cold-start loss floor: routes are withdrawn for the stop-settle plus the
+    # down hold of every cycle, measured against the whole graded window (the
+    # loop plus the trailing stabilization, which is the clean tail).
+    cold_start_down_total = cold_start_iterations * (
+        protocol_stop_settle_seconds + protocol_down_seconds
+    )
+    cold_start_window = (
+        cold_start_iterations
+        * (
+            protocol_stop_settle_seconds
+            + protocol_down_seconds
+            + protocol_restart_settle_seconds
+        )
+        + stabilization_seconds
+    )
+    cold_start_loss_threshold = (
+        f"{100.0 * cold_start_down_total / cold_start_window + cold_start_loss_margin_pct:.1f}"
+    )
+
+    def _packet_loss(main_loss: str):
+        # clear_traffic_stats=False on purpose: the check reads counters
+        # accumulated since the last clear, and the pre-loop clear-stats step
+        # pins that origin to the start of the disruption loop. Passing True
+        # here would clear at postcheck time and — because the check's
+        # "traffic running long enough" guard compares against the hours-old
+        # traffic start time — grade a near-empty post-recovery window instead.
+        return create_ixia_packet_loss_check(
+            clear_traffic_stats=False,
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=[main_traffic],
+                    str_value=main_loss,
+                    metric=hc_types.PacketLossMetric.PERCENTAGE,
+                ),
+                hc_types.PacketLossThreshold(
+                    names=[rouge_traffic],
+                    str_value="100",
+                    metric=hc_types.PacketLossMetric.PERCENTAGE,
+                ),
+            ],
+        )
+
+    def _postchecks(main_loss: str):
+        return [
+            create_systemctl_active_state_check(
+                services=[
+                    hc_types.Service.WEDGE_AGENT,
+                    hc_types.Service.BGPD,
+                    hc_types.Service.QSFP_SERVICE,
+                    hc_types.Service.FSDB,
+                    hc_types.Service.FBOSS_SW_AGENT,
+                ]
+            ),
+            # Member check fails on `>= max`, so pass max + 1.
+            create_ecmp_group_and_member_count_check(
+                ecmp_group_count=profile.max_ecmp_groups,
+                ecmp_member_count=profile.max_ecmp_members + 1,
+            ),
+            # The assertion neither source case wired up: the NDP table has
+            # actually re-resolved after the last cycle. Threshold is
+            # (upper, lower).
+            create_l2_entry_threshold_check(
+                ndp_entry_upper_lower_threshold=(NDP_SOFT_LIMIT, ndp_entry_floor),
+            ),
+            create_cpu_utilization_check(
+                threshold=400.0, start_time_jq_var="test_case_start_time"
+            ),
+            create_service_restart_check(
+                services=SERVICES_TO_MONITOR_DURING_AGENT_RESTART
+            ),
+            create_memory_utilization_check(
+                threshold=5 * (1024**3),
+                threshold_by_service={
+                    "bgpd": 4.5 * (1024**3),
+                    "fsdb": 5 * (1024**3),
+                    "qsfp_service": 2 * (1024**3),
+                    "fboss_sw_agent": 9 * (1024**3),
+                },
+                start_time_jq_var="test_case_start_time",
+            ),
+            create_unclean_exit_check(),
+            _packet_loss(main_loss),
+        ]
+
+    def _configure_steps():
+        steps = [
+            create_ixia_api_step(
+                api_name="toggle_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
+                    "enable": False,
+                },
+                description="Disable Rouge overflow group for longevity testing",
+            )
+        ]
+        if main_csv_path:
+            steps.append(
+                create_ixia_api_step(
+                    api_name="apply_pool_mutations",
+                    args_dict={"pool_csvs": [[main_csv_path, main_pool_name]]},
+                    description=f"Inject Group CSV into {main_pool_name}",
+                )
+            )
+        return steps
+
+    def _longevity_playbook(
+        name: str,
+        description: str,
+        cycle_stage_id: str,
+        cycle_steps: list,
+        iterations: int,
+        main_loss: str,
+    ):
+        return Playbook(
+            name=name,
+            description=description,
+            setup_steps=_configure_steps(),
+            stages=[
+                create_steps_stage(
+                    stage_id="pre_disruption_baseline",
+                    steps=[
+                        create_longevity_step(
+                            duration=60, description="Wait for BGP convergence"
+                        ),
+                        create_ixia_api_step(
+                            api_name="start_traffic",
+                            args_dict={},
+                            description="Start traffic after BGP convergence",
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Pre-disruption steady-state baseline",
+                        ),
+                        # Pins the origin of the postcheck's cumulative loss
+                        # window to the start of the disruption loop. Unlike
+                        # the packet-loss check, this clears counters WITHOUT
+                        # stopping traffic.
+                        create_clear_traffic_stats_step(),
+                    ],
+                ),
+                create_steps_stage(
+                    stage_id=cycle_stage_id,
+                    iteration=iterations,
+                    steps=cycle_steps,
+                ),
+                create_steps_stage(
+                    stage_id="post_disruption_stabilization",
+                    steps=[
+                        create_longevity_step(
+                            duration=stabilization_seconds,
+                            description="Post-disruption re-resolve and FIB rebuild",
+                        )
+                    ],
+                ),
+            ],
+            postchecks=_postchecks(main_loss),
+        )
+
+    def _ndp_toggle_step(enable: bool):
+        # Driven through create_ixia_api_step rather than
+        # create_ixia_device_group_toggle_step because the wrapper does not
+        # expose `sleep_time_before_applying_change`. That knob defaults to 30 s
+        # and delays the chassis apply (not the post-change settle), so leaving
+        # it would burn the whole 1-minute flap period on two dead waits.
+        # require_match turns a regex that selects nothing into a hard failure
+        # instead of a silent no-op that would run the loop against nothing.
+        return create_ixia_api_step(
+            api_name="toggle_device_groups",
+            args_dict={
+                "device_group_name_regex": "NDP_SUPPORTING_NEXTHOP",
+                "enable": enable,
+                "sleep_time_before_applying_change": 0,
+                "require_match": True,
+            },
+            description=(
+                f"{'Re-enable' if enable else 'Disable'} NDP-supporting "
+                "next-hop device group"
+            ),
+        )
+
+    def _cold_start_cycle_steps():
+        # `stop_protocols`/`start_protocols` (base Ixia) rather than
+        # `stop_all_protocols`/`start_all_protocols` (TaacIxia): the latter
+        # catch and downgrade chassis errors to a log warning, which across
+        # `cold_start_iterations` cycles would silently turn a failed stop into
+        # a no-op cycle that still passes. The base pair raises and carries the
+        # inband-recovery retry wrapper. `sleep_timer` is the settle that makes
+        # the stop real — StopAllProtocols returns before protocol state has
+        # fully left the started state.
+        return [
+            create_ixia_api_step(
+                api_name="stop_protocols",
+                args_dict={"sleep_timer": protocol_stop_settle_seconds},
+                description="Cold start: stop all IXIA protocols",
+            ),
+            create_longevity_step(
+                duration=protocol_down_seconds,
+                description=(
+                    "Protocols down — DUT peers IDLE, 100% of ECMP groups "
+                    "and members unprogrammed"
+                ),
+            ),
+            create_ixia_api_step(
+                api_name="start_protocols",
+                args_dict={},
+                description="Cold start: start all IXIA protocols",
+            ),
+            create_longevity_step(
+                duration=protocol_restart_settle_seconds,
+                description=(
+                    "BGP re-establish and full ECMP group + member re-program"
+                ),
+            ),
+        ]
+
+    return [
+        _longevity_playbook(
+            name="Full_Utilization_ECMP_ONLY_NDP_Flap_Longevity",
+            description=(
+                "ECMP-ONLY: flap the NDP entries backing every Main ECMP member "
+                "continuously for one hour and validate the group table, the NDP "
+                "table and the data plane all stay stable"
+            ),
+            cycle_stage_id="ndp_flap_loop",
+            cycle_steps=[
+                _ndp_toggle_step(enable=False),
+                create_longevity_step(
+                    duration=ndp_down_seconds,
+                    description="NDP entries withdrawn",
+                ),
+                _ndp_toggle_step(enable=True),
+                create_longevity_step(
+                    duration=ndp_up_seconds,
+                    description="NDP re-resolve window",
+                ),
+            ],
+            iterations=ndp_flap_iterations,
+            main_loss=ndp_loss_threshold,
+        ),
+        _longevity_playbook(
+            name="Full_Utilization_ECMP_ONLY_Cold_Start_Longevity",
+            description=(
+                "ECMP-ONLY: subject the device to continuous cycles of "
+                "programming and unprogramming 100% of the ECMP group and "
+                "member resources at once, by stopping and restarting all IXIA "
+                "protocols for one hour"
+            ),
+            cycle_stage_id="cold_start_loop",
+            cycle_steps=_cold_start_cycle_steps(),
+            iterations=cold_start_iterations,
+            main_loss=cold_start_loss_threshold,
+        ),
+    ]
+
+
+# =============================================================================
 # SECTION 5: COOP PATCHER TASKS
 # =============================================================================
 
