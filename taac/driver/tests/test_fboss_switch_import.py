@@ -1,6 +1,18 @@
 # pyre-strict
 import importlib
+import os
 import unittest
+
+TAAC_OSS: bool = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+# ShipIt rewrites import *statements* on export
+# (neteng.test_infra.dne.taac. -> taac.) but not string literals, so the
+# module name importlib is handed has to be chosen at runtime.
+FBOSS_SWITCH_MODULE: str = (
+    "taac.driver.fboss_switch"
+    if TAAC_OSS
+    else "neteng.test_infra.dne.taac.driver.fboss_switch"
+)
 
 
 class FbossSwitchImportTest(unittest.TestCase):
@@ -19,7 +31,5 @@ class FbossSwitchImportTest(unittest.TestCase):
     """
 
     def test_import_fboss_switch(self) -> None:
-        module = importlib.import_module(
-            "neteng.test_infra.dne.taac.driver.fboss_switch"
-        )
+        module = importlib.import_module(FBOSS_SWITCH_MODULE)
         self.assertTrue(hasattr(module, "FbossSwitch"))

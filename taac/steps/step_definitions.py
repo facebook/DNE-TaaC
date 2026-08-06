@@ -19,16 +19,21 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 
+import paramiko
+
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 if not TAAC_OSS:
     from libfb.py.asyncio.await_utils import convert_to_async
 else:
+    import functools as _functools
 
     async def convert_to_async(fn, *args, **kwargs):  # type: ignore
-        """OSS stub - libfb's convert_to_async wraps a sync callable in a thread."""
-        raise NotImplementedError(
-            "convert_to_async requires Meta-internal libfb; not available in OSS mode."
+        """OSS replacement - run a sync callable in the default executor."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            _functools.partial(fn, *args, **kwargs),
         )
 
 
@@ -60,12 +65,9 @@ else:
 if not TAAC_OSS:
     from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
 else:
-
-    async def wait_for_ping_reachable(*args, **kwargs):  # type: ignore
-        """OSS stub - netcastle reachability helper isn't shipped."""
-        raise NotImplementedError(
-            "wait_for_ping_reachable requires Meta-internal netcastle; not available in OSS mode."
-        )
+    from taac.utils.oss_driver_utils import (
+        wait_for_ping_reachable,
+    )
 
 
 from taac.constants import (
@@ -195,11 +197,38 @@ if not TAAC_OSS:
     )
 else:
 
-    def run_bmc_cmd_hwcontrol(*args, **kwargs):  # type: ignore
-        """OSS stub - service_automation.fboss.remediations isn't shipped."""
-        raise NotImplementedError(
-            "run_bmc_cmd_hwcontrol requires Meta-internal service_automation; not shipped under OSS."
-        )
+    def run_bmc_cmd_hwcontrol(hostname: str, cmd: str) -> str:  # type: ignore
+        """OSS replacement - run a BMC command on the device's BMC via SSH.
+
+        BMC hostname is resolved in order:
+          1. TAAC_BMC_HOST env var (explicit override, e.g. "10.0.0.5")
+          2. {shortname}{TAAC_BMC_SUFFIX}.{domain} where TAAC_BMC_SUFFIX
+             defaults to "-oob" (e.g. "crow231" -> "crow231-oob")
+        """
+        from taac.utils.oss_driver_utils import ParamikoClient
+
+        bmc_hostname = os.environ.get("TAAC_BMC_HOST")
+        if not bmc_hostname:
+            suffix = os.environ.get("TAAC_BMC_SUFFIX", "-oob")
+            parts = hostname.split(".", maxsplit=1)
+            short = parts[0]
+            if not short.endswith(suffix):
+                short += suffix
+            bmc_hostname = f"{short}.{parts[1]}" if len(parts) > 1 else short
+
+        bmc_user = os.environ.get("TAAC_BMC_USER", "root")
+        bmc_password = os.environ.get("TAAC_BMC_PASSWORD", "0penBmc")
+
+        with ParamikoClient(
+            bmc_hostname, username=bmc_user, password=bmc_password
+        ) as client:
+            result = client.run(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"BMC command failed on {bmc_hostname}: {cmd!r} "
+                f"(rc={result.returncode}, stderr={result.stderr})"
+            )
+        return result.stdout
 
 
 from taac.health_check.health_check import types as hc_types
@@ -3854,6 +3883,7 @@ def create_interface_flap_step(
 def create_system_reboot_step(
     trigger: taac_types.SystemRebootTrigger,
     description: t.Optional[str] = None,
+    use_ipv6: bool = True,
 ) -> Step:
     """
     Create a step to reboot the system.
@@ -3861,14 +3891,17 @@ def create_system_reboot_step(
     Args:
         trigger: The reboot trigger type (FULL_SYSTEM_REBOOT, BMC_POWER_RESET, etc.)
         description: Custom description for the step
+        use_ipv6: Use IPv6 for post-reboot ping reachability check
 
     Returns:
         Step object for system reboot
     """
+    params_dict = {"use_ipv6": use_ipv6}
     return Step(
         name=StepName.SYSTEM_REBOOT_STEP,
         input_json=thrift_to_json(taac_types.SystemRebootInput(trigger=trigger)),
         description=description,
+        step_params=Params(json_params=json.dumps(params_dict)),
     )
 
 
@@ -9923,19 +9956,41 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
             and self.is_fboss
         ):
             wedge_power_reset = f"{_WEDGE_POWER_CMD} reset"
-            run_bmc_cmd_hwcontrol(self.device.name, wedge_power_reset)
-            self.logger.info(
-                f"Successfully initiated the system reboot via the BMC command: {wedge_power_reset}"
-            )
+            try:
+                run_bmc_cmd_hwcontrol(self.device.name, wedge_power_reset)
+                self.logger.info(
+                    f"Successfully initiated the system reboot via the BMC command: {wedge_power_reset}"
+                )
+            except (
+                EOFError,
+                OSError,
+                paramiko.SSHException,
+                RuntimeError,
+            ) as e:
+                self.logger.info(
+                    f"BMC command {wedge_power_reset!r} raised {type(e).__name__} "
+                    f"(expected post-reboot disconnect): {e}"
+                )
         elif (
             input.trigger == taac_types.SystemRebootTrigger.BMC_MICROSERVER_ONLY_RESET
             and self.is_fboss
         ):
             wedge_power_microserver_reset = f"{_WEDGE_POWER_CMD} reset -s"
-            run_bmc_cmd_hwcontrol(self.device.name, wedge_power_microserver_reset)
-            self.logger.info(
-                f"Successfully initiated the system reboot via the BMC command: {wedge_power_microserver_reset}"
-            )
+            try:
+                run_bmc_cmd_hwcontrol(self.device.name, wedge_power_microserver_reset)
+                self.logger.info(
+                    f"Successfully initiated the system reboot via the BMC command: {wedge_power_microserver_reset}"
+                )
+            except (
+                EOFError,
+                OSError,
+                paramiko.SSHException,
+                RuntimeError,
+            ) as e:
+                self.logger.info(
+                    f"BMC command {wedge_power_microserver_reset!r} raised {type(e).__name__} "
+                    f"(expected post-reboot disconnect): {e}"
+                )
         if sleep_time_after_reboot > 0:
             self.logger.info(
                 f"Waiting for {sleep_time_after_reboot} seconds after reboot"
@@ -9943,7 +9998,18 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
             await asyncio.sleep(sleep_time_after_reboot)
 
         self.logger.info(f"Waiting for {self.device.name} to be pingable...")
-        await convert_to_async(wait_for_ping_reachable, ssh_entity=self.device.name)
+        use_ipv6 = params.get("use_ipv6", True)
+        if TAAC_OSS:
+            # Only the OSS helper takes use_ipv6; netcastle's always pings v6.
+            # pyre resolves wait_for_ping_reachable to the netcastle binding
+            # above, so it cannot see the OSS signature on this branch.
+            await convert_to_async(
+                wait_for_ping_reachable,
+                ssh_entity=self.device.name,
+                use_ipv6=use_ipv6,  # pyre-ignore[28]
+            )
+        else:
+            await convert_to_async(wait_for_ping_reachable, ssh_entity=self.device.name)
         self.logger.info(
             f"{self.device.name} is pingable {time.time() - start_time} seconds after {input.trigger.name}"
         )

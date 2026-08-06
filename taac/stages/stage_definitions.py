@@ -3827,6 +3827,25 @@ def create_speed_flip_stage(
     )
 
 
+# Long flap/longevity stages can hold dozens of steps; joining every name
+# yields ids in the hundreds of characters that then show up verbatim in log
+# lines, summary headers, and snapshot checkpoint keys.
+_MAX_DERIVED_STAGE_ID_STEPS = 4
+
+
+def _derive_stage_id(steps: list[Step]) -> str:
+    """Derive a stage ID by concatenating step names (without ``_STEP`` suffix)."""
+    parts = []
+    for step in steps:
+        name = step.name.name if hasattr(step.name, "name") else str(step.name)
+        name = name.removesuffix("_STEP").lower()
+        parts.append(name)
+    if len(parts) > _MAX_DERIVED_STAGE_ID_STEPS:
+        remaining = len(parts) - _MAX_DERIVED_STAGE_ID_STEPS
+        parts = parts[:_MAX_DERIVED_STAGE_ID_STEPS] + [f"and_{remaining}_more"]
+    return "__".join(parts)
+
+
 def create_steps_stage(
     steps: list[Step] | None = None,
     iteration: int = 1,
@@ -3844,6 +3863,10 @@ def create_steps_stage(
 
     Either `steps` (sequential) or `concurrent_steps` (a list of
     ConcurrentStep objects) must be provided, but not both.
+
+    When ``stage_id`` is omitted a human-readable ID is derived
+    automatically from the step names (e.g.
+    ``"service_interruption__service_convergence"``).
     """
     if steps is None and concurrent_steps is None:
         raise ValueError(
@@ -3853,6 +3876,8 @@ def create_steps_stage(
         raise ValueError(
             "create_steps_stage requires exactly one of `steps` or `concurrent_steps`, not both"
         )
+    if stage_id is None and steps:
+        stage_id = _derive_stage_id(steps)
     kwargs: dict[str, Any] = {
         "id": stage_id,
         "iteration": iteration,

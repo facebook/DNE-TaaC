@@ -370,7 +370,7 @@ def run_in_thread(func: t.Callable, *args, **kwargs) -> threading.Thread:
             asyncio.run(func(*args, **kwargs))
 
         callable = wrapper
-    thread = threading.Thread(target=callable, args=args, kwargs=kwargs)
+    thread = threading.Thread(target=callable, args=args, kwargs=kwargs, daemon=True)
     thread.start()
     return thread
 

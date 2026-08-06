@@ -74,7 +74,7 @@ PTP_OFFSET_NS = "Offset [ns]"
 class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        Thread.__init__(self)
+        Thread.__init__(self, daemon=True)
         self.capturing: bool = False
         self.captured_stats = defaultdict(dict)
         self.captured_stats_traffic = defaultdict(dict)
@@ -1315,6 +1315,23 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             except Exception as e:
                 self.logger.warning(f"ng.Stop() failed: {e}")
         self.logger.info(f"[toggle_dlb_pool_enabled] {pool_name} → enabled={enabled}")
+
+    def configure_traffic_item(
+        self,
+        traffic_item_name: str,
+        line_rate: t.Optional[int] = None,
+        line_rate_type: t.Optional[ixia_types.RateType] = None,
+        frame_size_setting: t.Optional[ixia_types.FrameSize] = None,
+        qos_config: t.Optional[ixia_types.QoSConfig] = None,
+    ) -> None:
+        self.configure_traffic_items_on_the_fly(
+            traffic_item_name,
+            line_rate,
+            line_rate_type,
+            frame_size_setting,
+            qos_config,
+        )
+        self.apply_traffic()
 
     def prepare_traffic(self) -> None:
         self.regenerate_traffic_items()

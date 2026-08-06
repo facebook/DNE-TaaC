@@ -11,6 +11,7 @@
 # ~40 markers without meaningful safety gain.
 
 import logging
+import os
 import sys
 import types
 import unittest
@@ -22,11 +23,17 @@ from taac.libs.ixia_candidate import (
     select_ixia_candidates,
 )
 
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
 _TEST_CONFIGS_MODULE = "neteng.test_infra.dne.taac.test_configs"
 _test_configs = types.ModuleType(_TEST_CONFIGS_MODULE)
 _test_configs.get_test_config = lambda config: config
 sys.modules[_TEST_CONFIGS_MODULE] = _test_configs
 
+from taac.libs import (
+    test_setup_orchestrator as _test_setup_orchestrator,
+    traffic_generator as _traffic_generator,
+)
 from taac.libs.taac_runner import (
     _start_test_case_time_window,
     TaacRunner,
@@ -43,8 +50,31 @@ from taac.utils.oss_taac_constants import (
 from taac.test_as_a_config import types as taac_types
 
 
-_MODULE = "neteng.test_infra.dne.taac.libs.test_setup_orchestrator"
-_TRAFFIC_GENERATOR_MODULE = "neteng.test_infra.dne.taac.libs.traffic_generator"
+# ShipIt rewrites import statements (neteng.test_infra.dne.taac. -> taac.) but
+# not string literals, so a hardcoded dotted path would only be correct in one
+# of the two worlds. These two modules are same-layer imports this file already
+# holds, so read the name straight off the imported module — that is guaranteed
+# to be the module patch() must target.
+_MODULE = _test_setup_orchestrator.__name__
+_TRAFFIC_GENERATOR_MODULE = _traffic_generator.__name__
+
+# Selected by env rather than imported: internal/ is stripped by ShipIt, so an
+# import statement here would both break OSS and add a libs -> internal BUCK
+# edge that the OSS layering rules disallow.
+_INTERNAL_UTILS_MODULE = (
+    "taac.internal.internal_utils"
+    if TAAC_OSS
+    else "neteng.test_infra.dne.taac.internal.internal_utils"
+)
+
+if TAAC_OSS:
+    # Register a stub under the name test_setup_orchestrator's lazy import
+    # resolves to after export, so the internal teardown path stays patchable.
+    _internal_pkg = types.ModuleType("taac.internal")
+    _internal_utils_stub = types.ModuleType(_INTERNAL_UTILS_MODULE)
+    _internal_utils_stub.async_release_devices_in_basset = None
+    sys.modules.setdefault("taac.internal", _internal_pkg)
+    sys.modules.setdefault(_INTERNAL_UTILS_MODULE, _internal_utils_stub)
 
 
 def _endpoint(interface: str, ixia_port: str) -> taac_types.Endpoint:
@@ -482,8 +512,7 @@ class IxiaFallbackTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch(f"{_MODULE}.TAAC_OSS", False),
             patch(
-                "neteng.test_infra.dne.taac.internal.internal_utils."
-                "async_release_devices_in_basset",
+                f"{_INTERNAL_UTILS_MODULE}.async_release_devices_in_basset",
                 new=release,
             ),
         ):

@@ -3,7 +3,7 @@
 
 """TAAC ``snake`` (loopback) standalone TestConfig builders.
 
-This module assembles the ``SNAKE_TEST_CONFIGS`` list — a family of
+This module assembles the ``SNAKE_TEST_CONFIGS`` list -- a family of
 single-DUT ``TestConfig`` objects that loop physical ports of a Minipack3
 or Kodiak3 chassis back into themselves via fiber jumpers (a "snake"
 topology). Each ``SnakeConfig`` declares one source/destination port pair
@@ -46,7 +46,7 @@ def gen_basic_traffic_item_configs(
 
     Each generated ``BasicTrafficItemConfig`` runs from
     ``snake_config.source`` to ``snake_config.destination`` (both on the
-    same DUT — the "snake" loop) at ``line_rate`` percent line rate.
+    same DUT -- the "snake" loop) at ``line_rate`` percent line rate.
 
     Args:
         snake_configs: Loop topology entries; each contributes one
@@ -147,6 +147,7 @@ def gen_snake_test_config(
     include_benchmark: bool = False,
     benchmark_packet_sizes: t.Optional[t.List[int]] = None,
     benchmark_line_rate: int = 100,
+    use_ipv6_ping: bool = True,
 ) -> taac_types.TestConfig:
     """Build a single-DUT snake/loopback ``TestConfig``.
 
@@ -212,7 +213,7 @@ def gen_snake_test_config(
     )
 
     # Benchmark sweep: one extra FIXED-frame-size traffic item per packet size.
-    # They are configured but not started by the standard playbooks — each
+    # They are configured but not started by the standard playbooks -- each
     # benchmark playbook selects its own via `traffic_items_to_start`.
     benchmark_name_by_packet_size = None
     if include_benchmark:
@@ -233,7 +234,7 @@ def gen_snake_test_config(
     #  * precheck_packet_loss_clear_stats: clear IXIA stats first so the PRE-check
     #    measures STEADY-STATE loss (excludes the NDP/MAC startup transient).
     #    This is ONLY ever applied to the pre-check. The post-check is ALWAYS
-    #    clear_traffic_stats=False — clearing it would discard exactly the
+    #    clear_traffic_stats=False -- clearing it would discard exactly the
     #    test/disruption-window loss the post-check exists to catch.
     #  * packet_loss_sleep_time: seconds between stop_traffic and sampling stats
     #    (the in-flight drain window); a longer drain lets all in-flight frames
@@ -279,7 +280,7 @@ def gen_snake_test_config(
         for snake_config in snake_configs
     ]
 
-    return taac_types.TestConfig(
+    test_config = taac_types.TestConfig(
         name=name,
         basset_pool=basset_pool,
         snake_configs=snake_configs,
@@ -307,15 +308,17 @@ def gen_snake_test_config(
             common_postchecks=common_postchecks,
             manual_test_interfaces=manual_test_interfaces,
             benchmark_traffic_item_name_by_packet_size=benchmark_name_by_packet_size,
+            use_ipv6_ping=use_ipv6_ping,
         ),
         # Opt out of the two-tier IXIA topology cache (default-on per D107780401).
         # Snake tests do single-DUT loopback bring-up that exercises
         # `create_basic_setup` itself (per-loop SnakeConfig + PTP unicast
-        # endpoints) — caching the post-setup ixncfg would obscure regressions
+        # endpoints) -- caching the post-setup ixncfg would obscure regressions
         # in that very code path. Every snake run pays the cold cost on
         # purpose so any drift in topology assembly surfaces immediately.
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
     )
+    return test_config
 
 
 MINIPACK3_STANDALONE_TEST_CONFIG = gen_snake_test_config(
@@ -602,7 +605,7 @@ KODIAK3_STANDALONE_TEST_CONFIG_ZR4_800G = gen_snake_test_config(
 )
 
 
-# fboss159.99.ash6 — Minipack3 (montblanc) 800G DR4 gearbox serpentine snake
+# fboss159.99.ash6 -- Minipack3 (montblanc) 800G DR4 gearbox serpentine snake
 # (NPI T267419633): 2x400G DR4 optics per module driven through the gearbox (800G/module).
 # The on-box config is a SINGLE serpentine chain with exactly
 # two clean IXIA endpoints (verified via VLAN membership on /etc/coop/agent/current):
@@ -627,16 +630,16 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # 45% is the qualified lossless operating point for these DR4 gearbox optics at 400B
     # frames. Repeatable 0% loss requires all three of: the FIXED 400B frame (below),
     # isolating the dangling eth1/1/5 tap out of snake VLAN 2004 (configerator
-    # fboss159_99_ash6 fix — removes a flood sink), and a warmed snake (MACs learned so
+    # fboss159_99_ash6 fix -- removes a flood sink), and a warmed snake (MACs learned so
     # traffic is unicast, not flooded). With those in place, 45% is lossless; lower rates
     # do NOT help the residual loss (it was flood/convergence, not a congestion cap).
     line_rate=45,
-    # Pin a FIXED 400B frame — the qualified DR4-gearbox operating point. Without an
+    # Pin a FIXED 400B frame -- the qualified DR4-gearbox operating point. Without an
     # explicit setting, frame_size_settings=None lets IXIA fall back to a small
     # control-plane frame size (UseControlPlaneFrameSize=True), whose ~6x higher packet
     # rate at 45% line rate overruns the gearbox pipeline (which is pps-limited) and
     # tail-drops ~46% of frames as ingress discards distributed around the loop
-    # (Input Discards >> 0, Input Errors = 0 — congestion, not optics). Pinning 400B
+    # (Input Discards >> 0, Input Errors = 0 -- congestion, not optics). Pinning 400B
     # restores the lossless packet rate characterized in the June baseline.
     frame_size_settings=ixia_types.FrameSize(
         type=ixia_types.FrameSizeType.FIXED,
@@ -655,15 +658,15 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # in-flight frames fully drain on this 96-hop snake before the loss measurement.
     packet_loss_sleep_time=30,
     # Enabled: Phase 1 (test_one_min_longevity) + Phase 3 (link-event/lane re-sync) +
-    # Enabled: Phase 3 (link-event) + Phase 4 (service resilience) — "all non-longevity"
+    # Enabled: Phase 3 (link-event) + Phase 4 (service resilience) -- "all non-longevity"
     # that can run on this box. Skipped, with reason:
     #  * test_ten_min_longevity: ENABLED as a steady-state soak with the port-state
     #    collector (gen_snake_longevity_playbook collect_port_state=True). It polls every
-    #    port every 5s for 10 min and FAILS on any flap — surfacing the spontaneous
+    #    port every 5s for 10 min and FAILS on any flap -- surfacing the spontaneous
     #    ~60s gearbox link flaps (T283020514) instead of riding through them.
     #  * remaining longevity (1m/1h/72h): out of scope for this run.
     #  * fsdb restart/crash: fsdb is not deployed on this manually brought-up box (no
-    #    fsdb.service), so they time out on fsdb-thrift — an environment gap, not a bug.
+    #    fsdb.service), so they time out on fsdb-thrift -- an environment gap, not a bug.
     #  * transceiver/fiber removal: require physical optic/fiber manipulation at the rack.
     #  * system reboots (bmc/userver): run separately/last (heavy; box is hand-deployed).
     playbooks_to_skip=[

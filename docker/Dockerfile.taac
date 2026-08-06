@@ -120,6 +120,8 @@ RUN find /scratch/installed \
 # =====================================================================
 FROM ${BASE_IMAGE} AS runtime
 
+RUN dnf install -y iputils && dnf clean all
+
 COPY --from=builder /scratch/installed /scratch/installed
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/lib64/python3.12/site-packages /usr/local/lib64/python3.12/site-packages

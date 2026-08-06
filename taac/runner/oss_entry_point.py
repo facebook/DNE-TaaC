@@ -36,6 +36,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from taac.libs.taac_runner import TaacRunner
+from taac.oss_topology_info.circuit_info_loader import (
+    load_circuit_info,
+)
 from taac.runner.cli_parser import parse_args
 from taac.runner.oss_exception_classifier import (
     classify_exception,
@@ -51,15 +54,88 @@ from taac.runner.oss_test_executor import OSSTestExecutor
 from taac.runner.oss_test_result import OSSTestResult
 from taac.runner.oss_test_status import OSSTestStatus
 from taac.runner.result_formatter import OSSResultAggregator
+from taac.runner.testbed_topology import (
+    CircuitLink,
+    ConfigTopology,
+    LinkType,
+)
 from taac.test_as_a_config.thrift_types import Endpoint
 
 
-def load_test_config(config_path: str):
+def _classify_link(
+    a_host: str,
+    z_host: str,
+    z_platform: str,
+    dut_set: set,
+) -> LinkType:
+    if a_host.lower() == z_host.lower():
+        return LinkType.SNAKE
+    if z_platform and "ixia" in z_platform.lower():
+        return LinkType.TGEN
+    if a_host.lower() in dut_set and z_host.lower() in dut_set:
+        return LinkType.DUT
+    return LinkType.UNKNOWN
+
+
+def build_testbed_topology(duts: List[str]) -> ConfigTopology:
+    """Build a ConfigTopology from the circuit CSV for the given DUTs.
+
+    Reads from TAAC_CIRCUIT_INFO_PATH (set by --circuit-info-csv).
+    Each circuit row where a DUT is an endpoint becomes a
+    :class:`CircuitLink` classified by :class:`LinkType`.  When a DUT
+    appears only as the z_endpoint of a row (i.e. the CSV lists the
+    link in one direction only), a reversed link is synthesised so
+    port discovery is direction-independent.
+    """
+    all_circuits, _ = load_circuit_info()
+    dut_set = {d.lower() for d in duts}
+    seen: set[tuple[str, str, str, str]] = set()
+    links: list[CircuitLink] = []
+
+    def _add(local_host, local_port, remote_host, remote_port, link_type):
+        key = (local_host.lower(), local_port, remote_host.lower(), remote_port)
+        if key not in seen:
+            seen.add(key)
+            links.append(
+                CircuitLink(
+                    local_host=local_host,
+                    local_port=local_port,
+                    remote_host=remote_host,
+                    remote_port=remote_port,
+                    link_type=link_type,
+                )
+            )
+
+    for circuit in all_circuits:
+        a_host = circuit.a_endpoint.device.name
+        a_port = circuit.a_endpoint.name
+        z_host = circuit.z_endpoint.device.name
+        z_port = circuit.z_endpoint.name
+        a_platform = circuit.a_endpoint.device.desired_platform.os_type_name or ""
+        z_platform = circuit.z_endpoint.device.desired_platform.os_type_name or ""
+
+        if a_host.lower() in dut_set:
+            link_type = _classify_link(a_host, z_host, z_platform, dut_set)
+            _add(a_host, a_port, z_host, z_port, link_type)
+
+        if z_host.lower() in dut_set and z_host.lower() != a_host.lower():
+            link_type = _classify_link(z_host, a_host, a_platform, dut_set)
+            _add(z_host, z_port, a_host, a_port, link_type)
+
+    return ConfigTopology(links=tuple(links))
+
+
+def load_test_config(config_path: str, topology: Optional[ConfigTopology] = None):
     """
     Load a test configuration from a Python file.
 
+    If the config exports a callable (function), it is called with a
+    ``topology`` keyword argument so the config can use the pre-built
+    ConfigTopology instead of importing loaders directly.
+
     Args:
         config_path: Path to the Python test config file
+        topology: Optional ConfigTopology to pass to callable configs
 
     Returns:
         TestConfig object
@@ -118,7 +194,10 @@ def load_test_config(config_path: str):
             if hasattr(module, attr_name):
                 config = getattr(module, attr_name)
                 if callable(config) and not isinstance(config, _testconfig_classes):
-                    config = config()
+                    if getattr(config, "_accepts_topology", False):
+                        config = config(topology=topology)
+                    else:
+                        config = config()
                 return config
 
         # If no config found, raise error
@@ -210,11 +289,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     aggregator = OSSResultAggregator()
 
     try:
+        # Build testbed topology from circuit CSV so callable configs
+        # can receive it instead of importing loaders directly.
+        topology = build_testbed_topology(args.duts)
+        by_type = {}
+        for link in topology.links:
+            by_type.setdefault(link.link_type.value, []).append(
+                f"{link.local_host}:{link.local_port} -> {link.remote_host}:{link.remote_port}"
+            )
+        logger.info(f"Testbed topology: {dict(by_type)}")
+
         # Load all test configs
         configs = []
         for config_path in args.test_configs:
             logger.info(f"Loading test config from: {config_path}")
-            config = load_test_config(config_path)
+            config = load_test_config(config_path, topology=topology)
             configs.append((config_path, config))
 
         # Process each test config

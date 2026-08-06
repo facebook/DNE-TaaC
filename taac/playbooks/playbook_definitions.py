@@ -12606,6 +12606,7 @@ def gen_snake_playbooks(
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     benchmark_traffic_item_name_by_packet_size: t.Optional[t.Dict[int, str]] = None,
     benchmark_duration_s: int = SNAKE_BENCHMARK_DURATION_S,
+    use_ipv6_ping: bool = True,
 ) -> t.List[taac_types.Playbook]:
     _prechecks = common_prechecks or []
     _postchecks = common_postchecks or []
@@ -13119,6 +13120,7 @@ def gen_snake_playbooks(
                         steps=[
                             create_system_reboot_step(
                                 trigger=taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT,
+                                use_ipv6=use_ipv6_ping,
                             ),
                             create_service_convergence_step(
                                 services=[taac_types.Service.AGENT],
@@ -13143,6 +13145,7 @@ def gen_snake_playbooks(
                         steps=[
                             create_system_reboot_step(
                                 trigger=taac_types.SystemRebootTrigger.BMC_POWER_RESET,
+                                use_ipv6=use_ipv6_ping,
                             ),
                             create_service_convergence_step(
                                 services=[taac_types.Service.AGENT],
@@ -13167,6 +13170,7 @@ def gen_snake_playbooks(
                         steps=[
                             create_system_reboot_step(
                                 trigger=taac_types.SystemRebootTrigger.BMC_MICROSERVER_ONLY_RESET,
+                                use_ipv6=use_ipv6_ping,
                             ),
                             create_service_convergence_step(
                                 services=[taac_types.Service.AGENT],
