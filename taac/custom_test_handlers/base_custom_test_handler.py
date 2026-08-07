@@ -10,6 +10,15 @@ class BaseCustomTestHandler:
     # only run this handler if the test config has any of the following tags
     SUPPORTED_TAGS: t.List[str] = []
 
+    @classmethod
+    def should_run(cls, tags: t.List[str]) -> bool:
+        """Whether the runner should run this handler for a test config with
+        ``tags``. Defaults to tag-based opt-in; override to add conditions.
+        This is the only selector the runner consults, so a handler's own
+        conditions belong here rather than in the runner.
+        """
+        return any(tag in cls.SUPPORTED_TAGS for tag in tags)
+
     def __init__(
         self,
         test_topology: TestTopology,

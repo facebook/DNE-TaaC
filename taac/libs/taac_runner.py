@@ -56,21 +56,10 @@ from taac.ixia.abstract_traffic_generator import (
 )
 from taac.ixia.taac_ixia import TaacIxia
 
-if not TAAC_OSS:
-    from taac.libs.fpf.fpf_collector_registry import (
-        set_test_case_start_time,
-    )
-else:
-    # OSS stub - taac.libs.fpf.* pulls in neteng.netcastle / taac.internal
-    # via fpf_stress_checks and friends. FPF collector is for Meta-internal
-    # performance flows; the recorded start time is read only by FPF
-    # collectors, which aren't registered under OSS, so a no-op stub is
-    # safe and the call site simply has no observable effect.
-    def set_test_case_start_time(*args, **kwargs):  # type: ignore
-        """OSS stub - FPF collector isn't shipped."""
-        pass
-
-
+# taac.libs.collectors.registry is OSS-safe (no Meta-internal imports), so
+# the real setter is used in both modes. Internal callers get the same
+# function object re-exported from taac.libs.fpf.fpf_collector_registry.
+from taac.libs.collectors.registry import set_test_case_start_time
 from taac.libs.ixia_candidate import (
     IxiaCandidate,
     normalize_ixia_candidates,
@@ -362,7 +351,9 @@ class TaacRunner:
     ) -> t.List[t.Type[BaseCustomTestHandler]]:
         handlers = []
         for handler in CUSTOM_TEST_HANDLERS:
-            if any(tag in handler.SUPPORTED_TAGS for tag in tags):
+            # Each handler owns its own selection rule (default: tag-based
+            # opt-in via SUPPORTED_TAGS) — see BaseCustomTestHandler.should_run.
+            if handler.should_run(tags):
                 handlers.append(handler)
         self.logger.info(
             # pyrefly: ignore [missing-attribute]

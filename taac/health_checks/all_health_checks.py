@@ -59,6 +59,9 @@ from taac.health_checks.device_health_checks.clear_counters_health_check import 
 from taac.health_checks.device_health_checks.cpu_percentile_health_check import (
     CpuPercentileHealthCheck,
 )
+from taac.health_checks.device_health_checks.cpu_utilization_health_check import (
+    CpuUtilizationHealthCheck,
+)
 from taac.health_checks.device_health_checks.device_core_dumps_health_check import (
     DeviceCoreDumpsHealthCheck,
 )
@@ -85,6 +88,9 @@ from taac.health_checks.device_health_checks.lldp_health_check import (
 )
 from taac.health_checks.device_health_checks.log_parsing_health_check import (
     LogParsingHealthCheck,
+)
+from taac.health_checks.device_health_checks.memory_utilization_health_check import (
+    MemoryUtilizationHealthCheck,
 )
 from taac.health_checks.device_health_checks.oomd_kill_health_check import (
     OomdKillHealthCheck,
@@ -229,8 +235,8 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     PfcWdHealthCheck,
     CpuQueueHealthCheck,
     # UncleanExitHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
-    # CpuUtilizationHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
-    # MemoryUtilizationHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
+    CpuUtilizationHealthCheck,
+    MemoryUtilizationHealthCheck,
     BgpSessionEstablishedHealthCheck,
     BgpConvergenceHealthCheck,
     BgpGracefulRestartHealthCheck,

@@ -17,6 +17,7 @@ from taac.health_checks.constants import (
     FBOSS_CORE_DUMP_PATH,
     FBOSS_CRITICAL_CORE_DUMPS,
 )
+from taac.libs.collectors.registry import get_test_case_start_time
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
@@ -203,6 +204,32 @@ def format_timestamp(timestamp: t.Union[int, float, str]) -> str:
         Human-readable timestamp string in format "YYYY-MM-DD HH:MM:SS"
     """
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(timestamp)))
+
+
+def collector_window_start(
+    check_params: t.Dict[str, t.Any], window_end: float, lookback_sec: float = 900
+) -> float:
+    """Default start of a collector-backed check's query window.
+
+    Two per-iteration anchors exist and they disagree by the duration of
+    test-case setUp: ``check_params["start_time"]``, from
+    ``start_time_jq_var`` (the runner stamps that jq var *before*
+    ``async_test_case_setUp``), and the collector registry's test-case start
+    (stamped *after* it). Take whichever is later.
+
+    Today that is always the registry's, so this preserves the tighter
+    post-setUp window every current call site gets — all of them pass
+    ``start_time_jq_var="test_case_start_time"``. It matters for a future
+    call site anchoring to a mid-playbook moment (a daemon restart, a config
+    push): that stamp is later, so it wins and the check measures the interval
+    the author asked for instead of silently widening to the whole iteration.
+
+    Callers wanting an explicitly wider window pass ``window_start``, which
+    takes precedence over this entirely.
+    """
+    jq_start = check_params.get("start_time") or 0
+    anchor = max(float(jq_start), get_test_case_start_time())
+    return anchor if anchor else window_end - lookback_sec
 
 
 def generate_prefix_nh_list_map(

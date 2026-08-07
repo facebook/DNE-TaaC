@@ -6,6 +6,9 @@ import typing as t
 from taac.custom_test_handlers.base_custom_test_handler import (
     BaseCustomTestHandler,
 )
+from taac.custom_test_handlers.collectors_test_handler import (
+    CollectorsTestHandler,
+)
 from taac.custom_test_handlers.patcher_cleanup_handler import (
     PatcherCleanupHandler,
 )
@@ -15,6 +18,7 @@ TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 # pyre-ignore
 CUSTOM_TEST_HANDLERS: t.List[BaseCustomTestHandler] = [
     PatcherCleanupHandler,
+    CollectorsTestHandler,
 ]
 
 if not TAAC_OSS:
