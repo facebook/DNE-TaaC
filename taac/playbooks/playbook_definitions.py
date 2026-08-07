@@ -18824,12 +18824,12 @@ def create_gtsw_warmboot_nbr_uplink_flap_playbook(
     nbr_uplink_neighbor_pattern: str = "stsw*",
     per_iteration_flap_sec: int = 200,
     longevity_sec: int = 300,
-    playbook_name: str = "test_gtsw_warmboot_nbr_uplink_flap",
+    playbook_name: str = "test_warmboot_nbr_uplink_flap",
     traffic_items_to_configure: t.Optional[
         t.Mapping[str, TrafficItemSettings]
     ] = None,
 ) -> Playbook:
-    """Build a `test_gtsw_warmboot_nbr_uplink_flap` Playbook.
+    """Build a `test_warmboot_nbr_uplink_flap` Playbook.
 
     Exercises a GTSW re-converging while its fabric neighbour's uplinks churn.
     Each pass is:

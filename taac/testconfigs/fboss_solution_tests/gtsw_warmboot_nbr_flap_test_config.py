@@ -218,21 +218,21 @@ GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
     basic_traffic_item_configs=GTSW_WARMBOOT_NBR_FLAP_TRAFFIC_ITEM_CONFIGS,
     playbooks=[
         _warmboot_nbr_flap_playbook(
-            "test_gtsw_warmboot_nbr_uplink_flap",
+            "test_warmboot_nbr_uplink_flap",
             FRAME_SIZE_72_TO_9000,
         ),
         _warmboot_nbr_flap_playbook(
-            "test_gtsw_warmboot_nbr_uplink_flap_72b",
+            "test_warmboot_nbr_uplink_flap_72b",
             FRAME_SIZE_72,
         ),
         _warmboot_nbr_flap_playbook(
-            "test_gtsw_warmboot_nbr_uplink_flap_9000b",
+            "test_warmboot_nbr_uplink_flap_9000b",
             FRAME_SIZE_9000,
         ),
         # qsfp_service: port state is asserted after the flap recovers, so it
         # catches a port the restart or the flap left permanently down.
         _service_restart_nbr_flap_playbook(
-            playbook_name="test_gtsw_qsfp_restart_nbr_uplink_flap",
+            playbook_name="test_qsfp_restart_nbr_uplink_flap",
             service=Service.QSFP_SERVICE,
             restart_service_check=QSFP_SERVICE_RESTART_SERVICE_CHECK,
             convergence_services=[Service.QSFP_SERVICE, Service.AGENT, Service.BGP],
@@ -242,7 +242,7 @@ GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
         # bgpd: session establishment is asserted per pass, after the flap
         # recovers, on top of the BGP convergence gate.
         _service_restart_nbr_flap_playbook(
-            playbook_name="test_gtsw_bgp_restart_nbr_uplink_flap",
+            playbook_name="test_bgp_restart_nbr_uplink_flap",
             service=Service.BGP,
             restart_service_check=BGP_RESTART_SERVICE_CHECK,
             convergence_services=[Service.BGP, Service.AGENT],
@@ -252,7 +252,7 @@ GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
         # fsdb: fixed settle rather than a convergence gate; AGENT + BGP are
         # still gated so the restart is not allowed to disturb forwarding.
         _service_restart_nbr_flap_playbook(
-            playbook_name="test_gtsw_fsdb_restart_nbr_uplink_flap",
+            playbook_name="test_fsdb_restart_nbr_uplink_flap",
             service=Service.FSDB,
             restart_service_check=FSDB_RESTART_SERVICE_CHECK,
             convergence_services=[Service.AGENT, Service.BGP],
