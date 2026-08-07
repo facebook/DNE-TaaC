@@ -30,6 +30,7 @@ from taac.utils.gate_control import (
 # SC1 -- performance-scaling (egress iBGP peer-scale) sweep test:
 GATE_SC1_CPU_STABLE = "sc1_cpu_stable"
 GATE_SC1_CPU_TRANSIENT = "sc1_cpu_transient"
+GATE_SC1_MEMORY_LEAK = "sc1_memory_leak"
 GATE_SC1_MEMORY_STABLE = "sc1_memory_stable"
 GATE_SC1_MEMORY_TRANSIENT = "sc1_memory_transient"
 GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
@@ -71,8 +72,19 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # Transient (peak - stable) memory flatness across the egress-peer sweep --
     # observe until calibrated.
     GATE_SC1_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
-    # Stable (soak-mean) memory flatness across the egress-peer sweep -- observe
-    # (some small per-peer session overhead is expected, hence a tolerance).
+    # Intra-soak memory leak: the soak TAIL (last 20% of samples) must not sit
+    # above the soak MEAN. A converged process is flat; a tail riding above the
+    # average is the moving average still climbing. Measured 1.000-1.001 across
+    # the sweep on bag010. Observe until flipped.
+    GATE_SC1_MEMORY_LEAK: GATE_MODE_PERMISSIVE,
+    # Steady memory must grow SUB-PROPORTIONALLY with the related-peer count.
+    # Distinct from the leak gate above: that one looks within a single soak,
+    # this one looks ACROSS the sweep. Peers grow 5x (202 -> 1002); memory grew
+    # 545.1 -> 624.4MB = 14.5%, i.e. ~99KB/peer of route-independent per-peer
+    # overhead (socket buffers, per-peer AdjRibOut bookkeeping, session state).
+    # Proportional growth would be 400%. Gated at 50% (~340KB/peer) rather than
+    # near the observation: one run gives no read on variance, and jemalloc
+    # retention can move RSS without a logical change. Observe until calibrated.
     GATE_SC1_MEMORY_STABLE: GATE_MODE_PERMISSIVE,
     # Stable (soak-mean) CPU flatness across the egress-peer sweep -- the core
     # "constant computation" characteristic (compute once per update-group, not

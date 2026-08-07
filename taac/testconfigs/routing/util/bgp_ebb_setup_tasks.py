@@ -1015,6 +1015,56 @@ _REGEX_IBGP_V6: str = "BGP_PEER_IPV6_IBGP"
 _REGEX_IBGP_V4: str = "BGP_PEER_IPV4_IBGP"
 
 
+_REGEX_EBGP_PREFIX_V6: str = "PREFIX_POOL_IPV6_EBGP"
+_REGEX_EBGP_PREFIX_V4: str = "PREFIX_POOL_IPV4_EBGP"
+
+
+def build_ixia_ebgp_prefix_withdraw_steps() -> list:
+    """Withdraw the eBGP route set BEFORE the daemon restart and peer bring-up.
+
+    The eBGP peer is the only advertiser in this topology (the iBGP groups carry
+    no route pools); it injects 50K per AF. Left enabled, the sequence is:
+
+        Bgp restart -> eBGP re-establishes -> 100K back in the RIB
+        -> N iBGP egress peers come UP -> N initial RIB dumps of 100K each
+
+    At 200 peers that is ~20M path advertisements, and it pinned bgpd at 100%
+    CPU for ~110s -- entirely inside the window the measurement step then tried
+    to use. Withdrawing first means the iBGP peers establish against an EMPTY
+    RIB, so bring-up is cheap and the measurement step's own advertisement is
+    the first route event the daemon sees.
+
+    This has to run here rather than in the measurement step: by the time that
+    step executes the peers are already up and the dumps have already happened.
+    Withdrawing there can only wait the cost out, not avoid it.
+    """
+    from taac.steps.step_definitions import create_run_task_step
+
+    # A TASK, not an Ixia API: prefix enable/disable is exposed as
+    # ``ixia_enable_disable_bgp_prefixes`` and runs as a RUN_TASK_STEP.
+    # ``prefix_end_index=None`` means "to the end of the pool".
+    return [
+        create_run_task_step(
+            task_name="ixia_enable_disable_bgp_prefixes",
+            params_dict={
+                "enable": False,
+                "prefix_pool_regex": regex,
+                "prefix_start_index": 0,
+                "prefix_end_index": None,
+            },
+            description=(
+                f"Withdraw {label} EBGP prefixes so IBGP peers establish "
+                f"against an empty RIB"
+            ),
+            ixia_needed=True,
+        )
+        for regex, label in (
+            (_REGEX_EBGP_PREFIX_V6, "IPv6"),
+            (_REGEX_EBGP_PREFIX_V4, "IPv4"),
+        )
+    ]
+
+
 def build_ixia_ibgp_subset_activation_steps(n_v6: int, n_v4: int) -> list:
     """Stop any prior IXIA IBGP sessions on both AFs, then start n_v6 + n_v4.
 
@@ -1109,12 +1159,19 @@ def build_per_iteration_factory_v4_capable(
             ibgp_peer_count=max(n_v6, n_v4),
             v4_peer_start_offset=v4_peer_start_offset,
         )
-        return build_rescale_bgpcpp_config_steps(
-            device_name=device_name,
-            peers=peers,
-            router_id=router_id,
-            config_path=config_path,
-        ) + build_ixia_ibgp_subset_activation_steps(n_v6=n_v6, n_v4=n_v4)
+        # Withdraw FIRST: the eBGP route set must be gone before the daemon
+        # restarts, or eBGP re-advertises 100K and every iBGP peer that comes up
+        # below triggers a full RIB dump of it.
+        return (
+            build_ixia_ebgp_prefix_withdraw_steps()
+            + build_rescale_bgpcpp_config_steps(
+                device_name=device_name,
+                peers=peers,
+                router_id=router_id,
+                config_path=config_path,
+            )
+            + build_ixia_ibgp_subset_activation_steps(n_v6=n_v6, n_v4=n_v4)
+        )
 
     return factory
 
