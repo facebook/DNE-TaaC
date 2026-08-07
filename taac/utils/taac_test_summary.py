@@ -221,6 +221,8 @@ class TaacTestSummary:
         duration_str = (
             format_duration(section.duration_secs) if section.duration_secs > 0 else "-"
         )
+        # "-" means "not uploaded separately", not "no logs". Passing sections
+        # are covered by the full-log paste linked at the bottom of the summary.
         url = section.everpaste_url or "-"
         lines.append(f"  {display_name:<45} {status_str:<10} {duration_str:<15} {url}")
         if section.status == SectionStatus.FAIL and section.error_message:
@@ -257,8 +259,24 @@ class TaacTestSummary:
         Generate a summary table of all tracked sections and upload per-section logs.
         Returns the formatted summary text.
         """
+        # Upload per-section logs for FAILED sections only.
+        #
+        # Every section's log_lines are a slice of the same buffer that
+        # async_upload_and_log_summary uploads whole a few lines later, so a
+        # per-section paste duplicates content that is already one click away.
+        # On a green run that was ~13 extra uploads and ~10s of teardown for
+        # links nobody follows -- the reader is scanning the summary table and
+        # moving on.
+        #
+        # Failed sections keep theirs: that link is the one thing someone
+        # actually wants, and _format_failure_details surfaces it directly.
+        # Passing rows show "-" in the Logs column and point at the full log.
         for section in self.sections:
-            if section.log_lines and not section.everpaste_url:
+            if (
+                section.status == SectionStatus.FAIL
+                and section.log_lines
+                and not section.everpaste_url
+            ):
                 await self.async_upload_section_logs(section)
 
         lines = []
