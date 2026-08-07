@@ -28,6 +28,7 @@ from taac.stages.stage_definitions import (
     create_cold_start_test_stage,
     create_fauu_drain_undrain_stage,
     create_longevity_churn_stage,
+    create_multipath_group_oscillation_cleanup_steps,
     create_multipath_group_oscillation_stage,
     create_plane_drain_undrain_stage,
     create_route_oscillations_stage,
@@ -60,6 +61,9 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     ProfileContext,
     RssDeltaConfig,
     RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
+)
+from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    IXIA_BGP_MON_IC_PARENT_NETWORK,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
@@ -892,6 +896,8 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         min_multipath_width: Floor for distribution scan (default None, delegates downstream).
         precheck_thresholds: Custom precheck thresholds (uses defaults if None)
         postcheck_thresholds: Custom postcheck thresholds (uses defaults if None)
+        exclude_bgp_mon: Exclude the BGP-MON parent prefix from session
+            inventory checks, including the recovered-state cleanup gate.
 
     Returns:
         Playbook configured for BGP multipath group oscillation testing
@@ -944,6 +950,16 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
                 min_multipath_width=min_multipath_width,
             ),
         ],
+        cleanup_steps=create_multipath_group_oscillation_cleanup_steps(
+            ipv4_peer_regex=ipv4_peer_regex,
+            ipv6_peer_regex=ipv6_peer_regex,
+            max_peers_to_restore=max_peers_to_stop,
+            expected_established_sessions=expected_established_sessions,
+            convergence_wait_seconds=oscillation_interval_seconds // 2,
+            parent_prefixes_to_ignore=(
+                [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"] if exclude_bgp_mon else None
+            ),
+        ),
     )
 
 

@@ -43,6 +43,7 @@ from taac.constants import (
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
     create_ixia_packet_loss_check,
+    create_next_hop_count_check,
 )
 from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
@@ -78,6 +79,7 @@ from taac.steps.step_definitions import (
     create_regenerate_traffic_step,
     create_register_port_channel_min_link_percentage_patcher_step,
     create_register_speed_flip_patcher_step_v2,
+    create_restore_bgp_peer_ranges_step,
     create_revert_route_storm_attributes_step,
     create_route_convergence_health_check_step,
     create_rss_start_step,
@@ -3222,7 +3224,7 @@ def create_multipath_group_oscillation_stage(
     ipv4_session_count: int = 100,
     ipv6_session_count: int = 100,  # noqa: F841 - IPv6 multipath validation TBD
     test_duration_seconds: int = 1800,
-    oscillation_interval_seconds: int = 60,
+    oscillation_interval_seconds: int = 280,
     min_peers_to_stop: int = 1,
     max_peers_to_stop: int = 11,
     prefix_subnets: list[str] | None = None,
@@ -3251,7 +3253,7 @@ def create_multipath_group_oscillation_stage(
         1. Discover baseline: Measure the live eBGP multipath group width and
            remember the prefix set at that width. Optional sanity bounds catch
            an implausibly-small or implausibly-large measurement.
-        2. For one hour, every minute fluctuate BGP multipath group for eBGP routes:
+        2. For each configured cycle, fluctuate BGP multipath groups for eBGP routes:
            a. Stop N (where N varies from 1 to max_peers_to_stop) of the eBGP sessions
               to reduce the multipath group
            b. Verify multipath group for discovered prefixes is reduced by exactly N
@@ -3266,8 +3268,11 @@ def create_multipath_group_oscillation_stage(
             used only for peer-stop indexing. The DUT-side multipath width is
             measured at runtime, NOT assumed to equal this value.
         ipv6_session_count: Total number of IPv6 eBGP sessions on the IXIA side.
-        test_duration_seconds: Total test duration in seconds (default: 3600 / 1 hour)
-        oscillation_interval_seconds: Interval between oscillations (default: 60 / 1 minute)
+        test_duration_seconds: Configured convergence-dwell budget in seconds
+            (default: 1800 / 30 minutes). Trigger and validation execution time
+            is additional. Any budget remaining after complete oscillation
+            intervals becomes a terminal soak after the final restoration check.
+        oscillation_interval_seconds: Interval between oscillations (default: 280 seconds)
         min_peers_to_stop: Minimum number of peers to stop per cycle (default: 1)
         max_peers_to_stop: Maximum number of peers to stop per cycle (default: 11)
         prefix_subnets: Optional list of prefix subnets to check for multipath groups.
@@ -3283,6 +3288,24 @@ def create_multipath_group_oscillation_stage(
     Returns:
         Stage object for BGP multipath group oscillation test
     """
+    if min_peers_to_stop < 1 or max_peers_to_stop < min_peers_to_stop:
+        raise ValueError("peer-stop range must satisfy 1 <= min <= max")
+    if max_peers_to_stop > min(ipv4_session_count, ipv6_session_count):
+        raise ValueError("peer-stop range exceeds the configured session count")
+    if oscillation_interval_seconds <= 0:
+        raise ValueError("oscillation_interval_seconds must be positive")
+    num_cycles = test_duration_seconds // oscillation_interval_seconds
+    if num_cycles != 6:
+        raise ValueError("multipath oscillation requires exactly six complete cycles")
+    terminal_soak_seconds = test_duration_seconds - (
+        num_cycles * oscillation_interval_seconds
+    )
+    required_baseline_width = max_peers_to_stop + 1
+    if expected_min_baseline_width is not None:
+        required_baseline_width = max(
+            required_baseline_width, expected_min_baseline_width
+        )
+
     steps = []
 
     # Step 0: Baseline discovery — measure the live multipath group width and
@@ -3294,23 +3317,25 @@ def create_multipath_group_oscillation_stage(
         create_multipath_nexthop_count_health_check_step(
             prefix_subnets=prefix_subnets,
             discover_baseline=True,
-            expected_min_baseline_width=expected_min_baseline_width,
+            expected_min_baseline_width=required_baseline_width,
             expected_max_baseline_width=expected_max_baseline_width,
             min_multipath_width=min_multipath_width,
+            required_address_families=["ipv4", "ipv6"],
             description="Baseline: Discover live multipath group width from eBGP RIB",
         )
     )
 
-    num_cycles = test_duration_seconds // oscillation_interval_seconds
+    if (min_peers_to_stop, max_peers_to_stop) == (1, 11):
+        peer_stop_schedule = [1, 3, 5, 7, 9, 11]
+    else:
+        peer_stop_span = max_peers_to_stop - min_peers_to_stop
+        peer_stop_schedule = [
+            min_peers_to_stop + round(cycle * peer_stop_span / (num_cycles - 1))
+            for cycle in range(num_cycles)
+        ]
 
-    for cycle in range(num_cycles):
+    for cycle, n_peers_to_stop in enumerate(peer_stop_schedule):
         cycle_num = cycle + 1
-
-        # Calculate how many peers to stop this cycle
-        # Vary N from min to max in a cycling pattern
-        n_peers_to_stop = (cycle % max_peers_to_stop) + min_peers_to_stop
-        if n_peers_to_stop > max_peers_to_stop:
-            n_peers_to_stop = max_peers_to_stop
 
         # Step 1: Stop N IPv4 eBGP sessions (reduce multipath group)
         steps.append(
@@ -3319,6 +3344,8 @@ def create_multipath_group_oscillation_stage(
                 start=False,
                 start_idx=1,
                 end_idx=n_peers_to_stop,
+                expected_peer_count=1,
+                validate_session_range=True,
                 description=f"Cycle {cycle_num}/{num_cycles}: Stop IPv4 eBGP sessions 1-{n_peers_to_stop} (reduce multipath group)",
             )
         )
@@ -3330,6 +3357,8 @@ def create_multipath_group_oscillation_stage(
                 start=False,
                 start_idx=1,
                 end_idx=n_peers_to_stop,
+                expected_peer_count=1,
+                validate_session_range=True,
                 description=f"Cycle {cycle_num}/{num_cycles}: Stop IPv6 eBGP sessions 1-{n_peers_to_stop} (reduce multipath group)",
             )
         )
@@ -3365,6 +3394,8 @@ def create_multipath_group_oscillation_stage(
                 start=True,
                 start_idx=1,
                 end_idx=n_peers_to_stop,
+                expected_peer_count=1,
+                validate_session_range=True,
                 description=f"Cycle {cycle_num}/{num_cycles}: Start IPv4 eBGP sessions 1-{n_peers_to_stop} (restore multipath group)",
             )
         )
@@ -3376,6 +3407,8 @@ def create_multipath_group_oscillation_stage(
                 start=True,
                 start_idx=1,
                 end_idx=n_peers_to_stop,
+                expected_peer_count=1,
+                validate_session_range=True,
                 description=f"Cycle {cycle_num}/{num_cycles}: Start IPv6 eBGP sessions 1-{n_peers_to_stop} (restore multipath group)",
             )
         )
@@ -3402,7 +3435,81 @@ def create_multipath_group_oscillation_stage(
             )
         )
 
+    if terminal_soak_seconds:
+        steps.append(
+            create_longevity_step(
+                duration=terminal_soak_seconds,
+                description=(
+                    f"Terminal {terminal_soak_seconds}s soak to complete the "
+                    "configured oscillation workload duration"
+                ),
+            )
+        )
+
     return Stage(steps=steps)
+
+
+def create_multipath_group_oscillation_cleanup_steps(
+    ipv4_peer_regex: str,
+    ipv6_peer_regex: str,
+    max_peers_to_restore: int,
+    expected_established_sessions: int,
+    convergence_wait_seconds: int,
+    parent_prefixes_to_ignore: list[str] | None = None,
+) -> list[Step]:
+    checks = []
+    if expected_established_sessions > 0:
+        checks.append(
+            create_bgp_session_establish_check(
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                expected_established_sessions=expected_established_sessions,
+                retry_count=6,
+                retry_delay_seconds=5,
+                retry_delay_multiplier=1.5,
+            )
+        )
+    checks.append(
+        create_next_hop_count_check(
+            use_discovered_prefixes=True,
+            use_discovered_width=True,
+            peers_stopped_delta=0,
+        )
+    )
+    return [
+        create_restore_bgp_peer_ranges_step(
+            peer_ranges=(
+                {
+                    "label": "IPv4",
+                    "regex": ipv4_peer_regex,
+                    "session_start_idx": 1,
+                    "session_end_idx": max_peers_to_restore,
+                    "expected_peer_count": 1,
+                },
+                {
+                    "label": "IPv6",
+                    "regex": ipv6_peer_regex,
+                    "session_start_idx": 1,
+                    "session_end_idx": max_peers_to_restore,
+                    "expected_peer_count": 1,
+                },
+            ),
+            description="Cleanup: Restore complete dual-stack oscillation peer ranges",
+        ),
+        create_longevity_step(
+            duration=convergence_wait_seconds,
+            description=(
+                "Cleanup: Wait for dual-stack multipath baseline reconvergence"
+            ),
+        ),
+        create_validation_step(
+            point_in_time_checks=checks,
+            stage=taac_types.ValidationStage.POST_TEST,
+            description=(
+                "Cleanup: Verify exact session inventory and dual-stack "
+                "multipath baseline"
+            ),
+        ),
+    ]
 
 
 def create_route_registry_runtime_update_stage(

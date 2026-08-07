@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
+import ipaddress
 import typing as t
 
 from taac.constants import TestDevice
@@ -68,11 +69,11 @@ class BgpMultipathNextHopCountHealthCheck(
     CHECK_NAME = hc_types.CheckName.NEXT_HOP_COUNT_CHECK
     OPERATING_SYSTEMS = ["EOS"]
 
-    # Class-level storage for the discovered baseline prefixes + measured width.
-    # Both are written by discovery mode and read by validation mode in the same
-    # stage; sharing via class attributes is consistent with the prior design.
-    _discovered_baseline_prefixes: t.ClassVar[t.Set[str]] = set()
-    _discovered_baseline_width: t.ClassVar[t.Optional[int]] = None
+    # TAAC does not schedule concurrent tests against one reserved device. Keying
+    # worker-local state by device prevents unrelated devices from sharing it.
+    _discovered_baselines: t.ClassVar[
+        t.Dict[str, t.Tuple[t.Set[str], t.Dict[int, int]]]
+    ] = {}
 
     async def _run(
         self,
@@ -126,6 +127,10 @@ class BgpMultipathNextHopCountHealthCheck(
         """
         min_multipath_width = check_params.get("min_multipath_width", 2)
 
+        # A failed discovery must never leave a later validation reading state
+        # captured by an earlier run against this device.
+        BgpMultipathNextHopCountHealthCheck._discovered_baselines.pop(obj.name, None)
+
         try:
             (
                 distribution,
@@ -153,14 +158,28 @@ class BgpMultipathNextHopCountHealthCheck(
                     ),
                 )
 
-            # Mode = the width that holds the largest prefix set.
-            discovered_width, discovered_prefixes = max(
-                distribution.items(), key=lambda kv: len(kv[1])
-            )
+            required_afis = self._required_address_families(check_params)
+            discovered_widths: t.Dict[int, int]
+            if required_afis:
+                discovered_widths, discovered_prefixes = self._discover_by_afi(
+                    distribution, required_afis
+                )
+            else:
+                discovered_width, discovered_prefixes = max(
+                    distribution.items(), key=lambda kv: len(kv[1])
+                )
+                discovered_widths = {
+                    ipaddress.ip_network(prefix, strict=False).version: discovered_width
+                    for prefix in discovered_prefixes
+                }
 
-            sanity_failures = self._baseline_sanity_failures(
-                discovered_width, check_params
-            )
+            sanity_failures = [
+                f"IPv{afi}: {failure}"
+                for afi, discovered_width in sorted(discovered_widths.items())
+                for failure in self._baseline_sanity_failures(
+                    discovered_width, check_params
+                )
+            ]
             if sanity_failures:
                 return hc_types.HealthCheckResult(
                     status=hc_types.HealthCheckStatus.FAIL,
@@ -170,16 +189,14 @@ class BgpMultipathNextHopCountHealthCheck(
                     ),
                 )
 
-            BgpMultipathNextHopCountHealthCheck._discovered_baseline_prefixes = (
-                discovered_prefixes
-            )
-            BgpMultipathNextHopCountHealthCheck._discovered_baseline_width = (
-                discovered_width
+            BgpMultipathNextHopCountHealthCheck._discovered_baselines[obj.name] = (
+                set(discovered_prefixes),
+                dict(discovered_widths),
             )
 
             success_message = (
                 f"BGP multipath baseline discovery PASSED.\n"
-                f"  - Measured baseline width: {discovered_width}-way ECMP\n"
+                f"  - Measured baseline widths: {discovered_widths}\n"
                 f"  - Prefixes at baseline width: {len(discovered_prefixes)}\n"
                 f"  - Distribution: {distribution_summary}\n"
                 f"  - Skipped {skipped_ibgp_count} iBGP/local routes\n"
@@ -198,6 +215,49 @@ class BgpMultipathNextHopCountHealthCheck(
                 status=hc_types.HealthCheckStatus.ERROR,
                 message=error_message,
             )
+
+    def _required_address_families(
+        self, check_params: t.Dict[str, t.Any]
+    ) -> t.Tuple[int, ...]:
+        normalized = []
+        for family in check_params.get("required_address_families", []):
+            value = str(family).lower()
+            if value not in {"ipv4", "ipv6"}:
+                raise ValueError(f"unsupported required address family {family!r}")
+            version = 4 if value == "ipv4" else 6
+            if version not in normalized:
+                normalized.append(version)
+        return tuple(normalized)
+
+    def _discover_by_afi(
+        self,
+        distribution: t.Dict[int, t.Set[str]],
+        required_afis: t.Tuple[int, ...],
+    ) -> t.Tuple[t.Dict[int, int], t.Set[str]]:
+        widths: t.Dict[int, int] = {}
+        prefixes: t.Set[str] = set()
+        for afi in required_afis:
+            family_distribution = {
+                width: {
+                    prefix
+                    for prefix in candidates
+                    if ipaddress.ip_network(prefix, strict=False).version == afi
+                }
+                for width, candidates in distribution.items()
+            }
+            family_distribution = {
+                width: candidates
+                for width, candidates in family_distribution.items()
+                if candidates
+            }
+            if not family_distribution:
+                raise ValueError(f"no IPv{afi} multipath eBGP baseline prefixes")
+            width, family_prefixes = max(
+                family_distribution.items(), key=lambda item: len(item[1])
+            )
+            widths[afi] = width
+            prefixes.update(family_prefixes)
+        return widths, prefixes
 
     async def _measure_nexthop_distribution(
         self,
@@ -324,55 +384,54 @@ class BgpMultipathNextHopCountHealthCheck(
         use_discovered_prefixes = check_params.get("use_discovered_prefixes", False)
         use_discovered_width = check_params.get("use_discovered_width", False)
         peers_stopped_delta = check_params.get("peers_stopped_delta", 0)
+        discovered_prefixes, discovered_widths = (
+            BgpMultipathNextHopCountHealthCheck._discovered_baselines.get(
+                obj.name, (set(), {})
+            )
+        )
 
         # Width-relative validation: derive expected_nexthop_count from the
         # measured baseline. Lets reduce/restore checks read the live
         # measurement instead of recomputing from external constants.
         if use_discovered_width:
-            discovered_width = (
-                BgpMultipathNextHopCountHealthCheck._discovered_baseline_width
-            )
-            if discovered_width is None:
+            if not discovered_widths:
                 return hc_types.HealthCheckResult(
-                    status=hc_types.HealthCheckStatus.SKIP,
-                    message=(
-                        "Skipping validation: no baseline width discovered. "
-                        "Discovery step should have reported the failure."
-                    ),
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=("Validation failed: no baseline width discovered"),
                 )
-            derived_expected = discovered_width - peers_stopped_delta
-            if derived_expected < 0:
+            if any(
+                width - peers_stopped_delta < 0 for width in discovered_widths.values()
+            ):
                 return hc_types.HealthCheckResult(
                     status=hc_types.HealthCheckStatus.ERROR,
                     message=(
                         f"peers_stopped_delta ({peers_stopped_delta}) exceeds "
-                        f"discovered baseline width ({discovered_width})"
+                        "a discovered baseline width "
+                        f"({discovered_widths})"
                     ),
                 )
-            expected_nexthop_count = derived_expected
             self.logger.info(
-                f"Width-relative expected_nexthop_count = {discovered_width} "
-                f"- {peers_stopped_delta} = {derived_expected}"
+                "Width-relative expected next-hop counts = "
+                f"{discovered_widths} - {peers_stopped_delta}"
             )
 
         # Get discovered prefixes if requested
-        discovered_prefixes = None
+        selected_discovered_prefixes = None
         if use_discovered_prefixes:
-            discovered_prefixes = (
-                BgpMultipathNextHopCountHealthCheck._discovered_baseline_prefixes
-            )
             if not discovered_prefixes:
                 return hc_types.HealthCheckResult(
-                    status=hc_types.HealthCheckStatus.SKIP,
-                    message="Skipping validation: no baseline prefixes have been discovered. Discovery step should have reported the failure.",
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message="Validation failed: no baseline prefixes have been discovered",
                 )
+            selected_discovered_prefixes = discovered_prefixes
             self.logger.debug(
                 f"Using {len(discovered_prefixes)} discovered baseline prefixes"
             )
 
         # Validate that at least one validation criterion is provided
         if (
-            expected_nexthop_count is None
+            not use_discovered_width
+            and expected_nexthop_count is None
             and min_nexthop_count is None
             and max_nexthop_count is None
         ):
@@ -413,8 +472,8 @@ class BgpMultipathNextHopCountHealthCheck(
                     continue
 
                 # If using discovered prefixes, only check those
-                if discovered_prefixes is not None:
-                    if prefix_str not in discovered_prefixes:
+                if selected_discovered_prefixes is not None:
+                    if prefix_str not in selected_discovered_prefixes:
                         continue
                 # Otherwise, filter by specific prefix subnets if provided
                 elif prefix_subnets and not self._matches_prefix_subnets(
@@ -432,6 +491,39 @@ class BgpMultipathNextHopCountHealthCheck(
                     message="No matching prefixes found in BGP RIB",
                 )
 
+            if selected_discovered_prefixes is not None:
+                missing_prefixes = sorted(
+                    selected_discovered_prefixes - prefix_nexthop_counts.keys()
+                )
+                if missing_prefixes:
+                    return hc_types.HealthCheckResult(
+                        status=hc_types.HealthCheckStatus.FAIL,
+                        message=(
+                            "BGP multipath validation lost baseline prefixes: "
+                            f"missing={len(missing_prefixes)}/"
+                            f"{len(selected_discovered_prefixes)}, sample={missing_prefixes[:10]}"
+                        ),
+                    )
+                if use_discovered_width:
+                    required_versions = {
+                        ipaddress.ip_network(prefix, strict=False).version
+                        for prefix in selected_discovered_prefixes
+                    }
+                    missing_versions = sorted(
+                        required_versions - discovered_widths.keys()
+                    )
+                    if missing_versions:
+                        missing_afis = ", ".join(
+                            f"IPv{version}" for version in missing_versions
+                        )
+                        return hc_types.HealthCheckResult(
+                            status=hc_types.HealthCheckStatus.FAIL,
+                            message=(
+                                "BGP multipath validation has no discovered "
+                                f"baseline width for {missing_afis}"
+                            ),
+                        )
+
             # Validate next-hop counts
             failures = []
             validated_count = 0
@@ -441,10 +533,26 @@ class BgpMultipathNextHopCountHealthCheck(
                 is_valid = True
                 failure_reason = None
 
-                if expected_nexthop_count is not None:
-                    if nexthop_count != expected_nexthop_count:
+                prefix_expected = expected_nexthop_count
+                if use_discovered_width:
+                    version = ipaddress.ip_network(prefix, strict=False).version
+                    baseline_width = discovered_widths.get(version)
+                    if baseline_width is None:
+                        failures.append(
+                            {
+                                "prefix": prefix,
+                                "reason": f"no IPv{version} baseline width",
+                            }
+                        )
+                        continue
+                    prefix_expected = baseline_width - peers_stopped_delta
+
+                if prefix_expected is not None:
+                    if nexthop_count != prefix_expected:
                         is_valid = False
-                        failure_reason = f"expected exactly {expected_nexthop_count}, got {nexthop_count}"
+                        failure_reason = (
+                            f"expected exactly {prefix_expected}, got {nexthop_count}"
+                        )
 
                 if min_nexthop_count is not None and is_valid:
                     if nexthop_count < min_nexthop_count:
@@ -461,7 +569,13 @@ class BgpMultipathNextHopCountHealthCheck(
                 if is_valid:
                     validated_count += 1
                 else:
-                    failures.append({"prefix": prefix, "reason": failure_reason})
+                    failures.append(
+                        {
+                            "prefix": prefix,
+                            "reason": failure_reason
+                            or "multipath validation failed without a reason",
+                        }
+                    )
 
                 # Collect sample results for logging
                 if len(sample_results) < sample_size:
@@ -495,7 +609,9 @@ class BgpMultipathNextHopCountHealthCheck(
 
             # Build success message
             criteria = []
-            if expected_nexthop_count is not None:
+            if use_discovered_width:
+                criteria.append(f"the per-AFI baseline minus {peers_stopped_delta}")
+            elif expected_nexthop_count is not None:
                 criteria.append(f"exactly {expected_nexthop_count}")
             if min_nexthop_count is not None:
                 criteria.append(f"at least {min_nexthop_count}")
@@ -581,8 +697,6 @@ class BgpMultipathNextHopCountHealthCheck(
 
     def _matches_prefix_subnets(self, ip_str: str, prefix_subnets: t.List[str]) -> bool:
         """Check if IP address matches any of the specified prefix subnets"""
-        import ipaddress
-
         try:
             ip_addr = ipaddress.ip_address(ip_str)
             for subnet_str in prefix_subnets:

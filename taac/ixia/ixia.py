@@ -3398,6 +3398,8 @@ class Ixia:
         device_group_idx: t.Optional[int] = None,
         session_start_idx: int = 1,
         session_end_idx: t.Optional[int] = None,
+        expected_peer_count: t.Optional[int] = None,
+        validate_session_range: bool = False,
     ) -> None:
         """Start or stop a contiguous range of emulated BGP sessions.
 
@@ -3446,6 +3448,16 @@ class Ixia:
                     bgp_peers.append(network_group_index.ipv4_bgp_peer)
                 if network_group_index.ipv6_bgp_peer:
                     bgp_peers.append(network_group_index.ipv6_bgp_peer)
+        matched_names = [str(peer.Name) for peer in bgp_peers]
+        self.logger.info(
+            f"start_bgp_peers matched {len(bgp_peers)} peer object(s): {matched_names}"
+        )
+        if expected_peer_count is not None and len(bgp_peers) != expected_peer_count:
+            raise ValueError(
+                "start_bgp_peers expected "
+                f"{expected_peer_count} peer object(s), got {len(bgp_peers)}: "
+                f"{matched_names}"
+            )
         for bgp_peer in bgp_peers:
             # Compute the end index PER PEER. Must be a local -- reassigning
             # session_end_idx would lock it to the first peer's Count and apply
@@ -3455,12 +3467,63 @@ class Ixia:
             peer_end_idx = (
                 session_end_idx if session_end_idx is not None else bgp_peer.Count
             )
+            if validate_session_range:
+                peer_count = int(bgp_peer.Count)
+                if (
+                    session_start_idx < 1
+                    or peer_end_idx < session_start_idx
+                    or peer_end_idx > peer_count
+                ):
+                    raise ValueError(
+                        f"start_bgp_peers invalid session range "
+                        f"{session_start_idx}-{peer_end_idx} for {bgp_peer.Name} "
+                        f"with Count={peer_count}"
+                    )
             if start:
                 bgp_peer.Start(SessionIndices=f"{session_start_idx}-{peer_end_idx}")
             else:
                 bgp_peer.Stop(SessionIndices=f"{session_start_idx}-{peer_end_idx}")
             self.logger.debug(
                 f"Successfully {'started' if start else 'stopped'} BGP sessions {session_start_idx}-{peer_end_idx} on {bgp_peer.Name}"
+            )
+
+    @external_api
+    def restore_bgp_peer_ranges(
+        self, peer_ranges: t.Sequence[t.Mapping[str, t.Any]]
+    ) -> None:
+        """Best-effort restoration of multiple BGP peer session ranges.
+
+        Successful starts are intentionally not undone when another target
+        fails: the desired baseline has every range started, and a subsequent
+        cleanup retry can idempotently reapply the complete target set. A
+        raised ``RuntimeError`` means the environment may be only partially
+        restored and must not be reused until retry or manual recovery
+        succeeds.
+        """
+        errors = []
+        successful_targets = []
+        for target in peer_ranges:
+            target_label = str(target.get("label", target.get("regex", "<unknown>")))
+            try:
+                self.start_bgp_peers(
+                    start=True,
+                    regex=str(target["regex"]),
+                    session_start_idx=int(target["session_start_idx"]),
+                    session_end_idx=int(target["session_end_idx"]),
+                    expected_peer_count=int(target["expected_peer_count"]),
+                    validate_session_range=True,
+                )
+            except Exception as error:
+                self.logger.exception(
+                    f"Failed to restore BGP peer range {target_label}"
+                )
+                errors.append(f"{target_label}: {type(error).__name__}: {error}")
+            else:
+                successful_targets.append(target_label)
+        if errors:
+            raise RuntimeError(
+                "BGP peer-range restoration failed after attempting every target: "
+                f"succeeded={successful_targets!r}; failed=" + "; ".join(errors)
             )
 
     @external_api

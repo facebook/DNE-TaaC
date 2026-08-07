@@ -5371,6 +5371,8 @@ def create_start_stop_bgp_peers_step(
     start: bool,
     start_idx: int,
     end_idx: int,
+    expected_peer_count: t.Optional[int] = None,
+    validate_session_range: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
     """Start or stop a contiguous range of IXIA BGP peer sessions.
@@ -5386,6 +5388,9 @@ def create_start_stop_bgp_peers_step(
         start_idx: Index of the first session in the range (inclusive,
             1-based). Must be >= 1; see the index-base note below.
         end_idx: Index of the last session in the range (inclusive, 1-based).
+        expected_peer_count: Optional exact number of peer objects the regex
+            must match before mutation.
+        validate_session_range: Reject ranges outside each matched peer's Count.
         description: Custom description for the step. If omitted, a
             default is generated counting the affected sessions.
 
@@ -5404,15 +5409,32 @@ def create_start_stop_bgp_peers_step(
             f"{action} sessions {start_idx}-{end_idx} ({session_count} sessions)"
         )
 
+    args_dict: t.Dict[str, t.Any] = {
+        "start": start,
+        "regex": peer_regex,
+        "session_start_idx": start_idx,
+        "session_end_idx": end_idx,
+    }
+    if expected_peer_count is not None:
+        args_dict["expected_peer_count"] = expected_peer_count
+    if validate_session_range:
+        args_dict["validate_session_range"] = True
+
     return create_ixia_api_step(
         api_name="start_bgp_peers",
-        args_dict={
-            "start": start,
-            "regex": peer_regex,
-            "session_start_idx": start_idx,
-            "session_end_idx": end_idx,
-        },
+        args_dict=args_dict,
         description=description,
+    )
+
+
+def create_restore_bgp_peer_ranges_step(
+    peer_ranges: t.Sequence[t.Mapping[str, t.Any]],
+    description: t.Optional[str] = None,
+) -> Step:
+    return create_ixia_api_step(
+        api_name="restore_bgp_peer_ranges",
+        args_dict={"peer_ranges": list(peer_ranges)},
+        description=description or "Restore all configured BGP peer ranges",
     )
 
 
@@ -6029,6 +6051,7 @@ def create_multipath_nexthop_count_health_check_step(
     expected_min_baseline_width: t.Optional[int] = None,
     expected_max_baseline_width: t.Optional[int] = None,
     min_multipath_width: t.Optional[int] = None,
+    required_address_families: t.Optional[t.List[str]] = None,
     use_discovered_prefixes: bool = False,
     use_discovered_width: bool = False,
     peers_stopped_delta: t.Optional[int] = None,
@@ -6061,6 +6084,7 @@ def create_multipath_nexthop_count_health_check_step(
         expected_min_baseline_width: Optional lower bound for the measured width
         expected_max_baseline_width: Optional upper bound for the measured width
         min_multipath_width: Floor for distribution scan (default 2)
+        required_address_families: Address families required during discovery.
         use_discovered_prefixes: If True, validate against discovered baseline prefixes
         use_discovered_width: If True, derive expected_nexthop_count from the
             stored baseline width minus peers_stopped_delta
@@ -6130,6 +6154,7 @@ def create_multipath_nexthop_count_health_check_step(
                         expected_min_baseline_width=expected_min_baseline_width,
                         expected_max_baseline_width=expected_max_baseline_width,
                         min_multipath_width=min_multipath_width,
+                        required_address_families=required_address_families,
                         use_discovered_prefixes=use_discovered_prefixes,
                         use_discovered_width=use_discovered_width,
                         peers_stopped_delta=peers_stopped_delta,
@@ -6139,6 +6164,7 @@ def create_multipath_nexthop_count_health_check_step(
                         max_nexthop_count=max_nexthop_count,
                     )
                 ],
+                fail_fast=True,
             )
         ),
     )

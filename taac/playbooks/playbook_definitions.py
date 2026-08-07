@@ -5157,6 +5157,7 @@ def build_arista_ebb_scale_playbook(
     prechecks=None,
     postchecks=None,
     snapshot_checks=None,
+    cleanup_steps=None,
 ):
     """Trampoline for `testconfigs/routing/ebb/arista_ebb_scale_test_config.py`.
 
@@ -5173,6 +5174,7 @@ def build_arista_ebb_scale_playbook(
         ("prechecks", prechecks),
         ("postchecks", postchecks),
         ("snapshot_checks", snapshot_checks),
+        ("cleanup_steps", cleanup_steps),
     ]:
         if v is not None:
             kwargs[k] = v

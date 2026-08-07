@@ -2314,6 +2314,7 @@ def create_next_hop_count_check(
     expected_min_baseline_width: t.Optional[int] = None,
     expected_max_baseline_width: t.Optional[int] = None,
     min_multipath_width: t.Optional[int] = None,
+    required_address_families: t.Optional[t.List[str]] = None,
     use_discovered_prefixes: bool = False,
     use_discovered_width: bool = False,
     peers_stopped_delta: t.Optional[int] = None,
@@ -2342,6 +2343,8 @@ def create_next_hop_count_check(
         expected_max_baseline_width: Optional upper bound for the measured width.
         min_multipath_width: Floor for the distribution scan (single-NH prefixes
             below this are excluded; default 2).
+        required_address_families: Address families that must each produce a
+            discovered multipath baseline.
         use_discovered_prefixes: Validate against previously-discovered prefixes.
         use_discovered_width: Derive expected_nexthop_count from the measured
             baseline width minus ``peers_stopped_delta``.
@@ -2364,6 +2367,7 @@ def create_next_hop_count_check(
         _set_if_present("expected_min_baseline_width", expected_min_baseline_width)
         _set_if_present("expected_max_baseline_width", expected_max_baseline_width)
         _set_if_present("min_multipath_width", min_multipath_width)
+        _set_if_present("required_address_families", required_address_families)
     if use_discovered_prefixes:
         check_params["use_discovered_prefixes"] = True
     if use_discovered_width:

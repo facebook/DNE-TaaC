@@ -32,6 +32,7 @@ from taac.stages.stage_definitions import (
     create_bgp_session_oscillation_stage,
     create_cold_start_test_stage,
     create_fauu_drain_undrain_stage,
+    create_multipath_group_oscillation_cleanup_steps,
     create_multipath_group_oscillation_stage,
     create_plane_aware_bgp_session_oscillation_stage,
     create_plane_drain_undrain_stage,
@@ -1232,13 +1233,20 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                     cpu_util_terminate_on_error=False,
                     memory_terminate_on_error=False,
                 ),
+                cleanup_steps=create_multipath_group_oscillation_cleanup_steps(
+                    ipv4_peer_regex=".*IPV4_EBGP$",
+                    ipv6_peer_regex=".*IPV6_EBGP$",
+                    max_peers_to_restore=11,
+                    expected_established_sessions=total_session_count,
+                    convergence_wait_seconds=140,
+                ),
                 stages=[
                     create_multipath_group_oscillation_stage(
                         ipv4_peer_regex=".*IPV4_EBGP$",
                         ipv6_peer_regex=".*IPV6_EBGP$",
-                        ipv4_session_count=140,  # Baseline next-hop count (actual multipath group size)
-                        ipv6_session_count=140,  # Baseline next-hop count (actual multipath group size)
-                        test_duration_seconds=1800,  # 1 hour (~12 cycles)
+                        ipv4_session_count=ebgp_peer_count_v4,
+                        ipv6_session_count=ebgp_peer_count_v6,
+                        test_duration_seconds=1800,  # 6 cycles plus terminal soak
                         oscillation_interval_seconds=280,  # 280s / 2 = 140s wait (GR 120s + 20s buffer)
                         min_peers_to_stop=1,
                         max_peers_to_stop=11,
