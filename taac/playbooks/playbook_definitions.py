@@ -177,6 +177,7 @@ from taac.test_as_a_config.types import (
     Step,
     SystemRebootTrigger,
     TrafficEndpoint,
+    TrafficItemSettings,
     TransformFunction,
     ValidationStage,
 )
@@ -18810,8 +18811,12 @@ def create_gtsw_warmboot_nbr_uplink_flap_playbook(
     nbr_uplink_neighbor_pattern: str = "stsw*",
     per_iteration_flap_sec: int = 200,
     longevity_sec: int = 300,
+    playbook_name: str = "test_gtsw_warmboot_nbr_uplink_flap",
+    traffic_items_to_configure: t.Optional[
+        t.Mapping[str, TrafficItemSettings]
+    ] = None,
 ) -> Playbook:
-    """Build the `test_gtsw_warmboot_nbr_uplink_flap` Playbook.
+    """Build a `test_gtsw_warmboot_nbr_uplink_flap` Playbook.
 
     Exercises a GTSW re-converging while its fabric neighbour's uplinks churn.
     Each pass is:
@@ -18848,9 +18853,20 @@ def create_gtsw_warmboot_nbr_uplink_flap_playbook(
             remote system names selecting which uplinks to flap.
         per_iteration_flap_sec: Flap window within each pass.
         longevity_sec: Steady-state settle before the full postchecks.
+        playbook_name: Playbook name, which is also the TAAC test-case name.
+            Must be unique when a TestConfig instantiates this factory more
+            than once.
+        traffic_items_to_configure: Per-playbook traffic overrides, applied by
+            the runner in `async_test_case_setUp` before traffic starts
+            (`libs/taac_runner.py:1718-1729`). Used to pin a frame size for the
+            duration of this playbook. Because the override mutates the live
+            IXIA traffic item and every playbook in a TestConfig shares one
+            session, a TestConfig running several of these should set it on
+            ALL of them — otherwise a playbook that omits it silently inherits
+            whatever the previous playbook left configured.
 
     Returns:
-        A `Playbook` named `test_gtsw_warmboot_nbr_uplink_flap`.
+        A `Playbook` named `playbook_name`.
     """
     non_circuit_checks = _warmboot_nbr_flap_non_circuit_checks()
 
@@ -18869,8 +18885,9 @@ def create_gtsw_warmboot_nbr_uplink_flap_playbook(
         )
 
     return Playbook(
-        name="test_gtsw_warmboot_nbr_uplink_flap",
+        name=playbook_name,
         iteration=iteration,
+        traffic_items_to_configure=traffic_items_to_configure,
         postchecks=[
             AGENT_WARMBOOT_SERVICE_CHECK,
             create_systemctl_active_state_check(),

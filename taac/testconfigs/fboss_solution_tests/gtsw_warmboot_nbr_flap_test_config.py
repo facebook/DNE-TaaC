@@ -47,6 +47,7 @@ from taac.test_as_a_config.types import (
     BasicTrafficItemConfig,
     TestConfig,
     TrafficEndpoint,
+    TrafficItemSettings,
 )
 
 # GTSW->STSW uplink selector on the NEIGHBOUR. The flap step resolves the actual
@@ -71,6 +72,17 @@ FRAME_SIZE_72_TO_9000 = ixia_types.FrameSize(
     type=ixia_types.FrameSizeType.RANDOM,
     random_min=72,
     random_max=9000,
+)
+
+# The two extremes of that range, pinned. 9000 sits exactly at the provisioned
+# IcePack fabric-port jumbo MTU; 9100 would be punted to CPU queue 0.
+FRAME_SIZE_72 = ixia_types.FrameSize(
+    type=ixia_types.FrameSizeType.FIXED,
+    fixed_size=72,
+)
+FRAME_SIZE_9000 = ixia_types.FrameSize(
+    type=ixia_types.FrameSizeType.FIXED,
+    fixed_size=9000,
 )
 
 # 3 source ports converge on a single destination port, so each flow is held to
@@ -110,18 +122,66 @@ GTSW_WARMBOOT_NBR_FLAP_TRAFFIC_ITEM_CONFIGS = [
 ]
 
 
+def _frame_size_override(
+    frame_size: ixia_types.FrameSize,
+) -> dict[str, TrafficItemSettings]:
+    """Pin every traffic item to one frame size for the duration of a playbook.
+
+    The runner applies these in `async_test_case_setUp` before traffic starts.
+    Keys are derived from the same port list that names the traffic items, so
+    they cannot drift apart.
+
+    Every playbook below sets this, including the one whose frame size already
+    matches the TestConfig default: the override mutates the live IXIA traffic
+    item and all playbooks share one session, so a playbook that omitted it
+    would inherit whatever the previous playbook left configured.
+    """
+    return {
+        f"L1001_TO_L1002_{src_port.replace('/', '_')}": TrafficItemSettings(
+            line_rate=PER_FLOW_LINE_RATE,
+            frame_size_settings=frame_size,
+        )
+        for src_port in GTSW001_L1001_C085_IXIA_SRC_PORTS
+    }
+
+
+def _warmboot_nbr_flap_playbook(
+    playbook_name: str,
+    frame_size: ixia_types.FrameSize,
+):
+    """One warmboot + NBR-flap playbook at a given frame size.
+
+    The three playbooks differ only in name and frame size; disruption shape,
+    iteration count, flap budget and health checks are identical.
+    """
+    return create_gtsw_warmboot_nbr_uplink_flap_playbook(
+        nbr_device_name=GTSW001_L1002_C085_ASH6,
+        iteration=PLAYBOOK_ITERATIONS,
+        nbr_uplink_neighbor_pattern=NBR_UPLINK_NEIGHBOR_PATTERN,
+        per_iteration_flap_sec=PER_ITERATION_FLAP_SEC,
+        longevity_sec=LONGEVITY_SEC,
+        playbook_name=playbook_name,
+        traffic_items_to_configure=_frame_size_override(frame_size),
+    )
+
+
 GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
     name="GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG",
     basset_pool="networkai.test",
     endpoints=ASH6_C085_GTSW_TH6_WARMBOOT_NBR_FLAP_END_POINTS,
     basic_traffic_item_configs=GTSW_WARMBOOT_NBR_FLAP_TRAFFIC_ITEM_CONFIGS,
     playbooks=[
-        create_gtsw_warmboot_nbr_uplink_flap_playbook(
-            nbr_device_name=GTSW001_L1002_C085_ASH6,
-            iteration=PLAYBOOK_ITERATIONS,
-            nbr_uplink_neighbor_pattern=NBR_UPLINK_NEIGHBOR_PATTERN,
-            per_iteration_flap_sec=PER_ITERATION_FLAP_SEC,
-            longevity_sec=LONGEVITY_SEC,
+        _warmboot_nbr_flap_playbook(
+            "test_gtsw_warmboot_nbr_uplink_flap",
+            FRAME_SIZE_72_TO_9000,
+        ),
+        _warmboot_nbr_flap_playbook(
+            "test_gtsw_warmboot_nbr_uplink_flap_72b",
+            FRAME_SIZE_72,
+        ),
+        _warmboot_nbr_flap_playbook(
+            "test_gtsw_warmboot_nbr_uplink_flap_9000b",
+            FRAME_SIZE_9000,
         ),
     ],
 )
