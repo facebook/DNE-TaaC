@@ -14,6 +14,8 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
 )
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
+    create_fauu_drain_undrain_stage,
+    create_plane_drain_undrain_stage,
 )
 from taac.steps.step_definitions import (
     create_bgp_attribute_churn_step,
@@ -109,6 +111,44 @@ def _serialized_stage_steps(playbook: taac_types.Playbook) -> str:
     return "\n".join(serialized)
 
 
+def _stage_steps(stage: object) -> list[taac_types.Step]:
+    """Flatten a stage factory's return value.
+
+    The two factories differ: fauu returns a single Stage, plane returns the
+    six-stage list, and either can hold concurrent steps.
+    """
+    if isinstance(stage, list):
+        return [step for entry in stage for step in _stage_steps(entry)]
+    steps = list(getattr(stage, "steps", None) or [])
+    for concurrent in getattr(stage, "concurrent_steps", None) or []:
+        steps.extend(concurrent.steps or [])
+    return steps
+
+
+def _count_convergence_verifiers(
+    test: unittest.TestCase, stage: object
+) -> tuple[int, int]:
+    """Count (counter polls, pcap verifiers), asserting each carries sane args."""
+    polls = 0
+    pcap_verifiers = 0
+    for step in _stage_steps(stage):
+        if step.name != taac_types.StepName.CUSTOM_STEP or step.step_params is None:
+            continue
+        payload = _step_payload(step)
+        if payload.get("custom_step_name") != "verify_drain_convergence":
+            continue
+        if payload["use_pcap_analysis"]:
+            # A pcap verifier without a filename would download nothing.
+            test.assertTrue(payload["pcap_filename"])
+            pcap_verifiers += 1
+        else:
+            # A counter poll never opens a capture, so naming one is the bug
+            # this contract exists to catch.
+            test.assertIsNone(payload["pcap_filename"])
+            polls += 1
+    return polls, pcap_verifiers
+
+
 def _convergence_contract(
     playbook: taac_types.Playbook,
 ) -> tuple[set[str], dict[str, set[str]]]:
@@ -119,7 +159,12 @@ def _convergence_contract(
             continue
         payload = _step_payload(step)
         if payload.get("custom_step_name") == "verify_drain_convergence":
-            verifier_pcaps.add(payload["pcap_filename"])
+            # Counter-poll verifiers have no capture behind them and report
+            # pcap_filename=None. Only None is skipped, so an empty name on a
+            # genuine pcap verifier still fails this contract.
+            pcap_filename = payload["pcap_filename"]
+            if pcap_filename is not None:
+                verifier_pcaps.add(pcap_filename)
         if (
             payload.get("custom_step_name")
             == "generate_consolidated_convergence_report"
@@ -224,6 +269,35 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     report_interfaces,
                 )
                 self.assertNotIn("bgpmon", _serialized_stage_steps(playbook).casefold())
+
+    def test_convergence_mode_selects_the_verification_mechanism(self) -> None:
+        """Each mode must emit exactly the verifiers it claims to run.
+
+        Guards the failure this contract was written for: a verifier that
+        carries a pcap filename but runs a counter poll because
+        use_pcap_analysis was never passed, so the capture is taken and never
+        read.
+        """
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        # counter: poll only, no capture. pcap: capture only, no poll.
+        # hybrid: the poll gates the wait, then tshark reads the capture.
+        expected = {"counter": (2, 0), "pcap": (0, 4), "hybrid": (2, 4)}
+        for name, stage_factory, prefix_pool_regex in stages:
+            for mode, (expected_polls, expected_pcap_verifiers) in expected.items():
+                with self.subTest(stage=name, convergence_mode=mode):
+                    stage = stage_factory(
+                        device_name="dut.example.com",
+                        prefix_pool_regex=prefix_pool_regex,
+                        tcp_dump_capture_interface_ebgp="Ethernet1",
+                        tcp_dump_capture_interface_ibgp="Ethernet2",
+                        convergence_mode=mode,
+                    )
+                    polls, pcap_verifiers = _count_convergence_verifiers(self, stage)
+                    self.assertEqual(expected_polls, polls)
+                    self.assertEqual(expected_pcap_verifiers, pcap_verifiers)
 
     def test_step_factory_serializes_locked_contract(self) -> None:
         step = create_bgp_attribute_churn_step(**_locked_step_kwargs())

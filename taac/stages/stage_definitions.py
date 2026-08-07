@@ -2438,6 +2438,11 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     tcp_dump_capture_interface_bgpmon: str | None = None,
     tcp_dump_capture_interface_ibgp: str | None = None,
     soak_time_seconds: int = 1800,
+    convergence_mode: str = "hybrid",
+    counter_convergence_soak_seconds: int = 30,
+    convergence_signal: str = "per_peer_rib_version",
+    peer_convergence_scope: dict | None = None,
+    expected_min_peers: int | None = None,
 ) -> Stage:
     """
     Create a test stage to verify BGP FAUU drain/undrain behavior on specific peers.
@@ -2487,20 +2492,65 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     """
     steps = []
 
-    # Step 1: Start IXIA packet capture on eBGP interface for drain (if provided)
-    if tcp_dump_capture_interface_ebgp:
-        steps.append(
-            create_ixia_packet_capture_step(
-                device_name=device_name,
-                interface=tcp_dump_capture_interface_ebgp,
-                mode="start",
-                capture_id="fauu_drain_ebgp",
-                description="Start IXIA packet capture for drain phase (eBGP SOURCE)",
-            ),
+    # convergence_mode selects how drain/undrain convergence is handled:
+    #   "counter" - poll bgpcpp RIB version to quiescence; no capture/tshark.
+    #   "pcap"    - legacy: fixed soak + IXIA capture + tshark verification.
+    #   "hybrid"  - counter poll gates the wait (replaces the fixed soak) while
+    #               the capture runs, then tshark verifies path attributes.
+    # do_pcap drives capture + tshark verify + report (pcap and hybrid);
+    # do_counter_poll drives the RIB-version poll (counter and hybrid).
+    if convergence_mode not in ("counter", "pcap", "hybrid"):
+        raise ValueError(f"invalid convergence_mode: {convergence_mode!r}")
+    do_pcap = convergence_mode in ("pcap", "hybrid")
+    do_counter_poll = convergence_mode in ("counter", "hybrid")
+    # Same value for both the drain and the undrain soak: a short settle in
+    # counter/hybrid mode (the RIB-version poll gates the wait instead), the
+    # full fixed soak otherwise.
+    settle_soak_seconds = (
+        counter_convergence_soak_seconds if do_counter_poll else soak_time_seconds
+    )
+
+    # Per-peer RIB-version convergence scope. fauu drains eBGP prefixes
+    # (.*EBGP.*) IXIA-side, so the DUT peers that reconverge are its eBGP peers
+    # (EB-FA, remote AS EBGP_REMOTE_AS); scope by that ASN. Local import keeps
+    # the testconfigs constants dependency out of module import time.
+    if peer_convergence_scope is None:
+        from taac.testconfigs.routing.util.bgp_ebb_constants import (
+            EBGP_REMOTE_AS,
         )
 
+        peer_convergence_scope = {"remote_as": [EBGP_REMOTE_AS]}
+
+    # Anti-vacuousness floor. The scope above matches every eBGP peer
+    # (EBGP_PEER_COUNT_V4 + EBGP_PEER_COUNT_V6 ~= 280), so a floor of 1 would
+    # let a mis-scoped filter that matches a single peer "converge" and PASS --
+    # the silent-narrowing case the guard exists to catch. Use the v4 peer
+    # count as a conservative floor (roughly half the expected set); callers
+    # with a deliberately narrower scope should pass their own value.
+    if expected_min_peers is None:
+        from taac.testconfigs.routing.util.bgp_ebb_constants import (
+            EBGP_PEER_COUNT_V4,
+        )
+
+        expected_min_peers = EBGP_PEER_COUNT_V4
+
+    # IXIA capture (bgp_fauu_*drain_*.pcap) feeds only this stage's tshark
+    # verification, so it runs only when do_pcap is set.
+    if do_pcap:
+        # Step 1: Start IXIA packet capture on eBGP interface for drain (if provided)
+        if tcp_dump_capture_interface_ebgp:
+            steps.append(
+                create_ixia_packet_capture_step(
+                    device_name=device_name,
+                    interface=tcp_dump_capture_interface_ebgp,
+                    mode="start",
+                    capture_id="fauu_drain_ebgp",
+                    description="Start IXIA packet capture for drain phase (eBGP SOURCE)",
+                ),
+            )
+
     # Step 3: Start IXIA packet capture on iBGP interface for drain (if provided)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2539,16 +2589,32 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         ),
     )
 
-    # Step 7: Soak after drain
+    # Counter-based convergence: poll the RIB version to quiescence right after
+    # the drain is applied, timing the actual reconvergence rather than a RIB
+    # that already settled during the soak.
+    if do_counter_poll:
+        steps.append(
+            create_drain_convergence_verification_step(
+                pcap_filename=None,
+                max_convergence_time_seconds=300,  # 5 minutes for FAUU
+                phase="drain",
+                convergence_signal=convergence_signal,
+                peer_scope=peer_convergence_scope,
+                expected_min_peers=expected_min_peers,
+            ),
+        )
+
+    # Step 7: Soak after drain (short settle in counter mode, full in pcap mode)
     steps.append(
         create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Soak after drain for {soak_time_seconds} seconds",
+            duration=settle_soak_seconds,
+            description=f"Soak after drain for {settle_soak_seconds} seconds "
+            f"({'counter-mode short settle' if do_counter_poll else 'pcap-mode full soak'})",
         ),
     )
 
     # Step 8: Stop IXIA packet capture for drain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2560,7 +2626,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 10: Stop IXIA packet capture for drain phase (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2572,7 +2638,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 11: Save IXIA packet capture for drain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2585,7 +2651,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 13: Save IXIA packet capture for drain phase (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2598,24 +2664,26 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 14: Verify drain convergence (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_fauu_drain_ebgp.pcap",
                 max_convergence_time_seconds=300,  # 5 minutes for FAUU
                 expected_as_path_asn=None,
                 phase="drain (eBGP SOURCE)",
+                use_pcap_analysis=True,
             ),
         )
 
     # Step 16: Verify drain convergence (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_fauu_drain_ibgp.pcap",
                 max_convergence_time_seconds=300,  # 5 minutes for FAUU
                 expected_as_path_asn=None,
                 phase="drain (iBGP RECEIVER)",
+                use_pcap_analysis=True,
             ),
         )
 
@@ -2626,16 +2694,17 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     if tcp_dump_capture_interface_ibgp:
         pcap_files_drain["ibgp_receiver"] = "bgp_fauu_drain_ibgp.pcap"
 
-    steps.append(
-        create_consolidated_convergence_report_step(
-            phase="drain",
-            pcap_files=pcap_files_drain,
-            description="Generate consolidated drain convergence report",
-        ),
-    )
+    if do_pcap:
+        steps.append(
+            create_consolidated_convergence_report_step(
+                phase="drain",
+                pcap_files=pcap_files_drain,
+                description="Generate consolidated drain convergence report",
+            ),
+        )
 
     # Step 17: Start new IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2647,7 +2716,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 19: Start new IXIA packet capture for undrain phase (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2688,16 +2757,32 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         ),
     )
 
-    # Step 23: Soak after undrain
+    # Counter-based convergence: poll the RIB version to quiescence right after
+    # the undrain is applied, timing the actual reconvergence rather than a RIB
+    # that already settled during the soak.
+    if do_counter_poll:
+        steps.append(
+            create_drain_convergence_verification_step(
+                pcap_filename=None,
+                max_convergence_time_seconds=300,  # 5 minutes for FAUU
+                phase="undrain",
+                convergence_signal=convergence_signal,
+                peer_scope=peer_convergence_scope,
+                expected_min_peers=expected_min_peers,
+            ),
+        )
+
+    # Step 23: Soak after undrain (short settle in counter mode, full in pcap mode)
     steps.append(
         create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Soak after undrain for {soak_time_seconds} seconds",
+            duration=settle_soak_seconds,
+            description=f"Soak after undrain for {settle_soak_seconds} seconds "
+            f"({'counter-mode short settle' if do_counter_poll else 'pcap-mode full soak'})",
         ),
     )
 
     # Step 24: Stop IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2709,7 +2794,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 26: Stop IXIA packet capture for undrain phase (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2721,7 +2806,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 27: Save IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2734,7 +2819,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 29: Save IXIA packet capture for undrain phase (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2747,24 +2832,26 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 30: Verify undrain convergence (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_fauu_undrain_ebgp.pcap",
                 max_convergence_time_seconds=300,  # 5 minutes for FAUU
                 expected_as_path_asn=None,
                 phase="undrain (eBGP SOURCE)",
+                use_pcap_analysis=True,
             ),
         )
 
     # Step 32: Verify undrain convergence (iBGP)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_fauu_undrain_ibgp.pcap",
                 max_convergence_time_seconds=300,  # 5 minutes for FAUU
                 expected_as_path_asn=None,
                 phase="undrain (iBGP RECEIVER)",
+                use_pcap_analysis=True,
             ),
         )
 
@@ -2775,13 +2862,14 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     if tcp_dump_capture_interface_ibgp:
         pcap_files_undrain["ibgp_receiver"] = "bgp_fauu_undrain_ibgp.pcap"
 
-    steps.append(
-        create_consolidated_convergence_report_step(
-            phase="undrain",
-            pcap_files=pcap_files_undrain,
-            description="Generate consolidated undrain convergence report",
-        ),
-    )
+    if do_pcap:
+        steps.append(
+            create_consolidated_convergence_report_step(
+                phase="undrain",
+                pcap_files=pcap_files_undrain,
+                description="Generate consolidated undrain convergence report",
+            ),
+        )
 
     return Stage(steps=steps)
 
@@ -2795,6 +2883,11 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     tcp_dump_capture_interface_ebgp: str | None = None,
     tcp_dump_capture_interface_ibgp: str | None = None,
     soak_time_seconds: int = 1800,
+    convergence_mode: str = "hybrid",
+    counter_convergence_soak_seconds: int = 30,
+    convergence_signal: str = "per_peer_rib_version",
+    peer_convergence_scope: dict | None = None,
+    expected_min_peers: int | None = None,
 ) -> list[Stage]:
     """
     Create a test stage to verify BGP plane drain/undrain behavior.
@@ -2851,10 +2944,55 @@ def create_plane_drain_undrain_stage(  # noqa: C901
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,        # iBGP Plane (source)
         )
     """
+    # convergence_mode in THIS stage selects only the RIB-version poll and the
+    # post-drain/undrain soak length, matching the fauu stage:
+    #   "counter" - RIB-version quiescence poll only; short settle soak, and no
+    #               capture or tshark at all.
+    #   "pcap"    - no poll; legacy fixed soak, capture + tshark verification.
+    #   "hybrid"  - poll gates the wait (replacing the fixed soak) while the
+    #               capture runs, then tshark verifies path attributes.
+    if convergence_mode not in ("counter", "pcap", "hybrid"):
+        raise ValueError(f"invalid convergence_mode: {convergence_mode!r}")
+    do_pcap = convergence_mode in ("pcap", "hybrid")
+    do_counter_poll = convergence_mode in ("counter", "hybrid")
+    # Same value for both the drain and the undrain soak: a short settle in
+    # counter/hybrid mode (the RIB-version poll gates the wait instead), the
+    # full fixed soak otherwise.
+    settle_soak_seconds = (
+        counter_convergence_soak_seconds if do_counter_poll else soak_time_seconds
+    )
+
+    # Per-peer RIB-version convergence scope. The plane drain applies egress
+    # policies to the EB-FA (eBGP) and EB-EB (iBGP) peer groups, so scope by
+    # egress_policy_name. Includes both the normal and -DRAIN variants because
+    # the same step runs in both phases (drain applies -DRAIN, undrain reverts).
+    # These mirror drain_policies / undrain_policies below (single set kept here
+    # so both the drain and undrain poll steps can reference it).
+    if peer_convergence_scope is None:
+        peer_convergence_scope = {
+            "egress_policy_names": [
+                "EB-FA-OUT",
+                "EB-FA-OUT-DRAIN",
+                "EB-EB-OUT",
+                "EB-EB-OUT-DRAIN",
+            ]
+        }
+
+    # Anti-vacuousness floor; see the fauu stage for the rationale. The plane
+    # scope is a superset of the eBGP set (EB-FA-* covers the same eBGP peers,
+    # EB-EB-* adds iBGP), so the v4 eBGP peer count is a conservative floor
+    # here too.
+    if expected_min_peers is None:
+        from taac.testconfigs.routing.util.bgp_ebb_constants import (
+            EBGP_PEER_COUNT_V4,
+        )
+
+        expected_min_peers = EBGP_PEER_COUNT_V4
+
     steps_pre_drain = []
 
     # Step 1B: Start IXIA packet capture on eBGP interface for drain (if provided)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_pre_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2866,7 +3004,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 1C: Start IXIA packet capture on iBGP Plane interface for drain (if provided)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_pre_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2925,16 +3063,32 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     # Stage 3 will contain all steps after drain (sequential)
     steps_after_drain = []
 
-    # Step 3: Soak after drain
+    # Counter-based convergence: poll bgpcpp RIB version to quiescence right
+    # after the drain is applied, timing the actual reconvergence rather than a
+    # RIB that already settled during a long post-soak.
+    if do_counter_poll:
+        steps_after_drain.append(
+            create_drain_convergence_verification_step(
+                pcap_filename=None,
+                max_convergence_time_seconds=600,  # 10 minutes for Plane
+                phase="drain",
+                convergence_signal=convergence_signal,
+                peer_scope=peer_convergence_scope,
+                expected_min_peers=expected_min_peers,
+            ),
+        )
+
+    # Step 3: Soak after drain (short settle in counter mode, full in pcap mode)
     steps_after_drain.append(
         create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Soak after drain for {soak_time_seconds} seconds",
+            duration=settle_soak_seconds,
+            description=f"Soak after drain for {settle_soak_seconds} seconds "
+            f"({'counter-mode short settle' if do_counter_poll else 'pcap-mode full soak'})",
         ),
     )
 
     # Step 4B: Stop IXIA packet capture for drain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_after_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2946,7 +3100,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 4C: Stop IXIA packet capture for drain phase (iBGP Plane)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_after_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2958,7 +3112,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 5B: Save IXIA packet capture for drain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_after_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2971,7 +3125,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 5C: Save IXIA packet capture for drain phase (iBGP Plane - SOURCE)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_after_drain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -2984,24 +3138,26 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 5A: Verify drain convergence (iBGP Plane SOURCE - FIRST as reference point)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_after_drain.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_plane_drain_ibgp_source.pcap",
                 max_convergence_time_seconds=600,  # 10 minutes for Plane
                 expected_as_path_asn=None,
                 phase="drain (iBGP Plane SOURCE)",
+                use_pcap_analysis=True,
             ),
         )
 
     # Step 5C: Verify drain convergence (eBGP to FA-UU)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_after_drain.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_plane_drain_ebgp.pcap",
                 max_convergence_time_seconds=600,  # 10 minutes for Plane
                 expected_as_path_asn=None,
                 phase="drain (eBGP to FA-UU)",
+                use_pcap_analysis=True,
             ),
         )
 
@@ -3012,13 +3168,14 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     if tcp_dump_capture_interface_ebgp:
         pcap_files_drain["ebgp"] = "bgp_plane_drain_ebgp.pcap"
 
-    steps_after_drain.append(
-        create_consolidated_convergence_report_step(
-            phase="drain",
-            pcap_files=pcap_files_drain,
-            description="Generate consolidated drain convergence report with latency analysis",
-        ),
-    )
+    if do_pcap:
+        steps_after_drain.append(
+            create_consolidated_convergence_report_step(
+                phase="drain",
+                pcap_files=pcap_files_drain,
+                description="Generate consolidated drain convergence report with latency analysis",
+            ),
+        )
 
     # Create Stage 3: Post-drain verification (sequential)
     stage_3_post_drain = Stage(
@@ -3031,7 +3188,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     steps_pre_undrain = []
 
     # Step 6B: Start new IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_pre_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3043,7 +3200,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 6C: Start new IXIA packet capture for undrain phase (iBGP Plane - SOURCE)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_pre_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3106,16 +3263,30 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     # Stage 6: Post-undrain verification
     steps_post_undrain = []
 
-    # Step 8: Soak after undrain
+    # Counter-based convergence: poll to quiescence right after undrain apply.
+    if do_counter_poll:
+        steps_post_undrain.append(
+            create_drain_convergence_verification_step(
+                pcap_filename=None,
+                max_convergence_time_seconds=600,  # 10 minutes for Plane
+                phase="undrain",
+                convergence_signal=convergence_signal,
+                peer_scope=peer_convergence_scope,
+                expected_min_peers=expected_min_peers,
+            ),
+        )
+
+    # Step 8: Soak after undrain (short settle in counter mode, full in pcap mode)
     steps_post_undrain.append(
         create_longevity_step(
-            duration=soak_time_seconds,
-            description=f"Soak after undrain for {soak_time_seconds} seconds",
+            duration=settle_soak_seconds,
+            description=f"Soak after undrain for {settle_soak_seconds} seconds "
+            f"({'counter-mode short settle' if do_counter_poll else 'pcap-mode full soak'})",
         ),
     )
 
     # Step 9B: Stop IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_post_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3127,7 +3298,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 9C: Stop IXIA packet capture for undrain phase (iBGP Plane - SOURCE)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_post_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3139,7 +3310,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 10B: Save IXIA packet capture for undrain phase (eBGP)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_post_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3152,7 +3323,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 10C: Save IXIA packet capture for undrain phase (iBGP Plane - SOURCE)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_post_undrain.append(
             create_ixia_packet_capture_step(
                 device_name=device_name,
@@ -3165,24 +3336,26 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         )
 
     # Step 10A: Verify undrain convergence (iBGP Plane SOURCE - FIRST as reference point)
-    if tcp_dump_capture_interface_ibgp:
+    if do_pcap and tcp_dump_capture_interface_ibgp:
         steps_post_undrain.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_plane_undrain_ibgp_source.pcap",
                 max_convergence_time_seconds=600,  # 10 minutes for Plane
                 expected_as_path_asn=None,
                 phase="undrain (iBGP Plane SOURCE)",
+                use_pcap_analysis=True,
             ),
         )
 
     # Step 10C: Verify undrain convergence (eBGP to FA-UU)
-    if tcp_dump_capture_interface_ebgp:
+    if do_pcap and tcp_dump_capture_interface_ebgp:
         steps_post_undrain.append(
             create_drain_convergence_verification_step(
                 pcap_filename="bgp_plane_undrain_ebgp.pcap",
                 max_convergence_time_seconds=600,  # 10 minutes for Plane
                 expected_as_path_asn=None,
                 phase="undrain (eBGP to FA-UU)",
+                use_pcap_analysis=True,
             ),
         )
 
@@ -3193,13 +3366,14 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     if tcp_dump_capture_interface_ebgp:
         pcap_files_undrain["ebgp"] = "bgp_plane_undrain_ebgp.pcap"
 
-    steps_post_undrain.append(
-        create_consolidated_convergence_report_step(
-            phase="undrain",
-            pcap_files=pcap_files_undrain,
-            description="Generate consolidated undrain convergence report with latency analysis",
-        ),
-    )
+    if do_pcap:
+        steps_post_undrain.append(
+            create_consolidated_convergence_report_step(
+                phase="undrain",
+                pcap_files=pcap_files_undrain,
+                description="Generate consolidated undrain convergence report with latency analysis",
+            ),
+        )
 
     # Create Stage 6: Post-undrain verification (sequential)
     stage_6_post_undrain = Stage(

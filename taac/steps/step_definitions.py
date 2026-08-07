@@ -5874,32 +5874,75 @@ def create_openr_route_action_step(
 
 
 def create_drain_convergence_verification_step(
-    pcap_filename: str,
+    pcap_filename: t.Optional[str],
     max_convergence_time_seconds: int = 600,
     expected_as_path_asn: t.Optional[int] = None,
     phase: str = "drain",
     description: t.Optional[str] = None,
+    use_pcap_analysis: bool = False,
+    quiescence_window_seconds: int = 30,
+    poll_interval_seconds: int = 5,
+    convergence_signal: str = "global_table_version",
+    peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
+    expected_min_peers: int = 1,
 ) -> Step:
     """
     Create a step to verify drain/undrain convergence from PCAP analysis.
 
-    This step verifies:
-    - Convergence time is within threshold
-    - Routes have expected BGP attributes (AS_PATH, ORIGIN)
-    - No BGP withdrawal messages during convergence
+    Two mechanisms are available:
+
+    - Counter-based (default, ``use_pcap_analysis=False``): poll bgpcpp live on
+      the DUT and declare convergence at quiescence. ``convergence_signal``
+      selects what is polled:
+        - "global_table_version" (default): the global ``bgpcpp.rib.tableVersion``
+          counter stops advancing for ``quiescence_window_seconds``.
+        - "per_peer_rib_version": each in-scope peer's ``rib_version`` (from
+          getBgpSessions) stops advancing for the window. ``peer_scope`` selects
+          the drained peer-group; ``expected_min_peers`` guards against a vacuous
+          empty-scope pass. More robust than the global counter, which is noisy
+          (advances per emitted prefix incl. no-op resyncs, across all peers).
+      No IXIA capture or tshark dependency either way.
+    - PCAP-based (``use_pcap_analysis=True``): download the IXIA capture and run
+      tshark over BGP UPDATE timestamps. Kept behind the flag for A/B comparison;
+      requires the capture steps to have run and saved ``pcap_filename``.
 
     Args:
-        pcap_filename: Name of PCAP file on IXIA server
+        pcap_filename: Name of PCAP file on IXIA server, or None for a
+            counter-based step that has no capture behind it at all. None is
+            not the same as "": an empty name would look like a capture whose
+            filename was lost, and the playbook contract tests reject it.
         max_convergence_time_seconds: Maximum allowed convergence time (default: 600s/10min)
         expected_as_path_asn: Expected ASN in AS_PATH (default: None, skips AS_PATH check)
         phase: "drain" or "undrain" for proper ORIGIN verification
         description: Custom description for the step
+        use_pcap_analysis: When True use the legacy PCAP+tshark path; when False
+            (default) use the counter-based path
+        quiescence_window_seconds: Counter-based mode: signal must be stable
+            for this long to declare convergence (default: 30s)
+        poll_interval_seconds: Counter-based mode: seconds between polls
+        convergence_signal: "global_table_version" (default) or
+            "per_peer_rib_version" (see above)
+        peer_scope: per_peer_rib_version mode: dict selecting the drained peers,
+            e.g. {"remote_as": [65334]} (fauu eBGP) or
+            {"egress_policy_names": ["EB-FA-OUT", "EB-FA-OUT-DRAIN", ...]} (plane).
+            A peer matches if it satisfies ANY provided key; empty means all peers.
+        expected_min_peers: per_peer_rib_version mode: fail unless at least this
+            many in-scope established peers with rib_version>0 were seen.
 
     Returns:
         Step object for drain convergence verification
     """
     if description is None:
-        description = f"Verify {phase} convergence from {pcap_filename} (max {max_convergence_time_seconds}s)"
+        if use_pcap_analysis:
+            mode = "pcap"
+        elif convergence_signal == "per_peer_rib_version":
+            mode = "per-peer-rib"
+        else:
+            mode = "counters"
+        description = (
+            f"Verify {phase} convergence via {mode} "
+            f"(max {max_convergence_time_seconds}s)"
+        )
 
     params = {
         "custom_step_name": "verify_drain_convergence",
@@ -5908,6 +5951,12 @@ def create_drain_convergence_verification_step(
         "expected_as_path_asn": expected_as_path_asn,
         "verify_origin_incomplete": True,
         "phase": phase,
+        "use_pcap_analysis": use_pcap_analysis,
+        "quiescence_window_seconds": quiescence_window_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "convergence_signal": convergence_signal,
+        "peer_scope": peer_scope or {},
+        "expected_min_peers": expected_min_peers,
     }
 
     return Step(
