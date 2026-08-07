@@ -33,8 +33,16 @@ Usage:
 """
 
 from ixia.ixia import types as ixia_types
+from taac.health_checks.healthcheck_definitions import (
+    create_bgp_session_establish_check,
+    create_port_state_check,
+)
 from taac.playbooks.playbook_definitions import (
+    BGP_RESTART_SERVICE_CHECK,
+    create_gtsw_service_restart_nbr_uplink_flap_playbook,
     create_gtsw_warmboot_nbr_uplink_flap_playbook,
+    FSDB_RESTART_SERVICE_CHECK,
+    QSFP_SERVICE_RESTART_SERVICE_CHECK,
 )
 from taac.testbed_params.testbed_params_gtsw_th6_ash6_c085 import (
     ASH6_C085_GTSW_TH6_WARMBOOT_NBR_FLAP_END_POINTS,
@@ -45,6 +53,7 @@ from taac.testbed_params.testbed_params_gtsw_th6_ash6_c085 import (
 )
 from taac.test_as_a_config.types import (
     BasicTrafficItemConfig,
+    Service,
     TestConfig,
     TrafficEndpoint,
     TrafficItemSettings,
@@ -165,6 +174,43 @@ def _warmboot_nbr_flap_playbook(
     )
 
 
+# fsdb exposes no convergence signal this test can gate on, so it gets a fixed
+# settle instead. 10s matches `create_fsdb_restart_playbook`.
+FSDB_SETTLE_SEC = 10
+
+
+def _service_restart_nbr_flap_playbook(
+    playbook_name: str,
+    service,
+    restart_service_check,
+    convergence_services,
+    service_label: str,
+    post_restart_settle_sec: int = 0,
+    extra_post_flap_checks=None,
+):
+    """One targeted service-restart + NBR-flap playbook.
+
+    Same disruption shape as the warmboot playbooks; only the restarted service
+    and its service-specific checks differ. Traffic stays on the 72..9000 random
+    range for all three.
+    """
+    return create_gtsw_service_restart_nbr_uplink_flap_playbook(
+        nbr_device_name=GTSW001_L1002_C085_ASH6,
+        playbook_name=playbook_name,
+        service=service,
+        restart_service_check=restart_service_check,
+        convergence_services=convergence_services,
+        service_label=service_label,
+        iteration=PLAYBOOK_ITERATIONS,
+        nbr_uplink_neighbor_pattern=NBR_UPLINK_NEIGHBOR_PATTERN,
+        per_iteration_flap_sec=PER_ITERATION_FLAP_SEC,
+        longevity_sec=LONGEVITY_SEC,
+        post_restart_settle_sec=post_restart_settle_sec,
+        extra_post_flap_checks=extra_post_flap_checks,
+        traffic_items_to_configure=_frame_size_override(FRAME_SIZE_72_TO_9000),
+    )
+
+
 GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
     name="GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG",
     basset_pool="networkai.test",
@@ -182,6 +228,36 @@ GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
         _warmboot_nbr_flap_playbook(
             "test_gtsw_warmboot_nbr_uplink_flap_9000b",
             FRAME_SIZE_9000,
+        ),
+        # qsfp_service: port state is asserted after the flap recovers, so it
+        # catches a port the restart or the flap left permanently down.
+        _service_restart_nbr_flap_playbook(
+            playbook_name="test_gtsw_qsfp_restart_nbr_uplink_flap",
+            service=Service.QSFP_SERVICE,
+            restart_service_check=QSFP_SERVICE_RESTART_SERVICE_CHECK,
+            convergence_services=[Service.QSFP_SERVICE, Service.AGENT, Service.BGP],
+            service_label="qsfp_service",
+            extra_post_flap_checks=[create_port_state_check()],
+        ),
+        # bgpd: session establishment is asserted per pass, after the flap
+        # recovers, on top of the BGP convergence gate.
+        _service_restart_nbr_flap_playbook(
+            playbook_name="test_gtsw_bgp_restart_nbr_uplink_flap",
+            service=Service.BGP,
+            restart_service_check=BGP_RESTART_SERVICE_CHECK,
+            convergence_services=[Service.BGP, Service.AGENT],
+            service_label="bgpd",
+            extra_post_flap_checks=[create_bgp_session_establish_check()],
+        ),
+        # fsdb: fixed settle rather than a convergence gate; AGENT + BGP are
+        # still gated so the restart is not allowed to disturb forwarding.
+        _service_restart_nbr_flap_playbook(
+            playbook_name="test_gtsw_fsdb_restart_nbr_uplink_flap",
+            service=Service.FSDB,
+            restart_service_check=FSDB_RESTART_SERVICE_CHECK,
+            convergence_services=[Service.AGENT, Service.BGP],
+            service_label="fsdb",
+            post_restart_settle_sec=FSDB_SETTLE_SEC,
         ),
     ],
 )
