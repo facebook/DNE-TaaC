@@ -1,0 +1,127 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# pyre-unsafe
+"""GTSW warmboot + neighbour uplink-flap hardening TestConfig (IcePack / TH6).
+
+Stresses a GTSW's ability to re-converge while its fabric neighbour's uplinks
+churn underneath it. The existing FBOSS hardening conveyors disrupt a single DUT
+in isolation; nothing there exercises "DUT recovers while the adjacent switch is
+flapping".
+
+Topology (reuses the ash6 c085 multi-node PFC cabling):
+
+    gtsw001.l1001.c085.ash6  (DUT, warmbooted)
+        3x IXIA src  eth1/17/1, eth1/17/3, eth1/17/5
+              |
+              v  8x STSW spine plane (stsw001.s001..s008.l201.ash6)
+              |
+    gtsw001.l1002.c085.ash6  (NBR, dut=False, uplinks flapped)
+        1x IXIA dst  eth1/1/1
+
+The neighbour is ``dut=False`` on purpose. ``TaacRunner.run_tests`` loops
+``for dut in duts``, so a second ``dut=True`` would run the whole playbook twice
+and warmboot both boxes. As a non-DUT endpoint the neighbour is still covered by
+device health checks (they fan out over topology endpoints) but is never
+iterated.
+
+Traffic uses a 72..9000 byte random frame-size range. 9000 sits exactly at the
+provisioned IcePack fabric-port jumbo MTU; 9100 would be punted to CPU queue 0.
+
+Usage:
+  buck2 run neteng/netcastle:netcastle_taac -- \\
+    --team taac --test-config GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG \\
+    --dev --skip-basset-reservation --debug
+"""
+
+from ixia.ixia import types as ixia_types
+from taac.playbooks.playbook_definitions import (
+    create_gtsw_warmboot_nbr_uplink_flap_playbook,
+)
+from taac.testbed_params.testbed_params_gtsw_th6_ash6_c085 import (
+    ASH6_C085_GTSW_TH6_WARMBOOT_NBR_FLAP_END_POINTS,
+    GTSW001_L1001_C085_ASH6,
+    GTSW001_L1001_C085_IXIA_SRC_PORTS,
+    GTSW001_L1002_C085_ASH6,
+    GTSW001_L1002_C085_IXIA_DST_PORTS,
+)
+from taac.test_as_a_config.types import (
+    BasicTrafficItemConfig,
+    TestConfig,
+    TrafficEndpoint,
+)
+
+# GTSW->STSW uplink selector on the NEIGHBOUR. The flap step resolves the actual
+# breakout list at run time from the neighbour's LLDP table, so no eth1/* lanes
+# are hardcoded here and the test survives re-cabling.
+NBR_UPLINK_NEIGHBOR_PATTERN = "stsw*"
+
+# The whole playbook -- warmboot, neighbour flap, convergence, longevity and the
+# full health-check set -- runs PLAYBOOK_ITERATIONS times. The 600s flap budget
+# is split evenly across those passes, so changing the iteration count re-slices
+# that budget rather than extending the run.
+PLAYBOOK_ITERATIONS = 3
+TOTAL_FLAP_SEC = 600
+PER_ITERATION_FLAP_SEC = TOTAL_FLAP_SEC // PLAYBOOK_ITERATIONS
+
+LONGEVITY_SEC = 300
+
+# Packet sizes span 72 bytes (above the 64B Ethernet minimum) to 9000 bytes
+# (the provisioned jumbo MTU on IcePack fabric ports). RANDOM is the only
+# frame-size mode that expresses a true min/max range.
+FRAME_SIZE_72_TO_9000 = ixia_types.FrameSize(
+    type=ixia_types.FrameSizeType.RANDOM,
+    random_min=72,
+    random_max=9000,
+)
+
+# 3 source ports converge on a single destination port, so each flow is held to
+# 30% line rate (~90% aggregate on the destination) to stay lossless in steady
+# state — otherwise the packet-loss postcheck would fail on oversubscription
+# rather than on a real regression.
+PER_FLOW_LINE_RATE = 30
+
+_DST_ENDPOINT = TrafficEndpoint(
+    name=f"{GTSW001_L1002_C085_ASH6}:{GTSW001_L1002_C085_IXIA_DST_PORTS[0]}",
+    network_group_index=0,
+    device_group_index=0,
+)
+
+GTSW_WARMBOOT_NBR_FLAP_TRAFFIC_ITEM_CONFIGS = [
+    BasicTrafficItemConfig(
+        name=f"L1001_TO_L1002_{src_port.replace('/', '_')}",
+        bidirectional=False,
+        line_rate=PER_FLOW_LINE_RATE,
+        frame_size_settings=FRAME_SIZE_72_TO_9000,
+        src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
+        src_endpoints=[
+            TrafficEndpoint(
+                name=f"{GTSW001_L1001_C085_ASH6}:{src_port}",
+                network_group_index=0,
+                device_group_index=0,
+            )
+        ],
+        dest_endpoints=[_DST_ENDPOINT],
+        traffic_type=ixia_types.TrafficType.IPV6,
+        tracking_types=[
+            ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+            ixia_types.TrafficStatsTrackingType.FLOW_GROUP,
+        ],
+    )
+    for src_port in GTSW001_L1001_C085_IXIA_SRC_PORTS
+]
+
+
+GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG = TestConfig(
+    name="GTSW_WARMBOOT_NBR_UPLINK_FLAP_TEST_CONFIG",
+    basset_pool="networkai.test",
+    endpoints=ASH6_C085_GTSW_TH6_WARMBOOT_NBR_FLAP_END_POINTS,
+    basic_traffic_item_configs=GTSW_WARMBOOT_NBR_FLAP_TRAFFIC_ITEM_CONFIGS,
+    playbooks=[
+        create_gtsw_warmboot_nbr_uplink_flap_playbook(
+            nbr_device_name=GTSW001_L1002_C085_ASH6,
+            iteration=PLAYBOOK_ITERATIONS,
+            nbr_uplink_neighbor_pattern=NBR_UPLINK_NEIGHBOR_PATTERN,
+            per_iteration_flap_sec=PER_ITERATION_FLAP_SEC,
+            longevity_sec=LONGEVITY_SEC,
+        ),
+    ],
+)

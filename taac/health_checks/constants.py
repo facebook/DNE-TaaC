@@ -104,6 +104,44 @@ SERVICES_EXPECTED_TO_RESTART_DURING_AGENT_WARMBOOT: t.List[str] = sorted(
 )
 
 
+# Health checks whose verdict depends on link/circuit state, and which therefore
+# false-fail while links are intentionally down (interface flaps, transceiver
+# resets, snake circuit teardown).
+#
+# Two distinct reasons a check lands here:
+#   - LLDP_CHECK / PORT_STATE_CHECK expand a disabled A-end to BOTH ends of a
+#     circuit, so they assert on every link in the topology.
+#   - PORT_TRANSCEIVER_CHECK / PORT_TX_RX_CHECK / PORT_FLAP_CHECK default to
+#     every topology interface and have no expected-down set at all, so they
+#     cannot be told a link is down on purpose.
+CIRCUIT_HEALTH_CHECK_NAMES: t.Set["hc_types.CheckName"] = {
+    hc_types.CheckName.LLDP_CHECK,
+    hc_types.CheckName.PORT_STATE_CHECK,
+    hc_types.CheckName.PORT_TRANSCEIVER_CHECK,
+    hc_types.CheckName.PORT_TX_RX_CHECK,
+    hc_types.CheckName.PORT_FLAP_CHECK,
+}
+
+
+def filter_out_circuit_health_checks(
+    checks: t.Sequence[t.Any],
+    also_exclude: t.Optional[t.Set["hc_types.CheckName"]] = None,
+) -> t.List[t.Any]:
+    """Drop circuit-dependent checks, keeping the rest in order.
+
+    Use for the mid-test validation set of a playbook that intentionally downs
+    links, so the surviving checks still assert process/device health while the
+    link-state ones are deferred to a later steady-state window.
+
+    Args:
+        checks: PointInTimeHealthCheck values to filter.
+        also_exclude: Extra CheckNames to drop (e.g. IXIA_PACKET_LOSS_CHECK when
+            the disruption breaks the traffic path by design).
+    """
+    excluded = CIRCUIT_HEALTH_CHECK_NAMES | (also_exclude or set())
+    return [check for check in checks if check.name not in excluded]
+
+
 # Arista hardware capacity health check constants
 ARISTA_DEFAULT_FEC_THRESHOLD: int = 10000
 ARISTA_DEFAULT_ECMP_THRESHOLD: int = 1000

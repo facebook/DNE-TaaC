@@ -55,6 +55,29 @@ ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_END_POINTS = [
     ),
 ]
 
+# Warmboot + neighbour-uplink-flap variant of the endpoint list.
+#
+# Same physical pair as the multi-node PFC list above, but ``l1002`` is
+# ``dut=False``. That test is symmetric (both boxes source/sink PFC traffic);
+# this one is not — only ``l1001`` is warmbooted, and ``l1002`` merely flaps
+# its own STSW-facing uplinks. ``TaacRunner.run_tests`` loops
+# ``for dut in duts``, so leaving both ``dut=True`` would run the whole
+# playbook twice and warmboot both boxes. With ``dut=False`` the neighbour is
+# still health-checked (device checks fan out over topology endpoints) but is
+# never iterated as a DUT.
+ASH6_C085_GTSW_TH6_WARMBOOT_NBR_FLAP_END_POINTS = [
+    Endpoint(
+        name=GTSW001_L1001_C085_ASH6,
+        dut=True,
+        ixia_ports=GTSW001_L1001_C085_IXIA_SRC_PORTS,
+    ),
+    Endpoint(
+        name=GTSW001_L1002_C085_ASH6,
+        dut=False,
+        ixia_ports=GTSW001_L1002_C085_IXIA_DST_PORTS,
+    ),
+]
+
 # 3 unique src ports + a repeat of P1 → 4-entry list (matches the shape
 # ``gen_pfc_functionality_test_generic_4port_configs`` expects; helper
 # will also auto-append if only 3 are supplied, but we spell it out to

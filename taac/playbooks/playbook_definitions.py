@@ -30,6 +30,7 @@ from taac.constants import (
 from taac.health_checks.constants import (
     _get_services_excluding,
     DEFAULT_SERVICE_NAMES,
+    filter_out_circuit_health_checks,
     SERVICES_EXPECTED_TO_RESTART_DURING_AGENT_WARMBOOT,
     SERVICES_TO_MONITOR_DURING_AGENT_RESTART,
     SERVICES_TO_MONITOR_DURING_BGP_RESTART,
@@ -125,6 +126,7 @@ from taac.steps.step_definitions import (
     create_custom_step,
     create_drain_undrain_step,
     create_ecmp_member_static_route_step,
+    create_fpf_rapid_flap_step_lldp,
     create_interface_flap_step,
     create_ixia_api_step,
     create_ixia_device_group_toggle_step,
@@ -18767,6 +18769,151 @@ def create_fboss_hw_agent_0_coldboot_playbook(
                         description=(
                             "Wait for the agent and bgpd to converge before the "
                             "next coldboot"
+                        ),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _warmboot_nbr_flap_non_circuit_checks() -> t.List[PointInTimeHealthCheck]:
+    """Mid-test health checks for the warmboot + neighbour-flap disruption window.
+
+    Circuit-dependent checks are filtered out because the neighbour's uplinks are
+    intentionally down for most of the window. IXIA packet loss is excluded for
+    the same reason: traffic runs DUT -> STSW -> NBR, so flapping the NBR's
+    uplinks breaks the path by design.
+
+    The service-restart check declares the full wedge_agent BindsTo cascade — a
+    check that monitors wedge_agent without it false-fails the intentional
+    warmboot (see `WEDGE_AGENT_BINDS_TO_CASCADE`).
+    """
+    return filter_out_circuit_health_checks(
+        [
+            create_systemctl_active_state_check(),
+            create_unclean_exit_check(),
+            create_device_core_dumps_check(),
+            create_memory_utilization_check(threshold=5 * (1024**3)),
+            create_cpu_utilization_check(threshold=400.0),
+            AGENT_WARMBOOT_SERVICE_CHECK,
+        ],
+        also_exclude={hc_types.CheckName.IXIA_PACKET_LOSS_CHECK},
+    )
+
+
+def create_gtsw_warmboot_nbr_uplink_flap_playbook(
+    nbr_device_name: str,
+    iteration: int = 3,
+    nbr_uplink_neighbor_pattern: str = "stsw*",
+    per_iteration_flap_sec: int = 200,
+    longevity_sec: int = 300,
+) -> Playbook:
+    """Build the `test_gtsw_warmboot_nbr_uplink_flap` Playbook.
+
+    Exercises a GTSW re-converging while its fabric neighbour's uplinks churn.
+    Each pass is:
+
+      1. Warmboot the DUT agent, wait for agent + bgpd convergence, rapid-flap
+         the neighbour's STSW-facing uplinks, converge again, then run the
+         non-circuit health checks.
+      2. A `longevity_sec` steady-state settle.
+
+    `iteration` repeats the whole thing at the PLAYBOOK level, not the stage
+    level, so every pass also re-runs the postchecks below and gets a fresh
+    `test_case_start_time` window (`libs/taac_runner.py:814`). That matters:
+    the time-windowed checks (unclean exit, core dumps, service restart) are
+    then scoped to their own pass rather than to the whole run.
+
+    The neighbour is flapped via `create_fpf_rapid_flap_step_lldp` scoped with
+    `device_regexes`. That step is wall-clock bounded (its handler loops until
+    the deadline) and resolves the uplink set from the neighbour's own LLDP
+    table, so no breakout ports are hardcoded. Its sibling
+    `create_fpf_rapid_flap_step` derives a flap COUNT from the duration and has
+    overshot its window badly in the past — do not substitute it here.
+
+    Health-check placement: the in-pass check is a MID_TEST validation step
+    carrying only the non-circuit set, because the links are intentionally
+    down. The playbook's own postchecks (the full usual set) are injected as
+    the final stage by the runner, so they land after the longevity settle when
+    every link is expected back up.
+
+    Args:
+        nbr_device_name: Hostname of the non-DUT neighbour to flap.
+        iteration: Playbook-level repeats of the whole warmboot + flap +
+            longevity + postcheck sequence. Default 3.
+        nbr_uplink_neighbor_pattern: fnmatch glob over the neighbour's LLDP
+            remote system names selecting which uplinks to flap.
+        per_iteration_flap_sec: Flap window within each pass.
+        longevity_sec: Steady-state settle before the full postchecks.
+
+    Returns:
+        A `Playbook` named `test_gtsw_warmboot_nbr_uplink_flap`.
+    """
+    non_circuit_checks = _warmboot_nbr_flap_non_circuit_checks()
+
+    def _nbr_flap_step(duration_sec: int) -> Step:
+        return create_fpf_rapid_flap_step_lldp(
+            neighbor_pattern=nbr_uplink_neighbor_pattern,
+            duration_sec=duration_sec,
+            flap_down_time_sec=6,
+            flap_up_time_sec=6,
+            device_regexes=[nbr_device_name],
+            description=(
+                f"Rapid-flap LLDP-resolved uplinks "
+                f"(neighbors~={nbr_uplink_neighbor_pattern!r}) on "
+                f"{nbr_device_name} for {duration_sec}s (wall-clock bound)"
+            ),
+        )
+
+    return Playbook(
+        name="test_gtsw_warmboot_nbr_uplink_flap",
+        iteration=iteration,
+        postchecks=[
+            AGENT_WARMBOOT_SERVICE_CHECK,
+            create_systemctl_active_state_check(),
+            create_device_core_dumps_check(),
+            create_unclean_exit_check(),
+            create_lldp_check(),
+            create_port_state_check(),
+            create_packetloss_health_check(),
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="warmboot_nbr_flap",
+                steps=[
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        description="Warmboot the DUT FBOSS agent",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Converge after warmboot, before flapping",
+                    ),
+                    _nbr_flap_step(per_iteration_flap_sec),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Converge after the neighbour uplink flap",
+                    ),
+                    create_validation_step(
+                        point_in_time_checks=non_circuit_checks,
+                        stage=taac_types.ValidationStage.MID_TEST,
+                        description=(
+                            "Non-circuit health for this pass "
+                            "(links intentionally flapping)"
+                        ),
+                    ),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="longevity",
+                steps=[
+                    create_longevity_step(
+                        duration=longevity_sec,
+                        description=(
+                            f"Settle {longevity_sec}s before the full "
+                            "health-check set"
                         ),
                     ),
                 ],
