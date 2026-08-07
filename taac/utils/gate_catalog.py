@@ -68,15 +68,27 @@ GATE_SC3_MEMORY_TRANSIENT = "sc3_memory_transient"
 
 # The central control point: gate name -> default enforcement mode. Flip a gate
 # globally by editing its mode here; override for a single run via the call site.
+# SC1 is fully BLOCKING as of the 2026-08-05 bag010 sweep -- the first run whose
+# measurement window contained only the advertisement (D114833653). Worst value
+# observed across 202/402/602/802/1002 peers, against the shipped ceiling:
+#
+#   cpu_stable         2.17%   vs 10%     (4.6x margin)
+#   cpu_transient      2 samples vs 5     (2.5x)
+#   memory_leak        1.001   vs 1.05
+#   memory_stable      14.5%   vs 50%     (3.4x)
+#   memory_transient   1.8%    vs 10%     (5.5x)
+#
+# Every threshold is overridable per test-config, so a flip that turns out wrong
+# is a param change rather than a code change.
 GATE_DEFAULT_MODES: dict[str, str] = {
     # Transient (peak - stable) memory flatness across the egress-peer sweep --
     # observe until calibrated.
-    GATE_SC1_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
+    GATE_SC1_MEMORY_TRANSIENT: GATE_MODE_BLOCKING,
     # Intra-soak memory leak: the soak TAIL (last 20% of samples) must not sit
     # above the soak MEAN. A converged process is flat; a tail riding above the
     # average is the moving average still climbing. Measured 1.000-1.001 across
     # the sweep on bag010. Observe until flipped.
-    GATE_SC1_MEMORY_LEAK: GATE_MODE_PERMISSIVE,
+    GATE_SC1_MEMORY_LEAK: GATE_MODE_BLOCKING,
     # Steady memory must grow SUB-PROPORTIONALLY with the related-peer count.
     # Distinct from the leak gate above: that one looks within a single soak,
     # this one looks ACROSS the sweep. Peers grow 5x (202 -> 1002); memory grew
@@ -85,18 +97,18 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # Proportional growth would be 400%. Gated at 50% (~340KB/peer) rather than
     # near the observation: one run gives no read on variance, and jemalloc
     # retention can move RSS without a logical change. Observe until calibrated.
-    GATE_SC1_MEMORY_STABLE: GATE_MODE_PERMISSIVE,
+    GATE_SC1_MEMORY_STABLE: GATE_MODE_BLOCKING,
     # Stable (soak-mean) CPU flatness across the egress-peer sweep -- the core
     # "constant computation" characteristic (compute once per update-group, not
     # per peer). Observe until calibrated.
-    GATE_SC1_CPU_STABLE: GATE_MODE_PERMISSIVE,
+    GATE_SC1_CPU_STABLE: GATE_MODE_BLOCKING,
     # Transient (peak - stable) CPU flatness across the egress-peer sweep (the
     # convergence-burst compute) -- observe.
-    GATE_SC1_CPU_TRANSIENT: GATE_MODE_PERMISSIVE,
+    GATE_SC1_CPU_TRANSIENT: GATE_MODE_BLOCKING,
     # Anti-vacuousness: the DUT must advertise the ingress route set OUT to its
     # iBGP egress peers (per-peer postpolicy_sent_prefix_count) -- observe until
     # the advertised floor is calibrated, then flip to blocking.
-    GATE_SC1_ROUTES_ADVERTISED: GATE_MODE_PERMISSIVE,
+    GATE_SC1_ROUTES_ADVERTISED: GATE_MODE_BLOCKING,
     # Anti-vacuousness: routes must reach the RIB -- hard from the start.
     GATE_SC2_ROUTES_ACCEPTANCE: GATE_MODE_BLOCKING,
     # Stable memory must grow sub-linearly (<= √k, k = path scale) across the

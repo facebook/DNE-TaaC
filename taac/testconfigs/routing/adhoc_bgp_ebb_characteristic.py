@@ -56,6 +56,11 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 #   │ router-id    = default   │                                 │
 #   └──────────────────────────┴─────────────────────────────────┘
 #   SIGNAL: per-update compute ~flat as related-peer count grows (UG amortized)
+#   GATES : all six BLOCKING, calibrated on the 2026-08-05 bag010 sweep
+#           cpu_stable <=10% (saw 2.17) · cpu_transient <=5 samples>50% (saw 2)
+#           memory_leak tail/mean <=1.05 (saw 1.001) · memory_stable growth
+#           <=50% across the sweep (saw 14.5) · memory_transient
+#           (peak-stable)/stable <=10% (saw 1.8) · routes_advertised fan-out
 #   name  : BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP
 BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_performance_scaling_test_config(
