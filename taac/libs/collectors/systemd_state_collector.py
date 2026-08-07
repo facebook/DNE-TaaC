@@ -252,16 +252,30 @@ class SystemdStateCollector(ServicePollingCollector):
         window_start: float,
         window_end: float,
         services: t.Optional[t.Sequence[str]] = None,
+        skip_disabled: bool = True,
+        skip_not_loaded: bool = True,
     ) -> t.Dict[str, str]:
         """Return ``{service: first_non_active_state}`` for services whose
         ``ActiveState`` was not ``active`` at any sample in the window.
 
-        A missing sample (service unloaded, ssh-error) is NOT counted — those
-        show up in the collector's ``notes`` field, not here. Callers who
-        want an SSH-error to fail the check should query the collector's
-        ``notes`` separately. Used by the future
-        ``SystemctlActiveStateHealthCheck`` collector-backed path.
+        ``skip_disabled=True`` (default): a service whose ``UnitFileState``
+        is ``disabled`` on any sample is omitted — an intentionally-disabled
+        unit is not an outage. ``skip_not_loaded=True`` (default): a service
+        whose ``LoadState`` is ``not-loaded`` / ``not-found`` on any sample
+        is omitted — the unit isn't present on this DUT image at all, so
+        there's nothing to check. Both match the semantics
+        ``SystemctlActiveStateHealthCheck``'s legacy per-service SSH path
+        used; a caller wanting stricter checking can flip either flag off.
         """
+        # The filters below decide sample-by-sample, not once-per-service:
+        # a monitored unit can be disabled/not-loaded at one poll and
+        # loaded/active at another (e.g. brought up mid-playbook, or an
+        # unrelated ``daemon-reload`` transient), and we must not let a
+        # single skip-worthy sample erase an outage recorded from a
+        # loaded+enabled one. This is a regression an earlier iteration
+        # of this method introduced (skip-set + ``first_bad.pop(...)``)
+        # and the review caught: a real ``failed`` sample at t=1 followed
+        # by a not-loaded sample at t=3 silently returned an empty dict.
         wanted = set(services) if services is not None else set(self.services)
         rows = self.get_rows_in_window(window_start, window_end)
         first_bad: t.Dict[str, str] = {}
@@ -271,20 +285,56 @@ class SystemdStateCollector(ServicePollingCollector):
                     continue
                 if not isinstance(state, SystemdUnitState):
                     continue
-                # A unit that isn't loaded on this DUT image can't be
-                # ``active`` by definition — reporting its ``inactive`` state
-                # as an outage would false-fail every image the caller's
-                # ``services`` list overspecifies (``DEFAULT_SERVICE_NAMES``
-                # includes ``coop``, ``netstate``, ``fan``, ``fboss_hw_agent@1``
-                # which most OSS FBOSS images don't ship). Skip when the
-                # unit isn't loaded; the caller who wants a stricter check
-                # can query the collector's ``notes`` field to distinguish
-                # "unit missing" from "unit was active the whole window".
-                if state.load_state and state.load_state != "loaded":
+                if skip_disabled and state.unit_file_state == "disabled":
+                    continue
+                if (
+                    skip_not_loaded
+                    and state.load_state
+                    and state.load_state != "loaded"
+                ):
                     continue
                 if state.active_state and state.active_state != "active":
                     first_bad[service] = state.active_state
         return first_bad
+
+    def services_not_active_at_end(
+        self,
+        window_start: float,
+        window_end: float,
+        services: t.Optional[t.Sequence[str]] = None,
+    ) -> t.Dict[str, str]:
+        """Return ``{service: final_active_state}`` for services whose *last*
+        in-window sample shows a non-``active`` state.
+
+        Complements ``services_ever_inactive_in_window``: that method surfaces
+        any transient outage during the window; this one only surfaces
+        services that didn't finish the window active. Used by checks that
+        allow-list an intentional restart — the transient
+        ``deactivating`` / ``activating`` states of the restarted service are
+        expected and must not FAIL, but the check still needs to verify
+        recovery. A disabled / not-loaded final sample is skipped (nothing
+        to verify recovery to)."""
+        wanted = set(services) if services is not None else set(self.services)
+        rows = self.get_rows_in_window(window_start, window_end)
+        # Walk the samples once, keeping the last SystemdUnitState per
+        # service; a later sample overwrites an earlier one.
+        last_seen: t.Dict[str, SystemdUnitState] = {}
+        for row in rows:
+            for service, state in row.per_service.items():
+                if service not in wanted:
+                    continue
+                if not isinstance(state, SystemdUnitState):
+                    continue
+                last_seen[service] = state
+        result: t.Dict[str, str] = {}
+        for service, state in last_seen.items():
+            if state.unit_file_state == "disabled":
+                continue
+            if state.load_state and state.load_state != "loaded":
+                continue
+            if state.active_state and state.active_state != "active":
+                result[service] = state.active_state
+        return result
 
     def services_restarted_in_window(
         self,

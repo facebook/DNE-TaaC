@@ -291,6 +291,279 @@ class TestSystemdStateCollector(unittest.IsolatedAsyncioTestCase):
             collector.services_ever_inactive_in_window(0, 100), {"bgpd": "deactivating"}
         )
 
+    def test_services_ever_inactive_skips_disabled_by_default(self) -> None:
+        """A service that samples as UnitFileState=disabled must NOT be
+        flagged — an intentionally-disabled unit is not an outage.
+        Matches the semantics the pre-collector per-service SSH path used."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["coop"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "coop": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="inactive",
+                        unit_file_state="disabled",
+                    )
+                },
+            )
+        ]
+        self.assertEqual(collector.services_ever_inactive_in_window(0, 100), {})
+        # With the filter off, the service DOES surface (opt-in strict).
+        self.assertEqual(
+            collector.services_ever_inactive_in_window(
+                0, 100, skip_disabled=False
+            ),
+            {"coop": "inactive"},
+        )
+
+    def test_services_ever_inactive_skips_not_loaded_by_default(self) -> None:
+        """A unit that isn't present on this DUT image (LoadState=not-found)
+        must NOT be flagged — matches the legacy per-service SSH path's
+        behavior of returning ``True`` for absent units."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["openr"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "openr": SystemdUnitState(
+                        load_state="not-found",
+                        active_state="inactive",
+                    )
+                },
+            )
+        ]
+        self.assertEqual(collector.services_ever_inactive_in_window(0, 100), {})
+        self.assertEqual(
+            collector.services_ever_inactive_in_window(
+                0, 100, skip_not_loaded=False
+            ),
+            {"openr": "inactive"},
+        )
+
+    async def test_services_ever_inactive_end_to_end(self) -> None:
+        """Regression: exercise the whole ``_poll_once → services_ever_inactive``
+        path. Guards against a future base-class change silently re-enabling
+        the LoadState/ActiveState filter that would swallow the very signal
+        this query exists to surface."""
+        driver = _make_driver(
+            {
+                "bgpd": _healthy(),
+                # fsdb is currently active-but-with-a-failed-Result — not the
+                # main scenario, but ActiveState=activating is what a real
+                # DUT looks like mid-restart. Distinct from `active`, so
+                # services_ever_inactive_in_window should surface it.
+                "fsdb": {
+                    "LoadState": "loaded",
+                    "ActiveState": "activating",
+                    "Result": "success",
+                    "UnitFileState": "enabled",
+                    "ActiveEnterTimestampMonotonic": "999",
+                    "NRestarts": "0",
+                },
+            }
+        )
+        collector = SystemdStateCollector(
+            driver=driver,
+            services=["bgpd", "fsdb"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        await collector._poll_once()
+        # Populate epoch on the row so the window query picks it up.
+        collector.rows[-1].epoch = 50.0
+        self.assertEqual(
+            collector.services_ever_inactive_in_window(0, 100),
+            {"fsdb": "activating"},
+        )
+
+    def test_services_ever_inactive_late_disabled_does_not_erase_earlier_flap(
+        self,
+    ) -> None:
+        """Regression guard for the reviewer's finding: a service that
+        samples as ``failed`` early and then gets disabled/masked later in
+        the window must still surface. The previous ``skip.add + pop``
+        implementation deleted the recorded flap when the later
+        ``disabled`` sample arrived, silently PASSing a real outage."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["bgpd"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="enabled",
+                        active_state="failed",
+                    )
+                },
+            ),
+            self._fake_row(
+                3,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="disabled",
+                        active_state="inactive",
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(
+            collector.services_ever_inactive_in_window(0, 100),
+            {"bgpd": "failed"},
+        )
+
+    def test_services_ever_inactive_early_not_loaded_does_not_veto_later_flap(
+        self,
+    ) -> None:
+        """The likelier direction of the same class of bug: a service that
+        isn't loaded at the first poll (brought up mid-playbook, or
+        started later than the collector) must not have its subsequent
+        flaps silently exempted. The previous implementation set a
+        persistent ``skip`` flag on the first not-loaded sample."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["bgpd"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(1, {"bgpd": SystemdUnitState(load_state="not-found")}),
+            self._fake_row(
+                2,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="enabled",
+                        active_state="failed",
+                    )
+                },
+            ),
+            self._fake_row(
+                3,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="enabled",
+                        active_state="failed",
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(
+            collector.services_ever_inactive_in_window(0, 100),
+            {"bgpd": "failed"},
+        )
+
+    def test_services_not_active_at_end_final_sample_wins(self) -> None:
+        """``services_not_active_at_end`` reports services whose LAST
+        in-window sample is non-active — used by checks that allow-list
+        an intentional restart to still verify recovery. A transient
+        ``deactivating`` earlier in the window must NOT surface here
+        (that's what ``services_ever_inactive_in_window`` is for)."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["fboss_sw_agent"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "fboss_sw_agent": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="deactivating",
+                    )
+                },
+            ),
+            self._fake_row(
+                3,
+                {
+                    "fboss_sw_agent": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="active",
+                    )
+                },
+            ),
+        ]
+        # Ends active — no failure surfaced despite the transient.
+        self.assertEqual(
+            collector.services_not_active_at_end(0, 100), {}
+        )
+
+    def test_services_not_active_at_end_reports_stuck_final_state(self) -> None:
+        """If the last sample is not ``active`` — the intentionally-
+        restarted service never came back — the check MUST surface it."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["fboss_sw_agent"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "fboss_sw_agent": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="deactivating",
+                    )
+                },
+            ),
+            self._fake_row(
+                3,
+                {
+                    "fboss_sw_agent": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="failed",
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(
+            collector.services_not_active_at_end(0, 100),
+            {"fboss_sw_agent": "failed"},
+        )
+
+    def test_services_not_active_at_end_skips_disabled_final(self) -> None:
+        """A service whose final state is ``disabled`` has nothing to
+        recover to — must not FAIL here."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["coop"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "coop": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="disabled",
+                        active_state="inactive",
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(collector.services_not_active_at_end(0, 100), {})
+
     def test_services_ever_inactive_ignores_healthy_series(self) -> None:
         collector = SystemdStateCollector(
             driver=MagicMock(),
