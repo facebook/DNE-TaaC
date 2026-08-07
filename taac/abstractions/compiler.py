@@ -797,6 +797,25 @@ def _ebb_full_scale_bgpcpp_deployment_tasks(
             )
         )
 
+    tasks.append(
+        create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[
+                'bash sudo python3 -c "'
+                "import json; "
+                f"f=open('{_EBB_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
+                "s=c.setdefault('bgp_setting_config',{}); "
+                "s['enable_med_comparison']=True; "
+                f"f=open('{_EBB_BGPCPP_CONFIG_PATH}','w'); "
+                "json.dump(c,f,indent=2); f.close(); "
+                "print('Patched bgp_setting_config: enable_med_comparison=True')"
+                '"',
+            ],
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
+    )
+
     tasks.extend(
         [
             create_validate_bgpcpp_config_on_device_task(
@@ -1570,15 +1589,31 @@ def _formulaic_prefix_mutation(advertisement: t.Any) -> dict[str, t.Any]:
     raw_start_index, remainder = divmod(delta, source_step)
     if remainder:
         raise ValueError("formulaic prefix window is not aligned to its source step")
+    membership = advertisement.spec.membership
+    last_prefix = advertisement.prefix_set.prefixes[
+        membership.start_index + membership.prefix_count - 1
+    ]
+    end_delta = int(ipaddress.ip_address(last_prefix)) - int(source_start)
+    raw_end_index, end_remainder = divmod(end_delta, source_step)
+    if end_remainder:
+        raise ValueError(
+            "formulaic prefix window end is not aligned to its source step"
+        )
+    # prefix_count counts retained prefixes, while raw_end_index also spans
+    # source indices excluded from the materialized prefix inventory.
+    excluded_indices = [
+        index - raw_start_index
+        for index in source.excluded_indices
+        if raw_start_index <= index <= raw_end_index
+    ]
+    raw_window_count = raw_end_index - raw_start_index + 1
+    if raw_window_count != membership.prefix_count + len(excluded_indices):
+        raise ValueError("formulaic prefix window has inconsistent sparse geometry")
     return {
         "start": first_prefix,
         "step": source_step,
         "count": membership.prefix_count,
-        "excluded_indices": [
-            index - raw_start_index
-            for index in source.excluded_indices
-            if raw_start_index <= index < raw_start_index + membership.prefix_count
-        ],
+        "excluded_indices": excluded_indices,
         "distribution": advertisement.spec.allocation.peer_distribution.value,
     }
 

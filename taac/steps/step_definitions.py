@@ -904,16 +904,14 @@ def _normalize_bgp_attribute_churn_pool_names(
 def _normalize_bgp_attribute_churn_matrix(
     attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
 ) -> t.Dict[str, t.Dict[str, t.Any]]:
-    expected_families = {"local_pref", "med", "origin", "as_path"}
+    expected_families = {"local_pref", "med", "origin"}
     expected_values = {
         "plane_1_preferred",
         "reference",
         "plane_1_nonpreferred",
     }
     if set(attribute_matrix) != expected_families:
-        raise ValueError(
-            "attribute_matrix must contain local_pref, med, origin, and as_path"
-        )
+        raise ValueError("attribute_matrix must contain local_pref, med, and origin")
 
     normalized: t.Dict[str, t.Dict[str, t.Any]] = {}
     for family in sorted(expected_families):
@@ -968,7 +966,8 @@ def create_bgp_attribute_churn_step(
     selected_block_count_per_afi: int,
     samples_per_block: int,
     routes_per_block: int,
-    iterations_per_family: int,
+    duration_seconds: int,
+    max_iterations: int,
     cadence_seconds: int,
     poll_interval_seconds: int,
     transition_timeout_seconds: int,
@@ -976,6 +975,7 @@ def create_bgp_attribute_churn_step(
     restore_timeout_seconds: int,
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
+    openr_mode: str,
     attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
     convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
@@ -986,7 +986,8 @@ def create_bgp_attribute_churn_step(
         "selected_block_count_per_afi": selected_block_count_per_afi,
         "samples_per_block": samples_per_block,
         "routes_per_block": routes_per_block,
-        "iterations_per_family": iterations_per_family,
+        "duration_seconds": duration_seconds,
+        "max_iterations": max_iterations,
         "cadence_seconds": cadence_seconds,
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
@@ -998,6 +999,8 @@ def create_bgp_attribute_churn_step(
     }
     if not hostname:
         raise ValueError("hostname must be non-empty")
+    if openr_mode not in {"none", "standalone"}:
+        raise ValueError("openr_mode must be none or standalone")
     _validate_bgp_attribute_churn_geometry(numeric_params)
 
     params: t.Dict[str, t.Any] = {
@@ -1007,6 +1010,7 @@ def create_bgp_attribute_churn_step(
             prefix_pool_names
         ),
         "attribute_matrix": _normalize_bgp_attribute_churn_matrix(attribute_matrix),
+        "openr_mode": openr_mode,
         **numeric_params,
     }
     return create_custom_step(

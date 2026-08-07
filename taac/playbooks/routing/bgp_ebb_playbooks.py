@@ -359,16 +359,18 @@ def get_bgp_ebb_attribute_churn_playbook(
     total_session_count: int,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
+    duration_seconds: int = 3_600,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
 
     See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
-    Drives deterministic local-pref, MED, origin, and AS-path transitions on
-    seven dual-stack plane-1 peer blocks. Planes 2-4 provide controlled
-    comparison paths. Every transition is verified through IXIA readback,
-    exact DUT RIB state, and selected source-session receive counters before
-    all mutated state is restored.
+    Drives deterministic MED, origin, and local-pref transitions on seven
+    dual-stack plane-1 peer blocks. Planes 2-4 provide controlled comparison
+    paths. Every transition is verified through IXIA readback, exact DUT RIB
+    state, and selected source-session receive counters before all mutated
+    state is restored. AS-path mutation remains excluded because IxNetwork
+    cannot change the route element while its BGP peer is started.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -379,6 +381,8 @@ def get_bgp_ebb_attribute_churn_playbook(
             by precheck/postcheck health checks.
         profile: `BgpPlusPlusProfile` enum value; enables the IBGP-PNH
             precheck when the OpenR variant is selected.
+        duration_seconds: Active monotonic churn window, divided evenly
+            across MED, origin, and local-pref.
 
     Returns:
         A `Playbook` named `bgp_ebb_attribute_churn_playbook` with standard
@@ -432,7 +436,8 @@ def get_bgp_ebb_attribute_churn_playbook(
                 selected_block_count_per_afi=7,
                 samples_per_block=2,
                 routes_per_block=750,
-                iterations_per_family=15,
+                duration_seconds=duration_seconds,
+                max_iterations=100_000,
                 cadence_seconds=60,
                 poll_interval_seconds=5,
                 transition_timeout_seconds=60,
@@ -440,6 +445,11 @@ def get_bgp_ebb_attribute_churn_playbook(
                 restore_timeout_seconds=120,
                 quiet_window_seconds=120,
                 max_lookup_concurrency=8,
+                openr_mode=(
+                    "standalone"
+                    if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+                    else "none"
+                ),
                 attribute_matrix={
                     "local_pref": {
                         "plane_1_preferred": 200,
@@ -455,11 +465,6 @@ def get_bgp_ebb_attribute_churn_playbook(
                         "plane_1_preferred": "igp",
                         "reference": "egp",
                         "plane_1_nonpreferred": "incomplete",
-                    },
-                    "as_path": {
-                        "plane_1_preferred": 1,
-                        "reference": 5,
-                        "plane_1_nonpreferred": 10,
                     },
                 },
             )

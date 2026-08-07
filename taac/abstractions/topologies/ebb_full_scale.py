@@ -127,7 +127,7 @@ _EBB_IBGP_ROUTE_ATTRIBUTES = RouteAttributePool(
 EBB_LONGEVITY_COMMUNITY_BASELINE_COUNT = len(
     _EBB_IBGP_ROUTE_ATTRIBUTES.community_rows[0]
 )
-_EBB_ATTRIBUTE_CHURN_BASELINE = (
+EBB_ATTRIBUTE_CHURN_BASELINE = (
     ("med", 200),
     ("local_pref", 100),
     ("origin", "egp"),
@@ -310,6 +310,52 @@ def _sequential_explicit_next_hop(
     )
 
 
+def _ebb_ibgp_next_hop_source(
+    afi: str,
+    plane: int,
+    openr_mode: OpenRMode,
+) -> tuple[str, str, bool]:
+    if afi not in {"v4", "v6"}:
+        raise ValueError(f"EBB iBGP next-hop AFI must be v4 or v6; got {afi!r}")
+    if not 1 <= plane <= 4:
+        raise ValueError(
+            f"EBB iBGP next-hop plane must be between 1 and 4; got {plane}"
+        )
+    openr_enabled = openr_mode is OpenRMode.STANDALONE
+    if afi == "v4":
+        first_octet = 20 if openr_enabled else 10
+        return (
+            f"{first_octet}.{163 + plane}.28.10",
+            f"{first_octet}.{163 + plane}.28.0/24",
+            True,
+        )
+
+    # Legacy OpenR CSVs and KV injection use the literal slots 9/10/11/12.
+    # Non-OpenR DC planes use hexadecimal slots a/b/c/9.
+    slot = str(plane + 8) if openr_enabled else f"{9 if plane == 4 else plane + 9:x}"
+    fabric = "e80d" if openr_enabled else "e50d"
+    start = f"2401:db00:{fabric}:11:{slot}::10"
+    return start, str(ipaddress.ip_network(f"{start}/80", strict=False)), False
+
+
+def ebb_ibgp_route_next_hops(
+    afi: str,
+    plane: int,
+    peer_count: int,
+    openr_mode: OpenRMode,
+) -> tuple[str, ...]:
+    """Return the route next hop associated with each EBB iBGP peer row."""
+    if peer_count < 1:
+        raise ValueError(f"EBB iBGP peer count must be positive; got {peer_count}")
+    start, _parent, lexical = _ebb_ibgp_next_hop_source(afi, plane, openr_mode)
+    if lexical:
+        return _lexical_ip_range(start, peer_count)
+    first = ipaddress.ip_address(start)
+    return tuple(
+        str(type(first)(int(first) + 2 * index)) for index in range(peer_count)
+    )
+
+
 def _ebb_next_hop(
     device_group: DeviceGroupSpec,
     openr_mode: OpenRMode,
@@ -346,22 +392,14 @@ def _ebb_next_hop(
         )
 
     plane = _ebb_plane_number(device_group)
-    if device_group.afi == "v4":
-        first_octet = 20 if openr_enabled else 10
-        start = f"{first_octet}.{163 + plane}.28.10"
-        return _explicit_next_hop(
-            start,
-            device_group.peer_count,
-            f"{first_octet}.{163 + plane}.28.0/24",
-        )
-
-    # Legacy OpenR CSVs and KV injection use the literal slots 9/10/11/12.
-    # Non-OpenR DC planes use hexadecimal slots a/b/c/9.
-    slot = str(plane + 8) if openr_enabled else f"{9 if plane == 4 else plane + 9:x}"
-    fabric = "e80d" if openr_enabled else "e50d"
-    start = f"2401:db00:{fabric}:11:{slot}::10"
-    parent = str(ipaddress.ip_network(f"{start}/80", strict=False))
-    return _formulaic_next_hop(start, parent)
+    start, parent, lexical = _ebb_ibgp_next_hop_source(
+        device_group.afi, plane, openr_mode
+    )
+    return (
+        _explicit_next_hop(start, device_group.peer_count, parent)
+        if lexical
+        else _formulaic_next_hop(start, parent)
+    )
 
 
 def _ebb_plane_number(device_group: DeviceGroupSpec) -> int:
@@ -439,7 +477,7 @@ def _ebb_advertisement(
         ),
         policy=EBB_ACCEPT_POLICY if device_group.role == "uplink" else None,
         attributes=(
-            _EBB_ATTRIBUTE_CHURN_BASELINE
+            EBB_ATTRIBUTE_CHURN_BASELINE
             if enable_attribute_churn and device_group.role.startswith("ibgp_dc_p")
             else (("med", None), ("local_pref", 100), ("origin", "igp"))
         ),
@@ -931,7 +969,10 @@ def _with_ebb_route_intent(
     return replace(
         topology,
         device_groups=tuple(device_groups),
-        device_config=replace(topology.device_config, openr_mode=openr_mode),
+        device_config=replace(
+            topology.device_config,
+            openr_mode=openr_mode,
+        ),
         policies=(EBB_ACCEPT_POLICY,),
         prefix_sets=(*prefix_sets, *extra_prefix_sets),
     )
@@ -1004,6 +1045,7 @@ __all__ = (
     "BGP_MON_PEER_GROUP",
     "EBB_AS_NUMBERS",
     "EBB_ATTRIBUTE_CHURN_AS_PATH",
+    "EBB_ATTRIBUTE_CHURN_BASELINE",
     "EBB_DEVICE_CONFIG",
     "EBB_EBGP_V4_PREFIX_SET",
     "EBB_EBGP_V6_PREFIX_SET",
@@ -1022,4 +1064,5 @@ __all__ = (
     "IBGP_V4_PEER_GROUP",
     "IBGP_V6_PEER_GROUP",
     "ebb_full_scale_topology",
+    "ebb_ibgp_route_next_hops",
 )

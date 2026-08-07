@@ -57,11 +57,6 @@ EXPECTED_MATRIX = {
         "reference": "egp",
         "plane_1_nonpreferred": "incomplete",
     },
-    "as_path": {
-        "plane_1_preferred": 1,
-        "reference": 5,
-        "plane_1_nonpreferred": 10,
-    },
 }
 
 
@@ -73,7 +68,8 @@ def _locked_step_kwargs() -> dict:
         "selected_block_count_per_afi": 7,
         "samples_per_block": 2,
         "routes_per_block": 750,
-        "iterations_per_family": 15,
+        "duration_seconds": 3_600,
+        "max_iterations": 100_000,
         "cadence_seconds": 60,
         "poll_interval_seconds": 5,
         "transition_timeout_seconds": 60,
@@ -82,6 +78,7 @@ def _locked_step_kwargs() -> dict:
         "restore_timeout_seconds": 120,
         "quiet_window_seconds": 120,
         "max_lookup_concurrency": 8,
+        "openr_mode": "standalone",
         "attribute_matrix": EXPECTED_MATRIX,
     }
 
@@ -237,7 +234,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(EXPECTED_POOLS, payload["prefix_pool_names"])
         self.assertEqual(EXPECTED_MATRIX, payload["attribute_matrix"])
         self.assertEqual(7, payload["selected_block_count_per_afi"])
-        self.assertEqual(15, payload["iterations_per_family"])
+        self.assertEqual(3_600, payload["duration_seconds"])
+        self.assertEqual(100_000, payload["max_iterations"])
         self.assertEqual(300, payload["convergence_hard_timeout_seconds"])
 
     def test_step_factory_rejects_incomplete_pool_geometry(self) -> None:
@@ -309,7 +307,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 "selected_block_count_per_afi": 7,
                 "samples_per_block": 2,
                 "routes_per_block": 750,
-                "iterations_per_family": 15,
+                "duration_seconds": 3_600,
+                "max_iterations": 100_000,
                 "cadence_seconds": 60,
                 "poll_interval_seconds": 5,
                 "transition_timeout_seconds": 60,
@@ -318,6 +317,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 "restore_timeout_seconds": 120,
                 "quiet_window_seconds": 120,
                 "max_lookup_concurrency": 8,
+                "openr_mode": "standalone",
             },
             {
                 key: payload[key]
@@ -326,7 +326,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     "selected_block_count_per_afi",
                     "samples_per_block",
                     "routes_per_block",
-                    "iterations_per_family",
+                    "duration_seconds",
+                    "max_iterations",
                     "cadence_seconds",
                     "poll_interval_seconds",
                     "transition_timeout_seconds",
@@ -335,9 +336,35 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     "restore_timeout_seconds",
                     "quiet_window_seconds",
                     "max_lookup_concurrency",
+                    "openr_mode",
                 )
             },
         )
+
+    def test_playbook_allows_ad_hoc_duration_override(self) -> None:
+        playbook = get_bgp_ebb_attribute_churn_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            total_session_count=1272,
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            duration_seconds=6 * 60 * 60,
+        )
+
+        payload = _step_payload(playbook.stages[0].steps[0])
+        self.assertEqual(21_600, payload["duration_seconds"])
+
+    def test_playbook_wires_non_openr_topology_mode(self) -> None:
+        playbook = get_bgp_ebb_attribute_churn_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            total_session_count=1272,
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        )
+
+        payload = _step_payload(playbook.stages[0].steps[0])
+        self.assertEqual("none", payload["openr_mode"])
 
     def test_openr_profile_enables_ibgp_pnh_check(self) -> None:
         target = (
