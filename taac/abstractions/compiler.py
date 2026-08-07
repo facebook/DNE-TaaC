@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import typing as t
 from dataclasses import dataclass
 
@@ -72,7 +71,6 @@ from taac.task_definitions import (
     create_interface_ip_configuration_task,
     create_invoke_ixia_api_task,
     create_run_commands_on_shell_task,
-    create_validate_bgpcpp_config_on_device_task,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     ACL_COMMANDS,
@@ -90,7 +88,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IPV4_START_OFFSET,
     IXIA_IPV6_START_OFFSET,
     REQUIRE_THRIFT_ACL_FILES_CMD,
-    UPDATE_GROUP_CONFIG,
     UPDATE_GROUP_VERIFICATION_CMD,
     VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
@@ -572,7 +569,6 @@ class _EbbFullScaleSetupArgs:
     bgp_asn: int
     bgpcpp_configerator_path: str
     enable_update_group: bool
-    update_group_config: dict[str, t.Any] | None
 
 
 @dataclass(frozen=True)
@@ -638,7 +634,6 @@ class _Ipv6UpdatePackingArgs:
     router_id: str | None
     bgpcpp_configerator_path: str | None
     enable_update_group: bool
-    update_group_config: tuple[tuple[str, t.Any], ...]
     openr_mode: OpenRMode
 
 
@@ -655,7 +650,6 @@ class _EgressPeerScaleArgs:
     router_id: str | None
     bgpcpp_configerator_path: str
     enable_update_group: bool
-    update_group_config: tuple[tuple[str, t.Any], ...]
     openr_mode: OpenRMode
 
 
@@ -672,7 +666,6 @@ class _BoundedEcmpArgs:
     router_id: str | None
     bgpcpp_configerator_path: str | None
     enable_update_group: bool
-    update_group_config: tuple[tuple[str, t.Any], ...]
     openr_mode: OpenRMode
 
 
@@ -770,59 +763,8 @@ def _ebb_full_scale_bgpcpp_deployment_tasks(
         ),
     ]
 
-    if args.enable_update_group:
-        update_group_config = (
-            args.update_group_config
-            if args.update_group_config is not None
-            else UPDATE_GROUP_CONFIG
-        )
-        tasks.append(
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[
-                    'bash sudo python3 -c "'
-                    "import json; "
-                    f"f=open('{_EBB_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
-                    "s=c.setdefault('bgp_setting_config',{}); "
-                    f"s['enable_update_group']={bool(args.enable_update_group)}; "
-                    f"s['update_group_config']={update_group_config!r}; "
-                    f"f=open('{_EBB_BGPCPP_CONFIG_PATH}','w'); "
-                    "json.dump(c,f,indent=2); f.close(); "
-                    "print('Patched bgp_setting_config: update_group=%s, update_group_config=%s' "
-                    f"% ({bool(args.enable_update_group)}, {json.dumps(update_group_config)!r}))"
-                    '"',
-                ],
-                set_outer_hostname=True,
-                ixia_needed=True,
-            )
-        )
-
-    tasks.append(
-        create_run_commands_on_shell_task(
-            hostname=device_name,
-            cmds=[
-                'bash sudo python3 -c "'
-                "import json; "
-                f"f=open('{_EBB_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
-                "s=c.setdefault('bgp_setting_config',{}); "
-                "s['enable_med_comparison']=True; "
-                f"f=open('{_EBB_BGPCPP_CONFIG_PATH}','w'); "
-                "json.dump(c,f,indent=2); f.close(); "
-                "print('Patched bgp_setting_config: enable_med_comparison=True')"
-                '"',
-            ],
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
-
     tasks.extend(
         [
-            create_validate_bgpcpp_config_on_device_task(
-                hostname=device_name,
-                config_path=_EBB_BGPCPP_CONFIG_PATH,
-                ixia_needed=True,
-            ),
             create_run_commands_on_shell_task(
                 hostname=device_name,
                 cmds=[FIBAGENT_BGP_CONF_DEPLOY_CMD],
@@ -1175,7 +1117,6 @@ def _characteristic_setup_phases(
     router_id: str | None,
     bgpcpp_configerator_path: str,
     enable_update_group: bool,
-    update_group_config: dict[str, t.Any] | None,
     openr_mode: OpenRMode,
     finalization_tasks: t.Sequence[t.Any] = (),
 ) -> tuple[EosBgpCppSetupPhase, ...]:
@@ -1190,7 +1131,6 @@ def _characteristic_setup_phases(
         bgp_asn=bgp_asn,
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=enable_update_group,
-        update_group_config=update_group_config,
     )
     return (
         *_characteristic_setup_prefix_phases(
@@ -2428,7 +2368,6 @@ def _ug_new_peer_join_setup_phases(
         router_id=args.router_id,
         bgpcpp_configerator_path=args.bgpcpp_configerator_path,
         enable_update_group=True,
-        update_group_config=None,
         openr_mode=args.openr_mode,
     )
 
@@ -2854,7 +2793,6 @@ def _ipv6_update_packing_args(  # noqa: C901
         router_id=router_id,
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=device_config.update_group_enable,
-        update_group_config=device_config.update_group_config,
         openr_mode=device_config.openr_mode,
     )
 
@@ -2909,9 +2847,6 @@ def _ipv6_update_packing_setup_phases(
         router_id=args.router_id,
         bgpcpp_configerator_path=args.bgpcpp_configerator_path,
         enable_update_group=args.enable_update_group,
-        update_group_config=(
-            dict(args.update_group_config) if args.update_group_config else None
-        ),
         openr_mode=args.openr_mode,
     )
 
@@ -3178,7 +3113,6 @@ def _egress_peer_scale_args(bound: BoundTopology) -> _EgressPeerScaleArgs:
             str, required_inventory["bgpcpp_configerator_path"]
         ),
         enable_update_group=device_config.update_group_enable,
-        update_group_config=device_config.update_group_config,
         openr_mode=device_config.openr_mode,
     )
 
@@ -3209,9 +3143,6 @@ def _egress_peer_scale_setup_phases(
         router_id=args.router_id,
         bgpcpp_configerator_path=args.bgpcpp_configerator_path,
         enable_update_group=args.enable_update_group,
-        update_group_config=(
-            dict(args.update_group_config) if args.update_group_config else None
-        ),
         openr_mode=args.openr_mode,
         finalization_tasks=(
             create_bgp_clear_route_filter_task(
@@ -3666,9 +3597,6 @@ def _bounded_ecmp_args(bound: BoundTopology) -> _BoundedEcmpArgs:  # noqa: C901
         enable_update_group=t.cast(
             RoutingDeviceConfig, device_config
         ).update_group_enable,
-        update_group_config=t.cast(
-            RoutingDeviceConfig, device_config
-        ).update_group_config,
         openr_mode=t.cast(RoutingDeviceConfig, device_config).openr_mode,
     )
 
@@ -3699,9 +3627,6 @@ def _bounded_ecmp_setup_phases(
         router_id=args.router_id,
         bgpcpp_configerator_path=args.bgpcpp_configerator_path,
         enable_update_group=args.enable_update_group,
-        update_group_config=(
-            dict(args.update_group_config) if args.update_group_config else None
-        ),
         openr_mode=args.openr_mode,
     )
 
@@ -3968,13 +3893,6 @@ def _ebb_component_runtime_plan(
         hostname=args.interfaces.device_name,
         router_id=None,
         peers=_bgpcpp_peer_configs(bound, peer_plan),
-    )
-    peer_tasks.append(
-        create_validate_bgpcpp_config_on_device_task(
-            hostname=args.interfaces.device_name,
-            config_path=_EBB_BGPCPP_CONFIG_PATH,
-            ixia_needed=True,
-        )
     )
     dependencies = {
         "FibAgent": ("FibGrpc",),
@@ -5514,13 +5432,11 @@ def _ebb_full_scale_setup_args(bound: BoundTopology) -> _EbbFullScaleSetupArgs:
     assert bgp_asn is not None
     assert bgpcpp_configerator_path
 
-    update_group_config = _update_group_config(bound, device_config)
     return _EbbFullScaleSetupArgs(
         interfaces=interfaces,
         bgp_asn=bgp_asn,
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=device_config.update_group_enable,
-        update_group_config=update_group_config,
     )
 
 
@@ -5768,24 +5684,3 @@ def _validate_ebb_full_scale_shape(  # noqa: C901
 
     if issues:
         raise TopologyValidationError(bound.logical_topology.name, issues)
-
-
-def _update_group_config(
-    bound: BoundTopology,
-    device_config: RoutingDeviceConfig,
-) -> dict[str, t.Any] | None:
-    if not device_config.update_group_config:
-        return None
-    try:
-        return dict(device_config.update_group_config)
-    except (TypeError, ValueError) as error:
-        raise TopologyValidationError(
-            bound.logical_topology.name,
-            [
-                ValidationIssue(
-                    path="device_config.update_group_config",
-                    code="invalid_update_group_config",
-                    message=f"update-group config must contain key/value pairs: {error}",
-                )
-            ],
-        ) from error

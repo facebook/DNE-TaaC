@@ -10,6 +10,8 @@ without changing TAAC runtime behavior or making flat TAAC authoring obsolete.
 
 Design reference: `P2421897026`.
 
+Implementation roadmap: [Generalized EOS compiler roadmap](GENERALIZED_EOS_COMPILER_ROADMAP.md).
+
 ---
 
 ## 1. Contract

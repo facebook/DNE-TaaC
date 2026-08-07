@@ -218,12 +218,18 @@ class ConveyorDaemonRestartOrderTest(unittest.TestCase):
             enable_update_group=True,
         )
         daemon_actions = _daemon_actions(tasks)
+        shell_commands = [
+            command for task in tasks for command in _shell_commands(task)
+        ]
 
         for daemon in ("FibAgent", "FibAgentBgp", "Bgp"):
             self.assertEqual(
                 ["disable", "enable"],
                 [action for name, action in daemon_actions if name == daemon],
             )
+        self.assertFalse(
+            any("bgp_setting_config" in command for command in shell_commands)
+        )
 
     def test_teardown_restores_whole_device_backups_in_reverse_order(self) -> None:
         tasks = get_teardown_tasks(

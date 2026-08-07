@@ -20,7 +20,6 @@ See ../README.md §3.
 """
 
 import os
-import typing as t
 from dataclasses import replace
 
 from taac.abstractions.physical_inventory import PhysicalInventory
@@ -78,10 +77,6 @@ from taac.task_definitions import (
     create_invoke_ixia_api_task,
     create_replace_bgp_peers_task,
     create_run_commands_on_shell_task,
-    create_validate_bgpcpp_config_on_device_task,
-)
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    UPDATE_GROUP_CONFIG,
 )
 from taac.testconfigs.routing.util.bgp_ebb_lab_wiring import (
     _direct_ixia_conns_two_port,
@@ -110,7 +105,6 @@ from taac.test_as_a_config.types import (
 # ``test_config_performance_scaling_case9.py`` constants so the ECMP-sets
 # factory produces byte-identical setup task strings.
 _RUN_BGPCPP_SCRIPT_PATH = "/usr/sbin/run_bgpcpp.sh"
-_BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
 
 # The community on the DUT's inbound eBGP allowlist policy (EB-FA-IN): routes
 # carrying it are accepted, everything else is denied by the catch-all term. The
@@ -138,13 +132,13 @@ def _managed_route_churn_setup_tasks(
     peergroup_ebgp_v6: str,
     peergroup_ibgp_v6: str,
     enable_update_group: bool,
-    update_group_config: t.Optional[t.Dict[str, t.Any]],
 ) -> list:
     """Conveyor-safe provisioning for the route-churn engine.
 
     Uses the same shared recipe SC2/SC3/SC4 run on bag010, which writes peers
     over ``run_commands_on_shell`` (base64-chunked, ``sudo``) rather than
-    scp-ing as ``admin``, and folds update-group into the deployed config.
+    scp-ing as ``admin``. Update-group comes from the shared Configerator
+    baseline and is verified after BGP starts when requested.
 
     Peer addressing matches the churn IXIA geometry: both sides lay v6 peers at
     ``<parent>::11`` stepping by 2 (locals at ``::10``), which is the
@@ -174,78 +168,7 @@ def _managed_route_churn_setup_tasks(
         ebgp_peer_group_v6=peergroup_ebgp_v6,
         ibgp_peer_group_v6=peergroup_ibgp_v6,
         enable_update_group=enable_update_group,
-        update_group_config=update_group_config,
     )
-
-
-def _ug_config_patch_setup_tasks(
-    device_name: str,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
-) -> list:
-    """
-    Return the 4-task update-group config-patch setup block.
-
-    Appends to setup_tasks AFTER a `create_replace_bgp_peers_task` to patch the
-    persisted bgpcpp_config on-device (set `bgp_setting_config.enable_update_group=True`
-    + `update_group_config`), validate, and restart the daemon. The persisted peers
-    are re-grouped on the restart.
-
-    Single source of truth for the UG config-patch recipe; reused by the bounded-ECMP
-    and churn factories.
-
-    Args:
-        device_name: Hostname of the DUT.
-        update_group_config: Optional custom UG config dict. Defaults to
-            `UPDATE_GROUP_CONFIG`.
-
-    Returns:
-        List of 4 tasks: config-patch, validate, daemon disable, daemon enable.
-    """
-    ug_config = (
-        update_group_config if update_group_config is not None else UPDATE_GROUP_CONFIG
-    )
-    return [
-        # ``sudo`` is required because ``/mnt/flash/bgpcpp_config`` is
-        # root-owned on EOS; without it the ``open(...,'w')`` raises
-        # PermissionError, the python process exits non-zero, but the
-        # outer ``bash`` swallows the error so the task reports success
-        # while the patch silently never lands on disk -- leaving the
-        # ``_UPDATE_GROUP`` variant running the non-UG baseline.
-        create_run_commands_on_shell_task(
-            hostname=device_name,
-            cmds=[
-                'bash sudo python3 -c "'
-                "import json; "
-                f"f=open('{_BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
-                "s=c.setdefault('bgp_setting_config',{}); "
-                "s['enable_update_group']=True; "
-                f"s['update_group_config']={ug_config!r}; "
-                f"f=open('{_BGPCPP_CONFIG_PATH}','w'); "
-                "json.dump(c,f,indent=2); f.close(); "
-                "print('Patched bgp_setting_config update_group')"
-                '"',
-            ],
-            set_outer_hostname=True,
-            ixia_needed=True,
-        ),
-        create_validate_bgpcpp_config_on_device_task(
-            hostname=device_name,
-            config_path=_BGPCPP_CONFIG_PATH,
-            ixia_needed=True,
-        ),
-        create_arista_daemon_control_task(
-            hostname=device_name,
-            daemon_name="Bgp",
-            action="disable",
-            ixia_needed=True,
-        ),
-        create_arista_daemon_control_task(
-            hostname=device_name,
-            daemon_name="Bgp",
-            action="enable",
-            ixia_needed=True,
-        ),
-    ]
 
 
 # =============================================================================
@@ -1145,7 +1068,6 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
     peergroup_ibgp_v6: str = "EB-EB-V6",
     extra_setup_tasks: list | None = None,
     enable_update_group: bool = False,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> TestConfig:
     """BGP++ route-churn prefix-scaling TestConfig -- perf-scaling case 6 (prefix scaling).
 
@@ -1181,7 +1103,6 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
         peergroup_ebgp_v6=peergroup_ebgp_v6,
         peergroup_ibgp_v6=peergroup_ibgp_v6,
         enable_update_group=enable_update_group,
-        update_group_config=update_group_config,
     )
 
     if extra_setup_tasks:
@@ -1310,7 +1231,6 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
     peergroup_ibgp_v6: str = "EB-EB-V6",
     peergroup_ibgp_v4: str = "EB-EB-V4",
     enable_update_group: bool = False,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     setup_tasks: list | None = None,
     log_collection_timeout: int | None = None,
     host_os_type_map: dict[str, taac_types.DeviceOsType] | None = None,
@@ -1417,35 +1337,22 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
             )
         )
 
-        if enable_update_group:
-            setup_tasks.extend(
-                _ug_config_patch_setup_tasks(device_name, update_group_config)
-            )
-        else:
-            setup_tasks.append(
-                create_validate_bgpcpp_config_on_device_task(
-                    hostname=device_name,
-                    config_path=_BGPCPP_CONFIG_PATH,
-                    ixia_needed=True,
-                )
-            )
-
-            setup_tasks.append(
+        setup_tasks.extend(
+            [
                 create_arista_daemon_control_task(
                     hostname=device_name,
                     daemon_name="Bgp",
                     action="disable",
                     ixia_needed=True,
-                )
-            )
-            setup_tasks.append(
+                ),
                 create_arista_daemon_control_task(
                     hostname=device_name,
                     daemon_name="Bgp",
                     action="enable",
                     ixia_needed=True,
-                )
-            )
+                ),
+            ]
+        )
 
     if (
         ebgp_peer_count_v6,
@@ -1478,11 +1385,6 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
         device_config_override=RoutingDeviceConfig(
             openr_mode=OpenRMode.NONE,
             update_group_enable=enable_update_group,
-            update_group_config=(
-                tuple((update_group_config or UPDATE_GROUP_CONFIG).items())
-                if enable_update_group
-                else ()
-            ),
         ),
     ).compile()
     return TestConfig(

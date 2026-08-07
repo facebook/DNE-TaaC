@@ -226,21 +226,20 @@ class Sc6DriverBindingTest(unittest.TestCase):
 
 
 class Sc6UpdateGroupEnablementTest(unittest.TestCase):
-    """SC6 enables update-group as part of the managed recipe's config deploy
-    (global bgp_setting_config flag; the persisted peers are re-grouped on the
-    daemon restart). The UG health check is present in the playbook
-    postchecks."""
+    """SC6 consumes update-group from the shared Configerator baseline and
+    verifies the running state after BGP starts. The UG health check is present
+    in the playbook postchecks."""
 
-    def test_update_group_config_patch_setup_present(self) -> None:
+    def test_update_group_config_is_not_overwritten_during_setup(self) -> None:
         run_cmds_tasks = _params_for(_SC6, "run_commands_on_shell")
         ug_patch_tasks = [
             p
             for p in run_cmds_tasks
-            if any("enable_update_group" in cmd for cmd in p.get("cmds", []))
+            if any("bgp_setting_config" in cmd for cmd in p.get("cmds", []))
         ]
-        self.assertEqual(len(ug_patch_tasks), 1, "UG config-patch task not found")
+        self.assertEqual([], ug_patch_tasks)
 
-    def test_daemon_restart_after_ug_patch(self) -> None:
+    def test_bgp_restarts_after_config_deployment(self) -> None:
         daemon_tasks = _params_for(_SC6, "arista_daemon_control")
         bgp_tasks = [p for p in daemon_tasks if p.get("daemon_name") == "Bgp"]
         self.assertGreaterEqual(

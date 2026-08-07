@@ -294,7 +294,6 @@ class RoutingDeviceConfig:
     update_group_enable: bool = False
     enable_next_hop_tracking: bool = False
     enable_dynamic_policy_evaluation: bool = False
-    update_group_config: tuple[tuple[str, t.Any], ...] = ()
     openr_mode: OpenRMode = OpenRMode.NONE
     openr_configerator_path: str | None = None
     openr_standalone_link: OpenRStandaloneLink | None = None

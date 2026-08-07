@@ -41,7 +41,6 @@ from taac.task_definitions import (
     create_interface_ip_configuration_task,
     create_run_commands_on_shell_task,
     create_set_bgp_setting_config_task,
-    create_validate_bgpcpp_config_on_device_task,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     ACL_COMMANDS,
@@ -202,8 +201,6 @@ def _get_bgpcpp_deployment_tasks(
     bgp_asn: int,
     bgpcpp_configerator_path: str,
     openr_configerator_path: t.Optional[str] = None,
-    enable_update_group: bool = False,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> t.List[Task]:
     """
     Deploy BGP++ configuration, certificates, and supporting agent configs.
@@ -216,17 +213,6 @@ def _get_bgpcpp_deployment_tasks(
         bgp_asn: BGP AS number to shutdown
         bgpcpp_configerator_path: Configerator path for bgpcpp_config
         openr_configerator_path: Configerator path for OpenR config
-        enable_update_group: When True, patches the freshly-deployed
-            ``/mnt/flash/bgpcpp_config`` to enable update grouping plus the
-            full ``update_group_config`` struct (per D100093369). The
-            standalone ``enable_serialize_group_pdu`` field no longer
-            exists in the thrift schema — its replacement
-            ``enableSerializeGroupPdu`` lives inside
-            ``update_group_config``.
-        update_group_config: Optional override for the ``update_group_config``
-            struct written to the device. When ``None`` (default), the
-            ``UPDATE_GROUP_CONFIG`` constant from ``conveyor_constants.py``
-            is used. Only honored when ``enable_update_group=True``.
 
     Returns:
         List of Task objects for BGP++ deployment
@@ -293,64 +279,6 @@ def _get_bgpcpp_deployment_tasks(
                 '"',
             ],
             set_outer_hostname=True,
-            ixia_needed=True,
-        )
-    )
-
-    # Optionally toggle BGP++ update_group settings.
-    # We patch the freshly-deployed /mnt/flash/bgpcpp_config in-shell (same
-    # pattern as the verify_client_type patch above) instead of going through
-    # the SFTP-based ``set_bgp_setting_config`` task — that task has a 120s
-    # SFTP write timeout which fails on the ~1.16 MB bgpcpp_config file.
-    # ``reload_bgp`` is unnecessary here because the daemons will be started
-    # fresh by the subsequent control plane step and will pick up the new
-    # settings directly.
-    #
-    # Per D100093369, the standalone ``enable_serialize_group_pdu`` field
-    # has moved into the new ``update_group_config`` struct (field 15) on
-    # ``BgpSettingConfig``. When update_group is enabled we write the
-    # full struct (allowSlowPeerDetach + slow-peer thresholds +
-    # enableSerializeGroupPdu) so slow peer detachment is exercised
-    # alongside update grouping. Callers can override the struct by passing
-    # ``update_group_config``; otherwise the ``UPDATE_GROUP_CONFIG``
-    # constant from ``conveyor_constants.py`` is used.
-    if enable_update_group:
-        ug_config = (
-            update_group_config
-            if update_group_config is not None
-            else UPDATE_GROUP_CONFIG
-        )
-        tasks.append(
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[
-                    # See verify_client_type patch above for why ``sudo`` is
-                    # required — without it the patch silently never lands.
-                    'bash sudo python3 -c "'
-                    "import json; "
-                    f"f=open('{BGPCPP_CONFIG_PATH}'); c=json.load(f); f.close(); "
-                    "s=c.setdefault('bgp_setting_config',{}); "
-                    f"s['enable_update_group']={bool(enable_update_group)}; "
-                    f"s['update_group_config']={ug_config!r}; "
-                    f"f=open('{BGPCPP_CONFIG_PATH}','w'); "
-                    "json.dump(c,f,indent=2); f.close(); "
-                    "print('Patched bgp_setting_config: update_group=%s, update_group_config=%s' "
-                    f"% ({bool(enable_update_group)}, {json.dumps(ug_config)!r}))"
-                    '"',
-                ],
-                set_outer_hostname=True,
-                ixia_needed=True,
-            )
-        )
-
-    # Validate bgpcpp_config using the production validator binary.
-    # Catches truncation from base64 chunk failures AND corruption
-    # from the Python patching scripts above — fails the setup task
-    # immediately instead of letting BGP++ crash 30 min into the test.
-    tasks.append(
-        create_validate_bgpcpp_config_on_device_task(
-            hostname=device_name,
-            config_path=BGPCPP_CONFIG_PATH,
             ixia_needed=True,
         )
     )
@@ -1359,7 +1287,6 @@ def get_common_setup_tasks(
     openr_configerator_path: t.Optional[str] = None,
     openr_standalone_link: OpenRStandaloneLink | None = None,
     enable_update_group: bool = False,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     consolidate_acl_restart: bool = True,
 ) -> t.List[Task]:
     """
@@ -1420,8 +1347,6 @@ def get_common_setup_tasks(
             bgp_asn=bgp_asn,
             bgpcpp_configerator_path=bgpcpp_configerator_path,
             openr_configerator_path=openr_configerator_path,
-            enable_update_group=enable_update_group,
-            update_group_config=update_group_config,
         )
     )
 
@@ -1557,7 +1482,6 @@ def get_update_packing_setup_tasks(
     ebgp_peer_group_v4: str = "EB-FA-V4",
     ibgp_peer_group_v4: str = "EB-EB-V4",
     enable_update_group: bool = False,
-    update_group_config: t.Optional[t.Dict[str, t.Any]] = None,
     v4_peer_start_offset: int = 16,
     bgpcpp_peers: t.Sequence[t.Mapping[str, t.Any]] | None = None,
     interface_ip_tasks: t.Sequence[Task] | None = None,
@@ -1616,8 +1540,6 @@ def get_update_packing_setup_tasks(
             bgp_asn=bgp_asn,
             bgpcpp_configerator_path=bgpcpp_configerator_path,
             openr_configerator_path=openr_configerator_path,
-            enable_update_group=enable_update_group,
-            update_group_config=update_group_config,
         )
     )
 

@@ -297,7 +297,7 @@ UPDATE_GROUP_VERIFICATION_CMD = (
     'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
     'echo "$out"; '
     'if echo "$out" | grep -qi DISABLED; then '
-    'echo "FAIL: BGP++ update_group is DISABLED -- patch did not take"; '
+    'echo "FAIL: BGP++ update_group is DISABLED in the deployed baseline"; '
     "exit 1; fi; "
     'if echo "$out" | grep -qi "Update group: ENABLED"; then '
     'echo "PASS: BGP++ update_group is ENABLED"; exit 0; fi; '
