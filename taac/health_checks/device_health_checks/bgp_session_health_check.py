@@ -91,16 +91,65 @@ class BgpSessionEstablishedHealthCheck(
             )
             return None
 
+    @staticmethod
+    def _peer_in_scope(
+        peer_addr: str,
+        parent_prefixes_to_ignore: t.Optional[t.List[str]],
+        ignore_all_prefixes_except: t.Optional[t.List[str]],
+    ) -> bool:
+        """Whether a peer address survives the caller's scope filters.
+
+        Single definition of "in scope" so the pass/fail loop and the peer
+        identity check cannot drift apart.
+
+        Args:
+            peer_addr: the peer address to test.
+            parent_prefixes_to_ignore: CIDR exclusions (subnet_of matching).
+            ignore_all_prefixes_except: exclusive peer-address allowlist.
+
+        Returns:
+            True when the peer should be considered by the caller.
+        """
+        if parent_prefixes_to_ignore and any(
+            is_parent_prefix(peer_addr, prefix) for prefix in parent_prefixes_to_ignore
+        ):
+            return False
+        if ignore_all_prefixes_except and not any(
+            peer_addr == prefix for prefix in ignore_all_prefixes_except
+        ):
+            return False
+        return True
+
     def _validate_peer_identity(
         self,
         expected_peers: t.Dict[str, str],
         established_sessions: t.List,
         hostname: str,
+        parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
+        ignore_all_prefixes_except: t.Optional[t.List[str]] = None,
     ) -> t.List[str]:
         """Validate established sessions against expected peer/local addresses.
 
         Compares actual (peer_addr, my_addr) pairs against expected. Logs a
         concise summary and returns warning strings for any mismatches.
+
+        Args:
+            expected_peers: peer_addr -> local_addr from the device's
+                bgpcpp_config, i.e. every configured peer.
+            established_sessions: the ESTABLISHED sessions that survived the
+                caller's scope filters.
+            hostname: device name, for log messages.
+            parent_prefixes_to_ignore: the caller's CIDR exclusions.
+            ignore_all_prefixes_except: the caller's exclusive peer-address
+                allowlist.
+
+        The two ignore lists must be the SAME ones the caller applied when
+        building ``established_sessions``. ``expected_peers`` is the whole
+        configured set, so comparing it against an already-scoped actual set
+        reports every out-of-scope peer as "missing" -- e.g. scoping UG 2.2.1's
+        isolation check to iBGP made all 280 eBGP peers look absent
+        (1272 configured - 992 in scope). Filtering both sides identically
+        keeps the identity check meaningful within the caller's scope.
         """
         actual_by_peer: t.Dict[str, str] = {}
         for session in established_sessions:
@@ -109,7 +158,13 @@ class BgpSessionEstablishedHealthCheck(
             actual_by_peer[norm_peer] = norm_local
 
         actual_addrs = set(actual_by_peer.keys())
-        expected_addrs = set(expected_peers.keys())
+        expected_addrs = {
+            addr
+            for addr in expected_peers
+            if self._peer_in_scope(
+                addr, parent_prefixes_to_ignore, ignore_all_prefixes_except
+            )
+        }
 
         matched = 0
         local_mismatches = []
@@ -414,15 +469,12 @@ class BgpSessionEstablishedHealthCheck(
         established_session_list = []
 
         for session in bgp_sessions:
-            if parent_prefixes_to_ignore and any(
-                is_parent_prefix(session.peer_addr, prefix)
-                for prefix in parent_prefixes_to_ignore
-            ):
-                continue
-
-            # If ignore_all_prefixes_except is specified, only check sessions with these prefixes
-            if ignore_all_prefixes_except and not any(
-                session.peer_addr == prefix for prefix in ignore_all_prefixes_except
+            # parent_prefixes_to_ignore excludes by CIDR; ignore_all_prefixes_except
+            # restricts to an exact peer-address allowlist.
+            if not self._peer_in_scope(
+                session.peer_addr,
+                parent_prefixes_to_ignore,
+                ignore_all_prefixes_except,
             ):
                 continue
 
@@ -539,7 +591,11 @@ class BgpSessionEstablishedHealthCheck(
         expected_peers = await self._read_bgpcpp_config(hostname)
         if expected_peers:
             peer_warnings = self._validate_peer_identity(
-                expected_peers, established_session_list, hostname
+                expected_peers,
+                established_session_list,
+                hostname,
+                parent_prefixes_to_ignore,
+                ignore_all_prefixes_except,
             )
             if peer_warnings:
                 pass_result = hc_types.HealthCheckResult(

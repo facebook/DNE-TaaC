@@ -1333,7 +1333,12 @@ class TaacRunner:
         )
         _stage_error = None
         try:
-            for _ in range(stage.iteration):
+            for _stage_iter in range(stage.iteration):
+                if stage.iteration > 1:
+                    self.logger.info(
+                        f"\033[1m\033[33m  ── Iteration {_stage_iter + 1}/"
+                        f"{stage.iteration} ──\033[0m"
+                    )
                 if stage.concurrent:
                     concurrent_steps = stage.concurrent_steps
                     if not concurrent_steps and stage.steps:

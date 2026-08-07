@@ -402,5 +402,90 @@ class TestCreateBgpSessionEstablishCheckRetryParams(unittest.TestCase):
         self.assertNotIn("retry_delay_multiplier", payload)
 
 
+# eBGP peers hang off the IXIA parent; iBGP planes live elsewhere. UG 2.2.1
+# scopes its isolation check to iBGP by ignoring this parent.
+_EBGP_PARENT = "2401:db00:e50d:11:8::/80"
+_EBGP_PEERS = ["2401:db00:e50d:11:8::11", "2401:db00:e50d:11:8::13"]
+_IBGP_PEERS = ["2401:db00:e50d:20::1", "2401:db00:e50d:20::2"]
+
+
+class PeerScopeFilterTest(unittest.TestCase):
+    """_peer_in_scope is the single definition of "in scope".
+
+    The verdict loop and the peer-identity check both route through it so they
+    cannot drift apart.
+    """
+
+    def test_peer_under_an_ignored_parent_is_out_of_scope(self):
+        self.assertFalse(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(
+                _EBGP_PEERS[0], [_EBGP_PARENT], None
+            )
+        )
+
+    def test_peer_outside_an_ignored_parent_stays_in_scope(self):
+        self.assertTrue(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(
+                _IBGP_PEERS[0], [_EBGP_PARENT], None
+            )
+        )
+
+    def test_allowlist_admits_only_exact_matches(self):
+        allow = [_IBGP_PEERS[0]]
+        self.assertTrue(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(_IBGP_PEERS[0], None, allow)
+        )
+        self.assertFalse(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(_IBGP_PEERS[1], None, allow)
+        )
+
+    def test_no_filters_admits_every_peer(self):
+        self.assertTrue(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(_EBGP_PEERS[0], None, None)
+        )
+        self.assertTrue(
+            BgpSessionEstablishedHealthCheck._peer_in_scope(_IBGP_PEERS[0], [], [])
+        )
+
+
+class ValidatePeerIdentityScopeTest(unittest.TestCase):
+    """The expected set must be filtered by the same scope as the actual set.
+
+    ``expected_peers`` is every configured peer, while ``established_sessions``
+    has already been narrowed by the caller's filters. Comparing the two
+    unfiltered reported every out-of-scope peer as missing: on bag011 that was
+    a bogus "Missing expected peers (280)" warning on a healthy run
+    (1272 configured - 992 in scope).
+    """
+
+    def setUp(self):
+        self.logger = MagicMock(spec=ConsoleFileLogger)
+        self.health_check = BgpSessionEstablishedHealthCheck(logger=self.logger)
+        self.expected = dict.fromkeys(_EBGP_PEERS + _IBGP_PEERS, "fc00::1")
+
+    def _validate(self, established_peers):
+        return self.health_check._validate_peer_identity(
+            self.expected,
+            [
+                _make_bgp_session(peer, TBgpPeerState.ESTABLISHED, my_addr="fc00::1")
+                for peer in established_peers
+            ],
+            "bag011.ash6",
+            [_EBGP_PARENT],
+            None,
+        )
+
+    def test_out_of_scope_peers_are_not_reported_missing(self):
+        # Caller scoped to iBGP, so the eBGP peers are absent by design.
+        self.assertEqual([], self._validate(_IBGP_PEERS))
+
+    def test_in_scope_peer_that_is_genuinely_absent_is_still_reported(self):
+        # The scope filter must not blanket-silence the missing-peer warning.
+        warnings = self._validate([_IBGP_PEERS[0]])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("Missing 1 expected peers", warnings[0])
+        self.assertIn(_IBGP_PEERS[1], warnings[0])
+
+
 if __name__ == "__main__":
     unittest.main()
