@@ -3,10 +3,9 @@
 """BGP Update Group qualification lifecycle bindings.
 
 Post-Wave-6 layout: sections 2.1 through 2.7 and the section-2.9 edge cases all
-have catalog constants here. Section 2.2 remains SKELETON — an empty-playbook
-TestConfig establishing the catalog surface pending implementation (2.5's
-umbrella skeleton was replaced by the implemented 2.5.1 + 2.5.2 factories, and
-2.6.1 Repeated Peer Flaps is now implemented). See
+have catalog constants here. Section 2.2 is implemented as the 2.2.1 + 2.2.2 +
+2.2.3 peer-lifecycle factories, as is 2.5 (2.5.1 + 2.5.2, replacing its umbrella
+skeleton) and 2.6.1 Repeated Peer Flaps. See
 ``factories/qual_bgp_update_group/tc{N}_*.py`` for per-section factories.
 
 Grandfathered Python constant names (referenced from cconf and elsewhere)
@@ -76,9 +75,9 @@ BAG013_ASH6_BGP_UG_INITIAL_DUMP_IDENTICAL_ROUTES_IXIA11_TEST_CONFIG = (
     )
 )
 
-# ─── Spec 2.2 Peer Lifecycle (SKELETON) ─────────────────────────────────
-BGP_UG_PEER_LIFECYCLE_TEST_CONFIG = create_bgp_ug_peer_lifecycle_test_config(
-    BAG013_ASH6
+# ─── Spec 2.2 Peer Lifecycle ────────────────────────────────────────────
+BAG011_ASH6_BGP_UG_PEER_LIFECYCLE_TEST_CONFIG = (
+    create_bgp_ug_peer_lifecycle_test_config(BAG011_ASH6)
 )
 
 # ─── Spec 2.3 Backpressure ──────────────────────────────────────────────
@@ -236,6 +235,7 @@ BAG013_ASH6_BGP_UG_NOTIFICATION_ISOLATION_TEST_CONFIG = (
 
 
 __all__ = [
+    "BAG011_ASH6_BGP_UG_PEER_LIFECYCLE_TEST_CONFIG",
     "BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG",
     "BAG013_ASH6_BGP_UG_CPU_QUANT_UG_OFF_TEST_CONFIG",
@@ -254,7 +254,6 @@ __all__ = [
     "BAG013_ASH6_BGP_UG_SUSTAINED_LINK_FLAP_TEST_CONFIG",
     "BGP_UG_BACKPRESSURE_TEST_CONFIG",
     "BGP_UG_NEW_PEER_JOIN_TEST_CONFIG",
-    "BGP_UG_PEER_LIFECYCLE_TEST_CONFIG",
     "EB03_LAB_ASH6_BGP_TEST_UPDATE_GROUP_CONFIG",
     "EB03_LAB_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG",
 ]

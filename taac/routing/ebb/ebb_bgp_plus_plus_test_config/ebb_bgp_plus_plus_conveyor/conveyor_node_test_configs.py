@@ -54,6 +54,7 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
 # manifest is byte-wise identical) now live in
 # testconfigs/routing/qual_bgp_update_group.py; import via that path.
 from taac.testconfigs.routing.qual_bgp_update_group import (
+    BAG011_ASH6_BGP_UG_PEER_LIFECYCLE_TEST_CONFIG,
     BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_ADD_PEER_DYNAMIC_TEST_CONFIG,
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
@@ -106,6 +107,11 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # paired with --skip-teardown --skip-ixia-cleanup so the DUT + IXIA
     # session stay live for hands-on inspection. Ad-hoc; not in conveyor.
     BAG013_ASH6_BGP_UG_BACKPRESSURE_TOPOLOGY_SMOKE_CONFIG,
+    # BGP++ UG peer-lifecycle qualification (specs 2.2.1 peer-down, 2.2.2
+    # reconnect shadow-RIB, 2.2.3 sustained-churn) on bag011.ash6; select one
+    # with --regex 'bgp_ug_<usecase>'. Ad-hoc; not scheduled on a conveyor
+    # stage (do NOT schedule until 2.2.1/2.2.2 are unblocked).
+    BAG011_ASH6_BGP_UG_PEER_LIFECYCLE_TEST_CONFIG,
     # Canonical BAG012 EBB full-scale Update Group 2.7 suite. Ad-hoc; not in
     # conveyor stages.
     BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG,
