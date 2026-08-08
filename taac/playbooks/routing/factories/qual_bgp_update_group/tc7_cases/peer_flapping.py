@@ -28,6 +28,7 @@ from taac.test_as_a_config.types import (
     Playbook,
     PointInTimeHealthCheck,
     SnapshotHealthCheck,
+    Stage,
     Step,
     ValidationStage,
 )
@@ -300,7 +301,7 @@ def _build_stages(
     churn_prefix_pool_regexes: t.Sequence[str],
     settle_seconds: int,
     memory_snapshot_key: str,
-) -> list[t.Any]:
+) -> list[Stage]:
     return [
         create_steps_stage(
             steps=[
