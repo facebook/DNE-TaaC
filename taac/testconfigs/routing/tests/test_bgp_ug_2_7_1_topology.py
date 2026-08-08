@@ -13,6 +13,10 @@ from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
     bgp_ug_2_7_suite as suite,
 )
+from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
+    _ibgp_groups,
+    _required_z_ip,
+)
 from pyre_extensions import none_throws
 from taac.health_check.health_check import types as hc_types
 
@@ -454,6 +458,7 @@ class BgpUg27SharedTopologyTest(TestCase):
             "bgp_ug_bgp_daemon_restart",
             "bgp_ug_fibagent_restart",
             "update_group_sustained_link_flap",
+            "bgp_ug_bgp_peer_flapping",
             "bgp_ug_cold_start",
         ]
         config = factory.create_bgp_ebb_full_scale_test_config(
@@ -468,3 +473,112 @@ class BgpUg27SharedTopologyTest(TestCase):
         self.assertEqual(2, len(config.basic_port_configs or []))
         self.assertEqual(18, len(_device_groups(config)))
         self.assertEqual(4, len(_runtime_route_specs(config)))
+
+    def test_peer_flapping_derives_exact_bag012_contract(self) -> None:
+        config = factory.create_bgp_ebb_full_scale_test_config(
+            BAG012_ASH6,
+            name="BAG012_UG_2_7_3_TEST",
+            playbooks_selected=["bgp_ug_bgp_peer_flapping"],
+        )
+
+        self.assertEqual(
+            ["bgp_ug_bgp_peer_flapping"],
+            [playbook.name for playbook in config.playbooks],
+        )
+        disruption = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[1].steps[0].step_params
+                ).json_params
+            )
+        )
+        self.assertIn("BGP_PEER_IPV4_EBGP", disruption["peer_regex"])
+        self.assertIn("BGP_PEER_IPV6_EBGP", disruption["peer_regex"])
+        self.assertEqual(2713, disruption["seed"])
+        self.assertEqual(1800, disruption["duration_seconds"])
+        self.assertEqual(2, len(set(disruption["reserved_peer_addresses"])))
+        self.assertEqual(
+            [
+                r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
+                r"^PREFIX_POOL_IPV6_EBGP_UG_2_7_RUNTIME$",
+            ],
+            disruption["churn_prefix_pool_regexes"],
+        )
+        receivers = disruption["receiver_parent_prefixes"]
+        self.assertEqual(992, len(receivers))
+        self.assertEqual(496, sum(prefix.endswith("/32") for prefix in receivers))
+        self.assertEqual(496, sum(prefix.endswith("/128") for prefix in receivers))
+        self.assertNotIn("capture_interface", disruption)
+        self.assertNotIn("receiver_source_pairs", disruption)
+        capture = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[0].steps[4].step_params
+                ).json_params
+            )
+        )
+        compare = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[2].steps[0].step_params
+                ).json_params
+            )
+        )
+        memory_snapshot = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[0].steps[5].step_params
+                ).json_params
+            )
+        )
+        memory_verify = json.loads(
+            none_throws(
+                none_throws(
+                    config.playbooks[0].stages[2].steps[1].step_params
+                ).json_params
+            )
+        )
+        self.assertEqual(1272, capture["expected_session_count"])
+        self.assertEqual(4, compare["expected_group_count"])
+        self.assertEqual(1272, compare["expected_session_count"])
+        self.assertEqual("snapshot_bgp_vmhwm", memory_snapshot["custom_step_name"])
+        self.assertEqual("verify_bgp_vmhwm_growth", memory_verify["custom_step_name"])
+        self.assertEqual(memory_snapshot["snapshot_key"], memory_verify["snapshot_key"])
+        self.assertEqual(199_999_999, memory_verify["growth_threshold_bytes"])
+        self.assertEqual(2, len(config.basic_port_configs or []))
+        self.assertEqual(18, len(_device_groups(config)))
+        self.assertNotIn(
+            "DEVICE_GROUP_BGP_MON",
+            {group.device_group_name for group in _device_groups(config)},
+        )
+        self.assertEqual(4, len(_runtime_route_specs(config)))
+        self.assertEqual([], _hardware_capacity_checks(config.playbooks[0].prechecks))
+        self.assertEqual([], _hardware_capacity_checks(config.playbooks[0].postchecks))
+
+    def test_peer_flapping_rejects_unequal_ibgp_group_sizes(self) -> None:
+        sizes = [61, 63, 62, 62, 62, 62, 62, 62]
+        bound = SimpleNamespace(
+            device_groups=[
+                SimpleNamespace(afi="v4", role=f"ibgp_{index}", peer_count=size)
+                for index, size in enumerate(sizes)
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "eight 62-peer"):
+            _ibgp_groups(t.cast(t.Any, bound), "v4")
+
+    def test_peer_flapping_selects_reserved_peer_by_numeric_ip_order(self) -> None:
+        for addresses, expected in (
+            (["192.0.2.10", "192.0.2.2"], "192.0.2.2"),
+            (["2001:db8::10", "2001:db8::2"], "2001:db8::2"),
+        ):
+            group = SimpleNamespace(name="dg_ebgp", z_ips=addresses)
+
+            with self.subTest(addresses=addresses):
+                self.assertEqual(expected, _required_z_ip(t.cast(t.Any, group)))
+
+    def test_peer_flapping_rejects_reserved_group_without_z_ips(self) -> None:
+        group = SimpleNamespace(name="dg_ebgp_v4", z_ips=[])
+
+        with self.assertRaisesRegex(ValueError, "dg_ebgp_v4.*no z_ips"):
+            _required_z_ip(t.cast(t.Any, group))

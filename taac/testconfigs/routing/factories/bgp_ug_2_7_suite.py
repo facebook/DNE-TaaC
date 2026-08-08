@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BAG012 EBB full-scale bindings for Update Group cases 2.7.4-2.7.6."""
+"""BAG012 EBB full-scale bindings for Update Group cases 2.7.3-2.7.6."""
 
 import ipaddress
 import re
@@ -21,6 +21,9 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.cold_start
 )
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.fibagent_restart import (
     create_bgp_ug_fibagent_restart_playbook,
+)
+from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.peer_flapping import (
+    create_bgp_ug_bgp_peer_flapping_playbook,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
@@ -43,6 +46,26 @@ _SHARED_RUNTIME_POOL_REGEX_BY_AFI = {
     "ipv4": r"^PREFIX_POOL_IPV4_EBGP_UG_2_7_RUNTIME$",
     "ipv6": r"^PREFIX_POOL_IPV6_EBGP_UG_2_7_RUNTIME$",
 }
+
+
+def _required_group(bound: BoundTopology, name: str) -> BoundDeviceGroup:
+    matches = [group for group in bound.device_groups if group.name == name]
+    if len(matches) != 1:
+        raise ValueError(f"Expected one EBB group {name!r}; found {len(matches)}")
+    return matches[0]
+
+
+def _required_peer_name(group: BoundDeviceGroup) -> str:
+    name = group.legacy_ixia_bgp_peer_name or group.legacy_ixia_tag_name
+    if not name:
+        raise ValueError(f"TC7 group {group.name!r} has no IXIA BGP peer name")
+    return name
+
+
+def _required_z_ip(group: BoundDeviceGroup) -> str:
+    if not group.z_ips:
+        raise ValueError(f"TC7 group {group.name!r} has no z_ips")
+    return min(group.z_ips, key=lambda address: int(ipaddress.ip_address(address)))
 
 
 def _ibgp_groups(bound: BoundTopology, afi: str) -> list[BoundDeviceGroup]:
@@ -264,6 +287,31 @@ def _cold_start(inventory: PhysicalInventory, bound: BoundTopology) -> Playbook:
     )
 
 
+def _peer_flapping(inventory: PhysicalInventory, bound: BoundTopology) -> Playbook:
+    playbook_name = "bgp_ug_bgp_peer_flapping"
+    v4 = _required_group(bound, "dg_ebgp_v4")
+    v6 = _required_group(bound, "dg_ebgp_v6")
+    names = [_required_peer_name(group) for group in (v4, v6)]
+    prechecks, postchecks, snapshots = _health_checks()
+    return create_bgp_ug_bgp_peer_flapping_playbook(
+        device_name=inventory.device_name,
+        peer_regex=rf"^(?:{'|'.join(re.escape(name) for name in names)})$",
+        reserved_peer_addresses=[_required_z_ip(v4), _required_z_ip(v6)],
+        churn_prefix_pool_regexes=[
+            _SHARED_RUNTIME_POOL_REGEX_BY_AFI["ipv4"],
+            _SHARED_RUNTIME_POOL_REGEX_BY_AFI["ipv6"],
+        ],
+        receiver_parent_prefixes=[
+            *_host_prefixes(_ibgp_groups(bound, "v4")),
+            *_host_prefixes(_ibgp_groups(bound, "v6")),
+        ],
+        state_key=_case_key(inventory.device_name, playbook_name, "semantic-state"),
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshots,
+    )
+
+
 def build_bgp_ug_2_7_playbook(
     playbook_name: str,
     inventory: PhysicalInventory,
@@ -271,6 +319,8 @@ def build_bgp_ug_2_7_playbook(
 ) -> Playbook:
     if playbook_name == "bgp_ug_cold_start":
         return _cold_start(inventory, bound)
+    if playbook_name == "bgp_ug_bgp_peer_flapping":
+        return _peer_flapping(inventory, bound)
     if playbook_name == "bgp_ug_fibagent_restart":
         return _fibagent_restart(inventory, bound)
     if playbook_name != "bgp_ug_bgp_daemon_restart":
