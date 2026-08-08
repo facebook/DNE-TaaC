@@ -4,7 +4,6 @@
 
 - 2.7.1 Link Flap: Update Group Recovery After Physical Link Bounces (REAL)
 - 2.7.2 Sustained Link Flapping Across Multiple Ports (REAL)
-- 2.7.3 BGP Peer Flapping: Rapid Session Bounces Within Update Group (SKELETON)
 - 2.7.4 BGP Daemon Restart: Update Group Reconstruction (SKELETON)
 - 2.7.5 Cold Start: Update Group Formation From Zero State (SKELETON)
 - 2.7.6 FibAgent Restart: Update Group Stability During Data-Plane Agent Recovery (SKELETON)
@@ -93,13 +92,6 @@ def create_bgp_ug_sustained_link_flap_playbook(
     )
 
 
-def create_bgp_ug_bgp_peer_flapping_playbook() -> Playbook:
-    """Spec 2.7.3 — BGP Peer Flapping: Rapid Session Bounces Within Update Group. SKELETON."""
-    raise NotImplementedError(
-        "Spec 2.7.3 (bgp_peer_flapping) playbook not yet implemented"
-    )
-
-
 def create_bgp_ug_bgp_daemon_restart_playbook() -> Playbook:
     """Spec 2.7.4 — BGP Daemon Restart: Update Group Reconstruction. SKELETON."""
     raise NotImplementedError(
@@ -121,7 +113,6 @@ def create_bgp_ug_fibagent_restart_playbook() -> Playbook:
 
 __all__ = [
     "create_bgp_ug_bgp_daemon_restart_playbook",
-    "create_bgp_ug_bgp_peer_flapping_playbook",
     "create_bgp_ug_cold_start_playbook",
     "create_bgp_ug_fibagent_restart_playbook",
     "create_bgp_ug_link_flap_recovery_playbook",
