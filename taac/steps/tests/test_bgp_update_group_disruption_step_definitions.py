@@ -6,11 +6,26 @@ import typing as t
 from unittest import TestCase
 
 from taac.steps.step_definitions import (
+    _validate_fixed_peer_disruption,
     create_bgp_update_group_disruption_step,
 )
 
 
 class BgpUpdateGroupDisruptionStepDefinitionsTest(TestCase):
+    @staticmethod
+    def _fixed_peer_params() -> dict[str, t.Any]:
+        return {
+            "peer_regex": "EBGP-V6$",
+            "duration_seconds": 1800,
+            "churn_prefix_pool_regexes": ["V4_RUNTIME", "V6_RUNTIME"],
+            "receiver_parent_prefixes": ["2401:db00::1/128"],
+            "expected_receiver_count": 1,
+            "expected_route_delta": 20,
+            "route_active_seconds": 10,
+            "route_period_seconds": 60,
+            "expected_route_cycles": 30,
+        }
+
     @staticmethod
     def _params(*, verify_down_route_delta: bool = False) -> dict[str, t.Any]:
         params: dict[str, t.Any] = {
@@ -125,5 +140,58 @@ class BgpUpdateGroupDisruptionStepDefinitionsTest(TestCase):
                     "peer_regex": "EBGP",
                     "seed": 7,
                     "churn_prefix_pool_regexes": [],
+                    "route_active_seconds": 10,
+                    "route_period_seconds": 60,
+                    "expected_route_cycles": 30,
                 },
             )
+
+    def test_fixed_peer_route_timing_requires_positive_integers(self) -> None:
+        for name in (
+            "route_active_seconds",
+            "route_period_seconds",
+            "expected_route_cycles",
+        ):
+            for value in (0, -1, True, 1.5, "1"):
+                params = self._fixed_peer_params()
+                params[name] = value
+                with (
+                    self.subTest(name=name, value=value),
+                    self.assertRaisesRegex(ValueError, "positive integers"),
+                ):
+                    _validate_fixed_peer_disruption("fixed_peer_flap", params)
+
+    def test_fixed_peer_route_timing_accepts_qualification_cadence(self) -> None:
+        params = self._fixed_peer_params()
+        expected = dict(params)
+
+        _validate_fixed_peer_disruption("fixed_peer_flap", params)
+
+        self.assertEqual(expected, params)
+
+    def test_fixed_peer_duration_requires_positive_divisible_integer(self) -> None:
+        for value in (0, -10, 11, True, 1800.5, "1800"):
+            params = self._fixed_peer_params()
+            params["duration_seconds"] = value
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "positive integer divisible"),
+            ):
+                _validate_fixed_peer_disruption("fixed_peer_flap", params)
+
+    def test_fixed_peer_duration_must_cover_all_route_cycles(self) -> None:
+        params = self._fixed_peer_params()
+        params["duration_seconds"] = 1790
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"duration_seconds \(1790\).*route_period_seconds.*\(1800\)",
+        ):
+            _validate_fixed_peer_disruption("fixed_peer_flap", params)
+
+    def test_fixed_peer_active_window_cannot_exceed_period(self) -> None:
+        params = self._fixed_peer_params()
+        params["route_active_seconds"] = 61
+
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            _validate_fixed_peer_disruption("fixed_peer_flap", params)

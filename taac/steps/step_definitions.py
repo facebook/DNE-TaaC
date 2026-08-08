@@ -599,10 +599,48 @@ def _validate_disruption_route_verifier(
 def _validate_fixed_peer_disruption(action: str, params: t.Mapping[str, t.Any]) -> None:
     if not params["peer_regex"]:
         raise ValueError("fixed_peer_flap peer_regex must be non-empty")
-    duration = int(params.get("duration_seconds", 1800))
-    if duration <= 0 or duration % 10:
+    duration = params.get("duration_seconds", 1800)
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int)
+        or duration <= 0
+        or duration % 10
+    ):
         raise ValueError(
-            "fixed_peer_flap duration_seconds must be positive and divisible by 10"
+            "fixed_peer_flap duration_seconds must be a positive integer divisible "
+            "by 10"
+        )
+    _require_custom_action_params(
+        "BGP Update Group disruption",
+        action,
+        params,
+        (
+            "route_active_seconds",
+            "route_period_seconds",
+            "expected_route_cycles",
+        ),
+    )
+    for name in (
+        "route_active_seconds",
+        "route_period_seconds",
+        "expected_route_cycles",
+    ):
+        value = params[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                "fixed_peer_flap route timing params must be positive integers; "
+                f"{name}={value!r}"
+            )
+    if params["route_active_seconds"] > params["route_period_seconds"]:
+        raise ValueError(
+            "fixed_peer_flap route_active_seconds must not exceed route_period_seconds"
+        )
+    minimum_duration = params["route_period_seconds"] * params["expected_route_cycles"]
+    if duration < minimum_duration:
+        raise ValueError(
+            f"fixed_peer_flap duration_seconds ({duration}) must be at least "
+            "route_period_seconds * expected_route_cycles "
+            f"({minimum_duration})"
         )
     _validate_disruption_route_verifier(action, params, "churn_prefix_pool_regexes")
 
