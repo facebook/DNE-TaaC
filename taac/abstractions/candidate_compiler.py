@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from taac.abstractions.artifacts import CompiledTaacArtifacts
+from taac.abstractions.compilation.basic_port_composition import (
+    BasicPortCompositionRequest,
+    BasicPortCompositionResult,
+)
 from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
@@ -21,6 +25,7 @@ from taac.abstractions.compilation.model import (
 )
 from taac.abstractions.compilation.planner import PlanningResult
 from taac.abstractions.compilation.protocols import (
+    BasicPortComposer,
     DutCapabilityPreflight,
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
@@ -122,6 +127,7 @@ class CandidateCompilation:
     traffic_generator_port_device_group_shadow: (
         TrafficGeneratorPortDeviceGroupRenderResult[object] | None
     ) = None
+    basic_port_composition_shadow: BasicPortCompositionResult[object] | None = None
     endpoint_composition_shadow: EndpointCompositionResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
@@ -160,6 +166,7 @@ class CandidateTopologyCompiler:
     traffic_generator_port_device_group_renderer: (
         TrafficGeneratorPortDeviceGroupRenderer[object] | None
     ) = None
+    basic_port_composer: BasicPortComposer | None = None
     endpoint_composer: EndpointComposer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
@@ -171,6 +178,13 @@ class CandidateTopologyCompiler:
             raise ValueError(
                 "endpoint composer requires DUT base and traffic-generator "
                 "endpoint renderers"
+            )
+        if self.basic_port_composer is not None and (
+            self.traffic_generator_port_base_renderer is None
+            or self.traffic_generator_port_device_group_renderer is None
+        ):
+            raise ValueError(
+                "basic-port composer requires port-base and device-group renderers"
             )
 
     def analyze(self, bound: BoundTopology) -> PlanningResult:
@@ -245,6 +259,28 @@ class CandidateTopologyCompiler:
             traffic_generator_port_device_group_shadow.validate(
                 traffic_generator_port_device_group_request
             )
+        basic_port_composition_shadow = None
+        if self.basic_port_composer is not None:
+            if (
+                traffic_generator_port_base_shadow is None
+                or traffic_generator_port_device_group_shadow is None
+            ):
+                raise RuntimeError("basic-port composer dependencies were not rendered")
+            required_traffic_generator_request = _require_traffic_generator_request(
+                traffic_generator_request
+            )
+            basic_port_composition_request = BasicPortCompositionRequest(
+                plan=required_traffic_generator_request.plan,
+                endpoint_activations=(
+                    required_traffic_generator_request.endpoint_activations
+                ),
+                port_bases=traffic_generator_port_base_shadow,
+                port_device_groups=traffic_generator_port_device_group_shadow,
+            )
+            basic_port_composition_shadow = self.basic_port_composer.compose(
+                basic_port_composition_request
+            )
+            basic_port_composition_shadow.validate(basic_port_composition_request)
         endpoint_composition_shadow = None
         if self.endpoint_composer is not None:
             if (
@@ -288,6 +324,7 @@ class CandidateTopologyCompiler:
             traffic_generator_port_device_group_shadow=(
                 traffic_generator_port_device_group_shadow
             ),
+            basic_port_composition_shadow=basic_port_composition_shadow,
             endpoint_composition_shadow=endpoint_composition_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
         )

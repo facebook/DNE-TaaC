@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import typing as t
 
+from taac.abstractions.compilation.basic_port_composition import (
+    BasicPortCompositionRequest,
+    BasicPortCompositionResult,
+)
 from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
@@ -54,6 +58,13 @@ class EndpointComposer(t.Protocol):
         self,
         request: EndpointCompositionRequest[object],
     ) -> EndpointCompositionResult[object]: ...
+
+
+class BasicPortComposer(t.Protocol):
+    def compose(
+        self,
+        request: BasicPortCompositionRequest[object, object],
+    ) -> BasicPortCompositionResult[object]: ...
 
 
 class TrafficGeneratorRenderer(t.Protocol):

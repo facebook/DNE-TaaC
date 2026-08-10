@@ -857,7 +857,8 @@ resource-keyed endpoint composition are committed. EOS/BGP++ capability
 preflight now runs ahead of adaptation and shadow rendering, and shared IXIA
 port-base rendering owns `BasicPortConfig.endpoint` across all frozen cases.
 The four already-native IXIA cases also expose resource-keyed
-`device_group_configs` shadows with per-group provenance.
+`device_group_configs` shadows with per-group provenance and compose both
+fields through an identity-blind, resource-keyed shadow boundary.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -892,6 +893,9 @@ of Phase 1.5:
 13. **Completed contract hardening:** Diff 1.5.5g, replace parallel IXIA
     device-group identity/config tuples with nested resource-keyed provenance
     before composing `BasicPortConfig` values.
+14. **Completed shadow capability:** Diff 1.5.5h, compose IXIA port bases and
+    device-group bodies by stable resource ID without changing artifact or
+    renderer-report authority.
 
 Remaining shared IXIA device-group, session, advertisement, and lifecycle
 capabilities, EOS lifecycle/config/interface rendering, facade cutover, Phase
@@ -1494,6 +1498,49 @@ targets without errors. Golden regeneration reported all 294 configs unchanged,
 with manifest SHA-256
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. The
 independent audit's mutation-sensitivity findings were closed before commit.
+
+#### Resource-keyed TAAC BasicPortConfig composition
+
+`BasicPortConfig` composition now has a task-free request and result that do
+not carry the legacy IXIA identity sidecar. The request combines the semantic
+IXIA plan, endpoint activation, validated port-base fragments, and validated
+device-group fragments. Port bases and bodies are associated through port
+`ResourceId`; nested device-group configs are associated through device-group
+`ResourceId` and materialized in semantic plan order. Endpoint strings and
+tuple positions are never join keys.
+
+The TAAC-specific composer is an explicit schema adapter outside the task-free
+package. It requires a base containing only `endpoint`, rejects any existing
+`l1_config` or `device_group_configs` value even when the latter is empty,
+requires TAAC device-group bodies, and emits a fresh `BasicPortConfig` with
+exact per-group session and advertisement provenance. Result validation
+rejects missing, unexpected, duplicate, or reordered port keys and any drift
+in DUT endpoint, physical endpoint, device-group order, session ownership, or
+advertisement boundaries.
+
+The four native UG and IPv6 update-packing cases match both the full shared
+renderer and established artifacts exactly. Candidate compilation exposes the
+composed values only as a shadow after both source lanes validate. The adapter's
+original `CompiledTaacArtifacts` object remains authoritative, and the DUT,
+traffic-generator, and artifact-adapter reports all remain
+`COMPATIBILITY_DELEGATED`.
+
+This boundary does not complete IXIA generalization. `l1_config` remains
+deferred; the twelve delegated device-group bodies retain their recorded
+route/session semantic gaps; and upstream native body lowering still uses the
+optional compatibility sidecar for presentation names and indices. Custom IXIA
+topology components can eventually provide those presentation attributes, but
+they are not composition semantics and cannot select capabilities.
+
+Validation passed the focused import, candidate, composer, IXIA, and EOS parity
+gate (73/73, TestInfra `21392098267160622`) and the complete abstraction suite
+(564/564, TestInfra `22799473150717648`). Changed-target Pyre checked seven
+targets without errors. The factory golden gate passed 2/2 (TestInfra
+`31243722439157375`), and golden regeneration reported all 294 configs
+unchanged, with manifest SHA-256
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. Two
+independent audits found no remaining architecture or mutation-sensitivity
+issue.
 
 ### Multi-agent operating model
 

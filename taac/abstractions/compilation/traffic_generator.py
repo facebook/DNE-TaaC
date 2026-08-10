@@ -522,12 +522,19 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
         self,
         request: TrafficGeneratorPortDeviceGroupRenderRequest,
     ) -> None:
+        self.validate_plan(request.plan, request.endpoint_activations)
+
+    def validate_plan(
+        self,
+        plan: IxiaPlan,
+        endpoint_activations: tuple[TrafficGeneratorEndpointActivation, ...],
+    ) -> None:
         _validate_exact_resource_order(
             "traffic-generator port device-group result resource",
-            request.plan.iter_resource_ids(),
+            plan.iter_resource_ids(),
             self.referenced_resource_ids,
         )
-        active_ports = request.active_ports()
+        active_ports = _active_ports(plan.ports, endpoint_activations)
         _validate_exact_resource_order(
             "traffic-generator port device-group result fragment",
             tuple(port.resource_id for port in active_ports),
@@ -540,7 +547,7 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
             fragment = fragments_by_port_id[port.resource_id]
             group_ids = tuple(
                 group.resource_id
-                for group in request.plan.device_groups
+                for group in plan.device_groups
                 if group.port_id == port.resource_id
             )
             _validate_exact_resource_order(
@@ -556,7 +563,7 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
                 group_fragment = fragments_by_group_id[group_id]
                 session_ids = tuple(
                     session.resource_id
-                    for session in request.plan.bgp_sessions
+                    for session in plan.bgp_sessions
                     if session.device_group_id == group_id
                 )
                 _validate_exact_resource_order(
@@ -566,7 +573,7 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
                 )
                 advertisement_ids = tuple(
                     advertisement.resource_id
-                    for advertisement in request.plan.advertisements
+                    for advertisement in plan.advertisements
                     if advertisement.device_group_id == group_id
                 )
                 _validate_exact_resource_order(
