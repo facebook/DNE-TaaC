@@ -15,11 +15,18 @@ from taac.abstractions.compilation.model import (
     TopologyCompilationPlan,
 )
 from taac.abstractions.compilation.planner import PlanningResult
+from taac.abstractions.compilation.protocols import (
+    TrafficGeneratorRenderer,
+)
 from taac.abstractions.compilation.report import (
     CompileReport,
     RendererDisposition,
     RendererLane,
     RendererReport,
+)
+from taac.abstractions.compilation.traffic_generator import (
+    TrafficGeneratorRenderRequest,
+    TrafficGeneratorRenderResult,
 )
 from taac.abstractions.topology.model import BoundTopology
 
@@ -88,12 +95,14 @@ class CandidateCompilation:
     plan: TopologyCompilationPlan
     report: CompileReport
     artifacts: CompiledTaacArtifacts
+    traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
 
 @dataclass(frozen=True)
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
     artifact_adapter: ArtifactAdapter
+    traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
     def analyze(self, bound: BoundTopology) -> PlanningResult:
         return self.planner.plan(bound)
@@ -103,6 +112,18 @@ class CandidateTopologyCompiler:
         resource_ids = planning.plan.iter_resource_ids()
         planning.report.assert_renderable(resource_ids)
         adapted = self.artifact_adapter.render(bound, planning.plan)
+        traffic_generator_shadow = None
+        if self.traffic_generator_renderer is not None:
+            traffic_generator_request = (
+                TrafficGeneratorRenderRequest.from_compilation_plan(
+                    planning.plan,
+                    planning.legacy_ixia_identity,
+                )
+            )
+            traffic_generator_shadow = self.traffic_generator_renderer.render(
+                traffic_generator_request
+            )
+            traffic_generator_shadow.validate(traffic_generator_request)
         report = planning.report.with_renderer_reports(*adapted.renderer_reports)
         report.assert_renderable(
             resource_ids,
@@ -112,6 +133,7 @@ class CandidateTopologyCompiler:
             plan=planning.plan,
             report=report,
             artifacts=adapted.artifacts,
+            traffic_generator_shadow=traffic_generator_shadow,
         )
 
     def compile(self, bound: BoundTopology) -> CompiledTaacArtifacts:

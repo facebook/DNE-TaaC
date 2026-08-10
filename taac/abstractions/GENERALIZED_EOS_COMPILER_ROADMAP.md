@@ -1009,29 +1009,69 @@ artifact-parity/import gate passed 45/45 tests (TestInfra
 with zero additions, changes, or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
-### Phase 1.5.4b deferred renderer boundary
+### Phase 1.5.4b shadow-renderer boundary result
 
-The semantic plan is sufficient input for a renderer, but native lowering is a
-separate migration risk. The largest remaining gaps are:
+The candidate pipeline now constructs a typed traffic-generator render request
+from the semantic `IxiaPlan`, its optional legacy identity sidecar, and an
+endpoint activation policy derived from setup mode. Full activates endpoint
+patches, basic port configs, and lifecycle. Skip keeps endpoint and port
+realization but suppresses lifecycle. Verify-only suppresses all three without
+changing the semantic IXIA graph.
 
-1. `CandidateTopologyCompiler` has one monolithic `ArtifactAdapter`; DUT and
-   traffic-generator results cannot yet be composed independently.
-2. `TrafficGeneratorRenderer.render()` accepts only `IxiaPlan`, so it has no
-   typed way to receive the optional compatibility identity sidecar or return
-   IXIA-owned lifecycle fragments.
+`TrafficGeneratorRenderer` returns a typed result containing exact resource-ID
+coverage, basic port and traffic-item configs, endpoint patches limited to
+`ixia_ports` and `direct_ixia_connections`, and named lifecycle fragments.
+Validation fails closed on missing or extra resources, inactive or incomplete
+endpoint patches, incorrect port-config cardinality, nonempty Phase 1.5 traffic
+items, duplicate lifecycle slots, and missing or extra formulaic-route
+configuration lifecycle.
+
+The renderer is an optional shadow lane. `CandidateTopologyCompiler` invokes it
+only after the established adapter has completed EOS capability preflight and
+artifact generation, validates the result, and exposes it on
+`CandidateCompilation`. It does not merge the result into artifacts, and the
+traffic-generator renderer report remains `COMPATIBILITY_DELEGATED`. This gives
+native lowering a comparison seam without permitting partial ownership or a
+consumer-visible shift.
+
+Final local validation passed on 2026-08-07: the full abstraction suite passed
+484/484 tests (TestInfra `21955048220539361`), the focused candidate/import/IXIA
+and 16-case EOS parity gate passed 31/31 tests (TestInfra
+`23362423104092708`), and changed-target Pyre found no errors across 17 owning
+targets. The factory golden gate passed 2/2 tests (TestInfra
+`16044073863541622`). Golden regeneration found 294 unchanged configurations,
+with zero additions, changes, or removals. The manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+### Phase 1.5.4c authoritative renderer boundary
+
+The semantic plan is sufficient for resource behavior, but exact legacy
+serialization and artifact composition remain separate migration risks. The
+largest gaps are:
+
+1. The established `ArtifactAdapter` remains the sole artifact authority; DUT
+   and traffic-generator results are not yet composed independently.
+2. Endpoint label compatibility is not modeled. UG uses `chassis:port` in
+   `ixia_ports`, while the other current families use DUT interface labels.
 3. The established EOS wrapper is also named `IxiaPlan` even though it stores
    already-rendered TAAC configs.
-4. Formulaic route mutation is emitted from the EOS setup-phase builder rather
-   than owned by the traffic-generator result.
-5. IXIA endpoint connection fragments are mixed into EOS endpoint rendering.
+4. IXIA endpoint connection fragments are mixed into whole EOS endpoints; an
+   authoritative merge needs keyed endpoint-patch composition.
+5. Formulaic route mutation is emitted from the EOS setup-phase builder rather
+   than lowered from advertisement intent into the named IXIA lifecycle slot.
 6. Existing lowering helpers branch on topology profiles and read
    `BoundTopology` directly. Their observable omitted-versus-`None` versus
-   empty-list behavior and exact tuple order must be preserved during
-   extraction.
+   empty-list behavior, encoding flavor, and exact tuple order must be frozen
+   as compatibility policy during extraction.
+7. EOS capability preflight lives inside the established adapter. It must move
+   before both renderers before the traffic-generator lane becomes
+   authoritative.
 
-These gaps do not block Diff 1.5.4a. They define the scope of 1.5.4b; if native
-rendering cannot reach exact parity in one slice, keep the adapter delegated
-and defer only the affected lowering profile rather than weakening the harness.
+Partitioned EBB is outside the current 16-case artifact matrix and remains
+delegated until it has direct parity coverage. For every family, shadow output
+may be compared, but native and delegated traffic-generator fragments must
+never be merged. Flip `RendererLane.TRAFFIC_GENERATOR` to `NATIVE` only when
+endpoint patches, port configs, traffic items, and lifecycle are all complete.
 
 ### Multi-agent operating model
 
