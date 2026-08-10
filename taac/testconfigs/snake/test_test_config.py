@@ -698,6 +698,18 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G = gen_snake_test_config(
             destination_ip="5000:1::2/64",
         ),
     ],
+    direct_ixia_connections=[
+        taac_types.DirectIxiaConnection(
+            interface="eth1/1/1",
+            ixia_chassis_ip="2401:db00:2066:31fb::3025",
+            ixia_port="1/7",
+        ),
+        taac_types.DirectIxiaConnection(
+            interface="eth1/64/5",
+            ixia_chassis_ip="2401:db00:2066:31fb::3025",
+            ixia_port="1/8",
+        ),
+    ],
     hostname="fboss335776657.ash6",
     line_rate=99,
     frame_size_settings=ixia_types.FrameSize(
@@ -725,7 +737,7 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G = gen_snake_test_config(
         ),
     ],
     hostname="fboss336803613.ash6",
-    line_rate=99,
+    line_rate=49,
     frame_size_settings=ixia_types.FrameSize(
         type=ixia_types.FrameSizeType.CUSTOM_IMIX,
         imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
