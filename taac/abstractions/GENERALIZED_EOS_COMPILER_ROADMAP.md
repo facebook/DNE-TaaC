@@ -1043,7 +1043,48 @@ targets. The factory golden gate passed 2/2 tests (TestInfra
 with zero additions, changes, or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
-### Phase 1.5.4c authoritative renderer boundary
+### Phase 1.5.4c initial shared IXIA shadow lowering result
+
+The shared renderer now performs real TAAC lowering for the initial IPv6
+device-group capability used by UG new-peer and dynamic-peer topologies. It
+consumes only the semantic `IxiaPlan`, typed endpoint activation, and optional
+legacy presentation sidecars. It does not inspect `BoundTopology`, EOS, FBOSS,
+topology/profile names, or role strings.
+
+Capability selection is semantic and fail-closed. The initial slice requires
+the exact supported IPv6 session, address, prefix-window, next-hop, and
+field-presence contract. Legacy tags, BGP peer names, and indices only supply
+presentation identity; changing identity alone cannot select the capability.
+Every non-UG case in the 16-case parity matrix is asserted unsupported. Invalid
+address progressions, identical local/gateway addresses, duplicate per-port
+group indices, sparse prefixes, attributes, peer slicing, and unsupported
+session shapes fail before rendering.
+
+Endpoint port presentation is now explicit port-scoped topology input through
+`IxiaEndpointPortLabelStyle`. UG selects `CHASSIS_PORT`; current other families
+retain `DUT_INTERFACE`. Logical validation requires the typed enum, binding
+preserves and audits its provenance, and mixed tag/named device-group identity
+cannot implicitly change the label. Endpoint labels and direct connections
+also retain independent port-resource provenance, allowing a future family to
+use different ordering for the two lists without weakening completeness
+validation.
+
+The two frozen UG cases match the established basic-port configs and endpoint
+wiring exactly, including the dynamic spare peer. This remains a shadow lane:
+the established adapter is still the sole artifact authority, no fragments are
+merged, and `RendererLane.TRAFFIC_GENERATOR` remains
+`COMPATIBILITY_DELEGATED`.
+
+Final local validation passed on 2026-08-07: the full abstraction suite passed
+498/498 tests (TestInfra `12666374140105692`), the focused IXIA/topology gate
+passed 162/162 tests (TestInfra `12947849116830946`), and changed-target Pyre
+found no errors across 18 owning targets. The factory golden gate passed 2/2
+tests (TestInfra `13229324093522662`). Golden regeneration found 294 unchanged
+configurations, with zero additions, changes, or removals. The manifest
+SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+### Phase 1.5.4d authoritative renderer boundary
 
 The semantic plan is sufficient for resource behavior, but exact legacy
 serialization and artifact composition remain separate migration risks. The
@@ -1051,8 +1092,10 @@ largest gaps are:
 
 1. The established `ArtifactAdapter` remains the sole artifact authority; DUT
    and traffic-generator results are not yet composed independently.
-2. Endpoint label compatibility is not modeled. UG uses `chassis:port` in
-   `ixia_ports`, while the other current families use DUT interface labels.
+2. Endpoint label style is modeled, but every delegated family still needs its
+   label and independent label/direct-connection ordering frozen before
+   authoritative cutover. IPv6 update packing intentionally uses different
+   orders for those two endpoint fields.
 3. The established EOS wrapper is also named `IxiaPlan` even though it stores
    already-rendered TAAC configs.
 4. IXIA endpoint connection fragments are mixed into whole EOS endpoints; an

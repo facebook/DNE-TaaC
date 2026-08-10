@@ -20,6 +20,7 @@ from taac.abstractions.topology.model import (
     BgpPeerGroup,
     DeviceGroupPartition,
     IxiaDeviceGroupChild,
+    IxiaEndpointPortLabelStyle,
     IxiaPortAssignment,
     OpenRMode,
 )
@@ -1194,6 +1195,17 @@ def _validate_device_group_port_assignment(
                 f"{path}.port_assignment.reuse_group",
                 "invalid_port_reuse_group",
                 "reuse_group must be non-empty without surrounding whitespace",
+            )
+        )
+    if not isinstance(
+        assignment.endpoint_label_style,
+        IxiaEndpointPortLabelStyle,
+    ):
+        issues.append(
+            _issue(
+                f"{path}.port_assignment.endpoint_label_style",
+                "invalid_ixia_endpoint_port_label_style",
+                "endpoint label style must be an IxiaEndpointPortLabelStyle",
             )
         )
 

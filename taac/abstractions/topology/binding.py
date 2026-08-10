@@ -1282,6 +1282,14 @@ def _validate_bound_ixia_snapshot(
                 message="resolved port reuse group differs from logical intent",
             )
         )
+    if assignment.endpoint_label_style is not authored.endpoint_label_style:
+        issues.append(
+            ValidationIssue(
+                path=f"{path}.endpoint_label_style",
+                code="resolved_port_assignment_mismatch",
+                message="resolved endpoint label style differs from logical intent",
+            )
+        )
     if (
         any(
             interface != assignment.dut_interface
@@ -1612,6 +1620,7 @@ def _resolve_device_group_ports(
                     ixia_port=ixia_port,
                     physical_inventory_index=port_index,
                     reuse_group=authored_assignment.reuse_group,
+                    endpoint_label_style=authored_assignment.endpoint_label_style,
                 )
     return _ResolvedDeviceGroupPorts(
         a_endpoint=a_endpoint,

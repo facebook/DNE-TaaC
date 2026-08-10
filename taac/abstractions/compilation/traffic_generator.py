@@ -83,17 +83,55 @@ class TrafficGeneratorRenderRequest:
 
 
 @dataclass(frozen=True)
+class TrafficGeneratorIxiaPortFragment:
+    port_id: ResourceId
+    label: str
+
+    def __post_init__(self) -> None:
+        _require_ixia_port_id(self.port_id)
+        if not self.label:
+            raise ValueError("traffic-generator IXIA port label must be nonempty")
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorDirectConnectionFragment:
+    port_id: ResourceId
+    connection: t.Any
+
+    def __post_init__(self) -> None:
+        _require_ixia_port_id(self.port_id)
+
+
+@dataclass(frozen=True)
 class TrafficGeneratorEndpointPatch:
     endpoint_id: ResourceId
-    ixia_ports: tuple[str, ...] = ()
-    direct_ixia_connections: tuple[t.Any, ...] = ()
+    ixia_port_fragments: tuple[TrafficGeneratorIxiaPortFragment, ...] = ()
+    direct_connection_fragments: tuple[
+        TrafficGeneratorDirectConnectionFragment, ...
+    ] = ()
 
     def __post_init__(self) -> None:
         _require_endpoint_id(self.endpoint_id)
-        if not self.ixia_ports and not self.direct_ixia_connections:
+        if not self.ixia_port_fragments and not self.direct_connection_fragments:
             raise ValueError("traffic-generator endpoint patch must not be empty")
-        if any(not ixia_port for ixia_port in self.ixia_ports):
-            raise ValueError("traffic-generator IXIA port names must be nonempty")
+        _validate_unique_resource_ids(
+            "traffic-generator IXIA port fragment",
+            tuple(fragment.port_id for fragment in self.ixia_port_fragments),
+        )
+        _validate_unique_resource_ids(
+            "traffic-generator direct connection fragment",
+            tuple(fragment.port_id for fragment in self.direct_connection_fragments),
+        )
+
+    @property
+    def ixia_ports(self) -> tuple[str, ...]:
+        return tuple(fragment.label for fragment in self.ixia_port_fragments)
+
+    @property
+    def direct_ixia_connections(self) -> tuple[t.Any, ...]:
+        return tuple(
+            fragment.connection for fragment in self.direct_connection_fragments
+        )
 
 
 @dataclass(frozen=True)
@@ -149,6 +187,24 @@ class TrafficGeneratorRenderResult:
             expected_patch_ids,
             tuple(patch.endpoint_id for patch in self.endpoint_patches),
         )
+        for patch in self.endpoint_patches:
+            expected_port_ids = tuple(
+                port.resource_id
+                for port in request.plan.ports
+                if port.dut_endpoint_id == patch.endpoint_id
+            )
+            _validate_exact_resource_coverage(
+                "traffic-generator IXIA port fragment",
+                expected_port_ids,
+                tuple(fragment.port_id for fragment in patch.ixia_port_fragments),
+            )
+            _validate_exact_resource_coverage(
+                "traffic-generator direct connection fragment",
+                expected_port_ids,
+                tuple(
+                    fragment.port_id for fragment in patch.direct_connection_fragments
+                ),
+            )
         expected_port_count = sum(
             activations[port.dut_endpoint_id].emit_basic_port_configs
             for port in request.plan.ports
@@ -205,6 +261,11 @@ def _require_endpoint_id(resource_id: ResourceId) -> None:
         raise ValueError(f"resource {resource_id} must identify an endpoint")
 
 
+def _require_ixia_port_id(resource_id: ResourceId) -> None:
+    if resource_id.kind is not ResourceKind.IXIA_PORT:
+        raise ValueError(f"resource {resource_id} must identify an IXIA port")
+
+
 def _validate_unique_resource_ids(
     subject: str,
     resource_ids: tuple[ResourceId, ...],
@@ -234,6 +295,8 @@ def _validate_exact_resource_coverage(
 __all__ = (
     "TrafficGeneratorEndpointActivation",
     "TrafficGeneratorEndpointPatch",
+    "TrafficGeneratorDirectConnectionFragment",
+    "TrafficGeneratorIxiaPortFragment",
     "TrafficGeneratorLifecycleFragment",
     "TrafficGeneratorLifecycleSlot",
     "TrafficGeneratorRenderRequest",

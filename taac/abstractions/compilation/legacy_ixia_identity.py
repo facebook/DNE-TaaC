@@ -17,6 +17,19 @@ class LegacyIxiaIdentityError(ValueError):
 
 
 @dataclass(frozen=True)
+class LegacyIxiaPortIdentity:
+    resource_id: ResourceId
+    endpoint_ixia_port_label: str
+
+    def __post_init__(self) -> None:
+        _require_kind(self.resource_id, ResourceKind.IXIA_PORT)
+        if not self.endpoint_ixia_port_label:
+            raise LegacyIxiaIdentityError(
+                "legacy endpoint IXIA port label must be non-empty"
+            )
+
+
+@dataclass(frozen=True)
 class LegacyIxiaGroupIdentity:
     resource_id: ResourceId
     device_group_name: str | None = None
@@ -64,6 +77,7 @@ class LegacyIxiaAdvertisementIdentity:
 
 @dataclass(frozen=True)
 class LegacyIxiaIdentitySidecar:
+    port_identities: tuple[LegacyIxiaPortIdentity, ...] = ()
     group_identities: tuple[LegacyIxiaGroupIdentity, ...] = ()
     session_identities: tuple[LegacyIxiaSessionIdentity, ...] = ()
     advertisement_identities: tuple[LegacyIxiaAdvertisementIdentity, ...] = ()
@@ -72,6 +86,7 @@ class LegacyIxiaIdentitySidecar:
         resource_ids = tuple(
             identity.resource_id
             for identity in (
+                *self.port_identities,
                 *self.group_identities,
                 *self.session_identities,
                 *self.advertisement_identities,
@@ -83,6 +98,19 @@ class LegacyIxiaIdentitySidecar:
             raise LegacyIxiaIdentityError(
                 f"legacy IXIA sidecar contains duplicate resource IDs: {rendered}"
             )
+
+    def port_identity(
+        self,
+        resource_id: ResourceId,
+    ) -> LegacyIxiaPortIdentity | None:
+        return next(
+            (
+                identity
+                for identity in self.port_identities
+                if identity.resource_id == resource_id
+            ),
+            None,
+        )
 
     def group_identity(
         self,
@@ -128,6 +156,7 @@ class LegacyIxiaIdentitySidecar:
         unknown = tuple(
             identity.resource_id
             for identity in (
+                *self.port_identities,
                 *self.group_identities,
                 *self.session_identities,
                 *self.advertisement_identities,

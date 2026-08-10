@@ -11,6 +11,7 @@ from taac.abstractions.compilation.legacy_ixia_identity import (
     LegacyIxiaAdvertisementIdentity,
     LegacyIxiaGroupIdentity,
     LegacyIxiaIdentitySidecar,
+    LegacyIxiaPortIdentity,
     LegacyIxiaSessionIdentity,
 )
 from taac.abstractions.compilation.model import (
@@ -56,6 +57,7 @@ from taac.abstractions.topology.model import (
     BoundTopology,
     EndpointSpec,
     IxiaBgpSessionIntent,
+    IxiaEndpointPortLabelStyle,
     ResolvedPeer,
     ResolvedPrefixAdvertisementLike,
 )
@@ -282,10 +284,43 @@ def plan_ixia(
     return IxiaPlanningResult(
         plan=plan,
         legacy_identity=LegacyIxiaIdentitySidecar(
+            port_identities=_legacy_port_identities(bound, plan),
             group_identities=tuple(group_identities),
             session_identities=tuple(session_identities),
             advertisement_identities=tuple(advertisement_identities),
         ),
+    )
+
+
+def _legacy_port_identities(
+    bound: BoundTopology,
+    plan: IxiaPlan,
+) -> tuple[LegacyIxiaPortIdentity, ...]:
+    styles_by_port_id: dict[ResourceId, IxiaEndpointPortLabelStyle] = {}
+    for device_group in bound.device_groups:
+        assignment = device_group.port_assignment
+        if assignment is None:
+            continue
+        port_id = ixia_port_resource_id(assignment.logical_role)
+        existing = styles_by_port_id.setdefault(
+            port_id,
+            assignment.endpoint_label_style,
+        )
+        if existing is not assignment.endpoint_label_style:
+            raise ValueError(
+                f"IXIA port {port_id} has conflicting endpoint label styles"
+            )
+    return tuple(
+        LegacyIxiaPortIdentity(
+            resource_id=port.resource_id,
+            endpoint_ixia_port_label=(
+                f"{port.chassis_identifier}:{port.ixia_port}"
+                if styles_by_port_id[port.resource_id]
+                is IxiaEndpointPortLabelStyle.CHASSIS_PORT
+                else port.dut_interface
+            ),
+        )
+        for port in plan.ports
     )
 
 

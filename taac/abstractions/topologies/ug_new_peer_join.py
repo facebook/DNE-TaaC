@@ -18,6 +18,7 @@ from taac.abstractions.topology import (
     EndpointSpec,
     FormulaicPrefixSource,
     IxiaBgpSessionIntent,
+    IxiaEndpointPortLabelStyle,
     IxiaPortAssignment,
     LogicalTopology,
     OpenRMode,
@@ -33,10 +34,12 @@ UG_NEW_PEER_JOIN_PORT_MAP = {"ebgp": 0, "ibgp": 1}
 _UG_EBGP_PORT_ASSIGNMENT = IxiaPortAssignment(
     logical_role="ebgp",
     reuse_group="ug_ebgp",
+    endpoint_label_style=IxiaEndpointPortLabelStyle.CHASSIS_PORT,
 )
 _UG_IBGP_PORT_ASSIGNMENT = IxiaPortAssignment(
     logical_role="ibgp",
     reuse_group="ug_ibgp",
+    endpoint_label_style=IxiaEndpointPortLabelStyle.CHASSIS_PORT,
 )
 UG_NEW_PEER_JOIN_PARENT_NETWORKS = {
     "ug_ebgp_v6": IXIA_EBGP_IC_PARENT_NETWORK_V6,

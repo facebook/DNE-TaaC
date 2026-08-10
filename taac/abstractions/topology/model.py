@@ -76,10 +76,18 @@ class EndpointSpec:
     setup_mode: str = "full"
 
 
+class IxiaEndpointPortLabelStyle(str, Enum):
+    DUT_INTERFACE = "dut_interface"
+    CHASSIS_PORT = "chassis_port"
+
+
 @dataclass(frozen=True)
 class IxiaPortAssignment:
     logical_role: str
     reuse_group: str | None = None
+    endpoint_label_style: IxiaEndpointPortLabelStyle = (
+        IxiaEndpointPortLabelStyle.DUT_INTERFACE
+    )
 
 
 @dataclass(frozen=True)
@@ -89,6 +97,9 @@ class ResolvedIxiaPortAssignment:
     ixia_port: str
     physical_inventory_index: int
     reuse_group: str | None
+    endpoint_label_style: IxiaEndpointPortLabelStyle = (
+        IxiaEndpointPortLabelStyle.DUT_INTERFACE
+    )
 
 
 @dataclass(frozen=True)
