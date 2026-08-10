@@ -10,7 +10,8 @@ without changing TAAC runtime behavior or making flat TAAC authoring obsolete.
 
 Design reference: `P2421897026`.
 
-Implementation roadmap: [Generalized EOS compiler roadmap](GENERALIZED_EOS_COMPILER_ROADMAP.md).
+Implementation roadmap:
+[Generalized topology compiler design and roadmap](GENERALIZED_EOS_COMPILER_ROADMAP.md).
 
 ---
 
@@ -95,6 +96,7 @@ defaults layer.
 Physical inventory supplies:
 
 - DUT name
+- physical network role, such as `EB`
 - ordered IXIA ports
 - IXIA chassis
 - local DUT BGP AS (`dut_bgp_as`)
@@ -103,7 +105,8 @@ Physical inventory supplies:
 
 LogicalTopology intent belongs in topology objects and factory-level dictionaries. Do
 not move logical topology data into `PhysicalInventory` as a side effect of using this
-package.
+package. The DUT's network role is physical metadata; endpoint function and adjacency
+purpose remain logical topology data.
 
 `bind_to_inventory()` resolves logical intent against physical inventory:
 
@@ -170,15 +173,15 @@ lowering path:
 | `openr_standalone_link.helper` | Far-side member bring-up on the peer DUT so the Port-Channel is operational. The helper does NOT run OpenR. |
 | `openr_standalone_link.kv_link(endpoint)` | Adjacency payload used by the standalone synthetic-injection sequence to build `adj:<DUT>`, `adj:<node.*>`, and `prefix:<node.*>` KvStore keys. |
 
-**Reference implementation (EBB BGP++).** The EOS BGP++ lowering path
-that implements this contract lives in
-`testconfigs/routing/util/bgp_ebb_setup_tasks.py`
-(`_get_bgpcpp_deployment_tasks`, `_get_openr_setup_tasks`) and
+**Reference implementation (EBB BGP++).** The current EOS BGP++ lowering is
+split between `abstractions/compiler.py`,
+`abstractions/eos_bgpcpp_setup_tasks.py`, and
 `internal/utils/openr_route_utils.py`
 (`OpenRRouteManager._handle_inject_action_openr`), which invokes
-`persistSelfOriginatedKey` via helpers in `openr_kvstore_utils.py`.
-Other backends implementing STANDALONE must satisfy the same
-field-to-role mapping above.
+`persistSelfOriginatedKey` via helpers in `openr_kvstore_utils.py`. Phase 1.5
+moves platform realization behind the EOS/BGP++ backend and prohibits
+`abstractions/**` from importing `testconfigs/**`. Other backends implementing
+STANDALONE must satisfy the same field-to-role mapping above.
 
 ### 4.4. Single-ownership invariant
 
@@ -239,12 +242,18 @@ Compiler classes are backend or driver implementations, not topology-specific
 classes. For example, EBB full-scale and UG custom topology data should both
 use the same EOS BGP++ compiler when bound to an EOS BGP++ physical_inventory.
 
-Route intent must satisfy the DUT policy that belongs to the selected testbed.
-Do not expand or bypass DUT policy merely to make a workload route pass. If a
-test explicitly exercises policy mutation, that mutation remains factory-owned:
-apply it as an explicit, fail-closed setup task before configuration validation
-and verify the resulting policy. Do not specialize a reusable topology or
-backend compiler with a qualification-only ingress or egress policy.
+Baseline policy selection is compiler-owned. The common planner resolves a
+semantic role-policy preset from the DUT network role, peer relationship,
+address family, and direction. The selected platform backend maps that preset
+to BGP++ peer-group/route-map references or the corresponding FBOSS policy.
+Do not expand or bypass the selected DUT policy merely to make a workload route
+pass.
+
+An experiment that compares configuration features uses the single explicit,
+typed routing-config variant described in the roadmap. Test-case policy
+mutations that are themselves the subject of a playbook remain factory-owned;
+they must be explicit and fail closed. They are not a reason to specialize a
+reusable topology or add a topology-name branch to a backend.
 
 Compiler-emitted teardown is a stack unwind. When setup tasks take full
 running-config snapshots, emit their restores in reverse setup order so the
@@ -306,3 +315,8 @@ explicit follow-on work.
 5. Do not create one compiler class per topology.
 6. Do not add `bgp_asn` to routing `PhysicalInventory`; use existing `dut_bgp_as`.
 7. Do not rebaseline goldens without direct semantic evidence for each change.
+8. Do not import `testconfigs/**` from `abstractions/**`.
+9. Do not store rendered TAAC `Task` objects in common resource plans.
+10. Do not select normal compilation behavior from topology name or
+    `legacy_profile`.
+11. Do not duplicate IXIA lowering between DUT platform backends.
