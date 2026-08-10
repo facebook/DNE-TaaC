@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import typing as t
 from dataclasses import dataclass
+from enum import Enum
 
 from ixia.ixia import types as ixia_types
 from taac.abstractions.compilation.legacy_ixia_identity import (
@@ -39,6 +40,17 @@ class UnsupportedIxiaRenderingError(ValueError):
     pass
 
 
+class _IxiaRenderingCapability(str, Enum):
+    INITIAL_IPV6 = "initial_ipv6"
+    COMPACT_NAMED_IPV6 = "compact_named_ipv6"
+
+
+_PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY = {
+    _IxiaRenderingCapability.INITIAL_IPV6: 127,
+    _IxiaRenderingCapability.COMPACT_NAMED_IPV6: 127,
+}
+
+
 @dataclass(frozen=True)
 class SharedIxiaRenderer:
     """Lowers capability-supported IXIA semantics without DUT-platform input."""
@@ -47,18 +59,22 @@ class SharedIxiaRenderer:
         self,
         request: TrafficGeneratorRenderRequest,
     ) -> TrafficGeneratorRenderResult:
-        _validate_initial_ipv6_capability(request)
+        capability = _select_capability(request)
+        if capability is _IxiaRenderingCapability.INITIAL_IPV6:
+            _validate_initial_ipv6_capability(request)
+        else:
+            _validate_compact_named_ipv6_capability(request)
         activation_by_endpoint = {
             activation.endpoint_id: activation
             for activation in request.endpoint_activations
         }
         basic_port_configs = tuple(
-            _basic_port_config(request, port)
+            _basic_port_config(request, port, capability)
             for port in request.plan.ports
             if activation_by_endpoint[port.dut_endpoint_id].emit_basic_port_configs
         )
         endpoint_patches = tuple(
-            _endpoint_patch(request, activation.endpoint_id)
+            _endpoint_patch(request, activation.endpoint_id, capability)
             for activation in request.endpoint_activations
             if activation.emit_endpoint_patch
         )
@@ -69,6 +85,30 @@ class SharedIxiaRenderer:
         )
         result.validate(request)
         return result
+
+
+def _select_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> _IxiaRenderingCapability:
+    session_shapes = frozenset(
+        (session.capabilities, session.address_prefix_length)
+        for session in request.plan.bgp_sessions
+    )
+    if session_shapes == {
+        ((IxiaBgpCapability.IPV6_UNICAST,), 127),
+    }:
+        return _IxiaRenderingCapability.INITIAL_IPV6
+    if session_shapes == {
+        (
+            (
+                IxiaBgpCapability.IPV4_UNICAST,
+                IxiaBgpCapability.IPV6_UNICAST,
+            ),
+            64,
+        ),
+    }:
+        return _IxiaRenderingCapability.COMPACT_NAMED_IPV6
+    _unsupported("IXIA plan is outside the shared renderer semantic capabilities")
 
 
 def _validate_initial_ipv6_capability(
@@ -104,6 +144,133 @@ def _validate_initial_ipv6_capability(
         )
 
 
+def _validate_compact_named_ipv6_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> None:
+    _validate_compact_shape_and_activation(request)
+    sessions_by_group = _sessions_by_group(request)
+    ordered_groups = _compact_ordered_groups(request)
+    groups_by_relationship = _compact_groups_by_relationship(
+        request,
+        sessions_by_group,
+    )
+    _validate_compact_relationship_geometry(
+        request,
+        sessions_by_group,
+        ordered_groups,
+        groups_by_relationship,
+    )
+
+
+def _validate_compact_shape_and_activation(
+    request: TrafficGeneratorRenderRequest,
+) -> None:
+    if (
+        len(request.plan.ports) != 2
+        or len(request.plan.device_groups) != 2
+        or len(request.plan.bgp_sessions) != 2
+        or len(request.plan.advertisements) != 1
+    ):
+        _unsupported("compact named IPv6 lowering requires its two-group shape")
+    if any(
+        not activation.emit_endpoint_patch or not activation.emit_basic_port_configs
+        for activation in request.endpoint_activations
+    ):
+        _unsupported(
+            "compact named IPv6 lowering does not support suppressed realization"
+        )
+
+
+def _compact_ordered_groups(
+    request: TrafficGeneratorRenderRequest,
+) -> tuple[IxiaDeviceGroupPlan, ...]:
+    ordered_groups: list[IxiaDeviceGroupPlan] = []
+    for port in request.plan.ports:
+        identity = request.legacy_identity.port_identity(port.resource_id)
+        if identity is None or identity.endpoint_ixia_port_label != port.dut_interface:
+            _unsupported(
+                f"IXIA port {port.resource_id} requires DUT-interface presentation"
+            )
+        groups = tuple(
+            group
+            for group in request.plan.device_groups
+            if group.port_id == port.resource_id
+        )
+        if len(groups) != 1:
+            _unsupported(
+                f"IXIA port {port.resource_id} requires exactly one device group"
+            )
+        ordered_groups.append(groups[0])
+        _validate_unique_group_indices(request, port)
+    return tuple(ordered_groups)
+
+
+def _compact_groups_by_relationship(
+    request: TrafficGeneratorRenderRequest,
+    sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
+) -> dict[PeerRelationship, IxiaDeviceGroupPlan]:
+    groups_by_relationship: dict[PeerRelationship, IxiaDeviceGroupPlan] = {}
+    for group in request.plan.device_groups:
+        if group.afi is not AddressFamily.IPV6 or group.peer_start_index != 0:
+            _unsupported(
+                f"IXIA group {group.resource_id} is outside compact named IPv6 lowering"
+            )
+        session = sessions_by_group.get(group.resource_id)
+        if session is None:
+            _unsupported(f"IXIA group {group.resource_id} has no BGP session")
+        if session.relationship in groups_by_relationship:
+            _unsupported(
+                "compact named IPv6 lowering requires one internal and one "
+                "external group"
+            )
+        groups_by_relationship[session.relationship] = group
+        _validate_compact_named_ipv6_session(group, session)
+        _validate_named_identity(request.legacy_identity, group, session)
+    return groups_by_relationship
+
+
+def _validate_compact_relationship_geometry(
+    request: TrafficGeneratorRenderRequest,
+    sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
+    ordered_groups: tuple[IxiaDeviceGroupPlan, ...],
+    groups_by_relationship: dict[PeerRelationship, IxiaDeviceGroupPlan],
+) -> None:
+    if set(groups_by_relationship) != {
+        PeerRelationship.EXTERNAL,
+        PeerRelationship.INTERNAL,
+    }:
+        _unsupported(
+            "compact named IPv6 lowering requires one internal and one external group"
+        )
+    if tuple(
+        sessions_by_group[group.resource_id].relationship for group in ordered_groups
+    ) != (PeerRelationship.INTERNAL, PeerRelationship.EXTERNAL) or tuple(
+        session.relationship for session in request.plan.bgp_sessions
+    ) != (
+        PeerRelationship.INTERNAL,
+        PeerRelationship.EXTERNAL,
+    ):
+        _unsupported(
+            "compact named IPv6 lowering requires internal then external ordering"
+        )
+    internal = groups_by_relationship[PeerRelationship.INTERNAL]
+    external = groups_by_relationship[PeerRelationship.EXTERNAL]
+    if internal.peer_count != 1 or external.peer_count != 10:
+        _unsupported("compact named IPv6 lowering requires 1 internal and 10 peers")
+    if any(
+        advertisement.device_group_id == internal.resource_id
+        for advertisement in request.plan.advertisements
+    ):
+        _unsupported("compact named IPv6 internal group must not advertise routes")
+    advertisement = request.plan.advertisements[0]
+    if advertisement.device_group_id != external.resource_id:
+        _unsupported("compact named IPv6 routes must belong to the external group")
+    _validate_compact_named_ipv6_advertisement(
+        request.legacy_identity,
+        advertisement,
+    )
+
+
 def _validate_initial_ipv6_session(
     group: IxiaDeviceGroupPlan,
     session: IxiaBgpSessionPlan,
@@ -130,10 +297,48 @@ def _validate_initial_ipv6_session(
             f"IXIA session {session.resource_id} is outside the initial IPv6 "
             "session capability"
         )
-    _validate_ipv6_session_addresses(session)
+    _validate_ipv6_session_addresses(
+        session,
+        _IxiaRenderingCapability.INITIAL_IPV6,
+    )
 
 
-def _validate_ipv6_session_addresses(session: IxiaBgpSessionPlan) -> None:
+def _validate_compact_named_ipv6_session(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+) -> None:
+    if group.local_asn is None or len(session.local_addresses) != group.peer_count:
+        _unsupported(f"IXIA session {session.resource_id} lacks complete group inputs")
+    if (
+        session.relationship
+        not in {PeerRelationship.EXTERNAL, PeerRelationship.INTERNAL}
+        or session.capabilities
+        != (
+            IxiaBgpCapability.IPV4_UNICAST,
+            IxiaBgpCapability.IPV6_UNICAST,
+        )
+        or session.address_prefix_length != 64
+        or session.address_step != 2
+        or session.address_start_index != 0
+        or not session.enable_four_byte_local_as
+        or session.hold_timer_s != 30
+        or session.keepalive_timer_s != 10
+        or not session.enable_graceful_restart
+    ):
+        _unsupported(
+            f"IXIA session {session.resource_id} is outside compact named IPv6 "
+            "session lowering"
+        )
+    _validate_ipv6_session_addresses(
+        session,
+        _IxiaRenderingCapability.COMPACT_NAMED_IPV6,
+    )
+
+
+def _validate_ipv6_session_addresses(
+    session: IxiaBgpSessionPlan,
+    capability: _IxiaRenderingCapability,
+) -> None:
     parsed_local = tuple(
         _required_ipv6_address(session.resource_id, address)
         for address in session.local_addresses
@@ -161,9 +366,10 @@ def _validate_ipv6_session_addresses(session: IxiaBgpSessionPlan) -> None:
         if peer_cidr is None:
             _unsupported(f"IXIA session {session.resource_id} has no peer CIDR")
         parsed_cidr = ipaddress.ip_interface(peer_cidr)
+        peer_pair_prefix_length = _PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY[capability]
         if (
             parsed_cidr.version != 6
-            or parsed_cidr.network.prefixlen != session.address_prefix_length
+            or parsed_cidr.network.prefixlen != peer_pair_prefix_length
             or local == peer
             or local not in parsed_cidr.network
             or peer not in parsed_cidr.network
@@ -194,6 +400,22 @@ def _validate_tag_identity(
         identity.tag_name is None
         or identity.device_group_name is not None
         or identity.device_group_index is None
+    ):
+        _unsupported(f"IXIA group {group.resource_id} has unsupported identity data")
+    if legacy_identity.session_identity(session.resource_id) is None:
+        _unsupported(f"IXIA session {session.resource_id} has no BGP peer identity")
+
+
+def _validate_named_identity(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+) -> None:
+    identity = _required_group_identity(legacy_identity, group.resource_id)
+    if (
+        identity.device_group_name is None
+        or identity.tag_name is not None
+        or identity.device_group_index != 0
     ):
         _unsupported(f"IXIA group {group.resource_id} has unsupported identity data")
     if legacy_identity.session_identity(session.resource_id) is None:
@@ -257,6 +479,38 @@ def _validate_initial_ipv6_advertisement(
             _unsupported(f"IXIA advertisement {advertisement.resource_id} is not IPv6")
 
 
+def _validate_compact_named_ipv6_advertisement(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    advertisement: IxiaAdvertisementPlan,
+) -> None:
+    prefix_window = advertisement.prefix_window
+    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    if (
+        advertisement.afi is not AddressFamily.IPV6
+        or advertisement.next_hop.mode is not IxiaNextHopMode.SELF
+        or advertisement.attributes
+        or advertisement.route_attributes is not None
+        or advertisement.policy_communities
+        or prefix_window.source_start != "5001:db8:1000::"
+        or prefix_window.source_step != 1 << 80
+        or prefix_window.source_count != 10_000
+        or prefix_window.source_excluded_indices
+        or prefix_window.membership_start_index != 0
+        or prefix_window.membership_prefix_count != 10_000
+        or prefix_window.starting_prefix != "5001:db8:1000::"
+        or prefix_window.prefix_length != 64
+        or prefix_window.prefixes_per_peer != 10_000
+        or prefix_window.peer_distribution is not IxiaPeerPrefixDistribution.SHARED
+        or prefix_window.network_group_index != 0
+        or advertisement.route_count != 10_000
+        or identity is None
+    ):
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} is outside compact "
+            "named IPv6 route lowering"
+        )
+
+
 def _sessions_by_group(
     request: TrafficGeneratorRenderRequest,
 ) -> dict[ResourceId, IxiaBgpSessionPlan]:
@@ -273,6 +527,7 @@ def _sessions_by_group(
 def _basic_port_config(
     request: TrafficGeneratorRenderRequest,
     port: IxiaPortPlan,
+    capability: _IxiaRenderingCapability,
 ) -> taac_types.BasicPortConfig:
     groups = sorted(
         (
@@ -287,13 +542,16 @@ def _basic_port_config(
     )
     return taac_types.BasicPortConfig(
         endpoint=f"{port.dut_physical_identifier}:{port.dut_interface}",
-        device_group_configs=[_device_group_config(request, group) for group in groups],
+        device_group_configs=[
+            _device_group_config(request, group, capability) for group in groups
+        ],
     )
 
 
 def _device_group_config(
     request: TrafficGeneratorRenderRequest,
     group: IxiaDeviceGroupPlan,
+    capability: _IxiaRenderingCapability,
 ) -> taac_types.DeviceGroupConfig:
     identity = _required_group_identity(
         request.legacy_identity,
@@ -308,6 +566,48 @@ def _device_group_config(
         request.legacy_identity,
         session.resource_id,
     )
+    if capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
+        advertisements = tuple(
+            advertisement
+            for advertisement in request.plan.advertisements
+            if advertisement.device_group_id == group.resource_id
+        )
+        route_scales = (
+            [
+                _compact_named_ipv6_route_scale(
+                    request.legacy_identity,
+                    advertisements[0],
+                )
+            ]
+            if advertisements
+            else None
+        )
+        return taac_types.DeviceGroupConfig(
+            device_group_name=identity.device_group_name,
+            device_group_index=identity.device_group_index,
+            multiplier=group.peer_count,
+            v6_addresses_config=taac_types.IpAddressesConfig(
+                starting_ip=session.local_addresses[0],
+                increment_ip=_legacy_v6_address_step(session.address_step),
+                gateway_starting_ip=session.peer_addresses[0],
+                gateway_increment_ip=_legacy_v6_address_step(session.address_step),
+                mask=None,
+                start_index=session.address_start_index,
+            ),
+            v6_bgp_config=taac_types.BgpConfig(
+                bgp_peer_name=session_identity.bgp_peer_name,
+                local_as_4_bytes=group.local_asn,
+                enable_4_byte_local_as=session.enable_four_byte_local_as,
+                bgp_peer_type=_BGP_PEER_TYPES[session.relationship],
+                bgp_capabilities=[
+                    _BGP_CAPABILITIES[capability] for capability in session.capabilities
+                ],
+                hold_timer=session.hold_timer_s,
+                keepalive_timer=session.keepalive_timer_s,
+                route_scales=route_scales,
+                enable_graceful_restart=session.enable_graceful_restart,
+            ),
+        )
     return taac_types.DeviceGroupConfig(
         device_group_index=identity.device_group_index,
         tag_name=identity.tag_name,
@@ -337,6 +637,32 @@ def _device_group_config(
             ],
             enable_graceful_restart=session.enable_graceful_restart,
         ),
+    )
+
+
+def _compact_named_ipv6_route_scale(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    advertisement: IxiaAdvertisementPlan,
+) -> taac_types.RouteScaleSpec:
+    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    if identity is None:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has no prefix identity"
+        )
+    prefix_window = advertisement.prefix_window
+    return taac_types.RouteScaleSpec(
+        v6_route_scale=taac_types.RouteScale(
+            prefix_name=identity.prefix_name,
+            starting_prefixes=prefix_window.starting_prefix,
+            prefix_step=str(ipaddress.IPv6Address(prefix_window.source_step)),
+            prefix_length=prefix_window.prefix_length,
+            multiplier=1,
+            prefix_count=prefix_window.prefixes_per_peer,
+            ip_address_family=ixia_types.IpAddressFamily.IPV6,
+            bgp_communities=[],
+        ),
+        multiplier=1,
+        network_group_index=prefix_window.network_group_index,
     )
 
 
@@ -378,6 +704,7 @@ def _route_scale(
 def _endpoint_patch(
     request: TrafficGeneratorRenderRequest,
     endpoint_id: ResourceId,
+    capability: _IxiaRenderingCapability,
 ) -> TrafficGeneratorEndpointPatch:
     ports = tuple(
         port for port in request.plan.ports if port.dut_endpoint_id == endpoint_id
@@ -385,6 +712,16 @@ def _endpoint_patch(
     labels = tuple(
         _required_port_label(request.legacy_identity, port.resource_id)
         for port in ports
+    )
+    direct_connection_ports = (
+        tuple(
+            sorted(
+                ports,
+                key=lambda port: _compact_port_relationship_order(request, port),
+            )
+        )
+        if capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6
+        else ports
     )
     return TrafficGeneratorEndpointPatch(
         endpoint_id=endpoint_id,
@@ -401,9 +738,26 @@ def _endpoint_patch(
                     ixia_port=port.ixia_port,
                 ),
             )
-            for port in ports
+            for port in direct_connection_ports
         ),
     )
+
+
+def _compact_port_relationship_order(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+) -> int:
+    group = next(
+        group
+        for group in request.plan.device_groups
+        if group.port_id == port.resource_id
+    )
+    session = next(
+        session
+        for session in request.plan.bgp_sessions
+        if session.device_group_id == group.resource_id
+    )
+    return 0 if session.relationship is PeerRelationship.EXTERNAL else 1
 
 
 def _required_port_label(
@@ -463,6 +817,7 @@ def _unsupported(message: str) -> t.NoReturn:
 
 
 _BGP_CAPABILITIES = {
+    IxiaBgpCapability.IPV4_UNICAST: ixia_types.BgpCapability.IpV4Unicast,
     IxiaBgpCapability.IPV6_UNICAST: ixia_types.BgpCapability.IpV6Unicast,
 }
 

@@ -1084,6 +1084,37 @@ configurations, with zero additions, changes, or removals. The manifest
 SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
+#### IPv6 update-packing shadow extension
+
+The shared renderer now also lowers the compact named-IPv6 capability used by
+IPv6 update packing. The capability is selected from the semantic session
+shape before compatibility identities are read. It requires one ordered iBGP
+singleton followed by one ten-peer eBGP sender, the checked effective session
+defaults, `/127` peer geometry, and the checked shared 10,000-prefix `/64`
+advertisement. Identity-only changes cannot enable this capability.
+
+This extension preserves the established field-presence contract rather than
+reusing UG serialization: named groups replace tags, address masks are omitted,
+session capabilities/timers/graceful-restart use their TAAC defaults, the iBGP
+group keeps `route_scales=None`, and the eBGP group emits its source step
+`0:0:1::` with an explicit empty community list. Endpoint label fragments stay
+iBGP then eBGP while independently proven direct-connection fragments remain
+eBGP then iBGP.
+
+Both frozen full and skip cases match established basic-port configs and
+endpoint wiring exactly. Verify-only is rejected until its established
+realization behavior is separately frozen. The remaining 12 parity cases stay
+fail-closed, and the established adapter remains the only artifact authority.
+
+Final local validation passed on 2026-08-07: the full abstraction suite passed
+505/505 tests (TestInfra `7036874786004605`), the focused renderer gate passed
+16/16 tests (TestInfra `34058472206227343`), and changed-target Pyre found no
+errors across 15 owning targets. The factory golden gate passed 2/2 tests
+(TestInfra `24206848034226053`). Golden regeneration found 294 unchanged
+configurations, with zero additions, changes, or removals. The manifest
+SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
 ### Phase 1.5.4d authoritative renderer boundary
 
 The semantic plan is sufficient for resource behavior, but exact legacy
