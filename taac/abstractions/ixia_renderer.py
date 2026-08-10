@@ -30,6 +30,9 @@ from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderRequest,
     TrafficGeneratorEndpointRenderResult,
     TrafficGeneratorIxiaPortFragment,
+    TrafficGeneratorPortBaseFragment,
+    TrafficGeneratorPortBaseRenderRequest,
+    TrafficGeneratorPortBaseRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -80,6 +83,23 @@ class SharedIxiaEndpointRenderer:
 
 
 @dataclass(frozen=True)
+class SharedIxiaPortBaseRenderer:
+    """Lowers the BasicPortConfig endpoint field from normalized IXIA ports."""
+
+    def render(
+        self,
+        request: TrafficGeneratorPortBaseRenderRequest,
+    ) -> TrafficGeneratorPortBaseRenderResult[taac_types.BasicPortConfig]:
+        fragments = tuple(_port_base_fragment(port) for port in request.active_ports())
+        result = TrafficGeneratorPortBaseRenderResult(
+            consumed_port_ids=tuple(port.resource_id for port in request.ports),
+            fragments=fragments,
+        )
+        result.validate(request)
+        return result
+
+
+@dataclass(frozen=True)
 class SharedIxiaRenderer:
     """Lowers capability-supported IXIA semantics without DUT-platform input."""
 
@@ -117,6 +137,24 @@ class SharedIxiaRenderer:
         )
         result.validate(request)
         return result
+
+
+def _port_base_fragment(
+    port: IxiaPortPlan,
+) -> TrafficGeneratorPortBaseFragment[taac_types.BasicPortConfig]:
+    physical_endpoint = f"{port.dut_physical_identifier}:{port.dut_interface}"
+    basic_port_config = taac_types.BasicPortConfig(endpoint=physical_endpoint)
+    if (
+        basic_port_config.l1_config is not None
+        or basic_port_config.device_group_configs is not None
+    ):
+        raise RuntimeError("BasicPortConfig base overlaps unowned IXIA fields")
+    return TrafficGeneratorPortBaseFragment(
+        port_id=port.resource_id,
+        dut_endpoint_id=port.dut_endpoint_id,
+        physical_endpoint=physical_endpoint,
+        basic_port_config=basic_port_config,
+    )
 
 
 def _select_capability(

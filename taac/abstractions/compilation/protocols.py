@@ -17,6 +17,8 @@ from taac.abstractions.compilation.model import DutPlan
 from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderRequest,
     TrafficGeneratorEndpointRenderResult,
+    TrafficGeneratorPortBaseRenderRequest,
+    TrafficGeneratorPortBaseRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -25,6 +27,7 @@ from taac.abstractions.compilation.traffic_generator import (
 TDutOutput_co = t.TypeVar("TDutOutput_co", covariant=True)
 TEndpoint_co = t.TypeVar("TEndpoint_co", covariant=True)
 THostOs_co = t.TypeVar("THostOs_co", covariant=True)
+TPortBase_co = t.TypeVar("TPortBase_co", covariant=True)
 
 
 class DutBackend(t.Protocol[TDutOutput_co]):
@@ -62,3 +65,10 @@ class TrafficGeneratorEndpointRenderer(t.Protocol):
         self,
         request: TrafficGeneratorEndpointRenderRequest,
     ) -> TrafficGeneratorEndpointRenderResult: ...
+
+
+class TrafficGeneratorPortBaseRenderer(t.Protocol[TPortBase_co]):
+    def render(
+        self,
+        request: TrafficGeneratorPortBaseRenderRequest,
+    ) -> TrafficGeneratorPortBaseRenderResult[TPortBase_co]: ...

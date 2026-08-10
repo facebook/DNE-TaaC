@@ -27,6 +27,7 @@ _ENDPOINT_CONNECTION_RELATIONSHIP_ORDER = {
     PeerRelationship.INTERNAL: 1,
     PeerRelationship.MONITOR: 2,
 }
+TPortBase_co = t.TypeVar("TPortBase_co", covariant=True)
 
 
 class TrafficGeneratorLifecycleSlot(str, Enum):
@@ -317,6 +318,103 @@ class TrafficGeneratorEndpointRenderResult:
 
 
 @dataclass(frozen=True)
+class TrafficGeneratorPortBaseRenderRequest:
+    ports: tuple[IxiaPortPlan, ...]
+    endpoint_activations: tuple[TrafficGeneratorEndpointActivation, ...]
+
+    def __post_init__(self) -> None:
+        _validate_unique_resource_ids(
+            "traffic-generator port-base request",
+            tuple(port.resource_id for port in self.ports),
+        )
+        _validate_exact_resource_order(
+            "traffic-generator port-base endpoint activation",
+            _ordered_dut_endpoint_ids_from_ports(self.ports),
+            tuple(activation.endpoint_id for activation in self.endpoint_activations),
+        )
+
+    @classmethod
+    def from_render_request(
+        cls,
+        request: TrafficGeneratorRenderRequest,
+    ) -> TrafficGeneratorPortBaseRenderRequest:
+        return cls(
+            ports=request.plan.ports,
+            endpoint_activations=request.endpoint_activations,
+        )
+
+    def active_ports(self) -> tuple[IxiaPortPlan, ...]:
+        activations = {
+            activation.endpoint_id: activation
+            for activation in self.endpoint_activations
+        }
+        return tuple(
+            port
+            for port in self.ports
+            if activations[port.dut_endpoint_id].emit_basic_port_configs
+        )
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorPortBaseFragment(t.Generic[TPortBase_co]):
+    port_id: ResourceId
+    dut_endpoint_id: ResourceId
+    physical_endpoint: str
+    basic_port_config: TPortBase_co
+
+    def __post_init__(self) -> None:
+        _require_ixia_port_id(self.port_id)
+        _require_endpoint_id(self.dut_endpoint_id)
+        if not self.physical_endpoint:
+            raise ValueError("traffic-generator physical endpoint must be nonempty")
+        if self.basic_port_config is None:
+            raise ValueError("traffic-generator basic port config must be present")
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorPortBaseRenderResult(t.Generic[TPortBase_co]):
+    consumed_port_ids: tuple[ResourceId, ...]
+    fragments: tuple[TrafficGeneratorPortBaseFragment[TPortBase_co], ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_unique_resource_ids(
+            "traffic-generator port-base result",
+            self.consumed_port_ids,
+        )
+        _validate_unique_resource_ids(
+            "traffic-generator port-base fragment",
+            tuple(fragment.port_id for fragment in self.fragments),
+        )
+
+    def validate(self, request: TrafficGeneratorPortBaseRenderRequest) -> None:
+        _validate_exact_resource_order(
+            "traffic-generator port-base result",
+            tuple(port.resource_id for port in request.ports),
+            self.consumed_port_ids,
+        )
+        active_ports = request.active_ports()
+        _validate_exact_resource_order(
+            "traffic-generator port-base fragment",
+            tuple(port.resource_id for port in active_ports),
+            tuple(fragment.port_id for fragment in self.fragments),
+        )
+        for port, fragment in zip(active_ports, self.fragments, strict=True):
+            if fragment.dut_endpoint_id != port.dut_endpoint_id:
+                raise ValueError(
+                    "traffic-generator port-base endpoint ID mismatch: "
+                    f"expected={port.dut_endpoint_id}, "
+                    f"actual={fragment.dut_endpoint_id}"
+                )
+            expected_endpoint = f"{port.dut_physical_identifier}:{port.dut_interface}"
+            if fragment.physical_endpoint != expected_endpoint:
+                raise ValueError(
+                    "traffic-generator port-base physical endpoint mismatch: "
+                    f"expected={expected_endpoint!r}, "
+                    f"actual={fragment.physical_endpoint!r}"
+                )
+
+
+@dataclass(frozen=True)
 class TrafficGeneratorLifecycleFragment:
     slot: TrafficGeneratorLifecycleSlot
     tasks: tuple[t.Any, ...]
@@ -502,6 +600,9 @@ __all__ = (
     "TrafficGeneratorIxiaPortFragment",
     "TrafficGeneratorLifecycleFragment",
     "TrafficGeneratorLifecycleSlot",
+    "TrafficGeneratorPortBaseFragment",
+    "TrafficGeneratorPortBaseRenderRequest",
+    "TrafficGeneratorPortBaseRenderResult",
     "TrafficGeneratorRenderRequest",
     "TrafficGeneratorRenderResult",
 )

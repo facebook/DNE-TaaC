@@ -26,6 +26,7 @@ from taac.abstractions.compilation.protocols import (
     DutHostOsRenderer,
     EndpointComposer,
     TrafficGeneratorEndpointRenderer,
+    TrafficGeneratorPortBaseRenderer,
     TrafficGeneratorRenderer,
 )
 from taac.abstractions.compilation.report import (
@@ -37,6 +38,8 @@ from taac.abstractions.compilation.report import (
 from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderRequest,
     TrafficGeneratorEndpointRenderResult,
+    TrafficGeneratorPortBaseRenderRequest,
+    TrafficGeneratorPortBaseRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -110,6 +113,9 @@ class CandidateCompilation:
     traffic_generator_endpoint_shadow: TrafficGeneratorEndpointRenderResult | None = (
         None
     )
+    traffic_generator_port_base_shadow: (
+        TrafficGeneratorPortBaseRenderResult[object] | None
+    ) = None
     endpoint_composition_shadow: EndpointCompositionResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
@@ -122,6 +128,9 @@ class CandidateTopologyCompiler:
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
     traffic_generator_endpoint_renderer: TrafficGeneratorEndpointRenderer | None = None
+    traffic_generator_port_base_renderer: (
+        TrafficGeneratorPortBaseRenderer[object] | None
+    ) = None
     endpoint_composer: EndpointComposer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
@@ -147,6 +156,7 @@ class CandidateTopologyCompiler:
         traffic_generator_request = None
         if (
             self.traffic_generator_endpoint_renderer is not None
+            or self.traffic_generator_port_base_renderer is not None
             or self.traffic_generator_renderer is not None
         ):
             traffic_generator_request = (
@@ -182,6 +192,23 @@ class CandidateTopologyCompiler:
             )
             traffic_generator_endpoint_shadow.validate(
                 traffic_generator_endpoint_request
+            )
+        traffic_generator_port_base_shadow = None
+        if self.traffic_generator_port_base_renderer is not None:
+            if traffic_generator_request is None:
+                raise RuntimeError("traffic-generator request was not constructed")
+            traffic_generator_port_base_request = (
+                TrafficGeneratorPortBaseRenderRequest.from_render_request(
+                    traffic_generator_request
+                )
+            )
+            traffic_generator_port_base_shadow = (
+                self.traffic_generator_port_base_renderer.render(
+                    traffic_generator_port_base_request
+                )
+            )
+            traffic_generator_port_base_shadow.validate(
+                traffic_generator_port_base_request
             )
         endpoint_composition_shadow = None
         if self.endpoint_composer is not None:
@@ -221,6 +248,7 @@ class CandidateTopologyCompiler:
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
             traffic_generator_endpoint_shadow=traffic_generator_endpoint_shadow,
+            traffic_generator_port_base_shadow=traffic_generator_port_base_shadow,
             endpoint_composition_shadow=endpoint_composition_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
         )

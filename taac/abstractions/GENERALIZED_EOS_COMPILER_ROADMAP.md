@@ -854,7 +854,8 @@ compatibility deletion follow the approved design.
 Status: implementation started 2026-08-07. Diffs 1.5.0 through the
 independently droppable all-16 shared IXIA endpoint extraction and
 resource-keyed endpoint composition are committed. EOS/BGP++ capability
-preflight now runs ahead of adaptation and shadow rendering.
+preflight now runs ahead of adaptation and shadow rendering, and shared IXIA
+port-base rendering owns `BasicPortConfig.endpoint` across all frozen cases.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -880,10 +881,14 @@ of Phase 1.5:
 10. **Completed migration gate:** Diff 1.5.5d, extract EOS/BGP++ capability
     preflight from the established adapter and run it before every rendering
     lane.
+11. **Completed shadow capability:** Diff 1.5.5e, render resource-keyed IXIA
+    `BasicPortConfig` endpoint bases independently of device-group, session,
+    advertisement, and lifecycle lowering.
 
-Remaining shared IXIA capabilities, EOS lifecycle/config/interface rendering,
-facade cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
-OpenR/helper behavior, and FBOSS task emission remain independently gated.
+Remaining shared IXIA device-group, session, advertisement, and lifecycle
+capabilities, EOS lifecycle/config/interface rendering, facade cutover, Phase
+1.6, Phase 1.7, traffic-item compilation, generalized OpenR/helper behavior,
+and FBOSS task emission remain independently gated.
 Do not substitute topology-selected compatibility constants for missing typed
 inputs merely to make the weekend stack appear complete.
 
@@ -1381,6 +1386,46 @@ changed-target Pyre found no errors across 11 owning targets. Golden
 regeneration found 294 unchanged configurations, with zero additions, changes,
 or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### Shared IXIA BasicPortConfig endpoint-base extraction
+
+The shared IXIA lane now has a task-free, field-scoped port-base contract. Its
+request contains only normalized `IxiaPortPlan` values and per-endpoint setup
+activation. It cannot inspect legacy IXIA identities, topology/profile names,
+BGP sessions, advertisements, policies, or TAAC tasks. Its result consumes
+every planned IXIA port by `ResourceId` and emits fragments for active ports in
+exact plan order; verify-only activation consumes the plan but emits no
+configuration fragment.
+
+`SharedIxiaPortBaseRenderer` lowers each active port to a
+`BasicPortConfig` containing only the physical DUT endpoint. `l1_config` and
+`device_group_configs` remain unset and unowned. A Thrift-metadata guard freezes
+the complete three-field schema partition, so adding a schema field requires an
+explicit owner instead of being silently dropped. The all-16 parity harness
+projects established configurations down to the endpoint-only base and proves
+exact sequence equality, including secondary IXIA, skip, and verify-only cases.
+
+`CandidateTopologyCompiler` exposes these keyed fragments as a separate shadow.
+It does not merge them into `CompiledTaacArtifacts`, and the established adapter
+and renderer reports remain authoritative and unchanged. Authoritative
+`BasicPortConfig` assembly still requires a resource-keyed composer plus native
+device-group/session/advertisement lowering. Full equality remains blocked on
+the recorded omitted-versus-empty route-scale behavior, peer start-index
+encoding, route geometry, baseline communities, `SELF` next-hop realization,
+and lifecycle ownership; the endpoint-base slice does not infer any of them.
+Opaque payload overlap checks belong at the future composer boundary, and
+multi-DUT/interleaved-port coverage is required before expanding beyond the
+current single-DUT EOS matrix.
+
+Final local validation passed on 2026-08-08: the split focused candidate, IXIA,
+EOS parity, and import-boundary gate passed 54/54 tests (TestInfra
+`35747322066529518` and `21110623290437692`); the combined full abstraction and
+factory-golden gate passed 546/546 tests (TestInfra `11821949210020761`); and
+changed-target Pyre found no errors across 9 owning targets. Golden
+regeneration found 294 unchanged configurations, with zero additions, changes,
+or removals. The manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. An
+independent harness audit found no must-fix issue.
 
 ### Multi-agent operating model
 
