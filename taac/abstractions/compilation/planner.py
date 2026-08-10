@@ -180,6 +180,7 @@ def _endpoint_plans(bound: BoundTopology) -> tuple[EndpointPlan, ...]:
                 endpoint.name,
                 endpoint.required_os or "unknown",
             ),
+            is_dut=is_dut_endpoint(endpoint),
             physical_identifier=_physical_identifier(bound, endpoint),
             setup_mode=EndpointSetupMode(endpoint.setup_mode),
             network_role=bound.endpoint_network_roles.get(endpoint.name),

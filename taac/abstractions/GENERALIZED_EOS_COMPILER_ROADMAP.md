@@ -1147,6 +1147,66 @@ may be compared, but native and delegated traffic-generator fragments must
 never be merged. Flip `RendererLane.TRAFFIC_GENERATOR` to `NATIVE` only when
 endpoint patches, port configs, traffic items, and lifecycle are all complete.
 
+#### Deferred egress next-hop realization
+
+Egress peer-scale lowering remains delegated because the semantic
+`IxiaNextHopMode.SELF` currently covers two observably different serialization
+shapes: an omitted `set_next_hop_type` and an explicit
+`SAME_AS_LOCAL_IP`. Runtime implementation and comments allow the omitted case
+to select `MANUALLY`, while the explicit value actively selects local-address
+realization. Treating this as a presentation-only sidecar would therefore risk
+changing behavior rather than merely preserving legacy field presence.
+
+Do not select either shape from a topology/profile/name or legacy IXIA
+identity. Before extracting egress lowering, collect runtime evidence for the
+unset case and then choose one semantic resolution:
+
+- if unset and explicit local-address realization are behaviorally identical,
+  preserve the difference as rendering compatibility;
+- if both are self next hops but use different self-address realizations, add
+  a typed self-realization field to the next-hop plan; or
+- if unset is not guaranteed to mean self, model it as a distinct next-hop
+  mode.
+
+Any plan-model change must explicitly preserve the existing UG and
+update-packing semantics and pass the zero-shift harness. Until then, egress
+remains fail-closed in the shared renderer and authoritative only through the
+established adapter.
+
+### Phase 1.5.5 initial EOS host-OS shadow extraction result
+
+The common endpoint plan now carries a normalized `is_dut` classification.
+`BoundTopologyPlanner` derives it with the established role-aware predicate,
+including the rule that traffic roles cannot become DUTs merely by using
+`kind="dut"`. This gives backend renderers one platform-neutral classification
+instead of duplicating legacy role/kind interpretation. The field remains
+required for manually constructed plans so alternate planners cannot silently
+omit the classification.
+
+The new `DutHostOsRenderer` seam owns only host-OS metadata. Its result is
+resource-keyed and validates exact normalized-DUT coverage, unique physical
+identifiers, and identifier agreement with the common plan. The EOS/BGP++
+implementation accepts exactly one normalized EOS DUT with a physical
+identifier and emits `ARISTA_FBOSS`. It does not inspect `BoundTopology`, a
+topology/profile name, a logical endpoint name, or testconfig helpers.
+
+`CandidateTopologyCompiler` invokes the renderer only after established
+capability preflight and artifact generation. The shadow result is validated
+and exposed separately; it is never merged into `CompiledTaacArtifacts`, and
+the DUT renderer report remains `COMPATIBILITY_DELEGATED`. Exact established
+host-OS map equality is frozen across all 16 EOS parity cases. Structural
+result validation intentionally does not define backend-specific OS values, so
+that parity gate remains mandatory until cutover.
+
+Final local validation passed on 2026-08-07: the focused renderer, candidate,
+planner, model, and import-boundary gate passed 46/46 tests (TestInfra
+`1125900425307579`); the combined full abstraction and factory-golden gate
+passed 516/516 tests (TestInfra `21110623290421101`); and changed-target Pyre
+found no errors across 13 owning targets. Golden regeneration found 294
+unchanged configurations, with zero additions, changes, or removals. The
+manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
 ### Multi-agent operating model
 
 Reuse the original DICE Phase 0/1 execution discipline, not its now-stale

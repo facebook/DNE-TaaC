@@ -251,12 +251,15 @@ class EndpointPlan:
     role: str
     kind: str
     backend: str
+    is_dut: bool
     physical_identifier: str | None = None
     setup_mode: EndpointSetupMode = EndpointSetupMode.FULL
     network_role: NetworkRole | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.ENDPOINT)
+        if not isinstance(self.is_dut, bool):
+            raise TypeError("endpoint DUT classification must be a bool")
 
 
 @dataclass(frozen=True)
