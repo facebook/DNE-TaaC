@@ -852,7 +852,7 @@ compatibility deletion follow the approved design.
 ## Weekend implementation plan
 
 Status: implementation started 2026-08-07. Diffs 1.5.0 through the
-independently droppable EOS endpoint-base extraction are committed.
+independently droppable all-16 shared IXIA endpoint extraction are committed.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -870,6 +870,8 @@ of Phase 1.5:
    for UG and IPv6 update-packing without artifact authority.
 7. **Completed shadow capability:** Diff 1.5.5a, extract field-scoped EOS
    host-OS and endpoint-base rendering.
+8. **Completed shadow capability:** Diff 1.5.5b, separate IXIA endpoint wiring
+   from full session, advertisement, and lifecycle lowering.
 
 Remaining shared IXIA capabilities, EOS lifecycle/config/interface rendering,
 facade cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
@@ -1227,8 +1229,8 @@ projection matches all 16 EOS parity cases with no ignored extra endpoint.
 Test-only keyed composition of the EOS base and the shared IXIA endpoint patch
 matches the complete established endpoint, including list order and
 unset-versus-list behavior, for UG new peer, UG dynamic peer, and IPv6 update
-packing in full and skip modes. The other 12 cases remain delegated until
-their shared IXIA endpoint patches are natively lowered.
+packing in full and skip modes. The endpoint-only extension below completes
+patch parity for the other 12 cases without changing base ownership.
 
 The endpoint result remains a separate validated shadow after the established
 adapter; it is never merged into artifacts and `RendererLane.DUT` remains
@@ -1247,6 +1249,45 @@ factory-golden gate passed 520/520 tests (TestInfra `844425448459007`); and
 changed-target Pyre found no errors across 13 owning targets. Golden
 regeneration found 294 unchanged configurations, with zero additions, changes,
 or removals. The manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### All-16 shared IXIA endpoint extension
+
+IXIA-owned endpoint wiring now has a contract independent of whole-session
+capability selection. Its request contains normalized port plans, one typed
+peer relationship per port, endpoint activation, and the resolved endpoint
+label. Its result owns only exact ordered endpoint and port consumption plus
+resource-keyed endpoint patches; it does not claim device-group, session,
+advertisement, port-config, traffic-item, or lifecycle completion.
+
+For every activated endpoint, `ixia_ports` preserves normalized port order.
+`direct_ixia_connections` independently uses external, internal, then monitor
+relationship order while preserving port order within a relationship. Result
+validation freezes both observable orders separately and rejects missing,
+unexpected, duplicate, or reordered resources. Verify-only deliberately emits
+no endpoint patch.
+
+This endpoint-only lane matches the complete established endpoint for all 16
+EOS parity cases when composed test-only with the EOS endpoint base. The full
+shared IXIA renderer intentionally retains its prior capability-specific
+endpoint path and accepted-domain/error ordering: it remains native only for
+the four UG and IPv6 update-packing cases. The other 12 cases still delegate
+port-config, session, advertisement, and formulaic lifecycle lowering, but no
+longer block independent endpoint-wiring progress.
+
+The candidate exposes the endpoint result as a separate validated shadow.
+Established artifacts and all renderer reports remain adapter-owned and
+`COMPATIBILITY_DELEGATED`. The current endpoint request rejects a physical port
+whose groups have multiple peer relationships. All current cases have an
+unambiguous relationship; a future mixed-role port requires a typed
+port-presentation ordering key rather than a topology/profile/name branch.
+
+Final local validation passed on 2026-08-08: the focused endpoint and full
+IXIA renderer gate passed 22/22 tests (TestInfra `12947849116845075`); the
+combined full abstraction and factory-golden gate passed 526/526 tests
+(TestInfra `13510799070260901`); and changed-target Pyre found no errors across
+10 owning targets. Golden regeneration found 294 unchanged configurations,
+with zero additions, changes, or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model

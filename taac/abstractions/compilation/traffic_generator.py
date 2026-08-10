@@ -14,10 +14,19 @@ from taac.abstractions.compilation.model import (
     EndpointSetupMode,
     IxiaNextHopMode,
     IxiaPlan,
+    IxiaPortPlan,
     ResourceId,
     ResourceKind,
     TopologyCompilationPlan,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
+
+
+_ENDPOINT_CONNECTION_RELATIONSHIP_ORDER = {
+    PeerRelationship.EXTERNAL: 0,
+    PeerRelationship.INTERNAL: 1,
+    PeerRelationship.MONITOR: 2,
+}
 
 
 class TrafficGeneratorLifecycleSlot(str, Enum):
@@ -83,6 +92,113 @@ class TrafficGeneratorRenderRequest:
 
 
 @dataclass(frozen=True)
+class TrafficGeneratorEndpointPortRequest:
+    port: IxiaPortPlan
+    relationship: PeerRelationship
+    ixia_port_label: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.relationship, PeerRelationship):
+            raise TypeError("traffic-generator port relationship must be typed")
+        if not self.ixia_port_label:
+            raise ValueError("traffic-generator IXIA port label must be nonempty")
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorEndpointRenderRequest:
+    ports: tuple[TrafficGeneratorEndpointPortRequest, ...]
+    endpoint_activations: tuple[TrafficGeneratorEndpointActivation, ...]
+
+    def __post_init__(self) -> None:
+        _validate_unique_resource_ids(
+            "traffic-generator endpoint port request",
+            tuple(port_request.port.resource_id for port_request in self.ports),
+        )
+        _validate_exact_resource_order(
+            "traffic-generator endpoint activation",
+            _ordered_dut_endpoint_ids_from_ports(
+                tuple(port_request.port for port_request in self.ports)
+            ),
+            tuple(activation.endpoint_id for activation in self.endpoint_activations),
+        )
+
+    def endpoint_ports(
+        self,
+        endpoint_id: ResourceId,
+    ) -> tuple[TrafficGeneratorEndpointPortRequest, ...]:
+        return tuple(
+            port_request
+            for port_request in self.ports
+            if port_request.port.dut_endpoint_id == endpoint_id
+        )
+
+    def direct_connection_ports(
+        self,
+        endpoint_id: ResourceId,
+    ) -> tuple[TrafficGeneratorEndpointPortRequest, ...]:
+        return tuple(
+            sorted(
+                self.endpoint_ports(endpoint_id),
+                key=lambda port_request: _ENDPOINT_CONNECTION_RELATIONSHIP_ORDER[
+                    port_request.relationship
+                ],
+            )
+        )
+
+    @classmethod
+    def from_render_request(
+        cls,
+        request: TrafficGeneratorRenderRequest,
+    ) -> TrafficGeneratorEndpointRenderRequest:
+        group_ids_by_port: dict[ResourceId, list[ResourceId]] = {}
+        for group in request.plan.device_groups:
+            group_ids_by_port.setdefault(group.port_id, []).append(group.resource_id)
+        session_group_ids = tuple(
+            session.device_group_id for session in request.plan.bgp_sessions
+        )
+        _validate_unique_resource_ids(
+            "traffic-generator endpoint session group",
+            session_group_ids,
+        )
+        sessions_by_group = {
+            session.device_group_id: session for session in request.plan.bgp_sessions
+        }
+        ports = []
+        for port in request.plan.ports:
+            relationships: set[PeerRelationship] = set()
+            for group_id in group_ids_by_port.get(port.resource_id, ()):
+                session = sessions_by_group.get(group_id)
+                if session is None:
+                    raise ValueError(
+                        f"IXIA group {group_id} has no BGP session for endpoint "
+                        "rendering"
+                    )
+                relationships.add(session.relationship)
+            if len(relationships) != 1:
+                raise ValueError(
+                    f"IXIA port {port.resource_id} must have exactly one peer "
+                    "relationship; found "
+                    f"{tuple(sorted(relationships, key=lambda item: item.value))}"
+                )
+            identity = request.legacy_identity.port_identity(port.resource_id)
+            if identity is None:
+                raise ValueError(
+                    f"IXIA port {port.resource_id} has no endpoint label identity"
+                )
+            ports.append(
+                TrafficGeneratorEndpointPortRequest(
+                    port=port,
+                    relationship=next(iter(relationships)),
+                    ixia_port_label=identity.endpoint_ixia_port_label,
+                )
+            )
+        return cls(
+            ports=tuple(ports),
+            endpoint_activations=request.endpoint_activations,
+        )
+
+
+@dataclass(frozen=True)
 class TrafficGeneratorIxiaPortFragment:
     port_id: ResourceId
     label: str
@@ -132,6 +248,72 @@ class TrafficGeneratorEndpointPatch:
         return tuple(
             fragment.connection for fragment in self.direct_connection_fragments
         )
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorEndpointRenderResult:
+    consumed_endpoint_ids: tuple[ResourceId, ...]
+    consumed_port_ids: tuple[ResourceId, ...]
+    endpoint_patches: tuple[TrafficGeneratorEndpointPatch, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_unique_resource_ids(
+            "traffic-generator endpoint result",
+            self.consumed_endpoint_ids,
+        )
+        _validate_unique_resource_ids(
+            "traffic-generator endpoint result port",
+            self.consumed_port_ids,
+        )
+        _validate_unique_resource_ids(
+            "traffic-generator endpoint patch",
+            tuple(patch.endpoint_id for patch in self.endpoint_patches),
+        )
+
+    def validate(self, request: TrafficGeneratorEndpointRenderRequest) -> None:
+        _validate_exact_resource_order(
+            "traffic-generator endpoint result",
+            tuple(
+                activation.endpoint_id for activation in request.endpoint_activations
+            ),
+            self.consumed_endpoint_ids,
+        )
+        _validate_exact_resource_order(
+            "traffic-generator endpoint result port",
+            tuple(port_request.port.resource_id for port_request in request.ports),
+            self.consumed_port_ids,
+        )
+        expected_patch_ids = tuple(
+            activation.endpoint_id
+            for activation in request.endpoint_activations
+            if activation.emit_endpoint_patch
+        )
+        _validate_exact_resource_order(
+            "traffic-generator endpoint patch",
+            expected_patch_ids,
+            tuple(patch.endpoint_id for patch in self.endpoint_patches),
+        )
+        for patch in self.endpoint_patches:
+            expected_ixia_port_ids = tuple(
+                port_request.port.resource_id
+                for port_request in request.endpoint_ports(patch.endpoint_id)
+            )
+            expected_connection_port_ids = tuple(
+                port_request.port.resource_id
+                for port_request in request.direct_connection_ports(patch.endpoint_id)
+            )
+            _validate_exact_resource_order(
+                "traffic-generator IXIA port fragment",
+                expected_ixia_port_ids,
+                tuple(fragment.port_id for fragment in patch.ixia_port_fragments),
+            )
+            _validate_exact_resource_order(
+                "traffic-generator direct connection fragment",
+                expected_connection_port_ids,
+                tuple(
+                    fragment.port_id for fragment in patch.direct_connection_fragments
+                ),
+            )
 
 
 @dataclass(frozen=True)
@@ -253,7 +435,13 @@ def _endpoint_activation(
 
 
 def _ordered_dut_endpoint_ids(plan: IxiaPlan) -> tuple[ResourceId, ...]:
-    return tuple(dict.fromkeys(port.dut_endpoint_id for port in plan.ports))
+    return _ordered_dut_endpoint_ids_from_ports(plan.ports)
+
+
+def _ordered_dut_endpoint_ids_from_ports(
+    ports: tuple[IxiaPortPlan, ...],
+) -> tuple[ResourceId, ...]:
+    return tuple(dict.fromkeys(port.dut_endpoint_id for port in ports))
 
 
 def _require_endpoint_id(resource_id: ResourceId) -> None:
@@ -292,9 +480,24 @@ def _validate_exact_resource_coverage(
         )
 
 
+def _validate_exact_resource_order(
+    subject: str,
+    expected: tuple[ResourceId, ...],
+    actual: tuple[ResourceId, ...],
+) -> None:
+    _validate_exact_resource_coverage(subject, expected, actual)
+    if actual != expected:
+        raise ValueError(
+            f"{subject} order mismatch: expected={expected}, actual={actual}"
+        )
+
+
 __all__ = (
     "TrafficGeneratorEndpointActivation",
+    "TrafficGeneratorEndpointPortRequest",
     "TrafficGeneratorEndpointPatch",
+    "TrafficGeneratorEndpointRenderRequest",
+    "TrafficGeneratorEndpointRenderResult",
     "TrafficGeneratorDirectConnectionFragment",
     "TrafficGeneratorIxiaPortFragment",
     "TrafficGeneratorLifecycleFragment",

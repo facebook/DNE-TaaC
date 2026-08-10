@@ -11,6 +11,8 @@ from taac.abstractions.compilation.dut import (
 )
 from taac.abstractions.compilation.model import DutPlan
 from taac.abstractions.compilation.traffic_generator import (
+    TrafficGeneratorEndpointRenderRequest,
+    TrafficGeneratorEndpointRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -38,3 +40,10 @@ class TrafficGeneratorRenderer(t.Protocol):
         self,
         request: TrafficGeneratorRenderRequest,
     ) -> TrafficGeneratorRenderResult: ...
+
+
+class TrafficGeneratorEndpointRenderer(t.Protocol):
+    def render(
+        self,
+        request: TrafficGeneratorEndpointRenderRequest,
+    ) -> TrafficGeneratorEndpointRenderResult: ...

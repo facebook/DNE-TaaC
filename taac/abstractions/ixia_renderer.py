@@ -27,6 +27,8 @@ from taac.abstractions.compilation.model import (
 from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorDirectConnectionFragment,
     TrafficGeneratorEndpointPatch,
+    TrafficGeneratorEndpointRenderRequest,
+    TrafficGeneratorEndpointRenderResult,
     TrafficGeneratorIxiaPortFragment,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
@@ -52,6 +54,32 @@ _PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY = {
 
 
 @dataclass(frozen=True)
+class SharedIxiaEndpointRenderer:
+    """Lowers IXIA-owned endpoint fields independently of session capabilities."""
+
+    def render(
+        self,
+        request: TrafficGeneratorEndpointRenderRequest,
+    ) -> TrafficGeneratorEndpointRenderResult:
+        endpoint_patches = tuple(
+            _endpoint_patch(request, activation.endpoint_id)
+            for activation in request.endpoint_activations
+            if activation.emit_endpoint_patch
+        )
+        result = TrafficGeneratorEndpointRenderResult(
+            consumed_endpoint_ids=tuple(
+                activation.endpoint_id for activation in request.endpoint_activations
+            ),
+            consumed_port_ids=tuple(
+                port_request.port.resource_id for port_request in request.ports
+            ),
+            endpoint_patches=endpoint_patches,
+        )
+        result.validate(request)
+        return result
+
+
+@dataclass(frozen=True)
 class SharedIxiaRenderer:
     """Lowers capability-supported IXIA semantics without DUT-platform input."""
 
@@ -74,7 +102,11 @@ class SharedIxiaRenderer:
             if activation_by_endpoint[port.dut_endpoint_id].emit_basic_port_configs
         )
         endpoint_patches = tuple(
-            _endpoint_patch(request, activation.endpoint_id, capability)
+            _full_renderer_endpoint_patch(
+                request,
+                activation.endpoint_id,
+                capability,
+            )
             for activation in request.endpoint_activations
             if activation.emit_endpoint_patch
         )
@@ -702,6 +734,35 @@ def _route_scale(
 
 
 def _endpoint_patch(
+    request: TrafficGeneratorEndpointRenderRequest,
+    endpoint_id: ResourceId,
+) -> TrafficGeneratorEndpointPatch:
+    ports = request.endpoint_ports(endpoint_id)
+    direct_connection_ports = request.direct_connection_ports(endpoint_id)
+    return TrafficGeneratorEndpointPatch(
+        endpoint_id=endpoint_id,
+        ixia_port_fragments=tuple(
+            TrafficGeneratorIxiaPortFragment(
+                port_id=port_request.port.resource_id,
+                label=port_request.ixia_port_label,
+            )
+            for port_request in ports
+        ),
+        direct_connection_fragments=tuple(
+            TrafficGeneratorDirectConnectionFragment(
+                port_id=port_request.port.resource_id,
+                connection=taac_types.DirectIxiaConnection(
+                    interface=port_request.port.dut_interface,
+                    ixia_chassis_ip=port_request.port.chassis_identifier,
+                    ixia_port=port_request.port.ixia_port,
+                ),
+            )
+            for port_request in direct_connection_ports
+        ),
+    )
+
+
+def _full_renderer_endpoint_patch(
     request: TrafficGeneratorRenderRequest,
     endpoint_id: ResourceId,
     capability: _IxiaRenderingCapability,
@@ -828,6 +889,7 @@ _BGP_PEER_TYPES = {
 
 
 __all__ = (
+    "SharedIxiaEndpointRenderer",
     "SharedIxiaRenderer",
     "UnsupportedIxiaRenderingError",
 )

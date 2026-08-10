@@ -22,6 +22,7 @@ from taac.abstractions.compilation.planner import PlanningResult
 from taac.abstractions.compilation.protocols import (
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
+    TrafficGeneratorEndpointRenderer,
     TrafficGeneratorRenderer,
 )
 from taac.abstractions.compilation.report import (
@@ -31,6 +32,8 @@ from taac.abstractions.compilation.report import (
     RendererReport,
 )
 from taac.abstractions.compilation.traffic_generator import (
+    TrafficGeneratorEndpointRenderRequest,
+    TrafficGeneratorEndpointRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -103,6 +106,9 @@ class CandidateCompilation:
     artifacts: CompiledTaacArtifacts
     dut_endpoint_base_shadow: DutEndpointBaseRenderResult[object] | None = None
     dut_host_os_shadow: DutHostOsRenderResult[object] | None = None
+    traffic_generator_endpoint_shadow: TrafficGeneratorEndpointRenderResult | None = (
+        None
+    )
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
 
@@ -112,6 +118,7 @@ class CandidateTopologyCompiler:
     artifact_adapter: ArtifactAdapter
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
+    traffic_generator_endpoint_renderer: TrafficGeneratorEndpointRenderer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
     def analyze(self, bound: BoundTopology) -> PlanningResult:
@@ -132,14 +139,36 @@ class CandidateTopologyCompiler:
         if self.dut_host_os_renderer is not None:
             dut_host_os_shadow = self.dut_host_os_renderer.render(planning.plan.dut)
             dut_host_os_shadow.validate(planning.plan.dut)
-        traffic_generator_shadow = None
-        if self.traffic_generator_renderer is not None:
+        traffic_generator_request = None
+        if (
+            self.traffic_generator_endpoint_renderer is not None
+            or self.traffic_generator_renderer is not None
+        ):
             traffic_generator_request = (
                 TrafficGeneratorRenderRequest.from_compilation_plan(
                     planning.plan,
                     planning.legacy_ixia_identity,
                 )
             )
+        traffic_generator_endpoint_shadow = None
+        if self.traffic_generator_endpoint_renderer is not None:
+            assert traffic_generator_request is not None
+            traffic_generator_endpoint_request = (
+                TrafficGeneratorEndpointRenderRequest.from_render_request(
+                    traffic_generator_request
+                )
+            )
+            traffic_generator_endpoint_shadow = (
+                self.traffic_generator_endpoint_renderer.render(
+                    traffic_generator_endpoint_request
+                )
+            )
+            traffic_generator_endpoint_shadow.validate(
+                traffic_generator_endpoint_request
+            )
+        traffic_generator_shadow = None
+        if self.traffic_generator_renderer is not None:
+            assert traffic_generator_request is not None
             traffic_generator_shadow = self.traffic_generator_renderer.render(
                 traffic_generator_request
             )
@@ -155,6 +184,7 @@ class CandidateTopologyCompiler:
             artifacts=adapted.artifacts,
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
+            traffic_generator_endpoint_shadow=traffic_generator_endpoint_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
         )
 
