@@ -22,6 +22,8 @@ from taac.abstractions.compilation.model import (
     IxiaNextHopMode,
     IxiaPeerPrefixDistribution,
     IxiaPortPlan,
+    IxiaRouteAttributeDistribution,
+    IxiaSelfNextHopRealization,
     ResourceId,
 )
 from taac.abstractions.compilation.traffic_generator import (
@@ -52,6 +54,7 @@ class UnsupportedIxiaRenderingError(ValueError):
 class _IxiaRenderingCapability(str, Enum):
     INITIAL_IPV6 = "initial_ipv6"
     COMPACT_NAMED_IPV6 = "compact_named_ipv6"
+    PARTITIONED_DUAL_STACK = "partitioned_dual_stack"
 
 
 _PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY = {
@@ -111,7 +114,7 @@ class SharedIxiaPortDeviceGroupRenderer:
         self,
         request: TrafficGeneratorPortDeviceGroupRenderRequest,
     ) -> TrafficGeneratorPortDeviceGroupRenderResult[taac_types.DeviceGroupConfig]:
-        capability = _validated_capability(request)
+        capability = _validated_device_group_capability(request)
         fragments = tuple(
             _port_device_group_fragment(request, port, capability)
             for port in request.active_ports()
@@ -132,7 +135,7 @@ class SharedIxiaRenderer:
         self,
         request: TrafficGeneratorRenderRequest,
     ) -> TrafficGeneratorRenderResult:
-        capability = _validated_capability(request)
+        capability = _validated_full_capability(request)
         activation_by_endpoint = {
             activation.endpoint_id: activation
             for activation in request.endpoint_activations
@@ -183,7 +186,7 @@ def _port_device_group_fragment(
     port: IxiaPortPlan,
     capability: _IxiaRenderingCapability,
 ) -> TrafficGeneratorPortDeviceGroupFragment[taac_types.DeviceGroupConfig]:
-    groups = _ordered_port_groups(request, port)
+    groups = _capability_port_groups(request, port, capability)
     sessions_by_group = _sessions_by_group(request)
     return TrafficGeneratorPortDeviceGroupFragment(
         port_id=port.resource_id,
@@ -207,15 +210,34 @@ def _port_device_group_fragment(
     )
 
 
-def _validated_capability(
+def _validated_device_group_capability(
     request: TrafficGeneratorRenderRequest,
 ) -> _IxiaRenderingCapability:
     capability = _select_capability(request)
+    _validate_capability(request, capability)
+    return capability
+
+
+def _validated_full_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> _IxiaRenderingCapability:
+    capability = _select_capability(request)
+    _validate_capability(request, capability)
+    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+        _unsupported("partitioned dual-stack IXIA lowering is field-scoped only")
+    return capability
+
+
+def _validate_capability(
+    request: TrafficGeneratorRenderRequest,
+    capability: _IxiaRenderingCapability,
+) -> None:
     if capability is _IxiaRenderingCapability.INITIAL_IPV6:
         _validate_initial_ipv6_capability(request)
-    else:
+    elif capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
         _validate_compact_named_ipv6_capability(request)
-    return capability
+    else:
+        _validate_partitioned_dual_stack_capability(request)
 
 
 def _select_capability(
@@ -239,6 +261,11 @@ def _select_capability(
         ),
     }:
         return _IxiaRenderingCapability.COMPACT_NAMED_IPV6
+    if session_shapes == {
+        ((IxiaBgpCapability.IPV6_UNICAST,), 64),
+        ((IxiaBgpCapability.IPV4_UNICAST,), 31),
+    }:
+        return _IxiaRenderingCapability.PARTITIONED_DUAL_STACK
     _unsupported("IXIA plan is outside the shared renderer semantic capabilities")
 
 
@@ -400,6 +427,337 @@ def _validate_compact_relationship_geometry(
         request.legacy_identity,
         advertisement,
     )
+
+
+def _validate_partitioned_dual_stack_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> None:
+    if (
+        len(request.plan.ports) != 2
+        or not request.plan.device_groups
+        or len(request.plan.bgp_sessions) != len(request.plan.device_groups)
+        or any(
+            not activation.emit_basic_port_configs
+            for activation in request.endpoint_activations
+        )
+    ):
+        _unsupported(
+            "partitioned dual-stack lowering requires two active ports and "
+            "one session per group"
+        )
+    sessions_by_group = _sessions_by_group(request)
+    if tuple(session.device_group_id for session in request.plan.bgp_sessions) != tuple(
+        group.resource_id for group in request.plan.device_groups
+    ):
+        _unsupported("partitioned dual-stack sessions must follow group plan order")
+    groups_by_relationship = _partitioned_groups_by_relationship(
+        request,
+        sessions_by_group,
+    )
+    for relationship, groups in groups_by_relationship.items():
+        _validate_partitioned_peer_windows(groups, relationship)
+    _validate_partitioned_advertisements(request, groups_by_relationship)
+
+
+def _partitioned_groups_by_relationship(
+    request: TrafficGeneratorRenderRequest,
+    sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
+) -> dict[PeerRelationship, tuple[IxiaDeviceGroupPlan, ...]]:
+    groups_by_relationship: dict[
+        PeerRelationship,
+        tuple[IxiaDeviceGroupPlan, ...],
+    ] = {}
+    for port in request.plan.ports:
+        groups = _plan_order_port_groups(request, port)
+        if not groups:
+            _unsupported(f"IXIA port {port.resource_id} has no device groups")
+        relationships = {
+            sessions_by_group[group.resource_id].relationship for group in groups
+        }
+        if len(relationships) != 1:
+            _unsupported(f"IXIA port {port.resource_id} mixes peer relationships")
+        relationship = next(iter(relationships))
+        if (
+            relationship not in {PeerRelationship.EXTERNAL, PeerRelationship.INTERNAL}
+            or relationship in groups_by_relationship
+        ):
+            _unsupported(
+                "partitioned dual-stack lowering requires one external and one "
+                "internal port"
+            )
+        _validate_unique_group_indices(request, port)
+        for group in groups:
+            session = sessions_by_group[group.resource_id]
+            _validate_partitioned_session(group, session, relationship)
+            _validate_partitioned_named_identity(
+                request.legacy_identity,
+                group,
+                session,
+            )
+        groups_by_relationship[relationship] = groups
+    if set(groups_by_relationship) != {
+        PeerRelationship.EXTERNAL,
+        PeerRelationship.INTERNAL,
+    }:
+        _unsupported(
+            "partitioned dual-stack lowering requires external and internal ports"
+        )
+    return groups_by_relationship
+
+
+def _validate_partitioned_peer_windows(
+    groups: tuple[IxiaDeviceGroupPlan, ...],
+    relationship: PeerRelationship,
+) -> None:
+    if {group.afi for group in groups} != {AddressFamily.IPV4, AddressFamily.IPV6}:
+        _unsupported(f"partitioned {relationship.value} groups require IPv4 and IPv6")
+    for afi in (AddressFamily.IPV6, AddressFamily.IPV4):
+        expected_start = 0
+        for group in (group for group in groups if group.afi is afi):
+            if group.peer_start_index != expected_start:
+                _unsupported(
+                    f"IXIA group {group.resource_id} has a non-contiguous peer window"
+                )
+            expected_start += group.peer_count
+
+
+def _validate_partitioned_session(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+    relationship: PeerRelationship,
+) -> None:
+    expected_capability = (
+        IxiaBgpCapability.IPV4_UNICAST
+        if group.afi is AddressFamily.IPV4
+        else IxiaBgpCapability.IPV6_UNICAST
+    )
+    expected_prefix_length = 31 if group.afi is AddressFamily.IPV4 else 64
+    if (
+        group.peer_count <= 1
+        or group.local_asn is None
+        or session.relationship is not relationship
+        or session.capabilities != (expected_capability,)
+        or session.address_prefix_length != expected_prefix_length
+        or session.address_step != 2
+        or session.address_start_index != 0
+        or not session.enable_four_byte_local_as
+        or session.hold_timer_s != 30
+        or session.keepalive_timer_s != 10
+        or session.enable_graceful_restart
+        is not (relationship is PeerRelationship.EXTERNAL)
+        or len(session.local_addresses) != group.peer_count
+        or len(session.peer_addresses) != group.peer_count
+        or len(session.peer_cidrs) != group.peer_count
+    ):
+        _unsupported(
+            f"IXIA session {session.resource_id} is outside partitioned "
+            "dual-stack lowering"
+        )
+    _validate_partitioned_session_addresses(group, session)
+
+
+def _validate_partitioned_session_addresses(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+) -> None:
+    version = 4 if group.afi is AddressFamily.IPV4 else 6
+    peer_prefix_length = 31 if version == 4 else 127
+    local_addresses = tuple(
+        _required_ip_address(session.resource_id, address, version)
+        for address in session.local_addresses
+    )
+    peer_addresses = tuple(
+        _required_ip_address(session.resource_id, address, version)
+        for address in session.peer_addresses
+    )
+    for label, addresses in (("local", local_addresses), ("peer", peer_addresses)):
+        start = int(addresses[0])
+        if any(
+            int(address) != start + session.address_step * ordinal
+            for ordinal, address in enumerate(addresses)
+        ):
+            _unsupported(
+                f"IXIA session {session.resource_id} {label} addresses are not an "
+                "arithmetic progression"
+            )
+    for local, peer, peer_cidr in zip(
+        local_addresses,
+        peer_addresses,
+        session.peer_cidrs,
+        strict=True,
+    ):
+        _validate_partitioned_peer_pair(
+            session.resource_id,
+            local,
+            peer,
+            peer_cidr,
+            version,
+            peer_prefix_length,
+        )
+
+
+def _validate_partitioned_peer_pair(
+    session_id: ResourceId,
+    local: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    peer: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    peer_cidr: str | None,
+    version: int,
+    prefix_length: int,
+) -> None:
+    if peer_cidr is None:
+        _unsupported(f"IXIA session {session_id} has no peer CIDR")
+    try:
+        parsed_cidr = ipaddress.ip_interface(peer_cidr)
+    except ValueError:
+        _unsupported(f"IXIA session {session_id} has an invalid peer CIDR")
+    if (
+        parsed_cidr.version != version
+        or parsed_cidr.network.prefixlen != prefix_length
+        or local == peer
+        or local not in parsed_cidr.network
+        or peer not in parsed_cidr.network
+    ):
+        _unsupported(
+            f"IXIA session {session_id} addresses do not form a distinct peer pair"
+        )
+
+
+def _required_ip_address(
+    session_id: ResourceId,
+    address: str,
+    version: int,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        _unsupported(f"IXIA session {session_id} contains an invalid address")
+    if parsed.version != version:
+        _unsupported(f"IXIA session {session_id} contains the wrong address family")
+    return parsed
+
+
+def _validate_partitioned_advertisements(
+    request: TrafficGeneratorRenderRequest,
+    groups_by_relationship: dict[
+        PeerRelationship,
+        tuple[IxiaDeviceGroupPlan, ...],
+    ],
+) -> None:
+    external_groups = groups_by_relationship[PeerRelationship.EXTERNAL]
+    expected_group_ids = tuple(group.resource_id for group in external_groups)
+    actual_group_ids = tuple(
+        advertisement.device_group_id for advertisement in request.plan.advertisements
+    )
+    if actual_group_ids != expected_group_ids:
+        _unsupported(
+            "partitioned dual-stack lowering requires one ordered advertisement "
+            "per external group"
+        )
+    for group, advertisement in zip(
+        external_groups,
+        request.plan.advertisements,
+        strict=True,
+    ):
+        _validate_partitioned_advertisement(
+            request.legacy_identity,
+            group,
+            advertisement,
+        )
+
+
+def _validate_partitioned_advertisement(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    group: IxiaDeviceGroupPlan,
+    advertisement: IxiaAdvertisementPlan,
+) -> None:
+    prefix_window = advertisement.prefix_window
+    expected_prefix_length = 24 if group.afi is AddressFamily.IPV4 else 64
+    address_bits = 32 if group.afi is AddressFamily.IPV4 else 128
+    expected_source_step = 1 << (address_bits - expected_prefix_length)
+    if (
+        advertisement.afi is not group.afi
+        or advertisement.route_count != prefix_window.source_count
+        or advertisement.route_count != prefix_window.prefixes_per_peer
+        or prefix_window.source_step != expected_source_step
+        or prefix_window.source_excluded_indices
+        or prefix_window.membership_start_index != 0
+        or prefix_window.membership_prefix_count != prefix_window.source_count
+        or prefix_window.starting_prefix != prefix_window.source_start
+        or prefix_window.prefix_length != expected_prefix_length
+        or prefix_window.peer_distribution is not IxiaPeerPrefixDistribution.SHARED
+        or advertisement.next_hop.mode is not IxiaNextHopMode.SELF
+        or advertisement.next_hop.self_realization
+        is not IxiaSelfNextHopRealization.ADVERTISING_SESSION_LOCAL_ADDRESS
+        or advertisement.attributes
+        or advertisement.policy_communities
+    ):
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} is outside "
+            "partitioned dual-stack lowering"
+        )
+    _validate_partitioned_route_attributes(advertisement)
+    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    if identity is None or not identity.prefix_name:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has no prefix identity"
+        )
+    try:
+        source_address = ipaddress.ip_address(prefix_window.source_start)
+    except ValueError:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has an invalid prefix"
+        )
+    if source_address.version != (4 if group.afi is AddressFamily.IPV4 else 6):
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has the wrong family"
+        )
+    source_value = int(source_address)
+    if (
+        source_value % expected_source_step != 0
+        or source_value + expected_source_step * (prefix_window.source_count - 1)
+        >= 1 << address_bits
+    ):
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has invalid prefix "
+            "source geometry"
+        )
+
+
+def _validate_partitioned_route_attributes(
+    advertisement: IxiaAdvertisementPlan,
+) -> None:
+    attributes = advertisement.route_attributes
+    if (
+        attributes is None
+        or len(attributes.community_rows) != 1
+        or not attributes.community_rows[0]
+        or attributes.extended_community_rows
+        or attributes.as_paths
+        or attributes.distribution is not IxiaRouteAttributeDistribution.ROUND_ROBIN
+    ):
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} requires one standard "
+            "community row"
+        )
+
+
+def _validate_partitioned_named_identity(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+) -> None:
+    identity = _required_group_identity(legacy_identity, group.resource_id)
+    session_identity = legacy_identity.session_identity(session.resource_id)
+    if (
+        identity.device_group_name is None
+        or identity.tag_name is not None
+        or identity.device_group_index is None
+        or session_identity is None
+        or not session_identity.bgp_peer_name
+    ):
+        _unsupported(
+            f"IXIA group {group.resource_id} requires named presentation identity"
+        )
 
 
 def _validate_initial_ipv6_session(
@@ -683,11 +1041,7 @@ def _ordered_port_groups(
     request: TrafficGeneratorRenderRequest,
     port: IxiaPortPlan,
 ) -> tuple[IxiaDeviceGroupPlan, ...]:
-    plan_order = tuple(
-        group
-        for group in request.plan.device_groups
-        if group.port_id == port.resource_id
-    )
+    plan_order = _plan_order_port_groups(request, port)
     compatibility_order = tuple(
         sorted(
             plan_order,
@@ -705,6 +1059,27 @@ def _ordered_port_groups(
             "compatibility device-group order"
         )
     return plan_order
+
+
+def _capability_port_groups(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+    capability: _IxiaRenderingCapability,
+) -> tuple[IxiaDeviceGroupPlan, ...]:
+    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+        return _plan_order_port_groups(request, port)
+    return _ordered_port_groups(request, port)
+
+
+def _plan_order_port_groups(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+) -> tuple[IxiaDeviceGroupPlan, ...]:
+    return tuple(
+        group
+        for group in request.plan.device_groups
+        if group.port_id == port.resource_id
+    )
 
 
 def _device_group_config(
@@ -725,6 +1100,14 @@ def _device_group_config(
         request.legacy_identity,
         session.resource_id,
     )
+    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+        return _partitioned_dual_stack_device_group_config(
+            request,
+            group,
+            identity,
+            session,
+            session_identity,
+        )
     if capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
         advertisements = tuple(
             advertisement
@@ -796,6 +1179,134 @@ def _device_group_config(
             ],
             enable_graceful_restart=session.enable_graceful_restart,
         ),
+    )
+
+
+def _partitioned_dual_stack_device_group_config(
+    request: TrafficGeneratorRenderRequest,
+    group: IxiaDeviceGroupPlan,
+    identity: LegacyIxiaGroupIdentity,
+    session: IxiaBgpSessionPlan,
+    session_identity: LegacyIxiaSessionIdentity,
+) -> taac_types.DeviceGroupConfig:
+    address_config = _partitioned_address_config(group, session)
+    bgp_config = _partitioned_bgp_config(
+        request,
+        group,
+        session,
+        session_identity,
+    )
+    return taac_types.DeviceGroupConfig(
+        device_group_name=identity.device_group_name,
+        device_group_index=identity.device_group_index,
+        multiplier=group.peer_count,
+        v4_addresses_config=(
+            address_config if group.afi is AddressFamily.IPV4 else None
+        ),
+        v6_addresses_config=(
+            address_config if group.afi is AddressFamily.IPV6 else None
+        ),
+        v4_bgp_config=(bgp_config if group.afi is AddressFamily.IPV4 else None),
+        v6_bgp_config=(bgp_config if group.afi is AddressFamily.IPV6 else None),
+    )
+
+
+def _partitioned_address_config(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+) -> taac_types.IpAddressesConfig:
+    return taac_types.IpAddressesConfig(
+        starting_ip=session.local_addresses[0],
+        increment_ip=(
+            "0.0.0.2"
+            if group.afi is AddressFamily.IPV4
+            else _legacy_v6_address_step(session.address_step)
+        ),
+        gateway_starting_ip=session.peer_addresses[0],
+        gateway_increment_ip=(
+            "0.0.0.2"
+            if group.afi is AddressFamily.IPV4
+            else _legacy_v6_address_step(session.address_step)
+        ),
+        mask=(
+            session.address_prefix_length if group.afi is AddressFamily.IPV4 else None
+        ),
+        start_index=session.address_start_index,
+    )
+
+
+def _partitioned_bgp_config(
+    request: TrafficGeneratorRenderRequest,
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+    session_identity: LegacyIxiaSessionIdentity,
+) -> taac_types.BgpConfig:
+    advertisements = tuple(
+        advertisement
+        for advertisement in request.plan.advertisements
+        if advertisement.device_group_id == group.resource_id
+    )
+    if len(advertisements) > 1:
+        _unsupported(
+            f"IXIA group {group.resource_id} has multiple partitioned advertisements"
+        )
+    bgp_params: dict[str, t.Any] = {
+        "bgp_peer_name": session_identity.bgp_peer_name,
+        "local_as_4_bytes": group.local_asn,
+        "enable_4_byte_local_as": session.enable_four_byte_local_as,
+        "bgp_capabilities": [
+            _BGP_CAPABILITIES[capability] for capability in session.capabilities
+        ],
+        "bgp_peer_type": _BGP_PEER_TYPES[session.relationship],
+    }
+    if advertisements:
+        bgp_params["route_scales"] = [
+            _partitioned_dual_stack_route_scale(
+                request.legacy_identity,
+                group,
+                advertisements[0],
+            )
+        ]
+    if not session.enable_graceful_restart:
+        bgp_params["enable_graceful_restart"] = False
+    return taac_types.BgpConfig(**bgp_params)
+
+
+def _partitioned_dual_stack_route_scale(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    group: IxiaDeviceGroupPlan,
+    advertisement: IxiaAdvertisementPlan,
+) -> taac_types.RouteScaleSpec:
+    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    attributes = advertisement.route_attributes
+    if identity is None or attributes is None:
+        raise RuntimeError("validated partitioned route inputs are missing")
+    prefix_window = advertisement.prefix_window
+    route_scale = taac_types.RouteScale(
+        prefix_name=identity.prefix_name,
+        prefix_count=prefix_window.prefixes_per_peer,
+        prefix_length=prefix_window.prefix_length,
+        starting_prefixes=prefix_window.starting_prefix,
+        prefix_step=(
+            "0.0.0.0" if group.afi is AddressFamily.IPV4 else "0:0:0:0:0:0:0:0"
+        ),
+        multiplier=1,
+        bgp_communities=[
+            f"{community.asn}:{community.value}"
+            for community in attributes.community_rows[0]
+        ],
+        ip_address_family=(
+            ixia_types.IpAddressFamily.IPV4
+            if group.afi is AddressFamily.IPV4
+            else ixia_types.IpAddressFamily.IPV6
+        ),
+        set_next_hop_type=ixia_types.SetNextHopType.SAME_AS_LOCAL_IP,
+    )
+    return taac_types.RouteScaleSpec(
+        network_group_index=prefix_window.network_group_index,
+        multiplier=1,
+        v4_route_scale=(route_scale if group.afi is AddressFamily.IPV4 else None),
+        v6_route_scale=(route_scale if group.afi is AddressFamily.IPV6 else None),
     )
 
 

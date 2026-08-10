@@ -898,11 +898,14 @@ of Phase 1.5:
     renderer-report authority.
 15. **Completed semantic prerequisite:** Diff 1.5.5i, distinguish an explicitly
     selected advertising-session local next hop from an unset IXIA default.
+16. **Completed shadow capability:** Diff 1.5.5j, lower partitioned dual-stack
+    IXIA device-group bodies from semantic resources and compose them by
+    resource ID for both bounded-ECMP cases.
 
-Remaining shared IXIA device-group, session, advertisement, and lifecycle
-capabilities, EOS lifecycle/config/interface rendering, facade cutover, Phase
-1.6, Phase 1.7, traffic-item compilation, generalized OpenR/helper behavior,
-and FBOSS task emission remain independently gated.
+Remaining IXIA families and lifecycle capabilities, EOS
+lifecycle/config/interface rendering, facade cutover, Phase 1.6, Phase 1.7,
+traffic-item compilation, generalized OpenR/helper behavior, and FBOSS task
+emission remain independently gated.
 Do not substitute topology-selected compatibility constants for missing typed
 inputs merely to make the weekend stack appear complete.
 
@@ -1573,6 +1576,54 @@ targets without errors. The factory golden gate passed 2/2 (TestInfra
 `7036874786034830`), and golden regeneration reported all 294 configs
 unchanged, with manifest SHA-256
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### Partitioned dual-stack IXIA device-group lowering
+
+The field-scoped shared renderer now lowers the partitioned dual-stack
+capability used by bounded ECMP. Capability selection and validation consume
+only normalized ports, device groups, BGP sessions, advertisements, endpoint
+activation, and typed next-hop realization. They do not inspect the topology
+name, `legacy_profile`, EOS, OpenR mode, or a compatibility helper.
+
+The capability requires one external and one internal active port, IPv4 and
+IPv6 groups per relationship, contiguous per-AFI child windows, one checked
+session per group, and ordered advertisements for every external child. It
+preserves the established address encoding, BGP field-presence defaults,
+graceful-restart distinction, standard communities, shared prefix allocation,
+and explicit advertising-session local next hop. Both frozen inventories
+therefore lower eight child groups, 512 peers, six advertisements, and 30,000
+routes without materializing route-sized collections.
+
+Legacy group, peer, prefix, and index values do not participate in capability
+selection and remain resource-keyed presentation data. Presentation validation
+requires complete names and unique per-port indices, but semantic plan order
+remains authoritative; tests reverse the indices and replace every name while
+preserving successful lowering and the requested serialized values. The
+sidecar cannot change peer partitions, capability, route geometry, next-hop
+behavior, ordering, ownership, or lifecycle. Removing it entirely by deriving
+stable default names and per-port indices from resource IDs and plan order is
+the next Phase 1.6 input-generalization step; explicit values then remain an
+override.
+
+The candidate pipeline composes the new bodies with shared port bases by
+`ResourceId`, but the established adapter's original artifacts remain the
+consumer result. Both bounded full and skip cases match established
+`BasicPortConfig` values and frozen digests exactly. The whole IXIA renderer
+continues to reject this capability because endpoint, `l1_config`, traffic
+items, and lifecycle authority are intentionally outside this slice. All
+renderer reports remain `COMPATIBILITY_DELEGATED`.
+
+Mutation tests fail closed on next-hop realization, prefix-source geometry,
+route-attribute rows, session timers, non-leading addresses,
+graceful-restart behavior, and child peer windows. Final validation passed the
+focused renderer target (42/42) and the complete abstraction suite (573/573,
+TestInfra `3940650056643110`). Changed-target Pyre checked eleven targets
+without errors. The factory golden gate passed 2/2 (TestInfra
+`18014398700788396`), and regeneration left all 294 configurations and the
+manifest SHA-256 unchanged at
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+Independent architecture and mutation-sensitivity re-audits found no remaining
+blocker.
 
 ### Multi-agent operating model
 
