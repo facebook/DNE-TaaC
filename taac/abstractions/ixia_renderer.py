@@ -33,6 +33,9 @@ from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorPortBaseFragment,
     TrafficGeneratorPortBaseRenderRequest,
     TrafficGeneratorPortBaseRenderResult,
+    TrafficGeneratorPortDeviceGroupFragment,
+    TrafficGeneratorPortDeviceGroupRenderRequest,
+    TrafficGeneratorPortDeviceGroupRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -100,6 +103,27 @@ class SharedIxiaPortBaseRenderer:
 
 
 @dataclass(frozen=True)
+class SharedIxiaPortDeviceGroupRenderer:
+    """Lowers supported IXIA device-group bodies by normalized port ID."""
+
+    def render(
+        self,
+        request: TrafficGeneratorPortDeviceGroupRenderRequest,
+    ) -> TrafficGeneratorPortDeviceGroupRenderResult[taac_types.DeviceGroupConfig]:
+        capability = _validated_capability(request)
+        fragments = tuple(
+            _port_device_group_fragment(request, port, capability)
+            for port in request.active_ports()
+        )
+        result = TrafficGeneratorPortDeviceGroupRenderResult(
+            consumed_resource_ids=request.plan.iter_resource_ids(),
+            fragments=fragments,
+        )
+        result.validate(request)
+        return result
+
+
+@dataclass(frozen=True)
 class SharedIxiaRenderer:
     """Lowers capability-supported IXIA semantics without DUT-platform input."""
 
@@ -107,11 +131,7 @@ class SharedIxiaRenderer:
         self,
         request: TrafficGeneratorRenderRequest,
     ) -> TrafficGeneratorRenderResult:
-        capability = _select_capability(request)
-        if capability is _IxiaRenderingCapability.INITIAL_IPV6:
-            _validate_initial_ipv6_capability(request)
-        else:
-            _validate_compact_named_ipv6_capability(request)
+        capability = _validated_capability(request)
         activation_by_endpoint = {
             activation.endpoint_id: activation
             for activation in request.endpoint_activations
@@ -155,6 +175,42 @@ def _port_base_fragment(
         physical_endpoint=physical_endpoint,
         basic_port_config=basic_port_config,
     )
+
+
+def _port_device_group_fragment(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+    capability: _IxiaRenderingCapability,
+) -> TrafficGeneratorPortDeviceGroupFragment[taac_types.DeviceGroupConfig]:
+    groups = _ordered_port_groups(request, port)
+    sessions_by_group = _sessions_by_group(request)
+    return TrafficGeneratorPortDeviceGroupFragment(
+        port_id=port.resource_id,
+        device_group_ids=tuple(group.resource_id for group in groups),
+        session_ids=tuple(
+            sessions_by_group[group.resource_id].resource_id for group in groups
+        ),
+        advertisement_ids=tuple(
+            advertisement.resource_id
+            for group in groups
+            for advertisement in request.plan.advertisements
+            if advertisement.device_group_id == group.resource_id
+        ),
+        device_group_configs=tuple(
+            _device_group_config(request, group, capability) for group in groups
+        ),
+    )
+
+
+def _validated_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> _IxiaRenderingCapability:
+    capability = _select_capability(request)
+    if capability is _IxiaRenderingCapability.INITIAL_IPV6:
+        _validate_initial_ipv6_capability(request)
+    else:
+        _validate_compact_named_ipv6_capability(request)
+    return capability
 
 
 def _select_capability(
@@ -599,23 +655,41 @@ def _basic_port_config(
     port: IxiaPortPlan,
     capability: _IxiaRenderingCapability,
 ) -> taac_types.BasicPortConfig:
-    groups = sorted(
-        (
-            group
-            for group in request.plan.device_groups
-            if group.port_id == port.resource_id
-        ),
-        key=lambda group: _required_group_index(
-            request.legacy_identity,
-            group.resource_id,
-        ),
-    )
+    groups = _ordered_port_groups(request, port)
     return taac_types.BasicPortConfig(
         endpoint=f"{port.dut_physical_identifier}:{port.dut_interface}",
         device_group_configs=[
             _device_group_config(request, group, capability) for group in groups
         ],
     )
+
+
+def _ordered_port_groups(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+) -> tuple[IxiaDeviceGroupPlan, ...]:
+    plan_order = tuple(
+        group
+        for group in request.plan.device_groups
+        if group.port_id == port.resource_id
+    )
+    compatibility_order = tuple(
+        sorted(
+            plan_order,
+            key=lambda group: _required_group_index(
+                request.legacy_identity,
+                group.resource_id,
+            ),
+        )
+    )
+    if tuple(group.resource_id for group in compatibility_order) != tuple(
+        group.resource_id for group in plan_order
+    ):
+        _unsupported(
+            f"IXIA port {port.resource_id} plan order does not match "
+            "compatibility device-group order"
+        )
+    return plan_order
 
 
 def _device_group_config(

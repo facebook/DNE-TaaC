@@ -19,6 +19,8 @@ from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderResult,
     TrafficGeneratorPortBaseRenderRequest,
     TrafficGeneratorPortBaseRenderResult,
+    TrafficGeneratorPortDeviceGroupRenderRequest,
+    TrafficGeneratorPortDeviceGroupRenderResult,
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
@@ -28,6 +30,7 @@ TDutOutput_co = t.TypeVar("TDutOutput_co", covariant=True)
 TEndpoint_co = t.TypeVar("TEndpoint_co", covariant=True)
 THostOs_co = t.TypeVar("THostOs_co", covariant=True)
 TPortBase_co = t.TypeVar("TPortBase_co", covariant=True)
+TDeviceGroupConfig_co = t.TypeVar("TDeviceGroupConfig_co", covariant=True)
 
 
 class DutBackend(t.Protocol[TDutOutput_co]):
@@ -72,3 +75,10 @@ class TrafficGeneratorPortBaseRenderer(t.Protocol[TPortBase_co]):
         self,
         request: TrafficGeneratorPortBaseRenderRequest,
     ) -> TrafficGeneratorPortBaseRenderResult[TPortBase_co]: ...
+
+
+class TrafficGeneratorPortDeviceGroupRenderer(t.Protocol[TDeviceGroupConfig_co]):
+    def render(
+        self,
+        request: TrafficGeneratorPortDeviceGroupRenderRequest,
+    ) -> TrafficGeneratorPortDeviceGroupRenderResult[TDeviceGroupConfig_co]: ...
