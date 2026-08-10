@@ -852,7 +852,8 @@ compatibility deletion follow the approved design.
 ## Weekend implementation plan
 
 Status: implementation started 2026-08-07. Diffs 1.5.0 through the
-independently droppable all-16 shared IXIA endpoint extraction are committed.
+independently droppable all-16 shared IXIA endpoint extraction and
+resource-keyed endpoint composition are committed.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -872,6 +873,9 @@ of Phase 1.5:
    host-OS and endpoint-base rendering.
 8. **Completed shadow capability:** Diff 1.5.5b, separate IXIA endpoint wiring
    from full session, advertisement, and lifecycle lowering.
+9. **Completed shadow capability:** Diff 1.5.5c, compose EOS endpoint bases and
+   shared IXIA endpoint patches by stable resource ID without changing artifact
+   authority.
 
 Remaining shared IXIA capabilities, EOS lifecycle/config/interface rendering,
 facade cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
@@ -1288,6 +1292,52 @@ combined full abstraction and factory-golden gate passed 526/526 tests
 (TestInfra `13510799070260901`); and changed-target Pyre found no errors across
 10 owning targets. Golden regeneration found 294 unchanged configurations,
 with zero additions, changes, or removals. The manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### Resource-keyed TAAC endpoint composition
+
+Endpoint composition now has a task-free cross-lane request and result. It
+joins EOS-owned endpoint bases with the traffic-generator endpoint-patch
+subset by stable `ResourceId`, emits exact `DutPlan` order, and validates
+unique and complete DUT coverage. A DUT may intentionally have no IXIA patch;
+traffic-generator resources may never reference an endpoint outside the DUT
+plan.
+
+The TAAC-specific composer lives outside the task-free package. It explicitly
+copies the five EOS-owned fields and fills only the two IXIA-owned fields. It
+rejects ownership collisions even when a base supplies an empty list, checks
+the concrete TAAC schema values, creates a new immutable endpoint for every
+result, and preserves verify-only `None` semantics rather than materializing
+empty IXIA lists. The existing schema-metadata guard continues to fail if a
+future endpoint field is silently left unowned.
+
+All 16 frozen EOS cases now exercise fully native endpoint source lanes: the
+EOS base renderer, shared IXIA endpoint renderer, and production keyed composer.
+The established endpoint is used only as the parity oracle. A synthetic
+two-DUT test reverses base-fragment order, patches only the second DUT, and
+proves that composition follows plan identity and order rather than input
+position.
+
+`CandidateTopologyCompiler` exposes the composed result as a separate shadow
+only after both source lanes validate. The established adapter object remains
+the returned `CompiledTaacArtifacts`, and all renderer reports remain
+`COMPATIBILITY_DELEGATED`; no consumer-visible artifact or lifecycle ownership
+changed.
+
+Authoritative endpoint cutover remains deferred until EOS capability preflight
+moves ahead of both renderers, keyed artifact assembly owns collision checks,
+and shared IXIA port-config, session, advertisement, and lifecycle lowering is
+complete. The egress self-next-hop ambiguity, remaining EOS
+config/interface/component lifecycle inputs, and multi-DUT orchestration also
+remain explicit blockers rather than compatibility fallbacks.
+
+Final local validation passed on 2026-08-08: the focused composer, candidate,
+IXIA, EOS parity, and import-boundary gate passed 54/54 tests (TestInfra
+`6755399808516615`); the combined full abstraction and factory-golden gate
+passed 534/534 tests (TestInfra `10696049303403415`); and changed-target Pyre
+found no errors across 11 owning targets. Golden regeneration found 294
+unchanged configurations, with zero additions, changes, or removals. The
+manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model

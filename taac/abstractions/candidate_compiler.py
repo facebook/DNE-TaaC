@@ -15,6 +15,10 @@ from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
 )
+from taac.abstractions.compilation.endpoint_composition import (
+    EndpointCompositionRequest,
+    EndpointCompositionResult,
+)
 from taac.abstractions.compilation.model import (
     TopologyCompilationPlan,
 )
@@ -22,6 +26,7 @@ from taac.abstractions.compilation.planner import PlanningResult
 from taac.abstractions.compilation.protocols import (
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
+    EndpointComposer,
     TrafficGeneratorEndpointRenderer,
     TrafficGeneratorRenderer,
 )
@@ -109,6 +114,7 @@ class CandidateCompilation:
     traffic_generator_endpoint_shadow: TrafficGeneratorEndpointRenderResult | None = (
         None
     )
+    endpoint_composition_shadow: EndpointCompositionResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
 
@@ -119,7 +125,18 @@ class CandidateTopologyCompiler:
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
     traffic_generator_endpoint_renderer: TrafficGeneratorEndpointRenderer | None = None
+    endpoint_composer: EndpointComposer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
+
+    def __post_init__(self) -> None:
+        if self.endpoint_composer is not None and (
+            self.dut_endpoint_base_renderer is None
+            or self.traffic_generator_endpoint_renderer is None
+        ):
+            raise ValueError(
+                "endpoint composer requires DUT base and traffic-generator "
+                "endpoint renderers"
+            )
 
     def analyze(self, bound: BoundTopology) -> PlanningResult:
         return self.planner.plan(bound)
@@ -150,6 +167,7 @@ class CandidateTopologyCompiler:
                     planning.legacy_ixia_identity,
                 )
             )
+        traffic_generator_endpoint_request = None
         traffic_generator_endpoint_shadow = None
         if self.traffic_generator_endpoint_renderer is not None:
             assert traffic_generator_request is not None
@@ -166,6 +184,24 @@ class CandidateTopologyCompiler:
             traffic_generator_endpoint_shadow.validate(
                 traffic_generator_endpoint_request
             )
+        endpoint_composition_shadow = None
+        if self.endpoint_composer is not None:
+            if (
+                dut_endpoint_base_shadow is None
+                or traffic_generator_endpoint_request is None
+                or traffic_generator_endpoint_shadow is None
+            ):
+                raise RuntimeError("endpoint composer dependencies were not rendered")
+            endpoint_composition_request = EndpointCompositionRequest(
+                dut_plan=planning.plan.dut,
+                dut_endpoint_bases=dut_endpoint_base_shadow,
+                traffic_generator_request=traffic_generator_endpoint_request,
+                traffic_generator_result=traffic_generator_endpoint_shadow,
+            )
+            endpoint_composition_shadow = self.endpoint_composer.compose(
+                endpoint_composition_request
+            )
+            endpoint_composition_shadow.validate(endpoint_composition_request)
         traffic_generator_shadow = None
         if self.traffic_generator_renderer is not None:
             assert traffic_generator_request is not None
@@ -185,6 +221,7 @@ class CandidateTopologyCompiler:
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
             traffic_generator_endpoint_shadow=traffic_generator_endpoint_shadow,
+            endpoint_composition_shadow=endpoint_composition_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
         )
 

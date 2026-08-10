@@ -9,6 +9,10 @@ from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
 )
+from taac.abstractions.compilation.endpoint_composition import (
+    EndpointCompositionRequest,
+    EndpointCompositionResult,
+)
 from taac.abstractions.compilation.model import DutPlan
 from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderRequest,
@@ -33,6 +37,13 @@ class DutHostOsRenderer(t.Protocol[THostOs_co]):
 
 class DutEndpointBaseRenderer(t.Protocol[TEndpoint_co]):
     def render(self, plan: DutPlan) -> DutEndpointBaseRenderResult[TEndpoint_co]: ...
+
+
+class EndpointComposer(t.Protocol):
+    def compose(
+        self,
+        request: EndpointCompositionRequest[object],
+    ) -> EndpointCompositionResult[object]: ...
 
 
 class TrafficGeneratorRenderer(t.Protocol):
