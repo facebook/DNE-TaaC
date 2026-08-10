@@ -9,6 +9,30 @@ from dataclasses import dataclass
 
 from ixia.ixia import types as ixia_types
 from taac.abstractions.artifacts import CompiledTaacArtifacts
+from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
+    ACL_COMMANDS,
+    ADD_INTERN_USER_IDS_CMD,
+    BGPCPP_DAEMONS,
+    EBB_BGPCPP_LOGGING_CONFIG,
+    FIBAGENT_BGP_CONF_DEPLOY_CMD,
+    FIBAGENT_CONF_DEPLOY_CMD,
+    REQUIRE_THRIFT_ACL_FILES_CMD,
+    UPDATE_GROUP_VERIFICATION_CMD,
+    VERIFY_THRIFT_ACL_USER_IDS_CMD,
+)
+from taac.abstractions.compatibility.legacy_ebb_binding import (
+    IXIA_IPV4_START_OFFSET,
+    IXIA_IPV6_START_OFFSET,
+)
+from taac.abstractions.compatibility.legacy_ebb_topology import (
+    BGP_MON_PEER_COUNT,
+    EBGP_PEER_COUNT_V4,
+    EBGP_PEER_COUNT_V6,
+    EBGP_REMOTE_AS,
+    EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
+    IBGP_PEER_SCALE_PER_PLANE,
+    IBGP_REMOTE_AS,
+)
 from taac.abstractions.eos_bgpcpp_component_runtime import (
     ComponentRuntime,
     ComponentStartupOption,
@@ -36,9 +60,6 @@ from taac.abstractions.eos_bgpcpp_setup_tasks import (
     get_openr_standalone_setup_tasks,
     get_openr_standalone_teardown_tasks,
     OpenRStandaloneTeardownTasks,
-)
-from taac.abstractions.topologies.egress_peer_scale import (
-    EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
 )
 from taac.abstractions.topology.model import (
     BgpPeerGroup,
@@ -71,25 +92,6 @@ from taac.task_definitions import (
     create_interface_ip_configuration_task,
     create_invoke_ixia_api_task,
     create_run_commands_on_shell_task,
-)
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    ACL_COMMANDS,
-    ADD_INTERN_USER_IDS_CMD,
-    BGP_MON_PEER_COUNT,
-    BGPCPP_DAEMONS,
-    EBB_BGPCPP_LOGGING_CONFIG,
-    EBGP_PEER_COUNT_V4,
-    EBGP_PEER_COUNT_V6,
-    EBGP_REMOTE_AS,
-    FIBAGENT_BGP_CONF_DEPLOY_CMD,
-    FIBAGENT_CONF_DEPLOY_CMD,
-    IBGP_PEER_SCALE_PER_PLANE,
-    IBGP_REMOTE_AS,
-    IXIA_IPV4_START_OFFSET,
-    IXIA_IPV6_START_OFFSET,
-    REQUIRE_THRIFT_ACL_FILES_CMD,
-    UPDATE_GROUP_VERIFICATION_CMD,
-    VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
 from taac.test_as_a_config import types as taac_types
 

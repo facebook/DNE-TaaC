@@ -823,9 +823,8 @@ compatibility deletion follow the approved design.
 
 ## Weekend implementation plan
 
-Status: waiting for an explicit start call. Research and planning are complete;
-no implementation, source-control mutation, CI run, or lab action belongs to
-the planning state.
+Status: implementation started 2026-08-07. Diff 1.5.0 is committed and Diff
+1.5.1 is in validation.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -842,6 +841,18 @@ Shared IXIA extraction, EOS renderer extraction, facade cutover, Phase 1.6,
 Phase 1.7, traffic-item compilation, generalized OpenR/helper behavior, and
 FBOSS task emission are explicitly deferred. Do not pull one of those into a
 required diff to make the weekend stack appear complete.
+
+### Recorded implementation blocker
+
+The Phase 1.5.1 source-boundary test has complete, fail-closed coverage for the
+current flat abstraction packages. Buck globs stop at child package boundaries,
+so that resource harness cannot automatically discover a future nested package
+such as `compilation/backends/eos`.
+
+Diff 1.5.2 therefore remains flat. Before introducing the first nested compiler
+package, add query/BXL-backed recursive discovery or a governed library macro
+that makes omission impossible. A nested package must not be added using only
+the current explicit resource manifest.
 
 ### Multi-agent operating model
 

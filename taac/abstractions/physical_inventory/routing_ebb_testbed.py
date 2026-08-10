@@ -125,7 +125,7 @@ from taac.abstractions.topology import (
     OpenRStandaloneEndpoint,
     OpenRStandaloneLink,
 )
-from taac.test_as_a_config import types as taac_types
+from taac.test_as_a_config.types import MockDeviceInfo
 
 
 def _ebb_peer_groups() -> dict[str, str]:
@@ -173,7 +173,7 @@ def _lab_oss_mock_device_data(
     device_name: str,
     *,
     network_type: str | None = None,
-) -> dict[str, taac_types.MockDeviceInfo]:
+) -> dict[str, MockDeviceInfo]:
     mock_kwargs: dict[str, t.Any] = {
         "name": device_name,
         "hardware": "ARISTA_7516",
@@ -190,7 +190,7 @@ def _lab_oss_mock_device_data(
     }
     if network_type is not None:
         mock_kwargs["network_type"] = network_type
-    return {device_name: taac_types.MockDeviceInfo(**mock_kwargs)}
+    return {device_name: MockDeviceInfo(**mock_kwargs)}
 
 
 # ─── bag010 ↔ bag011 OpenR-standalone pair (see Figure B in module docstring) ───

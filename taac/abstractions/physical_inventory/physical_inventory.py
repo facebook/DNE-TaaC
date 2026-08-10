@@ -8,7 +8,7 @@ import typing as t
 from dataclasses import dataclass, field, replace
 
 from taac.abstractions.topology import OpenRStandaloneLink
-from taac.test_as_a_config import types as taac_types
+from taac.test_as_a_config.types import MockDeviceInfo
 
 
 VALID_USAGES: frozenset[str] = frozenset({"cicd", "qual", "adhoc", "retired"})
@@ -66,7 +66,7 @@ class PhysicalInventory:
     # boxes; ``netwhoami`` returns ``#INVALID#`` for lab devices, so
     # ``get_common_setup_tasks`` needs a synthesized ``MockDeviceInfo``.
     # None for production / conveyor inventories.
-    oss_mock_device_data: dict[str, taac_types.MockDeviceInfo] | None = None
+    oss_mock_device_data: dict[str, MockDeviceInfo] | None = None
 
     # ─── Named parameter maps — BGP topology ──────────────────────────────
     peer_groups: dict = field(default_factory=dict)

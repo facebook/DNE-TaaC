@@ -1,6 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+from taac.abstractions.compatibility.legacy_ebb_binding import (
+    IXIA_EBGP_IC_PARENT_NETWORK_V6,
+    IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+)
+from taac.abstractions.compatibility.legacy_ebb_topology import (
+    EBGP_REMOTE_AS,
+    IBGP_REMOTE_AS,
+)
 from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
@@ -17,12 +25,6 @@ from taac.abstractions.topology import (
     PrefixMembership,
     PrefixSet,
     RoutingDeviceConfig,
-)
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    EBGP_REMOTE_AS,
-    IBGP_REMOTE_AS,
-    IXIA_EBGP_IC_PARENT_NETWORK_V6,
-    IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
 )
 
 UG_NEW_PEER_JOIN_PORT_MAP = {"ebgp": 0, "ibgp": 1}
