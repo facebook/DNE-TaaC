@@ -16,6 +16,8 @@ from taac.abstractions.topology import (
     DeviceGroupSpec,
     EndpointSpec,
     FormulaicPrefixSource,
+    IxiaBgpCapability,
+    IxiaBgpSessionIntent,
     IxiaPortAssignment,
     LogicalTopology,
     OpenRMode,
@@ -39,12 +41,20 @@ IPV6_UPDATE_PACKING_AS_NUMBERS = {
     "ibgp": IBGP_REMOTE_AS,
 }
 
+_IPV6_UPDATE_PACKING_IXIA_BGP_SESSION = IxiaBgpSessionIntent(
+    capabilities=(
+        IxiaBgpCapability.IPV4_UNICAST,
+        IxiaBgpCapability.IPV6_UNICAST,
+    ),
+)
+
 IPV6_UPDATE_PACKING_EBGP_PEER_GROUP = BgpPeerGroup(
     name="EB-FA-V6",
     remote_asn="ebgp",
     hold_timer_s=30,
     keepalive_timer_s=10,
     enable_graceful_restart=True,
+    ixia_session=_IPV6_UPDATE_PACKING_IXIA_BGP_SESSION,
 )
 IPV6_UPDATE_PACKING_IBGP_PEER_GROUP = BgpPeerGroup(
     name="EB-EB-V6",
@@ -53,6 +63,7 @@ IPV6_UPDATE_PACKING_IBGP_PEER_GROUP = BgpPeerGroup(
     hold_timer_s=30,
     keepalive_timer_s=10,
     enable_graceful_restart=True,
+    ixia_session=_IPV6_UPDATE_PACKING_IXIA_BGP_SESSION,
 )
 IPV6_UPDATE_PACKING_PEER_GROUPS = {
     IPV6_UPDATE_PACKING_EBGP_PEER_GROUP.name: (IPV6_UPDATE_PACKING_EBGP_PEER_GROUP),

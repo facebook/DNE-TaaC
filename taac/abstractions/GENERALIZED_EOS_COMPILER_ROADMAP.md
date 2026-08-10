@@ -25,24 +25,28 @@ to emit `CompiledTaacArtifacts` for existing consumers.
 
 ## Current position
 
-DICE already has a credible logical topology, binding model, and several
-production migrations. It can project bound device groups into interface and
-BGP peer plans, select an EOS/BGP++ compiler from physical backend metadata,
-and render the current BAG setup sequence.
+DICE now has a migration parity harness, enforced import boundaries, a
+task-free common compilation plan, explicit physical network roles, typed EB
+policy selection, and a complete semantic IXIA plan for the current topology
+families. The candidate compiler can project bound device groups into DUT and
+IXIA resources without invoking a renderer. The established compiler remains
+authoritative for production artifacts and still renders the current BAG setup
+sequence.
 
 It is not generalized yet:
 
 - `compiler.py` dispatches rendering through topology names and
   `legacy_profile`;
-- `abstractions/` imports constants from
-  `testconfigs/routing/util/bgp_ebb_constants.py`;
-- the compiler imports a concrete topology module;
-- setup phases and component plans contain rendered TAAC `Task` objects;
-- the IXIA plan contains already-rendered TAAC configs;
-- `BgpPolicyPlan` is only projection bookkeeping;
-- the physical network role is buried in mock-device metadata rather than
-  bound compiler input;
-- the normal EOS path rewrites fields in the fetched BGP++ configuration; and
+- established setup phases and component plans contain rendered TAAC `Task`
+  objects;
+- the established EOS `IxiaPlan` contains already-rendered TAAC configs, while
+  the new semantic `IxiaPlan` does not yet have a native renderer;
+- component-role and lifecycle dependency intent are not yet projected;
+- the candidate artifact adapter delegates DUT and IXIA rendering as one
+  monolithic compatibility operation;
+- IXIA endpoint wiring and route-mutation lifecycle are still embedded in the
+  EOS compiler;
+- profile-specific lowering still reads `BoundTopology` directly; and
 - `FbossCoopCompiler` is an empty shell.
 
 The current 48-task BAG sequence is valuable compatibility evidence, but it
@@ -571,14 +575,38 @@ make compiler migration drift impossible to attribute.
 
 ### Diff 1.5.4: shared IXIA lane
 
-1. Build a task-free IXIA plan from bound ports, addresses, ASNs, peers,
-   advertisements, and route attributes.
-2. Move deterministic IXIA naming and allocation into the shared planner.
-3. Render current port, device-group, BGP-session, and route-mutation artifacts
-   without an EOS/FBOSS branch.
-4. Do not add `TrafficFlowSpec` or traffic-item rendering.
-5. Compare normalized IXIA artifacts for BAG010 and representative UG,
-   update-packing, egress-scale, and bounded-ECMP inputs.
+Split this diff at the semantic-plan/native-renderer boundary so either slice
+can be reviewed or deferred independently.
+
+**Diff 1.5.4a: semantic IXIA plan**
+
+1. Build a task-free IXIA plan from bound ports, endpoint identities,
+   addresses, ASNs, peers, advertisements, next hops, and route attributes.
+2. Use stable logical `ResourceId` values for allocation and references.
+   Preserve legacy IXIA names and indices only in an optional compatibility
+   identity sidecar; they cannot affect semantic planning.
+3. Validate cross-resource references, peer cardinality, route cardinality,
+   child windows, and exactly-once compile reporting.
+4. Reject nonempty `TrafficFlowSpec` input explicitly until traffic-item
+   lowering has its own phase.
+5. Freeze semantic counts and route geometry for BAG010, UG new/dynamic peer,
+   update packing, egress scale, and bounded ECMP.
+
+Status: locally complete on 2026-08-07 with zero candidate artifact or golden
+shift.
+
+**Diff 1.5.4b: shared native IXIA renderer**
+
+1. Define a renderer result that owns port configs, traffic-generator-owned
+   setup fragments, and IXIA endpoint wiring.
+2. Render current port, device-group, BGP-session, advertisement, and
+   route-mutation artifacts from the semantic plan plus optional identity
+   sidecar, without an EOS/FBOSS branch.
+3. Preserve exact omitted-versus-`None` field behavior and established ordering
+   while compatibility identities are requested.
+4. Compare normalized IXIA artifacts for the complete parity case matrix.
+5. Switch only the traffic-generator lane to native after parity; keep DUT
+   rendering delegated until Diff 1.5.5.
 
 ### Diff 1.5.5: EOS/BGP++ renderer extraction
 
@@ -823,8 +851,9 @@ compatibility deletion follow the approved design.
 
 ## Weekend implementation plan
 
-Status: implementation started 2026-08-07. Diffs 1.5.0-1.5.2 are committed;
-Diff 1.5.3 is locally complete.
+Status: implementation started 2026-08-07. Diffs 1.5.0-1.5.3 are committed;
+the independently droppable Diff 1.5.4a semantic-plan slice is locally
+complete.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -834,13 +863,16 @@ of Phase 1.5:
 2. **Required:** Diff 1.5.1, dependency ownership and import guards.
 3. **Required:** Diff 1.5.2, task-free types and backend protocols behind the
    unchanged facade.
-4. **Stretch and independently droppable:** Diff 1.5.3, physical `EB` role and
-   the policy-resolution seam.
+4. **Completed stretch:** Diff 1.5.3, physical `EB` role and the
+   policy-resolution seam.
+5. **Autopilot extension, independently droppable:** Diff 1.5.4a, complete the
+   shared semantic IXIA plan and its invariants without changing rendering.
 
-Shared IXIA extraction, EOS renderer extraction, facade cutover, Phase 1.6,
-Phase 1.7, traffic-item compilation, generalized OpenR/helper behavior, and
-FBOSS task emission are explicitly deferred. Do not pull one of those into a
-required diff to make the weekend stack appear complete.
+Native shared IXIA rendering (Diff 1.5.4b), EOS renderer extraction, facade
+cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
+OpenR/helper behavior, and FBOSS task emission remain independently deferred.
+Do not pull one of those into Diff 1.5.4a merely to make the weekend stack
+appear complete.
 
 ### Recorded implementation blocker
 
@@ -920,6 +952,86 @@ Final local validation passed on 2026-08-07: the full abstraction suite passed
 unchanged configurations, with zero additions, changes, or removals. The
 manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+### Phase 1.5.4a implementation result
+
+The common planner now produces a complete semantic IXIA graph for every
+current parity topology. Ports identify both logical endpoints and physical DUT
+and chassis realization. Device groups own child peer windows. Sessions carry
+peer CIDRs, typed relationship and capabilities, address prefix/step/start-index
+realization, four-byte-AS behavior, timers, and effective graceful-restart
+intent. Advertisements retain compact prefix-source and membership geometry,
+peer distribution, next-hop intent, scalar attributes, standard and extended
+communities, AS paths, and policy communities without materializing scale
+lists.
+
+`IxiaBgpSessionIntent` makes traffic-side realization distinct from DUT
+peer-group defaults. Common IXIA defaults are 30/10-second timers, an address
+step derived from the authored address-plan stride, and backend-effective
+graceful restart. Update packing explicitly asks for both IPv4 and IPv6 unicast
+capabilities even though its adjacency is IPv6; UG explicitly asks for /127
+IXIA address realization. Other IPv6 profiles retain the established /64 IXIA
+realization, IPv4 masks derive from bound peer CIDRs, and monitor sessions
+derive their five-capability set from typed `PeerRelationship.MONITOR`. These
+differences no longer require a profile branch in the renderer.
+
+The planner has no topology-profile or DUT-platform branch. Stable resource
+paths are derived only from logical port, device-group, child, session, and
+advertisement identity. Legacy device-group, BGP-peer, tag, prefix-pool names,
+and device-group indices are produced in a separate optional sidecar. Tests
+change EOS to FBOSS and rename both top-level and bounded-child compatibility
+identities while proving the semantic `IxiaPlan` remains equal. This confirms
+that legacy IXIA names and indices can support custom topology components
+without becoming generalized compiler semantics.
+
+The frozen representative shapes are:
+
+- BAG EBB+BGP-MON: 3 ports, 19 groups/sessions, 1,274 peers, 10
+  advertisements, and 373,700 distinct routes;
+- UG new peer: 2 ports, 7 groups/sessions, 25 peers, and 850 routes;
+- UG dynamic peer: 2 ports, 8 groups/sessions, 26 IXIA peers, including the
+  intentionally absent baseline DUT adjacency, and 850 routes;
+- IPv6 update packing: 2 groups/sessions, 11 peers, and 10,000 routes;
+- egress peer scale: 4 groups/sessions, 1,002 peers, and 100,000 routes; and
+- bounded ECMP: 8 child groups/sessions, 512 peers, and 30,000 routes.
+
+Setup mode does not change the IXIA plan. Every IXIA resource is reported
+exactly once, and malformed port, endpoint, link, adjacency, peer-cardinality,
+or route-cardinality references fail during planning. Nonempty traffic-flow
+intent now fails explicitly instead of being silently ignored.
+
+Final local validation passed on 2026-08-07: the full abstraction suite passed
+481/481 tests (TestInfra `20266198360288304`), and changed-target Pyre found no
+errors across 34 owning targets. The complete 16-case EOS
+artifact-parity/import gate passed 45/45 tests (TestInfra
+`31806672392539190`), and the factory golden gate passed 2/2 tests (TestInfra
+`25895697894487685`). Golden regeneration found 294 unchanged configurations,
+with zero additions, changes, or removals. The manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+### Phase 1.5.4b deferred renderer boundary
+
+The semantic plan is sufficient input for a renderer, but native lowering is a
+separate migration risk. The largest remaining gaps are:
+
+1. `CandidateTopologyCompiler` has one monolithic `ArtifactAdapter`; DUT and
+   traffic-generator results cannot yet be composed independently.
+2. `TrafficGeneratorRenderer.render()` accepts only `IxiaPlan`, so it has no
+   typed way to receive the optional compatibility identity sidecar or return
+   IXIA-owned lifecycle fragments.
+3. The established EOS wrapper is also named `IxiaPlan` even though it stores
+   already-rendered TAAC configs.
+4. Formulaic route mutation is emitted from the EOS setup-phase builder rather
+   than owned by the traffic-generator result.
+5. IXIA endpoint connection fragments are mixed into EOS endpoint rendering.
+6. Existing lowering helpers branch on topology profiles and read
+   `BoundTopology` directly. Their observable omitted-versus-`None` versus
+   empty-list behavior and exact tuple order must be preserved during
+   extraction.
+
+These gaps do not block Diff 1.5.4a. They define the scope of 1.5.4b; if native
+rendering cannot reach exact parity in one slice, keep the adapter delegated
+and defer only the affected lowering profile rather than weakening the harness.
 
 ### Multi-agent operating model
 

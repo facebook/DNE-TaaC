@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from taac.abstractions.compilation.eb_policy_presets import (
     resolve_eb_policy_preset,
+)
+from taac.abstractions.compilation.ixia_planner import plan_ixia
+from taac.abstractions.compilation.legacy_ixia_identity import (
+    LegacyIxiaIdentitySidecar,
 )
 from taac.abstractions.compilation.model import (
     AddressFamily,
@@ -17,18 +21,12 @@ from taac.abstractions.compilation.model import (
     EndpointPlan,
     EndpointSetupMode,
     InterfacePlan,
-    IxiaAdvertisementPlan,
-    IxiaBgpSessionPlan,
-    IxiaDeviceGroupPlan,
-    IxiaPlan,
-    IxiaPortPlan,
     OpenRDesiredMode,
     OpenRPlan,
     PolicyBinding,
     PolicyDirection,
     PolicyPlan,
     ResourceId,
-    ResourceKind,
     RolePolicyKey,
     RoutingConfigPlan,
     TopologyCompilationPlan,
@@ -38,123 +36,41 @@ from taac.abstractions.compilation.report import (
     ResourceDisposition,
     ResourceReport,
 )
+from taac.abstractions.compilation.resource_ids import (
+    adjacency_resource_id,
+    endpoint_resource_id,
+    interface_resource_id,
+    is_dut_endpoint,
+    link_resource_id,
+    openr_resource_id,
+    policy_binding_resource_id,
+    policy_resource_id,
+    role_policy_resource_id,
+    routing_config_resource_id,
+)
 from taac.abstractions.topology.model import (
     BoundDeviceGroup,
-    BoundIxiaDeviceGroupChild,
     BoundTopology,
     EndpointSpec,
-    ResolvedPeer,
-    ResolvedPrefixAdvertisementLike,
     RoutingDeviceConfig,
 )
-
-
-_TRAFFIC_ENDPOINT_ROLES = frozenset({"ixia", "traffic", "trafficgen"})
-
-
-def endpoint_resource_id(logical_name: str) -> ResourceId:
-    return ResourceId(ResourceKind.ENDPOINT, (logical_name,))
-
-
-def link_resource_id(device_group_name: str) -> ResourceId:
-    return ResourceId(ResourceKind.LINK, (device_group_name,))
-
-
-def interface_resource_id(
-    endpoint_name: str,
-    logical_port_role: str,
-    afi: AddressFamily,
-) -> ResourceId:
-    return ResourceId(
-        ResourceKind.INTERFACE,
-        (endpoint_name, logical_port_role, afi.value),
-    )
-
-
-def adjacency_resource_id(device_group_name: str, ordinal: int) -> ResourceId:
-    return ResourceId(
-        ResourceKind.BGP_ADJACENCY,
-        (device_group_name, str(ordinal)),
-    )
-
-
-def policy_resource_id(logical_name: str) -> ResourceId:
-    return ResourceId(ResourceKind.POLICY, (logical_name,))
-
-
-def role_policy_resource_id(key: RolePolicyKey) -> ResourceId:
-    return ResourceId(
-        ResourceKind.POLICY,
-        (
-            "role",
-            key.local_role.value,
-            key.relationship.value,
-            key.afi.value,
-            key.direction.value,
-        ),
-    )
-
-
-def policy_binding_resource_id(
-    adjacency_id: ResourceId,
-    direction: PolicyDirection,
-) -> ResourceId:
-    return ResourceId(
-        ResourceKind.POLICY_BINDING,
-        (*adjacency_id.path, direction.value),
-    )
-
-
-def routing_config_resource_id(endpoint_name: str) -> ResourceId:
-    return ResourceId(ResourceKind.ROUTING_CONFIG, (endpoint_name,))
-
-
-def openr_resource_id(endpoint_name: str) -> ResourceId:
-    return ResourceId(ResourceKind.OPENR, (endpoint_name,))
-
-
-def ixia_port_resource_id(logical_role: str) -> ResourceId:
-    return ResourceId(ResourceKind.IXIA_PORT, (logical_role,))
-
-
-def ixia_device_group_resource_id(
-    device_group_name: str,
-    child_name: str | None = None,
-) -> ResourceId:
-    return ResourceId(
-        ResourceKind.IXIA_DEVICE_GROUP,
-        _ixia_instance_path(device_group_name, child_name),
-    )
-
-
-def ixia_session_resource_id(
-    device_group_name: str,
-    child_name: str | None = None,
-) -> ResourceId:
-    return ResourceId(
-        ResourceKind.IXIA_BGP_SESSION,
-        _ixia_instance_path(device_group_name, child_name),
-    )
-
-
-def ixia_advertisement_resource_id(
-    device_group_name: str,
-    logical_name: str,
-    child_name: str | None = None,
-) -> ResourceId:
-    return ResourceId(
-        ResourceKind.IXIA_ADVERTISEMENT,
-        (*_ixia_instance_path(device_group_name, child_name), logical_name),
-    )
 
 
 @dataclass(frozen=True)
 class PlanningResult:
     plan: TopologyCompilationPlan
     report: CompileReport
+    legacy_ixia_identity: LegacyIxiaIdentitySidecar = field(
+        default_factory=LegacyIxiaIdentitySidecar
+    )
 
     def __post_init__(self) -> None:
         self.report.validate(self.plan.iter_resource_ids())
+        self.legacy_ixia_identity.validate(self.plan.ixia.iter_resource_ids())
+
+
+class UnsupportedTrafficFlowIntentError(ValueError):
+    pass
 
 
 @dataclass
@@ -202,65 +118,14 @@ class _InterfaceAccumulator:
         )
 
 
-@dataclass
-class _IxiaPortAccumulator:
-    resource_id: ResourceId
-    logical_role: str
-    dut_interface: str
-    ixia_port: str
-    physical_inventory_index: int
-    reuse_group: str | None
-    link_ids: list[ResourceId]
-
-    def add(self, device_group: BoundDeviceGroup) -> None:
-        assignment = device_group.port_assignment
-        if assignment is None:
-            raise ValueError("IXIA port accumulation requires a bound assignment")
-        actual = (
-            assignment.dut_interface,
-            assignment.ixia_port,
-            assignment.physical_inventory_index,
-            assignment.reuse_group,
-        )
-        expected = (
-            self.dut_interface,
-            self.ixia_port,
-            self.physical_inventory_index,
-            self.reuse_group,
-        )
-        if actual != expected:
-            raise ValueError(
-                f"logical IXIA port {self.resource_id} resolves to multiple "
-                "physical connections"
-            )
-        link_id = link_resource_id(device_group.name)
-        if link_id not in self.link_ids:
-            self.link_ids.append(link_id)
-
-    def freeze(self) -> IxiaPortPlan:
-        return IxiaPortPlan(
-            resource_id=self.resource_id,
-            logical_role=self.logical_role,
-            link_ids=tuple(self.link_ids),
-            dut_interface=self.dut_interface,
-            ixia_port=self.ixia_port,
-            physical_inventory_index=self.physical_inventory_index,
-            reuse_group=self.reuse_group,
-        )
-
-
-@dataclass(frozen=True)
-class _IxiaInstance:
-    child_name: str | None
-    peer_start_index: int
-    peers: tuple[ResolvedPeer, ...]
-    advertisements: tuple[ResolvedPrefixAdvertisementLike, ...]
-
-
 class BoundTopologyPlanner:
     """Builds common semantic plans without invoking a compiler or renderer."""
 
     def plan(self, bound: BoundTopology) -> PlanningResult:
+        if bound.logical_topology.traffic_flows:
+            raise UnsupportedTrafficFlowIntentError(
+                "traffic-flow compilation is outside the Phase 1.5 IXIA lane"
+            )
         endpoint_specs = {
             endpoint.name: endpoint for endpoint in bound.logical_topology.endpoints
         }
@@ -281,11 +146,7 @@ class BoundTopologyPlanner:
         )
         routing_configs = _routing_config_plans(bound, endpoint_specs)
         openr = _openr_plans(bound, endpoint_specs)
-        ports = _ixia_port_plans(bound)
-        ixia_device_groups, sessions, advertisements = _ixia_session_plans(
-            bound,
-            endpoint_specs,
-        )
+        ixia = plan_ixia(bound, endpoint_specs)
 
         plan = TopologyCompilationPlan(
             dut=DutPlan(
@@ -299,14 +160,13 @@ class BoundTopologyPlanner:
                 components=(),
                 openr=openr,
             ),
-            ixia=IxiaPlan(
-                ports=ports,
-                device_groups=ixia_device_groups,
-                bgp_sessions=sessions,
-                advertisements=advertisements,
-            ),
+            ixia=ixia.plan,
         )
-        return PlanningResult(plan=plan, report=_compile_report(plan))
+        return PlanningResult(
+            plan=plan,
+            report=_compile_report(plan),
+            legacy_ixia_identity=ixia.legacy_identity,
+        )
 
 
 def _endpoint_plans(bound: BoundTopology) -> tuple[EndpointPlan, ...]:
@@ -470,7 +330,7 @@ def _routing_config_plans(
     config = bound.device_config or bound.logical_topology.device_config
     plans: list[RoutingConfigPlan] = []
     for endpoint in bound.logical_topology.endpoints:
-        if not _is_dut_endpoint(endpoint):
+        if not is_dut_endpoint(endpoint):
             continue
         drivers = _endpoint_routing_drivers(bound, endpoint.name)
         if not drivers:
@@ -505,131 +365,7 @@ def _openr_plans(
             mode=mode,
         )
         for endpoint in bound.logical_topology.endpoints
-        if _is_dut_endpoint(endpoint)
-    )
-
-
-def _ixia_port_plans(bound: BoundTopology) -> tuple[IxiaPortPlan, ...]:
-    accumulators: dict[str, _IxiaPortAccumulator] = {}
-    for device_group in bound.device_groups:
-        assignment = device_group.port_assignment
-        if assignment is None:
-            continue
-        accumulator = accumulators.get(assignment.logical_role)
-        if accumulator is None:
-            accumulator = _IxiaPortAccumulator(
-                resource_id=ixia_port_resource_id(assignment.logical_role),
-                logical_role=assignment.logical_role,
-                dut_interface=assignment.dut_interface,
-                ixia_port=assignment.ixia_port,
-                physical_inventory_index=assignment.physical_inventory_index,
-                reuse_group=assignment.reuse_group,
-                link_ids=[],
-            )
-            accumulators[assignment.logical_role] = accumulator
-        accumulator.add(device_group)
-    return tuple(accumulator.freeze() for accumulator in accumulators.values())
-
-
-def _ixia_session_plans(
-    bound: BoundTopology,
-    endpoint_specs: dict[str, EndpointSpec],
-) -> tuple[
-    tuple[IxiaDeviceGroupPlan, ...],
-    tuple[IxiaBgpSessionPlan, ...],
-    tuple[IxiaAdvertisementPlan, ...],
-]:
-    device_groups: list[IxiaDeviceGroupPlan] = []
-    sessions: list[IxiaBgpSessionPlan] = []
-    advertisements: list[IxiaAdvertisementPlan] = []
-    for device_group in bound.device_groups:
-        assignment = device_group.port_assignment
-        if assignment is None:
-            continue
-        _, _, _, dut_is_a = _dut_side(device_group, endpoint_specs)
-        for instance in _ixia_instances(device_group):
-            device_group_id = ixia_device_group_resource_id(
-                device_group.name,
-                instance.child_name,
-            )
-            device_groups.append(
-                IxiaDeviceGroupPlan(
-                    resource_id=device_group_id,
-                    link_id=link_resource_id(device_group.name),
-                    port_id=ixia_port_resource_id(assignment.logical_role),
-                    afi=_address_family(device_group.afi),
-                    peer_count=len(instance.peers),
-                    local_asn=device_group.remote_asn,
-                    remote_asn=device_group.local_asn,
-                    parent_network=device_group.parent_network,
-                )
-            )
-            sessions.append(
-                IxiaBgpSessionPlan(
-                    resource_id=ixia_session_resource_id(
-                        device_group.name,
-                        instance.child_name,
-                    ),
-                    device_group_id=device_group_id,
-                    adjacency_ids=tuple(
-                        adjacency_resource_id(
-                            device_group.name,
-                            instance.peer_start_index + ordinal,
-                        )
-                        for ordinal in range(len(instance.peers))
-                    ),
-                    local_addresses=tuple(
-                        peer.z_ip if dut_is_a else peer.a_ip for peer in instance.peers
-                    ),
-                    peer_addresses=tuple(
-                        peer.a_ip if dut_is_a else peer.z_ip for peer in instance.peers
-                    ),
-                )
-            )
-            for advertisement in instance.advertisements:
-                allocation = advertisement.spec.allocation
-                advertisements.append(
-                    IxiaAdvertisementPlan(
-                        resource_id=ixia_advertisement_resource_id(
-                            device_group.name,
-                            advertisement.spec.name,
-                            instance.child_name,
-                        ),
-                        device_group_id=device_group_id,
-                        logical_name=advertisement.spec.name,
-                        prefix_set_name=advertisement.spec.prefix_set,
-                        afi=_address_family(device_group.afi),
-                        route_count=allocation.distinct_prefix_count(
-                            len(instance.peers)
-                        ),
-                        prefixes_per_peer=allocation.prefixes_per_peer,
-                        prefix_length=(
-                            advertisement.prefix_set.spec.source.prefix_length
-                        ),
-                    )
-                )
-    return tuple(device_groups), tuple(sessions), tuple(advertisements)
-
-
-def _ixia_instances(device_group: BoundDeviceGroup) -> tuple[_IxiaInstance, ...]:
-    if not device_group.ixia_children:
-        return (
-            _IxiaInstance(
-                child_name=None,
-                peer_start_index=0,
-                peers=device_group.peers,
-                advertisements=device_group.prefix_advertisements,
-            ),
-        )
-    return tuple(_ixia_child_instance(child) for child in device_group.ixia_children)
-
-
-def _ixia_child_instance(child: BoundIxiaDeviceGroupChild) -> _IxiaInstance:
-    return _IxiaInstance(
-        child_name=child.name,
-        peer_start_index=child.spec.start_index,
-        peers=child.peers,
-        advertisements=child.prefix_advertisements,
+        if is_dut_endpoint(endpoint)
     )
 
 
@@ -696,9 +432,9 @@ def _dut_side(
             device_group.z_ips,
             False,
         )
-    if _is_dut_endpoint(a_endpoint) and not _is_dut_endpoint(z_endpoint):
+    if is_dut_endpoint(a_endpoint) and not is_dut_endpoint(z_endpoint):
         return a_endpoint.name, None, device_group.a_ips, True
-    if _is_dut_endpoint(z_endpoint) and not _is_dut_endpoint(a_endpoint):
+    if is_dut_endpoint(z_endpoint) and not is_dut_endpoint(a_endpoint):
         return z_endpoint.name, None, device_group.z_ips, False
     raise ValueError(
         f"device group {device_group.name!r} does not identify one DUT endpoint"
@@ -754,18 +490,3 @@ def _required_routing_features(config: RoutingDeviceConfig) -> tuple[str, ...]:
 
 def _address_family(afi: str) -> AddressFamily:
     return AddressFamily(afi)
-
-
-def _is_dut_endpoint(endpoint: EndpointSpec) -> bool:
-    return endpoint.role == "dut" or (
-        endpoint.kind == "dut" and endpoint.role not in _TRAFFIC_ENDPOINT_ROLES
-    )
-
-
-def _ixia_instance_path(
-    device_group_name: str,
-    child_name: str | None,
-) -> tuple[str, ...]:
-    return (
-        (device_group_name,) if child_name is None else (device_group_name, child_name)
-    )

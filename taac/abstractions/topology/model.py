@@ -8,6 +8,7 @@ import typing as t
 from dataclasses import dataclass, field, fields, MISSING
 from enum import Enum
 
+from taac.abstractions.ixia_semantics import IxiaBgpCapability
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -129,6 +130,84 @@ class BgpPolicy:
     as_path_prepend: str | None = None
 
 
+def _validate_ixia_bgp_capabilities(
+    capabilities: tuple[IxiaBgpCapability, ...] | None,
+) -> None:
+    if capabilities is None:
+        return
+    if not capabilities or any(
+        not isinstance(capability, IxiaBgpCapability) for capability in capabilities
+    ):
+        raise ValueError("IXIA BGP capabilities must be nonempty typed capabilities")
+    if len(frozenset(capabilities)) != len(capabilities):
+        raise ValueError("IXIA BGP capabilities must be unique")
+
+
+def _validate_ixia_bgp_integer(
+    field_name: str,
+    value: object,
+    *,
+    allow_none: bool,
+    allow_zero: bool,
+) -> None:
+    if value is None and allow_none:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"IXIA BGP {field_name} must be an integer")
+    if value < 0 or (not allow_zero and value == 0):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"IXIA BGP {field_name} must be {qualifier}")
+
+
+@dataclass(frozen=True)
+class IxiaBgpSessionIntent:
+    capabilities: tuple[IxiaBgpCapability, ...] | None = None
+    address_prefix_length: int | None = None
+    address_step: int | None = None
+    address_start_index: int | None = None
+    hold_timer_s: int = 30
+    keepalive_timer_s: int = 10
+    enable_graceful_restart: bool | None = None
+
+    def __post_init__(self) -> None:
+        _validate_ixia_bgp_capabilities(self.capabilities)
+        _validate_ixia_bgp_integer(
+            "address prefix length",
+            self.address_prefix_length,
+            allow_none=True,
+            allow_zero=True,
+        )
+        _validate_ixia_bgp_integer(
+            "hold_timer_s",
+            self.hold_timer_s,
+            allow_none=False,
+            allow_zero=False,
+        )
+        _validate_ixia_bgp_integer(
+            "keepalive_timer_s",
+            self.keepalive_timer_s,
+            allow_none=False,
+            allow_zero=False,
+        )
+        _validate_ixia_bgp_integer(
+            "address_step",
+            self.address_step,
+            allow_none=True,
+            allow_zero=False,
+        )
+        _validate_ixia_bgp_integer(
+            "address_start_index",
+            self.address_start_index,
+            allow_none=True,
+            allow_zero=True,
+        )
+        if self.enable_graceful_restart is not None and not isinstance(
+            self.enable_graceful_restart,
+            bool,
+        ):
+            raise TypeError("IXIA BGP graceful-restart intent must be a bool")
+
+
 @dataclass(frozen=True)
 class BgpPeerGroup:
     name: str
@@ -140,6 +219,7 @@ class BgpPeerGroup:
     connect_retry_timer_s: int = 120
     route_limit: int | str | None = None
     enable_graceful_restart: bool | None = None
+    ixia_session: IxiaBgpSessionIntent = field(default_factory=IxiaBgpSessionIntent)
 
 
 @dataclass(frozen=True)

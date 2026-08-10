@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+from taac.abstractions.ixia_semantics import IxiaBgpCapability
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -24,6 +25,7 @@ from taac.abstractions.topology.model import (
     DeviceGroupPartition,
     DeviceGroupSpec,
     EndpointSpec,
+    IxiaBgpSessionIntent,
     IxiaDeviceGroupChild,
     IxiaPortAssignment,
     LogicalTopology,
@@ -84,6 +86,8 @@ __all__ = (
     "FormulaicNextHopSource",
     "FormulaicPrefixSource",
     "IxiaDeviceGroupChild",
+    "IxiaBgpSessionIntent",
+    "IxiaBgpCapability",
     "IxiaPortAssignment",
     "NextHopDistribution",
     "NextHopIntent",

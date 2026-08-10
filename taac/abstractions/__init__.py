@@ -2,6 +2,7 @@
 # pyre-strict
 
 from taac.abstractions.artifacts import CompiledTaacArtifacts
+from taac.abstractions.ixia_semantics import IxiaBgpCapability
 from taac.abstractions.physical_inventory.physical_inventory import (
     PhysicalInventory,
 )
@@ -27,6 +28,7 @@ from taac.abstractions.topology import (
     FormulaicNextHopSource,
     FormulaicPrefixSequence,
     FormulaicPrefixSource,
+    IxiaBgpSessionIntent,
     IxiaDeviceGroupChild,
     IxiaPortAssignment,
     LogicalTopology,
@@ -84,6 +86,8 @@ __all__ = (
     "FormulaicNextHopSource",
     "FormulaicPrefixSource",
     "IxiaDeviceGroupChild",
+    "IxiaBgpCapability",
+    "IxiaBgpSessionIntent",
     "IxiaPortAssignment",
     "NextHopDistribution",
     "NextHopIntent",

@@ -17,6 +17,7 @@ from taac.abstractions.topology import (
     DeviceGroupSpec,
     EndpointSpec,
     FormulaicPrefixSource,
+    IxiaBgpSessionIntent,
     IxiaPortAssignment,
     LogicalTopology,
     OpenRMode,
@@ -46,11 +47,15 @@ UG_NEW_PEER_JOIN_AS_NUMBERS = {
     "ibgp": IBGP_REMOTE_AS,
 }
 
+_UG_IXIA_BGP_SESSION = IxiaBgpSessionIntent(address_prefix_length=127)
+
 UG_EBGP_PEER_GROUP = BgpPeerGroup(
     name="EB-FA-V6",
     remote_asn="ebgp",
     hold_timer_s=30,
     keepalive_timer_s=10,
+    enable_graceful_restart=True,
+    ixia_session=_UG_IXIA_BGP_SESSION,
 )
 UG_IBGP_PEER_GROUP = BgpPeerGroup(
     name="EB-EB-V6",
@@ -58,6 +63,8 @@ UG_IBGP_PEER_GROUP = BgpPeerGroup(
     remote_asn="ibgp",
     hold_timer_s=30,
     keepalive_timer_s=10,
+    enable_graceful_restart=True,
+    ixia_session=_UG_IXIA_BGP_SESSION,
 )
 UG_NEW_PEER_JOIN_PEER_GROUPS = {
     UG_EBGP_PEER_GROUP.name: UG_EBGP_PEER_GROUP,
