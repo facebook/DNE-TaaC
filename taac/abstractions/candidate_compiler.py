@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from taac.abstractions.artifacts import CompiledTaacArtifacts
-from taac.abstractions.compatibility.eos_bgpcpp_policy_bindings import (
-    resolve_eos_bgpcpp_policy_binding,
-)
 from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
@@ -24,6 +21,7 @@ from taac.abstractions.compilation.model import (
 )
 from taac.abstractions.compilation.planner import PlanningResult
 from taac.abstractions.compilation.protocols import (
+    DutCapabilityPreflight,
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
     EndpointComposer,
@@ -79,9 +77,7 @@ class EstablishedEosArtifactAdapter:
         bound: BoundTopology,
         plan: TopologyCompilationPlan,
     ) -> AdaptedArtifacts:
-        for policy in plan.dut.policies:
-            if policy.preset is not None:
-                resolve_eos_bgpcpp_policy_binding(policy.preset.key)
+        del plan
         return AdaptedArtifacts(
             artifacts=self.compile_bound(bound),
             renderer_reports=(
@@ -121,6 +117,7 @@ class CandidateCompilation:
 @dataclass(frozen=True)
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
+    dut_capability_preflight: DutCapabilityPreflight
     artifact_adapter: ArtifactAdapter
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
@@ -145,17 +142,8 @@ class CandidateTopologyCompiler:
         planning = self.analyze(bound)
         resource_ids = planning.plan.iter_resource_ids()
         planning.report.assert_renderable(resource_ids)
+        self.dut_capability_preflight.validate(planning.plan.dut)
         adapted = self.artifact_adapter.render(bound, planning.plan)
-        dut_endpoint_base_shadow = None
-        if self.dut_endpoint_base_renderer is not None:
-            dut_endpoint_base_shadow = self.dut_endpoint_base_renderer.render(
-                planning.plan.dut
-            )
-            dut_endpoint_base_shadow.validate(planning.plan.dut)
-        dut_host_os_shadow = None
-        if self.dut_host_os_renderer is not None:
-            dut_host_os_shadow = self.dut_host_os_renderer.render(planning.plan.dut)
-            dut_host_os_shadow.validate(planning.plan.dut)
         traffic_generator_request = None
         if (
             self.traffic_generator_endpoint_renderer is not None
@@ -167,10 +155,21 @@ class CandidateTopologyCompiler:
                     planning.legacy_ixia_identity,
                 )
             )
+        dut_endpoint_base_shadow = None
+        if self.dut_endpoint_base_renderer is not None:
+            dut_endpoint_base_shadow = self.dut_endpoint_base_renderer.render(
+                planning.plan.dut
+            )
+            dut_endpoint_base_shadow.validate(planning.plan.dut)
+        dut_host_os_shadow = None
+        if self.dut_host_os_renderer is not None:
+            dut_host_os_shadow = self.dut_host_os_renderer.render(planning.plan.dut)
+            dut_host_os_shadow.validate(planning.plan.dut)
         traffic_generator_endpoint_request = None
         traffic_generator_endpoint_shadow = None
         if self.traffic_generator_endpoint_renderer is not None:
-            assert traffic_generator_request is not None
+            if traffic_generator_request is None:
+                raise RuntimeError("traffic-generator request was not constructed")
             traffic_generator_endpoint_request = (
                 TrafficGeneratorEndpointRenderRequest.from_render_request(
                     traffic_generator_request
@@ -204,7 +203,8 @@ class CandidateTopologyCompiler:
             endpoint_composition_shadow.validate(endpoint_composition_request)
         traffic_generator_shadow = None
         if self.traffic_generator_renderer is not None:
-            assert traffic_generator_request is not None
+            if traffic_generator_request is None:
+                raise RuntimeError("traffic-generator request was not constructed")
             traffic_generator_shadow = self.traffic_generator_renderer.render(
                 traffic_generator_request
             )

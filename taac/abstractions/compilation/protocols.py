@@ -31,6 +31,10 @@ class DutBackend(t.Protocol[TDutOutput_co]):
     def render(self, plan: DutPlan) -> TDutOutput_co: ...
 
 
+class DutCapabilityPreflight(t.Protocol):
+    def validate(self, plan: DutPlan) -> None: ...
+
+
 class DutHostOsRenderer(t.Protocol[THostOs_co]):
     def render(self, plan: DutPlan) -> DutHostOsRenderResult[THostOs_co]: ...
 

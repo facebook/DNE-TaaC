@@ -853,7 +853,8 @@ compatibility deletion follow the approved design.
 
 Status: implementation started 2026-08-07. Diffs 1.5.0 through the
 independently droppable all-16 shared IXIA endpoint extraction and
-resource-keyed endpoint composition are committed.
+resource-keyed endpoint composition are committed. EOS/BGP++ capability
+preflight now runs ahead of adaptation and shadow rendering.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -876,6 +877,9 @@ of Phase 1.5:
 9. **Completed shadow capability:** Diff 1.5.5c, compose EOS endpoint bases and
    shared IXIA endpoint patches by stable resource ID without changing artifact
    authority.
+10. **Completed migration gate:** Diff 1.5.5d, extract EOS/BGP++ capability
+    preflight from the established adapter and run it before every rendering
+    lane.
 
 Remaining shared IXIA capabilities, EOS lifecycle/config/interface rendering,
 facade cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
@@ -944,8 +948,8 @@ The full EBB+BGP-MON candidate plan contains ten selected semantic presets,
 1,274 present adjacencies, and 2,548 directional bindings. Declared
 advertisement policies remain separate. EOS peer-group, route-map, and profile
 literals live only in the compatibility binding, and the candidate adapter
-preflights every selected preset before delegating unchanged artifact rendering
-to the established compiler.
+delegates unchanged artifact rendering only after the candidate compiler's
+EOS/BGP++ capability preflight accepts every selected preset.
 
 The EB inventory-ASN compatibility rule is also typed and provenance-limited:
 only an internal adjacency on an `EB` inventory may treat
@@ -1035,9 +1039,9 @@ endpoint patches, incorrect port-config cardinality, nonempty Phase 1.5 traffic
 items, duplicate lifecycle slots, and missing or extra formulaic-route
 configuration lifecycle.
 
-The renderer is an optional shadow lane. `CandidateTopologyCompiler` invokes it
-only after the established adapter has completed EOS capability preflight and
-artifact generation, validates the result, and exposes it on
+The renderer is an optional shadow lane. `CandidateTopologyCompiler` completes
+EOS capability preflight, delegates established artifact generation, invokes
+the renderer, validates the result, and exposes it on
 `CandidateCompilation`. It does not merge the result into artifacts, and the
 traffic-generator renderer report remains `COMPATIBILITY_DELEGATED`. This gives
 native lowering a comparison seam without permitting partial ownership or a
@@ -1146,9 +1150,9 @@ largest gaps are:
    `BoundTopology` directly. Their observable omitted-versus-`None` versus
    empty-list behavior, encoding flavor, and exact tuple order must be frozen
    as compatibility policy during extraction.
-7. EOS capability preflight lives inside the established adapter. It must move
-   before both renderers before the traffic-generator lane becomes
-   authoritative.
+7. EOS capability preflight now runs before the established adapter and both
+   renderers. It no longer blocks shadow extraction; artifact authority remains
+   blocked by the other incomplete lanes above.
 
 Partitioned EBB is outside the current 16-case artifact matrix and remains
 delegated until it has direct parity coverage. For every family, shadow output
@@ -1199,8 +1203,8 @@ implementation accepts exactly one normalized EOS DUT with a physical
 identifier and emits `ARISTA_FBOSS`. It does not inspect `BoundTopology`, a
 topology/profile name, a logical endpoint name, or testconfig helpers.
 
-`CandidateTopologyCompiler` invokes the renderer only after established
-capability preflight and artifact generation. The shadow result is validated
+`CandidateTopologyCompiler` invokes the renderer only after EOS capability
+preflight and established artifact generation. The shadow result is validated
 and exposed separately; it is never merged into `CompiledTaacArtifacts`, and
 the DUT renderer report remains `COMPATIBILITY_DELEGATED`. Exact established
 host-OS map equality is frozen across all 16 EOS parity cases. Structural
@@ -1324,8 +1328,8 @@ the returned `CompiledTaacArtifacts`, and all renderer reports remain
 `COMPATIBILITY_DELEGATED`; no consumer-visible artifact or lifecycle ownership
 changed.
 
-Authoritative endpoint cutover remains deferred until EOS capability preflight
-moves ahead of both renderers, keyed artifact assembly owns collision checks,
+With EOS capability preflight ahead of both renderers, authoritative endpoint
+cutover remains deferred until keyed artifact assembly owns collision checks
 and shared IXIA port-config, session, advertisement, and lifecycle lowering is
 complete. The egress self-next-hop ambiguity, remaining EOS
 config/interface/component lifecycle inputs, and multi-DUT orchestration also
@@ -1338,6 +1342,44 @@ passed 534/534 tests (TestInfra `10696049303403415`); and changed-target Pyre
 found no errors across 11 owning targets. Golden regeneration found 294
 unchanged configurations, with zero additions, changes, or removals. The
 manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### EOS/BGP++ capability preflight extraction
+
+EOS/BGP++ capability validation is now a required injected compiler stage. It
+runs after common-plan report renderability succeeds and before the established
+artifact adapter, endpoint renderers, traffic-generator renderers, or endpoint
+composer can run. The compatibility adapter is again only an artifact and
+renderer-report adapter; it no longer hides backend validation.
+
+The task-free preflight requires exactly one normalized EOS DUT with a physical
+identifier and exactly one routing-config plan targeting that DUT through the
+`bgpcpp` driver. For every present adjacency it requires one import and one
+export binding, rejects missing, duplicate, absent, or unknown adjacency
+coverage, and verifies the selected role-policy preset against binding
+direction, adjacency AFI and relationship, and the DUT network role. Every
+selected preset must also have a supported EOS peer-group and route-map
+binding. All 16 frozen EOS cases satisfy this contract; monitor IPv4 and other
+unsupported mappings fail before any artifact or shadow renderer call.
+
+The preflight does not yet claim that the selected Configerator artifact
+satisfies every `RoutingConfigPlan.required_features` entry. The plan still
+lacks the typed artifact reference, router-ID, experiment variant, and restart
+requirements needed for that check. Those remain explicit routing-config
+extraction work rather than an inferred compatibility rule.
+
+Established `CompiledTaacArtifacts` identity and the three
+`COMPATIBILITY_DELEGATED` renderer reports remain unchanged. The new gate
+closes preflight ordering as an authoritative-cutover blocker without moving
+artifact ownership.
+
+Final local validation passed on 2026-08-08: the focused capability,
+candidate, IXIA, EOS parity, and import-boundary gate passed 55/55 tests
+(TestInfra `10414574326720042`); the combined full abstraction and
+factory-golden gate passed 541/541 tests (TestInfra `22799473150708757`); and
+changed-target Pyre found no errors across 11 owning targets. Golden
+regeneration found 294 unchanged configurations, with zero additions, changes,
+or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model
