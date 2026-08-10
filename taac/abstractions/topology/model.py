@@ -8,6 +8,10 @@ import typing as t
 from dataclasses import dataclass, field, fields, MISSING
 from enum import Enum
 
+from taac.abstractions.routing_semantics import (
+    NetworkRole,
+    PeerRelationship,
+)
 from taac.abstractions.topology.address import AddressPlan
 from taac.abstractions.topology.attributes import (
     RouteAttributePool,
@@ -404,6 +408,7 @@ class DeviceGroupSpec:
     # plan). For runtime-added peers -- e.g. spec 2.4.4 (addPeers) -- where the peer
     # must be ABSENT from the DUT config at baseline so the test can add it live.
     dut_neighbor_absent: bool = False
+    peer_relationship: PeerRelationship | None = None
 
 
 @dataclass(frozen=True)
@@ -465,6 +470,7 @@ class ResolvedEndpoint:
     kind: str
     backend: str
     physical_identifier: str | None
+    network_role: NetworkRole | None = None
 
 
 @dataclass(frozen=True)
@@ -533,6 +539,7 @@ class ResolvedDeviceGroup:
     route_attributes: RouteAttributePool | None = None
     provenance: "ResolvedDeviceGroupProvenance | None" = None
     ixia_children: tuple[ResolvedIxiaDeviceGroupChild, ...] = ()
+    peer_relationship: PeerRelationship | None = None
 
     @property
     def peer_count(self) -> int:
@@ -600,6 +607,7 @@ class BoundDeviceGroup:
     route_attributes: RouteAttributePool | None = None
     provenance: ResolvedDeviceGroupProvenance | None = None
     ixia_children: tuple[BoundIxiaDeviceGroupChild, ...] = ()
+    peer_relationship: PeerRelationship | None = None
 
     @property
     def name(self) -> str:
@@ -652,6 +660,7 @@ class BoundTopology:
         default_factory=dict
     )
     endpoint_os: t.Mapping[str, str] = field(default_factory=dict)
+    endpoint_network_roles: t.Mapping[str, NetworkRole] = field(default_factory=dict)
     routing_drivers: t.Mapping[str, str] = field(default_factory=dict)
     ixia_ports: t.Mapping[str, str] = field(default_factory=dict)
     interfaces: t.Mapping[str, str] = field(default_factory=dict)

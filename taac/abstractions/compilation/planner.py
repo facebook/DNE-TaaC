@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from taac.abstractions.compilation.eb_policy_presets import (
+    resolve_eb_policy_preset,
+)
 from taac.abstractions.compilation.model import (
     AddressFamily,
     BgpAdjacencyPlan,
@@ -21,9 +24,12 @@ from taac.abstractions.compilation.model import (
     IxiaPortPlan,
     OpenRDesiredMode,
     OpenRPlan,
+    PolicyBinding,
+    PolicyDirection,
     PolicyPlan,
     ResourceId,
     ResourceKind,
+    RolePolicyKey,
     RoutingConfigPlan,
     TopologyCompilationPlan,
 )
@@ -33,7 +39,6 @@ from taac.abstractions.compilation.report import (
     ResourceReport,
 )
 from taac.abstractions.topology.model import (
-    BgpPeerGroup,
     BoundDeviceGroup,
     BoundIxiaDeviceGroupChild,
     BoundTopology,
@@ -75,6 +80,29 @@ def adjacency_resource_id(device_group_name: str, ordinal: int) -> ResourceId:
 
 def policy_resource_id(logical_name: str) -> ResourceId:
     return ResourceId(ResourceKind.POLICY, (logical_name,))
+
+
+def role_policy_resource_id(key: RolePolicyKey) -> ResourceId:
+    return ResourceId(
+        ResourceKind.POLICY,
+        (
+            "role",
+            key.local_role.value,
+            key.relationship.value,
+            key.afi.value,
+            key.direction.value,
+        ),
+    )
+
+
+def policy_binding_resource_id(
+    adjacency_id: ResourceId,
+    direction: PolicyDirection,
+) -> ResourceId:
+    return ResourceId(
+        ResourceKind.POLICY_BINDING,
+        (*adjacency_id.path, direction.value),
+    )
 
 
 def routing_config_resource_id(endpoint_name: str) -> ResourceId:
@@ -240,12 +268,16 @@ class BoundTopologyPlanner:
         links = _link_plans(bound)
         interfaces = _interface_plans(bound, endpoint_specs)
         adjacencies = _adjacency_plans(bound, endpoint_specs)
-        policies = tuple(
+        declared_policies = tuple(
             PolicyPlan(
                 resource_id=policy_resource_id(policy.name),
                 logical_name=policy.name,
             )
             for policy in bound.logical_topology.policies
+        )
+        role_policies, policy_bindings = _role_policy_plans(
+            bound,
+            endpoint_specs,
         )
         routing_configs = _routing_config_plans(bound, endpoint_specs)
         openr = _openr_plans(bound, endpoint_specs)
@@ -261,8 +293,8 @@ class BoundTopologyPlanner:
                 links=links,
                 interfaces=interfaces,
                 adjacencies=adjacencies,
-                policies=policies,
-                policy_bindings=(),
+                policies=(*declared_policies, *role_policies),
+                policy_bindings=policy_bindings,
                 routing_configs=routing_configs,
                 components=(),
                 openr=openr,
@@ -290,6 +322,7 @@ def _endpoint_plans(bound: BoundTopology) -> tuple[EndpointPlan, ...]:
             ),
             physical_identifier=_physical_identifier(bound, endpoint),
             setup_mode=EndpointSetupMode(endpoint.setup_mode),
+            network_role=bound.endpoint_network_roles.get(endpoint.name),
         )
         for endpoint in bound.logical_topology.endpoints
     )
@@ -371,15 +404,63 @@ def _adjacency_plans(
                     peer_address=peer.z_ip if dut_is_a else peer.a_ip,
                     local_asn=device_group.local_asn,
                     remote_asn=device_group.remote_asn,
-                    peer_group=_peer_group_name(device_group.peer_group),
                     desired_presence=(
                         DesiredPresence.ABSENT
                         if device_group.dut_neighbor_absent
                         else DesiredPresence.PRESENT
                     ),
+                    relationship=device_group.peer_relationship,
                 )
             )
     return tuple(adjacencies)
+
+
+def _role_policy_plans(
+    bound: BoundTopology,
+    endpoint_specs: dict[str, EndpointSpec],
+) -> tuple[tuple[PolicyPlan, ...], tuple[PolicyBinding, ...]]:
+    policies_by_key: dict[RolePolicyKey, PolicyPlan] = {}
+    bindings: list[PolicyBinding] = []
+    for device_group in bound.device_groups:
+        endpoint_name, _, _, _ = _dut_side(device_group, endpoint_specs)
+        local_role = bound.endpoint_network_roles.get(endpoint_name)
+        if local_role is None or device_group.dut_neighbor_absent:
+            continue
+        relationship = device_group.peer_relationship
+        if relationship is None:
+            raise ValueError(
+                f"device group {device_group.name!r} has no peer relationship"
+            )
+        afi = _address_family(device_group.afi)
+        for ordinal in range(device_group.peer_count):
+            adjacency_id = adjacency_resource_id(device_group.name, ordinal)
+            for direction in PolicyDirection:
+                key = RolePolicyKey(
+                    local_role=local_role,
+                    relationship=relationship,
+                    afi=afi,
+                    direction=direction,
+                )
+                preset = resolve_eb_policy_preset(key)
+                policy_id = role_policy_resource_id(key)
+                if key not in policies_by_key:
+                    policies_by_key[key] = PolicyPlan(
+                        resource_id=policy_id,
+                        logical_name=preset.semantic_id,
+                        preset=preset,
+                    )
+                bindings.append(
+                    PolicyBinding(
+                        resource_id=policy_binding_resource_id(
+                            adjacency_id,
+                            direction,
+                        ),
+                        adjacency_id=adjacency_id,
+                        policy_id=policy_id,
+                        direction=direction,
+                    )
+                )
+    return tuple(policies_by_key.values()), tuple(bindings)
 
 
 def _routing_config_plans(
@@ -503,7 +584,6 @@ def _ixia_session_plans(
                     peer_addresses=tuple(
                         peer.a_ip if dut_is_a else peer.z_ip for peer in instance.peers
                     ),
-                    peer_group=_peer_group_name(device_group.peer_group),
                 )
             )
             for advertisement in instance.advertisements:
@@ -670,10 +750,6 @@ def _required_routing_features(config: RoutingDeviceConfig) -> tuple[str, ...]:
         if value is not None:
             features.append(feature)
     return tuple(features)
-
-
-def _peer_group_name(peer_group: BgpPeerGroup | str | None) -> str | None:
-    return peer_group.name if isinstance(peer_group, BgpPeerGroup) else peer_group
 
 
 def _address_family(afi: str) -> AddressFamily:

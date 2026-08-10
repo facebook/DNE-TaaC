@@ -17,6 +17,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     EBGP_REMOTE_AS,
     IBGP_REMOTE_AS,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
@@ -207,6 +208,7 @@ BOUNDED_ECMP = LogicalTopology(
         DeviceGroupSpec(
             name="dg_bounded_ecmp_ebgp_v6",
             role="ebgp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=BOUNDED_ECMP_PEER_COUNT,
             address_plan=AddressPlan(
@@ -225,6 +227,7 @@ BOUNDED_ECMP = LogicalTopology(
         DeviceGroupSpec(
             name="dg_bounded_ecmp_ebgp_v4",
             role="ebgp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v4",
             peer_count=BOUNDED_ECMP_PEER_COUNT,
             address_plan=AddressPlan(
@@ -243,6 +246,7 @@ BOUNDED_ECMP = LogicalTopology(
         DeviceGroupSpec(
             name="dg_bounded_ecmp_ibgp_v6",
             role="ibgp",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=BOUNDED_ECMP_PEER_COUNT,
             address_plan=AddressPlan(
@@ -260,6 +264,7 @@ BOUNDED_ECMP = LogicalTopology(
         DeviceGroupSpec(
             name="dg_bounded_ecmp_ibgp_v4",
             role="ibgp",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=BOUNDED_ECMP_PEER_COUNT,
             address_plan=AddressPlan(

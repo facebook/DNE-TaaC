@@ -9,6 +9,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     EBGP_REMOTE_AS,
     IBGP_REMOTE_AS,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
@@ -156,6 +157,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ebgp_ctrl",
             role="ebgp_ug_ctrl",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=4,
             address_plan=AddressPlan(
@@ -173,6 +175,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ebgp_held",
             role="ebgp_ug_held",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -190,6 +193,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ebgp_disp",
             role="ebgp_ug_disp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=16,
             address_plan=AddressPlan(
@@ -207,6 +211,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ibgp_keep_initial",
             role="ibgp_ug_keep_initial",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -231,6 +236,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ibgp_keep_mutated",
             role="ibgp_ug_keep_mutated",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -255,6 +261,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ibgp_var1",
             role="ibgp_ug_var1",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -279,6 +286,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ug_ibgp_var2",
             role="ibgp_ug_var2",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -328,6 +336,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
 _UG_EBGP_SPARE_DG = DeviceGroupSpec(
     name="dg_ug_ebgp_spare",
     role="ebgp_ug_spare",
+    peer_relationship=PeerRelationship.EXTERNAL,
     afi="v6",
     peer_count=1,
     address_plan=AddressPlan(

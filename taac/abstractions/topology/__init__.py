@@ -1,6 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+from taac.abstractions.routing_semantics import (
+    NetworkRole,
+    PeerRelationship,
+)
 from taac.abstractions.topology.address import AddressPlan
 from taac.abstractions.topology.attributes import (
     AsPathSequence,
@@ -84,11 +88,13 @@ __all__ = (
     "NextHopDistribution",
     "NextHopIntent",
     "NextHopMode",
+    "NetworkRole",
     "OpenRMode",
     "OpenRSetupSequence",
     "OpenRStandaloneEndpoint",
     "OpenRStandaloneLink",
     "PeerPrefixDistribution",
+    "PeerRelationship",
     "PrefixAdvertisement",
     "PrefixAllocation",
     "PrefixMembership",

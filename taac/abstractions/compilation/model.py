@@ -6,6 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from taac.abstractions.routing_semantics import (
+    NetworkRole,
+    PeerRelationship,
+)
+
 
 class ResourceKind(str, Enum):
     ENDPOINT = "endpoint"
@@ -45,6 +50,34 @@ class PolicyDirection(str, Enum):
     EXPORT = "export"
 
 
+@dataclass(frozen=True)
+class RolePolicyKey:
+    local_role: NetworkRole
+    relationship: PeerRelationship
+    afi: AddressFamily
+    direction: PolicyDirection
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.local_role, NetworkRole):
+            raise TypeError("local role must be a NetworkRole")
+        if not isinstance(self.relationship, PeerRelationship):
+            raise TypeError("relationship must be a PeerRelationship")
+        if not isinstance(self.afi, AddressFamily):
+            raise TypeError("address family must be an AddressFamily")
+        if not isinstance(self.direction, PolicyDirection):
+            raise TypeError("policy direction must be a PolicyDirection")
+
+
+@dataclass(frozen=True)
+class RolePolicyPreset:
+    key: RolePolicyKey
+    semantic_id: str
+
+    def __post_init__(self) -> None:
+        if not self.semantic_id:
+            raise ValueError("role-policy semantic ID must be nonempty")
+
+
 class OpenRDesiredMode(str, Enum):
     NONE = "none"
     STANDALONE = "standalone"
@@ -79,6 +112,7 @@ class EndpointPlan:
     backend: str
     physical_identifier: str | None = None
     setup_mode: EndpointSetupMode = EndpointSetupMode.FULL
+    network_role: NetworkRole | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.ENDPOINT)
@@ -127,8 +161,8 @@ class BgpAdjacencyPlan:
     peer_address: str
     local_asn: int | None
     remote_asn: int | None
-    peer_group: str | None = None
     desired_presence: DesiredPresence = DesiredPresence.PRESENT
+    relationship: PeerRelationship | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.BGP_ADJACENCY)
@@ -140,6 +174,7 @@ class BgpAdjacencyPlan:
 class PolicyPlan:
     resource_id: ResourceId
     logical_name: str
+    preset: RolePolicyPreset | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.POLICY)
@@ -228,7 +263,6 @@ class IxiaBgpSessionPlan:
     adjacency_ids: tuple[ResourceId, ...]
     local_addresses: tuple[str, ...]
     peer_addresses: tuple[str, ...]
-    peer_group: str | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.IXIA_BGP_SESSION)

@@ -121,6 +121,7 @@ import typing as t
 from taac.abstractions.physical_inventory.physical_inventory import (
     PhysicalInventory,
 )
+from taac.abstractions.routing_semantics import NetworkRole
 from taac.abstractions.topology import (
     OpenRStandaloneEndpoint,
     OpenRStandaloneLink,
@@ -215,6 +216,7 @@ _BAG010_OPENR_LINK = OpenRStandaloneLink(
 
 BAG010_ASH6 = PhysicalInventory(
     device_name="bag010.ash6",
+    network_role=NetworkRole.EB,
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -257,6 +259,7 @@ _BAG011_OPENR_LINK = OpenRStandaloneLink(
 
 BAG011_ASH6 = PhysicalInventory(
     device_name="bag011.ash6",
+    network_role=NetworkRole.EB,
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -306,6 +309,7 @@ _BAG012_OPENR_LINK = OpenRStandaloneLink(
 
 BAG012_ASH6 = PhysicalInventory(
     device_name="bag012.ash6",
+    network_role=NetworkRole.EB,
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -352,6 +356,7 @@ _BAG013_OPENR_LINK = OpenRStandaloneLink(
 
 BAG013_ASH6 = PhysicalInventory(
     device_name="bag013.ash6",
+    network_role=NetworkRole.EB,
     usage=frozenset({"cicd", "qual"}),
     primary_ixia_chassis_ip=IXIA11_ASH6,
     secondary_ixia_chassis_ip=IXIA03_ASH6,
@@ -380,6 +385,7 @@ BAG013_ASH6 = PhysicalInventory(
 
 BAG002_SNC1 = PhysicalInventory(
     device_name="bag002.snc1",
+    network_role=NetworkRole.EB,
     usage=frozenset({"qual"}),
     primary_ixia_chassis_ip="ares1-my24520014",
     ixia_ports=[
@@ -400,6 +406,7 @@ BAG002_SNC1 = PhysicalInventory(
 EB01_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb01.lab.ash6",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "5/7"),
@@ -433,6 +440,7 @@ EB01_LAB_ASH6 = PhysicalInventory(
 EB02_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb02.lab.ash6",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "6/2"),
@@ -465,6 +473,7 @@ EB02_LAB_ASH6 = PhysicalInventory(
 EB03_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb03.lab.ash6",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "6/5"),
@@ -498,6 +507,7 @@ EB03_LAB_ASH6 = PhysicalInventory(
 EB04_LAB_ASH6 = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="eb04.lab.ash6",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/1", "6/7"),
@@ -537,6 +547,7 @@ EB04_LAB_ASH6 = PhysicalInventory(
 EB_TEST_DEVICE = PhysicalInventory(
     usage=frozenset({"qual"}),
     device_name="bgp.eb.test.ash6",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/5", "5/3"),
@@ -588,6 +599,7 @@ EB_TEST_DEVICE = PhysicalInventory(
 JSW002_M001_SNC1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="jsw002.m001.snc1",
+    network_role=NetworkRole.EB,
     primary_ixia_chassis_ip="",
     dut_bgp_as=64981,
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,

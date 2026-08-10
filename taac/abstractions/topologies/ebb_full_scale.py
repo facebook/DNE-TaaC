@@ -49,6 +49,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     IBGP_PEER_SCALE_PER_PLANE,
     IBGP_REMOTE_AS,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topologies.ebb_prefix_inventory import (
     EBB_IBGP_V4_EXCLUDED_PREFIX_INDICES,
     EBB_IBGP_V6_EXCLUDED_PREFIX_INDICES,
@@ -526,6 +527,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ebgp_v6",
             role="uplink",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=EBGP_PEER_COUNT_V6,
             a_endpoint="dut0",
@@ -545,6 +547,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ebgp_v4",
             role="uplink",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v4",
             peer_count=EBGP_PEER_COUNT_V4,
             a_endpoint="dut0",
@@ -565,6 +568,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_dc_p1",
             role="ibgp_dc_p1",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -584,6 +588,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_dc_p2",
             role="ibgp_dc_p2",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -603,6 +608,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_dc_p3",
             role="ibgp_dc_p3",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -622,6 +628,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_dc_p4",
             role="ibgp_dc_p4",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -642,6 +649,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_dc_p1",
             role="ibgp_dc_p1",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -661,6 +669,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_dc_p2",
             role="ibgp_dc_p2",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -680,6 +689,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_dc_p3",
             role="ibgp_dc_p3",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -699,6 +709,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_dc_p4",
             role="ibgp_dc_p4",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -719,6 +730,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_mp_p1",
             role="ibgp_mp_p1",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -738,6 +750,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_mp_p2",
             role="ibgp_mp_p2",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -757,6 +770,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_mp_p3",
             role="ibgp_mp_p3",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -776,6 +790,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v6_mp_p4",
             role="ibgp_mp_p4",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -796,6 +811,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_mp_p1",
             role="ibgp_mp_p1",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -815,6 +831,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_mp_p2",
             role="ibgp_mp_p2",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -834,6 +851,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_mp_p3",
             role="ibgp_mp_p3",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -853,6 +871,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ibgp_v4_mp_p4",
             role="ibgp_mp_p4",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=IBGP_PEER_SCALE_PER_PLANE,
             a_endpoint="dut0",
@@ -873,6 +892,7 @@ _EBB_FULL_SCALE_WITH_BGPMON_BASE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_bgp_mon_v6",
             role="bgpmon",
+            peer_relationship=PeerRelationship.MONITOR,
             afi="v6",
             peer_count=BGP_MON_PEER_COUNT,
             a_endpoint="dut0",

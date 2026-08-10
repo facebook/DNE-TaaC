@@ -9,6 +9,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     EBGP_REMOTE_AS,
     IBGP_REMOTE_AS,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
@@ -92,6 +93,7 @@ IPV6_UPDATE_PACKING = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ipv6_update_packing_ibgp",
             role="ibgp",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -110,6 +112,7 @@ IPV6_UPDATE_PACKING = LogicalTopology(
         DeviceGroupSpec(
             name="dg_ipv6_update_packing_ebgp",
             role="ebgp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=10,
             address_plan=AddressPlan(

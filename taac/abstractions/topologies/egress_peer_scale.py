@@ -18,6 +18,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
     IBGP_REMOTE_AS,
 )
+from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
@@ -167,6 +168,7 @@ EGRESS_PEER_SCALE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_egress_peer_scale_ebgp_v6",
             role="ebgp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v6",
             peer_count=1,
             address_plan=AddressPlan(
@@ -185,6 +187,7 @@ EGRESS_PEER_SCALE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_egress_peer_scale_ebgp_v4",
             role="ebgp",
+            peer_relationship=PeerRelationship.EXTERNAL,
             afi="v4",
             peer_count=1,
             address_plan=AddressPlan(
@@ -203,6 +206,7 @@ EGRESS_PEER_SCALE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_egress_peer_scale_ibgp_v6",
             role="ibgp",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v6",
             peer_count=max(EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS),
             address_plan=AddressPlan(
@@ -220,6 +224,7 @@ EGRESS_PEER_SCALE = LogicalTopology(
         DeviceGroupSpec(
             name="dg_egress_peer_scale_ibgp_v4",
             role="ibgp",
+            peer_relationship=PeerRelationship.INTERNAL,
             afi="v4",
             peer_count=max(EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS),
             address_plan=AddressPlan(

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from taac.abstractions.artifacts import CompiledTaacArtifacts
+from taac.abstractions.compatibility.eos_bgpcpp_policy_bindings import (
+    resolve_eos_bgpcpp_policy_binding,
+)
 from taac.abstractions.compilation.model import (
     TopologyCompilationPlan,
 )
@@ -55,7 +58,9 @@ class EstablishedEosArtifactAdapter:
         bound: BoundTopology,
         plan: TopologyCompilationPlan,
     ) -> AdaptedArtifacts:
-        del plan
+        for policy in plan.dut.policies:
+            if policy.preset is not None:
+                resolve_eos_bgpcpp_policy_binding(policy.preset.key)
         return AdaptedArtifacts(
             artifacts=self.compile_bound(bound),
             renderer_reports=(

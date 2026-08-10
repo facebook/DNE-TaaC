@@ -7,6 +7,10 @@ import ipaddress
 import typing as t
 from dataclasses import dataclass, fields, replace
 
+from taac.abstractions.routing_semantics import (
+    NetworkRole,
+    PeerRelationship,
+)
 from taac.abstractions.topology.address import AddressPlan
 from taac.abstractions.topology.model import (
     BgpPeerGroup,
@@ -49,8 +53,30 @@ _TRAFFIC_ENDPOINT_KINDS = frozenset({"ixia", "traffic", "trafficgen"})
 _TRAFFIC_ENDPOINT_ROLES = frozenset({"ixia", "traffic", "trafficgen"})
 _IXIA_4BYTE_ASN_MAX = IXIA_MAX_4BYTE_ASN
 _EOS_SECONDARY_IP_LIMIT_PER_INTERFACE_AFI = 500
-_STANDARD_SAME_AS_BGP_ROLES = frozenset({"ibgp"})
-_STANDARD_DIFFERENT_AS_BGP_ROLES = frozenset({"ebgp", "uplink", "bgpmon"})
+_LEGACY_PEER_RELATIONSHIPS = {
+    "uplink": PeerRelationship.EXTERNAL,
+    "ebgp": PeerRelationship.EXTERNAL,
+    "ebgp_ug_ctrl": PeerRelationship.EXTERNAL,
+    "ebgp_ug_held": PeerRelationship.EXTERNAL,
+    "ebgp_ug_disp": PeerRelationship.EXTERNAL,
+    "ebgp_ug_spare": PeerRelationship.EXTERNAL,
+    "ebgp_fast": PeerRelationship.EXTERNAL,
+    "ebgp_slow": PeerRelationship.EXTERNAL,
+    "ibgp": PeerRelationship.INTERNAL,
+    "ibgp_dc_p1": PeerRelationship.INTERNAL,
+    "ibgp_dc_p2": PeerRelationship.INTERNAL,
+    "ibgp_dc_p3": PeerRelationship.INTERNAL,
+    "ibgp_dc_p4": PeerRelationship.INTERNAL,
+    "ibgp_mp_p1": PeerRelationship.INTERNAL,
+    "ibgp_mp_p2": PeerRelationship.INTERNAL,
+    "ibgp_mp_p3": PeerRelationship.INTERNAL,
+    "ibgp_mp_p4": PeerRelationship.INTERNAL,
+    "ibgp_ug_keep_initial": PeerRelationship.INTERNAL,
+    "ibgp_ug_keep_mutated": PeerRelationship.INTERNAL,
+    "ibgp_ug_var1": PeerRelationship.INTERNAL,
+    "ibgp_ug_var2": PeerRelationship.INTERNAL,
+    "bgpmon": PeerRelationship.MONITOR,
+}
 _DEVICE_CONFIG_OVERRIDDEN_FIELDS_ATTR = "_taac_overridden_fields"
 _DEVICE_CONFIG_FIELDS = tuple(
     config_field
@@ -72,7 +98,6 @@ class _BindingContext:
     parent_networks: t.Mapping[str, str]
     peer_groups: t.Mapping[str, BgpPeerGroup | str]
     as_numbers: t.Mapping[str, int]
-    logical_topology_legacy_profile: str | None
     endpoint_by_name: t.Mapping[str, EndpointSpec]
     endpoint_os: t.Mapping[str, str]
     bound_ips: dict[str, tuple[str, str]]
@@ -84,6 +109,7 @@ class _BindingContext:
 class _BoundTopologyMappings:
     resolved_endpoints: t.Mapping[str, t.Mapping[str, t.Any]]
     resolved_device_groups: t.Mapping[str, t.Mapping[str, t.Any]]
+    endpoint_network_roles: t.Mapping[str, NetworkRole]
     routing_drivers: t.Mapping[str, str]
     ixia_ports: t.Mapping[str, str]
     interfaces: t.Mapping[str, str]
@@ -201,7 +227,6 @@ def _build_binding_context(
         parent_networks=parent_networks,
         peer_groups=peer_groups,
         as_numbers=as_numbers,
-        logical_topology_legacy_profile=logical_topology.legacy_profile,
         endpoint_by_name=endpoint_by_name,
         endpoint_os=endpoint_os,
         bound_ips={},
@@ -454,6 +479,7 @@ def _build_bound_topology(
         resolved_endpoints=mappings.resolved_endpoints,
         resolved_device_groups=mappings.resolved_device_groups,
         endpoint_os=context.endpoint_os,
+        endpoint_network_roles=mappings.endpoint_network_roles,
         routing_drivers=mappings.routing_drivers,
         ixia_ports=mappings.ixia_ports,
         interfaces=mappings.interfaces,
@@ -796,6 +822,103 @@ def _validate_legacy_device_group_indices(
                 indices_by_connection[connection][legacy_index] = path
 
 
+def _validate_bound_endpoint_resolution(
+    bound: BoundTopology,
+    endpoint: EndpointSpec,
+    issues: list[ValidationIssue],
+) -> None:
+    if endpoint.name not in bound.endpoint_os:
+        issues.append(
+            ValidationIssue(
+                path=f"endpoint_os.{endpoint.name}",
+                code="unresolved_endpoint_os",
+                message="bound endpoint has no resolved backend OS",
+            )
+        )
+    resolved_endpoint = bound.resolved_endpoints.get(endpoint.name)
+    if resolved_endpoint is None:
+        issues.append(
+            ValidationIssue(
+                path=f"resolved_endpoints.{endpoint.name}",
+                code="missing_resolved_endpoint",
+                message="bound endpoint has no resolved physical identifier",
+            )
+        )
+        return
+    identifier_field = resolved_endpoint.get("physical_identifier_field")
+    if identifier_field not in {"device_name", "ixia_chassis_ip"}:
+        issues.append(
+            ValidationIssue(
+                path=(f"resolved_endpoints.{endpoint.name}.physical_identifier_field"),
+                code="unresolved_endpoint_physical_identifier",
+                message="bound endpoint has no resolved physical identifier field",
+            )
+        )
+    elif not getattr(bound.physical_inventory, identifier_field, None):
+        issues.append(
+            ValidationIssue(
+                path=f"resolved_endpoints.{endpoint.name}.physical_identifier",
+                code="unresolved_endpoint_physical_identifier",
+                message="bound endpoint has no resolved physical identifier",
+            )
+        )
+
+
+def _validate_bound_endpoint_network_role(
+    endpoint_name: str,
+    network_role: NetworkRole,
+    endpoint_by_name: t.Mapping[str, EndpointSpec],
+    issues: list[ValidationIssue],
+) -> None:
+    endpoint = endpoint_by_name.get(endpoint_name)
+    if endpoint is None:
+        issues.append(
+            ValidationIssue(
+                path=f"endpoint_network_roles.{endpoint_name}",
+                code="unknown_endpoint_network_role",
+                message="network role references an unknown logical endpoint",
+            )
+        )
+    elif not _endpoint_is_dut(endpoint):
+        issues.append(
+            ValidationIssue(
+                path=f"endpoint_network_roles.{endpoint_name}",
+                code="traffic_endpoint_network_role",
+                message="network-device roles may only be assigned to DUT endpoints",
+            )
+        )
+    if not isinstance(network_role, NetworkRole):
+        issues.append(
+            ValidationIssue(
+                path=f"endpoint_network_roles.{endpoint_name}",
+                code="invalid_endpoint_network_role",
+                message="bound endpoint network role must be a NetworkRole",
+            )
+        )
+
+
+def _validate_inventory_network_role(
+    bound: BoundTopology,
+    issues: list[ValidationIssue],
+) -> None:
+    inventory_network_role = getattr(bound.physical_inventory, "network_role", None)
+    if not isinstance(inventory_network_role, NetworkRole):
+        return
+    for endpoint in bound.logical_topology.endpoints:
+        if (
+            _endpoint_is_dut(endpoint)
+            and bound.endpoint_network_roles.get(endpoint.name)
+            is not inventory_network_role
+        ):
+            issues.append(
+                ValidationIssue(
+                    path=f"endpoint_network_roles.{endpoint.name}",
+                    code="missing_endpoint_network_role",
+                    message="DUT endpoint did not retain the inventory network role",
+                )
+            )
+
+
 def _validate_bound_endpoints(
     bound: BoundTopology,
     issues: list[ValidationIssue],
@@ -809,45 +932,7 @@ def _validate_bound_endpoints(
             )
         )
     for endpoint in bound.logical_topology.endpoints:
-        if endpoint.name not in bound.endpoint_os:
-            issues.append(
-                ValidationIssue(
-                    path=f"endpoint_os.{endpoint.name}",
-                    code="unresolved_endpoint_os",
-                    message="bound endpoint has no resolved backend OS",
-                )
-            )
-        if endpoint.name not in bound.resolved_endpoints:
-            issues.append(
-                ValidationIssue(
-                    path=f"resolved_endpoints.{endpoint.name}",
-                    code="missing_resolved_endpoint",
-                    message="bound endpoint has no resolved physical identifier",
-                )
-            )
-        else:
-            identifier_field = bound.resolved_endpoints[endpoint.name].get(
-                "physical_identifier_field"
-            )
-            if identifier_field not in {"device_name", "ixia_chassis_ip"}:
-                issues.append(
-                    ValidationIssue(
-                        path=(
-                            f"resolved_endpoints.{endpoint.name}."
-                            "physical_identifier_field"
-                        ),
-                        code="unresolved_endpoint_physical_identifier",
-                        message="bound endpoint has no resolved physical identifier field",
-                    )
-                )
-            elif not getattr(bound.physical_inventory, identifier_field, None):
-                issues.append(
-                    ValidationIssue(
-                        path=f"resolved_endpoints.{endpoint.name}.physical_identifier",
-                        code="unresolved_endpoint_physical_identifier",
-                        message="bound endpoint has no resolved physical identifier",
-                    )
-                )
+        _validate_bound_endpoint_resolution(bound, endpoint, issues)
     for endpoint_name, endpoint_os in bound.endpoint_os.items():
         if endpoint_os == "unknown":
             issues.append(
@@ -857,6 +942,17 @@ def _validate_bound_endpoints(
                     message="bound endpoint has unresolved backend OS",
                 )
             )
+    endpoint_by_name = {
+        endpoint.name: endpoint for endpoint in bound.logical_topology.endpoints
+    }
+    for endpoint_name, network_role in bound.endpoint_network_roles.items():
+        _validate_bound_endpoint_network_role(
+            endpoint_name,
+            network_role,
+            endpoint_by_name,
+            issues,
+        )
+    _validate_inventory_network_role(bound, issues)
 
 
 def validate_bound_topology_for_compile(bound: BoundTopology) -> None:  # noqa: C901
@@ -875,6 +971,39 @@ def validate_bound_topology_for_compile(bound: BoundTopology) -> None:  # noqa: 
     for index, dg in enumerate(bound.device_groups):
         _validate_bound_legacy_bgp_peer_name(dg, index, bound, issues)
         _validate_bound_ixia_children(dg, index, bound, issues)
+        if dg.peer_relationship is not None and not isinstance(
+            dg.peer_relationship,
+            PeerRelationship,
+        ):
+            issues.append(
+                ValidationIssue(
+                    path=f"device_groups[{index}].peer_relationship",
+                    code="invalid_peer_relationship",
+                    message="bound peer relationship must be a PeerRelationship",
+                )
+            )
+        if (
+            NetworkRole.EB in bound.endpoint_network_roles.values()
+            and dg.peer_relationship is None
+        ):
+            issues.append(
+                ValidationIssue(
+                    path=f"device_groups[{index}].peer_relationship",
+                    code="missing_peer_relationship",
+                    message="EB adjacencies require a normalized peer relationship",
+                )
+            )
+        if (
+            dg.spec.peer_relationship is not None
+            and dg.peer_relationship is not dg.spec.peer_relationship
+        ):
+            issues.append(
+                ValidationIssue(
+                    path=f"device_groups[{index}].peer_relationship",
+                    code="resolved_peer_relationship_mismatch",
+                    message="bound peer relationship differs from logical intent",
+                )
+            )
         if dg.route_attributes != dg.spec.route_attributes:
             issues.append(
                 ValidationIssue(
@@ -1384,11 +1513,60 @@ def _bind_device_group(
 ) -> BoundDeviceGroup:
     path = f"device_groups[{index}]"
     base_role = _base_role(dg.role)
+    peer_relationship = _resolve_peer_relationship(dg, path, context)
 
     ports = _resolve_device_group_ports(dg, base_role, path, context)
     addresses = _resolve_device_group_addresses(dg, base_role, path, context)
-    bgp = _resolve_device_group_bgp(dg, base_role, path, context)
-    return _build_bound_device_group(dg, ports, addresses, bgp, context)
+    bgp = _resolve_device_group_bgp(
+        dg,
+        base_role,
+        peer_relationship,
+        path,
+        context,
+    )
+    return _build_bound_device_group(
+        dg,
+        ports,
+        addresses,
+        bgp,
+        peer_relationship,
+        context,
+    )
+
+
+def _resolve_peer_relationship(
+    dg: DeviceGroupSpec,
+    path: str,
+    context: _BindingContext,
+) -> PeerRelationship | None:
+    relationship = dg.peer_relationship
+    if relationship is not None and not isinstance(relationship, PeerRelationship):
+        context.issues.append(
+            ValidationIssue(
+                path=f"{path}.peer_relationship",
+                code="invalid_peer_relationship",
+                message="peer relationship must be a PeerRelationship",
+            )
+        )
+        return None
+    if relationship is not None:
+        return relationship
+    relationship = _LEGACY_PEER_RELATIONSHIPS.get(dg.role)
+    if (
+        relationship is None
+        and getattr(context.physical_inventory, "network_role", None) is NetworkRole.EB
+    ):
+        context.issues.append(
+            ValidationIssue(
+                path=f"{path}.peer_relationship",
+                code="missing_peer_relationship",
+                message=(
+                    "EB device groups require an explicit peer relationship; "
+                    "the raw role has no exact compatibility mapping"
+                ),
+            )
+        )
+    return relationship
 
 
 def _resolve_device_group_ports(
@@ -1501,6 +1679,7 @@ def _resolve_device_group_addresses(
 def _resolve_device_group_bgp(
     dg: DeviceGroupSpec,
     base_role: str,
+    peer_relationship: PeerRelationship | None,
     path: str,
     context: _BindingContext,
 ) -> _ResolvedDeviceGroupBgp:
@@ -1521,9 +1700,8 @@ def _resolve_device_group_bgp(
     )
     _validate_standard_bgp_role_asn_relationship(
         dg=dg,
-        base_role=base_role,
-        peer_group=peer_group,
-        logical_topology_legacy_profile=context.logical_topology_legacy_profile,
+        peer_relationship=peer_relationship,
+        local_network_role=getattr(context.physical_inventory, "network_role", None),
         local_asn=local_asn,
         local_asn_source=local_asn_source,
         remote_asn=remote_asn,
@@ -1563,6 +1741,7 @@ def _build_bound_device_group(
     ports: _ResolvedDeviceGroupPorts,
     addresses: _ResolvedDeviceGroupAddresses,
     bgp: _ResolvedDeviceGroupBgp,
+    peer_relationship: PeerRelationship | None,
     context: _BindingContext,
 ) -> BoundDeviceGroup:
     a_os = context.endpoint_os[dg.a_endpoint]
@@ -1590,6 +1769,7 @@ def _build_bound_device_group(
         partition=dg.partition,
         legacy_ixia_device_group_index=dg.legacy_ixia_device_group_index,
         route_attributes=dg.route_attributes,
+        peer_relationship=peer_relationship,
         provenance=ResolvedDeviceGroupProvenance(
             parent_network=addresses.parent_network,
             parent_network_source=addresses.parent_network_source,
@@ -1614,7 +1794,15 @@ def _build_bound_topology_mappings(
         if interface is not None:
             interfaces[bound_dg.name] = interface
 
+    network_role = getattr(physical_inventory, "network_role", None)
+    endpoint_network_roles = {
+        endpoint.name: network_role
+        for endpoint in logical_topology.endpoints
+        if _endpoint_is_dut(endpoint) and isinstance(network_role, NetworkRole)
+    }
+
     return _BoundTopologyMappings(
+        endpoint_network_roles=endpoint_network_roles,
         resolved_endpoints={
             endpoint.name: {
                 "os": endpoint_os[endpoint.name],
@@ -1674,6 +1862,15 @@ def _validate_physical_inventory(
     physical_inventory: t.Any,
     issues: list[ValidationIssue],
 ) -> None:
+    network_role = getattr(physical_inventory, "network_role", None)
+    if network_role is not None and not isinstance(network_role, NetworkRole):
+        issues.append(
+            ValidationIssue(
+                path="physical_inventory.network_role",
+                code="invalid_physical_inventory_field",
+                message="physical_inventory.network_role must be a NetworkRole",
+            )
+        )
     if not getattr(physical_inventory, "device_name", None):
         issues.append(
             ValidationIssue(
@@ -2168,9 +2365,8 @@ def _valid_asn_or_none(value: t.Any) -> int | None:
 def _validate_standard_bgp_role_asn_relationship(
     *,
     dg: DeviceGroupSpec,
-    base_role: str,
-    peer_group: BgpPeerGroup | str | None,
-    logical_topology_legacy_profile: str | None,
+    peer_relationship: PeerRelationship | None,
+    local_network_role: NetworkRole | None,
     local_asn: int | None,
     local_asn_source: str | None,
     remote_asn: int | None,
@@ -2179,11 +2375,9 @@ def _validate_standard_bgp_role_asn_relationship(
 ) -> None:
     if local_asn is None or remote_asn is None:
         return
-    if base_role in _STANDARD_SAME_AS_BGP_ROLES and local_asn != remote_asn:
-        if _is_legacy_ebb_ibgp_physical_inventory_as_fallback(
-            dg=dg,
-            peer_group=peer_group,
-            logical_topology_legacy_profile=logical_topology_legacy_profile,
+    if peer_relationship is PeerRelationship.INTERNAL and local_asn != remote_asn:
+        if _is_eb_inventory_identity_asn_fallback(
+            local_network_role=local_network_role,
             local_asn_source=local_asn_source,
         ):
             return
@@ -2197,7 +2391,14 @@ def _validate_standard_bgp_role_asn_relationship(
                 ),
             )
         )
-    if base_role in _STANDARD_DIFFERENT_AS_BGP_ROLES and local_asn == remote_asn:
+    if (
+        peer_relationship
+        in {
+            PeerRelationship.EXTERNAL,
+            PeerRelationship.MONITOR,
+        }
+        and local_asn == remote_asn
+    ):
         issues.append(
             ValidationIssue(
                 path=f"{path}.role",
@@ -2210,33 +2411,17 @@ def _validate_standard_bgp_role_asn_relationship(
         )
 
 
-def _is_legacy_ebb_ibgp_physical_inventory_as_fallback(
+def _is_eb_inventory_identity_asn_fallback(
     *,
-    dg: DeviceGroupSpec,
-    peer_group: BgpPeerGroup | str | None,
-    logical_topology_legacy_profile: str | None,
+    local_network_role: NetworkRole | None,
     local_asn_source: str | None,
 ) -> bool:
-    # Legacy EBB full-scale has split AS identity:
-    # PhysicalInventory.dut_bgp_as names the BAG routing fixture, while BGP++
-    # local_as_4_byte is the protocol local AS.
-    # EB-EB peer groups currently omit local_asn, so do not compare their iBGP
-    # remote AS against the physical inventory fixture AS during the migration.
-    if (
-        logical_topology_legacy_profile != "ebb_full_scale"
-        or local_asn_source != "physical_inventory.dut_bgp_as"
-        or _base_role(dg.role) != "ibgp"
-    ):
-        return False
-    return _peer_group_name(peer_group) in {"EB-EB-V4", "EB-EB-V6"}
-
-
-def _peer_group_name(peer_group: BgpPeerGroup | str | None) -> str | None:
-    if isinstance(peer_group, BgpPeerGroup):
-        return peer_group.name
-    if isinstance(peer_group, str):
-        return peer_group
-    return None
+    # The current EB inventory ASN identifies the physical fixture, while the
+    # fetched routing artifact owns the protocol-local ASN.
+    return (
+        local_network_role is NetworkRole.EB
+        and local_asn_source == "physical_inventory.dut_bgp_as"
+    )
 
 
 def _record_duplicate_ips(

@@ -41,6 +41,7 @@ def inspect_resolved_intent(bound: BoundTopology) -> ResolvedIntentReport:
                 bound.resolved_endpoints[endpoint.name]["physical_identifier_field"],
                 None,
             ),
+            network_role=bound.endpoint_network_roles.get(endpoint.name),
         )
         for endpoint in bound.logical_topology.endpoints
     )
@@ -107,6 +108,7 @@ def inspect_resolved_intent(bound: BoundTopology) -> ResolvedIntentReport:
                 )
                 for child in device_group.ixia_children
             ),
+            peer_relationship=device_group.peer_relationship,
         )
         for device_group in bound.device_groups
     )

@@ -5,6 +5,10 @@ from taac.abstractions.artifacts import CompiledTaacArtifacts
 from taac.abstractions.physical_inventory.physical_inventory import (
     PhysicalInventory,
 )
+from taac.abstractions.routing_semantics import (
+    NetworkRole,
+    PeerRelationship,
+)
 from taac.abstractions.topology import (
     AddressPlan,
     AsPathSequence,
@@ -84,10 +88,12 @@ __all__ = (
     "NextHopDistribution",
     "NextHopIntent",
     "NextHopMode",
+    "NetworkRole",
     "OpenRMode",
     "OpenRSetupSequence",
     "PhysicalInventory",
     "PeerPrefixDistribution",
+    "PeerRelationship",
     "PrefixAdvertisement",
     "PrefixAllocation",
     "PrefixMembership",

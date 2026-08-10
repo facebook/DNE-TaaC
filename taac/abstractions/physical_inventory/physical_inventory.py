@@ -7,6 +7,7 @@ from __future__ import annotations
 import typing as t
 from dataclasses import dataclass, field, replace
 
+from taac.abstractions.routing_semantics import NetworkRole
 from taac.abstractions.topology import OpenRStandaloneLink
 from taac.test_as_a_config.types import MockDeviceInfo
 
@@ -86,12 +87,23 @@ class PhysicalInventory:
     # unlocked (chassis alone is treated as a placeholder).
     secondary_ixia_ports: list[tuple[str, str]] = field(default_factory=list)
 
+    # ─── Explicit network role ────────────────────────────────────────────
+    network_role: NetworkRole | None = None
+
     @property
     def ixia_chassis_ip(self) -> str:
         """Compatibility alias for factories that consume the primary chassis."""
         return self.primary_ixia_chassis_ip
 
     def __post_init__(self) -> None:
+        if self.network_role is not None and not isinstance(
+            self.network_role, NetworkRole
+        ):
+            raise ValueError(
+                f"PhysicalInventory {self.device_name}: network_role must be a "
+                "NetworkRole member or None"
+            )
+
         bad = self.usage - VALID_USAGES
         if bad:
             raise ValueError(

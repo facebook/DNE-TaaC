@@ -823,8 +823,8 @@ compatibility deletion follow the approved design.
 
 ## Weekend implementation plan
 
-Status: implementation started 2026-08-07. Diffs 1.5.0 and 1.5.1 are committed;
-Diff 1.5.2 is in validation.
+Status: implementation started 2026-08-07. Diffs 1.5.0-1.5.2 are committed;
+Diff 1.5.3 is locally complete.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -860,9 +860,9 @@ The task-free contracts expose policy bindings and component resources, but the
 current logical topology does not yet provide enough platform-neutral input to
 populate them safely:
 
-- `BgpPolicy` does not encode import versus export direction. Directional
-  `PolicyBinding` projection remains in Diff 1.5.3 with the normalized
-  relationship and EB policy seam.
+- `BgpPolicy` does not encode DUT import versus export direction. Diff 1.5.3
+  resolves directional DUT bindings from typed network role, relationship,
+  AFI, and direction instead of misusing advertisement `BgpPolicy` intent.
 - Current topology intent does not declare semantic component roles or their
   dependencies. `ComponentPlan` projection remains in Diff 1.5.5 with EOS
   renderer extraction; the common planner must not infer daemon roles.
@@ -875,6 +875,51 @@ sidecar keyed by stable `ResourceId`. The sidecar cannot affect allocation,
 capability selection, scheduling, ownership, or lifecycle. Peer counts,
 partitions, child windows, physical inventory indices, ports, addresses, ASNs,
 and route geometry remain semantic plan data.
+
+### Phase 1.5.3 implementation result
+
+The implementation uses strict `NetworkRole` and `PeerRelationship` enums.
+All eleven definite EBB inventories in `routing_ebb_testbed.py` declare `EB`;
+QZD/FSW inventories remain unclassified rather than inheriting a role from a
+hostname or Configerator path. `EndpointSpec.role="dut"` is unchanged, and the
+new role is propagated in a separate typed bound mapping so legacy resolution
+dictionaries retain their exact shape.
+
+All 37 directly authored current device groups declare external, internal, or
+monitor relationship explicitly. Derived UG-backpressure groups retain the
+relationship through immutable replacement. Binding keeps one exact legacy
+role table for older callers, but policy projection never parses raw role
+strings, topology names, or `legacy_profile`.
+
+The common catalog contains the complete twelve-key EB semantic matrix:
+three relationships by two AFIs by import/export. The EOS/BGP++ compatibility
+binding supports the ten references proven by the current profile: external
+and internal v4/v6 plus monitor v6. Monitor v4 fails before established task
+rendering because no current topology or Configerator contract proves that
+mapping. The normal path still consumes the fetched Configerator artifact; it
+does not patch BGP++ policy content.
+
+The full EBB+BGP-MON candidate plan contains ten selected semantic presets,
+1,274 present adjacencies, and 2,548 directional bindings. Declared
+advertisement policies remain separate. EOS peer-group, route-map, and profile
+literals live only in the compatibility binding, and the candidate adapter
+preflights every selected preset before delegating unchanged artifact rendering
+to the established compiler.
+
+The EB inventory-ASN compatibility rule is also typed and provenance-limited:
+only an internal adjacency on an `EB` inventory may treat
+`physical_inventory.dut_bgp_as` as fixture identity while the fetched routing
+artifact owns the protocol-local ASN. An unclassified inventory or an
+explicitly authored local-ASN mismatch still fails validation. The rule does
+not inspect a topology profile, role string, ASN-map key, or EOS peer-group
+name.
+
+Final local validation passed on 2026-08-07: the full abstraction suite passed
+471/471 tests (TestInfra `10977524280131120`), and the factory golden gate passed
+2/2 tests (TestInfra `28710447648723841`). Golden regeneration found 294
+unchanged configurations, with zero additions, changes, or removals. The
+manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model
 
@@ -1188,8 +1233,9 @@ are fixed within the owning diff without expanding scope.
 | `W1-03` | Open | 1.5.1 | The import gate needs a complete packaged-source inventory. Select explicit AST inputs or a build-layering rule; do not rely on a best-effort filesystem walk. |
 | `W2-01` | Open | 1.5.2 | Freeze resource-ID namespace/tie-breaks, borrowed teardown, snapshot reuse, readiness representation, and cleanup-error aggregation before parallel coding. |
 | `W2-02` | Open | 1.5.2 | `CompileReport` cannot change flat artifacts. Choose an internal `CompilationResult` stripped by the adapter or a separate inspection API. |
-| `W3-01` | Stretch-open | 1.5.3 | Choose enum versus normalized string for network role and confirm whether only BAG inventories or every EBB-class inventory is marked now. |
+| `W3-01` | Resolved | 1.5.3 | Use a strict enum. Mark all eleven definite inventories in `routing_ebb_testbed.py`; do not infer roles for QZD/FSW inventories. |
 | `W3-02` | Known limit | 1.5.3 | Configerator lacks a complete peer/policy capability contract. Bind existing references only and leave peer materialization as explicit compatibility debt. |
+| `W3-03` | Deferred | 1.5.3 | EOS monitor-v4 has no current topology or profile-contract evidence. Keep semantic intent representable but fail EOS capability resolution until the Configerator owner confirms a mapping. |
 
 Traffic items, generalized OpenR/helper semantics, FBOSS emission, and Phase
 1.6/1.7 capabilities are recorded deferrals, not blockers for the weekend
