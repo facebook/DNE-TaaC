@@ -578,6 +578,11 @@ def _validate_initial_ipv6_advertisement(
             f"IXIA advertisement {advertisement.resource_id} has unsupported "
             f"next-hop mode {advertisement.next_hop.mode.value}"
         )
+    if advertisement.next_hop.self_realization is not None:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has unsupported "
+            "self next-hop realization"
+        )
     if advertisement.attributes or advertisement.route_attributes is not None:
         _unsupported(
             f"IXIA advertisement {advertisement.resource_id} has unsupported "
@@ -616,6 +621,11 @@ def _validate_compact_named_ipv6_advertisement(
 ) -> None:
     prefix_window = advertisement.prefix_window
     identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    if advertisement.next_hop.self_realization is not None:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has unsupported "
+            "self next-hop realization"
+        )
     if (
         advertisement.afi is not AddressFamily.IPV6
         or advertisement.next_hop.mode is not IxiaNextHopMode.SELF

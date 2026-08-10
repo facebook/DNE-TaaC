@@ -18,6 +18,10 @@ class NextHopMode(str, Enum):
     EXPLICIT = "explicit"
 
 
+class SelfNextHopRealization(str, Enum):
+    ADVERTISING_SESSION_LOCAL_ADDRESS = "advertising_session_local_address"
+
+
 class NextHopDistribution(str, Enum):
     SHARED = "shared"
     PER_PEER = "per_peer"
@@ -80,3 +84,4 @@ class NextHopIntent:
     formulaic_source: FormulaicNextHopSource | None = None
     explicit_source: ExplicitNextHopSource | None = None
     description: str | None = None
+    self_realization: SelfNextHopRealization | None = None

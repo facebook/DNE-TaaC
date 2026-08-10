@@ -31,6 +31,7 @@ from taac.abstractions.compilation.model import (
     IxiaPrefixWindowPlan,
     IxiaRouteAttributeDistribution,
     IxiaRouteAttributePoolPlan,
+    IxiaSelfNextHopRealization,
     IxiaStandardCommunityPlan,
     ResourceId,
 )
@@ -491,6 +492,8 @@ def _advertisement_plan(
 
 def _next_hop_plan(intent: NextHopIntent, afi: str) -> IxiaNextHopPlan:
     mode = IxiaNextHopMode(intent.mode.value)
+    if mode is not IxiaNextHopMode.SELF and intent.self_realization is not None:
+        raise ValueError("non-self IXIA next hop cannot carry a self realization")
     distribution = (
         IxiaNextHopDistribution(intent.distribution.value)
         if intent.distribution is not None
@@ -515,7 +518,14 @@ def _next_hop_plan(intent: NextHopIntent, afi: str) -> IxiaNextHopPlan:
             distribution=distribution,
             explicit_addresses=explicit.addresses,
         )
-    return IxiaNextHopPlan(mode=mode)
+    return IxiaNextHopPlan(
+        mode=mode,
+        self_realization=(
+            IxiaSelfNextHopRealization(intent.self_realization.value)
+            if intent.self_realization is not None
+            else None
+        ),
+    )
 
 
 def _route_attribute_plan(

@@ -26,8 +26,10 @@ from taac.abstractions.topology.model import (
 )
 from taac.abstractions.topology.prefix import (
     NextHopDistribution,
+    NextHopIntent,
     NextHopMode,
     PeerPrefixDistribution,
+    SelfNextHopRealization,
 )
 
 if t.TYPE_CHECKING:
@@ -588,6 +590,28 @@ def _validate_next_hop_intent(
     issues: list[ValidationIssue],
 ) -> None:
     next_hop = advertisement.next_hop
+    if not _validate_next_hop_types(next_hop, path, issues):
+        return
+    if next_hop.mode == NextHopMode.SELF:
+        _validate_self_next_hop(next_hop, path, issues)
+        return
+    distribution = _validate_external_next_hop(next_hop, path, issues)
+    if distribution is None:
+        return
+    required = _next_hop_cardinality(
+        distribution,
+        peer_count,
+        advertisement.allocation.prefixes_per_peer,
+        distinct_prefix_count,
+    )
+    _validate_next_hop_source(next_hop, required, afi, path, issues)
+
+
+def _validate_next_hop_types(
+    next_hop: NextHopIntent,
+    path: str,
+    issues: list[ValidationIssue],
+) -> bool:
     if not isinstance(next_hop.mode, NextHopMode):
         issues.append(
             _issue(
@@ -596,25 +620,58 @@ def _validate_next_hop_intent(
                 "next-hop mode must be a NextHopMode",
             )
         )
-        return
-    if next_hop.mode == NextHopMode.SELF:
-        if any(
-            value is not None
-            for value in (
-                next_hop.distribution,
-                next_hop.formulaic_source,
-                next_hop.explicit_source,
-                next_hop.description,
+        return False
+    if next_hop.self_realization is not None and not isinstance(
+        next_hop.self_realization,
+        SelfNextHopRealization,
+    ):
+        issues.append(
+            _issue(
+                f"{path}.next_hop.self_realization",
+                "invalid_self_next_hop_realization",
+                "self next-hop realization must be a SelfNextHopRealization",
             )
-        ):
-            issues.append(
-                _issue(
-                    f"{path}.next_hop",
-                    "invalid_self_next_hop",
-                    "SELF next hop cannot carry a source or distribution",
-                )
+        )
+        return False
+    return True
+
+
+def _validate_self_next_hop(
+    next_hop: NextHopIntent,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if any(
+        value is not None
+        for value in (
+            next_hop.distribution,
+            next_hop.formulaic_source,
+            next_hop.explicit_source,
+            next_hop.description,
+        )
+    ):
+        issues.append(
+            _issue(
+                f"{path}.next_hop",
+                "invalid_self_next_hop",
+                "SELF next hop cannot carry a source or distribution",
             )
-        return
+        )
+
+
+def _validate_external_next_hop(
+    next_hop: NextHopIntent,
+    path: str,
+    issues: list[ValidationIssue],
+) -> NextHopDistribution | None:
+    if next_hop.self_realization is not None:
+        issues.append(
+            _issue(
+                f"{path}.next_hop.self_realization",
+                "invalid_self_next_hop_realization",
+                "only SELF next hop can select a self realization",
+            )
+        )
     if next_hop.distribution is None:
         issues.append(
             _issue(
@@ -623,7 +680,7 @@ def _validate_next_hop_intent(
                 "non-SELF next hop requires an explicit distribution",
             )
         )
-        return
+        return None
     if not isinstance(next_hop.distribution, NextHopDistribution):
         issues.append(
             _issue(
@@ -632,7 +689,7 @@ def _validate_next_hop_intent(
                 "next-hop distribution must be a NextHopDistribution",
             )
         )
-        return
+        return None
     if not next_hop.description or not next_hop.description.strip():
         issues.append(
             _issue(
@@ -641,12 +698,16 @@ def _validate_next_hop_intent(
                 "external next-hop reachability requires a description",
             )
         )
-    required = _next_hop_cardinality(
-        next_hop.distribution,
-        peer_count,
-        advertisement.allocation.prefixes_per_peer,
-        distinct_prefix_count,
-    )
+    return next_hop.distribution
+
+
+def _validate_next_hop_source(
+    next_hop: NextHopIntent,
+    required: int,
+    afi: str,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
     if next_hop.mode == NextHopMode.FORMULAIC:
         if next_hop.formulaic_source is None or next_hop.explicit_source is not None:
             issues.append(

@@ -62,6 +62,10 @@ class IxiaNextHopMode(str, Enum):
     EXPLICIT = "explicit"
 
 
+class IxiaSelfNextHopRealization(str, Enum):
+    ADVERTISING_SESSION_LOCAL_ADDRESS = "advertising_session_local_address"
+
+
 class IxiaNextHopDistribution(str, Enum):
     SHARED = "shared"
     PER_PEER = "per_peer"
@@ -216,11 +220,19 @@ class IxiaNextHopPlan:
     formulaic_start: str | None = None
     formulaic_step: int | None = None
     explicit_addresses: tuple[str, ...] = ()
+    self_realization: IxiaSelfNextHopRealization | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, IxiaNextHopMode):
             raise TypeError("next-hop mode must be an IxiaNextHopMode")
         if self.mode is IxiaNextHopMode.SELF:
+            if self.self_realization is not None and not isinstance(
+                self.self_realization,
+                IxiaSelfNextHopRealization,
+            ):
+                raise TypeError(
+                    "self next-hop realization must be an IxiaSelfNextHopRealization"
+                )
             if (
                 self.distribution is not None
                 or self.formulaic_start is not None
@@ -229,6 +241,8 @@ class IxiaNextHopPlan:
             ):
                 raise ValueError("self next hop cannot carry a source or distribution")
             return
+        if self.self_realization is not None:
+            raise ValueError("non-self next hop cannot carry a self realization")
         if not isinstance(self.distribution, IxiaNextHopDistribution):
             raise ValueError("non-self next hop requires a distribution")
         if self.mode is IxiaNextHopMode.FORMULAIC:

@@ -39,6 +39,7 @@ from taac.abstractions.topology import (
     RouteAttributePool,
     RouteSender,
     RoutingDeviceConfig,
+    SelfNextHopRealization,
     StandardCommunity,
 )
 
@@ -128,7 +129,10 @@ BOUNDED_ECMP_EBGP_V6_ADVERTISEMENT = PrefixAdvertisement(
         start_index=0,
         prefix_count=BOUNDED_ECMP_PREFIX_COUNT,
     ),
-    next_hop=NextHopIntent(mode=NextHopMode.SELF),
+    next_hop=NextHopIntent(
+        mode=NextHopMode.SELF,
+        self_realization=(SelfNextHopRealization.ADVERTISING_SESSION_LOCAL_ADDRESS),
+    ),
     route_attributes=BOUNDED_ECMP_ROUTE_ATTRIBUTES,
 )
 BOUNDED_ECMP_EBGP_V4_ADVERTISEMENT = PrefixAdvertisement(
@@ -143,7 +147,10 @@ BOUNDED_ECMP_EBGP_V4_ADVERTISEMENT = PrefixAdvertisement(
         start_index=0,
         prefix_count=BOUNDED_ECMP_PREFIX_COUNT,
     ),
-    next_hop=NextHopIntent(mode=NextHopMode.SELF),
+    next_hop=NextHopIntent(
+        mode=NextHopMode.SELF,
+        self_realization=(SelfNextHopRealization.ADVERTISING_SESSION_LOCAL_ADDRESS),
+    ),
     route_attributes=BOUNDED_ECMP_ROUTE_ATTRIBUTES,
 )
 

@@ -896,6 +896,8 @@ of Phase 1.5:
 14. **Completed shadow capability:** Diff 1.5.5h, compose IXIA port bases and
     device-group bodies by stable resource ID without changing artifact or
     renderer-report authority.
+15. **Completed semantic prerequisite:** Diff 1.5.5i, distinguish an explicitly
+    selected advertising-session local next hop from an unset IXIA default.
 
 Remaining shared IXIA device-group, session, advertisement, and lifecycle
 capabilities, EOS lifecycle/config/interface rendering, facade cutover, Phase
@@ -1541,6 +1543,36 @@ unchanged, with manifest SHA-256
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. Two
 independent audits found no remaining architecture or mutation-sensitivity
 issue.
+
+#### Typed self next-hop realization
+
+`SELF` next-hop intent now has an optional behavioral realization rather than
+using legacy identity or route shape to select IXIA serialization. The initial
+explicit value means that the advertising BGP session's local address must be
+used. The task-free IXIA plan carries the normalized value, and it is legal
+only with `IxiaNextHopMode.SELF`.
+
+Bounded ECMP declares this requirement for its six eBGP child advertisements,
+matching the established `SAME_AS_LOCAL_IP` behavior in both frozen full and
+skip cases. Existing UG and IPv6 update-packing advertisements intentionally
+retain no explicit realization. Their native renderer paths now reject a
+nonempty value rather than silently preserving the old omitted field. Egress
+and EBB remain deferred until their desired behavior is represented and proven
+independently; the planner does not infer realization from topology/profile
+name, OpenR mode, route geometry, or legacy IXIA identity.
+
+Legacy device-group, peer, prefix, and index values remain optional custom
+topology presentation attributes projected into the resource-keyed identity
+sidecar. They can preserve serialized names and indices, but cannot select
+next-hop behavior, capability, allocation, ordering, ownership, or lifecycle.
+
+Validation passed the focused topology, model, planner, and renderer gate
+(81/81, TestInfra `12103424186717476`) and the complete abstraction suite
+(568/568, TestInfra `3659175079964137`). Changed-target Pyre checked nineteen
+targets without errors. The factory golden gate passed 2/2 (TestInfra
+`7036874786034830`), and golden regeneration reported all 294 configs
+unchanged, with manifest SHA-256
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model
 

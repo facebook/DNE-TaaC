@@ -59,6 +59,7 @@ from taac.abstractions.topology.prefix import (
     PrefixAllocation,
     PrefixMembership,
     PrefixSet,
+    SelfNextHopRealization,
 )
 from taac.abstractions.topology.routes import (
     FormulaicAddressSequence,
@@ -125,6 +126,7 @@ __all__ = (
     "RouteAttributePool",
     "RouteSender",
     "RoutingDeviceConfig",
+    "SelfNextHopRealization",
     "StandardCommunity",
     "TrafficFlowSpec",
 )
