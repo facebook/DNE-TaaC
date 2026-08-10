@@ -165,6 +165,29 @@ POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
 
 EBB_BGPCPP_LOGGING_CONFIG = "DBG3;default:async=true"
 
+
+def build_update_group_setting_override_cmd(
+    enable_update_group: bool,
+    *,
+    config_path: str = "/mnt/flash/bgpcpp_config",
+) -> str:
+    enabled_literal = repr(enable_update_group)
+    script = "\n".join(
+        [
+            "import json",
+            "from pathlib import Path",
+            f"config_path = Path({config_path!r})",
+            "config = json.loads(config_path.read_text())",
+            "bgp_settings = config.setdefault('bgp_setting_config', {})",
+            f"bgp_settings['enable_update_group'] = {enabled_literal}",
+            "config_path.write_text(json.dumps(config, indent=2) + '\\n')",
+            f"print('Set bgp_setting_config.enable_update_group={str(enable_update_group).lower()}')",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
+
+
 UPDATE_GROUP_VERIFICATION_CMD = (
     "bash sudo bash -c 'set +e; "
     'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
@@ -174,6 +197,20 @@ UPDATE_GROUP_VERIFICATION_CMD = (
     "exit 1; fi; "
     'if echo "$out" | grep -qi "Update group: ENABLED"; then '
     'echo "PASS: BGP++ update_group is ENABLED"; exit 0; fi; '
+    'echo "FAIL: BGP++ update_group state could not be confirmed -- '
+    'CLI may have failed or returned unexpected output"; '
+    "exit 1'"
+)
+
+UPDATE_GROUP_DISABLED_VERIFICATION_CMD = (
+    "bash sudo bash -c 'set +e; "
+    'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
+    'echo "$out"; '
+    'if echo "$out" | grep -qi "Update group: ENABLED"; then '
+    'echo "FAIL: BGP++ update_group is ENABLED in the deployed baseline"; '
+    "exit 1; fi; "
+    'if echo "$out" | grep -qi "Update group: DISABLED"; then '
+    'echo "PASS: BGP++ update_group is DISABLED"; exit 0; fi; '
     'echo "FAIL: BGP++ update_group state could not be confirmed -- '
     'CLI may have failed or returned unexpected output"; '
     "exit 1'"

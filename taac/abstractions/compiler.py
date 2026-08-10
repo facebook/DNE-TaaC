@@ -13,10 +13,12 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     ACL_COMMANDS,
     ADD_INTERN_USER_IDS_CMD,
     BGPCPP_DAEMONS,
+    build_update_group_setting_override_cmd,
     EBB_BGPCPP_LOGGING_CONFIG,
     FIBAGENT_BGP_CONF_DEPLOY_CMD,
     FIBAGENT_CONF_DEPLOY_CMD,
     REQUIRE_THRIFT_ACL_FILES_CMD,
+    UPDATE_GROUP_DISABLED_VERIFICATION_CMD,
     UPDATE_GROUP_VERIFICATION_CMD,
     VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
@@ -765,6 +767,16 @@ def _ebb_full_scale_bgpcpp_deployment_tasks(
         ),
     ]
 
+    if not args.enable_update_group:
+        tasks.append(
+            create_run_commands_on_shell_task(
+                hostname=device_name,
+                cmds=[build_update_group_setting_override_cmd(False)],
+                set_outer_hostname=True,
+                ixia_needed=True,
+            )
+        )
+
     tasks.extend(
         [
             create_run_commands_on_shell_task(
@@ -839,15 +851,18 @@ def _ebb_full_scale_control_plane_tasks(
         )
     )
 
-    if args.enable_update_group:
-        tasks.append(
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[UPDATE_GROUP_VERIFICATION_CMD],
-                set_outer_hostname=True,
-                ixia_needed=True,
-            )
+    tasks.append(
+        create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[
+                UPDATE_GROUP_VERIFICATION_CMD
+                if args.enable_update_group
+                else UPDATE_GROUP_DISABLED_VERIFICATION_CMD
+            ],
+            set_outer_hostname=True,
+            ixia_needed=True,
         )
+    )
 
     return tasks
 

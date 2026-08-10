@@ -29,18 +29,21 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
 )
 
-# Post-cleanup: only the 8 configs actually referenced by
-# ``dne_routing.conveyor_config.cconf`` remain in ``cicd_ebb_int_tc.py``.
-# Every entry below has an inline ``CONVEYOR: dne_routing / <node>`` marker at
-# its definition site (see cicd_ebb_int_tc.py) identifying the scheduling node.
+# The eight conveyor bindings and four Stage 1 non-UG counterparts live in
+# ``cicd_ebb_int_tc.py``. Every scheduled entry has an inline
+# ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 
@@ -94,6 +97,11 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    # Stage 1 non-UG variants for validation before the conveyor switch.
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     # BGP++ Update Group "new peer join" qualification (specs 2.4.1 + 2.4.2
     # + 2.4.3 combined into one TestConfig with 3 playbooks sharing the
     # 21-eBGP + 4-iBGP testbed). Ad-hoc; not yet wired into a conveyor stage
