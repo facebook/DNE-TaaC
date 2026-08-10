@@ -431,30 +431,45 @@ class TrafficGeneratorPortDeviceGroupRenderRequest(TrafficGeneratorRenderRequest
 
 
 @dataclass(frozen=True)
-class TrafficGeneratorPortDeviceGroupFragment(t.Generic[TDeviceGroupConfig_co]):
-    port_id: ResourceId
-    device_group_ids: tuple[ResourceId, ...]
-    session_ids: tuple[ResourceId, ...]
+class TrafficGeneratorDeviceGroupConfigFragment(t.Generic[TDeviceGroupConfig_co]):
+    device_group_id: ResourceId
+    session_id: ResourceId
     advertisement_ids: tuple[ResourceId, ...]
-    device_group_configs: tuple[TDeviceGroupConfig_co, ...]
+    device_group_config: TDeviceGroupConfig_co
 
     def __post_init__(self) -> None:
-        _require_ixia_port_id(self.port_id)
         _require_resource_kinds(
-            self.device_group_ids,
+            (self.device_group_id,),
             ResourceKind.IXIA_DEVICE_GROUP,
-            "traffic-generator port device-group fragment",
+            "traffic-generator device-group config fragment",
         )
         _require_resource_kinds(
-            self.session_ids,
+            (self.session_id,),
             ResourceKind.IXIA_BGP_SESSION,
-            "traffic-generator port session fragment",
+            "traffic-generator device-group session fragment",
         )
         _require_resource_kinds(
             self.advertisement_ids,
             ResourceKind.IXIA_ADVERTISEMENT,
-            "traffic-generator port advertisement fragment",
+            "traffic-generator device-group advertisement fragment",
         )
+        _validate_unique_resource_ids(
+            "traffic-generator device-group advertisement fragment",
+            self.advertisement_ids,
+        )
+        if self.device_group_config is None:
+            raise ValueError("traffic-generator device-group config must be present")
+
+
+@dataclass(frozen=True)
+class TrafficGeneratorPortDeviceGroupFragment(t.Generic[TDeviceGroupConfig_co]):
+    port_id: ResourceId
+    device_groups: tuple[
+        TrafficGeneratorDeviceGroupConfigFragment[TDeviceGroupConfig_co], ...
+    ]
+
+    def __post_init__(self) -> None:
+        _require_ixia_port_id(self.port_id)
         for subject, resource_ids in (
             ("traffic-generator port device-group fragment", self.device_group_ids),
             ("traffic-generator port session fragment", self.session_ids),
@@ -464,21 +479,31 @@ class TrafficGeneratorPortDeviceGroupFragment(t.Generic[TDeviceGroupConfig_co]):
             ),
         ):
             _validate_unique_resource_ids(subject, resource_ids)
-        if len(self.session_ids) != len(self.device_group_ids):
-            raise ValueError(
-                "traffic-generator port session count must match device groups"
-            )
-        if len(self.device_group_configs) != len(self.device_group_ids):
-            raise ValueError(
-                "traffic-generator port config count must match device groups"
-            )
-        if any(config is None for config in self.device_group_configs):
-            raise ValueError("traffic-generator device-group configs must be present")
+
+    @property
+    def device_group_ids(self) -> tuple[ResourceId, ...]:
+        return tuple(fragment.device_group_id for fragment in self.device_groups)
+
+    @property
+    def session_ids(self) -> tuple[ResourceId, ...]:
+        return tuple(fragment.session_id for fragment in self.device_groups)
+
+    @property
+    def advertisement_ids(self) -> tuple[ResourceId, ...]:
+        return tuple(
+            advertisement_id
+            for fragment in self.device_groups
+            for advertisement_id in fragment.advertisement_ids
+        )
+
+    @property
+    def device_group_configs(self) -> tuple[TDeviceGroupConfig_co, ...]:
+        return tuple(fragment.device_group_config for fragment in self.device_groups)
 
 
 @dataclass(frozen=True)
 class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_co]):
-    consumed_resource_ids: tuple[ResourceId, ...]
+    referenced_resource_ids: tuple[ResourceId, ...]
     fragments: tuple[
         TrafficGeneratorPortDeviceGroupFragment[TDeviceGroupConfig_co], ...
     ] = ()
@@ -486,7 +511,7 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
     def __post_init__(self) -> None:
         _validate_unique_resource_ids(
             "traffic-generator port device-group result resource",
-            self.consumed_resource_ids,
+            self.referenced_resource_ids,
         )
         _validate_unique_resource_ids(
             "traffic-generator port device-group result fragment",
@@ -500,7 +525,7 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
         _validate_exact_resource_order(
             "traffic-generator port device-group result resource",
             request.plan.iter_resource_ids(),
-            self.consumed_resource_ids,
+            self.referenced_resource_ids,
         )
         active_ports = request.active_ports()
         _validate_exact_resource_order(
@@ -508,7 +533,11 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
             tuple(port.resource_id for port in active_ports),
             tuple(fragment.port_id for fragment in self.fragments),
         )
-        for port, fragment in zip(active_ports, self.fragments, strict=True):
+        fragments_by_port_id = {
+            fragment.port_id: fragment for fragment in self.fragments
+        }
+        for port in active_ports:
+            fragment = fragments_by_port_id[port.resource_id]
             group_ids = tuple(
                 group.resource_id
                 for group in request.plan.device_groups
@@ -519,28 +548,32 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
                 group_ids,
                 fragment.device_group_ids,
             )
-            session_ids = tuple(
-                session.resource_id
-                for group_id in group_ids
-                for session in request.plan.bgp_sessions
-                if session.device_group_id == group_id
-            )
-            _validate_exact_resource_order(
-                "traffic-generator port session fragment",
-                session_ids,
-                fragment.session_ids,
-            )
-            advertisement_ids = tuple(
-                advertisement.resource_id
-                for group_id in group_ids
-                for advertisement in request.plan.advertisements
-                if advertisement.device_group_id == group_id
-            )
-            _validate_exact_resource_order(
-                "traffic-generator port advertisement fragment",
-                advertisement_ids,
-                fragment.advertisement_ids,
-            )
+            fragments_by_group_id = {
+                group_fragment.device_group_id: group_fragment
+                for group_fragment in fragment.device_groups
+            }
+            for group_id in group_ids:
+                group_fragment = fragments_by_group_id[group_id]
+                session_ids = tuple(
+                    session.resource_id
+                    for session in request.plan.bgp_sessions
+                    if session.device_group_id == group_id
+                )
+                _validate_exact_resource_order(
+                    "traffic-generator device-group session fragment",
+                    session_ids,
+                    (group_fragment.session_id,),
+                )
+                advertisement_ids = tuple(
+                    advertisement.resource_id
+                    for advertisement in request.plan.advertisements
+                    if advertisement.device_group_id == group_id
+                )
+                _validate_exact_resource_order(
+                    "traffic-generator device-group advertisement fragment",
+                    advertisement_ids,
+                    group_fragment.advertisement_ids,
+                )
 
 
 @dataclass(frozen=True)
@@ -757,6 +790,7 @@ __all__ = (
     "TrafficGeneratorEndpointRenderRequest",
     "TrafficGeneratorEndpointRenderResult",
     "TrafficGeneratorDirectConnectionFragment",
+    "TrafficGeneratorDeviceGroupConfigFragment",
     "TrafficGeneratorIxiaPortFragment",
     "TrafficGeneratorLifecycleFragment",
     "TrafficGeneratorLifecycleSlot",

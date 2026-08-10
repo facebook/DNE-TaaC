@@ -857,7 +857,7 @@ resource-keyed endpoint composition are committed. EOS/BGP++ capability
 preflight now runs ahead of adaptation and shadow rendering, and shared IXIA
 port-base rendering owns `BasicPortConfig.endpoint` across all frozen cases.
 The four already-native IXIA cases also expose resource-keyed
-`device_group_configs` shadows.
+`device_group_configs` shadows with per-group provenance.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -889,6 +889,9 @@ of Phase 1.5:
 12. **Completed shadow capability:** Diff 1.5.5f, extract resource-keyed
     `BasicPortConfig.device_group_configs` bodies for the four existing native
     IXIA cases without expanding their semantic capability.
+13. **Completed contract hardening:** Diff 1.5.5g, replace parallel IXIA
+    device-group identity/config tuples with nested resource-keyed provenance
+    before composing `BasicPortConfig` values.
 
 Remaining shared IXIA device-group, session, advertisement, and lifecycle
 capabilities, EOS lifecycle/config/interface rendering, facade cutover, Phase
@@ -1441,12 +1444,12 @@ functions; this slice adds no topology family, route shape, session behavior,
 or compatibility fallback.
 
 Each active port produces one fragment keyed by `IxiaPortPlan.resource_id`.
-The fragment records the exact device-group, BGP-session, and advertisement
-resource IDs that produced its ordered schema values. Validation requires exact
-plan order and coverage at every level, rejects missing, duplicate, or
-unexpected provenance, and consumes the complete semantic IXIA graph. The
-twelve delegated cases continue to fail closed, and identity-only changes
-cannot select a semantic capability.
+Each device-group value is nested with the exact device-group, BGP-session, and
+advertisement resource IDs that produced it. Validation requires exact plan
+order and coverage at every level, rejects missing, duplicate, or unexpected
+provenance, and references the complete semantic IXIA graph. The twelve
+delegated cases continue to fail closed, and identity-only changes cannot select
+a semantic capability.
 
 `BasicPortConfig.endpoint` remains owned by `SharedIxiaPortBaseRenderer`;
 `l1_config` remains explicitly deferred. The Thrift-metadata guard now freezes
@@ -1467,6 +1470,30 @@ targets without errors. Golden regeneration reported all 294 configs unchanged,
 with manifest SHA-256
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. An
 independent harness audit found no must-fix issue.
+
+#### Keyed IXIA device-group provenance
+
+The device-group shadow no longer associates device-group configs with resource
+IDs through parallel tuples. Each port contains keyed per-group children with
+one device-group ID, one BGP-session ID, that group's ordered advertisement IDs,
+and its opaque rendered config. Port and group output order still comes only
+from `IxiaPlan`, while maps keyed by `ResourceId` perform association.
+
+The result now calls its complete-graph coverage `referenced_resource_ids`
+rather than claiming those resources as artifact ownership. Endpoint ownership
+stays with the port-base lane, device-group field ownership stays with this
+lane, and `l1_config` remains deferred. This removes positional and flattened
+advertisement provenance before the next `BasicPortConfig` composition slice;
+it does not remove the upstream compatibility sidecar that currently supplies
+legacy presentation names and indices.
+
+Validation passed the focused import, candidate, IXIA, and EOS parity gate
+(63/63, TestInfra `5910974891543779`) and the complete abstraction suite
+(553/553, TestInfra `28991922625450767`). Changed-target Pyre checked six
+targets without errors. Golden regeneration reported all 294 configs unchanged,
+with manifest SHA-256
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`. The
+independent audit's mutation-sensitivity findings were closed before commit.
 
 ### Multi-agent operating model
 

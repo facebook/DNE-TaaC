@@ -25,6 +25,7 @@ from taac.abstractions.compilation.model import (
     ResourceId,
 )
 from taac.abstractions.compilation.traffic_generator import (
+    TrafficGeneratorDeviceGroupConfigFragment,
     TrafficGeneratorDirectConnectionFragment,
     TrafficGeneratorEndpointPatch,
     TrafficGeneratorEndpointRenderRequest,
@@ -116,7 +117,7 @@ class SharedIxiaPortDeviceGroupRenderer:
             for port in request.active_ports()
         )
         result = TrafficGeneratorPortDeviceGroupRenderResult(
-            consumed_resource_ids=request.plan.iter_resource_ids(),
+            referenced_resource_ids=request.plan.iter_resource_ids(),
             fragments=fragments,
         )
         result.validate(request)
@@ -186,18 +187,22 @@ def _port_device_group_fragment(
     sessions_by_group = _sessions_by_group(request)
     return TrafficGeneratorPortDeviceGroupFragment(
         port_id=port.resource_id,
-        device_group_ids=tuple(group.resource_id for group in groups),
-        session_ids=tuple(
-            sessions_by_group[group.resource_id].resource_id for group in groups
-        ),
-        advertisement_ids=tuple(
-            advertisement.resource_id
+        device_groups=tuple(
+            TrafficGeneratorDeviceGroupConfigFragment(
+                device_group_id=group.resource_id,
+                session_id=sessions_by_group[group.resource_id].resource_id,
+                advertisement_ids=tuple(
+                    advertisement.resource_id
+                    for advertisement in request.plan.advertisements
+                    if advertisement.device_group_id == group.resource_id
+                ),
+                device_group_config=_device_group_config(
+                    request,
+                    group,
+                    capability,
+                ),
+            )
             for group in groups
-            for advertisement in request.plan.advertisements
-            if advertisement.device_group_id == group.resource_id
-        ),
-        device_group_configs=tuple(
-            _device_group_config(request, group, capability) for group in groups
         ),
     )
 
@@ -1002,6 +1007,8 @@ _BGP_PEER_TYPES = {
 
 __all__ = (
     "SharedIxiaEndpointRenderer",
+    "SharedIxiaPortBaseRenderer",
+    "SharedIxiaPortDeviceGroupRenderer",
     "SharedIxiaRenderer",
     "UnsupportedIxiaRenderingError",
 )
