@@ -5512,6 +5512,19 @@ class Ixia:
             t.List["ixia_types.CustomNetworkGroupConfig"]
         ] = None,
     ) -> None:
+        # IxNetwork has no raw-UPDATE replay primitive, so this field cannot be
+        # honoured here.  Dropping it quietly is the worst outcome: the session
+        # establishes, the bytes are never sent, and a test that exists to send
+        # them passes having exercised nothing.  Only the OTG backend implements
+        # it (OtgTrafficGen._build_bgp_update_sequence).
+        update_sequence = getattr(bgp_config, "update_sequence", None)
+        if update_sequence is not None and getattr(update_sequence, "updates", None):
+            raise NotImplementedError(
+                "BgpConfig.update_sequence needs raw BGP UPDATE replay, which the "
+                "restpy/IxNetwork backend does not support. Run this config "
+                "against the OTG backend, or drop update_sequence."
+            )
+
         self.create_bgp_peer(
             port_identifier,
             bgp_config.ip_address_family,

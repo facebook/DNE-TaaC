@@ -673,6 +673,20 @@ class TrafficGenerator:
                 for config in bgp_config.custom_network_group_configs
             ]
 
+        # `BgpUpdateSequence` is a local addition to both thrift files, and both
+        # are @generated mirrors of configerator sources — so a sync removes the
+        # field. Read it defensively and only forward it when set: otherwise the
+        # revert turns every BGP config into an AttributeError here (and a
+        # TypeError on the kwarg), when only the malformed profile actually needs
+        # the struct. That profile still fails loudly, in
+        # _malformed_bgp_device_group. Entries are already wire bytes, so there
+        # is nothing to translate; only the OTG backend can send them, and restpy
+        # raises NotImplementedError rather than dropping them silently.
+        update_sequence = getattr(bgp_config, "update_sequence", None)
+        update_sequence_kwarg = (
+            {"update_sequence": update_sequence} if update_sequence else {}
+        )
+
         return ixia_types.BgpConfig(
             ip_address_family=ip_address_family,
             bgp_peer_config=self._create_bgp_peer_config(
@@ -684,6 +698,7 @@ class TrafficGenerator:
             bgp_prefix_configs=bgp_prefix_configs,
             import_bgp_routes_params_list=bgp_config.import_bgp_routes_params_list,
             custom_network_group_configs=custom_network_group_configs,
+            **update_sequence_kwarg,
         )
 
     def _create_bgp_peer_config(

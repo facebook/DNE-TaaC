@@ -3,6 +3,7 @@
 """Unit tests for OTG traffic generator support."""
 
 import asyncio
+import collections.abc
 import threading
 import time
 import typing as t
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from taac.ixia.abstract_traffic_generator import (
     AbstractTrafficGenerator,
 )
+from taac.ixia.otg_traffic_gen import _nonempty_sequence
 
 
 def _make_ixia_config(port_configs=None, traffic_items=None):
@@ -50,10 +52,12 @@ def _make_device_group_config(
     ipv6_start: t.Optional[str] = None,
     ipv6_gw: t.Optional[str] = None,
     bgp_config=None,
+    enable: bool = True,
 ):
     dg = MagicMock()
     dg.device_group_index = index
     dg.bgp_config = bgp_config
+    dg.enable = enable
     ip_cfg = MagicMock()
     if ipv4_start:
         v4 = MagicMock()
@@ -91,25 +95,21 @@ def _create_otg_tgen(**kwargs):
     mock_api.config.return_value = mock_config
 
     with patch("taac.ixia.otg_traffic_gen.snappi", mock_snappi):
-        tgen = OtgTrafficGen.__new__(OtgTrafficGen)
-        tgen.logger = MagicMock()
-        tgen.ixia_config = kwargs.get("ixia_config", _make_ixia_config())
-        tgen._location = kwargs.get("location", "https://localhost:8443")
-        tgen.api = mock_api
-        tgen.config = mock_config
-        tgen._bgp_peer_names = []
-        tgen._device_group_info = {}
-        tgen.test_case_uuid = None
-        tgen.paused = False
-        tgen.capturing = False
-        tgen._traffic_start_time = 0.0
-        tgen._disabled_flows = set()
-        tgen._capture_thread = None
-        tgen._capture_stop = threading.Event()
-        tgen._captured_stats = {}
-        tgen._capture_lock = threading.Lock()
-        tgen._flow_loss_start = {}
-        tgen._flow_loss_accumulated = {}
+        # Run the REAL __init__ so instance state cannot drift from it — this
+        # helper used to mirror every attribute by hand, and each new one broke
+        # every test with AttributeError until the list was updated.
+        #
+        # Construct against an EMPTY ixia_config so __init__'s _build_config()
+        # is a guaranteed no-op, then swap in the caller's config.  Building at
+        # construction time would double-build for tests that also call the
+        # builders explicitly, which could mask a broken builder.
+        tgen = OtgTrafficGen(
+            ixia_config=_make_ixia_config(),
+            location=kwargs.get("location", "https://localhost:8443"),
+            logger=MagicMock(),
+        )
+        if "ixia_config" in kwargs:
+            tgen.ixia_config = kwargs["ixia_config"]
     return tgen
 
 
@@ -897,7 +897,7 @@ class TestBgpConfigBuilders(unittest.TestCase):
             local_as=65001,
         )
         bgp_info = self._make_bgp_info(v4_peer_config=peer_cfg)
-        tgen._build_bgp_config(device, "p1_DG0", bgp_info)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
         self.assertIn("p1_DG0_bgp_v4", tgen._bgp_peer_names)
         peer = device.bgp.ipv4_interfaces.v4interface.return_value[
             -1
@@ -912,8 +912,71 @@ class TestBgpConfigBuilders(unittest.TestCase):
         device = MagicMock()
         peer_cfg = self._make_bgp_peer_config(peer_type=ixia_types.BgpPeerType.EBGP)
         bgp_info = self._make_bgp_info(v6_peer_config=peer_cfg)
-        tgen._build_bgp_config(device, "p1_DG0", bgp_info)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
         self.assertIn("p1_DG0_bgp_v6", tgen._bgp_peer_names)
+
+    def test_v6_only_peer_gets_derived_ipv4_router_id(self):
+        """A v6 local IP cannot be a router_id; a v4 one must be derived."""
+        tgen = _create_otg_tgen()
+        device = MagicMock()
+        peer_cfg = self._make_bgp_peer_config(
+            local_ip="2001:db8:1::1", remote_ip="2001:db8:1::2"
+        )
+        bgp_info = self._make_bgp_info(v6_peer_config=peer_cfg)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
+        self.assertEqual(device.bgp.router_id, "192.0.2.1")
+
+    def test_v6_only_device_groups_get_distinct_router_ids(self):
+        """Duplicate router IDs break eBGP establishment, so each speaker
+        must get its own — including groups whose device_group_name does not
+        embed the port name (regression guard for port-index inference)."""
+        tgen = _create_otg_tgen()
+        assigned = []
+        for device_name in ("ECMP_1_eth1", "ECMP_2_eth1", "ECMP_2_eth2"):
+            device = MagicMock()
+            peer_cfg = self._make_bgp_peer_config(
+                local_ip="2001:db8:1::1", remote_ip="2001:db8:1::2"
+            )
+            bgp_info = self._make_bgp_info(v6_peer_config=peer_cfg)
+            tgen._build_bgp_config(device, device_name, bgp_info, port_name="p1")
+            assigned.append(device.bgp.router_id)
+
+        self.assertEqual(len(set(assigned)), len(assigned), assigned)
+
+    def test_router_id_is_stable_for_same_device(self):
+        tgen = _create_otg_tgen()
+        first = tgen._derive_router_id("p1", "ECMP_1_eth1")
+        second = tgen._derive_router_id("p1", "ECMP_1_eth1")
+        self.assertEqual(first, second)
+
+    def test_v4_local_ip_used_as_router_id_verbatim(self):
+        tgen = _create_otg_tgen()
+        device = MagicMock()
+        peer_cfg = self._make_bgp_peer_config(local_ip="10.0.1.1")
+        bgp_info = self._make_bgp_info(v4_peer_config=peer_cfg)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
+        self.assertEqual(device.bgp.router_id, "10.0.1.1")
+        self.assertEqual(tgen._router_ids, {})
+
+    def test_route_refresh_capability_honored(self):
+        """RouteRefresh was absent from cap_map, so it was always set False."""
+        from ixia.ixia import types as ixia_types
+
+        tgen = _create_otg_tgen()
+        device = MagicMock()
+        peer_cfg = self._make_bgp_peer_config()
+        peer_cfg.capabilities = [
+            ixia_types.BgpCapability.IpV4Unicast,
+            ixia_types.BgpCapability.RouteRefresh,
+        ]
+        bgp_info = self._make_bgp_info(v4_peer_config=peer_cfg)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
+        cap = device.bgp.ipv4_interfaces.v4interface.return_value[
+            -1
+        ].peers.v4peer.return_value[-1].capability
+        self.assertTrue(cap.ipv4_unicast)
+        self.assertTrue(cap.route_refresh)
+        self.assertFalse(cap.ipv6_unicast)
 
     def test_ibgp_as_type(self):
         from ixia.ixia import types as ixia_types
@@ -922,11 +985,78 @@ class TestBgpConfigBuilders(unittest.TestCase):
         device = MagicMock()
         peer_cfg = self._make_bgp_peer_config(peer_type=ixia_types.BgpPeerType.IBGP)
         bgp_info = self._make_bgp_info(v4_peer_config=peer_cfg)
-        tgen._build_bgp_config(device, "p1_DG0", bgp_info)
+        tgen._build_bgp_config(device, "p1_DG0", bgp_info, port_name="p1")
         peer = device.bgp.ipv4_interfaces.v4interface.return_value[
             -1
         ].peers.v4peer.return_value[-1]
         self.assertEqual(peer.as_type, "ibgp")
+
+    def _prefix_cfg(self, starting_ip, prefix_length, increment_ip, count=100):
+        cfg = MagicMock()
+        cfg.prefix_name = "r"
+        cfg.starting_ip = starting_ip
+        cfg.prefix_length = prefix_length
+        cfg.count = count
+        cfg.increment_ip = increment_ip
+        cfg.bgp_communities = []
+        cfg.as_path_prepend = None
+        return cfg
+
+    def test_prefix_step_is_in_blocks_not_addresses(self):
+        """snappi's route-range step counts prefix blocks, not addresses.
+
+        `increment_ip` is an address delta, so it must be divided by the block
+        size.  Skipping that walks the range 2**host_bits times too far, which
+        silently overlaps other speakers' ranges instead of failing — the v4
+        baseline advertised 100.1.0.0..100.100.0.0 rather than ..100.1.99.0.
+        """
+        for af, start, plen, inc, expected in (
+            ("v4", "100.1.0.0", 24, "0.0.1.0", 1),
+            ("v4", "10.0.0.0", 16, "0.1.0.0", 1),
+            ("v4", "192.0.2.0", 32, "0.0.0.1", 1),
+            ("v6", "2001:db8:1100::", 64, "0:0:0:1::", 1),
+            ("v6", "2001:db8::", 48, "0:0:1::", 1),
+        ):
+            with self.subTest(af=af, prefix_length=plen, increment=inc):
+                tgen = _create_otg_tgen()
+                peer = MagicMock()
+                tgen._build_bgp_prefix(
+                    peer, af, self._prefix_cfg(start, plen, inc)
+                )
+                routes = (
+                    peer.v4_routes.v4routerange if af == "v4"
+                    else peer.v6_routes.v6routerange
+                )
+                addrs = (
+                    routes.return_value[-1].addresses.v4routeaddress
+                    if af == "v4"
+                    else routes.return_value[-1].addresses.v6routeaddress
+                )
+                self.assertEqual(addrs.return_value[-1].step, expected)
+
+    def test_a_step_smaller_than_one_block_falls_back_to_one(self):
+        """Shifting down to 0 would collapse every prefix onto one address."""
+        for af, start, plen, inc in (
+            ("v4", "100.1.0.0", 24, "0.0.0.1"),
+            ("v6", "2001:db8:1100::", 64, "::1"),
+        ):
+            with self.subTest(af=af, increment=inc):
+                tgen = _create_otg_tgen()
+                peer = MagicMock()
+                tgen._build_bgp_prefix(
+                    peer, af, self._prefix_cfg(start, plen, inc)
+                )
+                addrs = (
+                    peer.v4_routes.v4routerange.return_value[-1]
+                    .addresses.v4routeaddress
+                    if af == "v4"
+                    else peer.v6_routes.v6routerange.return_value[-1]
+                    .addresses.v6routeaddress
+                )
+                self.assertEqual(addrs.return_value[-1].step, 1)
+                self.assertTrue(
+                    tgen.logger.warning.called, "collapsing must be reported"
+                )
 
     def test_bgp_prefix_v4_route(self):
         tgen = _create_otg_tgen()
@@ -982,6 +1112,393 @@ class TestBgpConfigBuilders(unittest.TestCase):
         route = peer.v4_routes.v4routerange.return_value[-1]
         seg = route.as_path.segments.bgpaspathsegment.return_value[-1]
         self.assertEqual(seg.as_numbers, [65001, 65002])
+
+
+# -- Addressing into an advertised prefix -------------------------------------
+
+
+class TestPrefixTargetedDestinations(unittest.TestCase):
+    """A prefix-targeted flow must span more than one hash bucket.
+
+    A single src/dst pair hashes to one next-hop no matter how many ECMP members
+    exist, so it can only prove that *one* path resolves — not that selection is
+    spread across the members. Varying the destination inside the advertised
+    prefix is what makes wrong next-hop selection observable.
+    """
+
+    def _tgen_with_prefix(self, af="v6", address="2001:db8:ec00::", prefix_len=64):
+        tgen = _create_otg_tgen()
+        tgen._advertised_prefixes[("p1", 1, 0, af)] = {
+            "address": address,
+            "prefix_len": prefix_len,
+        }
+        return tgen
+
+    def test_returns_a_span_not_a_single_address(self):
+        tgen = self._tgen_with_prefix()
+        start, count = tgen._prefix_host_span("p1", 1, 0, "v6")
+        self.assertEqual(start, "2001:db8:ec00::1")
+        self.assertGreater(count, 1)
+
+    def test_span_is_bounded_by_a_tiny_prefix(self):
+        """A /31 has two addresses; the span must not promise more than exist."""
+        tgen = self._tgen_with_prefix(af="v4", address="198.51.100.0", prefix_len=31)
+        _, count = tgen._prefix_host_span("p1", 1, 0, "v4")
+        self.assertLessEqual(count, 2)
+        self.assertGreaterEqual(count, 1)
+
+    def test_absent_prefix_yields_no_span(self):
+        tgen = _create_otg_tgen()
+        self.assertIsNone(tgen._prefix_host_span("p1", 9, 0, "v6"))
+
+
+# -- Flow-name collisions fail loudly ----------------------------------------
+
+
+class TestDuplicateFlowNameRaises(unittest.TestCase):
+    """The flow-name key omits the rx port, so collisions are possible.
+
+    `config.flows.flow(name=...)` appends rather than replaces, so a collision
+    would silently produce two flows sharing a name — and every later lookup
+    (loss reporting, _disabled_flows, transmit) would address whichever one it
+    found first. Renaming is not free because playbooks match flow names by
+    regex, so the key is left alone and the collision is made an error instead.
+    """
+
+    def test_a_repeated_flow_name_raises(self):
+        tgen = _create_otg_tgen()
+        tgen.config.flows = [_make_flow("dup_p1_0_to_0")]
+        with self.assertRaises(ValueError) as ctx:
+            tgen._assert_unique_flow_name("dup_p1_0_to_0")
+        self.assertIn("rx port", str(ctx.exception))
+
+    def test_a_fresh_flow_name_is_accepted(self):
+        tgen = _create_otg_tgen()
+        tgen.config.flows = [_make_flow("other_p1_0_to_0")]
+        tgen._assert_unique_flow_name("dup_p1_0_to_0")
+
+
+# -- Controller warnings must not be discarded --------------------------------
+
+
+class TestControllerWarnings(unittest.TestCase):
+    """snappi returns a Warning object from set_config/set_control_state.
+
+    OTG uses warnings for "accepted, but" — a peer the controller declined to
+    start, an unsupported capability.  They are not errors, so nothing raises and
+    nothing else surfaces them; discarding the return value makes the
+    controller's own explanation of a failure invisible.
+    """
+
+    @staticmethod
+    def _with_warnings(*messages):
+        resp = MagicMock()
+        resp.warnings = list(messages)
+        return resp
+
+    def test_push_config_logs_controller_warnings(self):
+        tgen = _create_otg_tgen()
+        tgen.api.set_config.return_value = self._with_warnings(
+            "bgp peer NO_PACKET_LOSS_EXPECTED_PORT1_bgp_v4 not started"
+        )
+        tgen._push_config()
+        logged = " ".join(str(c) for c in tgen.logger.warning.call_args_list)
+        self.assertIn("not started", logged)
+
+    def test_start_protocols_logs_controller_warnings(self):
+        tgen = _create_otg_tgen()
+        tgen.api.set_control_state.return_value = self._with_warnings(
+            "protocol engine declined to start"
+        )
+        tgen._start_protocols()
+        logged = " ".join(str(c) for c in tgen.logger.warning.call_args_list)
+        self.assertIn("declined to start", logged)
+
+    def test_a_response_with_nothing_to_report_is_quiet(self):
+        """Empty list and absent attribute (older snappi returns None)."""
+        for label, response in (("empty", self._with_warnings()), ("none", None)):
+            with self.subTest(response=label):
+                tgen = _create_otg_tgen()
+                tgen.api.set_config.return_value = response
+                tgen._push_config()
+                self.assertEqual(tgen.logger.warning.call_count, 0)
+
+
+# -- Degraded setup must not force a re-push ----------------------------------
+
+
+class TestDegradedSetupSkipsRepush(unittest.TestCase):
+    """A setup that bailed early still recorded what it pushed.
+
+    Otherwise `_last_pushed_config` stays None, the next `_prepare_traffic()`
+    sees a difference and does a full set_config plus protocol restart — the
+    exact flap the skip-if-unchanged check exists to avoid, landing on a run
+    that is already degraded.
+    """
+
+    def test_arp_path_records_pushed_config(self):
+        tgen = _create_otg_tgen()
+        with (
+            patch.object(tgen, "_get_resolved_gw_macs", return_value={}),
+            patch.object(tgen, "_start_protocols"),
+            patch.object(tgen, "_wait_for_arp"),
+        ):
+            tgen._setup_with_explicit_flows()
+        pushes = tgen.api.set_config.call_count
+        tgen._prepare_traffic()
+        self.assertEqual(tgen.api.set_config.call_count, pushes)
+
+    def test_bgp_path_records_pushed_config(self):
+        tgen = _create_otg_tgen()
+        with (
+            patch.object(tgen, "_get_resolved_gw_macs", return_value={}),
+            patch.object(tgen, "_start_protocols"),
+            patch.object(tgen, "_wait_for_bgp"),
+        ):
+            tgen._setup_bgp_with_explicit_flows(90)
+        pushes = tgen.api.set_config.call_count
+        tgen._prepare_traffic()
+        self.assertEqual(tgen.api.set_config.call_count, pushes)
+
+
+# -- DeviceGroupConfig.enable -------------------------------------------------
+
+
+class TestDeviceGroupEnable(unittest.TestCase):
+    """A disabled group is built but held down.
+
+    OTG has no device-level disable, so honouring `enable=False` means building
+    the group normally and driving its peers DOWN once protocols start.  That is
+    what makes a playbook's later toggle-up a real transition instead of a no-op
+    against an already-established peer.
+    """
+
+    PEER = "p1_DG0_bgp_v4"
+
+    def _build(self, enable):
+        tgen = _create_otg_tgen()
+        dg = _make_device_group_config(bgp_config=MagicMock(), enable=enable)
+        tgen.ixia_config.port_configs = [
+            _make_port_config("p1", device_group_configs=[dg])
+        ]
+        mock_device = MagicMock()
+        tgen.config.devices.device.return_value = [mock_device]
+        mock_device.ethernets.ethernet.return_value = [MagicMock()]
+        # Mirror the real contract: _build_bgp_config appends to _bgp_peer_names.
+        with patch.object(
+            tgen,
+            "_build_bgp_config",
+            side_effect=lambda *a, **k: tgen._bgp_peer_names.append(self.PEER),
+        ):
+            tgen._build_device_group("p1", dg)
+        return tgen
+
+    def test_disabled_group_is_still_built(self):
+        tgen = self._build(enable=False)
+        self.assertIn(self.PEER, tgen._bgp_peer_names)
+        self.assertEqual(tgen._device_group_info[("p1", 0)]["peers"], [self.PEER])
+
+    def test_disabled_group_peers_not_required_at_setup(self):
+        self.assertIn(self.PEER, self._build(enable=False)._unrequired_peers)
+
+    def test_enabled_group_peers_are_required_at_setup(self):
+        self.assertNotIn(self.PEER, self._build(enable=True)._unrequired_peers)
+
+    def test_starting_protocols_holds_disabled_peers_down(self):
+        tgen = self._build(enable=False)
+        cs = tgen.api.control_state.return_value
+        tgen._start_protocols()
+        self.assertEqual(cs.protocol.bgp.peers.peer_names, [self.PEER])
+        self.assertIs(cs.protocol.bgp.peers.state, cs.protocol.bgp.peers.DOWN)
+
+    def test_starting_protocols_issues_no_peer_state_call_when_all_enabled(self):
+        """Exactly one control_state call — the protocol START, no hold-down.
+
+        Asserting on the mock's `peer_names` instead would pass vacuously: an
+        unset MagicMock attribute never equals a list, so that assertion holds
+        even if the method does nothing. Counting the calls can actually fail.
+        """
+        tgen = self._build(enable=True)
+        tgen.api.set_control_state.reset_mock()
+        tgen._start_protocols()
+        self.assertEqual(tgen.api.set_control_state.call_count, 1)
+
+    def test_enabling_a_disabled_group_is_sticky(self):
+        """A later config re-push must not silently undo a playbook's toggle-up.
+
+        `begin_test_case` reaches `_prepare_traffic`, which re-pushes and restarts
+        protocols when the config changed.  On restpy this cannot happen — config
+        build is one-shot — so OTG has to stop treating the group as disabled once
+        a playbook has enabled it.
+        """
+        tgen = self._build(enable=False)
+        tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex=".*",
+            sleep_time_before_applying_change=0,
+        )
+        self.assertNotIn(self.PEER, tgen._unrequired_peers)
+
+        cs = tgen.api.control_state.return_value
+        cs.protocol.bgp.peers.peer_names = None
+        tgen._start_protocols()
+        self.assertIsNone(cs.protocol.bgp.peers.peer_names)
+
+    def test_disabling_a_group_again_re_arms_the_hold(self):
+        tgen = self._build(enable=False)
+        for state in (True, False):
+            tgen.toggle_device_groups(
+                enable=state,
+                device_group_name_regex=".*",
+                sleep_time_before_applying_change=0,
+            )
+        self.assertIn(self.PEER, tgen._unrequired_peers)
+
+    def test_disabled_peer_down_does_not_block_setup(self):
+        tgen = self._build(enable=False)
+        tgen._bgp_peer_names.append("other_bgp_v4")
+        down = MagicMock(session_state="down")
+        down.name = self.PEER
+        up = MagicMock(session_state="up")
+        up.name = "other_bgp_v4"
+        with patch.object(tgen, "_get_bgp_metrics", return_value=[up, down]):
+            tgen._wait_for_bgp(timeout=1)
+
+
+# -- BGP session gate ---------------------------------------------------------
+
+
+class TestWaitForBgp(unittest.TestCase):
+    """Replay peers flap by design and must not gate setup."""
+
+    @staticmethod
+    def _metric(name, state):
+        # `name` is reserved by the MagicMock constructor, so set it after.
+        m = MagicMock(session_state=state)
+        m.name = name
+        return m
+
+    def test_replay_peer_down_does_not_block(self):
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "rogue_bgp_v4"]
+        tgen._unrequired_peers = {"rogue_bgp_v4": {"replay sequence"}}
+        metrics = [self._metric("good_bgp_v4", "up"), self._metric("rogue_bgp_v4", "down")]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            tgen._wait_for_bgp(timeout=1)
+
+    def test_non_replay_peer_down_still_blocks(self):
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "rogue_bgp_v4"]
+        tgen._unrequired_peers = {"rogue_bgp_v4": {"replay sequence"}}
+        metrics = [self._metric("good_bgp_v4", "down"), self._metric("rogue_bgp_v4", "up")]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            with self.assertRaises(TimeoutError):
+                tgen._wait_for_bgp(timeout=1)
+
+    def test_empty_metrics_is_not_a_silent_timeout(self):
+        """The controller reporting no peers must not look like the peers being
+        down.  Without this the whole 90s produces no output at all — the
+        per-poll line is inside `if metrics` — so the failure is unfalsifiable.
+        """
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4"]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=[]):
+            with self.assertRaises(TimeoutError):
+                tgen._wait_for_bgp(timeout=1)
+        logged = " ".join(
+            str(c) for c in tgen.logger.warning.call_args_list
+        )
+        self.assertIn("good_bgp_v4", logged)
+
+    def test_a_held_down_peer_reading_up_is_a_warning(self):
+        """The hold-down is fire-and-forget; this is the only thing checking it.
+
+        If the DOWN races peer instantiation the peer stays up, and then
+        toggle_device_groups(enable=True) is a no-op against an established
+        session — the playbook measures nothing and reports green. Riding on this
+        poll rather than checking right after the DOWN avoids false positives:
+        by the time the required peers are up, the DOWN has had seconds to land.
+        """
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "held_bgp_v4"]
+        tgen._unrequired_peers = {"held_bgp_v4": {"device group disabled"}}
+        metrics = [
+            self._metric("good_bgp_v4", "up"),
+            self._metric("held_bgp_v4", "up"),
+        ]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            tgen._wait_for_bgp(timeout=1)
+        logged = " ".join(str(c) for c in tgen.logger.warning.call_args_list)
+        self.assertIn("held_bgp_v4", logged)
+
+    def test_a_held_down_peer_reading_down_is_not_a_warning(self):
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "held_bgp_v4"]
+        tgen._unrequired_peers = {"held_bgp_v4": {"device group disabled"}}
+        metrics = [
+            self._metric("good_bgp_v4", "up"),
+            self._metric("held_bgp_v4", "down"),
+        ]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            tgen._wait_for_bgp(timeout=1)
+        self.assertEqual(tgen.logger.warning.call_count, 0)
+
+    def test_a_replay_peer_reading_up_is_not_a_warning(self):
+        """Only the disabled reason implies it should be down."""
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "rogue_bgp_v4"]
+        tgen._unrequired_peers = {"rogue_bgp_v4": {"replay sequence"}}
+        metrics = [
+            self._metric("good_bgp_v4", "up"),
+            self._metric("rogue_bgp_v4", "up"),
+        ]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            tgen._wait_for_bgp(timeout=1)
+        self.assertEqual(tgen.logger.warning.call_count, 0)
+
+    def test_timeout_reports_neighbour_resolution(self):
+        """Splits "cannot reach the gateway" from "bgpd is not peering".
+
+        Both surface identically as a down session, but the fixes live in
+        different places -- cabling/port/addressing versus bgpd config -- so the
+        timeout has to say which layer got as far as resolving.
+        """
+        for neighbours, expected in (
+            ({}, "no gateway"),
+            ({"10.0.1.2": "aa:bb"}, "10.0.1.2"),
+        ):
+            with self.subTest(resolved=bool(neighbours)):
+                tgen = _create_otg_tgen()
+                tgen._bgp_peer_names = ["good_bgp_v4"]
+                metrics = [self._metric("good_bgp_v4", "down")]
+                with (
+                    patch.object(tgen, "_get_bgp_metrics", return_value=metrics),
+                    patch.object(
+                        tgen, "_get_resolved_gw_macs", return_value=neighbours
+                    ),
+                ):
+                    with self.assertRaises(TimeoutError) as ctx:
+                        tgen._wait_for_bgp(timeout=1)
+                self.assertIn(expected, str(ctx.exception).lower())
+
+    def test_timeout_message_names_the_required_peers(self):
+        tgen = _create_otg_tgen()
+        tgen._bgp_peer_names = ["good_bgp_v4", "rogue_bgp_v4"]
+        tgen._unrequired_peers = {"rogue_bgp_v4": {"replay sequence"}}
+        metrics = [self._metric("good_bgp_v4", "down")]
+        with patch.object(tgen, "_get_bgp_metrics", return_value=metrics):
+            with self.assertRaises(TimeoutError) as ctx:
+                tgen._wait_for_bgp(timeout=1)
+        message = str(ctx.exception)
+        self.assertIn("good_bgp_v4", message)
+        self.assertNotIn("rogue_bgp_v4", message)
+
+    def test_update_sequence_registers_replay_peer(self):
+        tgen = _create_otg_tgen()
+        peer = MagicMock()
+        entry = MagicMock(update_bytes="ffff0013", time_gap_ms=0)
+        tgen._build_bgp_update_sequence(peer, MagicMock(updates=[entry]), "rogue_bgp_v4")
+        self.assertIn("rogue_bgp_v4", tgen._unrequired_peers)
 
 
 # -- Two-phase setup ----------------------------------------------------------
@@ -1195,6 +1712,53 @@ class TestBackgroundCapture(unittest.TestCase):
         tgen._capture_loop(interval=0.01)
         tgen.api.get_metrics.assert_not_called()
 
+    def test_two_snapshots_within_one_second_are_both_kept(self):
+        """A 1.0s capture interval jitters either side of a second boundary.
+
+        Truncating the key to an int makes two polls collide and the later one
+        overwrite the earlier, silently losing a sample.
+        """
+        tgen = _create_otg_tgen()
+        tgen.paused = False
+        stamps = [10.1, 10.9]
+
+        def fake_get_flow_metrics():
+            if len(tgen._captured_stats) >= 1:
+                tgen._capture_stop.set()
+            return [{"name": "f1", "frames_tx": 10, "frames_rx": 10, "loss": 0.0}]
+
+        with (
+            patch.object(tgen, "get_flow_metrics", side_effect=fake_get_flow_metrics),
+            patch(
+                "taac.ixia.otg_traffic_gen.time.time",
+                side_effect=lambda: stamps.pop(0) if stamps else 11.0,
+            ),
+        ):
+            tgen._capture_loop(interval=0)
+
+        self.assertEqual(len(tgen._captured_stats), 2)
+
+    def test_subsecond_snapshot_is_newer_than_subsecond_since_time(self):
+        """An int key truncates 10.9 to 10, which then reads as older than 10.5."""
+        tgen = _create_otg_tgen()
+        tgen.paused = False
+        stamps = [10.9]
+
+        def fake_get_flow_metrics():
+            tgen._capture_stop.set()
+            return [{"name": "f1", "frames_tx": 10, "frames_rx": 9, "loss": 10.0}]
+
+        with (
+            patch.object(tgen, "get_flow_metrics", side_effect=fake_get_flow_metrics),
+            patch(
+                "taac.ixia.otg_traffic_gen.time.time",
+                side_effect=lambda: stamps.pop(0) if stamps else 11.0,
+            ),
+        ):
+            tgen._capture_loop(interval=0)
+
+        self.assertTrue(any(ts > 10.5 for ts in tgen._captured_stats))
+
     def test_capture_survives_api_error(self):
         tgen = _create_otg_tgen()
         tgen.paused = False
@@ -1309,5 +1873,733 @@ class TestOtgTrafficGeneratorWrapper(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
 
+# ===========================================================================
+# Step-facing APIs used by the OTG hardening playbooks
+# (taac/otg/otg_hardening_playbooks.py).
+# ===========================================================================
+
+
+def _make_flow(name):
+    flow = MagicMock()
+    flow.name = name
+    return flow
+
+
+def _make_attr(name, value, kind="str"):
+    """Build an ixia Attr-alike; AttrValue is a union, so only one arm is set."""
+    attr = MagicMock()
+    attr.name = name
+    attr.value = MagicMock()
+    for arm in ("str", "integer", "str_list", "integer_list", "boolean"):
+        setattr(attr.value, arm, None)
+    setattr(attr.value, kind, value)
+    return attr
+
+
+def _make_field(regex, attrs):
+    field = MagicMock()
+    field.query.regex = regex
+    field.attrs = attrs
+    return field
+
+
+def _make_header(stack_regex, fields):
+    header = MagicMock()
+    header.query.regex = stack_regex
+    header.fields = fields
+    return header
+
+
+# -- device group naming ------------------------------------------------------
+
+
+class TestDeviceGroupNaming(unittest.TestCase):
+    """Playbooks address device groups by regex, so names must be honored."""
+
+    def _dg(self, device_group_name=None, tag_name=None):
+        dg = MagicMock()
+        dg.device_group_name = device_group_name
+        dg.tag_name = tag_name
+        return dg
+
+    def test_device_group_name_wins(self):
+        tgen = _create_otg_tgen()
+        name = tgen._device_group_name(
+            "p1", self._dg(device_group_name="ECMP_2_PORT1", tag_name="TAG"), 2
+        )
+        self.assertEqual(name, "ECMP_2_PORT1")
+
+    def test_tag_name_is_fallback(self):
+        tgen = _create_otg_tgen()
+        name = tgen._device_group_name("p1", self._dg(tag_name="ECMP_1"), 1)
+        self.assertEqual(name, "ECMP_1")
+
+    def test_positional_fallback_when_unset(self):
+        tgen = _create_otg_tgen()
+        name = tgen._device_group_name("p1", self._dg(), 3)
+        self.assertEqual(name, "p1_DG3")
+
+    def test_non_string_treated_as_unset(self):
+        """Both thrift fields are `optional string`; anything else is unset."""
+        tgen = _create_otg_tgen()
+        dg = MagicMock()  # auto-attributes are MagicMocks, not strings
+        self.assertEqual(tgen._device_group_name("p1", dg, 0), "p1_DG0")
+
+
+# -- toggle_device_groups -----------------------------------------------------
+
+
+class TestToggleDeviceGroups(unittest.TestCase):
+    def setUp(self):
+        self.tgen = _create_otg_tgen()
+        self.tgen._device_group_keys = {
+            "NO_PACKET_LOSS_EXPECTED_PORT1": ("p1", 0),
+            "ECMP_1_PORT1": ("p1", 1),
+            "ECMP_2_PORT1": ("p1", 2),
+            "ECMP_2_PORT2": ("p2", 2),
+        }
+        self.tgen._device_group_info = {
+            ("p1", 0): {"peers": ["dg0_bgp_v4", "dg0_bgp_v6"]},
+            ("p1", 1): {"peers": ["ecmp1_p1_bgp_v6"]},
+            ("p1", 2): {"peers": ["ecmp2_p1_bgp_v6"]},
+            ("p2", 2): {"peers": ["ecmp2_p2_bgp_v6"]},
+        }
+
+    def _peer_state_calls(self):
+        """Extract (peer_names, state) from each set_control_state call."""
+        calls = []
+        for call in self.tgen.api.set_control_state.call_args_list:
+            cs = call.args[0]
+            calls.append((cs.protocol.bgp.peers.peer_names, cs.protocol.bgp.peers.state))
+        return calls
+
+    def test_matches_both_ports_and_brings_peers_up(self):
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2",
+            sleep_time_before_applying_change=0,
+        )
+        calls = self._peer_state_calls()
+        self.assertEqual(len(calls), 1)
+        peer_names, _ = calls[0]
+        self.assertEqual(
+            sorted(peer_names), ["ecmp2_p1_bgp_v6", "ecmp2_p2_bgp_v6"]
+        )
+
+    def test_multiplied_group_sends_each_peer_once(self):
+        """A multiplier expands one group into N device names sharing one key.
+
+        `_device_group_keys` is keyed per device, but the info behind that key
+        holds all N peers — so resolving per device name yields N copies of an
+        N-element list. Harmless at multiplier 1; at the documented
+        LICENSED_ECMP_MULTIPLIERS of (8, 24) that is 576 entries in a single
+        control_state call, and a wrong peer count in the log.
+        """
+        self.tgen._device_group_keys.update(
+            {
+                "ECMP_2_PORT1_1": ("p1", 3),
+                "ECMP_2_PORT1_2": ("p1", 3),
+                "ECMP_2_PORT1_3": ("p1", 3),
+            }
+        )
+        self.tgen._device_group_info[("p1", 3)] = {
+            "peers": ["m1_bgp_v6", "m2_bgp_v6", "m3_bgp_v6"]
+        }
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2_PORT1_",
+            sleep_time_before_applying_change=0,
+        )
+        peer_names, _ = self._peer_state_calls()[0]
+        self.assertEqual(
+            sorted(peer_names), ["m1_bgp_v6", "m2_bgp_v6", "m3_bgp_v6"]
+        )
+
+    def test_disable_uses_down_state(self):
+        self.tgen.toggle_device_groups(
+            enable=False,
+            device_group_name_regex="ECMP_2_PORT1",
+            sleep_time_before_applying_change=0,
+        )
+        calls = self._peer_state_calls()
+        self.assertEqual(len(calls), 1)
+        peers = self.tgen.api.control_state.return_value.protocol.bgp.peers
+        self.assertIs(calls[0][1], peers.DOWN)
+
+    def test_enable_uses_up_state(self):
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2_PORT1",
+            sleep_time_before_applying_change=0,
+        )
+        peers = self.tgen.api.control_state.return_value.protocol.bgp.peers
+        self.assertIs(self._peer_state_calls()[0][1], peers.UP)
+
+    def test_does_not_repush_config(self):
+        """A set_config would restart protocols and flap unrelated sessions."""
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2",
+            sleep_time_before_applying_change=0,
+        )
+        self.tgen.api.set_config.assert_not_called()
+
+    def test_exception_device_groups_excluded(self):
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2",
+            exception_device_groups=["PORT2"],
+            sleep_time_before_applying_change=0,
+        )
+        peer_names, _ = self._peer_state_calls()[0]
+        self.assertEqual(peer_names, ["ecmp2_p1_bgp_v6"])
+
+    def test_no_match_is_a_warning_not_an_error(self):
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="NO_SUCH_GROUP",
+            sleep_time_before_applying_change=0,
+        )
+        self.tgen.api.set_control_state.assert_not_called()
+        self.tgen.logger.warning.assert_called()
+
+    def test_group_without_bgp_peers_is_a_warning(self):
+        self.tgen._device_group_info[("p1", 2)] = {"peers": []}
+        self.tgen.toggle_device_groups(
+            enable=True,
+            device_group_name_regex="ECMP_2_PORT1",
+            sleep_time_before_applying_change=0,
+        )
+        self.tgen.api.set_control_state.assert_not_called()
+        self.tgen.logger.warning.assert_called()
+
+    def test_invalid_regex_raises(self):
+        with self.assertRaises(ValueError):
+            self.tgen.toggle_device_groups(
+                enable=True,
+                device_group_name_regex="ECMP_2(",
+                sleep_time_before_applying_change=0,
+            )
+
+
+# -- enable_traffic -----------------------------------------------------------
+
+
+class TestEnableTrafficPublicApi(unittest.TestCase):
+    def setUp(self):
+        self.tgen = _create_otg_tgen()
+        # enable_traffic issues two _transmit calls (start matched, stop the
+        # rest).  A shared control_state mock would show only the last
+        # assignment for both, so hand out a fresh one per call.
+        self.tgen.api.control_state.side_effect = lambda: MagicMock()
+        self.tgen.config.flows = [
+            _make_flow("NO_PACKET_LOSS_EXPECTED_V4_p1_0_to_0"),
+            _make_flow("NO_PACKET_LOSS_EXPECTED_V6_p1_0_to_0"),
+            _make_flow("HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0"),
+        ]
+
+    def _transmit_calls(self):
+        """(flow_names, state) per set_control_state call."""
+        out = []
+        for call in self.tgen.api.set_control_state.call_args_list:
+            cs = call.args[0]
+            out.append(
+                (
+                    cs.traffic.flow_transmit.flow_names,
+                    cs.traffic.flow_transmit.state,
+                )
+            )
+        return out
+
+    def test_enabling_everything_restarts_the_cp_flood(self):
+        """Characterises the trap: regexes=None does NOT mean "restore".
+
+        It clears the disabled set *and* transmit-starts every name it matched,
+        the CP flood included. Anything wanting "put the measured path back"
+        must name the measured flows, so the disable-non-matching branch stops
+        the flood instead of restarting it.
+        """
+        self.tgen.enable_traffic(regexes=None, enable=True)
+        started = [
+            names for names, state in self._transmit_calls() if names
+        ]
+        self.assertIn("HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0", started[0])
+
+    def test_restoring_the_measured_path_stops_the_cp_flood(self):
+        """Naming the measured prefix leaves the flood explicitly disabled."""
+        self.tgen.enable_traffic(
+            regexes=["NO_PACKET_LOSS_EXPECTED"], enable=True
+        )
+        self.assertEqual(
+            self.tgen._disabled_flows, {"HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0"}
+        )
+        calls = self._transmit_calls()
+        stopped = [names for names, state in calls if names and "HIGH" in names[0]]
+        self.assertTrue(stopped, "the flood must be transmit-stopped, not left running")
+
+    def test_enabling_one_flow_disables_the_rest(self):
+        """Matches restpy: enabling a subset stops every non-matching item."""
+        self.tgen.enable_traffic(regexes=["HIGH_QUEUE_BGP_CP_TRAFFIC"], enable=True)
+        self.assertEqual(
+            self.tgen._disabled_flows,
+            {
+                "NO_PACKET_LOSS_EXPECTED_V4_p1_0_to_0",
+                "NO_PACKET_LOSS_EXPECTED_V6_p1_0_to_0",
+            },
+        )
+
+    def test_enabling_transmits_matched_and_stops_non_matching(self):
+        self.tgen.enable_traffic(regexes=["HIGH_QUEUE_BGP_CP_TRAFFIC"], enable=True)
+        calls = self._transmit_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], ["HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0"])
+        self.assertEqual(
+            calls[1][0],
+            [
+                "NO_PACKET_LOSS_EXPECTED_V4_p1_0_to_0",
+                "NO_PACKET_LOSS_EXPECTED_V6_p1_0_to_0",
+            ],
+        )
+
+    def test_disabling_leaves_other_flows_alone(self):
+        self.tgen.enable_traffic(regexes=["HIGH_QUEUE_BGP_CP_TRAFFIC"], enable=False)
+        self.assertEqual(
+            self.tgen._disabled_flows, {"HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0"}
+        )
+        calls = self._transmit_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], ["HIGH_QUEUE_BGP_CP_TRAFFIC_p1_0_to_0"])
+
+    def test_does_not_repush_config(self):
+        """The CPU-queue test asserts BGP sessions did NOT flap; a set_config
+        here would restart protocols and fail that check spuriously."""
+        self.tgen.enable_traffic(regexes=["HIGH_QUEUE_BGP_CP_TRAFFIC"], enable=True)
+        self.tgen.api.set_config.assert_not_called()
+
+    def test_prepare_traffic_skips_repush_after_enable_traffic(self):
+        """End-to-end of the above: the serialized config is unchanged, so
+        _prepare_traffic() short-circuits."""
+        self.tgen.config.serialize.return_value = "SERIALIZED"
+        self.tgen._last_pushed_config = "SERIALIZED"
+        self.tgen.enable_traffic(regexes=["HIGH_QUEUE_BGP_CP_TRAFFIC"], enable=True)
+        self.tgen._prepare_traffic()
+        self.tgen.api.set_config.assert_not_called()
+
+    def test_none_regex_targets_all_flows(self):
+        self.tgen.enable_traffic(regexes=None, enable=False)
+        self.assertEqual(len(self.tgen._disabled_flows), 3)
+
+    def test_no_match_warns(self):
+        self.tgen.enable_traffic(regexes=["NOPE"], enable=True)
+        self.tgen.logger.warning.assert_called()
+
+
+# -- packet header translation ------------------------------------------------
+
+
+class TestPacketHeaderTranslation(unittest.TestCase):
+    def setUp(self):
+        self.tgen = _create_otg_tgen()
+        self.flow = MagicMock()
+
+    def test_single_value_and_reference_resolved_upstream(self):
+        """References are already flattened into attrs by the pipeline."""
+        headers = [
+            _make_header(
+                "^ethernet$",
+                [
+                    _make_field(
+                        "Destination MAC Address",
+                        [
+                            _make_attr("ValueType", "increment"),
+                            _make_attr("StepValue", "00:00:00:00:00:00"),
+                            _make_attr("CountValue", 1, kind="integer"),
+                            _make_attr("StartValue", "02:00:00:00:00:01"),
+                        ],
+                    ),
+                    _make_field(
+                        "Source MAC Address",
+                        [_make_attr("SingleValue", "00:00:00:11:22:33")],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        eth = stacks["ethernet"]
+        self.assertEqual(eth.dst.value, "02:00:00:00:00:01")
+        self.assertEqual(eth.src.value, "00:00:00:11:22:33")
+
+    def test_tcp_ports(self):
+        headers = [
+            _make_header(
+                "^tcp$",
+                [
+                    _make_field(
+                        "TCP-Dest-Port",
+                        [_make_attr("SingleValue", 179, kind="integer")],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertEqual(stacks["tcp"].dst_port.value, 179)
+
+    def test_degenerate_increment_collapses_to_fixed_value(self):
+        """Count 1 with a zero step is a fixed value; emit it as one."""
+        headers = [
+            _make_header(
+                "^ipv4$",
+                [
+                    _make_field(
+                        "Destination Address",
+                        [
+                            _make_attr("ValueType", "increment"),
+                            _make_attr("StepValue", "0.0.0.0"),
+                            _make_attr("CountValue", 1, kind="integer"),
+                            _make_attr("StartValue", "10.0.1.2"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertEqual(stacks["ipv4"].dst.value, "10.0.1.2")
+
+    def test_real_increment_is_preserved(self):
+        headers = [
+            _make_header(
+                "^ipv4$",
+                [
+                    _make_field(
+                        "Source Address",
+                        [
+                            _make_attr("ValueType", "increment"),
+                            _make_attr("StepValue", "0.0.0.1"),
+                            _make_attr("CountValue", 10, kind="integer"),
+                            _make_attr("StartValue", "10.0.1.1"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        src = stacks["ipv4"].src
+        self.assertEqual(src.increment.start, "10.0.1.1")
+        self.assertEqual(src.increment.step, "0.0.0.1")
+        self.assertEqual(src.increment.count, 10)
+
+    def test_value_list_of_one_becomes_a_value(self):
+        headers = [
+            _make_header(
+                "^tcp$",
+                [
+                    _make_field(
+                        "TCP-Source-Port",
+                        [
+                            _make_attr("ValueType", "valueList"),
+                            _make_attr("ValueList", [179], kind="integer_list"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertEqual(stacks["tcp"].src_port.value, 179)
+
+    def test_value_list_of_many_becomes_values(self):
+        headers = [
+            _make_header(
+                "^tcp$",
+                [
+                    _make_field(
+                        "TCP-Source-Port",
+                        [
+                            _make_attr("ValueType", "valueList"),
+                            _make_attr(
+                                "ValueList", [179, 180], kind="integer_list"
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+        stacks = self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertEqual(stacks["tcp"].src_port.values, [179, 180])
+
+    def test_unsupported_stack_raises_naming_it(self):
+        headers = [_make_header("^mpls$", [])]
+        with self.assertRaises(NotImplementedError) as ctx:
+            self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertIn("mpls", str(ctx.exception))
+
+    def test_unsupported_field_raises_naming_it(self):
+        headers = [
+            _make_header(
+                "^ethernet$",
+                [_make_field("Ethernet-Type", [_make_attr("SingleValue", 1)])],
+            ),
+        ]
+        with self.assertRaises(NotImplementedError) as ctx:
+            self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertIn("Ethernet-Type", str(ctx.exception))
+
+    def test_unsupported_value_type_raises(self):
+        headers = [
+            _make_header(
+                "^ethernet$",
+                [
+                    _make_field(
+                        "Source MAC Address",
+                        [_make_attr("ValueType", "random")],
+                    )
+                ],
+            ),
+        ]
+        with self.assertRaises(NotImplementedError) as ctx:
+            self.tgen.apply_packet_headers(self.flow, headers)
+        self.assertIn("random", str(ctx.exception))
+
+    def test_increment_without_start_raises(self):
+        headers = [
+            _make_header(
+                "^ethernet$",
+                [
+                    _make_field(
+                        "Source MAC Address",
+                        [_make_attr("ValueType", "increment")],
+                    )
+                ],
+            ),
+        ]
+        with self.assertRaises(NotImplementedError):
+            self.tgen.apply_packet_headers(self.flow, headers)
+
+
+# -- QoS / DSCP ---------------------------------------------------------------
+
+
+class TestFlowQos(unittest.TestCase):
+    def _ti(self, dscp):
+        ti = MagicMock()
+        ti.qos_config.dscp_value = dscp
+        return ti
+
+    def test_dscp_on_ipv4_uses_phb(self):
+        tgen = _create_otg_tgen()
+        stacks = {"ipv4": MagicMock()}
+        tgen._apply_flow_qos(stacks, self._ti(48))
+        self.assertEqual(stacks["ipv4"].priority.dscp.phb.value, 48)
+
+    def test_dscp_on_ipv6_shifts_into_traffic_class(self):
+        tgen = _create_otg_tgen()
+        stacks = {"ipv6": MagicMock()}
+        tgen._apply_flow_qos(stacks, self._ti(48))
+        self.assertEqual(stacks["ipv6"].traffic_class.value, 48 << 2)
+
+    def test_no_qos_config_is_a_noop(self):
+        """A flow without qos_config must keep snappi's default priority."""
+        tgen = _create_otg_tgen()
+        ti = MagicMock()
+        ti.qos_config = None
+        ipv4 = MagicMock()
+        sentinel = ipv4.priority.dscp.phb.value
+        tgen._apply_flow_qos({"ipv4": ipv4}, ti)
+        self.assertIs(ipv4.priority.dscp.phb.value, sentinel)
+
+    def test_non_integer_dscp_is_a_noop(self):
+        """qos_config is optional thrift; a non-int dscp_value means unset."""
+        tgen = _create_otg_tgen()
+        ti = MagicMock()  # dscp_value auto-mocks to a MagicMock, not an int
+        ipv4 = MagicMock()
+        sentinel = ipv4.priority.dscp.phb.value
+        tgen._apply_flow_qos({"ipv4": ipv4}, ti)
+        self.assertIs(ipv4.priority.dscp.phb.value, sentinel)
+
+    def test_dscp_without_l3_header_warns(self):
+        tgen = _create_otg_tgen()
+        tgen._apply_flow_qos({"ethernet": MagicMock()}, self._ti(48))
+        tgen.logger.warning.assert_called()
+
+# -- BGP update sequence (raw UPDATE replay) ----------------------------------
+
+
+class _ThriftLikeList(collections.abc.Sequence):
+    """Stands in for thrift.python.types.List, which is a Sequence but NOT a
+    list or tuple.  An isinstance(x, (list, tuple)) guard silently drops it —
+    that bug shipped once already, in the packet_headers path."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __len__(self):
+        return len(self._items)
+
+
+def _make_update_entry(update_bytes, time_gap_ms=0):
+    entry = MagicMock()
+    entry.update_bytes = update_bytes
+    entry.time_gap_ms = time_gap_ms
+    return entry
+
+
+def _make_update_sequence(entries, container=list):
+    seq = MagicMock()
+    seq.updates = container(entries)
+    return seq
+
+
+class TestNonEmptySequence(unittest.TestCase):
+    """Guards the helper both isinstance bugs came down to."""
+
+    def test_accepts_list_and_tuple(self):
+        self.assertTrue(_nonempty_sequence([1]))
+        self.assertTrue(_nonempty_sequence((1,)))
+
+    def test_accepts_a_thrift_style_sequence(self):
+        self.assertTrue(_nonempty_sequence(_ThriftLikeList([1])))
+
+    def test_rejects_empty(self):
+        self.assertFalse(_nonempty_sequence([]))
+        self.assertFalse(_nonempty_sequence(_ThriftLikeList([])))
+
+    def test_rejects_none_and_mocks(self):
+        self.assertFalse(_nonempty_sequence(None))
+        self.assertFalse(_nonempty_sequence(MagicMock()))
+
+    def test_rejects_strings(self):
+        """str is a Sequence; treating one as a list of fields would be wrong."""
+        self.assertFalse(_nonempty_sequence("abc"))
+        self.assertFalse(_nonempty_sequence(b"abc"))
+
+
+class TestBuildBgpUpdateSequence(unittest.TestCase):
+    def setUp(self):
+        self.tgen = _create_otg_tgen()
+        self.peer = MagicMock()
+
+    def _replayed(self):
+        """(update_bytes, time_gap) for each replayed entry, in order."""
+        calls = self.peer.replay_updates.raw_bytes.updates.oneupdatereplay
+        out = []
+        for c in calls.return_value.__getitem__.call_args_list:
+            pass
+        # oneupdatereplay()[-1] returns the same mock each call, so read the
+        # recorded assignments instead.
+        return out
+
+    def test_sets_raw_bytes_choice(self):
+        seq = _make_update_sequence([_make_update_entry("ffab")])
+        self.tgen._build_bgp_update_sequence(self.peer, seq, "peer1")
+        self.assertEqual(self.peer.replay_updates.choice, "raw_bytes")
+
+    def test_creates_one_entry_per_update(self):
+        seq = _make_update_sequence(
+            [_make_update_entry("aa"), _make_update_entry("bb"), _make_update_entry("cc")]
+        )
+        self.tgen._build_bgp_update_sequence(self.peer, seq, "peer1")
+        self.assertEqual(
+            self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.call_count, 3
+        )
+
+    def test_works_with_a_thrift_style_list(self):
+        """Regression guard: thrift lists are not list/tuple instances."""
+        seq = _make_update_sequence(
+            [_make_update_entry("aa")], container=_ThriftLikeList
+        )
+        self.tgen._build_bgp_update_sequence(self.peer, seq, "peer1")
+        self.assertEqual(
+            self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.call_count, 1
+        )
+
+    def test_last_entry_values_are_applied(self):
+        seq = _make_update_sequence([_make_update_entry("dead", time_gap_ms=250)])
+        self.tgen._build_bgp_update_sequence(self.peer, seq, "peer1")
+        one = self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.return_value[-1]
+        self.assertEqual(one.update_bytes, "dead")
+        self.assertEqual(one.time_gap, 250)
+
+    def test_missing_time_gap_defaults_to_zero(self):
+        entry = MagicMock()
+        entry.update_bytes = "beef"
+        entry.time_gap_ms = None
+        self.tgen._build_bgp_update_sequence(
+            self.peer, _make_update_sequence([entry]), "peer1"
+        )
+        one = self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.return_value[-1]
+        self.assertEqual(one.time_gap, 0)
+
+    def test_no_sequence_is_a_noop(self):
+        self.tgen._build_bgp_update_sequence(self.peer, None, "peer1")
+        self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.assert_not_called()
+
+    def test_empty_sequence_is_a_noop(self):
+        self.tgen._build_bgp_update_sequence(
+            self.peer, _make_update_sequence([]), "peer1"
+        )
+        self.peer.replay_updates.raw_bytes.updates.oneupdatereplay.assert_not_called()
+
+    def test_entry_without_bytes_raises(self):
+        """Only the raw-bytes arm is wired; a structured entry must not be
+        silently dropped, which would send nothing and still report green."""
+        entry = MagicMock()
+        entry.update_bytes = None
+        with self.assertRaises(ValueError):
+            self.tgen._build_bgp_update_sequence(
+                self.peer, _make_update_sequence([entry]), "peer1"
+            )
+
+    def test_warns_when_snappi_lacks_replay_updates(self):
+        """Older snappi has no peer.replay_updates; warn rather than crash."""
+        peer = MagicMock(spec=["v4_routes"])
+        self.tgen._build_bgp_update_sequence(
+            peer, _make_update_sequence([_make_update_entry("aa")]), "peer1"
+        )
+        self.tgen.logger.warning.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLegacyIpStackRejectsMultiplier(unittest.TestCase):
+    """The legacy `ip_addr_1` path predates `multiplier` and ignores `offset`.
+
+    A multiplied group taking it would put N devices on one address: no distinct
+    router IDs, no sessions, and nothing in the config that looks wrong. Refusing
+    the combination is cheaper than the latent bug, and it is unreachable in the
+    current configs so the raise costs nothing today.
+    """
+
+    def _legacy_ip_cfg(self):
+        cfg = MagicMock(
+            spec=["ip_addr_1", "ipv4_addresses_config", "ipv6_addresses_config"]
+        )
+        cfg.ipv4_addresses_config = None
+        cfg.ipv6_addresses_config = None
+        addr_info = MagicMock(spec=["ipv4_addr_info", "ipv6_addr_info"])
+        v4 = MagicMock()
+        v4.starting_ip = "10.0.1.1"
+        v4.gateway_starting_ip = "10.0.1.2"
+        v4.subnet_mask = 24
+        v4.ip_obj_name = None
+        addr_info.ipv4_addr_info = v4
+        addr_info.ipv6_addr_info = None
+        cfg.ip_addr_1 = addr_info
+        return cfg
+
+    def test_offset_zero_still_works(self):
+        tgen = _create_otg_tgen()
+        eth = MagicMock()
+        tgen._build_ip_stack(eth, "dev", self._legacy_ip_cfg(), offset=0)
+        eth.ipv4_addresses.ipv4.assert_called()
+
+    def test_a_nonzero_offset_raises(self):
+        tgen = _create_otg_tgen()
+        with self.assertRaises(ValueError) as ctx:
+            tgen._build_ip_stack(
+                MagicMock(), "dev", self._legacy_ip_cfg(), offset=1
+            )
+        self.assertIn("multiplier", str(ctx.exception).lower())

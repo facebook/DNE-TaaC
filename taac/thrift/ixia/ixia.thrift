@@ -546,12 +546,36 @@ struct CustomNetworkGroupConfig {
   14: i32 network_group_index;
 }
 
+# One BGP UPDATE in an ordered sequence sent to the peer.
+struct BgpUpdateSequenceEntry {
+  # Minimum delay in milliseconds from the previous entry in the sequence.
+  1: i32 time_gap_ms = 0;
+  # The complete UPDATE as a hex string (no leading "0x"), including the 16-byte
+  # marker, 2-byte length and type octet.  Callers own length-field consistency.
+  2: optional string update_bytes;
+}
+
+# An ordered, timed sequence of BGP UPDATEs sent once the session is established,
+# and again on each re-establishment — which is what makes a peer down/up a usable
+# trigger.  Advertise and withdraw are both expressible.
+#
+# An escape hatch from the declarative route-range model (bgp_prefix_configs),
+# which describes only conformant BGP.  Use it when the exact bytes matter:
+# replaying a captured stream, precisely-timed churn, or deliberately
+# non-conformant messages for protocol hardening.
+#
+# OTG/snappi: maps to peer.replay_updates (BgpUpdateReplay), raw_bytes arm.
+struct BgpUpdateSequence {
+  1: list<BgpUpdateSequenceEntry> updates;
+}
+
 struct BgpConfig {
   1: IpAddressFamily ip_address_family;
   2: BgpPeerConfig bgp_peer_config;
   3: optional list<BgpPrefixConfig> bgp_prefix_configs;
   4: optional list<ImportBgpRoutesParams> import_bgp_routes_params_list;
   5: optional list<CustomNetworkGroupConfig> custom_network_group_configs;
+  6: optional BgpUpdateSequence update_sequence;
 }
 
 struct BgpConfigInfo {
