@@ -496,7 +496,7 @@ Use three independent gates:
    `buck test fbcode//neteng/test_infra/dne/taac/tests:test_config_golden`
    without changing the checked-in manifest.
 3. **No-diff regeneration check.** Run
-   `buck run fbcode//neteng/test_infra/dne/taac/tests:config_golden -- --update`
+   `(cd fbcode && buck run //neteng/test_infra/dne/taac/tests:config_golden -- --update)`
    as a diagnostic and require no tracked manifest change. If it changes,
    investigate the candidate output and do not include the regenerated
    manifest.
@@ -823,8 +823,8 @@ compatibility deletion follow the approved design.
 
 ## Weekend implementation plan
 
-Status: implementation started 2026-08-07. Diff 1.5.0 is committed and Diff
-1.5.1 is in validation.
+Status: implementation started 2026-08-07. Diffs 1.5.0 and 1.5.1 are committed;
+Diff 1.5.2 is in validation.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
@@ -853,6 +853,28 @@ Diff 1.5.2 therefore remains flat. Before introducing the first nested compiler
 package, add query/BXL-backed recursive discovery or a governed library macro
 that makes omission impossible. A nested package must not be added using only
 the current explicit resource manifest.
+
+### Phase 1.5.2 deferred projections
+
+The task-free contracts expose policy bindings and component resources, but the
+current logical topology does not yet provide enough platform-neutral input to
+populate them safely:
+
+- `BgpPolicy` does not encode import versus export direction. Directional
+  `PolicyBinding` projection remains in Diff 1.5.3 with the normalized
+  relationship and EB policy seam.
+- Current topology intent does not declare semantic component roles or their
+  dependencies. `ComponentPlan` projection remains in Diff 1.5.5 with EOS
+  renderer extraction; the common planner must not infer daemon roles.
+- Final EOS and IXIA artifact rendering remains compatibility-delegated in the
+  Phase 1.5.2 harness composition. Native renderer reports replace those
+  delegations in Diffs 1.5.4-1.5.6.
+
+Legacy IXIA names and indices are accepted only through an optional identity
+sidecar keyed by stable `ResourceId`. The sidecar cannot affect allocation,
+capability selection, scheduling, ownership, or lifecycle. Peer counts,
+partitions, child windows, physical inventory indices, ports, addresses, ASNs,
+and route geometry remain semantic plan data.
 
 ### Multi-agent operating model
 
