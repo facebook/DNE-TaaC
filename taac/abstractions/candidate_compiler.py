@@ -12,6 +12,7 @@ from taac.abstractions.compatibility.eos_bgpcpp_policy_bindings import (
     resolve_eos_bgpcpp_policy_binding,
 )
 from taac.abstractions.compilation.dut import (
+    DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
 )
 from taac.abstractions.compilation.model import (
@@ -19,6 +20,7 @@ from taac.abstractions.compilation.model import (
 )
 from taac.abstractions.compilation.planner import PlanningResult
 from taac.abstractions.compilation.protocols import (
+    DutEndpointBaseRenderer,
     DutHostOsRenderer,
     TrafficGeneratorRenderer,
 )
@@ -99,6 +101,7 @@ class CandidateCompilation:
     plan: TopologyCompilationPlan
     report: CompileReport
     artifacts: CompiledTaacArtifacts
+    dut_endpoint_base_shadow: DutEndpointBaseRenderResult[object] | None = None
     dut_host_os_shadow: DutHostOsRenderResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
 
@@ -107,6 +110,7 @@ class CandidateCompilation:
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
     artifact_adapter: ArtifactAdapter
+    dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
@@ -118,6 +122,12 @@ class CandidateTopologyCompiler:
         resource_ids = planning.plan.iter_resource_ids()
         planning.report.assert_renderable(resource_ids)
         adapted = self.artifact_adapter.render(bound, planning.plan)
+        dut_endpoint_base_shadow = None
+        if self.dut_endpoint_base_renderer is not None:
+            dut_endpoint_base_shadow = self.dut_endpoint_base_renderer.render(
+                planning.plan.dut
+            )
+            dut_endpoint_base_shadow.validate(planning.plan.dut)
         dut_host_os_shadow = None
         if self.dut_host_os_renderer is not None:
             dut_host_os_shadow = self.dut_host_os_renderer.render(planning.plan.dut)
@@ -143,6 +153,7 @@ class CandidateTopologyCompiler:
             plan=planning.plan,
             report=report,
             artifacts=adapted.artifacts,
+            dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
         )

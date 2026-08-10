@@ -7,14 +7,23 @@ import typing as t
 from dataclasses import dataclass
 
 from taac.abstractions.compilation.dut import (
+    DutEndpointBaseFragment,
+    DutEndpointBaseRenderResult,
     DutHostOsFragment,
     DutHostOsRenderResult,
 )
-from taac.abstractions.compilation.model import DutPlan
+from taac.abstractions.compilation.model import (
+    DutPlan,
+    EndpointPlan,
+)
 from taac.test_as_a_config import types as taac_types
 
 
 class UnsupportedEosBgpCppHostOsRenderingError(ValueError):
+    pass
+
+
+class UnsupportedEosBgpCppEndpointBaseRenderingError(ValueError):
     pass
 
 
@@ -26,23 +35,11 @@ class EosBgpCppHostOsRenderer:
         self,
         plan: DutPlan,
     ) -> DutHostOsRenderResult[taac_types.DeviceOsType]:
-        endpoints = tuple(endpoint for endpoint in plan.endpoints if endpoint.is_dut)
-        if len(endpoints) != 1:
-            _unsupported(
-                "EOS/BGP++ host-OS rendering requires exactly one DUT endpoint; "
-                f"found {len(endpoints)}"
-            )
-        endpoint = endpoints[0]
-        if endpoint.backend != "eos":
-            _unsupported(
-                f"DUT endpoint {endpoint.resource_id} has unsupported backend "
-                f"{endpoint.backend!r}"
-            )
-        physical_identifier = endpoint.physical_identifier
-        if not physical_identifier:
-            _unsupported(
-                f"DUT endpoint {endpoint.resource_id} has no physical identifier"
-            )
+        endpoint, physical_identifier = _required_eos_dut_endpoint(
+            plan,
+            subject="host-OS",
+            error_type=UnsupportedEosBgpCppHostOsRenderingError,
+        )
 
         result = DutHostOsRenderResult(
             owned_endpoint_ids=(endpoint.resource_id,),
@@ -58,11 +55,71 @@ class EosBgpCppHostOsRenderer:
         return result
 
 
-def _unsupported(message: str) -> t.NoReturn:
-    raise UnsupportedEosBgpCppHostOsRenderingError(message)
+@dataclass(frozen=True)
+class EosBgpCppEndpointBaseRenderer:
+    """Lowers EOS-owned endpoint fields without IXIA wiring."""
+
+    def render(
+        self,
+        plan: DutPlan,
+    ) -> DutEndpointBaseRenderResult[taac_types.Endpoint]:
+        endpoint, physical_identifier = _required_eos_dut_endpoint(
+            plan,
+            subject="endpoint-base",
+            error_type=UnsupportedEosBgpCppEndpointBaseRenderingError,
+        )
+        result = DutEndpointBaseRenderResult(
+            owned_endpoint_ids=(endpoint.resource_id,),
+            fragments=(
+                DutEndpointBaseFragment(
+                    endpoint_id=endpoint.resource_id,
+                    physical_identifier=physical_identifier,
+                    endpoint=taac_types.Endpoint(
+                        name=physical_identifier,
+                        dut=True,
+                    ),
+                ),
+            ),
+        )
+        result.validate(plan)
+        return result
+
+
+TUnsupportedRenderingError = t.TypeVar(
+    "TUnsupportedRenderingError",
+    bound=ValueError,
+)
+
+
+def _required_eos_dut_endpoint(
+    plan: DutPlan,
+    *,
+    subject: str,
+    error_type: type[TUnsupportedRenderingError],
+) -> tuple[EndpointPlan, str]:
+    endpoints = tuple(endpoint for endpoint in plan.endpoints if endpoint.is_dut)
+    if len(endpoints) != 1:
+        raise error_type(
+            f"EOS/BGP++ {subject} rendering requires exactly one DUT endpoint; "
+            f"found {len(endpoints)}"
+        )
+    endpoint = endpoints[0]
+    if endpoint.backend != "eos":
+        raise error_type(
+            f"DUT endpoint {endpoint.resource_id} has unsupported backend "
+            f"{endpoint.backend!r}"
+        )
+    physical_identifier = endpoint.physical_identifier
+    if not physical_identifier:
+        raise error_type(
+            f"DUT endpoint {endpoint.resource_id} has no physical identifier"
+        )
+    return endpoint, physical_identifier
 
 
 __all__ = (
+    "EosBgpCppEndpointBaseRenderer",
     "EosBgpCppHostOsRenderer",
+    "UnsupportedEosBgpCppEndpointBaseRenderingError",
     "UnsupportedEosBgpCppHostOsRenderingError",
 )

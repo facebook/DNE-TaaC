@@ -851,28 +851,31 @@ compatibility deletion follow the approved design.
 
 ## Weekend implementation plan
 
-Status: implementation started 2026-08-07. Diffs 1.5.0-1.5.3 are committed;
-the independently droppable Diff 1.5.4a semantic-plan slice is locally
-complete.
+Status: implementation started 2026-08-07. Diffs 1.5.0 through the
+independently droppable EOS endpoint-base extraction are committed.
 
 The weekend goal is a reviewable stack that establishes the migration safety
 rail and generalized compiler contracts. It does not attempt to complete all
 of Phase 1.5:
 
-1. **Required:** Diff 1.5.0, compatibility/parity harness.
-2. **Required:** Diff 1.5.1, dependency ownership and import guards.
-3. **Required:** Diff 1.5.2, task-free types and backend protocols behind the
+1. **Completed:** Diff 1.5.0, compatibility/parity harness.
+2. **Completed:** Diff 1.5.1, dependency ownership and import guards.
+3. **Completed:** Diff 1.5.2, task-free types and backend protocols behind the
    unchanged facade.
-4. **Completed stretch:** Diff 1.5.3, physical `EB` role and the
+4. **Completed:** Diff 1.5.3, physical `EB` role and the
    policy-resolution seam.
-5. **Autopilot extension, independently droppable:** Diff 1.5.4a, complete the
+5. **Completed:** Diff 1.5.4a, complete the
    shared semantic IXIA plan and its invariants without changing rendering.
+6. **Completed shadow capabilities:** Diff 1.5.4b, add shared IXIA rendering
+   for UG and IPv6 update-packing without artifact authority.
+7. **Completed shadow capability:** Diff 1.5.5a, extract field-scoped EOS
+   host-OS and endpoint-base rendering.
 
-Native shared IXIA rendering (Diff 1.5.4b), EOS renderer extraction, facade
-cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
-OpenR/helper behavior, and FBOSS task emission remain independently deferred.
-Do not pull one of those into Diff 1.5.4a merely to make the weekend stack
-appear complete.
+Remaining shared IXIA capabilities, EOS lifecycle/config/interface rendering,
+facade cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
+OpenR/helper behavior, and FBOSS task emission remain independently gated.
+Do not substitute topology-selected compatibility constants for missing typed
+inputs merely to make the weekend stack appear complete.
 
 ### Recorded implementation blocker
 
@@ -1205,6 +1208,45 @@ passed 516/516 tests (TestInfra `21110623290421101`); and changed-target Pyre
 found no errors across 13 owning targets. Golden regeneration found 294
 unchanged configurations, with zero additions, changes, or removals. The
 manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+
+#### Endpoint-base shadow extension
+
+The EOS backend now also lowers the DUT endpoint base from the same normalized
+endpoint plan. It owns exactly the ordered normalized-DUT coverage and the
+`Endpoint` fields `name`, `dut`, `ixia_needed`, `mac_address`, and
+`exclude_ixia_ports`. The current capability requires exactly one EOS DUT with
+a physical identifier, emits `name=<physical identifier>` and `dut=True`, and
+requires the three optional non-IXIA fields to retain their unset defaults.
+The shared traffic-generator lane remains the sole owner of `ixia_ports` and
+`direct_ixia_connections`.
+
+A Thrift-metadata guard partitions every current `Endpoint` field between
+those two owners and fails if a future field is silently unowned. Exact base
+projection matches all 16 EOS parity cases with no ignored extra endpoint.
+Test-only keyed composition of the EOS base and the shared IXIA endpoint patch
+matches the complete established endpoint, including list order and
+unset-versus-list behavior, for UG new peer, UG dynamic peer, and IPv6 update
+packing in full and skip modes. The other 12 cases remain delegated until
+their shared IXIA endpoint patches are natively lowered.
+
+The endpoint result remains a separate validated shadow after the established
+adapter; it is never merged into artifacts and `RendererLane.DUT` remains
+`COMPATIBILITY_DELEGATED`. Lifecycle extraction is explicitly deferred. Host
+preparation still contains an unmodeled physical interface profile, including
+fixed descriptions and `speed 100g-2`; common component plans are empty;
+routing configuration lacks the Configerator artifact, router ID, variant, and
+restart requirements; interface realization lacks aggregation and
+clear-versus-secondary semantics; and OpenR lacks helper/config materialization.
+No topology/profile/name-selected constant may substitute for those inputs.
+
+Final local validation passed on 2026-08-07: the focused EOS endpoint, shared
+IXIA composition, candidate, complete parity, and import-boundary gate passed
+51/51 tests (TestInfra `36028797043214708`); the combined full abstraction and
+factory-golden gate passed 520/520 tests (TestInfra `844425448459007`); and
+changed-target Pyre found no errors across 13 owning targets. Golden
+regeneration found 294 unchanged configurations, with zero additions, changes,
+or removals. The manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 ### Multi-agent operating model
