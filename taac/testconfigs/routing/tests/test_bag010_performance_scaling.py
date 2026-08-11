@@ -35,6 +35,21 @@ def _task_json_params(task) -> dict:
     return value
 
 
+def _custom_step_params(config) -> list:
+    """Params of every CUSTOM_STEP across the config's playbooks."""
+    found = []
+    for pb in config.playbooks or []:
+        for stage in getattr(pb, "stages", None) or []:
+            for step in stage.steps or []:
+                step_params = getattr(step, "step_params", None)
+                raw = getattr(step_params, "json_params", None) if step_params else None
+                if raw:
+                    params = json.loads(raw)
+                    if params.get("custom_step_name"):
+                        found.append(params)
+    return found
+
+
 class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
     """The perf-scaling factory is physical-inventory-driven: the TestConfig name derives
     from ``physical_inventory.device_name`` and ``router_id`` is optional so physical inventories that
@@ -198,6 +213,64 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
         self.assertEqual(1, len(flag_indices))
         self.assertGreater(len(bgp_enable_indices), 0)
         self.assertLess(flag_indices[0], bgp_enable_indices[0])
+
+    def test_ingress_only_config_also_resolves_nexthops(self) -> None:
+        """SC2 must resolve next-hops too, and be ingress-only for a different
+        reason.
+
+        char-2 measures attribute storage in a REAL, best-path selected RIB;
+        leaving next-hops unresolvable would measure a different (and easier)
+        thing to store, and forces the acceptance gate down to counting RECEIVED
+        rather than accepted-and-resolved. Selection state does not distort
+        sc2_memory_growth either -- the path count is fixed at 800K across the
+        sweep, so it is a constant additive term, not a growth term.
+
+        Ingress-only comes from configuring NO egress peer, which the sibling
+        test below pins.
+        """
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            enable_update_group=True,
+        )
+        enabling = [
+            params
+            for params in self._configure_startup_params(config)
+            if params.get("flags", {}).get("bgp_resolve_nexthops_from_interface_state")
+            == "true"
+        ]
+        self.assertEqual(
+            1,
+            len(enabling),
+            "SC2 measures a resolved RIB; exactly one setup task must enable "
+            "bgp_resolve_nexthops_from_interface_state",
+        )
+
+    def test_ingress_only_comes_from_having_no_egress_peer(self) -> None:
+        """The property that actually makes SC2 ingress-only.
+
+        With next-hops resolving, nothing stops advertisement except the absence
+        of an egress peer -- so pin it. Note BGP++ does NOT suppress eBGP->eBGP
+        under update-group (``AdjRibOutGroup::canAnnounceForGroup`` returns true
+        for eBGP without consulting ``suppressLoopedAdvertisements``), so the
+        iBGP peer count reaching zero is what keeps the DUT silent.
+        """
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            enable_update_group=True,
+        )
+        sweep_steps = [
+            params
+            for params in _custom_step_params(config)
+            if "unique_combination_counts" in params
+        ]
+        self.assertEqual(
+            1, len(sweep_steps), "expected exactly one combination-sweep step"
+        )
+        self.assertEqual(
+            0,
+            sweep_steps[0].get("constant_ibgp_peer_count"),
+            "SC2 is ingress-only by configuring no iBGP egress peer",
+        )
 
 
 class PerformanceScalingRouteFilterClearTest(unittest.TestCase):

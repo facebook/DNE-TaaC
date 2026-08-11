@@ -36,6 +36,7 @@ GATE_SC1_MEMORY_TRANSIENT = "sc1_memory_transient"
 GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
+GATE_SC2_NEXTHOPS_RESOLVED = "sc2_nexthops_resolved"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
 # SC5 -- maximally-packed UPDATE messages. Both gate the same custom step that
 # BAG012's update-packing test already drives; they were previously bare
@@ -111,9 +112,21 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     GATE_SC1_ROUTES_ADVERTISED: GATE_MODE_BLOCKING,
     # Anti-vacuousness: routes must reach the RIB -- hard from the start.
     GATE_SC2_ROUTES_ACCEPTANCE: GATE_MODE_BLOCKING,
-    # Stable memory must grow sub-linearly (<= √k, k = path scale) across the
-    # combination sweep -- calibrated on bag010 (fit p~=0.36, gated at 0.5),
-    # blocking.
+    # Every accepted route must have a RESOLVABLE next-hop, i.e.
+    # TRibSummary.routes_with_unresolved_nexthops == 0. char-2 measures a real,
+    # best-path-selected RIB; a RIB full of unresolved routes is a different
+    # (and easier) thing to store. Blocking from the start and deliberately not
+    # a tolerance -- the expected value is exactly zero, so there is nothing to
+    # calibrate. Ingress-only comes from having no egress peer configured, NOT
+    # from breaking next-hop resolution.
+    GATE_SC2_NEXTHOPS_RESOLVED: GATE_MODE_BLOCKING,
+    # Stable memory must grow sub-linearly (<= k^p, k = path scale) across the
+    # combination sweep. The earlier bag010 calibration (fit p~=0.36) is VOID --
+    # it was measured against the old ingredient-pool attribute model -- so the
+    # exponent is currently an uncalibrated, deliberately loose backstop. See
+    # _SC2_MEMORY_SCALING_EXPONENT in
+    # internal/steps/bgp_attribute_storage_varying_combinations_custom_step.py
+    # for the re-derivation this needs from the first clean run.
     GATE_SC2_MEMORY_GROWTH: GATE_MODE_BLOCKING,
     # Deduplicator-size constancy across the route sweep -- observe.
     GATE_SC3_MEMORY_DEDUP: GATE_MODE_PERMISSIVE,

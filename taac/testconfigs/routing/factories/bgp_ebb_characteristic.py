@@ -811,12 +811,12 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
     constant_ibgp_peer_count: int = 2,
     constant_total_paths: int = 800_000,
     test_address_families: list[str] | None = None,
-    base_as_path_pool_size: int = 100,
-    base_community_pool_size: int = 100,
-    base_extended_community_pool_size: int = 100,
+    # Entries in EACH of the three attribute pools (AS paths / community sets /
+    # extended-community sets). A pool entry is one COMPLETE attribute, so the
+    # DUT stores 3x this many attributes for the whole sweep and at most
+    # attribute_pool_size**3 distinct attribute-sets can be requested.
+    attribute_pool_size: int = 100,
     constant_acceptance_communities: list[str] | None = None,
-    max_communities_per_route_from_pool: int | None = None,
-    random_seed: int = 42,
     test_route_withdrawal: bool = False,
     withdrawal_wait_minutes: int = 3,
     dump_attribute_assignments: bool = False,
@@ -1040,12 +1040,8 @@ def test_config_constant_attribute_storage_varying_combinations_on_eos(
                 unique_combination_counts=unique_combination_counts,
                 test_address_families=test_address_families,
                 soak_time_minutes=soak_time_minutes,
-                base_as_path_pool_size=base_as_path_pool_size,
-                base_community_pool_size=base_community_pool_size,
-                base_extended_community_pool_size=base_extended_community_pool_size,
+                attribute_pool_size=attribute_pool_size,
                 constant_acceptance_communities=constant_acceptance_communities,
-                max_communities_per_route_from_pool=max_communities_per_route_from_pool,
-                random_seed=random_seed,
                 test_route_withdrawal=test_route_withdrawal,
                 withdrawal_wait_minutes=withdrawal_wait_minutes,
                 dump_attribute_assignments=dump_attribute_assignments,
@@ -1464,8 +1460,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
     dump_attribute_assignments: bool = True,
     test_address_families: list[str] | None = None,
     constant_acceptance_communities: list[str] | None = None,
-    max_communities_per_route_from_pool: int | None = 5,
-    random_seed: int = 42,
+    attribute_pool_size: int = 100,
     peergroup_ebgp_v6: str = "EB-FA-V6",
     peergroup_ebgp_v4: str = "EB-FA-V4",
     peergroup_ibgp_v6: str = "EB-EB-V6",
@@ -1548,8 +1543,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
         host_os_type_map=host_os_type_map,
         direct_ixia_connections=resolved_direct_ixia_connections,
         constant_acceptance_communities=constant_acceptance_communities,
-        max_communities_per_route_from_pool=max_communities_per_route_from_pool,
-        random_seed=random_seed,
+        attribute_pool_size=attribute_pool_size,
         peergroup_ebgp_v6=peergroup_ebgp_v6,
         peergroup_ebgp_v4=peergroup_ebgp_v4,
         peergroup_ibgp_v6=peergroup_ibgp_v6,
@@ -1880,8 +1874,6 @@ def create_bgp_ebb_constant_attribute_storage_test_config(
         direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
         # Constant acceptance community (required by device BGP policy)
         constant_acceptance_communities=["65529:39744"],
-        max_communities_per_route_from_pool=5,
-        random_seed=42,
         # Device-level BGP peer group names
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
@@ -1903,14 +1895,24 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     into the RIB (route_registry cleared + acceptance community) but the nexthop
     is left UNRESOLVABLE (the interface-state nexthop gflag is deliberately NOT
     enabled) so they are received+accepted but never best-path/advertised. NO
-    iBGP egress is configured. The swept axis is the number of unique attribute
-    COMBINATIONS (100K->800K) at fixed 800K paths; steady memory must stay
-    ~constant (attribute storage depends on the individual attribute pools, not
-    the combination count).
+    iBGP egress is configured.
+
+    FIXED across the whole sweep: 800K paths, and the three attribute pools --
+    100 complete AS paths + 100 complete community sets + 100 complete
+    extended-community sets = 300 attributes, the only attribute payloads the DUT
+    ever stores. SWEPT: N, the number of distinct attribute-SETS (triples drawn
+    from those pools) spread round-robin over the 800K paths, 100K -> 800K. Since
+    100**3 = 1M, N can reach 800K without ever growing the pools -- which is
+    precisely why the SoT pairs 100-entry pools with an 800K path count.
+
+    Steady memory must therefore stay ~constant as N grows: the attributes are
+    the same 300 objects at every point, and only the per-combination attribute
+    BUNDLE (pointers + scalars) scales with N.
 
     Gates: an acceptance gate (RECEIVED = TRibSummary.total_prefixes >=
     prefixes/peer -- the anti-vacuousness guard, default blocking) and the
-    memory-growth gate (stable memory <= k^0.5, blocking). The nexthop is
+    memory-growth gate (stable memory <= k^0.5, blocking -- a loose backstop
+    pending recalibration, see _SC2_MEMORY_SCALING_EXPONENT). The nexthop is
     unresolvable, so the acceptance gate deliberately counts RECEIVED, not
     selected.
 
@@ -1952,6 +1954,17 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
         enable_update_group=enable_update_group,
+        # Nexthops are deliberately left RESOLVABLE (the WITHOUT_OPEN_R profile
+        # enables bgp_resolve_nexthops_from_interface_state and the IXIA eBGP
+        # peers sit on a directly-connected subnet). A populated, best-path
+        # selected RIB is the realistic state char-2 should measure, and it is
+        # what the sc2_nexthops_resolved gate asserts.
+        #
+        # Selection state does NOT pollute the sc2_memory_growth ratio: the path
+        # count is FIXED at 800K across every sweep point, so selection is a
+        # constant additive term, identical at N=100K and N=800K. It shifts the
+        # intercept, not the growth curve. Ingress-only is delivered by having
+        # NO egress peer configured, not by breaking nexthop resolution.
     )
     # Clear the route_registry / CRF so injected scale prefixes are accepted.
     # This scenario remains ingress-only because it has no iBGP egress peers.
@@ -1986,8 +1999,6 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         test_address_families=["ipv6"],
         setup_tasks=setup_tasks,
         constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,
-        max_communities_per_route_from_pool=5,
-        random_seed=42,
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
         # Acceptance gate (anti-vacuousness): routes must REACH the RIB. Nexthops

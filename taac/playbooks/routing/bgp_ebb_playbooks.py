@@ -1752,12 +1752,8 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
     unique_combination_counts: list[int],
     test_address_families: list[str],
     soak_time_minutes: int,
-    base_as_path_pool_size: int,
-    base_community_pool_size: int,
-    base_extended_community_pool_size: int,
+    attribute_pool_size: int,
     constant_acceptance_communities: list[str] | None,
-    max_communities_per_route_from_pool: int | None,
-    random_seed: int,
     test_route_withdrawal: bool,
     withdrawal_wait_minutes: int,
     dump_attribute_assignments: bool,
@@ -1796,15 +1792,13 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
                             "unique_combination_counts": unique_combination_counts,
                             "test_address_families": test_address_families,
                             "soak_time_minutes": soak_time_minutes,
-                            "base_as_path_pool_size": base_as_path_pool_size,
-                            "base_community_pool_size": base_community_pool_size,
-                            "base_extended_community_pool_size": base_extended_community_pool_size,
-                            "as_path_length": 5,
-                            "communities_per_route": 5,
-                            "extended_communities_per_route": 1,
+                            # Entries in EACH of the three attribute pools. A
+                            # pool entry is one COMPLETE attribute, so the DUT
+                            # stores 3x this many for the whole sweep and at
+                            # most attribute_pool_size**3 distinct
+                            # attribute-sets can be requested.
+                            "attribute_pool_size": attribute_pool_size,
                             "attach_communities_for_ebgp_prefixes": constant_acceptance_communities,
-                            "max_communities_per_route_from_pool": max_communities_per_route_from_pool,
-                            "random_seed": random_seed,
                             "test_route_withdrawal": test_route_withdrawal,
                             "withdrawal_wait_minutes": withdrawal_wait_minutes,
                             "dump_attribute_assignments": dump_attribute_assignments,

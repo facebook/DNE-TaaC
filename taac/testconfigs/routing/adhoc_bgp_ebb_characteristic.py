@@ -81,13 +81,20 @@ BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 #   IXIA eBGP ×8 ══▶ bag010 (DUT) accept→RIB ──╳ nexthop unresolvable
 #     800K paths      route_registry cleared   └─▶ never advertised
 #
-#   ┌─ FIXED ──────────────────┬─ DYNAMIC (swept) ───────────────┐
-#   │ eBGP peers  = 8          │ unique attribute combinations:  │
-#   │ total paths = 800K       │      100K → 800K                │
-#   │ nexthop     = unresolv.  │                                 │
-#   │ iBGP egress = none       │                                 │
-#   └──────────────────────────┴─────────────────────────────────┘
+#   ┌─ FIXED ──────────────────────────┬─ DYNAMIC (swept) ───────────────┐
+#   │ eBGP peers  = 8                  │ N = distinct attribute-SETS     │
+#   │ total paths = 800K               │ (triples from the pools, spread │
+#   │ nexthop     = unresolvable       │  round-robin over the paths):   │
+#   │ iBGP egress = none               │      100K → 800K                │
+#   │ ATTRIBUTE POOLS (the 300):       │                                 │
+#   │   100 complete AS paths          │ 100³ = 1M ≥ 800K, so N is swept │
+#   │   100 complete community sets    │ to 800K without ever growing    │
+#   │   100 complete ext-comm sets     │ the pools.                      │
+#   └──────────────────────────────────┴─────────────────────────────────┘
+#   The 300 pool entries are the ONLY attribute payloads the DUT stores at any
+#   sweep point; only the per-combination attribute bundle scales with N.
 #   GATES : acceptance (RECEIVED)=BLOCKING · mem-growth (≤ k^0.5)=BLOCKING
+#           (k^0.5 is a loose backstop — uncalibrated, see the step constant)
 #   name  : BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP
 BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
