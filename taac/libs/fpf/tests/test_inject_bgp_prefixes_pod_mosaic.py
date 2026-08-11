@@ -25,7 +25,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from neteng.fboss.bgp_attr.types import TAsPathSeg, TAsPathSegType
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
-from neteng.test_infra.dne.taac.libs.fpf import inject_bgp_prefixes as inj
+from taac.libs.fpf import (  # oss-rewrite-touch
+    inject_bgp_prefixes as inj,
+)
 
 
 VIP_COMMUNITY = "65529:52792"  # AI_ZONE_LB_HOST_VIP

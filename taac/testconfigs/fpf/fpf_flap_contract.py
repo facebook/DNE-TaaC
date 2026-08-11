@@ -45,7 +45,9 @@ from taac.health_checks.healthcheck_definitions import (
     create_systemctl_active_state_check,
     create_unclean_exit_check,
 )
-from neteng.test_infra.dne.taac.libs.fpf.fpf_thresholds import ACTIVE as _THR
+from taac.libs.fpf.fpf_thresholds import (  # oss-rewrite-touch
+    ACTIVE as _THR,
+)
 
 # ODS discard/congestion counters on the GTSW "industrial cards".
 _ODS_REDUCE = r"groupby(entity, (\S+?\.\S+?)\..*, %1),sum"
