@@ -29,7 +29,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
 )
 
-# The eight conveyor bindings and four Stage 1 non-UG counterparts live in
+# The four conveyor bindings and retained Stage 1 UG and scale counterparts live in
 # ``cicd_ebb_int_tc.py``. Every scheduled entry has an inline
 # ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
@@ -80,28 +80,31 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 
 
 # Aggregated list of every TestConfig registered with the routing framework's
-# Netcastle registry. Two groups:
-#   1. CONVEYOR configs — the 8 from ``cicd_ebb_int_tc.py`` that are scheduled
+# Netcastle registry. Three groups:
+#   1. CONVEYOR configs — the 4 Stage 1 configs from ``cicd_ebb_int_tc.py``
+#      that are scheduled
 #      by ``dne_routing.conveyor_config.cconf`` (see the ``CONVEYOR:`` markers
 #      in that file for the per-node mapping).
-#   2. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
+#   2. RETAINED configs — the 4 Stage 1 UG counterparts and 4
+#      scale-and-characteristic configs held for later onboarding.
+#   3. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
 #      via Netcastle CLI but not (yet) wired into a conveyor node.
 EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
-    # Stage 1 — four runtime-balanced full-scale playbooks on each BAG.
-    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    # Stage 2 — one scale-and-characteristic workflow on each BAG.
-    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
-    BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
-    BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
-    BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
-    # Stage 1 non-UG variants for validation before the conveyor switch.
+    # Stage 1 — runtime-balanced full-scale playbooks on each BAG.
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    # Retained Stage 1 UG counterparts for qualification and A/B comparison.
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    # Retained scale-and-characteristic configs for later onboarding.
+    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
+    BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
+    BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
+    BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     # BGP++ Update Group "new peer join" qualification (specs 2.4.1 + 2.4.2
     # + 2.4.3 combined into one TestConfig with 3 playbooks sharing the
     # 21-eBGP + 4-iBGP testbed). Ad-hoc; not yet wired into a conveyor stage

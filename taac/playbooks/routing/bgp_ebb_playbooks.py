@@ -1627,7 +1627,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     exclude_bgp_mon: bool = True,
 ) -> Playbook:
     """
-    Build CICD-EBB-17: Nexthop-group count threshold.
+    Build CICD-EBB-16: Nexthop-group count threshold.
 
     See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
@@ -1699,10 +1699,7 @@ def get_bgp_ebb_update_packing_playbook(
     min_advertised_nlri: int = 0,
     restart_bgp_for_complete_view: bool,
 ) -> Playbook:
-    """Build CICD-EBB-18: UPDATE packing.
-
-    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
-    """
+    """Build the deferred UPDATE-packing playbook."""
     return Playbook(
         name="bgp_ebb_update_packing_playbook",
         description="Validate BGP++ UPDATE message packing efficiency",
@@ -1780,10 +1777,7 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
     peergroup_ibgp_v4: str | None,
     ssh_password: str,
 ) -> Playbook:
-    """Build CICD-EBB-19: Constant attribute storage.
-
-    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
-    """
+    """Build the deferred constant-attribute-storage playbook."""
     return Playbook(
         name="bgp_ebb_constant_attribute_storage_playbook",
         description="Test BGP++ constant attribute storage with varying unique combination counts",
@@ -1852,10 +1846,7 @@ def get_bgp_ebb_queue_memory_monitoring_playbook(
     ixia_interface_mimic_ebgp: str,
     monitor_cpu_stress: bool,
 ) -> Playbook:
-    """Build CICD-EBB-16: Queue and memory monitoring.
-
-    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
-    """
+    """Build the deferred queue and memory monitoring playbook."""
     return Playbook(
         name="bgp_ebb_queue_memory_monitoring_playbook",
         description="Monitor BGP++ queue and memory under route churn",
@@ -1897,10 +1888,7 @@ def get_bgp_ebb_bounded_ecmp_sets_playbook(
     *,
     device_name: str,
 ) -> Playbook:
-    """Build CICD-EBB-20: Bounded ECMP sets.
-
-    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
-    """
+    """Build the deferred bounded-ECMP-sets playbook."""
     profile_checks = get_profile_checks(
         CheckProfile.PERF_SCALING_BOUNDED_ECMP, ProfileContext()
     )
