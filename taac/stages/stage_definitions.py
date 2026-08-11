@@ -33,7 +33,7 @@ import json
 import random
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 from taac.constants import (
     DEFAULT_LOCAL_LINK,
@@ -3692,6 +3692,7 @@ def create_route_registry_runtime_update_stage(
     prefix_pool_regex: str = ".*EBGP.*",
     prefix_start_index: int = 0,
     prefix_end_index: int = 100,
+    expected_prefix_pool_names: Optional[Sequence[str]] = None,
     soak_time_seconds: int = 600,
     baseline_route_count: int = 650,
     convergence_soft_threshold_seconds: float | None = None,
@@ -3700,6 +3701,8 @@ def create_route_registry_runtime_update_stage(
     expanded_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
     baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
     exact_peer_group_names: list[str] | None = None,
+    verify_trigger_readback: bool = False,
+    verify_policy_readback: bool = False,
 ) -> Stage:
     """
     Create a test stage to verify route registry runtime update behavior for prefix-lists.
@@ -3757,17 +3760,50 @@ def create_route_registry_runtime_update_stage(
     )
     steps = []
 
+    def create_prefix_slice_steps(
+        advertise: bool, description: str, evidence_phase: str
+    ) -> list[Step]:
+        if expected_prefix_pool_names is None:
+            return [
+                create_advertise_withdraw_prefixes_step(
+                    device_name=device_name,
+                    advertise=advertise,
+                    prefix_pool_regex=prefix_pool_regex,
+                    prefix_start_index=prefix_start_index,
+                    prefix_end_index=prefix_end_index,
+                    runtime_route_operation=True,
+                    strict_range=verify_trigger_readback,
+                    verify_readback=verify_trigger_readback,
+                    evidence_label=evidence_phase,
+                    description=description,
+                )
+            ]
+        return [
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=advertise,
+                prefix_pool_regex=rf"^{re.escape(pool_name)}$",
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                runtime_route_operation=True,
+                expected_prefix_pool_names=(pool_name,),
+                strict_range=verify_trigger_readback,
+                verify_readback=verify_trigger_readback,
+                evidence_label=f"{evidence_phase}:{pool_name}",
+                description=f"{description} ({pool_name})",
+            )
+            for pool_name in expected_prefix_pool_names
+        ]
+
     # Step 1: Start advertising additional prefixes (per-AFI) from FAUU to DUT
     # These prefixes should be denied by prefix-list configured on EB-FA peer-groups
-    steps.append(
-        create_advertise_withdraw_prefixes_step(
-            device_name=device_name,
-            advertise=True,
-            prefix_pool_regex=prefix_pool_regex,
-            prefix_start_index=prefix_start_index,
-            prefix_end_index=prefix_end_index,
-            description=f"Start advertising {prefix_end_index - prefix_start_index} prefixes (per-AFI) from FAUU to DUT",
-        ),
+    steps.extend(
+        create_prefix_slice_steps(
+            True,
+            f"Start advertising {prefix_end_index - prefix_start_index} "
+            "prefixes (per-AFI) from FAUU to DUT",
+            "stage_advertise",
+        )
     )
 
     # Step 2: Verify these prefixes are denied by prefix-list on EB-FA peer-groups
@@ -3788,6 +3824,7 @@ def create_route_registry_runtime_update_stage(
         create_set_route_filter_step(
             device_name=device_name,
             config_path=expanded_policy_path,
+            verify_readback=verify_policy_readback,
             description=f"Add {prefix_end_index - prefix_start_index} prefixes to prefix-list using setRouteFilterPolicy ({added_route_count} config)",
         ),
     )
@@ -3839,6 +3876,7 @@ def create_route_registry_runtime_update_stage(
         create_set_route_filter_step(
             device_name=device_name,
             config_path=baseline_policy_path,
+            verify_readback=verify_policy_readback,
             description=f"Remove {prefix_end_index - prefix_start_index} prefixes from prefix-list using setRouteFilterPolicy ({baseline_route_count} config)",
         ),
     )
@@ -3885,7 +3923,40 @@ def create_route_registry_runtime_update_stage(
             ),
         )
 
-    # Step 9: Verify all BGP sessions are still established
+    # Restore the permissive full-route state before shared postchecks and the
+    # next playbook. Cleanup repeats this chain as an idempotent fallback.
+    steps.extend(
+        create_prefix_slice_steps(
+            True,
+            "Restore and verify the runtime-update IXIA prefix slice",
+            "stage_restore",
+        )
+    )
+    steps.append(
+        create_set_route_filter_step(
+            device_name=device_name,
+            config_path=expanded_policy_path,
+            verify_readback=verify_policy_readback,
+            description="Restore and verify the permissive route filter policy",
+        )
+    )
+    if convergence_enabled:
+        steps.append(
+            create_verify_received_routes_step(
+                device_name=device_name,
+                descriptions_to_check=descriptions_to_check,
+                exact_peer_group_names=exact_peer_group_names,
+                expected_count=added_route_count,
+                convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
+                convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
+                convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
+                description=(
+                    f"Verify post-workload restoration to {added_route_count} routes"
+                ),
+            )
+        )
+
+    # Verify all BGP sessions are still established in the restored state.
     # This catches any actual session flaps that occurred during the test,
     # independent of the snapshot uptime check (which is skipped due to
     # BGP daemon restart during setup resetting all session uptimes).

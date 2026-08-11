@@ -24,6 +24,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
         ReplaceBgpPeersTask,
         RestoreBgpPeersTask,
     )
+    from taac.internal.tasks.bgp_route_registry_cleanup_task import (
+        BgpRouteRegistryCleanupTask,
+    )
     from taac.internal.tasks.bgp_set_peer_groups_policy_task import (
         BgpSetPeerGroupsPolicyTask,
     )
@@ -203,6 +206,7 @@ if not TAAC_OSS:
             OpenRRouteActionTask,
             DeviceProvisioningTask,
             BgpQueueBackpressurePoll,
+            BgpRouteRegistryCleanupTask,
             BgpSetRouteFilterTask,
             BgpClearRouteFilterTask,
             BgpSetPeerGroupsPolicyTask,

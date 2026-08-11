@@ -13,6 +13,7 @@ import itertools
 import json
 import math
 import os
+import re
 import time
 import typing as t
 import uuid
@@ -4996,6 +4997,7 @@ def create_set_route_filter_step(
     source: str = "configerator",
     json_file_path: t.Optional[str] = None,
     description: t.Optional[str] = None,
+    verify_readback: bool = False,
 ) -> Step:
     """
     Create a step to set BGP route filter policy using setRouteFilterPolicy.
@@ -5037,6 +5039,8 @@ def create_set_route_filter_step(
 
     if json_file_path is not None:
         params_dict["json_file_path"] = json_file_path
+    if verify_readback:
+        params_dict["verify_readback"] = True
 
     return create_run_task_step(
         task_name="bgp_set_route_filter",
@@ -5619,6 +5623,10 @@ def create_advertise_withdraw_prefixes_step(
     expected_prefix_pool_count: t.Optional[int] = None,
     expected_number_of_addresses: t.Optional[int] = None,
     runtime_route_operation: bool = False,
+    expected_prefix_pool_names: t.Optional[t.Sequence[str]] = None,
+    strict_range: bool = False,
+    verify_readback: bool = False,
+    evidence_label: t.Optional[str] = None,
 ) -> Step:
     """
     Create a step to advertise or withdraw BGP prefixes from matching prefix pools.
@@ -5633,6 +5641,10 @@ def create_advertise_withdraw_prefixes_step(
         expected_number_of_addresses: Exact compact-pool route capacity.
         runtime_route_operation: Stop/start the selected physical route-property
             rows around the Active mutation. Requires exactly one matched pool.
+        expected_prefix_pool_names: Exact names of matching IXIA prefix pools.
+        strict_range: Reject invalid, truncated, or empty logical ranges.
+        verify_readback: Require exact fresh IXIA readback verification.
+        evidence_label: Stable phase label for append-only trigger evidence.
 
     Returns:
         Step object for BGP prefix advertisement/withdrawal
@@ -5655,10 +5667,61 @@ def create_advertise_withdraw_prefixes_step(
         params_dicts["expected_number_of_addresses"] = expected_number_of_addresses
     if runtime_route_operation:
         params_dicts["runtime_route_operation"] = True
+    if expected_prefix_pool_names is not None:
+        params_dicts["expected_prefix_pool_names"] = list(expected_prefix_pool_names)
+    if strict_range:
+        params_dicts["strict_range"] = True
+    if verify_readback:
+        params_dicts["verify_readback"] = True
+    if evidence_label is not None:
+        params_dicts["evidence_label"] = evidence_label
 
     return create_run_task_step(
         task_name="ixia_enable_disable_bgp_prefixes",
         params_dict=params_dicts,
+        description=description,
+        ixia_needed=True,
+    )
+
+
+def create_route_registry_cleanup_step(
+    device_name: str,
+    prefix_pool_names: t.Sequence[str],
+    prefix_start_index: int,
+    prefix_end_index: int,
+    expanded_policy_path: str,
+    expected_route_count: int,
+    ebgp_peer_description: str,
+    expected_established_sessions: int | None,
+    parent_prefixes_to_ignore: t.Sequence[str],
+    exact_peer_group_names: t.Sequence[str] | None = None,
+    convergence_soft_threshold_seconds: float = 60,
+    convergence_hard_timeout_seconds: float = 300,
+    convergence_poll_interval_seconds: float = 5,
+    description: str = "Restore and validate CICD-EBB-12 state",
+) -> Step:
+    """Create failure-safe D12 cleanup that attempts every restore operation."""
+    params_dict: t.Dict[str, t.Any] = {
+        "hostname": device_name,
+        "prefix_pool_names": list(prefix_pool_names),
+        "prefix_start_index": prefix_start_index,
+        "prefix_end_index": prefix_end_index,
+        "expanded_policy_path": expanded_policy_path,
+        "expected_route_count": expected_route_count,
+        "ebgp_peer_description": ebgp_peer_description,
+        "expected_established_sessions": expected_established_sessions,
+        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+        "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+        "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "session_poll_interval_seconds": convergence_poll_interval_seconds,
+    }
+    if exact_peer_group_names is not None:
+        params_dict["exact_peer_group_names"] = list(exact_peer_group_names)
+    return create_run_task_step(
+        task_name="bgp_route_registry_cleanup",
+        params_dict=params_dict,
         description=description,
         ixia_needed=True,
     )
@@ -6540,6 +6603,10 @@ def create_route_registry_prefix_list_setup_steps(
     convergence_hard_timeout_seconds: float | None = None,
     convergence_poll_interval_seconds: float | None = None,
     exact_peer_group_names: t.Optional[t.List[str]] = None,
+    prefix_pool_regex: str = ".*EBGP.*",
+    expected_prefix_pool_names: t.Optional[t.Sequence[str]] = None,
+    verify_trigger_readback: bool = False,
+    verify_policy_readback: bool = False,
 ) -> t.List[Step]:
     """
     Create setup steps for BGP route registry prefix list runtime update testing.
@@ -6599,22 +6666,45 @@ def create_route_registry_prefix_list_setup_steps(
         else f"Load baseline route filter policy without test prefixes ({baseline_policy_path})"
     )
 
-    withdraw_step = create_advertise_withdraw_prefixes_step(
-        device_name=device_name,
-        advertise=False,
-        prefix_pool_regex=".*EBGP.*",
-        prefix_start_index=prefix_start_index,
-        prefix_end_index=prefix_end_index,
-        description=withdraw_description,
-    )
+    if expected_prefix_pool_names is None:
+        withdraw_steps = [
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=False,
+                prefix_pool_regex=prefix_pool_regex,
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                strict_range=verify_trigger_readback,
+                verify_readback=verify_trigger_readback,
+                evidence_label="setup_withdraw",
+                description=withdraw_description,
+            )
+        ]
+    else:
+        withdraw_steps = [
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=False,
+                prefix_pool_regex=rf"^{re.escape(pool_name)}$",
+                prefix_start_index=prefix_start_index,
+                prefix_end_index=prefix_end_index,
+                expected_prefix_pool_names=(pool_name,),
+                strict_range=verify_trigger_readback,
+                verify_readback=verify_trigger_readback,
+                evidence_label=f"setup_withdraw:{pool_name}",
+                description=f"{withdraw_description} ({pool_name})",
+            )
+            for pool_name in expected_prefix_pool_names
+        ]
     baseline_policy_step = create_set_route_filter_step(
         device_name=device_name,
         config_path=baseline_policy_path,
+        verify_readback=verify_policy_readback,
         description=policy_description,
     )
 
     if convergence_enabled:
-        steps = [withdraw_step, baseline_policy_step, *standard_steps]
+        steps = [*withdraw_steps, baseline_policy_step, *standard_steps]
         steps.append(
             create_verify_received_routes_step(
                 device_name=device_name,
@@ -6634,7 +6724,7 @@ def create_route_registry_prefix_list_setup_steps(
                 duration=convergence_wait_seconds,
                 description=f"Wait for BGP session establishment and convergence ({convergence_wait_seconds}s)",
             ),
-            withdraw_step,
+            *withdraw_steps,
             baseline_policy_step,
         ]
 

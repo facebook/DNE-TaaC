@@ -465,7 +465,7 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
             peergroup_ibgp_v4=ctx.peergroup_ibgp_v4,
             precheck_thresholds=ctx.precheck_thresholds,
             cpu_baseline=ctx.cpu_baseline,
-            expected_established_sessions=ctx.expected_established_sessions,
+            expected_established_sessions=(ctx.expected_established_sessions or None),
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
         )

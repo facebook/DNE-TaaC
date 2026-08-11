@@ -41,14 +41,13 @@ from taac.stages.stage_definitions import (
     create_validated_plane_bgp_session_oscillation_stage,
 )
 from taac.steps.step_definitions import (
-    create_advertise_withdraw_prefixes_step,
     create_bgp_instability_setup_steps,
     create_bgp_restart_setup_steps,
     create_custom_step,
     create_longevity_step,
     create_openr_route_action_step,
+    create_route_registry_cleanup_step,
     create_route_registry_prefix_list_setup_steps,
-    create_set_route_filter_step,
     create_validated_igp_pnh_metric_oscillation_step,
 )
 from taac.task_definitions import (
@@ -700,15 +699,19 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
-    expected_established_sessions: int = 0,
+    expected_established_sessions: t.Optional[int] = None,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     cpu_baseline: float = 6.0,
     memory_threshold: int = Gigabyte.GIG_5.value,
     cpu_util_terminate_on_error: bool = False,
     memory_terminate_on_error: bool = False,
     ebgp_peer_description: str = "EBGP",
-    prefix_pool_regex: str = ".*EBGP.*",
-    soak_time_seconds: int = 600,
+    prefix_pool_regex: str = r"^PREFIX_POOL_IPV[46]_EBGP$",
+    expected_prefix_pool_names: t.Sequence[str] = (
+        "PREFIX_POOL_IPV4_EBGP",
+        "PREFIX_POOL_IPV6_EBGP",
+    ),
+    soak_time_seconds: int = 120,
     expected_route_count: int = 750,
     runtime_prefix_start_index: int = 750,
     runtime_prefix_end_index: int = 850,
@@ -733,7 +736,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         device_name: Name of the device under test
         peergroup_ibgp_v6: IPv6 iBGP peer group name for session checks
         peergroup_ibgp_v4: IPv4 iBGP peer group name for session checks
-        expected_established_sessions: Expected number of established BGP sessions
+        expected_established_sessions: Optional positive established-session count
         profile: BGP++ profile (with or without Open/R)
         cpu_baseline: CPU baseline threshold for prechecks (default: 6.0)
         memory_threshold: Memory threshold in bytes (default: 5GB)
@@ -741,8 +744,8 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         memory_terminate_on_error: Terminate test on memory threshold breach
         ebgp_peer_description: Deprecated compatibility parameter; ignored
             because CICD-EBB-12 is locked to exact EB-FA peer-group names
-        prefix_pool_regex: Regex to match prefix pool names (default: ".*EBGP.*")
-        soak_time_seconds: Soak duration for BGP stability (default: 600s)
+        prefix_pool_regex: Anchored regex matching the IPv4 and IPv6 eBGP pools
+        soak_time_seconds: Soak duration for BGP stability (default: 120s)
         expected_route_count: Expected baseline eBGP route count (default: 750)
         runtime_prefix_start_index: First test prefix index (default: 750)
         runtime_prefix_end_index: Last test prefix index (default: 850)
@@ -760,6 +763,18 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    if expected_established_sessions is not None and (
+        isinstance(expected_established_sessions, bool)
+        or not isinstance(expected_established_sessions, int)
+        or expected_established_sessions < 1
+    ):
+        raise ValueError("expected_established_sessions must be a positive integer")
+    if not expected_prefix_pool_names or len(set(expected_prefix_pool_names)) != len(
+        expected_prefix_pool_names
+    ):
+        raise ValueError("expected_prefix_pool_names must be nonempty and unique")
+    profile_session_count = expected_established_sessions or 0
+
     runtime_update_checks = get_profile_checks(
         CheckProfile.RUNTIME_UPDATE,
         ProfileContext(
@@ -768,7 +783,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             precheck_thresholds=precheck_thresholds,
             postcheck_thresholds=postcheck_thresholds,
             cpu_baseline=cpu_baseline,
-            expected_established_sessions=expected_established_sessions,
+            expected_established_sessions=profile_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             exclude_bgp_mon=exclude_bgp_mon,
             route_count_expected=expected_route_count,
@@ -781,7 +796,11 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
             prefix_start_index=runtime_prefix_start_index,
             prefix_end_index=runtime_prefix_end_index,
+            prefix_pool_regex=prefix_pool_regex,
+            expected_prefix_pool_names=expected_prefix_pool_names,
             baseline_policy_path=baseline_policy_path,
+            verify_trigger_readback=True,
+            verify_policy_readback=True,
             expected_route_count=expected_route_count,
             convergence_soft_threshold_seconds=60,
             convergence_hard_timeout_seconds=300,
@@ -803,6 +822,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 prefix_pool_regex=prefix_pool_regex,
                 prefix_start_index=runtime_prefix_start_index,
                 prefix_end_index=runtime_prefix_end_index,
+                expected_prefix_pool_names=expected_prefix_pool_names,
                 soak_time_seconds=soak_time_seconds,
                 baseline_route_count=expected_route_count,
                 convergence_soft_threshold_seconds=60,
@@ -810,21 +830,30 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 convergence_poll_interval_seconds=5,
                 expanded_policy_path=expanded_policy_path,
                 baseline_policy_path=baseline_policy_path,
+                verify_trigger_readback=True,
+                verify_policy_readback=True,
             )
         ],
         cleanup_steps=[
-            create_advertise_withdraw_prefixes_step(
+            create_route_registry_cleanup_step(
                 device_name=device_name,
-                advertise=True,
-                prefix_pool_regex=prefix_pool_regex,
+                prefix_pool_names=expected_prefix_pool_names,
                 prefix_start_index=runtime_prefix_start_index,
                 prefix_end_index=runtime_prefix_end_index,
-                description=f"Cleanup: Re-advertise {runtime_prefix_end_index - runtime_prefix_start_index} test prefixes ({runtime_prefix_start_index}-{runtime_prefix_end_index}) so next playbook has the full prefix pool",
-            ),
-            create_set_route_filter_step(
-                device_name=device_name,
-                config_path=expanded_policy_path,
-                description="Cleanup: Restore permissive route filter policy so the next playbook receives all prefixes",
+                expanded_policy_path=expanded_policy_path,
+                expected_route_count=(
+                    expected_route_count
+                    + runtime_prefix_end_index
+                    - runtime_prefix_start_index
+                ),
+                ebgp_peer_description=ebgp_peer_description,
+                exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=(
+                    [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+                    if exclude_bgp_mon
+                    else []
+                ),
             ),
         ],
     )

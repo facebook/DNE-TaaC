@@ -522,6 +522,38 @@ class CheckProfileRegistryTest(unittest.TestCase):
             ),
         )
 
+    def test_runtime_update_omits_unset_exact_session_count(self):
+        checks = get_profile_checks(
+            CheckProfile.RUNTIME_UPDATE,
+            ProfileContext(
+                peergroup_ibgp_v6="PG_IBGP_V6",
+                peergroup_ibgp_v4="PG_IBGP_V4",
+                expected_established_sessions=0,
+                route_count_expected=650,
+            ),
+        )
+
+        self.assertEqual(
+            checks.prechecks,
+            create_standard_prechecks(
+                peergroup_ibgp_v6="PG_IBGP_V6",
+                peergroup_ibgp_v4="PG_IBGP_V4",
+                cpu_baseline=8.0,
+                expected_established_sessions=None,
+            )
+            + [
+                create_bgp_route_count_verification_check(
+                    json_params={
+                        "exact_peer_group_names": ["EB-FA-V6", "EB-FA-V4"],
+                        "direction": "received",
+                        "expected_count": 650,
+                        "policy_type": "post_policy",
+                    },
+                    check_id="startup_bgp_session_verification",
+                ),
+            ],
+        )
+
     def test_soak_no_precheck_longevity_matches_factory(self):
         """SOAK_NO_PRECHECK with convergence OFF reproduces the longevity-soak
         playbook (no prechecks, no convergence postcheck, snapshot skips flap +

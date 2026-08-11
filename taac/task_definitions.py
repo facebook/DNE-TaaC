@@ -2711,6 +2711,47 @@ def create_set_port_channel_min_link_patcher_task(
     )
 
 
+def create_bgp_route_registry_cleanup_task(
+    hostname: str,
+    prefix_pool_names: t.Sequence[str],
+    prefix_start_index: int,
+    prefix_end_index: int,
+    expanded_policy_path: str,
+    expected_route_count: int,
+    ebgp_peer_description: str = "EBGP",
+    exact_peer_group_names: t.Optional[t.Sequence[str]] = None,
+    expected_established_sessions: t.Optional[int] = None,
+    parent_prefixes_to_ignore: t.Sequence[str] = (),
+    convergence_soft_threshold_seconds: float = 60,
+    convergence_hard_timeout_seconds: float = 300,
+    convergence_poll_interval_seconds: float = 5,
+) -> Task:
+    """Build the failure-safe CICD-EBB-12 cleanup task."""
+    params: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "prefix_pool_names": list(prefix_pool_names),
+        "prefix_start_index": prefix_start_index,
+        "prefix_end_index": prefix_end_index,
+        "expanded_policy_path": expanded_policy_path,
+        "expected_route_count": expected_route_count,
+        "ebgp_peer_description": ebgp_peer_description,
+        "expected_established_sessions": expected_established_sessions,
+        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+        "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
+        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+        "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "session_poll_interval_seconds": convergence_poll_interval_seconds,
+    }
+    if exact_peer_group_names is not None:
+        params["exact_peer_group_names"] = list(exact_peer_group_names)
+    return Task(
+        task_name="bgp_route_registry_cleanup",
+        ixia_needed=True,
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
 # =============================================================================
 # GENERIC TASK BUILDER (used by step factories that wrap a Task into a Step)
 # =============================================================================

@@ -109,7 +109,7 @@ def create_standard_prechecks(
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
     precheck_thresholds=None,
-    expected_established_sessions: int = 0,
+    expected_established_sessions: int | None = 0,
     cpu_baseline: float = 4.0,
     check_ibgp_pnh: bool = False,
     check_bgp_convergence: bool = True,
