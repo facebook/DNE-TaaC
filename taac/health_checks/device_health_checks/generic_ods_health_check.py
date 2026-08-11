@@ -19,10 +19,7 @@ from taac.internal.ods_utils import (
 from taac.libs.fpf.fpf_collector_registry import (
     get_test_case_start_time,
 )
-from taac.utils.common import (  # oss-rewrite-touch
-    async_get_fburl_retry,
-    eval_jq,
-)
+from neteng.test_infra.dne.taac.utils.common import async_get_fburl_retry, eval_jq
 from pyre_extensions import JSON
 from taac.health_check.health_check import types as hc_types
 

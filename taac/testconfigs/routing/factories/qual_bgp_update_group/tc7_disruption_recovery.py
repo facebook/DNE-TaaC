@@ -16,10 +16,7 @@ bag013 conveyor topology (setup / teardown / port config).
 """
 
 from taac.abstractions.physical_inventory import PhysicalInventory
-from taac.constants import (  # oss-rewrite-touch
-    BgpPlusPlusProfile,
-    Gigabyte,
-)
+from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
     create_bgp_update_group_check,

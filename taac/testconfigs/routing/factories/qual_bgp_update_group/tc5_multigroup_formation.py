@@ -15,10 +15,7 @@ configs use the builder's default standard EBB_FULL_SCALE topology (no BGP-MON D
 """
 
 from taac.abstractions.physical_inventory import PhysicalInventory
-from taac.constants import (  # oss-rewrite-touch
-    BgpPlusPlusProfile,
-    Gigabyte,
-)
+from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc5_multigroup_formation import (
     create_bgp_ug_multiple_groups_outbound_policies_playbook,
     create_bgp_ug_scale_withdraw_10plus_peers_playbook,

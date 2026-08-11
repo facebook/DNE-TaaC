@@ -32,10 +32,7 @@ from taac.abstractions.topology import (
     OpenRMode,
     RoutingDeviceConfig,
 )
-from taac.constants import (  # oss-rewrite-touch
-    BgpPlusPlusProfile,
-    Gigabyte,
-)
+from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_convergence_check,
     create_bgp_rib_fib_consistency_check,

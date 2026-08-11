@@ -22,7 +22,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from neteng.test_infra.dne.taac.ixia.ixia import external_api, Ixia  # oss-rewrite-touch
+from neteng.test_infra.dne.taac.ixia.ixia import external_api, Ixia
 
 
 _LIB_PATH = "neteng.test_infra.dne.taac.internal.utils.ixia_recovery_lib"
