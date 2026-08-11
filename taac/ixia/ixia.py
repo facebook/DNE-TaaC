@@ -7895,6 +7895,7 @@ class Ixia:
         restart_protocols: bool = True,
         device_group_regex: str = ".*",
         stop_protocols: bool = True,
+        fail_closed: bool = False,
     ) -> bool:
         """
         Configure AS path distribution from a constant pool across BGP routes.
@@ -7993,7 +7994,9 @@ class Ixia:
                         bgp_route_properties = ip_prefix_pool.BgpIPRouteProperty.find()
                         if bgp_route_properties:
                             self._configure_as_path_pool_on_route_property(
-                                bgp_route_properties[0], as_path_pool
+                                bgp_route_properties[0],
+                                as_path_pool,
+                                fail_closed=fail_closed,
                             )
                         else:
                             self.logger.warning(
@@ -8007,7 +8010,9 @@ class Ixia:
                         )
                         if bgp_route_properties:
                             self._configure_as_path_pool_on_route_property(
-                                bgp_route_properties[0], as_path_pool
+                                bgp_route_properties[0],
+                                as_path_pool,
+                                fail_closed=fail_closed,
                             )
                         else:
                             self.logger.warning(
@@ -8124,6 +8129,8 @@ class Ixia:
         self,
         bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
         as_path_pool: t.List[str],
+        *,
+        fail_closed: bool = False,
     ) -> None:
         """
         Configure AS path pool on a BGP route property to distribute AS paths across routes.
@@ -8135,10 +8142,20 @@ class Ixia:
         Args:
             bgp_route_prop: BGP route property object (BgpIPRouteProperty or BgpV6IPRouteProperty)
             as_path_pool: List of AS path strings
+            fail_closed: Propagate instead of warning. Mirrors
+                ``_configure_extended_community_pool_on_route_property``. Callers
+                whose test is INVALID without the pool must pass True: swallowing
+                here still lets ``configure_as_path_pool`` return True, so the
+                caller logs success while the DUT receives IXIA's default AS
+                path. That is what silently invalidated SC2 iteration 1 on
+                2026-08-08 -- the device reported a 2-hop AS path and 1 unique AS
+                path where 100 were configured, and nothing failed.
         """
         try:
             self._program_as_path_pool_on_route_property(bgp_route_prop, as_path_pool)
         except Exception as e:
+            if fail_closed:
+                raise
             self.logger.warning(f"Error configuring AS path pool: {str(e)}")
 
     def _program_as_path_pool_on_route_property(
@@ -8155,6 +8172,19 @@ class Ixia:
         bgp_route_prop.NoOfASPathSegmentsPerRouteRange = 1
         bgp_as_path_segment_list = bgp_route_prop.BgpAsPathSegmentList.find()
         if not bgp_as_path_segment_list:
+            # On a freshly-loaded topology the segment list that
+            # EnableAsPathSegments.Single(True) requests does not exist until the
+            # pending change is committed, so this first find() returns empty and
+            # the entire pool is skipped. Commit once and retry rather than give
+            # up. Costs nothing on the normal path -- it only runs where we would
+            # otherwise have raised.
+            self.logger.info(
+                "AS path segment list not materialized yet; committing pending "
+                "changes and retrying"
+            )
+            self.apply_changes()
+            bgp_as_path_segment_list = bgp_route_prop.BgpAsPathSegmentList.find()
+        if not bgp_as_path_segment_list:
             raise ValueError("No BGP AS path segment list found")
 
         bgp_as_path_segment = bgp_as_path_segment_list[0]
@@ -8164,6 +8194,16 @@ class Ixia:
         self.logger.info(f"Maximum AS path length in pool: {max_as_path_length}")
 
         bgp_as_number_list = bgp_as_path_segment.BgpAsNumberList.find()
+        if not bgp_as_number_list:
+            # Same materialization race as the segment list above, one level
+            # down: NumberOfAsNumberInSegment has to be committed before the
+            # per-position rows exist.
+            self.logger.info(
+                "AS number list not materialized yet; committing pending "
+                "changes and retrying"
+            )
+            self.apply_changes()
+            bgp_as_number_list = bgp_as_path_segment.BgpAsNumberList.find()
         if not bgp_as_number_list:
             raise ValueError("No BGP AS number list found")
 
@@ -8679,6 +8719,7 @@ class Ixia:
         restart_protocols: bool = True,
         device_group_regex: str = ".*",
         stop_protocols: bool = True,
+        fail_closed: bool = False,
     ) -> bool:
         """
         Configure diverse extended community combinations for each prefix using Ixia API.
@@ -8791,6 +8832,7 @@ class Ixia:
                             self._configure_extended_community_pool_on_route_property(
                                 bgp_route_properties[0],
                                 extended_community_combinations,
+                                fail_closed=fail_closed,
                             )
                         else:
                             self.logger.warning(
@@ -8806,6 +8848,7 @@ class Ixia:
                             self._configure_extended_community_pool_on_route_property(
                                 bgp_route_properties[0],
                                 extended_community_combinations,
+                                fail_closed=fail_closed,
                             )
                         else:
                             self.logger.warning(
@@ -8939,7 +8982,18 @@ class Ixia:
         try:
             bgp_route_prop.EnableExtendedCommunity.Single(True)
             bgp_route_prop.NoOfExternalCommunities = position_count
-            return bgp_route_prop.BgpExtendedCommunitiesList.find()
+            positions = bgp_route_prop.BgpExtendedCommunitiesList.find()
+            if not positions:
+                # Same materialization race as the AS-path segment list: the
+                # rows EnableExtendedCommunity requests do not exist until the
+                # pending change is committed.
+                self.logger.info(
+                    "Extended-community list not materialized yet; committing "
+                    "pending changes and retrying"
+                )
+                self.apply_changes()
+                positions = bgp_route_prop.BgpExtendedCommunitiesList.find()
+            return positions
         except Exception:
             self.logger.exception(
                 "Failed to initialize %d extended-community position(s) "
