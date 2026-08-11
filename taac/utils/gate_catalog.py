@@ -37,6 +37,8 @@ GATE_SC1_ROUTES_ADVERTISED = "sc1_routes_advertised"
 # SC2 -- constant-attribute-storage (ingress-only) varying-combinations test:
 GATE_SC2_ROUTES_ACCEPTANCE = "sc2_routes_acceptance"
 GATE_SC2_NEXTHOPS_RESOLVED = "sc2_nexthops_resolved"
+GATE_SC2_ATTRIBUTE_POOLS_FLAT = "sc2_attribute_pools_flat"
+GATE_SC2_PATHS_DEDUPLICATED = "sc2_paths_deduplicated"
 GATE_SC2_MEMORY_GROWTH = "sc2_memory_growth"
 # SC5 -- maximally-packed UPDATE messages. Both gate the same custom step that
 # BAG012's update-packing test already drives; they were previously bare
@@ -120,6 +122,18 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # calibrate. Ingress-only comes from having no egress peer configured, NOT
     # from breaking next-hop resolution.
     GATE_SC2_NEXTHOPS_RESOLVED: GATE_MODE_BLOCKING,
+    # The three sub-attribute pools (AS paths / community sets / ext-community
+    # sets) must stay at their configured pool size however far the combination
+    # count is swept -- combinations only INDEX the pools. This is characteristic
+    # 2 stated directly, and it is the one SC threshold that needs no
+    # calibration: the expected value is exactly the pool size, so the tolerance
+    # is measurement headroom for the 180s eviction lag rather than a guess.
+    GATE_SC2_ATTRIBUTE_POOLS_FLAT: GATE_MODE_BLOCKING,
+    # BgpPath's compare key includes the next-hop, so a prefix contributes one
+    # entry per peer and the deduplicator should hold exactly the path count at
+    # every sweep point. Growth here means paths are NOT collapsing, and storage
+    # scales with combinations x peers instead of with attributes.
+    GATE_SC2_PATHS_DEDUPLICATED: GATE_MODE_BLOCKING,
     # Stable memory must grow sub-linearly (<= k^p, k = path scale) across the
     # combination sweep. The earlier bag010 calibration (fit p~=0.36) is VOID --
     # it was measured against the old ingredient-pool attribute model -- so the
