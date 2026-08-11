@@ -14,7 +14,10 @@ each catalog entry's stated scale (64 / 32 / 32 eBGP sessions).
 """
 
 from taac.abstractions.physical_inventory import PhysicalInventory
-from neteng.test_infra.dne.taac.constants import BgpPlusPlusProfile, Gigabyte
+from taac.constants import (  # oss-rewrite-touch
+    BgpPlusPlusProfile,
+    Gigabyte,
+)
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc2_peer_lifecycle import (
     create_bgp_ug_peer_down_remaining_unaffected_playbook,
     create_bgp_ug_peer_reconnect_shadow_rib_playbook,
