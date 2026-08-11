@@ -89,6 +89,11 @@ def _create_ixia_instance():
     ixia.logger = MagicMock()
     ixia.session = MagicMock()
     ixia.stop_protocols = MagicMock()
+    # Protocol-state settling is out of scope here (these tests cover regex
+    # filtering and position math) and needs a live topology to poll
+    # DeviceGroup.Status against. It has dedicated coverage in
+    # test_protocol_state_wait.py.
+    ixia.stop_protocols_and_wait = MagicMock()
     ixia.start_protocols = MagicMock()
     ixia.apply_changes = MagicMock()
     return ixia
@@ -208,15 +213,16 @@ class TestExtendedCommunityPool(unittest.TestCase):
         )
         self.assertEqual([True], route.EnableExtendedCommunity.Values)
         self.assertEqual(1, route.NoOfExternalCommunities)
-        self.assertEqual(
-            ["administratoras2octet", "administratoras2octet"],
-            position.Type.Values,
-        )
-        self.assertEqual(["routetarget", "routetarget"], position.SubType.Values)
-        self.assertEqual([65001, 65001], position.AsNumber2Bytes.Values)
+        # Both rows share a two-byte ASN and route-target subtype, so five of the
+        # six fields are constant and collapse to a single value. Only the
+        # assigned number differs per row, so only it ships a per-route list --
+        # see Ixia._write_multivalue.
+        self.assertEqual(["administratoras2octet"], position.Type.Values)
+        self.assertEqual(["routetarget"], position.SubType.Values)
+        self.assertEqual([65001], position.AsNumber2Bytes.Values)
         self.assertEqual([1, 70000], position.AssignedNumber4Bytes.Values)
-        self.assertEqual([0, 0], position.AsNumber4Bytes.Values)
-        self.assertEqual([0, 0], position.AssignedNumber2Bytes.Values)
+        self.assertEqual([0], position.AsNumber4Bytes.Values)
+        self.assertEqual([0], position.AssignedNumber2Bytes.Values)
 
     def test_four_byte_as_route_target_uses_two_byte_assigned_number(self):
         position = _ExtendedCommunity()
@@ -259,7 +265,8 @@ class TestExtendedCommunityPool(unittest.TestCase):
 
     def test_extended_community_api_errors_are_logged_and_reraised(self):
         position = _ExtendedCommunity()
-        position.Type.ValueList = MagicMock(side_effect=RuntimeError("write failed"))
+        # A single row makes Type constant, so the write goes through Single().
+        position.Type.Single = MagicMock(side_effect=RuntimeError("write failed"))
 
         with self.assertRaisesRegex(RuntimeError, "write failed"):
             self.ixia.configure_extended_community_pool_on_route_property(

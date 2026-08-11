@@ -719,6 +719,23 @@ def require_traffic_item(func: t.Callable) -> t.Callable:
 _INBAND_SOURCE_API_CALL: str = "inband_api_call"
 _INBAND_SOURCE_BETWEEN_PLAYBOOK_GATE: str = "between_playbook_gate"
 
+# `DeviceGroup.Status` values in which IxNetwork accepts a property write. The
+# full enum is configured|error|mixed|notStarted|started|starting|stopping; only
+# these two mean "not running". `stopping` is deliberately excluded -- it is the
+# transitional state a queued-but-unapplied StopAllProtocols leaves behind, and
+# writing during it is what raises "Changing the property in a started element
+# is not permitted". `error` is excluded so a broken element surfaces as a
+# timeout naming it, rather than being treated as safely stopped.
+_PROTOCOLS_STOPPED_STATES: t.FrozenSet[str] = frozenset({"notStarted", "configured"})
+
+# Bound on the ERROR path for protocol-state settling, not an estimate of how
+# long stopping takes: `wait_for_protocols_stopped` returns as soon as the state
+# actually flips, so a healthy stop never approaches this. Generous enough that
+# a large topology under load does not trip it spuriously.
+_PROTOCOL_STATE_SETTLE_TIMEOUT_SECONDS: int = 120
+# Each poll is one REST round-trip per device group, so keep it coarse.
+_PROTOCOL_STATE_POLL_SECONDS: int = 2
+
 
 def external_api(func: t.Callable) -> t.Callable:
     """Marks a method that issues IxNetwork SDK RPCs to the chassis and routes
@@ -2212,6 +2229,82 @@ class Ixia:
         )
 
         time.sleep(sleep_timer)
+
+    def stop_protocols_and_wait(
+        self,
+        timeout_seconds: int = _PROTOCOL_STATE_SETTLE_TIMEOUT_SECONDS,
+        poll_seconds: int = _PROTOCOL_STATE_POLL_SECONDS,
+    ) -> None:
+        """Stop all protocols and block until the device groups have really stopped.
+
+        Use this, not bare :meth:`stop_protocols`, before writing any property
+        that IxNetwork refuses to change on a started element (AS-path segments,
+        community lists, prefix-pool multipliers, ...).
+
+        ``StopAllProtocols(Arg1="sync")`` returns once the stop is QUEUED, not
+        once it has been applied: IxNetwork reports the outstanding work as
+        "changes are pending to be applied after the following action(s) ...
+        Stopping <element>". A property write issued inside that window is
+        rejected outright with "Changing the property in a started element is
+        not permitted", and the caller sees an error that looks nothing like a
+        race.
+        """
+        self.stop_protocols()
+        self.wait_for_protocols_stopped(
+            timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
+        )
+
+    def wait_for_protocols_stopped(
+        self,
+        timeout_seconds: int = _PROTOCOL_STATE_SETTLE_TIMEOUT_SECONDS,
+        poll_seconds: int = _PROTOCOL_STATE_POLL_SECONDS,
+    ) -> None:
+        """Block until every device group has left the started/transitioning state.
+
+        Polls the authoritative ``DeviceGroup.Status`` rather than sleeping for a
+        guessed duration: it returns as soon as the state actually flips (usually
+        far sooner than a fixed sleep) and still waits when a large topology
+        genuinely takes longer. ``timeout_seconds`` is therefore a bound on the
+        ERROR path -- a healthy stop never reaches it -- not an estimate of how
+        long stopping takes.
+
+        Raises:
+            IxiaOperationTimeoutError: if any device group is still not stopped
+                when the timeout expires. Named elements and their states are
+                included, because "which element is still started" is exactly
+                what the raw IxNetwork rejection does not tell you.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            # `Status` is a REST round-trip and is free to change between reads,
+            # so sample it ONCE per device group: reading it again for the error
+            # message could report a different state than the one that failed
+            # the check.
+            statuses = [
+                (device_group.Name, device_group.Status)
+                for topology in self.ixnetwork.Topology.find()
+                for device_group in topology.DeviceGroup.find()
+            ]
+            pending = [
+                (name, status)
+                for name, status in statuses
+                if status not in _PROTOCOLS_STOPPED_STATES
+            ]
+            if not pending:
+                self.logger.debug(
+                    "[GLOBAL] All device groups have reached a stopped state"
+                )
+                return
+            if time.monotonic() >= deadline:
+                raise IxiaOperationTimeoutError(
+                    f"device groups still not stopped after {timeout_seconds}s, "
+                    f"so a property write would be rejected: {pending}",
+                    deadline_expired=True,
+                )
+            self.logger.info(
+                f"Waiting for {len(pending)} device group(s) to stop: {pending}"
+            )
+            time.sleep(poll_seconds)
 
     def verify_protocols(self) -> None:
         """API to verify the status of the protocols in the topology"""
@@ -7057,7 +7150,7 @@ class Ixia:
                     # StopAllProtocols can return before the protocol state fully
                     # settles; wait so the network group has actually left the
                     # started state before the (non-on-the-fly) multiplier PATCH.
-                    self.stop_protocols(sleep_timer=30)
+                    self.stop_protocols_and_wait()
                     self.logger.info(
                         f"Setting multiplier to {network_group_multiplier} for network group {network_group.Name}"
                     )
@@ -7621,7 +7714,7 @@ class Ixia:
 
             # Stop protocols before making changes
             self.logger.info("Stopping protocols before configuring BGP attributes")
-            self.stop_protocols()
+            self.stop_protocols_and_wait()
 
             # Find device groups for the specified interface
             device_groups = self.get_device_groups_by_port_and_interface(
@@ -7795,7 +7888,7 @@ class Ixia:
             self.logger.info(
                 "Stopping protocols before reverting route storm attributes"
             )
-            self.stop_protocols(sleep_timer=30)
+            self.stop_protocols_and_wait()
 
             # Find device groups for the specified interface
             device_groups = self.get_device_groups_by_port_and_interface(
@@ -7943,7 +8036,7 @@ class Ixia:
             # Stop protocols before making changes (opt-in to avoid chassis-wide cascade)
             if stop_protocols:
                 self.logger.info("Stopping protocols before configuring AS path pool")
-                self.stop_protocols()
+                self.stop_protocols_and_wait()
             else:
                 self.logger.info(
                     "Skipping stop_protocols (caller opted out — config write "
@@ -8147,9 +8240,8 @@ class Ixia:
                 whose test is INVALID without the pool must pass True: swallowing
                 here still lets ``configure_as_path_pool`` return True, so the
                 caller logs success while the DUT receives IXIA's default AS
-                path. That is what silently invalidated SC2 iteration 1 on
-                2026-08-08 -- the device reported a 2-hop AS path and 1 unique AS
-                path where 100 were configured, and nothing failed.
+                path -- a silently different workload from the one requested,
+                with no failure anywhere to say so.
         """
         try:
             self._program_as_path_pool_on_route_property(bgp_route_prop, as_path_pool)
@@ -8402,7 +8494,7 @@ class Ixia:
             # Stop protocols before making changes (opt-in to avoid chassis-wide cascade)
             if stop_protocols:
                 self.logger.info("Stopping protocols before configuring community pool")
-                self.stop_protocols()
+                self.stop_protocols_and_wait()
             else:
                 self.logger.info(
                     "Skipping stop_protocols (caller opted out — config write "
@@ -8779,7 +8871,7 @@ class Ixia:
                 self.logger.info(
                     "Stopping protocols before configuring extended community pool"
                 )
-                self.stop_protocols()
+                self.stop_protocols_and_wait()
             else:
                 self.logger.info(
                     "Skipping stop_protocols (caller opted out — config write "
@@ -9064,6 +9156,47 @@ class Ixia:
             assigned2_values,
         )
 
+    def _write_multivalue(
+        self,
+        field: t.Any,
+        values: t.Sequence[t.Any],
+        label: str,
+    ) -> None:
+        """Write a per-route field, collapsing a constant column to ``Single()``.
+
+        A ``ValueList`` uploads one entry per route. When every entry is the same
+        value that payload carries no information: an extended community whose
+        AS number is fixed still ships that AS number once per row. IxNetwork's
+        ``Single()`` expresses the identical configuration as one scalar.
+
+        This is not a micro-optimisation. An extended community decomposes into
+        SIX per-route Multivalues, and for a pool of the form ``<asn>:<n>`` with
+        a two-byte ASN, FIVE of them are constant -- including both string
+        fields, which dominate the payload. Collapsing them turns tens of
+        megabytes of REST body into five scalars.
+
+        Falls back to ``ValueList`` whenever the column genuinely varies, so the
+        configuration produced is identical either way.
+        """
+        if not values:
+            raise ValueError(f"{label}: refusing to write an empty value list")
+
+        first = values[0]
+        if all(value == first for value in values):
+            self.logger.info(
+                f"  {label}: constant {first!r} across {len(values):,} row(s) "
+                "-> Single()"
+            )
+            field.Single(first)
+            return
+
+        distinct = len(set(values))
+        self.logger.info(
+            f"  {label}: {distinct:,} distinct value(s) across {len(values):,} "
+            "row(s) -> ValueList()"
+        )
+        field.ValueList(list(values))
+
     def _write_extended_community_position(
         self,
         position: t.Any,
@@ -9088,12 +9221,20 @@ class Ixia:
             assigned2_values,
         ) = values
         try:
-            position.Type.ValueList(types)
-            position.SubType.ValueList(subtypes)
-            position.AsNumber2Bytes.ValueList(as2_values)
-            position.AssignedNumber4Bytes.ValueList(assigned4_values)
-            position.AsNumber4Bytes.ValueList(as4_values)
-            position.AssignedNumber2Bytes.ValueList(assigned2_values)
+            self._write_multivalue(position.Type, types, "Type")
+            self._write_multivalue(position.SubType, subtypes, "SubType")
+            self._write_multivalue(
+                position.AsNumber2Bytes, as2_values, "AsNumber2Bytes"
+            )
+            self._write_multivalue(
+                position.AssignedNumber4Bytes, assigned4_values, "AssignedNumber4Bytes"
+            )
+            self._write_multivalue(
+                position.AsNumber4Bytes, as4_values, "AsNumber4Bytes"
+            )
+            self._write_multivalue(
+                position.AssignedNumber2Bytes, assigned2_values, "AssignedNumber2Bytes"
+            )
         except Exception:
             self.logger.exception(
                 "Failed to configure extended-community position %d of %d "
