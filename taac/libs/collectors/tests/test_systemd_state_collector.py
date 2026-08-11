@@ -625,6 +625,140 @@ class TestSystemdStateCollector(unittest.IsolatedAsyncioTestCase):
         result = collector.services_restarted_in_window(0, 100)
         self.assertEqual(result, {"fboss_sw_agent": (0, 1)})
 
+    def test_services_restarted_skips_disabled_by_default(self) -> None:
+        """A disabled service can't be running to restart — its restart-
+        indicator fields must NOT be reported. Mirrors the filter added on
+        services_ever_inactive_in_window."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["coop"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "coop": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="active",
+                        unit_file_state="disabled",
+                        n_restarts=0,
+                        active_enter_ts=1000,
+                    )
+                },
+            ),
+            self._fake_row(
+                2,
+                {
+                    "coop": SystemdUnitState(
+                        load_state="loaded",
+                        active_state="active",
+                        unit_file_state="disabled",
+                        n_restarts=1,
+                        active_enter_ts=5000,
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(collector.services_restarted_in_window(0, 100), {})
+        # With the filter off, the restart DOES surface.
+        self.assertEqual(
+            collector.services_restarted_in_window(0, 100, skip_disabled=False),
+            {"coop": (1, 1)},
+        )
+
+    def test_services_restarted_late_disabled_does_not_erase_earlier_restart(
+        self,
+    ) -> None:
+        """Mirror of the ``services_ever_inactive`` regression guard: a
+        real NRestarts / AET bump captured from loaded+enabled samples
+        must NOT be erased by a later disabled / not-loaded sample."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["bgpd"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="enabled",
+                        n_restarts=0,
+                        active_enter_ts=1000,
+                    )
+                },
+            ),
+            self._fake_row(
+                2,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="enabled",
+                        n_restarts=3,
+                        active_enter_ts=9000,
+                    )
+                },
+            ),
+            self._fake_row(
+                3,
+                {
+                    "bgpd": SystemdUnitState(
+                        load_state="loaded",
+                        unit_file_state="disabled",
+                        n_restarts=3,
+                        active_enter_ts=9000,
+                    )
+                },
+            ),
+        ]
+        # NRestarts bumped from 0→3 and AET changed 1000→9000, so restart
+        # is real — must surface despite the late disabled sample.
+        self.assertEqual(
+            collector.services_restarted_in_window(0, 100),
+            {"bgpd": (3, 1)},
+        )
+
+    def test_services_restarted_skips_not_loaded_by_default(self) -> None:
+        """A unit that isn't present on the DUT image can't restart —
+        its fields must not be reported."""
+        collector = SystemdStateCollector(
+            driver=MagicMock(),
+            services=["openr"],
+            host="dut1",
+            tmp_path="/dev/null",
+        )
+        collector.rows = [
+            self._fake_row(
+                1,
+                {
+                    "openr": SystemdUnitState(
+                        load_state="not-found",
+                        n_restarts=0,
+                        active_enter_ts=1000,
+                    )
+                },
+            ),
+            self._fake_row(
+                2,
+                {
+                    "openr": SystemdUnitState(
+                        load_state="not-found",
+                        n_restarts=1,
+                        active_enter_ts=9000,
+                    )
+                },
+            ),
+        ]
+        self.assertEqual(collector.services_restarted_in_window(0, 100), {})
+        self.assertEqual(
+            collector.services_restarted_in_window(0, 100, skip_not_loaded=False),
+            {"openr": (1, 1)},
+        )
+
     def test_services_restarted_empty_when_stable(self) -> None:
         collector = SystemdStateCollector(
             driver=MagicMock(),

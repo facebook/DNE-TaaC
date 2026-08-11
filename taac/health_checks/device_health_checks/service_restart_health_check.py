@@ -1,6 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
+import asyncio
+import os
 import time
 import typing as t
 
@@ -14,12 +16,17 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from taac.health_checks.constants import DEFAULT_SERVICE_NAMES
+from taac.libs.collectors.registry import get_collector
+from taac.libs.collectors.systemd_state_collector import SystemdStateCollector
 from taac.utils.arista_utils import (
     DaemonStatus,
     get_daemon_status_comprehensive,
     parse_uptime_to_seconds,
 )
+from taac.utils.health_check_utils import collector_window_start
 from taac.health_check.health_check import types as hc_types
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 SERVICE_NAME_TO_DRIVER_ENUM = {
     "wedge_agent": FbossSystemctlServiceName.AGENT,
@@ -70,50 +77,53 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         self.logger.info(
             f"Checking service status for {len(services)} services: {services}"
         )
-        # pyrefly: ignore [missing-attribute]
         is_netos = await self.driver.async_is_netos()
-        for service in services:
-            try:
-                if service == "fboss_hw_agent@1":
-                    self.logger.debug(
-                        f"Service {service} is 'fboss_hw_agent@1' - skipping as it's not applicable"
-                    )
-                    continue
-                if is_netos and service in SERVICES_TO_IGNORE_FOR_NETOS:
-                    self.logger.debug(
-                        f"Service {service} does not run NetOS, skipping..."
-                    )
-                    continue
 
-                # Convert service name string to Service enum if needed
-                if service in SERVICE_NAME_TO_DRIVER_ENUM:
-                    service_enum = SERVICE_NAME_TO_DRIVER_ENUM[service]
-                else:
+        async def _classify(service: str) -> t.Tuple[str, t.Optional[str]]:
+            """Classify a single service's state. Returns (bucket, message)
+            where bucket is one of 'skip' / 'active' / 'inactive' / 'failed'.
+            Per-service work runs concurrently across all services below.
+            """
+            if service == "fboss_hw_agent@1":
+                return (
+                    "skip",
+                    f"Service {service} is 'fboss_hw_agent@1' - skipping as it's not applicable",
+                )
+            if is_netos and service in SERVICES_TO_IGNORE_FOR_NETOS:
+                return ("skip", f"Service {service} does not run NetOS, skipping...")
+            try:
+                if service not in SERVICE_NAME_TO_DRIVER_ENUM:
                     self.logger.warning(
                         f"Service {service} not found in SERVICE_NAME_TO_DRIVER_ENUM mapping. Available services: {list(SERVICE_NAME_TO_DRIVER_ENUM.keys())}"
                     )
-                    failed_services.append(
-                        f"{service}: not found in service enum mapping"
-                    )
-                    continue
-
-                # pyrefly: ignore [missing-attribute]
+                    return ("failed", f"{service}: not found in service enum mapping")
+                service_enum = SERVICE_NAME_TO_DRIVER_ENUM[service]
                 service_status = await self.driver.async_get_service_status(
                     service_enum
                 )
-
-                # Check if status is ACTIVE (comparing enum values)
                 if service_status.name.lower() != "active":
-                    inactive_services.append(
-                        f"{service} (status: {service_status.name})"
-                    )
                     self.logger.warning(
                         f"Service {service} on {obj.name} is not ACTIVE, current status: {service_status.name}"
                     )
+                    return (
+                        "inactive",
+                        f"{service} (status: {service_status.name}) — "
+                        "if unexpected, verify the unit is present and enabled on the DUT",
+                    )
+                return ("active", None)
             except Exception as e:
                 error_msg = f"Failed to check service status for {service} on {obj.name}: {str(e)}"
                 self.logger.error(error_msg)
-                failed_services.append(f"{service}: {str(e)}")
+                return ("failed", f"{service}: {str(e)}")
+
+        results = await asyncio.gather(*(_classify(s) for s in services))
+        for service, (bucket, message) in zip(services, results):
+            if bucket == "skip":
+                self.logger.debug(message)
+            elif bucket == "failed":
+                failed_services.append(message)
+            elif bucket == "inactive":
+                inactive_services.append(message)
 
         return failed_services, inactive_services
 
@@ -148,7 +158,6 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
 
         self.logger.info("Getting agent uptimes for restart detection")
         self.logger.info(f"Passing services list to get_agents_uptime: {services}")
-        # pyrefly: ignore [missing-attribute]
         is_netos = await self.driver.async_is_netos()
         try:
             if is_netos:
@@ -157,7 +166,6 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                     for service in services
                     if service not in SERVICES_TO_IGNORE_FOR_NETOS
                 ]
-            # pyrefly: ignore [missing-attribute]
             agent_uptimes = await self.driver.get_agents_uptime(services=services)
             self.logger.info(f"Retrieved agent uptimes: {agent_uptimes}")
 
@@ -189,7 +197,10 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                         f"Service {service} not found in agent uptime results for {obj.name}. "
                         f"Available services in uptime results: {list(agent_uptimes.keys())}"
                     )
-                    failed_services.append(f"{service}: not found in uptime results")
+                    failed_services.append(
+                        f"{service}: not found in uptime results — "
+                        "if unexpected, verify the unit is present and enabled on the DUT"
+                    )
 
         except Exception as e:
             error_msg = f"Failed to get agent uptimes for {obj.name}: {str(e)}"
@@ -322,7 +333,6 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         """
         agents = list(ARISTA_CRITICAL_SAND_AGENTS)
         try:
-            # pyrefly: ignore [missing-attribute]
             lc_agents = await self.driver.async_get_lc_agent_names()
             if lc_agents:
                 self.logger.info(f"Discovered linecard agents: {lc_agents}")
@@ -330,7 +340,6 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         except Exception as e:
             self.logger.warning(f"Failed to discover linecard agents: {e}")
         try:
-            # pyrefly: ignore [missing-attribute]
             fabric_agents = await self.driver.async_get_fabric_agent()
             if fabric_agents:
                 self.logger.info(f"Discovered fabric agents: {fabric_agents}")
@@ -378,7 +387,6 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             f"Checking {len(agents)} EOS agents on {obj.name} via 'show agent <name> uptime'"
         )
 
-        # pyrefly: ignore [missing-attribute]
         agent_statuses = await self.driver.async_get_agent_statuses(agents)
 
         for agent, status in agent_statuses.items():
@@ -623,6 +631,11 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                 f"  - Expected restarted services (allowlist): {expected_restarted_services}"
             )
 
+        if TAAC_OSS:
+            return await self._run_oss(
+                obj, services, expected_restarted_services, check_params
+            )
+
         # Check if services are in ACTIVE state
         (
             failed_services_active,
@@ -681,3 +694,148 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                 status=hc_types.HealthCheckStatus.PASS,
                 message="All services running continuously for the test duration",
             )
+
+    async def _run_oss(
+        self,
+        obj: TestDevice,
+        services: t.List[str],
+        expected_restarted_services: t.Optional[t.List[str]],
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        """OSS path — window-based verdict backed by SystemdStateCollector.
+
+        Replaces both legacy signals (a point-in-time ``ActiveState`` read
+        and a driver-side uptime query) with two queries against the shared
+        collector: did any monitored service drop out of ``active`` during
+        the check window, and did any bump NRestarts / reset
+        ActiveEnterTimestamp during the check window? ``expected_restarted_
+        services`` are subtracted from the queried set — a service the
+        playbook intentionally restarted is neither an outage nor an
+        unexpected restart.
+
+        Window defaults to ``[test_case_start_time, now]`` — the current
+        playbook iteration — and can be overridden per-check via
+        ``check_params["window_start"]`` / ``["window_end"]``.
+        """
+        return await self._run_oss_via_collector(
+            obj, services, expected_restarted_services, check_params
+        )
+
+    async def _run_oss_via_collector(
+        self,
+        obj: TestDevice,
+        services: t.Sequence[str],
+        expected_restarted_services: t.Optional[t.Sequence[str]],
+        check_params: t.Dict[str, t.Any],
+    ) -> hc_types.HealthCheckResult:
+        collector = get_collector("systemd_state")
+        if not isinstance(collector, SystemdStateCollector):
+            self.logger.warning(
+                "No SystemdStateCollector registered under 'systemd_state' -- "
+                "CollectorsTestHandler runs by default under TAAC_OSS, so "
+                "this means either no FBOSS device in the topology, the "
+                "'no_oss_collectors' opt-out tag, or a failed handler setUp. "
+                "Skipping."
+            )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "No SystemdStateCollector registered under "
+                    "'systemd_state'. The test config didn't start one — "
+                    "this check has nothing to evaluate."
+                ),
+            )
+        if collector.host != obj.name:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    f"Registered SystemdStateCollector is bound to host "
+                    f"'{collector.host}', not '{obj.name}' — multi-DUT "
+                    "collector support isn't implemented; skipping this "
+                    "device."
+                ),
+            )
+
+        # Split behaviour for ``expected_restarted_services``. Subtracting
+        # the allowlist from BOTH queries — the previous iteration — meant
+        # the check said nothing at all about the intentionally-restarted
+        # service, including whether it came back up. A warmboot that left
+        # the agent dead silently PASSed. Split it:
+        #   * restart query      -> keep the allowlist subtraction; the
+        #     allowlist is exactly the "expected to restart" set, so a
+        #     NRestarts / AET bump on those services is fine.
+        #   * outage query       -> KEEP allowlisted services in the query
+        #     but only require them to be active at window END (not
+        #     throughout). Their transient ``deactivating`` / ``activating``
+        #     samples during the intentional restart are expected; leaving
+        #     the window in a non-active state is NOT.
+        expected_set = set(expected_restarted_services or [])
+        restart_query_services = [s for s in services if s not in expected_set]
+
+        now = time.time()
+        window_end = check_params.get("window_end", now)
+        lookback_sec = check_params.get("lookback_sec", 900)
+        window_start = check_params.get(
+            "window_start",
+            collector_window_start(check_params, window_end, lookback_sec),
+        )
+
+        missing_from_collector = [
+            s for s in services if s not in collector.services
+        ]
+        if missing_from_collector:
+            self.logger.warning(
+                f"Requested services not monitored by the running "
+                f"SystemdStateCollector (started with services="
+                f"{collector.services}): {missing_from_collector}. These "
+                f"will not be checked."
+            )
+
+        # Outage query: full-window verdict for non-allowlisted services,
+        # final-sample verdict for the allowlist (see ``expected_set`` above).
+        inactive = collector.services_ever_inactive_in_window(
+            window_start, window_end, services=restart_query_services
+        )
+        not_recovered = (
+            collector.services_not_active_at_end(
+                window_start, window_end, services=list(expected_set)
+            )
+            if expected_set
+            else {}
+        )
+        restarted = collector.services_restarted_in_window(
+            window_start, window_end, services=restart_query_services
+        )
+
+        if not inactive and not not_recovered and not restarted:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message="All services running continuously for the test duration",
+            )
+
+        problems: t.List[str] = []
+        if inactive:
+            detail = ", ".join(
+                f"{svc}={state}" for svc, state in sorted(inactive.items())
+            )
+            problems.append(f"not active during window: {detail}")
+        if not_recovered:
+            detail = ", ".join(
+                f"{svc}={state}" for svc, state in sorted(not_recovered.items())
+            )
+            problems.append(f"expected-restart didn't recover: {detail}")
+        if restarted:
+            detail = ", ".join(
+                f"{svc} (NRestarts+{d[0]}, AET changed={d[1]})"
+                for svc, d in sorted(restarted.items())
+            )
+            problems.append(f"restarted during window: {detail}")
+
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.FAIL,
+            message=(
+                f"Service restart / outage on {obj.name} during window "
+                f"[{window_start:.0f}, {window_end:.0f}]:\n"
+                + "\n".join(problems)
+            ),
+        )

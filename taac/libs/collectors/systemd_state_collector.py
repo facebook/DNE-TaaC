@@ -341,6 +341,8 @@ class SystemdStateCollector(ServicePollingCollector):
         window_start: float,
         window_end: float,
         services: t.Optional[t.Sequence[str]] = None,
+        skip_disabled: bool = True,
+        skip_not_loaded: bool = True,
     ) -> t.Dict[str, t.Tuple[int, int]]:
         """Return ``{service: (n_restarts_delta, active_enter_ts_changes)}``
         for services whose restart-indicating fields changed across the window.
@@ -350,9 +352,22 @@ class SystemdStateCollector(ServicePollingCollector):
         activation moment moved). Either signal alone is sufficient; both
         are tracked so a consumer can distinguish "clean restart" (NRestarts
         bumped) from "warmboot-style re-init" (ActiveEnterTimestamp changed
-        without NRestarts, seen in some FBOSS paths). Used by the future
-        ``ServiceRestartHealthCheck`` collector-backed path.
+        without NRestarts, seen in some FBOSS paths).
+
+        ``skip_disabled=True`` (default): omit services that sampled as
+        ``UnitFileState=disabled`` — a disabled unit can't be running to
+        restart. ``skip_not_loaded=True`` (default): omit services that
+        sampled as ``LoadState`` != ``loaded`` — the unit isn't present on
+        this DUT image. Both match the semantics ``ServiceRestartHealthCheck``
+        wants; a stricter caller can flip either off.
         """
+        # Filters decide per-sample, not per-service — mirrors the fix on
+        # ``services_ever_inactive_in_window`` (see the comment there).
+        # An early not-loaded or a late disabled sample must not veto
+        # loaded+enabled samples on either side of it: a service brought
+        # up mid-playbook (early sample = not-found) or torn down late
+        # (late sample = disabled) still has its NRestarts / AET delta
+        # computed from the loaded+enabled samples.
         wanted = set(services) if services is not None else set(self.services)
         rows = self.get_rows_in_window(window_start, window_end)
         first_seen: t.Dict[str, SystemdUnitState] = {}
@@ -363,11 +378,13 @@ class SystemdStateCollector(ServicePollingCollector):
                     continue
                 if not isinstance(state, SystemdUnitState):
                     continue
-                # Same rationale as ``services_ever_inactive_in_window``: a
-                # unit that isn't loaded on this DUT image can't restart, so
-                # a not-found sample must not contribute a first/last state
-                # that later gets misread as a restart signal. Skip.
-                if state.load_state and state.load_state != "loaded":
+                if skip_disabled and state.unit_file_state == "disabled":
+                    continue
+                if (
+                    skip_not_loaded
+                    and state.load_state
+                    and state.load_state != "loaded"
+                ):
                     continue
                 if service not in first_seen:
                     first_seen[service] = state
