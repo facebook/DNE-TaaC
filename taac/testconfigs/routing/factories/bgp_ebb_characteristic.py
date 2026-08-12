@@ -1998,7 +1998,19 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         constant_total_paths=_INGRESS_ATTR_TOTAL_PATHS,
         unique_combination_counts=_INGRESS_ATTR_COMBINATION_SWEEP,
         soak_time_minutes=2,
-        dump_attribute_assignments=True,
+        # SC2 is a scale-CHARACTERISTIC measurement, so both activities this
+        # flag enables are switched off:
+        #   - Step 9 (dump_and_verify_rib_attributes) pulls the whole 800K-path
+        #     RIB over thrift per sweep point. The sweep deliberately does not
+        #     restart BGP between iterations, so the RSS that dump churns in
+        #     bgpd_main lands in the NEXT point's stable-memory sample and skews
+        #     the blocking sc2_memory_growth gate.
+        #   - Step 1's combination file-dump writes ~180MB to the runner's /tmp
+        #     across the sweep, is never uploaded anywhere, and each file is a
+        #     prefix of the next. The combinations are deterministic (seeded
+        #     pools, fixed attribute_pool_size) and reproducible offline.
+        # Set back to True only for one-off attribute-correctness debugging.
+        dump_attribute_assignments=False,
         test_address_families=["ipv6"],
         setup_tasks=setup_tasks,
         constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,

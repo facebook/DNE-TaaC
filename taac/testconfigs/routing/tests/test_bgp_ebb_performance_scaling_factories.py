@@ -273,6 +273,48 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
         )
 
 
+class ConstantAttributeStorageIngressAttributeDumpTest(unittest.TestCase):
+    """SC2 must not run the per-iteration attribute dump/verify work.
+
+    ``dump_attribute_assignments`` enables two things inside the sweep step, and
+    the first one corrupts the measurement SC2 exists to make:
+
+      * Step 9 (``dump_and_verify_rib_attributes``) pulls the entire 800K-path
+        RIB over thrift out of ``bgpd_main`` once per sweep point. The sweep
+        deliberately never restarts BGP between iterations, so the RSS churned
+        serving that dump carries into the NEXT point's stable-memory sample --
+        the exact quantity the blocking ``sc2_memory_growth`` gate compares.
+      * Step 1's combination file-dump writes ~180MB to the runner's /tmp over
+        the sweep, uploads nowhere, and emits four files that are prefixes of
+        one another.
+
+    Neither is part of a scale-characteristic measurement, so the flag stays off.
+    """
+
+    def test_attribute_dump_disabled(self) -> None:
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            enable_update_group=True,
+        )
+        sweep_steps = [
+            params
+            for params in _custom_step_params(config)
+            if "unique_combination_counts" in params
+        ]
+        self.assertEqual(
+            1, len(sweep_steps), "expected exactly one combination-sweep step"
+        )
+        # Assert the key is present rather than relying on a .get() default: if
+        # it is ever renamed, this test must fail loudly instead of passing on a
+        # missing-key fallback that happens to be False.
+        self.assertIn("dump_attribute_assignments", sweep_steps[0])
+        self.assertFalse(
+            sweep_steps[0]["dump_attribute_assignments"],
+            "SC2 is a scale-characteristic measurement; the RIB attribute "
+            "dump/verify perturbs bgpd_main RSS across sweep points",
+        )
+
+
 class PerformanceScalingRouteFilterClearTest(unittest.TestCase):
     """This test injects arbitrary scale prefixes that are not in the device's
     baked-in route registry, so the Centralized Route Filter (CRF) must be
