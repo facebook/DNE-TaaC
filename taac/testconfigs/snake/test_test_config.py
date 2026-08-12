@@ -140,6 +140,12 @@ def gen_snake_test_config(
     frame_size_settings: t.Optional[ixia_types.FrameSize] = None,
     playbooks_to_skip: t.Optional[t.List[str]] = None,
     include_link_flap_longevity: bool = False,
+    link_flap_longevity_iterations: int = 33,
+    link_flap_longevity_disable_delay_s: int = 30,
+    link_flap_longevity_enable_delay_s: int = 300,
+    link_flap_longevity_recovery_wait_s: int = 300,
+    link_flap_longevity_soak_s: int = 3600,
+    link_flap_longevity_interface_slice: t.Optional[str] = None,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     ixia_ports: t.Optional[t.List[str]] = None,
     precheck_packet_loss_clear_stats: bool = False,
@@ -191,6 +197,15 @@ def gen_snake_test_config(
                 generated playbook list.
             include_link_flap_longevity: When True, include the long
                 link-flap longevity playbook variant.
+            link_flap_longevity_iterations / _disable_delay_s /
+                _enable_delay_s / _recovery_wait_s / _soak_s /
+                _interface_slice: Tuning knobs for that playbook (only
+                meaningful when ``include_link_flap_longevity=True``).
+                Defaults reproduce the original hardcoded behavior (33
+                cycles over all interfaces, 30s/300s flap delays, 5-min
+                recovery wait, 1-hour soak). ``_interface_slice`` is a
+                positional slice expression (e.g. ``":3"`` = first 3
+                interfaces) to flap a subset; ``None`` flaps all.
             manual_test_interfaces: Optional explicit interface list
                 forwarded to ``gen_snake_playbooks`` for tests that
                 need an operator-pinned target set.
@@ -304,6 +319,12 @@ def gen_snake_test_config(
             iteration,
             playbooks_to_skip,
             include_link_flap_longevity,
+            link_flap_longevity_iterations=link_flap_longevity_iterations,
+            link_flap_longevity_disable_delay_s=link_flap_longevity_disable_delay_s,
+            link_flap_longevity_enable_delay_s=link_flap_longevity_enable_delay_s,
+            link_flap_longevity_recovery_wait_s=link_flap_longevity_recovery_wait_s,
+            link_flap_longevity_soak_s=link_flap_longevity_soak_s,
+            link_flap_longevity_interface_slice=link_flap_longevity_interface_slice,
             common_prechecks=common_prechecks,
             common_postchecks=common_postchecks,
             manual_test_interfaces=manual_test_interfaces,
@@ -700,6 +721,19 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # iteration=1 for the first full Phase 3/4 sweep (validate each disruption once);
     # bump later once a clean single-iteration sweep is confirmed.
     iteration=1,
+    # test_snake_link_flap_with_longevity: enabled as a SMALL first-pass to assess the
+    # test-case quality on this box before running the full-scale timeline. Scaled down
+    # from the defaults (33 iters, all interfaces, 300s enable delay, 5m recovery, 1h
+    # soak) to a quick ~8-minute run: 1 flap cycle over just the first 3 interfaces
+    # (30s spacing each way), 2-minute recovery wait, 2-minute longevity soak. Bump
+    # these to the production timeline once the small run looks clean.
+    include_link_flap_longevity=True,
+    link_flap_longevity_iterations=1,
+    link_flap_longevity_interface_slice=":3",
+    link_flap_longevity_disable_delay_s=30,
+    link_flap_longevity_enable_delay_s=30,
+    link_flap_longevity_recovery_wait_s=120,
+    link_flap_longevity_soak_s=120,
 )
 
 

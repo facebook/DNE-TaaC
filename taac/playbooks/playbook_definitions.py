@@ -12380,9 +12380,7 @@ def create_ecmp_only_longevity_playbooks(
         )
         + stabilization_seconds
     )
-    cold_start_loss_threshold = (
-        f"{100.0 * cold_start_down_total / cold_start_window + cold_start_loss_margin_pct:.1f}"
-    )
+    cold_start_loss_threshold = f"{100.0 * cold_start_down_total / cold_start_window + cold_start_loss_margin_pct:.1f}"
 
     def _packet_loss(main_loss: str):
         # clear_traffic_stats=False on purpose: the check reads counters
@@ -12949,6 +12947,12 @@ def gen_snake_playbooks(
     iteration: int,
     playbooks_to_skip: t.Optional[t.List[str]] = None,
     include_link_flap_longevity: bool = False,
+    link_flap_longevity_iterations: int = 33,
+    link_flap_longevity_disable_delay_s: int = 30,
+    link_flap_longevity_enable_delay_s: int = 300,
+    link_flap_longevity_recovery_wait_s: int = 300,
+    link_flap_longevity_soak_s: int = 3600,
+    link_flap_longevity_interface_slice: t.Optional[str] = None,
     common_prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     common_postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
@@ -13538,35 +13542,67 @@ def gen_snake_playbooks(
     )
 
     if include_link_flap_longevity:
+        # Optional subset scoping: when a slice expression is given (e.g. ":3" for the
+        # first 3 interfaces), flap only that positional slice of the DUT's interfaces
+        # instead of the whole set. Applied identically to the disable and enable steps
+        # so the same interfaces are brought down and back up. When None (default), the
+        # step selects every interface -- the full-fabric flap.
+        _flap_transform_params = (
+            {
+                "interfaces": [
+                    taac_types.TransformFunction(
+                        name="SELECT_INTERFACES_BY_SLICING",
+                        json_params=json.dumps(
+                            {"slicing_expression": link_flap_longevity_interface_slice}
+                        ),
+                    )
+                ]
+            }
+            if link_flap_longevity_interface_slice
+            else None
+        )
+        _flap_scope_desc = (
+            f"interfaces[{link_flap_longevity_interface_slice}]"
+            if link_flap_longevity_interface_slice
+            else "all interfaces"
+        )
         playbooks.append(
             taac_types.Playbook(
                 name="test_snake_link_flap_with_longevity",
                 prechecks=_prechecks,
                 stages=[
-                    # Stage 1: Flap all links for ~3 hours
-                    # Each cycle: ~330 seconds (30s disable delay + 300s enable delay)
-                    # 33 iterations ≈ 3 hours
+                    # Stage 1: Flap links repeatedly. Each cycle takes
+                    # ~(disable_delay + enable_delay) s; total ~= iterations x that.
+                    # Defaults (33 iters, 30s/300s) => ~3 hours over all interfaces.
                     create_steps_stage(
                         steps=[
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=1,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
-                                description="Sequentially disable all interfaces",
+                                transform_params=_flap_transform_params,
+                                description=f"Sequentially disable {_flap_scope_desc}",
                             ),
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=1,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
-                                description="Sequentially enable all interfaces",
+                                transform_params=_flap_transform_params,
+                                description=f"Sequentially enable {_flap_scope_desc}",
                             ),
                         ],
-                        iteration=33,
+                        iteration=link_flap_longevity_iterations,
                     ),
-                    # Stage 2: Wait 5 minutes for links to come UP
-                    create_steps_stage(steps=[create_longevity_step(duration=300)]),
+                    # Stage 2: Wait for links to come UP.
+                    create_steps_stage(
+                        steps=[
+                            create_longevity_step(
+                                duration=link_flap_longevity_recovery_wait_s
+                            )
+                        ]
+                    ),
                     # Stage 3: Validate links are UP and LLDP is correct
                     create_steps_stage(
                         steps=[
@@ -13579,8 +13615,12 @@ def gen_snake_playbooks(
                             ),
                         ]
                     ),
-                    # Stage 4: 1 hour longevity
-                    create_steps_stage(steps=[create_longevity_step(duration=3600)]),
+                    # Stage 4: Longevity soak
+                    create_steps_stage(
+                        steps=[
+                            create_longevity_step(duration=link_flap_longevity_soak_s)
+                        ]
+                    ),
                 ],
                 postchecks=_postchecks
                 + [
@@ -18825,9 +18865,7 @@ def create_gtsw_warmboot_nbr_uplink_flap_playbook(
     per_iteration_flap_sec: int = 200,
     longevity_sec: int = 300,
     playbook_name: str = "test_warmboot_nbr_uplink_flap",
-    traffic_items_to_configure: t.Optional[
-        t.Mapping[str, TrafficItemSettings]
-    ] = None,
+    traffic_items_to_configure: t.Optional[t.Mapping[str, TrafficItemSettings]] = None,
 ) -> Playbook:
     """Build a `test_warmboot_nbr_uplink_flap` Playbook.
 
@@ -18967,9 +19005,7 @@ def create_gtsw_service_restart_nbr_uplink_flap_playbook(
     longevity_sec: int = 300,
     post_restart_settle_sec: int = 0,
     extra_post_flap_checks: t.Optional[t.Sequence[PointInTimeHealthCheck]] = None,
-    traffic_items_to_configure: t.Optional[
-        t.Mapping[str, TrafficItemSettings]
-    ] = None,
+    traffic_items_to_configure: t.Optional[t.Mapping[str, TrafficItemSettings]] = None,
 ) -> Playbook:
     """Restart one service on the DUT, then flap the neighbour's uplinks.
 
