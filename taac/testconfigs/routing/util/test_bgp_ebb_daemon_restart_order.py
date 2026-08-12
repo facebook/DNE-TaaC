@@ -1,7 +1,7 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
 # pyre-strict
-"""Regression test for BGP++ conveyor daemon-restart ORDER.
+"""Regression test for BGP++ daemon-restart order.
 
 BGP++ (the ``Bgp`` daemon) programs routes into ``FibAgentBgp`` and resolves
 nexthops via the Open-R FIB agent. The control-plane setup must therefore
@@ -11,7 +11,7 @@ restarted out from under it, leaving BGP++ unable to program at init
 ("Fib agent is not connected. Skipping fib batch programming."). See
 T274256815. This pins the FibAgentBgp-before-Bgp invariant for every BGP++
 profile, since the daemon restart is the shared control-plane setup used by all
-conveyor-onboarded BGP++ tests.
+BGP++ tests.
 """
 
 import json
@@ -74,7 +74,7 @@ def _shell_commands(task) -> list[str]:
     return json.loads(task.params.json_params)["cmds"]
 
 
-class ConveyorDaemonRestartOrderTest(unittest.TestCase):
+class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
     def test_bgpcpp_daemons_lists_bgp_last(self) -> None:
         # Single source of truth for the order: Bgp must be last so its FIB /
         # Open-R dependencies are restarted first.

@@ -5,9 +5,6 @@ import json
 import re
 import unittest
 
-from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
-    BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
-)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     _SC4_FIXED_IBGP_PEER_COUNT,
     _SC4_INGRESS_EBGP_PEER_COUNTS,
@@ -21,7 +18,10 @@ from taac.testconfigs.routing.physical_inventory import (
 
 _GFLAG = "bgp_resolve_nexthops_from_interface_state"
 _INGRESS_PLAYBOOK_NAME = "Transient_Memory_Ingress_Peer_Scale"
-_SC4_UG = BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG
+_SC4_UG = create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
+    BAG010_ASH6,
+    enable_update_group=True,
+)
 
 # IxNetwork rejects any port whose imported-route total exceeds this hard cap.
 _IXIA_MAX_ROUTES_PER_PORT = 5_000_000

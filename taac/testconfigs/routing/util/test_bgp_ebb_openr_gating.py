@@ -1,7 +1,7 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
 # pyre-strict
-"""Unit tests for Open/R daemon gating in the BGP++ conveyor control-plane setup.
+"""Unit tests for Open/R daemon gating in the BGP++ control-plane setup.
 
 ``_get_control_plane_tasks`` must enable the Open/R daemon only for the
 ``WITH_OPEN_R`` profile. For ``WITHOUT_OPEN_R`` no ``openr_config`` is deployed,

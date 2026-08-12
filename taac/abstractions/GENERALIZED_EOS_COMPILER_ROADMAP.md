@@ -25,13 +25,13 @@ to emit `CompiledTaacArtifacts` for existing consumers.
 
 ## Current position
 
-DICE now has a migration parity harness, enforced import boundaries, a
-task-free common compilation plan, explicit physical network roles, typed EB
-policy selection, and a complete semantic IXIA plan for the current topology
-families. The candidate compiler can project bound device groups into DUT and
-IXIA resources without invoking a renderer. The established compiler remains
-authoritative for production artifacts and still renders the current BAG setup
-sequence.
+DICE now has enforced import boundaries, a task-free common compilation plan,
+explicit physical network roles, typed EB policy selection, and a complete
+semantic IXIA plan for the current topology families. The temporary migration
+parity harness was retired after cutover; reusable topology cases remain in
+`abstractions/tests/compiler_test_cases.py` for focused planner and renderer
+tests. The candidate compiler can project bound device groups into DUT and IXIA
+resources without invoking a renderer.
 
 It is not generalized yet:
 
@@ -445,7 +445,10 @@ Establish the generalized internal structure and remove reverse helper
 dependencies without changing existing factory APIs or BAG behavior. Phase 1.5
 does not claim profile-free compilation.
 
-### Diff 1.5.0: compatibility and parity harness
+### Diff 1.5.0: compatibility and parity harness (historical)
+
+This migration-only gate was removed after cutover. The following records the
+constraints it enforced while both compiler paths coexisted.
 
 Implement the migration harness before extracting planner or renderer code:
 
@@ -1711,7 +1714,7 @@ One worker owns the harness implementation, one reviews fixture coverage, and
 the gatekeeper adversarially tests the comparator. No production compiler file
 changes in this diff.
 
-The proposed test-only surface is:
+The retired test-only surface was:
 
 ```text
 abstractions/tests/compiler_parity_harness.py

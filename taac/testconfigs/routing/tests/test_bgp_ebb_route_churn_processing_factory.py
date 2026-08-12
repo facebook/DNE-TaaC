@@ -4,14 +4,14 @@ import json
 import unittest
 
 from taac.abstractions.physical_inventory import BAG010_ASH6
-from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
-    BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
-)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_route_churn_processing_test_config,
 )
 
-_SC6 = BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG
+_SC6 = create_bgp_ebb_characteristic_route_churn_processing_test_config(
+    BAG010_ASH6,
+    enable_update_group=True,
+)
 _NEXTHOP_IFACE_STATE_FLAG = "bgp_resolve_nexthops_from_interface_state"
 
 

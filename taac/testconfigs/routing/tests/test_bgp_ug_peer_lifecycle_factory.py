@@ -15,7 +15,7 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc2_peer_lifecycle
 )
 
 
-class BgpUgPeerLifecycleTestConfigTest(unittest.TestCase):
+class BgpUgPeerLifecycleFactoryTest(unittest.TestCase):
     def test_constructs_on_bag011_with_expected_name_and_playbooks(self) -> None:
         config = create_bgp_ug_peer_lifecycle_test_config(BAG011_ASH6)
         # --test-config resolves against .name; must match the sibling UG
