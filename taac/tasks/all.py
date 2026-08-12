@@ -976,12 +976,18 @@ class RunCommandsOnShell(BaseTask):
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         hostname = params["hostname"]
         cmds = params.get("cmds", [])
+        validate_output = params.get("validate_output", False)
         driver = await async_get_device_driver(hostname)
         for cmd in cmds:
             self.logger.info(
                 f"{hostname} -- Running command: {_truncate_cmd_for_log(cmd)}"
             )
-            await driver.async_run_cmd_on_shell(cmd)
+            if validate_output:
+                await t.cast(
+                    t.Any, driver
+                ).async_execute_show_or_configure_cmd_on_shell(cmd)
+            else:
+                await driver.async_run_cmd_on_shell(cmd)
 
 
 class AllocateCgroupSliceMemory(BaseTask):
@@ -1766,6 +1772,37 @@ class ValidateBgpcppConfigOnDevice(BaseTask):
             self.logger.warning(
                 f"BGP++ config validator returned unexpected output on "
                 f"{hostname}: {output_str.strip()}"
+            )
+
+
+class ValidateBgpcppUpdateGroupState(BaseTask):
+    """Validate the live BGP++ Update Group state through Thrift."""
+
+    NAME = "validate_bgpcpp_update_group_state"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        hostname = params["hostname"]
+        expect_enabled = params["expect_enabled"]
+        if not isinstance(expect_enabled, bool):
+            raise ValueError("expect_enabled must be a bool")
+
+        driver = await async_get_device_driver(hostname)
+        try:
+            response = await t.cast(t.Any, driver).async_get_update_group_info()
+        except Exception:
+            self.logger.exception(
+                f"Unable to query BGP++ update_group state on {hostname}"
+            )
+            raise
+        actual_enabled = response.enable_update_group
+        self.logger.info(
+            f"Observed BGP++ update_group enabled={actual_enabled} on {hostname}; "
+            f"expected {expect_enabled}"
+        )
+        if actual_enabled != expect_enabled:
+            raise RuntimeError(
+                f"BGP++ update_group enabled={actual_enabled} on {hostname}; "
+                f"expected {expect_enabled}"
             )
 
 

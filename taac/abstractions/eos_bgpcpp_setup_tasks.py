@@ -72,7 +72,11 @@ def _build_bgpcpp_logging_script(
             "        temporary_file.write(updated_content)",
             "        temporary_file.flush()",
             "        os.fsync(temporary_file.fileno())",
-            "    os.chown(temporary_path, metadata.st_uid, metadata.st_gid)",
+            "    temporary_metadata = temporary_path.stat()",
+            "    if (temporary_metadata.st_uid, temporary_metadata.st_gid) != (",
+            "        metadata.st_uid, metadata.st_gid",
+            "    ):",
+            "        os.chown(temporary_path, metadata.st_uid, metadata.st_gid)",
             "    shutil.copymode(path, temporary_path)",
             "    os.replace(temporary_path, path)",
             "finally:",
@@ -90,12 +94,14 @@ def create_bgpcpp_logging_setup_task(
 ) -> Task:
     script = _build_bgpcpp_logging_script(logging_config)
     encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    command = f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
+    pipeline = f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
+    command = f"bash {pipeline}"
     return create_run_commands_on_shell_task(
         hostname=hostname,
         cmds=[command],
         set_outer_hostname=True,
         ixia_needed=True,
+        validate_output=True,
     )
 
 

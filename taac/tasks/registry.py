@@ -112,6 +112,7 @@ from taac.tasks.all import (
     ScpFile,
     SetPortChannelMinLinkPatcherTask,
     ValidateBgpcppConfigOnDevice,
+    ValidateBgpcppUpdateGroupState,
     WaitForAgentConvergenceTask,
     WaitForBgpConvergenceTask,
 )
@@ -194,6 +195,7 @@ TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     ThriftStressPeriodicTask,
     AristaCreateFileFromConfig,
     ValidateBgpcppConfigOnDevice,
+    ValidateBgpcppUpdateGroupState,
     ConfigureBgpcppStartupTask,
     VerifyBestPathChangesTask,
     SetPortChannelMinLinkPatcherTask,

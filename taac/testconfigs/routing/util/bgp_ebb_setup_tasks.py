@@ -126,6 +126,7 @@ def _get_add_intern_userid_tasks(
             cmds=commands,
             set_outer_hostname=True,
             ixia_needed=True,
+            validate_output=True,
         ),
     ]
 
@@ -137,6 +138,7 @@ def _get_verify_intern_userid_tasks(device_name: str) -> t.List[Task]:
             cmds=[VERIFY_THRIFT_ACL_USER_IDS_CMD],
             set_outer_hostname=True,
             ixia_needed=True,
+            validate_output=True,
         )
     ]
 
@@ -280,6 +282,7 @@ def _get_bgpcpp_deployment_tasks(
             ],
             set_outer_hostname=True,
             ixia_needed=True,
+            validate_output=True,
         )
     )
 
@@ -464,6 +467,7 @@ def _get_control_plane_tasks(
                 cmds=[UPDATE_GROUP_VERIFICATION_CMD],
                 set_outer_hostname=True,
                 ixia_needed=True,
+                validate_output=True,
             )
         )
 

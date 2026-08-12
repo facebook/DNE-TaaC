@@ -600,6 +600,7 @@ def create_run_commands_on_shell_task(
     cmds: t.List[str],
     set_outer_hostname: bool = False,
     ixia_needed: bool = False,
+    validate_output: bool = False,
 ) -> Task:
     """
     Create a task to run shell commands on a device.
@@ -610,22 +611,22 @@ def create_run_commands_on_shell_task(
         set_outer_hostname: If True, also set Task.hostname (the outer Thrift field).
             Some legacy call sites set this for runner-side scoping.
         ixia_needed: If True, the task runs after IXIA setup with an Ixia instance available.
+        validate_output: If True, reject EOS parser, authorization, and shell-exit errors.
 
     Returns:
         Task object to run shell commands
     """
+    params: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "cmds": cmds,
+    }
+    if validate_output:
+        params["validate_output"] = True
     return Task(
         task_name="run_commands_on_shell",
         hostname=hostname if set_outer_hostname else None,
         ixia_needed=ixia_needed,
-        params=Params(
-            json_params=json.dumps(
-                {
-                    "hostname": hostname,
-                    "cmds": cmds,
-                }
-            )
-        ),
+        params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -2950,6 +2951,27 @@ def create_validate_bgpcpp_config_on_device_task(
         task_name="validate_bgpcpp_config_on_device",
         ixia_needed=ixia_needed,
         params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_validate_bgpcpp_update_group_state_task(
+    hostname: str,
+    expect_enabled: bool,
+    ixia_needed: bool = True,
+) -> Task:
+    """Validate the live BGP++ Update Group state through its Thrift API."""
+    return Task(
+        task_name="validate_bgpcpp_update_group_state",
+        hostname=hostname,
+        ixia_needed=ixia_needed,
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hostname": hostname,
+                    "expect_enabled": expect_enabled,
+                }
+            )
+        ),
     )
 
 

@@ -3,9 +3,15 @@
 import base64
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from taac.tasks.all import AristaCreateFileFromConfig
+import later.unittest
+from taac.tasks.all import (
+    AristaCreateFileFromConfig,
+    RunCommandsOnShell,
+    ValidateBgpcppUpdateGroupState,
+)
 
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
@@ -141,3 +147,123 @@ class AristaCreateFileFromConfigTest(unittest.IsolatedAsyncioTestCase):
             if "wc -c" in call.args[0]
         )
         self.assertEqual(AristaCreateFileFromConfig.MAX_RETRIES, wc_calls)
+
+
+class RunCommandsOnShellTest(later.unittest.TestCase):
+    def setUp(self) -> None:
+        self.driver = MagicMock()
+        self.driver.async_run_cmd_on_shell = AsyncMock()
+        self.driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
+        self.task = RunCommandsOnShell(
+            hostname="bag012.ash6",
+            logger=MagicMock(),
+        )
+
+    async def test_uses_existing_unvalidated_path_by_default(self) -> None:
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=self.driver,
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "cmds": ["show version"],
+                }
+            )
+
+        self.driver.async_run_cmd_on_shell.assert_awaited_once_with("show version")
+        self.driver.async_execute_show_or_configure_cmd_on_shell.assert_not_awaited()
+
+    async def test_validates_output_when_requested(self) -> None:
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=self.driver,
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "cmds": ["bash false"],
+                    "validate_output": True,
+                }
+            )
+
+        self.driver.async_execute_show_or_configure_cmd_on_shell.assert_awaited_once_with(
+            "bash false"
+        )
+        self.driver.async_run_cmd_on_shell.assert_not_awaited()
+
+
+class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
+    def setUp(self) -> None:
+        self.driver = MagicMock()
+        self.logger = MagicMock()
+        self.task = ValidateBgpcppUpdateGroupState(
+            hostname="bag012.ash6",
+            logger=self.logger,
+        )
+
+    async def test_accepts_expected_disabled_state(self) -> None:
+        self.driver.async_get_update_group_info = AsyncMock(
+            return_value=SimpleNamespace(enable_update_group=False)
+        )
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=self.driver,
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "expect_enabled": False,
+                }
+            )
+        self.driver.async_get_update_group_info.assert_awaited_once_with()
+        self.logger.info.assert_called_once()
+        log_message = self.logger.info.call_args.args[0]
+        self.assertIn("enabled=False", log_message)
+        self.assertIn("bag012.ash6", log_message)
+
+    async def test_rejects_unexpected_enabled_state(self) -> None:
+        self.driver.async_get_update_group_info = AsyncMock(
+            return_value=SimpleNamespace(enable_update_group=True)
+        )
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=self.driver,
+            ),
+            self.assertRaisesRegex(RuntimeError, "expected False"),
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "expect_enabled": False,
+                }
+            )
+        self.logger.info.assert_called_once()
+        log_message = self.logger.info.call_args.args[0]
+        self.assertIn("enabled=True", log_message)
+        self.assertIn("expected False", log_message)
+
+    async def test_logs_query_failure(self) -> None:
+        self.driver.async_get_update_group_info = AsyncMock(
+            side_effect=RuntimeError("permission denied")
+        )
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=self.driver,
+            ),
+            self.assertRaisesRegex(RuntimeError, "permission denied"),
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "expect_enabled": False,
+                }
+            )
+        self.logger.exception.assert_called_once()

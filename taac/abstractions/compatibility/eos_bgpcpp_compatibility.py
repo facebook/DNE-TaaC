@@ -102,18 +102,17 @@ for f in FILES:
 _ADD_INTERN_USER_IDS_SCRIPT_B64 = base64.b64encode(
     _ADD_INTERN_USER_IDS_SCRIPT.encode("utf-8")
 ).decode("utf-8")
-# The fixed path is legacy behavior serialized into frozen TestConfigs and runs
-# only on the reserved EOS DUT. Harden it in a standalone, DUT-validated setup
-# command migration rather than changing compiler-refactor output.
 ADD_INTERN_USER_IDS_CMD = (
-    f"bash echo '{_ADD_INTERN_USER_IDS_SCRIPT_B64}' | base64 -d > "
-    "/tmp/add_uids.py && sudo python3 /tmp/add_uids.py"
+    f"bash printf '%s' {shlex.quote(_ADD_INTERN_USER_IDS_SCRIPT_B64)} "
+    "| base64 -d | sudo python3 -"
 )
 
 
 def _on_device_python_command(script: str) -> str:
     encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    return f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
+    return (
+        f"bash printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
+    )
 
 
 _REQUIRE_THRIFT_ACL_FILES_SCRIPT = "\n".join(
@@ -163,7 +162,7 @@ VERIFY_THRIFT_ACL_USER_IDS_CMD = _on_device_python_command(
 
 POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
 
-EBB_BGPCPP_LOGGING_CONFIG = "DBG3;default:async=true"
+EBB_BGPCPP_LOGGING_CONFIG = "DBG5;default:async=true"
 
 
 def build_update_group_setting_override_cmd(
@@ -175,12 +174,36 @@ def build_update_group_setting_override_cmd(
     script = "\n".join(
         [
             "import json",
+            "import os",
+            "import shutil",
+            "import tempfile",
             "from pathlib import Path",
             f"config_path = Path({config_path!r})",
             "config = json.loads(config_path.read_text())",
             "bgp_settings = config.setdefault('bgp_setting_config', {})",
             f"bgp_settings['enable_update_group'] = {enabled_literal}",
-            "config_path.write_text(json.dumps(config, indent=2) + '\\n')",
+            "updated_content = (json.dumps(config, indent=2) + '\\n').encode()",
+            "metadata = config_path.stat()",
+            "fd, temporary_name = tempfile.mkstemp(",
+            "    dir=config_path.parent, prefix=f'.{config_path.name}.'",
+            ")",
+            "temporary_path = Path(temporary_name)",
+            "try:",
+            "    with os.fdopen(fd, 'wb') as temporary_file:",
+            "        temporary_file.write(updated_content)",
+            "        temporary_file.flush()",
+            "        os.fsync(temporary_file.fileno())",
+            "    temporary_metadata = temporary_path.stat()",
+            "    if (temporary_metadata.st_uid, temporary_metadata.st_gid) != (",
+            "        metadata.st_uid, metadata.st_gid",
+            "    ):",
+            "        os.chown(temporary_path, metadata.st_uid, metadata.st_gid)",
+            "    shutil.copymode(config_path, temporary_path)",
+            "    os.replace(temporary_path, config_path)",
+            "finally:",
+            "    temporary_path.unlink(missing_ok=True)",
+            "if config_path.read_bytes() != updated_content:",
+            "    raise RuntimeError('failed to verify BGP++ config replacement')",
             f"print('Set bgp_setting_config.enable_update_group={str(enable_update_group).lower()}')",
             "",
         ]
