@@ -312,6 +312,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",
             expected_established_sessions=42,
+            check_cpu_load_average=False,
             check_ibgp_pnh=True,
             exclude_bgp_mon=True,
         )
@@ -323,6 +324,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
                 peergroup_ibgp_v6="PG_IBGP_V6",
                 peergroup_ibgp_v4="PG_IBGP_V4",
                 expected_established_sessions=42,
+                check_cpu_load_average=False,
                 check_ibgp_pnh=True,
                 exclude_bgp_mon=True,
             ),

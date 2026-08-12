@@ -158,6 +158,7 @@ class ProfileContext:
     # ever read by the 8.0 consumers. Keeping it 8.0 means a direct
     # get_profile_checks(DAEMON_RESTART, ProfileContext()) matches the playbook.
     cpu_baseline: float = 8.0
+    check_cpu_load_average: bool = True
     check_ibgp_pnh: bool = False
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None
@@ -385,6 +386,7 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
             peergroup_ibgp_v4=ctx.peergroup_ibgp_v4,
             expected_established_sessions=ctx.expected_established_sessions,
+            check_cpu_load_average=ctx.check_cpu_load_average,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
             bgp_mon_parent_network=ctx.bgp_mon_parent_network,

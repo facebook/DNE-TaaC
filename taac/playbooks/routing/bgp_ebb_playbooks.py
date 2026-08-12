@@ -517,6 +517,7 @@ def get_bgp_ebb_route_storm_playbook(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=total_session_count,
+            check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             exclude_bgp_mon=exclude_bgp_mon,
         ),

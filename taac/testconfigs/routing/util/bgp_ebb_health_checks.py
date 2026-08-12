@@ -111,6 +111,7 @@ def create_standard_prechecks(
     precheck_thresholds=None,
     expected_established_sessions: int | None = 0,
     cpu_baseline: float = 4.0,
+    check_cpu_load_average: bool = True,
     check_ibgp_pnh: bool = False,
     check_bgp_convergence: bool = True,
     check_hardware_capacity: bool = True,
@@ -136,6 +137,9 @@ def create_standard_prechecks(
         precheck_thresholds: Hardware capacity thresholds (optional)
         expected_established_sessions: Expected number of established BGP sessions
         cpu_baseline: CPU load average baseline threshold
+        check_cpu_load_average: Add the startup CPU load-average gate. Disable
+            when resource utilization is collected by non-terminating periodic
+            telemetry instead.
         check_ibgp_pnh: Enable iBGP PNH metric check (only for Open/R profiles)
         check_bgp_convergence: Add the BGP++ initialization-events convergence
             precheck (default True). Asserts the device reached INITIALIZED
@@ -214,10 +218,16 @@ def create_standard_prechecks(
             retry_count=bgp_session_retry_count,
             retry_delay_seconds=bgp_session_retry_delay_seconds,
         ),
-        # Pre-condition 2: Confirm CPU load-average is stable and within baseline levels
-        create_system_cpu_load_average_check(
-            baseline=cpu_baseline,
-            check_id="startup_cpu_load_average_baseline",
+        *(
+            [
+                # Pre-condition 2: Confirm CPU load-average is stable and within baseline levels
+                create_system_cpu_load_average_check(
+                    baseline=cpu_baseline,
+                    check_id="startup_cpu_load_average_baseline",
+                )
+            ]
+            if check_cpu_load_average
+            else []
         ),
         # Pre-condition 3: Make sure that GR is not enabled on iBGP-mesh (IPv6)
         create_bgp_graceful_restart_check(

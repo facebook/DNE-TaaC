@@ -169,3 +169,4 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
             )
 
         self.assertTrue(get_checks.call_args.args[1].check_ibgp_pnh)
+        self.assertFalse(get_checks.call_args.args[1].check_cpu_load_average)

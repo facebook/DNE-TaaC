@@ -147,5 +147,26 @@ class CommonHealthChecksHardwareCapacityTest(unittest.TestCase):
         self.assertFalse(any(c.check_id == self.PRECHECK_ID for c in checks))
 
 
+class CommonHealthChecksCpuLoadAverageTest(unittest.TestCase):
+    PRECHECK_ID = "startup_cpu_load_average_baseline"
+
+    def test_cpu_load_average_precheck_is_enabled_by_default(self):
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+        )
+
+        self.assertEqual(1, sum(c.check_id == self.PRECHECK_ID for c in checks))
+
+    def test_cpu_load_average_precheck_can_be_omitted(self):
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+            check_cpu_load_average=False,
+        )
+
+        self.assertFalse(any(c.check_id == self.PRECHECK_ID for c in checks))
+
+
 if __name__ == "__main__":
     unittest.main()
