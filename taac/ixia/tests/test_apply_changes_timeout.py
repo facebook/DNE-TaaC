@@ -189,6 +189,38 @@ class ApplyChangesTimeoutTest(unittest.TestCase):
                 )
                 self.assertEqual("outer", self.ixia._request_deadline_state.phase)
 
+    def test_mutation_transaction_allows_nested_bounded_apply(self) -> None:
+        with self.ixia.mutation_transaction():
+            self.ixia.apply_changes_bounded(1.0)
+
+        self.topology.ApplyOnTheFly.assert_called_once_with()
+
+    def test_mutation_transaction_serializes_same_session_writers(self) -> None:
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def first_writer() -> None:
+            with self.ixia.mutation_transaction():
+                first_entered.set()
+                release_first.wait(timeout=1.0)
+
+        def second_writer() -> None:
+            with self.ixia.mutation_transaction():
+                second_entered.set()
+
+        first = threading.Thread(target=first_writer)
+        second = threading.Thread(target=second_writer)
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=1.0))
+        second.start()
+        self.assertFalse(second_entered.wait(timeout=0.05))
+        release_first.set()
+        first.join()
+        second.join()
+
+        self.assertTrue(second_entered.is_set())
+
     def test_deadline_cleanup_does_not_mask_body_error_after_state_loss(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "operation body failed"):
             with self.ixia.request_deadline(1.0, "body"):

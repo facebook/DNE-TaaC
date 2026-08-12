@@ -1364,6 +1364,16 @@ class Ixia:
             else:
                 state.phase = previous_phase
 
+    def mutation_transaction(self) -> AbstractContextManager[None]:
+        """Serialize a complete same-session IXIA mutation transaction."""
+        return self._mutation_transaction_scope()
+
+    @contextmanager
+    def _mutation_transaction_scope(self) -> t.Iterator[None]:
+        with self._bounded_apply_lock:
+            self.assert_session_not_quarantined()
+            yield
+
     @property
     def session_quarantined(self) -> bool:
         with self._bounded_apply_lock:
