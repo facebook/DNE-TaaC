@@ -33,7 +33,6 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
 # ``cicd_ebb_int_tc.py``. Every scheduled entry has an inline
 # ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
@@ -101,7 +100,6 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     # Retained scale-and-characteristic configs for later onboarding.
-    BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG,
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,

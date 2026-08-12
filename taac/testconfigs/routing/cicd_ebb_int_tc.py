@@ -21,7 +21,6 @@ from taac.abstractions.physical_inventory import (
 from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config,
-    create_bgp_ebb_constant_attribute_storage_test_config,
     create_bgp_ebb_queue_memory_monitor_test_config,
     create_bgp_ebb_update_packing_test_config,
 )
@@ -129,15 +128,6 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
 
 
 # Retained scale-and-characteristic configs for later onboarding.
-BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG = (
-    create_bgp_ebb_constant_attribute_storage_test_config(
-        BAG010_ASH6,
-        enable_update_group=True,
-        name_override="BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG",
-        profile=_OPENR_STANDALONE,
-    )
-)
-
 BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG = (
     create_bgp_ebb_queue_memory_monitor_test_config(
         BAG011_ASH6,
@@ -165,7 +155,6 @@ BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
 
 
 __all__ = [
-    "BAG010_CONSTANT_ATTRIBUTE_STORAGE_TEST_CONFIG_UG",
     "BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG",

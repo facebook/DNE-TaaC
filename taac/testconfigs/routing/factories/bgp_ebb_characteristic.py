@@ -1644,8 +1644,8 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
 
 
 # =============================================================================
-# BAG012_ASH6 conveyor family — Update Packing / Constant Attribute Storage /
-# Queue Memory Monitor / Performance Scaling / Bounded ECMP.
+# BAG012_ASH6 conveyor family — Update Packing / Queue Memory Monitor /
+# Performance Scaling / Bounded ECMP.
 # =============================================================================
 # Defaults for the performance-scaling egress IBGP peer sweep match the
 # simplified rewrite of D104072489: per stage n peers per AF, total = 2n + 2
@@ -1784,104 +1784,6 @@ def create_bgp_ebb_update_packing_test_config(
         host_os_type_map=compiled.host_os_type_map,
         endpoints=compiled.endpoints,
         basic_port_configs=compiled.basic_port_configs,
-        log_collection_timeout=600,
-    )
-
-
-def create_bgp_ebb_constant_attribute_storage_test_config(
-    physical_inventory: PhysicalInventory,
-    enable_update_group: bool = False,
-    name_override: str | None = None,
-    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-) -> taac_types.TestConfig:
-    """Constant Attribute Storage varying-combinations test config.
-
-    Extracted verbatim from the legacy
-    ``bag012_ash6_test_config.create_bag012_ash6_constant_attribute_storage_test_config``
-    factory. Validates that the amount of memory for storing pool of
-    attributes remains constant regardless of the number of unique
-    attribute-set combinations.
-    """
-    assert physical_inventory.ixia_ports, (
-        "factory requires IXIA port map on physical_inventory"
-    )
-    assert physical_inventory.bgpcpp_configerator_path, (
-        "factory requires bgpcpp_configerator_path on physical_inventory"
-    )
-    assert physical_inventory.dut_bgp_as is not None, (
-        "factory requires dut_bgp_as on physical_inventory"
-    )
-    device_name = physical_inventory.device_name
-    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
-
-    name = name_override or _derive_test_config_name(
-        physical_inventory, "CONSTANT_ATTRIBUTE_STORAGE", enable_update_group
-    )
-
-    setup_tasks = get_update_packing_setup_tasks(
-        device_name=device_name,
-        bgp_asn=physical_inventory.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ebgp_peer_count=8,
-        ibgp_peer_count=2,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        router_id=physical_inventory.router_id,
-        bgpcpp_configerator_path=physical_inventory.bgpcpp_configerator_path,
-        profile=profile,
-        openr_configerator_path=(
-            physical_inventory.openr_configerator_path
-            if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-            else None
-        ),
-        openr_standalone_link=physical_inventory.openr_standalone_link,
-        enable_update_group=enable_update_group,
-    )
-
-    return test_config_constant_attribute_storage_varying_combinations_on_eos(
-        test_config_name=name,
-        device_name=device_name,
-        # EBGP configuration
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        # IBGP configuration
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        ibgp_local_as=IBGP_REMOTE_AS,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
-        # Fixed: 8 EBGP peers + 2 IBGP peers (smaller scale)
-        constant_ebgp_peer_count=8,
-        constant_ibgp_peer_count=2,
-        # Fixed: 800K total paths
-        constant_total_paths=800_000,
-        # Variable: unique combination counts
-        unique_combination_counts=[
-            100_000,
-            200_000,
-            400_000,
-            600_000,
-            800_000,
-        ],
-        soak_time_minutes=2,
-        dump_attribute_assignments=True,
-        test_address_families=["ipv6"],
-        # Custom setup tasks
-        setup_tasks=setup_tasks,
-        host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
-        direct_ixia_connections=_two_port_direct_ixia_connections(physical_inventory),
-        # Constant acceptance community (required by device BGP policy)
-        constant_acceptance_communities=["65529:39744"],
-        # Device-level BGP peer group names
-        peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
-        peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
-        peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-        peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
         log_collection_timeout=600,
     )
 
