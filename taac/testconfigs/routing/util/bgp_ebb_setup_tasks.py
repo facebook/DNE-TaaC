@@ -1404,7 +1404,9 @@ def get_common_setup_tasks(
     return setup_tasks
 
 
-def build_expected_peer_identity() -> t.Dict[str, str]:
+def build_expected_peer_identity(
+    parent_networks: t.Optional[t.Dict[str, str]] = None,
+) -> t.Dict[str, str]:
     """
     Build expected {peer_addr: local_addr} mapping for full-scale EBB tests.
 
@@ -1414,21 +1416,54 @@ def build_expected_peer_identity() -> t.Dict[str, str]:
 
     This is optional — callers that don't need peer identity validation
     can skip calling this entirely.
+
+    Args:
+        parent_networks: Per-role IXIA parent networks, keyed as in
+            ``EBB_PARENT_NETWORKS`` (``ebgp_v6``, ``ibgp_dc_p1_v4``,
+            ``bgpmon_v6``, ...). Defaults to the ixia11 constants. A config
+            that drives the secondary chassis has to pass its own map:
+            the peers really do come up on that chassis' subnets, so leaving
+            this at the default marks every session as unexpected and fails
+            the snapshot check on an otherwise healthy run.
+
+    Returns:
+        Mapping of peer address to the DUT-local address facing it.
     """
+    nets = parent_networks or {}
+
+    def _net(key: str, default: str) -> str:
+        return nets.get(key, default)
+
     expected_peer_identity: t.Dict[str, str] = {}
 
     # IPv6 peers (from _generate_ixia_v6_peer_entries_for_bgpcpp)
     for base, count in [
-        (IXIA_EBGP_IC_PARENT_NETWORK_V6, EBGP_PEER_COUNT_V6),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_BGP_MON_IC_PARENT_NETWORK, BGP_MON_PEER_COUNT),
+        (_net("ebgp_v6", IXIA_EBGP_IC_PARENT_NETWORK_V6), EBGP_PEER_COUNT_V6),
+        *(
+            (_net(f"ibgp_{tier}_p{plane}_v6", default), IBGP_PEER_SCALE_PER_PLANE)
+            for tier, defaults in (
+                (
+                    "dc",
+                    (
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
+                    ),
+                ),
+                (
+                    "mp",
+                    (
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
+                    ),
+                ),
+            )
+            for plane, default in enumerate(defaults, start=1)
+        ),
+        (_net("bgpmon_v6", IXIA_BGP_MON_IC_PARENT_NETWORK), BGP_MON_PEER_COUNT),
     ]:
         for entry in _generate_ixia_v6_peer_entries_for_bgpcpp(
             remote_as=0,
@@ -1440,15 +1475,31 @@ def build_expected_peer_identity() -> t.Dict[str, str]:
 
     # IPv4 peers (same offset formula: local = base + start_offset + i*2)
     for base, count in [
-        (IXIA_EBGP_IC_PARENT_NETWORK_V4, EBGP_PEER_COUNT_V4),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3, IBGP_PEER_SCALE_PER_PLANE),
-        (IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4, IBGP_PEER_SCALE_PER_PLANE),
+        (_net("ebgp_v4", IXIA_EBGP_IC_PARENT_NETWORK_V4), EBGP_PEER_COUNT_V4),
+        *(
+            (_net(f"ibgp_{tier}_p{plane}_v4", default), IBGP_PEER_SCALE_PER_PLANE)
+            for tier, defaults in (
+                (
+                    "dc",
+                    (
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
+                    ),
+                ),
+                (
+                    "mp",
+                    (
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
+                        IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
+                    ),
+                ),
+            )
+            for plane, default in enumerate(defaults, start=1)
+        ),
     ]:
         base_ip = ipaddress.IPv4Address(f"{base}.{IXIA_IPV4_START_OFFSET}")
         for i in range(count):

@@ -1009,6 +1009,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
     tcp_dump_capture_interface_ibgp: str = "",
     soak_time_seconds: int = 300,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-13: FAUU drain and undrain.
@@ -1045,6 +1046,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon_parent_network=bgp_mon_parent_network,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
         ),
     )
@@ -1088,6 +1090,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
     tcp_dump_capture_interface_ibgp: str = "",
     soak_time_seconds: int = 1200,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-14: Plane drain and undrain.
@@ -1123,6 +1126,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=expected_established_sessions,
             exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon_parent_network=bgp_mon_parent_network,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
         ),
     )

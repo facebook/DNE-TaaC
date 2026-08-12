@@ -266,12 +266,21 @@ def _openr_port_channel_command(
 
 def get_openr_standalone_setup_tasks(
     link: OpenRStandaloneLink,
+    start_ipv4s: t.Sequence[str] | None = None,
+    start_ipv6s: t.Sequence[str] | None = None,
 ) -> list[Task]:
     """Render the standardized EOS standalone link and KvStore sequence.
 
     OpenR mode selection and placement in the complete setup sequence belong to
     ``EosBgpCppCompiler``. This renderer owns only the EOS commands emitted once
     that compiler has selected ``OpenRMode.STANDALONE``.
+
+    Args:
+        link: Owner/helper standalone link to render.
+        start_ipv4s: Per-plane IPv4 next hops to inject reachability for. These
+            must match the next hops the topology's emulated peers advertise,
+            or those routes never resolve. Defaults to the ixia11 set.
+        start_ipv6s: IPv6 counterpart of ``start_ipv4s``.
     """
     return [
         create_run_commands_on_shell_task(
@@ -288,8 +297,8 @@ def get_openr_standalone_setup_tasks(
         create_openr_route_action_task(
             device_name=link.owner.hostname,
             action=OpenRRouteAction.INJECT.value,
-            start_ipv4s=DEFAULT_OPENR_START_IPV4S,
-            start_ipv6s=DEFAULT_OPENR_START_IPV6S,
+            start_ipv4s=list(start_ipv4s or DEFAULT_OPENR_START_IPV4S),
+            start_ipv6s=list(start_ipv6s or DEFAULT_OPENR_START_IPV6S),
             local_link=link.kv_link(link.owner),
             other_link=link.kv_link(link.helper),
             count=_OPENR_STANDALONE_ROUTE_COUNT,
@@ -302,12 +311,22 @@ def get_openr_standalone_setup_tasks(
 
 def get_openr_standalone_teardown_tasks(
     link: OpenRStandaloneLink,
+    start_ipv4s: t.Sequence[str] | None = None,
+    start_ipv6s: t.Sequence[str] | None = None,
 ) -> OpenRStandaloneTeardownTasks:
+    """Render the standalone link teardown, withdrawing the injected routes.
+
+    Args:
+        link: Owner/helper standalone link to tear down.
+        start_ipv4s: Per-plane IPv4 next hops to withdraw. Must match what
+            setup injected, or the withdrawal misses. Defaults to the ixia11 set.
+        start_ipv6s: IPv6 counterpart of ``start_ipv4s``.
+    """
     route_withdrawal = create_openr_route_action_task(
         device_name=link.owner.hostname,
         action=OpenRRouteAction.DELETE.value,
-        start_ipv4s=DEFAULT_OPENR_START_IPV4S,
-        start_ipv6s=DEFAULT_OPENR_START_IPV6S,
+        start_ipv4s=list(start_ipv4s or DEFAULT_OPENR_START_IPV4S),
+        start_ipv6s=list(start_ipv6s or DEFAULT_OPENR_START_IPV6S),
         local_link=link.kv_link(link.owner),
         other_link=link.kv_link(link.helper),
         count=_OPENR_STANDALONE_ROUTE_COUNT,

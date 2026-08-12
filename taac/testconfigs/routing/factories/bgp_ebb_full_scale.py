@@ -16,8 +16,10 @@ from taac.abstractions.topologies.ebb_full_scale import (
     EBB_FULL_SCALE_PORT_MAP,
     EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
     ebb_full_scale_topology,
+    EBB_NEXT_HOPS,
     EBB_PARENT_NETWORKS,
     EBB_PEER_GROUPS,
+    EbbNextHopScheme,
 )
 from taac.abstractions.topology import (
     BgpPeerGroup,
@@ -652,7 +654,16 @@ def _get_bgp_ebb_full_scale_playbooks(
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
     session_count = _expected_established_session_count()
-    expected_peer_identity = build_expected_peer_identity()
+    # Derive from the bound topology rather than the module constants, so the
+    # checks describe the chassis the run is actually wired to. A config using
+    # for_secondary_ixia() peers on the secondary chassis' subnets, and the
+    # ixia11 defaults would mark every one of those sessions unexpected.
+    bound_parent_networks = dict(bound.parent_networks)
+    bound_bgp_mon_network = bound_parent_networks.get(
+        "bgpmon_v6", IXIA_BGP_MON_IC_PARENT_NETWORK
+    )
+    bgp_mon_parent_prefix = f"{bound_bgp_mon_network}::/80"
+    expected_peer_identity = build_expected_peer_identity(bound_parent_networks)
     local_link = _openr_owner_kv_link(physical_inventory)
     other_link = _openr_helper_kv_link(physical_inventory)
 
@@ -670,7 +681,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-            observer_peer_parent_prefix=f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80",
+            observer_peer_parent_prefix=bgp_mon_parent_prefix,
             profile=profile,
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(
@@ -705,6 +716,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
+            bgp_mon_parent_network=bound_bgp_mon_network,
         ),
         get_bgp_ebb_plane_drain_undrain_playbook(
             device_name=device_name,
@@ -714,6 +726,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
+            bgp_mon_parent_network=bound_bgp_mon_network,
         ),
         get_bgp_ebb_longevity_playbook(
             device_name=device_name,
@@ -726,7 +739,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_cold_start_playbook(
             device_name=device_name,
@@ -735,7 +748,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name=device_name,
@@ -746,7 +759,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_ebgp_route_oscillation_playbook(
             device_name=device_name,
@@ -754,7 +767,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name=device_name,
@@ -765,7 +778,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name=device_name,
@@ -774,7 +787,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
         get_bgp_ebb_igp_unresolvable_pnh_playbook(
             device_name=device_name,
@@ -801,8 +814,38 @@ def create_bgp_ebb_full_scale_test_config(
     playbooks_selected: list[str] | None = None,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = True,
+    parent_networks: dict[str, str] | None = None,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> TestConfig:
-    """Build one selectable test suite on the canonical EBB full-scale topology."""
+    """Build one selectable test suite on the canonical EBB full-scale topology.
+
+    Args:
+        physical_inventory: DUT and IXIA port bindings for the run.
+        name: Test config name, used to resolve it from the catalog.
+        playbooks_selected: Subset of the suite's playbooks to run; all if None.
+        profile: BGP++ profile, which also decides the Open/R mode.
+        enable_update_group: Whether to enable BGP Update Group on the device.
+        parent_networks: IXIA-side parent networks, defaulting to
+            ``EBB_PARENT_NETWORKS`` (ixia11). Pass ``EBB_PARENT_NETWORKS_IXIA03``
+            when the inventory has been swapped with
+            ``PhysicalInventory.for_secondary_ixia()``: that helper moves the
+            ports but not the addressing, and the two have to agree or the
+            emulated peers land on subnets the DUT has no address in.
+        next_hops: Chassis scheme for the next hops the emulated peers
+            advertise. Built during topology construction, before binding, so
+            it cannot be derived from ``parent_networks``; pass
+            ``EBB_NEXT_HOPS_IXIA03`` alongside
+            ``EBB_PARENT_NETWORKS_IXIA03``. Mismatched pairs are rejected,
+            because peers on one chassis' subnets advertising next hops on
+            another's produce routes the DUT cannot resolve.
+    """
+    resolved_parent_networks = parent_networks or EBB_PARENT_NETWORKS
+    if resolved_parent_networks.get("ebgp_v4") != next_hops.ebgp_v4_network:
+        raise ValueError(
+            "parent_networks and next_hops describe different chassis: "
+            f"eBGP v4 parent {resolved_parent_networks.get('ebgp_v4')!r} vs "
+            f"next-hop base {next_hops.ebgp_v4_network!r}"
+        )
     duplicate_names = sorted(
         selected_name
         for selected_name, count in Counter(playbooks_selected or ()).items()
@@ -837,6 +880,7 @@ def create_bgp_ebb_full_scale_test_config(
         not selected_tc7_playbooks and len(physical_inventory.ixia_ports) > 2
     )
     topology = ebb_full_scale_topology(
+        next_hops=next_hops,
         openr_mode=openr_mode,
         include_bgpmon=include_auxiliary_observers,
         ebgp_graceful_restart=not selected_tc7_playbooks,
@@ -857,7 +901,7 @@ def create_bgp_ebb_full_scale_test_config(
             if include_auxiliary_observers
             else EBB_FULL_SCALE_PORT_MAP
         ),
-        parent_networks=EBB_PARENT_NETWORKS,
+        parent_networks=resolved_parent_networks,
         peer_groups=EBB_PEER_GROUPS,
         as_numbers=EBB_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(

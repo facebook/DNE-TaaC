@@ -162,6 +162,11 @@ class ProfileContext:
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None
     exclude_bgp_mon: bool = True
+    # Which chassis' BGP-MON prefix the session checks should ignore. None
+    # keeps the ixia11 default; a config driving the secondary chassis must set
+    # it, or its BGP-MON sessions are counted instead of excluded and every
+    # session-count check is off by the BGP-MON peer count.
+    bgp_mon_parent_network: t.Optional[str] = None
     # Cold-start tolerates an expired EOR timer by default.
     fail_on_eor_expired: bool = False
     # Oscillation: expected established session count at precheck, and which
@@ -217,6 +222,7 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=create_standard_postchecks(
             postcheck_thresholds=ctx.postcheck_thresholds,
@@ -229,6 +235,7 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
             expected_restarted_services=["Bgp"],
             restart_start_time_jq_var="daemon_restart_time",
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             skip_flap_check=True,
@@ -236,6 +243,7 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
             expected_peer_identity=ctx.expected_peer_identity,
             parent_prefixes_to_ignore=ctx.parent_prefixes_to_ignore,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -277,6 +285,7 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=_append_characterization_postchecks(
             create_standard_postchecks(
@@ -291,12 +300,14 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
                 expected_restarted_services=["Bgp"],
                 restart_start_time_jq_var="daemon_restart_time",
                 exclude_bgp_mon=ctx.exclude_bgp_mon,
+                bgp_mon_parent_network=ctx.bgp_mon_parent_network,
             ),
             ctx,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             expected_peer_identity=ctx.expected_peer_identity,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -315,11 +326,13 @@ def _oscillation(ctx: ProfileContext) -> ProfileChecks:
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=create_standard_postchecks(
             postcheck_thresholds=ctx.postcheck_thresholds,
             check_bgp_convergence=False,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             skip_flap_check=ctx.snapshot_skip_flap,
@@ -327,6 +340,7 @@ def _oscillation(ctx: ProfileContext) -> ProfileChecks:
             expected_peer_identity=ctx.expected_peer_identity,
             parent_prefixes_to_ignore=ctx.parent_prefixes_to_ignore,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -343,14 +357,17 @@ def _drain_undrain(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=ctx.expected_established_sessions,
             check_ibgp_pnh=False,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=create_standard_postchecks(
             check_bgp_convergence=False,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             skip_flap_check=True,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -370,17 +387,20 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=ctx.expected_established_sessions,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=create_standard_postchecks(
             check_bgp_convergence=False,
             expected_established_session_count=ctx.expected_established_sessions,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         snapshot_checks=(
             create_standard_snapshot_checks(
                 expected_peer_identity=ctx.expected_peer_identity,
                 parent_prefixes_to_ignore=ctx.parent_prefixes_to_ignore,
                 exclude_bgp_mon=ctx.exclude_bgp_mon,
+                bgp_mon_parent_network=ctx.bgp_mon_parent_network,
             )
             if ctx.full_session_snapshot
             else [create_core_dumps_snapshot_check()]
@@ -398,6 +418,7 @@ def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
         postcheck_thresholds=ctx.postcheck_thresholds,
         check_bgp_convergence=False,
         exclude_bgp_mon=ctx.exclude_bgp_mon,
+        bgp_mon_parent_network=ctx.bgp_mon_parent_network,
     )
     if (
         ctx.tcpdump_expected_message_types is not None
@@ -419,11 +440,13 @@ def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         postchecks=postchecks,
         snapshot_checks=create_standard_snapshot_checks(
             expected_peer_identity=ctx.expected_peer_identity,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -449,6 +472,7 @@ def _soak_no_precheck(ctx: ProfileContext) -> ProfileChecks:
             skip_flap_check=True,
             skip_uptime_check=True,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 
@@ -468,6 +492,7 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=(ctx.expected_established_sessions or None),
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         )
         + [
             create_bgp_route_count_verification_check(
@@ -486,9 +511,11 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
             postcheck_thresholds=ctx.postcheck_thresholds,
             fail_on_eor_expired=False,
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             exclude_bgp_mon=ctx.exclude_bgp_mon,
+            bgp_mon_parent_network=ctx.bgp_mon_parent_network,
         ),
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 import typing as t
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     PEERGROUP_BGP_MON,
@@ -15,6 +15,25 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     PEERGROUP_IBGP_V6,
 )
 from taac.abstractions.compatibility.legacy_ebb_binding import (
+    IXIA03_BGP_MON_IC_PARENT_NETWORK,
+    IXIA03_EBGP_IC_PARENT_NETWORK_V4,
+    IXIA03_EBGP_IC_PARENT_NETWORK_V6,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
     IXIA_BGP_MON_IC_PARENT_NETWORK,
     IXIA_EBGP_IC_PARENT_NETWORK_V4,
     IXIA_EBGP_IC_PARENT_NETWORK_V6,
@@ -100,6 +119,34 @@ EBB_PARENT_NETWORKS: dict[str, str] = {
     "ibgp_mp_p3_v4": IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
     "ibgp_mp_p4_v4": IXIA_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
     "bgpmon_v6": IXIA_BGP_MON_IC_PARENT_NETWORK,
+}
+
+# Same topology against the secondary chassis (ixia03) instead of ixia11. The
+# addressing has to be swapped alongside the ports: PhysicalInventory
+# .for_secondary_ixia() moves which DUT interfaces are driven, but the parent
+# networks are what TAAC programs onto the IXIA side, so leaving them at the
+# ixia11 defaults would emulate peers the DUT has no gateway for and fail
+# looking like a link fault. Keys must mirror EBB_PARENT_NETWORKS exactly.
+EBB_PARENT_NETWORKS_IXIA03: dict[str, str] = {
+    "ebgp_v6": IXIA03_EBGP_IC_PARENT_NETWORK_V6,
+    "ebgp_v4": IXIA03_EBGP_IC_PARENT_NETWORK_V4,
+    "ibgp_dc_p1_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+    "ibgp_dc_p2_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE2,
+    "ibgp_dc_p3_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE3,
+    "ibgp_dc_p4_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE4,
+    "ibgp_mp_p1_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE1,
+    "ibgp_mp_p2_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE2,
+    "ibgp_mp_p3_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE3,
+    "ibgp_mp_p4_v6": IXIA03_IBGP_IC_PARENT_NETWORK_V6_MP_PLANE4,
+    "ibgp_dc_p1_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+    "ibgp_dc_p2_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE2,
+    "ibgp_dc_p3_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE3,
+    "ibgp_dc_p4_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE4,
+    "ibgp_mp_p1_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE1,
+    "ibgp_mp_p2_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE2,
+    "ibgp_mp_p3_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE3,
+    "ibgp_mp_p4_v4": IXIA03_IBGP_IC_PARENT_NETWORK_V4_MP_PLANE4,
+    "bgpmon_v6": IXIA03_BGP_MON_IC_PARENT_NETWORK,
 }
 
 EBB_AS_NUMBERS: dict[str, int] = {
@@ -314,10 +361,51 @@ def _sequential_explicit_next_hop(
     )
 
 
+@dataclass(frozen=True)
+class EbbNextHopScheme:
+    """Chassis-specific bases for the next hops emulated peers advertise.
+
+    These are built during topology construction, before ``bind_to_inventory``,
+    so they cannot be read from ``parent_networks``. They also are not simply
+    the peer subnets: the v6 iBGP next hops deliberately sit on different
+    hextets from the peer parents, and the Open/R variants live in their own
+    ``20.x`` / ``e80d`` space. What does move together across chassis is the
+    numbering *structure*, so only the two bases that differ are captured here.
+
+    Attributes:
+        ebgp_v4_network: eBGP /23 base, e.g. ``"10.163.28"``.
+        ebgp_v6_network: eBGP /80 base, e.g. ``"2401:db00:e50d:11:8"``.
+        ibgp_v4_plane_base: Second octet that plane N counts from, so plane N
+            is ``<first>.<base + N>.28.0/24``. Equals the eBGP second octet.
+        ibgp_v6_group: Fourth hextet identifying the chassis, e.g. ``"11"``.
+    """
+
+    ebgp_v4_network: str
+    ebgp_v6_network: str
+    ibgp_v4_plane_base: int
+    ibgp_v6_group: str
+
+
+EBB_NEXT_HOPS: EbbNextHopScheme = EbbNextHopScheme(
+    ebgp_v4_network=IXIA_EBGP_IC_PARENT_NETWORK_V4,
+    ebgp_v6_network=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+    ibgp_v4_plane_base=163,
+    ibgp_v6_group="11",
+)
+
+EBB_NEXT_HOPS_IXIA03: EbbNextHopScheme = EbbNextHopScheme(
+    ebgp_v4_network=IXIA03_EBGP_IC_PARENT_NETWORK_V4,
+    ebgp_v6_network=IXIA03_EBGP_IC_PARENT_NETWORK_V6,
+    ibgp_v4_plane_base=180,
+    ibgp_v6_group="33",
+)
+
+
 def _ebb_ibgp_next_hop_source(
     afi: str,
     plane: int,
     openr_mode: OpenRMode,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> tuple[str, str, bool]:
     if afi not in {"v4", "v6"}:
         raise ValueError(f"EBB iBGP next-hop AFI must be v4 or v6; got {afi!r}")
@@ -328,9 +416,10 @@ def _ebb_ibgp_next_hop_source(
     openr_enabled = openr_mode is OpenRMode.STANDALONE
     if afi == "v4":
         first_octet = 20 if openr_enabled else 10
+        second_octet = next_hops.ibgp_v4_plane_base + plane
         return (
-            f"{first_octet}.{163 + plane}.28.10",
-            f"{first_octet}.{163 + plane}.28.0/24",
+            f"{first_octet}.{second_octet}.28.10",
+            f"{first_octet}.{second_octet}.28.0/24",
             True,
         )
 
@@ -338,8 +427,40 @@ def _ebb_ibgp_next_hop_source(
     # Non-OpenR DC planes use hexadecimal slots a/b/c/9.
     slot = str(plane + 8) if openr_enabled else f"{9 if plane == 4 else plane + 9:x}"
     fabric = "e80d" if openr_enabled else "e50d"
-    start = f"2401:db00:{fabric}:11:{slot}::10"
+    start = f"2401:db00:{fabric}:{next_hops.ibgp_v6_group}:{slot}::10"
     return start, str(ipaddress.ip_network(f"{start}/80", strict=False)), False
+
+
+def ebb_openr_injected_next_hops(
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+) -> tuple[list[str], list[str]]:
+    """Return the (v4, v6) plane next hops Open/R must inject reachability for.
+
+    The emulated peers advertise routes whose iBGP next hops come from
+    ``_ebb_ibgp_next_hop_source``; those next hops only resolve because Open/R
+    injects a route covering each one. Expressing the injection set separately
+    from the advertised set lets the two drift, and on a chassis whose scheme
+    differs the drift is silent: the routes still arrive and sit in the RIB,
+    but none become installable, so the shadow RIB and everything advertised
+    downstream collapse to whatever else happens to resolve. Deriving both from
+    one scheme is what keeps them in step.
+
+    Args:
+        next_hops: Chassis scheme; defaults to ixia11.
+
+    Returns:
+        Parallel lists of the four plane start addresses, v4 first.
+    """
+    v4_starts: list[str] = []
+    v6_starts: list[str] = []
+    for plane in range(1, 5):
+        v4_starts.append(
+            _ebb_ibgp_next_hop_source("v4", plane, OpenRMode.STANDALONE, next_hops)[0]
+        )
+        v6_starts.append(
+            _ebb_ibgp_next_hop_source("v6", plane, OpenRMode.STANDALONE, next_hops)[0]
+        )
+    return v4_starts, v6_starts
 
 
 def ebb_ibgp_route_next_hops(
@@ -347,11 +468,22 @@ def ebb_ibgp_route_next_hops(
     plane: int,
     peer_count: int,
     openr_mode: OpenRMode,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> tuple[str, ...]:
-    """Return the route next hop associated with each EBB iBGP peer row."""
+    """Return the route next hop associated with each EBB iBGP peer row.
+
+    Args:
+        afi: ``"v4"`` or ``"v6"``.
+        plane: iBGP plane, 1-4.
+        peer_count: Number of peer rows to generate next hops for.
+        openr_mode: Selects the Open/R next-hop space when STANDALONE.
+        next_hops: Chassis scheme; defaults to ixia11.
+    """
     if peer_count < 1:
         raise ValueError(f"EBB iBGP peer count must be positive; got {peer_count}")
-    start, _parent, lexical = _ebb_ibgp_next_hop_source(afi, plane, openr_mode)
+    start, _parent, lexical = _ebb_ibgp_next_hop_source(
+        afi, plane, openr_mode, next_hops
+    )
     if lexical:
         return _lexical_ip_range(start, peer_count)
     first = ipaddress.ip_address(start)
@@ -363,41 +495,44 @@ def ebb_ibgp_route_next_hops(
 def _ebb_next_hop(
     device_group: DeviceGroupSpec,
     openr_mode: OpenRMode,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> NextHopIntent:
     """Build next hops aligned with legacy route assets and OpenR injection."""
     openr_enabled = openr_mode is OpenRMode.STANDALONE
     if device_group.name == "dg_ebgp_v4":
+        ebgp_v4_parent = f"{next_hops.ebgp_v4_network}.0/23"
         return (
             _sequential_explicit_next_hop(
-                "10.163.28.11",
+                f"{next_hops.ebgp_v4_network}.11",
                 device_group.peer_count,
-                "10.163.28.0/23",
+                ebgp_v4_parent,
             )
             if openr_enabled
             else _explicit_next_hop(
-                "10.163.28.10",
+                f"{next_hops.ebgp_v4_network}.10",
                 device_group.peer_count,
-                "10.163.28.0/23",
+                ebgp_v4_parent,
             )
         )
     if device_group.name == "dg_ebgp_v6":
+        ebgp_v6_parent = f"{next_hops.ebgp_v6_network}::/80"
         return (
             _sequential_explicit_next_hop(
-                "2401:db00:e50d:11:8::11",
+                f"{next_hops.ebgp_v6_network}::11",
                 device_group.peer_count,
-                "2401:db00:e50d:11:8::/80",
+                ebgp_v6_parent,
             )
             if openr_enabled
             else _explicit_next_hop(
-                "2401:db00:e50d:11:8::10",
+                f"{next_hops.ebgp_v6_network}::10",
                 device_group.peer_count,
-                "2401:db00:e50d:11:8::/80",
+                ebgp_v6_parent,
             )
         )
 
     plane = _ebb_plane_number(device_group)
     start, parent, lexical = _ebb_ibgp_next_hop_source(
-        device_group.afi, plane, openr_mode
+        device_group.afi, plane, openr_mode, next_hops
     )
     return (
         _explicit_next_hop(start, device_group.peer_count, parent)
@@ -431,6 +566,7 @@ def _ebb_advertisement(
     next_hop_self: bool = False,
     enable_attribute_churn: bool = False,
     include_legacy_community_rows: bool = False,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> PrefixAdvertisement | None:
     if device_group.name == "dg_ebgp_v4":
         prefix_set = prefix_sets_by_name[EBB_EBGP_V4_PREFIX_SET.name]
@@ -477,7 +613,7 @@ def _ebb_advertisement(
         next_hop=(
             NextHopIntent(mode=NextHopMode.SELF)
             if next_hop_self
-            else _ebb_next_hop(device_group, openr_mode)
+            else _ebb_next_hop(device_group, openr_mode, next_hops)
         ),
         policy=EBB_ACCEPT_POLICY if device_group.role == "uplink" else None,
         attributes=(
@@ -927,6 +1063,7 @@ def _with_ebb_route_intent(
     ebgp_static_prefix_count: int | None = None,
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]] | None = None,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> LogicalTopology:
     if ebgp_prefix_count < 750:
         raise ValueError("ebgp_prefix_count must be at least 750")
@@ -970,6 +1107,7 @@ def _with_ebb_route_intent(
             next_hop_self=next_hop_self,
             enable_attribute_churn=enable_attribute_churn,
             include_legacy_community_rows=include_legacy_community_rows,
+            next_hops=next_hops,
         )
         additional_advertisements = tuple(
             replace(extra, route_attributes=_EBB_IBGP_ROUTE_ATTRIBUTES)
@@ -989,12 +1127,20 @@ def _with_ebb_route_intent(
                 ),
             )
         )
+    # Only STANDALONE injects; leaving the other modes empty keeps the NONE-mode
+    # module topologies byte-identical to what they were before this field.
+    if openr_mode is OpenRMode.STANDALONE:
+        injected_v4, injected_v6 = ebb_openr_injected_next_hops(next_hops)
+    else:
+        injected_v4, injected_v6 = [], []
     return replace(
         topology,
         device_groups=tuple(device_groups),
         device_config=replace(
             topology.device_config,
             openr_mode=openr_mode,
+            openr_injected_start_ipv4s=tuple(injected_v4),
+            openr_injected_start_ipv6s=tuple(injected_v6),
         ),
         policies=(EBB_ACCEPT_POLICY,),
         prefix_sets=(*prefix_sets, *extra_prefix_sets),
@@ -1044,6 +1190,7 @@ def ebb_full_scale_topology(
     ebgp_static_prefix_count: int | None = None,
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]] | None = None,
+    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> LogicalTopology:
     base = (
         _EBB_FULL_SCALE_WITH_BGPMON_BASE
@@ -1061,6 +1208,7 @@ def ebb_full_scale_topology(
         ebgp_static_prefix_count=ebgp_static_prefix_count,
         extra_prefix_sets=extra_prefix_sets,
         extra_advertisements=extra_advertisements,
+        next_hops=next_hops,
     )
 
 
@@ -1079,6 +1227,10 @@ __all__ = (
     "EBB_IBGP_V4_PREFIX_SET",
     "EBB_IBGP_V6_PREFIX_SET",
     "EBB_LONGEVITY_COMMUNITY_BASELINE_COUNT",
+    "EBB_NEXT_HOPS",
+    "EBB_NEXT_HOPS_IXIA03",
+    "EBB_PARENT_NETWORKS_IXIA03",
+    "EbbNextHopScheme",
     "EBB_PARENT_NETWORKS",
     "EBB_PEER_GROUPS",
     "EBB_PREFIX_SETS",
@@ -1088,4 +1240,5 @@ __all__ = (
     "IBGP_V6_PEER_GROUP",
     "ebb_full_scale_topology",
     "ebb_ibgp_route_next_hops",
+    "ebb_openr_injected_next_hops",
 )

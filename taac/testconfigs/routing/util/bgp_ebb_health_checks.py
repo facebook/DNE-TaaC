@@ -118,6 +118,7 @@ def create_standard_prechecks(
     bgp_session_retry_count: int = _BGP_SESSION_RETRY_COUNT,
     bgp_session_retry_delay_seconds: float = _BGP_SESSION_RETRY_DELAY_SECONDS,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
     rib_fib_precheck_json_params: dict | None = None,
     rib_fib_precheck_retry_count: int = _RIB_FIB_RETRY_COUNT,
     rib_fib_precheck_retry_delay_seconds: int = _RIB_FIB_RETRY_DELAY_SECONDS,
@@ -199,7 +200,9 @@ def create_standard_prechecks(
         precheck_thresholds = get_precheck_thresholds()
 
     bgp_mon_ignore = (
-        [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"] if exclude_bgp_mon else None
+        [f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+        if exclude_bgp_mon
+        else None
     )
 
     prechecks = [
@@ -327,6 +330,7 @@ def create_standard_postchecks(
     rib_fib_retry_count: int = _RIB_FIB_RETRY_COUNT,
     rib_fib_retry_delay_seconds: float = _RIB_FIB_RETRY_DELAY_SECONDS,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
     rib_fib_record_heal_latency: bool = True,
     rib_fib_heal_latency_max_sec: int = _RIB_FIB_HEAL_LATENCY_MAX_SEC,
     rib_fib_heal_latency_poll_sec: int = _RIB_FIB_HEAL_LATENCY_POLL_SEC,
@@ -413,7 +417,9 @@ def create_standard_postchecks(
         daemons_to_check = ["FibBgpGrpc"]
 
     bgp_mon_ignore = (
-        [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"] if exclude_bgp_mon else None
+        [f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
+        if exclude_bgp_mon
+        else None
     )
 
     postchecks: list[PointInTimeHealthCheck] = []
@@ -510,6 +516,7 @@ def create_standard_snapshot_checks(
     expected_peer_identity: dict[str, str] | None = None,
     parent_prefixes_to_ignore: list[str] | None = None,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
 ) -> list[SnapshotHealthCheck]:
     """
     Create standard snapshot checks for BGP tests.
@@ -539,7 +546,9 @@ def create_standard_snapshot_checks(
 
     all_prefixes_to_ignore = list(parent_prefixes_to_ignore or [])
     if exclude_bgp_mon:
-        all_prefixes_to_ignore.append(f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80")
+        all_prefixes_to_ignore.append(
+            f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"
+        )
 
     return [
         create_core_dumps_snapshot_check(),

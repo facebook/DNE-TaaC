@@ -582,6 +582,8 @@ class _EosBgpCppOpenRInputs:
     device_name: str | None = None
     configerator_path: str | None = None
     standalone_link: OpenRStandaloneLink | None = None
+    injected_start_ipv4s: tuple[str, ...] = ()
+    injected_start_ipv6s: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3858,6 +3860,8 @@ def _eos_bgpcpp_openr_inputs(bound: BoundTopology) -> _EosBgpCppOpenRInputs:
         device_name=device_name,
         configerator_path=configerator_path,
         standalone_link=standalone_link,
+        injected_start_ipv4s=device_config.openr_injected_start_ipv4s,
+        injected_start_ipv6s=device_config.openr_injected_start_ipv6s,
     )
 
 
@@ -3906,7 +3910,11 @@ def _eos_bgpcpp_openr_daemon_tasks(inputs: _EosBgpCppOpenRInputs) -> list:
 def _eos_bgpcpp_openr_tail_tasks(inputs: _EosBgpCppOpenRInputs) -> list:
     if inputs.mode is OpenRMode.STANDALONE:
         assert inputs.standalone_link is not None
-        return get_openr_standalone_setup_tasks(inputs.standalone_link)
+        return get_openr_standalone_setup_tasks(
+            inputs.standalone_link,
+            start_ipv4s=inputs.injected_start_ipv4s or None,
+            start_ipv6s=inputs.injected_start_ipv6s or None,
+        )
     return []
 
 
@@ -4510,7 +4518,11 @@ def _openr_teardown_tasks(
                 )
             ],
         )
-    return get_openr_standalone_teardown_tasks(standalone_link)
+    return get_openr_standalone_teardown_tasks(
+        standalone_link,
+        start_ipv4s=openr_inputs.injected_start_ipv4s or None,
+        start_ipv6s=openr_inputs.injected_start_ipv6s or None,
+    )
 
 
 def _enabled_teardown_components(
