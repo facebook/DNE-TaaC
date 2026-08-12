@@ -560,8 +560,9 @@ def get_bgp_ebb_route_storm_playbook(
                 max_lookup_concurrency=8,
                 as_path_pool_size=10,
                 as_path_length=255,
+                as_set_length=255,
                 communities_per_route=32,
-                extended_communities_per_route=1,
+                extended_communities_per_route=16,
             ),
         ],
     )

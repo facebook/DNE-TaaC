@@ -1112,6 +1112,7 @@ def create_bgp_route_storm_step(
     max_lookup_concurrency: int,
     as_path_pool_size: int,
     as_path_length: int,
+    as_set_length: int,
     communities_per_route: int,
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
@@ -1151,6 +1152,7 @@ def create_bgp_route_storm_step(
         "max_lookup_concurrency": max_lookup_concurrency,
         "as_path_pool_size": as_path_pool_size,
         "as_path_length": as_path_length,
+        "as_set_length": as_set_length,
         "communities_per_route": communities_per_route,
         "extended_communities_per_route": extended_communities_per_route,
     }
@@ -1160,10 +1162,14 @@ def create_bgp_route_storm_step(
         raise ValueError(
             "convergence_hard_timeout_seconds must exceed transition_timeout_seconds"
         )
-    if extended_communities_per_route != 1:
+    if (
+        as_path_length != 255
+        or as_set_length != 255
+        or extended_communities_per_route != 16
+    ):
         raise ValueError(
-            "CICD-EBB-11 currently requires exactly one extended community pending "
-            "isolated IXIA capability validation"
+            "CICD-EBB-11 requires 255-AS AS_SEQUENCE and AS_SET segments "
+            "plus 16 extended communities"
         )
 
     return create_custom_step(

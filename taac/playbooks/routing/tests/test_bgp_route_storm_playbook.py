@@ -49,8 +49,9 @@ def _locked_step_kwargs() -> dict:
         "max_lookup_concurrency": 8,
         "as_path_pool_size": 10,
         "as_path_length": 255,
+        "as_set_length": 255,
         "communities_per_route": 32,
-        "extended_communities_per_route": 1,
+        "extended_communities_per_route": 16,
     }
 
 
@@ -72,15 +73,16 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         self.assertEqual(EXPECTED_ROWS, payload["selected_peer_rows"])
         self.assertEqual(60, payload["cycles"])
         self.assertEqual(255, payload["as_path_length"])
+        self.assertEqual(255, payload["as_set_length"])
         self.assertEqual(32, payload["communities_per_route"])
-        self.assertEqual(1, payload["extended_communities_per_route"])
+        self.assertEqual(16, payload["extended_communities_per_route"])
         self.assertEqual(300, payload["convergence_hard_timeout_seconds"])
 
-    def test_step_factory_rejects_silent_extended_community_reduction(self) -> None:
+    def test_step_factory_rejects_heavy_attribute_shape_reduction(self) -> None:
         kwargs = _locked_step_kwargs()
-        kwargs["extended_communities_per_route"] = 16
+        kwargs["extended_communities_per_route"] = 1
 
-        with self.assertRaisesRegex(ValueError, "exactly one"):
+        with self.assertRaisesRegex(ValueError, "16 extended communities"):
             create_bgp_route_storm_step(**kwargs)
 
     def test_step_factory_requires_hard_timeout_above_transition_timeout(
@@ -125,8 +127,9 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                 "convergence_hard_timeout_seconds": 300,
                 "as_path_pool_size": 10,
                 "as_path_length": 255,
+                "as_set_length": 255,
                 "communities_per_route": 32,
-                "extended_communities_per_route": 1,
+                "extended_communities_per_route": 16,
             },
             {
                 key: payload[key]
@@ -137,6 +140,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                     "convergence_hard_timeout_seconds",
                     "as_path_pool_size",
                     "as_path_length",
+                    "as_set_length",
                     "communities_per_route",
                     "extended_communities_per_route",
                 )

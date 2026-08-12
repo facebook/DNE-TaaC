@@ -2312,6 +2312,7 @@ def create_bgp_ebb_route_storm_stage(
     max_lookup_concurrency: int,
     as_path_pool_size: int,
     as_path_length: int,
+    as_set_length: int,
     communities_per_route: int,
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
@@ -2341,6 +2342,7 @@ def create_bgp_ebb_route_storm_stage(
                 max_lookup_concurrency=max_lookup_concurrency,
                 as_path_pool_size=as_path_pool_size,
                 as_path_length=as_path_length,
+                as_set_length=as_set_length,
                 communities_per_route=communities_per_route,
                 extended_communities_per_route=extended_communities_per_route,
             )

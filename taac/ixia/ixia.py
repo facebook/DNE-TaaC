@@ -6,6 +6,7 @@
 import functools
 import ipaddress
 import itertools
+import json
 import logging
 import operator
 import os
@@ -8138,7 +8139,7 @@ class Ixia:
 
     @staticmethod
     def _build_as_path_position_values(
-        as_path_pool: t.List[str],
+        as_path_pool: t.Sequence[t.Tuple[int, ...]],
         max_as_path_length: int,
     ) -> t.List[t.List[int]]:
         """Build per-position AS number value lists from an AS path pool.
@@ -8149,16 +8150,12 @@ class Ixia:
         Returns:
             List of value lists, one per AS number position.
         """
-        position_values = []
-        for asn_position in range(max_as_path_length):
-            as_values_at_position = []
-            for as_path_str in as_path_pool:
-                as_numbers = [int(asn) for asn in as_path_str.split()]
-                if asn_position < len(as_numbers):
-                    as_values_at_position.append(as_numbers[asn_position])
-                else:
-                    as_values_at_position.append(0)
-            position_values.append(as_values_at_position)
+        position_values: t.List[t.List[int]] = [[] for _ in range(max_as_path_length)]
+        for as_path in as_path_pool:
+            for asn_position, values in enumerate(position_values):
+                values.append(
+                    as_path[asn_position] if asn_position < len(as_path) else 0
+                )
         return position_values
 
     def _apply_as_positions_concurrently(
@@ -8168,20 +8165,28 @@ class Ixia:
     ) -> None:
         """Apply AS number position values concurrently via ThreadPoolExecutor.
 
+        Every position must describe the same number of route rows.
         Failed positions are automatically retried sequentially.
         """
         from concurrent.futures import as_completed, ThreadPoolExecutor
 
-        max_workers = 10
         num_positions = len(position_values)
-        self.logger.info(
-            f"Configuring {num_positions} AS positions concurrently "
-            f"(max_workers={max_workers})..."
-        )
 
         def set_position(pos: int) -> None:
             bgp_as_number_list[pos].AsNumber.ValueList(position_values[pos])
             bgp_as_number_list[pos].EnableASNumber.Single(True)
+
+        route_row_count = self._as_position_route_row_count(position_values)
+        if self._apply_large_as_positions_in_batches(
+            bgp_as_number_list, position_values, route_row_count
+        ):
+            return
+
+        max_workers = 10
+        self.logger.info(
+            f"Configuring {num_positions} AS positions concurrently "
+            f"(max_workers={max_workers})..."
+        )
 
         errors = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -8217,6 +8222,105 @@ class Ixia:
                 f"{len(retry_failures)} AS path positions failed even after retry: "
                 f"{retry_failures[:5]}"
             )
+
+    @staticmethod
+    def _as_position_route_row_count(
+        position_values: t.Sequence[t.Sequence[int]],
+    ) -> int:
+        route_row_counts = {len(values) for values in position_values}
+        if len(route_row_counts) > 1:
+            raise ValueError(
+                "AS position value lists must have equal route-row counts, got "
+                f"{sorted(route_row_counts)}"
+            )
+        return next(iter(route_row_counts), 0)
+
+    def _apply_large_as_positions_in_batches(
+        self,
+        bgp_as_number_list: t.Sequence[t.Any],
+        position_values: t.Sequence[t.Sequence[int]],
+        route_row_count: int,
+    ) -> bool:
+        num_positions = len(position_values)
+        if num_positions < 128 or route_row_count < 10_000:
+            return False
+        batch_size = 16
+        slots = list(bgp_as_number_list[:num_positions])
+        xpaths = self._resolve_resource_xpaths(slots)
+        self.logger.info(
+            "Configuring %d AS positions in ResourceManager batches of %d "
+            "across %d route rows",
+            num_positions,
+            batch_size,
+            route_row_count,
+        )
+        for start in range(0, num_positions, batch_size):
+            stop = min(start + batch_size, num_positions)
+            batch_started = time.monotonic()
+            payload = []
+            for position in range(start, stop):
+                source = xpaths[position]
+                payload.extend(
+                    (
+                        {
+                            "xpath": (
+                                f"/multivalue[@source = '{source} asNumber']/valueList"
+                            ),
+                            "values": list(position_values[position]),
+                        },
+                        {
+                            "xpath": (
+                                f"/multivalue[@source = '{source} enableASNumber']"
+                                "/singleValue"
+                            ),
+                            "value": True,
+                        },
+                    )
+                )
+            errors = self.ixnetwork.ResourceManager.ImportConfig(
+                json.dumps(payload, separators=(",", ":")), False
+            )
+            if errors:
+                raise RuntimeError(
+                    "IXIA AS-position batch import failed for positions "
+                    f"[{start}, {stop}): {self._bounded_rollback_error(errors)}"
+                )
+            self.logger.info(
+                "Configured AS positions [%d, %d) in %.2fs",
+                start,
+                stop,
+                time.monotonic() - batch_started,
+            )
+        return True
+
+    def _resolve_resource_xpaths(self, resources: t.Sequence[t.Any]) -> t.List[str]:
+        if not resources:
+            return []
+        root_href = str(self.ixnetwork.href)
+        ixnetwork_end = root_href.index("ixnetwork") + len("ixnetwork")
+        responses = self.ixnetwork._connection._execute(
+            f"{root_href[:ixnetwork_end]}/operations/select?xpath=true",
+            {
+                "selects": [
+                    {
+                        "from": resource.href,
+                        "properties": ["href"],
+                        "children": [],
+                        "inlines": [],
+                    }
+                    for resource in resources
+                ]
+            },
+        )
+        if len(responses) != len(resources):
+            raise RuntimeError(
+                "IXIA XPath resolution returned "
+                f"{len(responses)} result(s) for {len(resources)} resource(s)"
+            )
+        xpaths = [response.get("xpath") for response in responses]
+        if any(not xpath for xpath in xpaths):
+            raise RuntimeError("IXIA XPath resolution returned an empty XPath")
+        return t.cast(t.List[str], xpaths)
 
     def _configure_as_path_pool_on_route_property(
         self,
@@ -8281,7 +8385,10 @@ class Ixia:
 
         bgp_as_path_segment = bgp_as_path_segment_list[0]
         bgp_as_path_segment.SegmentType.Single("asseq")
-        max_as_path_length = max(len(as_path.split()) for as_path in as_path_pool)
+        parsed_paths = [
+            tuple(int(asn) for asn in as_path.split()) for as_path in as_path_pool
+        ]
+        max_as_path_length = max(len(as_path) for as_path in parsed_paths)
         bgp_as_path_segment.NumberOfAsNumberInSegment = max_as_path_length
         self.logger.info(f"Maximum AS path length in pool: {max_as_path_length}")
 
@@ -8300,7 +8407,7 @@ class Ixia:
             raise ValueError("No BGP AS number list found")
 
         position_values = self._build_as_path_position_values(
-            as_path_pool, max_as_path_length
+            parsed_paths, max_as_path_length
         )
         self._apply_as_positions_concurrently(bgp_as_number_list, position_values)
         self.logger.info("Successfully configured AS path distribution")
@@ -8318,6 +8425,251 @@ class Ixia:
     ) -> None:
         """Configure AS paths on an already-resolved BGP route property."""
         self._program_as_path_pool_on_route_property(bgp_route_prop, as_path_pool)
+
+    def configure_as_path_segment_pools_on_route_property(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        segment_pools: t.Sequence[t.Tuple[str, t.Sequence[str]]],
+    ) -> None:
+        """Configure multiple AS-path segment pools on one route property."""
+        normalized = self._normalize_as_path_segment_pools(segment_pools)
+        prepared_segments, original_segment_count = self._prepare_as_path_segments(
+            bgp_route_prop, normalized
+        )
+        try:
+            snapshots = self._capture_as_path_segment_values(
+                bgp_route_prop, prepared_segments, original_segment_count
+            )
+        except Exception as error:
+            try:
+                self._restore_as_path_segment_structure(
+                    bgp_route_prop, prepared_segments, original_segment_count
+                )
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "AS path segment snapshot failed "
+                    f"({self._bounded_rollback_error(error)}); rollback also failed "
+                    f"({self._bounded_rollback_error(rollback_error)})"
+                ) from error
+            raise
+        try:
+            bgp_route_prop.EnableAsPathSegments.Single(True)
+            for (segment_type, _width, position_values), (
+                segment,
+                slots,
+                _original_width,
+            ) in zip(normalized, prepared_segments):
+                segment.SegmentType.Single(segment_type)
+                self._apply_as_positions_concurrently(slots, position_values)
+        except Exception as error:
+            try:
+                self._rollback_as_path_segment_programming(
+                    bgp_route_prop,
+                    prepared_segments,
+                    original_segment_count,
+                    snapshots,
+                )
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "AS path segment programming failed "
+                    f"({self._bounded_rollback_error(error)}); rollback also failed "
+                    f"({self._bounded_rollback_error(rollback_error)})"
+                ) from error
+            raise
+
+    def _normalize_as_path_segment_pools(
+        self,
+        segment_pools: t.Sequence[t.Tuple[str, t.Sequence[str]]],
+    ) -> t.List[t.Tuple[str, int, t.List[t.List[int]]]]:
+        if not segment_pools:
+            raise ValueError("AS path segment pools must not be empty")
+        normalized: t.List[t.Tuple[str, int, t.List[t.List[int]]]] = []
+        row_count: t.Optional[int] = None
+        for segment_type, paths in segment_pools:
+            ixia_type = str(segment_type).lower()
+            if ixia_type not in {"asseq", "asset"}:
+                raise ValueError(f"unsupported AS path segment type {segment_type!r}")
+            path_values = list(paths)
+            parsed_paths = [
+                tuple(int(asn) for asn in path.split()) for path in path_values
+            ]
+            if not path_values or any(not path for path in parsed_paths):
+                raise ValueError(f"{ixia_type} AS path pool must not be empty")
+            if row_count is None:
+                row_count = len(path_values)
+            elif len(path_values) != row_count:
+                raise ValueError("AS path segment pools must have equal row counts")
+            widths = {len(path) for path in parsed_paths}
+            if len(widths) != 1:
+                raise ValueError(
+                    f"{ixia_type} AS path pool must have one fixed positive width"
+                )
+            width = next(iter(widths))
+            position_values = self._build_as_path_position_values(parsed_paths, width)
+            normalized.append((ixia_type, width, position_values))
+        return normalized
+
+    def _prepare_as_path_segments(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        normalized: t.Sequence[t.Tuple[str, int, t.List[t.List[int]]]],
+    ) -> t.Tuple[t.List[t.Tuple[t.Any, t.Sequence[t.Any], int]], int]:
+        original_segment_count = int(bgp_route_prop.NoOfASPathSegmentsPerRouteRange)
+        prepared_segments: t.List[t.Tuple[t.Any, t.Sequence[t.Any], int]] = []
+        original_widths: t.List[t.Tuple[t.Any, int]] = []
+        try:
+            bgp_route_prop.NoOfASPathSegmentsPerRouteRange = len(normalized)
+            segments = bgp_route_prop.BgpAsPathSegmentList.find()
+            if len(segments) < len(normalized):
+                raise ValueError(
+                    f"AS path segment list has {len(segments)} entries, "
+                    f"expected at least {len(normalized)}"
+                )
+            for index, (_segment_type, width, _values) in enumerate(normalized):
+                segment = segments[index]
+                original_width = int(segment.NumberOfAsNumberInSegment)
+                original_widths.append((segment, original_width))
+                segment.NumberOfAsNumberInSegment = width
+                slots = segment.BgpAsNumberList.find()
+                prepared_segments.append((segment, slots, original_width))
+                if len(slots) < width:
+                    raise ValueError(
+                        f"AS path segment {index} has {len(slots)} slots, "
+                        f"expected at least {width}"
+                    )
+        except Exception as error:
+            try:
+                self._restore_as_path_segment_structure(
+                    bgp_route_prop,
+                    tuple(
+                        (segment, (), original_width)
+                        for segment, original_width in original_widths
+                    ),
+                    original_segment_count,
+                )
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "AS path segment preparation failed "
+                    f"({self._bounded_rollback_error(error)}); rollback also failed "
+                    f"({self._bounded_rollback_error(rollback_error)})"
+                ) from error
+            raise
+        return prepared_segments, original_segment_count
+
+    def _capture_as_path_segment_values(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        prepared_segments: t.Sequence[t.Tuple[t.Any, t.Sequence[t.Any], int]],
+        original_segment_count: int,
+    ) -> t.List[t.Tuple[str, t.Any, t.Tuple[t.Any, ...]]]:
+        handles = [("route.enable", bgp_route_prop.EnableAsPathSegments)]
+        for segment_index, (segment, slots, original_width) in enumerate(
+            prepared_segments[:original_segment_count]
+        ):
+            handles.append((f"segment[{segment_index}].type", segment.SegmentType))
+            for slot_index, slot in enumerate(slots[:original_width]):
+                handles.extend(
+                    (
+                        (
+                            f"segment[{segment_index}].slot[{slot_index}].asn",
+                            slot.AsNumber,
+                        ),
+                        (
+                            f"segment[{segment_index}].slot[{slot_index}].enable",
+                            slot.EnableASNumber,
+                        ),
+                    )
+                )
+        return [(label, handle, tuple(handle.Values)) for label, handle in handles]
+
+    def _restore_ixia_values(self, handle: t.Any, values: t.Sequence[t.Any]) -> None:
+        if not values:
+            raise ValueError("cannot restore an empty IXIA multivalue snapshot")
+        if len(values) == 1:
+            handle.Single(values[0])
+        else:
+            handle.ValueList(list(values))
+
+    @staticmethod
+    def _bounded_rollback_error(error: Exception, limit: int = 256) -> str:
+        rendered = repr(error)
+        return rendered if len(rendered) <= limit else f"{rendered[: limit - 3]}..."
+
+    def _restore_as_path_segment_structure(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        prepared_segments: t.Sequence[t.Tuple[t.Any, t.Sequence[t.Any], int]],
+        original_segment_count: int,
+    ) -> None:
+        failed_count = 0
+        failed_sample = []
+        for segment_index, (segment, _slots, original_width) in enumerate(
+            prepared_segments
+        ):
+            try:
+                segment.NumberOfAsNumberInSegment = original_width
+            except Exception as error:
+                failed_count += 1
+                if len(failed_sample) < 10:
+                    failed_sample.append(
+                        f"segment[{segment_index}].width: "
+                        f"{self._bounded_rollback_error(error)}"
+                    )
+        try:
+            bgp_route_prop.NoOfASPathSegmentsPerRouteRange = original_segment_count
+        except Exception as error:
+            failed_count += 1
+            if len(failed_sample) < 10:
+                failed_sample.append(
+                    f"route.segment_count: {self._bounded_rollback_error(error)}"
+                )
+        if failed_count:
+            raise RuntimeError(
+                "AS path segment structural rollback errors: "
+                f"failed_count={failed_count}, failed_sample={failed_sample}"
+            )
+
+    def _rollback_as_path_segment_programming(
+        self,
+        bgp_route_prop: t.Union["BgpIPRouteProperty", "BgpV6IPRouteProperty"],
+        prepared_segments: t.Sequence[t.Tuple[t.Any, t.Sequence[t.Any], int]],
+        original_segment_count: int,
+        snapshots: t.Sequence[t.Tuple[str, t.Any, t.Tuple[t.Any, ...]]],
+    ) -> None:
+        failed_count = 0
+        failed_sample = []
+        restored_count = 0
+        restored_sample = []
+        for label, handle, values in reversed(snapshots):
+            try:
+                self._restore_ixia_values(handle, values)
+            except Exception as error:
+                failed_count += 1
+                if len(failed_sample) < 10:
+                    failed_sample.append(
+                        f"{label}: {self._bounded_rollback_error(error)}"
+                    )
+            else:
+                restored_count += 1
+                if len(restored_sample) < 5:
+                    restored_sample.append(label)
+        try:
+            self._restore_as_path_segment_structure(
+                bgp_route_prop, prepared_segments, original_segment_count
+            )
+        except Exception as error:
+            failed_count += 1
+            if len(failed_sample) < 10:
+                failed_sample.append(
+                    f"structure: {self._bounded_rollback_error(error)}"
+                )
+        if failed_count:
+            raise RuntimeError(
+                "AS path segment rollback errors: "
+                f"failed_count={failed_count}, failed_sample={failed_sample}, "
+                f"restored_count={restored_count}, "
+                f"restored_sample={restored_sample}"
+            )
 
     @external_api
     def configure_bgp_peer_tcp_window_size(
