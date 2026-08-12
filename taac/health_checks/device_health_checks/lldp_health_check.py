@@ -24,6 +24,18 @@ def is_fabric_interface(name: str) -> bool:
     return "fab" in name
 
 
+def is_ixia_interface(interface) -> bool:
+    """IXIA-facing tap whose neighbor is an IXIA port, not another device.
+
+    IXIA LLDP is not a stable or meaningful signal for snake/standalone tests: the
+    IXIA ports stop advertising LLDP after any ixnetworkweb restart, so requiring an
+    LLDP neighbor on these taps makes the check fail spuriously. Exclude them so LLDP
+    validation only covers device-to-device links (the meaningful snake signal).
+    """
+    nbr = f"{interface.neighbor_interface_name or ''} {interface.neighbor_switch_name or ''}".lower()
+    return "ixia" in nbr
+
+
 class LldpHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
     CHECK_NAME = hc_types.CheckName.LLDP_CHECK
     OPERATING_SYSTEMS = [
@@ -55,6 +67,7 @@ class LldpHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
             if (
                 interface.interface_name not in disabled_interface_names
                 and not is_fabric_interface(interface.interface_name)
+                and not is_ixia_interface(interface)
             ):
                 enabled_interfaces.append(interface)
         return enabled_interfaces, disabled_interfaces

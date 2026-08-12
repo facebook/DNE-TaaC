@@ -647,6 +647,22 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     ),
     # Use only the two clean IXIA endpoints; ignore the dangling eth1/1/5, eth1/64/5 taps.
     ixia_ports=["eth1/1/1", "eth1/64/1"],
+    # Bypass IXIA LLDP asset discovery (IXIA LLDP is not a meaningful signal for this
+    # snake NPI, and it drops after any ixnetworkweb restart on this hand-brought-up box).
+    # Pin the tap->chassis/port mapping explicitly so setup never depends on IXIA LLDP;
+    # the snake device-to-device circuits are unaffected. ixia16.netcastle.ash6.
+    direct_ixia_connections=[
+        taac_types.DirectIxiaConnection(
+            interface="eth1/1/1",
+            ixia_chassis_ip="2401:db00:2066:304b::3004",
+            ixia_port="1/21",
+        ),
+        taac_types.DirectIxiaConnection(
+            interface="eth1/64/1",
+            ixia_chassis_ip="2401:db00:2066:304b::3004",
+            ixia_port="1/23",
+        ),
+    ],
     # LLDP_CHECK enabled: D109171150 (eth1/34<->eth1/35 lane-swap) has LANDED, so the
     # check's expected neighbor (read from the landed static topology) now matches the
     # real swapped cabling. LLDP is validated, not skipped.
