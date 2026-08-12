@@ -2,11 +2,12 @@
 # pyre-strict
 
 """
-Async client for the Keysight Ixia chassis DiagnosticService REST API.
+Clients for collecting Keysight Ixia platform and session diagnostics.
 
-Wraps `/platform/api/v2/diagnostics/*` so TAAC test runs can collect chassis
-diagnostic archives (IxNetwork session logs incl. BGP++, port logs, etc.) at
-teardown.
+`IxiaDiagnosticsClient` wraps `/platform/api/v2/diagnostics/*` for platform
+system and port logs. `collect_ixnetwork_session_diagnostics` calls the
+IxNetwork session's `CollectLogs` operation for the current session. These are
+separate vendor APIs and produce separate archives.
 
 Vendor warning: every collection costs time + disk on the chassis. The class
 ALWAYS pairs a download with a DELETE in a try/finally so archives do not
@@ -28,10 +29,13 @@ import asyncio
 import ipaddress
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from aiohttp import BasicAuth, ClientSession, ClientTimeout
+from ixnetwork_restpy.files import Files
 from neteng.netcastle.constants_not_thrift import RestAPI
 from neteng.netcastle.utils.common import json_dumps
 from neteng.netcastle.utils.ixia_utils import (
@@ -57,10 +61,10 @@ COMPONENT_PORT_LOGS = "Port logs"
 COMPONENT_CHASSIS = "Chassis (System logs)"
 COMPONENT_NETWORK_CONFORMANCE = "Network Conformance (System logs)"
 
-# Recommended default when a TestConfig opts into diagnostics without naming
-# components: covers the BGP/protocol-engine logs that live in the IxNetwork
-# app plus per-port L1/SFP transitions, skipping the larger chassis HW dump.
-DEFAULT_SESSION_COMPONENTS: tuple[str, ...] = (
+# Recommended platform default: IxNetwork system logs plus per-port L1/SFP
+# transitions, skipping the larger chassis hardware dump. Per-session logs are
+# collected separately through `collect_ixnetwork_session_diagnostics`.
+DEFAULT_PLATFORM_COMPONENTS: tuple[str, ...] = (
     COMPONENT_IXNETWORK,
     COMPONENT_PORT_LOGS,
 )
@@ -86,6 +90,15 @@ class DiagnosticsArchive:
     path: Path
     size_bytes: int
     components: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SessionDiagnosticsArchive:
+    """IxNetwork `CollectLogs` archive for the current live session."""
+
+    path: Path
+    size_bytes: int
+    remote_filename: str
 
 
 class IxiaDiagnosticsCollectionError(Exception):
@@ -285,13 +298,13 @@ class IxiaDiagnosticsClient:
 
         DELETE always runs (in finally) — even if the download fails — so the
         chassis stays clean. If `components` is None, uses the TAAC framework
-        default subset (`DEFAULT_SESSION_COMPONENTS`: IxNetwork app + Port
+        default subset (`DEFAULT_PLATFORM_COMPONENTS`: IxNetwork app + Port
         logs), NOT the vendor's "collect everything" default. Pass an explicit
         list of names to override; use `start_collection(None)` if you really
         want the vendor-default full collection.
         """
         effective_components = (
-            list(components) if components else list(DEFAULT_SESSION_COMPONENTS)
+            list(components) if components else list(DEFAULT_PLATFORM_COMPONENTS)
         )
         async_id = await self.start_collection(effective_components)
         logger.info(
@@ -326,6 +339,56 @@ class IxiaDiagnosticsClient:
             size_bytes=size,
             components=tuple(effective_components),
         )
+
+
+async def collect_ixnetwork_session_diagnostics(
+    ixia: Any,
+    dest_path: Path,
+) -> SessionDiagnosticsArchive:
+    """Collect and download the current IxNetwork session's diagnostic ZIP."""
+    remote_basename = f"taac_session_diagnostics_{uuid.uuid4().hex}"
+    remote_filename = f"{remote_basename}.zip"
+    size_bytes = await asyncio.to_thread(
+        _collect_ixnetwork_session_diagnostics,
+        ixia,
+        dest_path,
+        remote_basename,
+        remote_filename,
+    )
+    logger.info(
+        f"ixia session diagnostics: downloaded {remote_filename} "
+        f"({size_bytes} bytes) -> {dest_path}"
+    )
+    return SessionDiagnosticsArchive(
+        path=dest_path,
+        size_bytes=size_bytes,
+        remote_filename=remote_filename,
+    )
+
+
+def _collect_ixnetwork_session_diagnostics(
+    ixia: Any,
+    dest_path: Path,
+    remote_basename: str,
+    remote_filename: str,
+) -> int:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ixia.ixnetwork.CollectLogs(
+            Arg1=Files(remote_basename),
+            Arg2="currentInstance",
+        )
+        ixia.session.Session.DownloadFile(remote_filename, str(dest_path))
+        return dest_path.stat().st_size
+    finally:
+        for filename in (remote_filename, remote_basename):
+            try:
+                ixia.session.Session.RemoveFile(filename)
+            except Exception as exc:
+                logger.error(
+                    f"ixia session diagnostics: failed to remove remote file "
+                    f"{filename}: {exc!r}"
+                )
 
 
 def _flatten_components(nodes: list[dict]) -> list[str]:

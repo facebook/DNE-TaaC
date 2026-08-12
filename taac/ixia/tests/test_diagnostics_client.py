@@ -1,16 +1,54 @@
 # pyre-strict
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.ixia.diagnostics_client import (
     _flatten_components,
     _url_safe_host,
+    collect_ixnetwork_session_diagnostics,
     IxiaDiagnosticsClient,
     IxiaDiagnosticsCollectionError,
 )
+
+
+class SessionDiagnosticsTest(IsolatedAsyncioTestCase):
+    async def test_collects_current_instance_and_downloads_zip(self):
+        ixia = MagicMock()
+
+        def download_file(remote_path, local_path):
+            Path(local_path).write_bytes(b"session diagnostics")
+
+        ixia.session.Session.DownloadFile.side_effect = download_file
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_path = Path(tmpdir) / "session.zip"
+            archive = await collect_ixnetwork_session_diagnostics(ixia, dest_path)
+
+            collect_kwargs = ixia.ixnetwork.CollectLogs.call_args.kwargs
+            self.assertEqual(collect_kwargs["Arg2"], "currentInstance")
+            remote_handle = collect_kwargs["Arg1"]
+            self.assertTrue(
+                remote_handle.file_name.startswith("taac_session_diagnostics_")
+            )
+            self.assertEqual(
+                ixia.session.Session.DownloadFile.call_args.args,
+                (f"{remote_handle.file_name}.zip", str(dest_path)),
+            )
+            self.assertEqual(
+                ixia.session.Session.RemoveFile.call_args_list[0].args,
+                (f"{remote_handle.file_name}.zip",),
+            )
+            self.assertEqual(
+                ixia.session.Session.RemoveFile.call_args_list[1].args,
+                (remote_handle.file_name,),
+            )
+            self.assertEqual(archive.path, dest_path)
+            self.assertEqual(archive.size_bytes, len(b"session diagnostics"))
+            self.assertEqual(archive.remote_filename, f"{remote_handle.file_name}.zip")
 
 
 class UrlSafeHostTest(IsolatedAsyncioTestCase):

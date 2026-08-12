@@ -8,9 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from taac.internal.tasks.ixia_diagnostics_collection_task import (
     DEFAULT_MANIFOLD_BUCKET,
     IxiaDiagnosticsCollectionTask,
+    SESSION_SHARED_DATA_URL_KEY,
     SHARED_DATA_URL_KEY,
 )
-from taac.ixia.diagnostics_client import DiagnosticsArchive
+from taac.ixia.diagnostics_client import (
+    DiagnosticsArchive,
+    SessionDiagnosticsArchive,
+)
 
 
 # Module-level constant — using a fresh Path() in a function default would be
@@ -46,6 +50,10 @@ _PATCH_UPLOAD = (
     "neteng.test_infra.dne.taac.internal.tasks.ixia_diagnostics_collection_task."
     "async_upload_file_to_manifold"
 )
+_PATCH_SESSION_COLLECT = (
+    "neteng.test_infra.dne.taac.internal.tasks.ixia_diagnostics_collection_task."
+    "collect_ixnetwork_session_diagnostics"
+)
 
 
 def _make_archive(path=_DEFAULT_ARCHIVE_PATH, size=12345, async_id="999"):
@@ -57,7 +65,68 @@ def _make_archive(path=_DEFAULT_ARCHIVE_PATH, size=12345, async_id="999"):
     )
 
 
+def _make_session_archive():
+    return SessionDiagnosticsArchive(
+        path=Path("/tmp/session.zip"),
+        size_bytes=6789,
+        remote_filename="taac_session_diagnostics_abc.zip",
+    )
+
+
 class IxiaDiagnosticsCollectionTaskTest(IsolatedAsyncioTestCase):
+    @patch(_PATCH_UPLOAD, new_callable=AsyncMock)
+    @patch(_PATCH_CLIENT)
+    @patch(_PATCH_SESSION_COLLECT, new_callable=AsyncMock)
+    async def test_uploads_session_and_platform_archives_independently(
+        self, mock_session_collect, mock_client_cls, mock_upload
+    ):
+        mock_session_collect.return_value = _make_session_archive()
+        mock_client = MagicMock()
+        mock_client.collect_and_download = AsyncMock(return_value=_make_archive())
+        mock_client_cls.return_value = mock_client
+        mock_upload.side_effect = [
+            "https://manifold.../session.zip",
+            "https://manifold.../platform.tar.gz",
+        ]
+        shared_data = {}
+        task = _make_task(shared_data=shared_data)
+
+        await task.run({"run_id": "BAG012_TEST"})
+
+        mock_session_collect.assert_awaited_once()
+        self.assertEqual(mock_upload.await_count, 2)
+        session_key = mock_upload.await_args_list[0].args[1]
+        platform_key = mock_upload.await_args_list[1].args[1]
+        self.assertTrue(session_key.endswith("_session.zip"))
+        self.assertTrue(platform_key.endswith(".tar.gz"))
+        prefix = f"__{IxiaDiagnosticsCollectionTask.NAME}__:"
+        self.assertEqual(
+            shared_data[f"{prefix}{SESSION_SHARED_DATA_URL_KEY}"],
+            "https://manifold.../session.zip",
+        )
+        self.assertEqual(
+            shared_data[f"{prefix}{SHARED_DATA_URL_KEY}"],
+            "https://manifold.../platform.tar.gz",
+        )
+
+    @patch(_PATCH_UPLOAD, new_callable=AsyncMock)
+    @patch(_PATCH_CLIENT)
+    @patch(_PATCH_SESSION_COLLECT, new_callable=AsyncMock)
+    async def test_platform_collection_continues_when_session_collection_fails(
+        self, mock_session_collect, mock_client_cls, mock_upload
+    ):
+        mock_session_collect.side_effect = RuntimeError("session API failed")
+        mock_client = MagicMock()
+        mock_client.collect_and_download = AsyncMock(return_value=_make_archive())
+        mock_client_cls.return_value = mock_client
+        mock_upload.return_value = "https://manifold.../platform.tar.gz"
+        task = _make_task()
+
+        await task.run({"run_id": "BAG012_TEST"})
+
+        mock_client.collect_and_download.assert_awaited_once()
+        mock_upload.assert_awaited_once()
+
     @patch(_PATCH_UPLOAD, new_callable=AsyncMock)
     @patch(_PATCH_CLIENT)
     async def test_happy_path_uploads_and_returns_none(
