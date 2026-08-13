@@ -27,6 +27,15 @@ from taac.abstractions.component_semantics import (
 from taac.abstractions.config_artifact_semantics import (
     ConfigArtifactProvider,
 )
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceProfile,
+    PhysicalLinkRate,
+)
+
+
+_EOS_IXIA_INTERFACE_PROFILE = PhysicalInterfaceProfile(
+    rate=PhysicalLinkRate(aggregate_gbps=100, lane_count=2)
+)
 
 
 class UnsupportedEosBgpCppCapabilityError(ValueError):
@@ -39,6 +48,7 @@ class EosBgpCppCapabilityPreflight:
 
     def validate(self, plan: DutPlan) -> None:
         endpoint = _required_dut_endpoint(plan)
+        _validate_physical_interfaces(plan, endpoint)
         routing_config = _validate_routing_config(plan, endpoint)
         _validate_components(plan, endpoint, routing_config)
         _validate_policy_bindings(plan, endpoint)
@@ -105,6 +115,47 @@ def _validate_routing_config(
             f"provider {source.provider.value!r}"
         )
     return routing_config
+
+
+def _validate_physical_interfaces(
+    plan: DutPlan,
+    endpoint: EndpointPlan,
+) -> None:
+    for interface in plan.interfaces:
+        if interface.endpoint_id != endpoint.resource_id:
+            raise UnsupportedEosBgpCppCapabilityError(
+                f"interface {interface.resource_id} targets {interface.endpoint_id}, "
+                f"expected {endpoint.resource_id}"
+            )
+        if interface.bound_interface is None or interface.physical_interface_id is None:
+            raise UnsupportedEosBgpCppCapabilityError(
+                f"interface {interface.resource_id} has no physical binding"
+            )
+    for physical_interface in plan.physical_interfaces:
+        if physical_interface.endpoint_id != endpoint.resource_id:
+            raise UnsupportedEosBgpCppCapabilityError(
+                f"physical interface {physical_interface.resource_id} targets "
+                f"{physical_interface.endpoint_id}, expected {endpoint.resource_id}"
+            )
+        if physical_interface.profile != _EOS_IXIA_INTERFACE_PROFILE:
+            raise UnsupportedEosBgpCppCapabilityError(
+                f"physical interface {physical_interface.resource_id} has "
+                f"unsupported profile {physical_interface.profile!r}"
+            )
+    expected_link_ids = {
+        link.resource_id
+        for link in plan.links
+        if endpoint.resource_id in {link.a_endpoint_id, link.z_endpoint_id}
+    }
+    physical_link_ids = {
+        link_id
+        for physical_interface in plan.physical_interfaces
+        for link_id in physical_interface.link_ids
+    }
+    if physical_link_ids != expected_link_ids:
+        raise UnsupportedEosBgpCppCapabilityError(
+            "EOS/BGP++ physical interfaces must own every DUT link exactly"
+        )
 
 
 def _validate_components(

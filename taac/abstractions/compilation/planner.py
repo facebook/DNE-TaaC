@@ -24,6 +24,7 @@ from taac.abstractions.compilation.model import (
     InterfacePlan,
     OpenRDesiredMode,
     OpenRPlan,
+    PhysicalInterfacePlan,
     PolicyBinding,
     PolicyDirection,
     PolicyPlan,
@@ -45,6 +46,7 @@ from taac.abstractions.compilation.resource_ids import (
     is_dut_endpoint,
     link_resource_id,
     openr_resource_id,
+    physical_interface_resource_id,
     policy_binding_resource_id,
     policy_resource_id,
     role_policy_resource_id,
@@ -56,12 +58,17 @@ from taac.abstractions.component_semantics import (
     ComponentReconcileMode,
     ComponentRole,
 )
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceGroupKind,
+    PhysicalInterfaceProfile,
+)
 from taac.abstractions.topology.model import (
     BoundDeviceGroup,
     BoundRoutingConfig,
     BoundTopology,
     EndpointSpec,
     resolve_endpoint_routing_drivers,
+    ResolvedIxiaPortAssignment,
     RoutingDeviceConfig,
 )
 
@@ -90,6 +97,7 @@ class _InterfaceAccumulator:
     logical_port_role: str
     afi: AddressFamily
     bound_interface: str | None
+    physical_interface_id: ResourceId | None
     link_ids: list[ResourceId]
     addresses: list[str]
 
@@ -97,6 +105,7 @@ class _InterfaceAccumulator:
         self,
         link_id: ResourceId,
         bound_interface: str | None,
+        physical_interface_id: ResourceId | None,
         addresses: tuple[str, ...],
     ) -> None:
         if (
@@ -110,6 +119,11 @@ class _InterfaceAccumulator:
             )
         if self.bound_interface is None:
             self.bound_interface = bound_interface
+        if self.physical_interface_id != physical_interface_id:
+            raise ValueError(
+                f"logical interface {self.resource_id} resolves to multiple "
+                "physical interface owners"
+            )
         if link_id not in self.link_ids:
             self.link_ids.append(link_id)
         for address in addresses:
@@ -125,6 +139,43 @@ class _InterfaceAccumulator:
             afi=self.afi,
             addresses=tuple(self.addresses),
             bound_interface=self.bound_interface,
+            physical_interface_id=self.physical_interface_id,
+        )
+
+
+@dataclass
+class _PhysicalInterfaceAccumulator:
+    resource_id: ResourceId
+    endpoint_id: ResourceId
+    group_kind: PhysicalInterfaceGroupKind
+    logical_key: str
+    bound_interface: str
+    profile: PhysicalInterfaceProfile
+    link_ids: list[ResourceId]
+
+    def add(
+        self,
+        bound_interface: str,
+        profile: PhysicalInterfaceProfile,
+        link_id: ResourceId,
+    ) -> None:
+        if (bound_interface, profile) != (self.bound_interface, self.profile):
+            raise ValueError(
+                f"physical interface {self.resource_id} has conflicting bindings "
+                "or profiles"
+            )
+        if link_id not in self.link_ids:
+            self.link_ids.append(link_id)
+
+    def freeze(self) -> PhysicalInterfacePlan:
+        return PhysicalInterfacePlan(
+            resource_id=self.resource_id,
+            endpoint_id=self.endpoint_id,
+            group_kind=self.group_kind,
+            logical_key=self.logical_key,
+            link_ids=tuple(self.link_ids),
+            bound_interface=self.bound_interface,
+            profile=self.profile,
         )
 
 
@@ -142,6 +193,7 @@ class BoundTopologyPlanner:
         endpoints = _endpoint_plans(bound)
         links = _link_plans(bound)
         interfaces = _interface_plans(bound, endpoint_specs)
+        physical_interfaces = _physical_interface_plans(bound, endpoint_specs)
         adjacencies = _adjacency_plans(bound, endpoint_specs)
         declared_policies = tuple(
             PolicyPlan(
@@ -163,6 +215,7 @@ class BoundTopologyPlanner:
             dut=DutPlan(
                 endpoints=endpoints,
                 links=links,
+                physical_interfaces=physical_interfaces,
                 interfaces=interfaces,
                 adjacencies=adjacencies,
                 policies=(*declared_policies, *role_policies),
@@ -230,6 +283,10 @@ def _interface_plans(
         )
         afi = _address_family(device_group.afi)
         logical_port_role = _logical_port_role(device_group)
+        physical_interface_id = _physical_interface_id(
+            endpoint_name,
+            device_group.port_assignment,
+        )
         key = (endpoint_name, logical_port_role, afi)
         accumulator = accumulators.get(key)
         if accumulator is None:
@@ -243,6 +300,7 @@ def _interface_plans(
                 logical_port_role=logical_port_role,
                 afi=afi,
                 bound_interface=bound_interface,
+                physical_interface_id=physical_interface_id,
                 link_ids=[],
                 addresses=[],
             )
@@ -250,9 +308,113 @@ def _interface_plans(
         accumulator.add(
             link_resource_id(device_group.name),
             bound_interface,
+            physical_interface_id,
             addresses,
         )
     return tuple(accumulator.freeze() for accumulator in accumulators.values())
+
+
+def _physical_interface_plans(
+    bound: BoundTopology,
+    endpoint_specs: dict[str, EndpointSpec],
+) -> tuple[PhysicalInterfacePlan, ...]:
+    accumulators: dict[ResourceId, _PhysicalInterfaceAccumulator] = {}
+    connection_owners: dict[tuple[ResourceId, str], ResourceId] = {}
+    for device_group in bound.device_groups:
+        _add_physical_interface(
+            accumulators,
+            connection_owners,
+            device_group,
+            endpoint_specs,
+        )
+    return tuple(accumulator.freeze() for accumulator in accumulators.values())
+
+
+def _add_physical_interface(
+    accumulators: dict[ResourceId, _PhysicalInterfaceAccumulator],
+    connection_owners: dict[tuple[ResourceId, str], ResourceId],
+    device_group: BoundDeviceGroup,
+    endpoint_specs: dict[str, EndpointSpec],
+) -> None:
+    assignment = device_group.port_assignment
+    if assignment is None:
+        return
+    endpoint_name, bound_interface, _, _ = _dut_side(
+        device_group,
+        endpoint_specs,
+    )
+    if bound_interface is None:
+        raise ValueError(
+            f"device group {device_group.name!r} has no bound DUT interface"
+        )
+    endpoint_id = endpoint_resource_id(endpoint_name)
+    group_kind, logical_key = _physical_interface_group(assignment)
+    resource_id = physical_interface_resource_id(
+        endpoint_id,
+        group_kind,
+        logical_key,
+    )
+    _claim_physical_connection(
+        connection_owners,
+        endpoint_id,
+        bound_interface,
+        resource_id,
+    )
+    accumulator = accumulators.get(resource_id)
+    if accumulator is None:
+        accumulator = _PhysicalInterfaceAccumulator(
+            resource_id=resource_id,
+            endpoint_id=endpoint_id,
+            group_kind=group_kind,
+            logical_key=logical_key,
+            bound_interface=bound_interface,
+            profile=assignment.physical_interface_profile,
+            link_ids=[],
+        )
+        accumulators[resource_id] = accumulator
+    accumulator.add(
+        bound_interface,
+        assignment.physical_interface_profile,
+        link_resource_id(device_group.name),
+    )
+
+
+def _claim_physical_connection(
+    owners: dict[tuple[ResourceId, str], ResourceId],
+    endpoint_id: ResourceId,
+    bound_interface: str,
+    resource_id: ResourceId,
+) -> None:
+    connection = (endpoint_id, bound_interface)
+    prior_owner = owners.get(connection)
+    if prior_owner is not None and prior_owner != resource_id:
+        raise ValueError(
+            f"physical connection {connection!r} resolves to multiple logical "
+            "interface groups"
+        )
+    owners[connection] = resource_id
+
+
+def _physical_interface_id(
+    endpoint_name: str,
+    assignment: ResolvedIxiaPortAssignment | None,
+) -> ResourceId | None:
+    if assignment is None:
+        return None
+    group_kind, logical_key = _physical_interface_group(assignment)
+    return physical_interface_resource_id(
+        endpoint_resource_id(endpoint_name),
+        group_kind,
+        logical_key,
+    )
+
+
+def _physical_interface_group(
+    assignment: ResolvedIxiaPortAssignment,
+) -> tuple[PhysicalInterfaceGroupKind, str]:
+    if assignment.reuse_group is not None:
+        return PhysicalInterfaceGroupKind.REUSE_GROUP, assignment.reuse_group
+    return PhysicalInterfaceGroupKind.LOGICAL_ROLE, assignment.logical_role
 
 
 def _adjacency_plans(

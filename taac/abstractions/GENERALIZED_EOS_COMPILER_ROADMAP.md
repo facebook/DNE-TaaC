@@ -43,6 +43,8 @@ It is not generalized yet:
   the new semantic `IxiaPlan` does not yet have a native renderer;
 - one task-free routing-control-plane component role and its routing-config
   dependency are projected, but executable lifecycle operations are not;
+- typed physical rate/lane intent and logical port-sharing ownership are
+  projected, but executable EOS interface operations are not;
 - the candidate artifact adapter delegates DUT and IXIA rendering as one
   monolithic compatibility operation;
 - IXIA endpoint wiring and route-mutation lifecycle are still embedded in the
@@ -923,6 +925,10 @@ of Phase 1.5:
     task-free routing-control-plane component per routed DUT, depend on the
     typed routing config, and fail closed on unsupported EOS component
     contracts without changing artifact or task authority.
+22. **Completed Phase 1.6 physical-interface prerequisite:** Diff 1.6.2f,
+    normalize typed rate/lane profiles at inventory binding and project one
+    task-free physical owner per logical port-sharing group without changing
+    established EOS rendering, artifact, lifecycle, or task authority.
 
 #### Resource-derived IXIA presentation
 
@@ -1008,10 +1014,51 @@ planning retain the same semantic component graph; later lifecycle lowering
 decides which operations each mode executes. Preloaded EOS setup remains
 unsupported.
 
-Physical-interface grouping and typed rate/lane intent, config-install
-snapshot/restoration, component-state restoration, native-BGP and
-`BgpTcpdump` ownership, and a concrete health probe remain prerequisites for
-native lifecycle generation.
+Config-install snapshot/restoration, executable interface state and L2 mode,
+component-state restoration, native-BGP and `BgpTcpdump` ownership, and a
+concrete health probe remain prerequisites for native lifecycle generation.
+
+#### Task-free physical-interface ownership contract
+
+`PhysicalLinkRate` and `PhysicalInterfaceProfile` carry aggregate Gbps and
+lane count as typed common intent. `PhysicalInventory` accepts a typed default
+plus exact DUT-interface overrides. Its old `speed` string is parsed only at
+that compatibility boundary and only for interfaces not covered by typed
+input; complete typed overrides are authoritative. The fallback is
+transitional for inventories outside the migrated EBB set and is not exposed
+to binding or common planning.
+
+Binding attaches one resolved profile to each `ResolvedIxiaPortAssignment`.
+The common planner groups physical ownership by endpoint plus `reuse_group`,
+falling back to a dedicated logical role when no sharing group is authored.
+The stable `PHYSICAL_INTERFACE` ID contains that typed discriminator and
+logical key. It never contains a bound interface name, IXIA port, inventory
+index, topology name, or legacy profile.
+
+Each physical resource owns its exact logical link IDs. Per-AFI
+`InterfacePlan` resources reference that owner. Their `bound_interface` field
+remains a transitional projection of the owner's physical identity until
+lifecycle lowering consumes the owner directly. Common validation rejects
+multiple physical owners for one endpoint/link, multiple owners for one bound
+connection, duplicate or
+incomplete logical membership, cross-endpoint references, AFI mismatches, and
+logical-role fallback mismatches. Logical endpoint, link, role, and AFI
+references are validated even when an interface is intentionally unbound.
+EOS/BGP++ preflight additionally requires
+every EOS interface to be bound, every DUT link to have physical ownership,
+and the currently supported `100G/2-lane` profile.
+
+The all-case harness fixes the expected physical-group inventory for all 16
+EOS parity cases. Its BAG010 anchor proves one uplink owner for two links, one
+iBGP owner for sixteen links, and one BGP-monitor owner for one link, with the
+IPv4/IPv6 logical interfaces referencing those owners. The profile-free
+candidate harness includes the two bounded-ECMP physical resources in its
+exact resource inventory.
+
+This slice does not render EOS `speed`, description, admin-state, switchport,
+FEC, autonegotiation, wait, snapshot, or daemon tasks. Those remain established
+backend authority. OpenR standalone's separate `400g-8` link is intentionally
+excluded until Phase 1.9 defines helper ownership and lifecycle.
 
 Final local validation passed on 2026-08-08: the full abstraction suite passed
 599/599 tests (TestInfra `1407375402294830`), the factory golden gate passed
@@ -1021,9 +1068,19 @@ configurations, with zero additions, changes, or removals. The manifest
 SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
-This completes the task-free routing-config and routing-control-plane
-prerequisites of Diff 1.6.2. Native lifecycle, EOS setup/teardown task lowering,
-artifact assembly, and facade authority remain required for Phase 1.6 exit.
+Phase 1.6.2f final local validation passed on 2026-08-08: the full abstraction
+suite passed 614/614 tests (TestInfra `24769797987710712`), the factory golden
+gate passed 2/2 tests (TestInfra `24769797987711009`), and changed-target Pyre
+found no errors across 23 owning targets. Golden regeneration found 294
+unchanged configurations, with zero additions, changes, or removals. The
+manifest SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
+Two independent final architecture audits found no remaining P0 blocker.
+
+This completes the task-free routing-config, routing-control-plane, and
+physical-interface prerequisites of Diff 1.6.2. Native lifecycle, EOS
+setup/teardown task lowering, artifact assembly, and facade authority remain
+required for Phase 1.6 exit.
 Initial/tagged and compact/named group, session, and advertisement identities
 remain deferred to their Phase 1.7 profile migrations.
 

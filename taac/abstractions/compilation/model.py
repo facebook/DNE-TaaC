@@ -19,6 +19,10 @@ from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
 )
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceGroupKind,
+    PhysicalInterfaceProfile,
+)
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -28,6 +32,7 @@ from taac.abstractions.routing_semantics import (
 class ResourceKind(str, Enum):
     ENDPOINT = "endpoint"
     LINK = "link"
+    PHYSICAL_INTERFACE = "physical_interface"
     INTERFACE = "interface"
     BGP_ADJACENCY = "bgp_adjacency"
     POLICY = "policy"
@@ -306,6 +311,43 @@ class DutLinkPlan:
 
 
 @dataclass(frozen=True)
+class PhysicalInterfacePlan:
+    resource_id: ResourceId
+    endpoint_id: ResourceId
+    group_kind: PhysicalInterfaceGroupKind
+    logical_key: str
+    link_ids: tuple[ResourceId, ...]
+    bound_interface: str
+    profile: PhysicalInterfaceProfile
+
+    def __post_init__(self) -> None:
+        _require_kind(self.resource_id, ResourceKind.PHYSICAL_INTERFACE)
+        _require_kind(self.endpoint_id, ResourceKind.ENDPOINT)
+        if not isinstance(self.group_kind, PhysicalInterfaceGroupKind):
+            raise TypeError("physical interface group kind must be typed")
+        if not isinstance(self.logical_key, str) or not self.logical_key:
+            raise ValueError("physical interface logical key must be nonempty")
+        expected_path = (
+            *self.endpoint_id.path,
+            self.group_kind.value,
+            self.logical_key,
+        )
+        if self.resource_id.path != expected_path:
+            raise ValueError(
+                "physical interface resource ID must derive from endpoint and group"
+            )
+        if not isinstance(self.link_ids, tuple) or not self.link_ids:
+            raise ValueError("physical interface link IDs must be a nonempty tuple")
+        _require_kinds(self.link_ids, ResourceKind.LINK)
+        if len(frozenset(self.link_ids)) != len(self.link_ids):
+            raise ValueError("physical interface link IDs must be unique")
+        if not isinstance(self.bound_interface, str) or not self.bound_interface:
+            raise ValueError("physical interface binding must be nonempty")
+        if not isinstance(self.profile, PhysicalInterfaceProfile):
+            raise TypeError("physical interface profile must be typed")
+
+
+@dataclass(frozen=True)
 class InterfacePlan:
     resource_id: ResourceId
     endpoint_id: ResourceId
@@ -314,11 +356,17 @@ class InterfacePlan:
     afi: AddressFamily
     addresses: tuple[str, ...] = ()
     bound_interface: str | None = None
+    physical_interface_id: ResourceId | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.INTERFACE)
         _require_kind(self.endpoint_id, ResourceKind.ENDPOINT)
         _require_kinds(self.link_ids, ResourceKind.LINK)
+        if self.physical_interface_id is not None:
+            _require_kind(
+                self.physical_interface_id,
+                ResourceKind.PHYSICAL_INTERFACE,
+            )
 
 
 @dataclass(frozen=True)
@@ -594,6 +642,7 @@ class OpenRPlan:
 ResourcePlan = (
     EndpointPlan
     | DutLinkPlan
+    | PhysicalInterfacePlan
     | InterfacePlan
     | BgpAdjacencyPlan
     | PolicyPlan
@@ -612,6 +661,7 @@ ResourcePlan = (
 class DutPlan:
     endpoints: tuple[EndpointPlan, ...] = ()
     links: tuple[DutLinkPlan, ...] = ()
+    physical_interfaces: tuple[PhysicalInterfacePlan, ...] = ()
     interfaces: tuple[InterfacePlan, ...] = ()
     adjacencies: tuple[BgpAdjacencyPlan, ...] = ()
     policies: tuple[PolicyPlan, ...] = ()
@@ -622,12 +672,14 @@ class DutPlan:
 
     def __post_init__(self) -> None:
         _validate_unique_resource_ids(self.iter_resources())
+        _validate_physical_interface_references(self)
         _validate_component_references(self)
 
     def iter_resources(self) -> tuple[ResourcePlan, ...]:
         return (
             *self.endpoints,
             *self.links,
+            *self.physical_interfaces,
             *self.interfaces,
             *self.adjacencies,
             *self.policies,
@@ -733,6 +785,207 @@ def _validate_component_references(plan: DutPlan) -> None:
                     f"component {component.resource_id} dependency {dependency_id} "
                     "targets a different endpoint"
                 )
+
+
+def _validate_physical_interface_references(plan: DutPlan) -> None:
+    endpoints = {endpoint.resource_id: endpoint for endpoint in plan.endpoints}
+    links = {link.resource_id: link for link in plan.links}
+    physical_interfaces = {
+        interface.resource_id: interface for interface in plan.physical_interfaces
+    }
+    _validate_physical_interface_owners(
+        plan.physical_interfaces,
+        endpoints,
+        links,
+    )
+    members = _physical_interface_members(
+        plan.interfaces,
+        physical_interfaces,
+        endpoints,
+        links,
+    )
+    _validate_physical_interface_membership(physical_interfaces, members)
+
+
+def _validate_physical_interface_owners(
+    physical_interfaces: tuple[PhysicalInterfacePlan, ...],
+    endpoints: dict[ResourceId, EndpointPlan],
+    links: dict[ResourceId, DutLinkPlan],
+) -> None:
+    connection_owners: dict[tuple[ResourceId, str], ResourceId] = {}
+    link_owners: dict[tuple[ResourceId, ResourceId], ResourceId] = {}
+    for physical_interface in physical_interfaces:
+        if physical_interface.endpoint_id not in endpoints:
+            raise ValueError(
+                f"physical interface {physical_interface.resource_id} references "
+                f"unknown endpoint {physical_interface.endpoint_id}"
+            )
+        _claim_physical_links(physical_interface, links, link_owners)
+        connection = (
+            physical_interface.endpoint_id,
+            physical_interface.bound_interface,
+        )
+        prior_owner = connection_owners.get(connection)
+        if prior_owner is not None:
+            raise ValueError(
+                f"physical connection {connection!r} has multiple owners: "
+                f"{prior_owner}, {physical_interface.resource_id}"
+            )
+        connection_owners[connection] = physical_interface.resource_id
+
+
+def _claim_physical_links(
+    physical_interface: PhysicalInterfacePlan,
+    links: dict[ResourceId, DutLinkPlan],
+    owners: dict[tuple[ResourceId, ResourceId], ResourceId],
+) -> None:
+    for link_id in physical_interface.link_ids:
+        link = links.get(link_id)
+        if link is None:
+            raise ValueError(
+                f"physical interface {physical_interface.resource_id} references "
+                f"unknown link {link_id}"
+            )
+        if physical_interface.endpoint_id not in {
+            link.a_endpoint_id,
+            link.z_endpoint_id,
+        }:
+            raise ValueError(
+                f"physical interface {physical_interface.resource_id} link "
+                f"{link_id} targets a different endpoint"
+            )
+        owner_key = (physical_interface.endpoint_id, link_id)
+        prior_owner = owners.get(owner_key)
+        if prior_owner is not None:
+            raise ValueError(
+                f"link {link_id} has multiple physical owners at "
+                f"{physical_interface.endpoint_id}: {prior_owner}, "
+                f"{physical_interface.resource_id}"
+            )
+        owners[owner_key] = physical_interface.resource_id
+
+
+def _physical_interface_members(
+    interfaces: tuple[InterfacePlan, ...],
+    physical_interfaces: dict[ResourceId, PhysicalInterfacePlan],
+    endpoints: dict[ResourceId, EndpointPlan],
+    links: dict[ResourceId, DutLinkPlan],
+) -> dict[ResourceId, list[InterfacePlan]]:
+    members: dict[ResourceId, list[InterfacePlan]] = {
+        resource_id: [] for resource_id in physical_interfaces
+    }
+    for interface in interfaces:
+        _validate_logical_interface_links(interface, endpoints, links)
+        physical_id = interface.physical_interface_id
+        if interface.bound_interface is None:
+            if physical_id is not None:
+                raise ValueError(
+                    f"unbound interface {interface.resource_id} references "
+                    f"physical interface {physical_id}"
+                )
+            continue
+        if physical_id is None:
+            raise ValueError(
+                f"bound interface {interface.resource_id} has no physical interface"
+            )
+        physical_interface = physical_interfaces.get(physical_id)
+        if physical_interface is None:
+            raise ValueError(
+                f"interface {interface.resource_id} references unknown physical "
+                f"interface {physical_id}"
+            )
+        _validate_logical_physical_interface(
+            interface,
+            physical_interface,
+        )
+        members[physical_id].append(interface)
+    return members
+
+
+def _validate_logical_interface_links(
+    interface: InterfacePlan,
+    endpoints: dict[ResourceId, EndpointPlan],
+    links: dict[ResourceId, DutLinkPlan],
+) -> None:
+    if interface.endpoint_id not in endpoints:
+        raise ValueError(
+            f"interface {interface.resource_id} references unknown endpoint "
+            f"{interface.endpoint_id}"
+        )
+    for link_id in interface.link_ids:
+        link = links.get(link_id)
+        if link is None:
+            raise ValueError(
+                f"interface {interface.resource_id} references unknown link {link_id}"
+            )
+        if interface.endpoint_id not in {link.a_endpoint_id, link.z_endpoint_id}:
+            raise ValueError(
+                f"interface {interface.resource_id} link {link_id} targets a "
+                "different endpoint"
+            )
+        if interface.logical_port_role != link.logical_port_role:
+            raise ValueError(
+                f"interface {interface.resource_id} logical role does not match "
+                f"link {link_id}"
+            )
+        if interface.afi is not link.afi:
+            raise ValueError(
+                f"interface {interface.resource_id} AFI does not match link {link_id}"
+            )
+
+
+def _validate_logical_physical_interface(
+    interface: InterfacePlan,
+    physical_interface: PhysicalInterfacePlan,
+) -> None:
+    if interface.endpoint_id != physical_interface.endpoint_id:
+        raise ValueError(
+            f"interface {interface.resource_id} and physical interface "
+            f"{physical_interface.resource_id} target different endpoints"
+        )
+    if interface.bound_interface != physical_interface.bound_interface:
+        raise ValueError(
+            f"interface {interface.resource_id} binding does not match physical "
+            f"interface {physical_interface.resource_id}"
+        )
+    if not set(interface.link_ids).issubset(physical_interface.link_ids):
+        raise ValueError(
+            f"interface {interface.resource_id} links are not owned by physical "
+            f"interface {physical_interface.resource_id}"
+        )
+    if (
+        physical_interface.group_kind is PhysicalInterfaceGroupKind.LOGICAL_ROLE
+        and interface.logical_port_role != physical_interface.logical_key
+    ):
+        raise ValueError(
+            f"interface {interface.resource_id} logical role does not match "
+            f"physical interface {physical_interface.resource_id}"
+        )
+
+
+def _validate_physical_interface_membership(
+    physical_interfaces: dict[ResourceId, PhysicalInterfacePlan],
+    members: dict[ResourceId, list[InterfacePlan]],
+) -> None:
+    for physical_id, grouped_interfaces in members.items():
+        if not grouped_interfaces:
+            raise ValueError(f"physical interface {physical_id} has no members")
+        member_link_ids = {
+            link_id
+            for interface in grouped_interfaces
+            for link_id in interface.link_ids
+        }
+        member_link_count = sum(
+            len(interface.link_ids) for interface in grouped_interfaces
+        )
+        if len(member_link_ids) != member_link_count:
+            raise ValueError(
+                f"physical interface {physical_id} link membership is duplicated"
+            )
+        if member_link_ids != set(physical_interfaces[physical_id].link_ids):
+            raise ValueError(
+                f"physical interface {physical_id} link membership is incomplete"
+            )
 
 
 def _validate_ixia_internal_references(plan: IxiaPlan) -> None:

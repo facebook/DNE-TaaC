@@ -15,6 +15,9 @@ from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
 )
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceProfile,
+)
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -98,9 +101,14 @@ class ResolvedIxiaPortAssignment:
     ixia_port: str
     physical_inventory_index: int
     reuse_group: str | None
+    physical_interface_profile: PhysicalInterfaceProfile
     endpoint_label_style: IxiaEndpointPortLabelStyle = (
         IxiaEndpointPortLabelStyle.DUT_INTERFACE
     )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.physical_interface_profile, PhysicalInterfaceProfile):
+            raise TypeError("resolved physical interface profile must be typed")
 
 
 @dataclass(frozen=True)

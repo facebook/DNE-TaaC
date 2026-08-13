@@ -2,6 +2,10 @@
 # pyre-strict
 """DICE physical inventory model and concrete testbed inventories."""
 
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceProfile,
+    PhysicalLinkRate,
+)
 from taac.abstractions.physical_inventory.physical_inventory import (
     PhysicalInventory,
     VALID_USAGES,
@@ -56,6 +60,8 @@ __all__ = (
     "FSW001_QZB",
     "JSW002_M001_SNC1",
     "PhysicalInventory",
+    "PhysicalInterfaceProfile",
+    "PhysicalLinkRate",
     "QZD_FSW002",
     "QZD_LAB",
     "SSW_ELBERT_QZD1",

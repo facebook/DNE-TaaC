@@ -11,6 +11,10 @@ from taac.abstractions.config_artifact_semantics import (
     ConfigArtifactProvider,
     ConfigArtifactRef,
 )
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceProfile,
+    PhysicalLinkRate,
+)
 from taac.abstractions.routing_semantics import NetworkRole
 from taac.abstractions.topology import OpenRStandaloneLink
 from taac.test_as_a_config.types import MockDeviceInfo
@@ -46,6 +50,10 @@ class PhysicalInventory:
     # ─── DUT identity properties (optional, flat) ─────────────────────────
     mac_address: str | None = None
     speed: str = "100g-2"
+    default_physical_interface_profile: PhysicalInterfaceProfile | None = None
+    physical_interface_profile_overrides: dict[str, PhysicalInterfaceProfile] = field(
+        default_factory=dict
+    )
     router_id: str | None = None
     dut_bgp_as: int | None = None  # DUT's own local BGP AS
 
@@ -114,7 +122,28 @@ class PhysicalInventory:
             )
         return artifacts
 
+    @property
+    def physical_interface_profiles(self) -> dict[str, PhysicalInterfaceProfile]:
+        interfaces = _ixia_dut_interfaces(self.ixia_ports)
+        if not interfaces:
+            return {}
+        profiles = {
+            interface: self.physical_interface_profile_overrides[interface]
+            for interface in interfaces
+            if interface in self.physical_interface_profile_overrides
+        }
+        uncovered = tuple(
+            interface for interface in interfaces if interface not in profiles
+        )
+        if uncovered:
+            default = self.default_physical_interface_profile
+            if default is None:
+                default = _legacy_physical_interface_profile(self.speed)
+            profiles.update({interface: default for interface in uncovered})
+        return profiles
+
     def __post_init__(self) -> None:
+        _validate_physical_interface_profiles(self)
         if self.network_role is not None and not isinstance(
             self.network_role, NetworkRole
         ):
@@ -172,13 +201,75 @@ class PhysicalInventory:
             raise ValueError(
                 f"PhysicalInventory {self.device_name}: no secondary IXIA mapping is defined"
             )
+        secondary_interfaces = frozenset(
+            _ixia_dut_interfaces(self.secondary_ixia_ports)
+        )
         return replace(
             self,
             primary_ixia_chassis_ip=t.cast(str, self.secondary_ixia_chassis_ip),
             ixia_ports=list(self.secondary_ixia_ports),
             secondary_ixia_chassis_ip=None,
             secondary_ixia_ports=[],
+            physical_interface_profile_overrides={
+                interface: profile
+                for interface, profile in self.physical_interface_profile_overrides.items()
+                if interface in secondary_interfaces
+            },
         )
+
+
+def _validate_physical_interface_profiles(inventory: PhysicalInventory) -> None:
+    default = inventory.default_physical_interface_profile
+    if default is not None and not isinstance(default, PhysicalInterfaceProfile):
+        raise TypeError("default physical interface profile must be typed")
+    overrides = inventory.physical_interface_profile_overrides
+    if not isinstance(overrides, dict):
+        raise TypeError("physical interface profile overrides must be a dict")
+    known_interfaces = frozenset(
+        (
+            *_ixia_dut_interfaces(inventory.ixia_ports),
+            *_ixia_dut_interfaces(inventory.secondary_ixia_ports),
+        )
+    )
+    for interface, profile in overrides.items():
+        if not isinstance(interface, str) or not interface:
+            raise TypeError("physical interface profile keys must be nonempty strings")
+        if not isinstance(profile, PhysicalInterfaceProfile):
+            raise TypeError("physical interface profile overrides must be typed")
+        if interface not in known_interfaces:
+            raise ValueError(
+                f"physical interface profile override targets unknown interface "
+                f"{interface!r}"
+            )
+    if inventory.ixia_ports:
+        _ = inventory.physical_interface_profiles
+
+
+def _legacy_physical_interface_profile(speed: object) -> PhysicalInterfaceProfile:
+    if not isinstance(speed, str):
+        raise TypeError("legacy physical interface speed must be a string")
+    aggregate, separator, lanes = speed.partition("g-")
+    if not separator or not aggregate.isdigit() or not lanes.isdigit():
+        raise ValueError("legacy physical interface speed must use '<rate>g-<lanes>'")
+    return PhysicalInterfaceProfile(
+        rate=PhysicalLinkRate(
+            aggregate_gbps=int(aggregate),
+            lane_count=int(lanes),
+        )
+    )
+
+
+def _ixia_dut_interfaces(
+    ports: t.Iterable[tuple[str, str]],
+) -> tuple[str, ...]:
+    return tuple(
+        entry[0]
+        for entry in ports
+        if isinstance(entry, (tuple, list))
+        and len(entry) == 2
+        and isinstance(entry[0], str)
+        and entry[0]
+    )
 
 
 def _validate_ixia_port_mapping(

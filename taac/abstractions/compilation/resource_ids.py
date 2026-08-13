@@ -11,6 +11,9 @@ from taac.abstractions.compilation.model import (
     RolePolicyKey,
 )
 from taac.abstractions.component_semantics import ComponentRole
+from taac.abstractions.physical_interface_semantics import (
+    PhysicalInterfaceGroupKind,
+)
 from taac.abstractions.topology.model import EndpointSpec
 
 
@@ -39,6 +42,23 @@ def interface_resource_id(
     return ResourceId(
         ResourceKind.INTERFACE,
         (endpoint_name, logical_port_role, afi.value),
+    )
+
+
+def physical_interface_resource_id(
+    endpoint_id: ResourceId,
+    group_kind: PhysicalInterfaceGroupKind,
+    logical_key: str,
+) -> ResourceId:
+    if endpoint_id.kind is not ResourceKind.ENDPOINT:
+        raise ValueError("physical interface endpoint ID must have endpoint kind")
+    if not isinstance(group_kind, PhysicalInterfaceGroupKind):
+        raise TypeError("physical interface group kind must be typed")
+    if not isinstance(logical_key, str) or not logical_key:
+        raise ValueError("physical interface logical key must be nonempty")
+    return ResourceId(
+        ResourceKind.PHYSICAL_INTERFACE,
+        (*endpoint_id.path, group_kind.value, logical_key),
     )
 
 
@@ -149,6 +169,7 @@ __all__ = (
     "is_dut_endpoint",
     "link_resource_id",
     "openr_resource_id",
+    "physical_interface_resource_id",
     "policy_binding_resource_id",
     "policy_resource_id",
     "role_policy_resource_id",
