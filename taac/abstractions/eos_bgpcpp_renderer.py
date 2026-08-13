@@ -32,7 +32,13 @@ from taac.abstractions.compilation.model import (
     PhysicalInterfacePlan,
     ResourceId,
     ResourceKind,
+    RoutingConfigPlan,
 )
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactProvider,
+    ConfigArtifactRef,
+)
+from pyre_extensions import none_throws
 from taac.test_as_a_config import types as taac_types
 
 
@@ -50,6 +56,13 @@ class UnsupportedEosBgpCppLifecycleRenderingError(ValueError):
 
 class EosPhysicalLifecycleAction(str, Enum):
     REALIZE_AND_VERIFY = "realize_and_verify"
+
+
+class EosRoutingConfigLifecycleAction(str, Enum):
+    INSTALL_AND_VERIFY = "install_and_verify"
+
+
+_EOS_BGPCPP_CONFIG_DESTINATION = "/mnt/flash/bgpcpp_config"
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,52 @@ class EosPhysicalLifecycleCleanupIntent:
             for operation_id in self.operation_ids
         ):
             raise ValueError("EOS physical cleanup must target physical interfaces")
+
+
+@dataclass(frozen=True)
+class EosRoutingConfigLifecycleTaskIntent:
+    action: EosRoutingConfigLifecycleAction
+    hostname: str
+    operation_id: ResourceId
+    source: ConfigArtifactRef
+    destination: str
+    required_features: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.action is not EosRoutingConfigLifecycleAction.INSTALL_AND_VERIFY:
+            raise TypeError("EOS routing-config lifecycle action must be typed")
+        _validate_routing_config_intent_fields(
+            self.hostname,
+            self.operation_id,
+            self.destination,
+        )
+        if not isinstance(self.source, ConfigArtifactRef):
+            raise TypeError("EOS routing-config source must be typed")
+        if self.source.provider is not ConfigArtifactProvider.CONFIGERATOR:
+            raise ValueError("EOS routing-config source must be Configerator-owned")
+        if not isinstance(self.required_features, tuple) or any(
+            not isinstance(feature, str) or not feature
+            for feature in self.required_features
+        ):
+            raise ValueError(
+                "EOS routing-config required features must be nonempty strings"
+            )
+        if len(frozenset(self.required_features)) != len(self.required_features):
+            raise ValueError("EOS routing-config required features must be unique")
+
+
+@dataclass(frozen=True)
+class EosRoutingConfigLifecycleCleanupIntent:
+    hostname: str
+    operation_id: ResourceId
+    destination: str
+
+    def __post_init__(self) -> None:
+        _validate_routing_config_intent_fields(
+            self.hostname,
+            self.operation_id,
+            self.destination,
+        )
 
 
 @dataclass(frozen=True)
@@ -160,8 +219,8 @@ class EosBgpCppEndpointBaseRenderer:
 
 
 @dataclass(frozen=True)
-class EosBgpCppPhysicalLifecycleRenderer:
-    """Lowers exact physical intent without making it artifact-authoritative."""
+class EosBgpCppLifecycleRenderer:
+    """Lowers exact EOS lifecycle intent without artifact authority."""
 
     def render(
         self,
@@ -170,19 +229,24 @@ class EosBgpCppPhysicalLifecycleRenderer:
     ) -> DutLifecycleRenderResult[object]:
         endpoint, hostname = _required_eos_dut_endpoint(
             plan,
-            subject="physical lifecycle",
+            subject="lifecycle",
             error_type=UnsupportedEosBgpCppLifecycleRenderingError,
         )
         physical_by_id = {
             physical.resource_id: physical for physical in plan.physical_interfaces
         }
+        routing_config = _required_routing_config(plan, endpoint)
+        supported_kinds = {
+            ResourceKind.PHYSICAL_INTERFACE,
+            ResourceKind.ROUTING_CONFIG,
+        }
         operations = tuple(
             operation
             for operation in lifecycle.setup_order()
-            if operation.resource_id.kind is ResourceKind.PHYSICAL_INTERFACE
+            if operation.resource_id.kind in supported_kinds
         )
         expected_ids = (
-            tuple(physical_by_id)
+            (*tuple(physical_by_id), routing_config.resource_id)
             if endpoint.setup_mode is EndpointSetupMode.FULL
             else ()
         )
@@ -191,7 +255,7 @@ class EosBgpCppPhysicalLifecycleRenderer:
             operation_ids
         ) != frozenset(expected_ids):
             raise UnsupportedEosBgpCppLifecycleRenderingError(
-                "EOS/BGP++ physical lifecycle coverage mismatch: "
+                "EOS/BGP++ lifecycle coverage mismatch: "
                 f"expected={expected_ids}, actual={operation_ids}"
             )
 
@@ -199,7 +263,8 @@ class EosBgpCppPhysicalLifecycleRenderer:
             self._render_fragment(
                 plan,
                 hostname,
-                physical_by_id[operation.resource_id],
+                physical_by_id,
+                routing_config,
                 operation,
             )
             for operation in operations
@@ -207,28 +272,21 @@ class EosBgpCppPhysicalLifecycleRenderer:
         teardown_ids = tuple(
             operation.resource_id
             for operation in lifecycle.teardown_order()
-            if operation.resource_id.kind is ResourceKind.PHYSICAL_INTERFACE
+            if operation.resource_id.kind in supported_kinds
         )
         expected_teardown_ids = tuple(reversed(operation_ids))
         if teardown_ids != expected_teardown_ids:
             raise UnsupportedEosBgpCppLifecycleRenderingError(
-                "EOS/BGP++ physical cleanup must reverse setup order: "
+                "EOS/BGP++ cleanup must reverse setup order: "
                 f"expected={expected_teardown_ids}, actual={teardown_ids}"
             )
         result = DutLifecycleRenderResult[object](
             consumed_operation_ids=operation_ids,
             fragments=fragments,
-            cleanup_fragments=(
-                DutLifecycleCleanupFragment(
-                    operation_ids=teardown_ids,
-                    task=EosPhysicalLifecycleCleanupIntent(
-                        hostname=hostname,
-                        operation_ids=teardown_ids,
-                    ),
-                ),
-            )
-            if teardown_ids
-            else (),
+            cleanup_fragments=self._render_cleanup_fragments(
+                hostname,
+                teardown_ids,
+            ),
         )
         result.validate(plan, lifecycle)
         return result
@@ -237,9 +295,18 @@ class EosBgpCppPhysicalLifecycleRenderer:
         self,
         plan: DutPlan,
         hostname: str,
-        physical: PhysicalInterfacePlan,
+        physical_by_id: dict[ResourceId, PhysicalInterfacePlan],
+        routing_config: RoutingConfigPlan,
         operation: LifecycleOperation,
     ) -> DutLifecycleFragment[object]:
+        if operation.resource_id.kind is ResourceKind.ROUTING_CONFIG:
+            return self._render_routing_config_fragment(
+                plan,
+                hostname,
+                routing_config,
+                operation,
+            )
+        physical = physical_by_id[operation.resource_id]
         _validate_physical_operation(operation)
         ipv4_cidrs, ipv6_cidrs = _physical_cidrs(plan, physical.resource_id)
         return DutLifecycleFragment(
@@ -257,6 +324,176 @@ class EosBgpCppPhysicalLifecycleRenderer:
                 ),
             ),
         )
+
+    def _render_routing_config_fragment(
+        self,
+        plan: DutPlan,
+        hostname: str,
+        routing_config: RoutingConfigPlan,
+        operation: LifecycleOperation,
+    ) -> DutLifecycleFragment[object]:
+        physical_ids = tuple(
+            physical.resource_id
+            for physical in plan.physical_interfaces
+            if physical.endpoint_id == routing_config.endpoint_id
+        )
+        _validate_routing_config_operation(
+            operation,
+            routing_config,
+            physical_ids,
+        )
+        source = none_throws(routing_config.source)
+        return DutLifecycleFragment(
+            operation_id=routing_config.resource_id,
+            post_ixia_tasks=(
+                EosRoutingConfigLifecycleTaskIntent(
+                    action=EosRoutingConfigLifecycleAction.INSTALL_AND_VERIFY,
+                    hostname=hostname,
+                    operation_id=routing_config.resource_id,
+                    source=source,
+                    destination=_EOS_BGPCPP_CONFIG_DESTINATION,
+                    required_features=routing_config.required_features,
+                ),
+            ),
+        )
+
+    def _render_cleanup_fragments(
+        self,
+        hostname: str,
+        teardown_ids: tuple[ResourceId, ...],
+    ) -> tuple[DutLifecycleCleanupFragment[object], ...]:
+        routing_config_ids = tuple(
+            operation_id
+            for operation_id in teardown_ids
+            if operation_id.kind is ResourceKind.ROUTING_CONFIG
+        )
+        physical_ids = tuple(
+            operation_id
+            for operation_id in teardown_ids
+            if operation_id.kind is ResourceKind.PHYSICAL_INTERFACE
+        )
+        if teardown_ids != (*routing_config_ids, *physical_ids):
+            raise UnsupportedEosBgpCppLifecycleRenderingError(
+                "EOS/BGP++ cleanup must restore routing config before interfaces"
+            )
+        return (
+            *(
+                DutLifecycleCleanupFragment(
+                    operation_ids=(operation_id,),
+                    task=EosRoutingConfigLifecycleCleanupIntent(
+                        hostname=hostname,
+                        operation_id=operation_id,
+                        destination=_EOS_BGPCPP_CONFIG_DESTINATION,
+                    ),
+                )
+                for operation_id in routing_config_ids
+            ),
+            *(
+                (
+                    DutLifecycleCleanupFragment(
+                        operation_ids=physical_ids,
+                        task=EosPhysicalLifecycleCleanupIntent(
+                            hostname=hostname,
+                            operation_ids=physical_ids,
+                        ),
+                    ),
+                )
+                if physical_ids
+                else ()
+            ),
+        )
+
+
+def _required_routing_config(
+    plan: DutPlan,
+    endpoint: EndpointPlan,
+) -> RoutingConfigPlan:
+    if len(plan.routing_configs) != 1:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            "EOS/BGP++ lifecycle rendering requires exactly one routing config; "
+            f"found {len(plan.routing_configs)}"
+        )
+    routing_config = plan.routing_configs[0]
+    if routing_config.endpoint_id != endpoint.resource_id:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing config {routing_config.resource_id} targets "
+            f"{routing_config.endpoint_id}, expected {endpoint.resource_id}"
+        )
+    if routing_config.routing_driver != "bgpcpp":
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing config {routing_config.resource_id} has unsupported driver "
+            f"{routing_config.routing_driver!r}"
+        )
+    source = routing_config.source
+    if endpoint.setup_mode is EndpointSetupMode.FULL and source is None:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing config {routing_config.resource_id} has no artifact source"
+        )
+    if (
+        source is not None
+        and source.provider is not ConfigArtifactProvider.CONFIGERATOR
+    ):
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing config {routing_config.resource_id} has unsupported source "
+            f"provider {source.provider.value!r}"
+        )
+    return routing_config
+
+
+def _validate_routing_config_operation(
+    operation: LifecycleOperation,
+    routing_config: RoutingConfigPlan,
+    physical_ids: tuple[ResourceId, ...],
+) -> None:
+    expected = (
+        routing_config.resource_id,
+        OwnershipMode.SNAPSHOT_RESTORED,
+        RestorationMode.FIRST_SNAPSHOT,
+        ReadinessMode.EXACT_READBACK,
+        physical_ids,
+        True,
+    )
+    actual = (
+        operation.resource_id,
+        operation.ownership,
+        operation.restoration,
+        operation.readiness,
+        operation.dependencies,
+        operation.state_changing,
+    )
+    dependencies_match = len(operation.dependencies) == len(physical_ids) and frozenset(
+        operation.dependencies
+    ) == frozenset(physical_ids)
+    if (
+        actual[:4] != expected[:4]
+        or not dependencies_match
+        or actual[5:] != expected[5:]
+    ):
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing-config operation {operation.resource_id} has unsupported "
+            f"lifecycle contract: expected={expected}, actual={actual}"
+        )
+
+
+def _validate_routing_config_intent_fields(
+    hostname: str,
+    operation_id: ResourceId,
+    destination: str,
+) -> None:
+    if not isinstance(hostname, str) or not hostname:
+        raise ValueError("EOS routing-config hostname must be nonempty")
+    if operation_id.kind is not ResourceKind.ROUTING_CONFIG:
+        raise ValueError("EOS routing-config lifecycle operation must target config")
+    if (
+        not isinstance(destination, str)
+        or not destination.startswith("/")
+        or not destination.isascii()
+        or any(
+            not (character.isalnum() or character in "/._-")
+            for character in destination
+        )
+    ):
+        raise ValueError("EOS routing-config destination must be a safe absolute path")
 
 
 def _validate_physical_operation(operation: LifecycleOperation) -> None:
@@ -370,10 +607,13 @@ def _required_eos_dut_endpoint(
 __all__ = (
     "EosBgpCppEndpointBaseRenderer",
     "EosBgpCppHostOsRenderer",
-    "EosBgpCppPhysicalLifecycleRenderer",
+    "EosBgpCppLifecycleRenderer",
     "EosPhysicalLifecycleAction",
     "EosPhysicalLifecycleCleanupIntent",
     "EosPhysicalLifecycleTaskIntent",
+    "EosRoutingConfigLifecycleAction",
+    "EosRoutingConfigLifecycleCleanupIntent",
+    "EosRoutingConfigLifecycleTaskIntent",
     "UnsupportedEosBgpCppEndpointBaseRenderingError",
     "UnsupportedEosBgpCppHostOsRenderingError",
     "UnsupportedEosBgpCppLifecycleRenderingError",

@@ -937,6 +937,10 @@ of Phase 1.5:
     1.6.3a, lower exact EOS physical-interface realization and reverse-cleanup
     intent from the common lifecycle while leaving executable tasks and
     established artifacts authoritative.
+25. **Completed Phase 1.6 routing-config lifecycle shadow prerequisite:** Diff
+    1.6.3b, lower Configerator installation, exact-readback, and
+    first-snapshot restoration intent after physical realization without
+    changing executable tasks or artifact authority.
 
 #### Resource-derived IXIA presentation
 
@@ -1159,6 +1163,36 @@ Final local validation passed on 2026-08-11: the full abstraction suite passed
 errors across 10 owning targets. Golden regeneration found 294 unchanged
 configurations, with zero additions, changes, or removals. The manifest
 SHA-256 remained
+`b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
+
+#### EOS routing-config lifecycle shadow rendering
+
+The EOS lifecycle renderer now consumes the routed DUT's single
+`RoutingConfigPlan` after its aggregate physical owners. Full setup requires a
+typed Configerator source, the `bgpcpp` driver, exact-readback readiness,
+first-snapshot restoration, and dependencies on every physical owner in plan
+order. Missing sources, driver drift, dependency drift, weaker readiness, and
+non-snapshot ownership fail before an intent is emitted.
+
+The task-free post-IXIA intent binds the stable config operation to its typed
+artifact source, required feature contract, and backend-owned
+`/mnt/flash/bgpcpp_config` destination. Cleanup restores the routing config
+before the reverse-ordered physical cleanup, matching the common lifecycle's
+exact teardown order. Changing only the Configerator source changes only the
+install intent; skip and verify-only modes still emit no lifecycle fragments.
+
+This remains a shadow contract. It does not fetch or install the artifact,
+capture prior bytes or absence, perform content readback, restore or remove the
+destination, create TAAC tasks, merge fragments into artifacts, or change
+facade authority.
+
+Final local validation passed on 2026-08-11: the focused lifecycle and
+candidate tests passed 23/23 (TestInfra `27021597802079640`), the full
+abstraction suite passed 692/692 tests (TestInfra `2251800199512017`), and the
+factory golden gate passed 2/2 tests (TestInfra `21110623291151448`).
+Changed-target Pyre found no errors across 9 owning targets. Golden
+regeneration found 294 unchanged configurations, with zero additions, changes,
+or removals. The manifest SHA-256 remained
 `b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
 
 Initial/tagged and compact/named group, session, and advertisement identities
