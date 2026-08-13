@@ -910,6 +910,10 @@ of Phase 1.5:
 18. **Completed Phase 1.6 identity prerequisite:** Diff 1.6.2b, normalize
     endpoint-label style into `IxiaPortPlan` and remove planner-synthesized
     port identities.
+19. **Completed Phase 1.6 integration gate:** Diff 1.6.2c, compile a
+    profile-free bounded topology with an empty identity sidecar through the
+    real EOS endpoint and shared IXIA `BasicPortConfig` composition chains
+    while a compatibility stub remains artifact authority.
 
 #### Resource-derived IXIA presentation
 
@@ -935,9 +939,11 @@ compose without legacy identity.
 
 The current bounded fixture continues authoring child legacy names and indices
 solely to preserve established artifact bytes until its Phase 1.7 migration.
-The immediate Diff 1.6.2c gate is one profile-free, empty-sidecar candidate
-compilation through both resource-keyed endpoint and `BasicPortConfig`
-composition chains, without changing facade authority.
+Diff 1.6.2c now proves that independently named profile-free bounded
+topologies produce identical semantic plans and resource-ordered endpoint and
+`BasicPortConfig` compositions from an empty identity sidecar. The adapter
+returns marker artifacts only, proving that this integration gate does not
+change facade or artifact authority.
 
 This completes the IXIA presentation portion of Diff 1.6.2. Native lifecycle,
 EOS setup/teardown task lowering, artifact assembly, and facade authority
