@@ -39,6 +39,7 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     PEERGROUP_IBGP_V6,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
+    BgpMonScope,
     create_standard_prechecks,
 )
 from taac.test_as_a_config import types as taac_types
@@ -188,7 +189,7 @@ def create_bgp_ug_peer_lifecycle_test_config(
             peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=_EXPECTED_ESTABLISHED_SESSIONS,
-            exclude_bgp_mon=True,
+            bgp_mon=BgpMonScope(exclude=True),
             # Precheck runs ~15-20s after the heavy full-scale setup, while bgpcpp
             # is still churning through initial convergence (~1272 sessions / ~1M
             # routes), so the 1-min load transiently exceeds the default 4.0

@@ -61,8 +61,9 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     RssDeltaConfig,
     RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
 )
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    IXIA_BGP_MON_IC_PARENT_NETWORK,
+from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
+    bgp_mon_ignore_prefix,
+    BgpMonScope,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
@@ -174,7 +175,7 @@ def get_bgp_ebb_daemon_restart_playbook(
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             expected_established_sessions=expected_established_sessions,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(
@@ -304,7 +305,7 @@ def get_bgp_ebb_cold_start_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             expected_established_sessions=expected_established_sessions,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             fail_on_eor_expired=fail_on_eor_expired,
             # Observe-only characterization postchecks (results land in the
             # POST-HEALTH CHECK RESULTS table). CPU percentile is reported from
@@ -400,7 +401,7 @@ def get_bgp_ebb_attribute_churn_playbook(
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=total_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             full_session_snapshot=True,
         ),
     )
@@ -519,7 +520,7 @@ def get_bgp_ebb_route_storm_playbook(
             expected_established_sessions=total_session_count,
             check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(
@@ -649,7 +650,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(
@@ -787,7 +788,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             cpu_baseline=cpu_baseline,
             expected_established_sessions=profile_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             route_count_expected=expected_route_count,
         ),
     )
@@ -852,9 +853,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
                 expected_established_sessions=expected_established_sessions,
                 parent_prefixes_to_ignore=(
-                    [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
-                    if exclude_bgp_mon
-                    else []
+                    [bgp_mon_ignore_prefix()] if exclude_bgp_mon else []
                 ),
             ),
         ],
@@ -949,7 +948,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             expected_established_sessions=expected_established_sessions,
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
         ),
@@ -988,7 +987,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             expected_established_sessions=expected_established_sessions,
             convergence_wait_seconds=oscillation_interval_seconds // 2,
             parent_prefixes_to_ignore=(
-                [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"] if exclude_bgp_mon else None
+                BgpMonScope(exclude=exclude_bgp_mon).ignore_prefixes()
             ),
         ),
     )
@@ -1046,8 +1045,10 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=expected_established_sessions,
-            exclude_bgp_mon=exclude_bgp_mon,
-            bgp_mon_parent_network=bgp_mon_parent_network,
+            bgp_mon=BgpMonScope(
+                exclude=exclude_bgp_mon,
+                parent_network=bgp_mon_parent_network,
+            ),
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
         ),
     )
@@ -1126,8 +1127,10 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=expected_established_sessions,
-            exclude_bgp_mon=exclude_bgp_mon,
-            bgp_mon_parent_network=bgp_mon_parent_network,
+            bgp_mon=BgpMonScope(
+                exclude=exclude_bgp_mon,
+                parent_network=bgp_mon_parent_network,
+            ),
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
         ),
     )
@@ -1190,7 +1193,7 @@ def get_bgp_ebb_longevity_playbook(
         ProfileContext(
             postcheck_thresholds=postcheck_thresholds,
             check_bgp_convergence=False,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(
@@ -1251,7 +1254,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
         ),
     )
@@ -1334,7 +1337,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
         ),
     )
@@ -1431,7 +1434,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(
@@ -1524,7 +1527,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
         ),
@@ -1613,7 +1616,7 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
         ),
@@ -1675,7 +1678,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
         ProfileContext(
             check_bgp_convergence=True,
             convergence_threshold=convergence_threshold,
-            exclude_bgp_mon=exclude_bgp_mon,
+            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
         ),
     )
     return Playbook(

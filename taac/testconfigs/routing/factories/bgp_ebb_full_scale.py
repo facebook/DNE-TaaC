@@ -76,6 +76,7 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     PEERGROUP_IBGP_V6,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
+    BgpMonScope,
     create_standard_postchecks,
     create_standard_prechecks,
     create_standard_snapshot_checks,
@@ -362,11 +363,11 @@ def _tc7_health_checks() -> tuple[
         cpu_baseline=12.0,
         check_ibgp_pnh=True,
         check_hardware_capacity=False,
-        exclude_bgp_mon=True,
+        bgp_mon=BgpMonScope(exclude=True),
     )
     postchecks = create_standard_postchecks(
         expected_established_session_count=_TC7_EXPECTED_SESSION_COUNT,
-        exclude_bgp_mon=True,
+        bgp_mon=BgpMonScope(exclude=True),
     )
     return (
         prechecks,
@@ -374,7 +375,7 @@ def _tc7_health_checks() -> tuple[
         create_standard_snapshot_checks(
             skip_flap_check=True,
             skip_uptime_check=True,
-            exclude_bgp_mon=True,
+            bgp_mon=BgpMonScope(exclude=True),
         ),
     )
 

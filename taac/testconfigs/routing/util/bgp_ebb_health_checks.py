@@ -1,4 +1,6 @@
 # pyre-unsafe
+import dataclasses
+
 from taac.constants import Gigabyte
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_convergence_check,
@@ -132,6 +134,40 @@ def bgp_mon_ignore_prefix(bgp_mon_parent_network: str | None = None) -> str:
     return f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"
 
 
+@dataclasses.dataclass(frozen=True)
+class BgpMonScope:
+    """Which BGP-MON peers the standard checks exclude, and on which chassis.
+
+    ``exclude`` and ``parent_network`` are meaningless apart: excluding without
+    knowing the chassis excludes the wrong subnet, and naming a chassis while
+    not excluding does nothing. Passing them as two independent kwargs made it
+    possible to thread one and forget the other -- which is exactly what
+    happened in ``_soak_no_precheck``, whose postchecks took ``exclude_bgp_mon``
+    but not the parent network. Binding them into one value makes that class of
+    omission unrepresentable, and means a future chassis-varying field is added
+    here rather than at every call site.
+    """
+
+    exclude: bool = True
+    parent_network: str | None = None
+
+    def ignore_prefixes(self) -> list[str] | None:
+        """Return the ``parent_prefixes_to_ignore`` entries for this scope.
+
+        Returns:
+            A single-entry list holding the chassis BGP-MON parent prefix, or
+            None when BGP-MON peers are not excluded (the checks' own "no
+            prefixes to ignore" sentinel).
+        """
+        return [bgp_mon_ignore_prefix(self.parent_network)] if self.exclude else None
+
+
+# Shared default for the three factories. Hoisted to module scope because a
+# constructor call in an argument default is evaluated once at definition time
+# (FLAKE8 B008); BgpMonScope is frozen, so one shared instance is safe.
+DEFAULT_BGP_MON_SCOPE = BgpMonScope()
+
+
 def create_standard_prechecks(
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -145,8 +181,7 @@ def create_standard_prechecks(
     rp_file_path: str | None = None,
     bgp_session_retry_count: int = _BGP_SESSION_RETRY_COUNT,
     bgp_session_retry_delay_seconds: float = _BGP_SESSION_RETRY_DELAY_SECONDS,
-    exclude_bgp_mon: bool = True,
-    bgp_mon_parent_network: str | None = None,
+    bgp_mon: BgpMonScope = DEFAULT_BGP_MON_SCOPE,
     rib_fib_precheck_json_params: dict | None = None,
     rib_fib_precheck_retry_count: int = _RIB_FIB_RETRY_COUNT,
     rib_fib_precheck_retry_delay_seconds: int = _RIB_FIB_RETRY_DELAY_SECONDS,
@@ -184,9 +219,10 @@ def create_standard_prechecks(
         bgp_session_retry_delay_seconds: Base delay in seconds before the
             first retry (default 10.0). Subsequent delays grow by 1.5x:
             10s, 15s, 22.5s.
-        exclude_bgp_mon: When True, exclude BGP_MON peers from session
-            establish checks via ``parent_prefixes_to_ignore``. BGP_MON IXIA peers
-            flap frequently and cause false health check failures.
+        bgp_mon: Which BGP-MON peers to exclude from session establish checks
+            via ``parent_prefixes_to_ignore``, and on which chassis. BGP_MON
+            IXIA peers flap frequently and cause false health check failures,
+            so the default excludes them on the default chassis.
         rib_fib_precheck_json_params: Optional extra params forwarded to the
             RIB-FIB consistency precheck (e.g. parent prefixes to ignore).
             Mirrors ``rib_fib_json_params`` on ``create_standard_postchecks``.
@@ -226,9 +262,7 @@ def create_standard_prechecks(
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
 
-    bgp_mon_ignore = (
-        [bgp_mon_ignore_prefix(bgp_mon_parent_network)] if exclude_bgp_mon else None
-    )
+    bgp_mon_ignore = bgp_mon.ignore_prefixes()
 
     prechecks = [
         # Pre-condition 1: Verify no established BGP sessions between DUT and traffic generators
@@ -360,8 +394,7 @@ def create_standard_postchecks(
     bgp_session_retry_delay_seconds: float = _BGP_SESSION_RETRY_DELAY_SECONDS,
     rib_fib_retry_count: int = _RIB_FIB_RETRY_COUNT,
     rib_fib_retry_delay_seconds: float = _RIB_FIB_RETRY_DELAY_SECONDS,
-    exclude_bgp_mon: bool = True,
-    bgp_mon_parent_network: str | None = None,
+    bgp_mon: BgpMonScope = DEFAULT_BGP_MON_SCOPE,
     rib_fib_record_heal_latency: bool = True,
     rib_fib_heal_latency_max_sec: int = _RIB_FIB_HEAL_LATENCY_MAX_SEC,
     rib_fib_heal_latency_poll_sec: int = _RIB_FIB_HEAL_LATENCY_POLL_SEC,
@@ -413,11 +446,12 @@ def create_standard_postchecks(
         rib_fib_retry_delay_seconds: Base delay in seconds before the
             first retry (default 30.0). Subsequent delays grow by 1.5x:
             30s, 45s, 67.5s, 101s, 152s (re-checks at ~30/75/142/244/396s).
-        exclude_bgp_mon: When True, exclude BGP_MON peers from session
-            establish checks via ``parent_prefixes_to_ignore``, and skip the
-            BGP_TCPDUMP_CHECK (tcpdump captures on ``interface: any``
-            which includes BGP_MON traffic that cannot be filtered by
-            peer address in the grep-based analyzer).
+        bgp_mon: Which BGP-MON peers to exclude from the session establish and
+            peer-route checks via ``parent_prefixes_to_ignore``, and on which
+            chassis. BGP_MON IXIA peers flap frequently and cause false health
+            check failures, so the default excludes them on the default
+            chassis. Note this does NOT gate the BGP_TCPDUMP_CHECK, which is
+            added purely on the message-type args above.
         rib_fib_record_heal_latency: Opt in to the post-verdict heal-latency
             probe on RIB-FIB postcheck FAIL (paste P2390924278). Default
             **True** for all EBB conveyor configs so a postcheck FAIL is
@@ -443,9 +477,7 @@ def create_standard_postchecks(
     if daemons_to_check is None:
         daemons_to_check = ["FibBgpGrpc"]
 
-    bgp_mon_ignore = (
-        [bgp_mon_ignore_prefix(bgp_mon_parent_network)] if exclude_bgp_mon else None
-    )
+    bgp_mon_ignore = bgp_mon.ignore_prefixes()
 
     postchecks: list[PointInTimeHealthCheck] = []
 
@@ -540,8 +572,7 @@ def create_standard_snapshot_checks(
     post_snapshot_checkpoint_id: str | None = None,
     expected_peer_identity: dict[str, str] | None = None,
     parent_prefixes_to_ignore: list[str] | None = None,
-    exclude_bgp_mon: bool = True,
-    bgp_mon_parent_network: str | None = None,
+    bgp_mon: BgpMonScope = DEFAULT_BGP_MON_SCOPE,
 ) -> list[SnapshotHealthCheck]:
     """
     Create standard snapshot checks for BGP tests.
@@ -556,9 +587,10 @@ def create_standard_snapshot_checks(
             or get_update_packing_setup_tasks.
         parent_prefixes_to_ignore: Optional list of CIDR prefixes to ignore in
             BGP session snapshot checks (e.g. ["10.171.28.0/24"] to skip iBGP MP Plane 4 IPv4 peers)
-        exclude_bgp_mon: When True, exclude BGP_MON peers from snapshot
-            checks via ``parent_prefixes_to_ignore``. BGP_MON IXIA peers
-            flap frequently and cause false snapshot check failures.
+        bgp_mon: Which BGP-MON peers to exclude from snapshot checks (appended
+            to ``parent_prefixes_to_ignore``), and on which chassis. BGP_MON
+            IXIA peers flap frequently and cause false snapshot check
+            failures, so the default excludes them on the default chassis.
 
     Returns:
         List of standard snapshot health checks
@@ -566,8 +598,7 @@ def create_standard_snapshot_checks(
     # Lazy import to break a load-time circular import (see
     # create_standard_prechecks); required for TAAC_OSS=1.
     all_prefixes_to_ignore = list(parent_prefixes_to_ignore or [])
-    if exclude_bgp_mon:
-        all_prefixes_to_ignore.append(bgp_mon_ignore_prefix(bgp_mon_parent_network))
+    all_prefixes_to_ignore.extend(bgp_mon.ignore_prefixes() or [])
 
     return [
         create_core_dumps_snapshot_check(),
