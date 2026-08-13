@@ -8,7 +8,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Dict, FrozenSet, List, Optional, Union
 
 from neteng.test_infra.ixia.ixnetwork_restpy.ixia_config_thrift import (
     types as ixia_config_types,
@@ -1255,6 +1255,42 @@ class UpdateSwitchOption(Enum):
     UPDATE_BINARY = "update_binary"  # update binary only as to force both agent and qsfp binary to be updated
     QSFP_CONFIG = "qsfp_config"
     LOGGING_CONFIG = "logging_config"
+
+
+class ProdLikeEnvOption(Enum):
+    """Individually selectable phases of a prod-like environment setup.
+
+    Passing none of these runs every phase (a full native->prod-like setup).
+    Passing a subset runs only those phases, which is only allowed on a switch
+    that is already prod-like -- see ProdLikeEnvHandler.setup_prod_like_env.
+    """
+
+    # fbpkg.fetch wedge_agent + qsfp_service and enable their systemd units
+    BINARIES = "binaries"
+    # Push the agent and QSFP configs, with the local mutations applied
+    CONFIGS = "configs"
+    # Verify the SAI SDK ships in the package and install the native SDK kmod
+    SDK = "sdk"
+    # Fetch the transceiver firmware images qsfp_service upgrades optics with
+    OPTICS_FIRMWARE = "optics_firmware"
+    # rsyslog + logrotate for the agent/qsfp logs
+    LOGGING = "logging"
+    # Stop services before the mutating phases, start + health check after
+    SERVICES = "services"
+
+
+# Phases that change what the agent or qsfp_service would run with. None of
+# them take effect until a restart, so selecting any of them also selects
+# SERVICES unless the caller opts out with skip_services. LOGGING is
+# deliberately absent: it restarts rsyslog, not the agent.
+PROD_LIKE_MUTATING_OPTIONS: FrozenSet[ProdLikeEnvOption] = frozenset(
+    {
+        ProdLikeEnvOption.BINARIES,
+        ProdLikeEnvOption.CONFIGS,
+        ProdLikeEnvOption.SDK,
+        ProdLikeEnvOption.OPTICS_FIRMWARE,
+    }
+)
 
 
 FSDB_PORT: int = 5908
