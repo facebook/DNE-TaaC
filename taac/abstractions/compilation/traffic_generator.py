@@ -7,6 +7,9 @@ import typing as t
 from dataclasses import dataclass, field
 from enum import Enum
 
+from taac.abstractions.compilation.ixia_presentation import (
+    resolve_ixia_port_presentations,
+)
 from taac.abstractions.compilation.legacy_ixia_identity import (
     LegacyIxiaIdentitySidecar,
 )
@@ -165,6 +168,13 @@ class TrafficGeneratorEndpointRenderRequest:
         sessions_by_group = {
             session.device_group_id: session for session in request.plan.bgp_sessions
         }
+        presentations_by_port_id = {
+            presentation.resource_id: presentation
+            for presentation in resolve_ixia_port_presentations(
+                request.plan,
+                request.legacy_identity,
+            )
+        }
         ports = []
         for port in request.plan.ports:
             relationships: set[PeerRelationship] = set()
@@ -182,16 +192,15 @@ class TrafficGeneratorEndpointRenderRequest:
                     "relationship; found "
                     f"{tuple(sorted(relationships, key=lambda item: item.value))}"
                 )
-            identity = request.legacy_identity.port_identity(port.resource_id)
-            if identity is None:
-                raise ValueError(
-                    f"IXIA port {port.resource_id} has no endpoint label identity"
-                )
             ports.append(
                 TrafficGeneratorEndpointPortRequest(
                     port=port,
                     relationship=next(iter(relationships)),
-                    ixia_port_label=identity.endpoint_ixia_port_label,
+                    ixia_port_label=(
+                        presentations_by_port_id[
+                            port.resource_id
+                        ].endpoint_ixia_port_label
+                    ),
                 )
             )
         return cls(

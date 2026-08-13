@@ -907,8 +907,11 @@ of Phase 1.5:
 17. **Completed Phase 1.6 identity prerequisite:** Diff 1.6.2a, derive
     partitioned IXIA group, session, and advertisement presentation from
     stable resource IDs while retaining field-scoped compatibility overrides.
+18. **Completed Phase 1.6 identity prerequisite:** Diff 1.6.2b, normalize
+    endpoint-label style into `IxiaPortPlan` and remove planner-synthesized
+    port identities.
 
-#### Resource-derived partitioned IXIA presentation
+#### Resource-derived IXIA presentation
 
 Partitioned dual-stack lowering no longer requires group, session, or
 advertisement entries in `LegacyIxiaIdentitySidecar`. A task-free presentation
@@ -923,11 +926,24 @@ bounded-ECMP topology with `legacy_profile=None` and those fields omitted
 produces the same semantic IXIA plan, while the existing overrides preserve
 the established artifacts exactly.
 
-This completes only the partitioned IXIA identity-allocation portion of Diff
-1.6.2. Port endpoint labels still depend on `LegacyIxiaPortIdentity`; native
-EOS setup, teardown, endpoint realization, and artifact assembly remain Phase
-1.6 work. Legacy identity requirements for the initial/tagged and compact/named
-IXIA capabilities remain deferred to their Phase 1.7 profile migrations.
+Endpoint port labels now derive from typed style and normalized physical fields
+on `IxiaPortPlan`; optional `LegacyIxiaPortIdentity` entries remain
+resource-keyed overrides. A profile-free bounded plan therefore emits a
+completely empty `LegacyIxiaIdentitySidecar`, while endpoint,
+direct-connection, BasicPort base, and partitioned device-group shadows
+compose without legacy identity.
+
+The current bounded fixture continues authoring child legacy names and indices
+solely to preserve established artifact bytes until its Phase 1.7 migration.
+The immediate Diff 1.6.2c gate is one profile-free, empty-sidecar candidate
+compilation through both resource-keyed endpoint and `BasicPortConfig`
+composition chains, without changing facade authority.
+
+This completes the IXIA presentation portion of Diff 1.6.2. Native lifecycle,
+EOS setup/teardown task lowering, artifact assembly, and facade authority
+remain required for Phase 1.6 exit. Initial/tagged and compact/named group,
+session, and advertisement identities remain deferred to their Phase 1.7
+profile migrations.
 
 Remaining IXIA families and lifecycle capabilities, EOS
 lifecycle/config/interface rendering, facade cutover, Phase 1.6, Phase 1.7,

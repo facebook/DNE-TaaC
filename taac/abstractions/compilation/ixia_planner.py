@@ -11,7 +11,6 @@ from taac.abstractions.compilation.legacy_ixia_identity import (
     LegacyIxiaAdvertisementIdentity,
     LegacyIxiaGroupIdentity,
     LegacyIxiaIdentitySidecar,
-    LegacyIxiaPortIdentity,
     LegacyIxiaSessionIdentity,
 )
 from taac.abstractions.compilation.model import (
@@ -45,7 +44,10 @@ from taac.abstractions.compilation.resource_ids import (
     ixia_session_resource_id,
     link_resource_id,
 )
-from taac.abstractions.ixia_semantics import IxiaBgpCapability
+from taac.abstractions.ixia_semantics import (
+    IxiaBgpCapability,
+    IxiaEndpointPortLabelStyle,
+)
 from taac.abstractions.routing_semantics import PeerRelationship
 from taac.abstractions.topology.attributes import (
     RouteAttributePool,
@@ -58,7 +60,6 @@ from taac.abstractions.topology.model import (
     BoundTopology,
     EndpointSpec,
     IxiaBgpSessionIntent,
-    IxiaEndpointPortLabelStyle,
     ResolvedPeer,
     ResolvedPrefixAdvertisementLike,
 )
@@ -86,6 +87,7 @@ class _IxiaPortAccumulator:
     ixia_port: str
     physical_inventory_index: int
     reuse_group: str | None
+    endpoint_label_style: IxiaEndpointPortLabelStyle
     link_ids: list[ResourceId]
 
     def add(
@@ -96,6 +98,10 @@ class _IxiaPortAccumulator:
         assignment = device_group.port_assignment
         if assignment is None:
             raise ValueError("IXIA port accumulation requires a bound assignment")
+        if assignment.endpoint_label_style is not self.endpoint_label_style:
+            raise ValueError(
+                f"IXIA port {self.resource_id} has conflicting endpoint label styles"
+            )
         actual = (
             endpoint_resource_id(endpoints.dut.name),
             endpoint_resource_id(endpoints.traffic.name),
@@ -138,6 +144,7 @@ class _IxiaPortAccumulator:
             ixia_port=self.ixia_port,
             physical_inventory_index=self.physical_inventory_index,
             reuse_group=self.reuse_group,
+            endpoint_label_style=self.endpoint_label_style,
         )
 
 
@@ -285,43 +292,10 @@ def plan_ixia(
     return IxiaPlanningResult(
         plan=plan,
         legacy_identity=LegacyIxiaIdentitySidecar(
-            port_identities=_legacy_port_identities(bound, plan),
             group_identities=tuple(group_identities),
             session_identities=tuple(session_identities),
             advertisement_identities=tuple(advertisement_identities),
         ),
-    )
-
-
-def _legacy_port_identities(
-    bound: BoundTopology,
-    plan: IxiaPlan,
-) -> tuple[LegacyIxiaPortIdentity, ...]:
-    styles_by_port_id: dict[ResourceId, IxiaEndpointPortLabelStyle] = {}
-    for device_group in bound.device_groups:
-        assignment = device_group.port_assignment
-        if assignment is None:
-            continue
-        port_id = ixia_port_resource_id(assignment.logical_role)
-        existing = styles_by_port_id.setdefault(
-            port_id,
-            assignment.endpoint_label_style,
-        )
-        if existing is not assignment.endpoint_label_style:
-            raise ValueError(
-                f"IXIA port {port_id} has conflicting endpoint label styles"
-            )
-    return tuple(
-        LegacyIxiaPortIdentity(
-            resource_id=port.resource_id,
-            endpoint_ixia_port_label=(
-                f"{port.chassis_identifier}:{port.ixia_port}"
-                if styles_by_port_id[port.resource_id]
-                is IxiaEndpointPortLabelStyle.CHASSIS_PORT
-                else port.dut_interface
-            ),
-        )
-        for port in plan.ports
     )
 
 
@@ -346,6 +320,7 @@ def _ixia_port_plans(
                 ixia_port=assignment.ixia_port,
                 physical_inventory_index=assignment.physical_inventory_index,
                 reuse_group=assignment.reuse_group,
+                endpoint_label_style=assignment.endpoint_label_style,
                 link_ids=[],
             )
             accumulators[assignment.logical_role] = accumulator

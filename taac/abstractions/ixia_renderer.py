@@ -12,10 +12,12 @@ from ixia.ixia import types as ixia_types
 from taac.abstractions.compilation.ixia_presentation import (
     IxiaAdvertisementPresentation,
     IxiaDeviceGroupPresentation,
+    IxiaPortPresentation,
     IxiaPresentationError,
     IxiaSessionPresentation,
     resolve_ixia_advertisement_presentation,
     resolve_ixia_device_group_presentation,
+    resolve_ixia_port_presentations,
     resolve_ixia_session_presentation,
 )
 from taac.abstractions.compilation.legacy_ixia_identity import (
@@ -282,9 +284,8 @@ def _validate_initial_ipv6_capability(
     request: TrafficGeneratorRenderRequest,
 ) -> None:
     sessions_by_group = _sessions_by_group(request)
+    _resolved_port_presentations(request)
     for port in request.plan.ports:
-        if request.legacy_identity.port_identity(port.resource_id) is None:
-            _unsupported(f"IXIA port {port.resource_id} has no endpoint label identity")
         _validate_unique_group_indices(request, port)
     for group in request.plan.device_groups:
         if group.afi is not AddressFamily.IPV6:
@@ -352,9 +353,12 @@ def _compact_ordered_groups(
     request: TrafficGeneratorRenderRequest,
 ) -> tuple[IxiaDeviceGroupPlan, ...]:
     ordered_groups: list[IxiaDeviceGroupPlan] = []
+    presentations_by_port_id = _resolved_port_presentations(request)
     for port in request.plan.ports:
-        identity = request.legacy_identity.port_identity(port.resource_id)
-        if identity is None or identity.endpoint_ixia_port_label != port.dut_interface:
+        if (
+            presentations_by_port_id[port.resource_id].endpoint_ixia_port_label
+            != port.dut_interface
+        ):
             _unsupported(
                 f"IXIA port {port.resource_id} requires DUT-interface presentation"
             )
@@ -1507,8 +1511,9 @@ def _full_renderer_endpoint_patch(
     ports = tuple(
         port for port in request.plan.ports if port.dut_endpoint_id == endpoint_id
     )
+    presentations_by_port_id = _resolved_port_presentations(request)
     labels = tuple(
-        _required_port_label(request.legacy_identity, port.resource_id)
+        presentations_by_port_id[port.resource_id].endpoint_ixia_port_label
         for port in ports
     )
     direct_connection_ports = (
@@ -1558,14 +1563,19 @@ def _compact_port_relationship_order(
     return 0 if session.relationship is PeerRelationship.EXTERNAL else 1
 
 
-def _required_port_label(
-    legacy_identity: LegacyIxiaIdentitySidecar,
-    resource_id: ResourceId,
-) -> str:
-    identity = legacy_identity.port_identity(resource_id)
-    if identity is None:
-        _unsupported(f"IXIA port {resource_id} has no endpoint label identity")
-    return identity.endpoint_ixia_port_label
+def _resolved_port_presentations(
+    request: TrafficGeneratorRenderRequest,
+) -> dict[ResourceId, IxiaPortPresentation]:
+    try:
+        return {
+            presentation.resource_id: presentation
+            for presentation in resolve_ixia_port_presentations(
+                request.plan,
+                request.legacy_identity,
+            )
+        }
+    except IxiaPresentationError as error:
+        _unsupported(str(error))
 
 
 def _required_group_identity(

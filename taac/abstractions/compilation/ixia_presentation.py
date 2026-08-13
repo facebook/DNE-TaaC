@@ -15,8 +15,12 @@ from taac.abstractions.compilation.model import (
     IxiaBgpSessionPlan,
     IxiaDeviceGroupPlan,
     IxiaPlan,
+    IxiaPortPlan,
     ResourceId,
     ResourceKind,
+)
+from taac.abstractions.ixia_semantics import (
+    IxiaEndpointPortLabelStyle,
 )
 
 
@@ -28,6 +32,20 @@ class IxiaPresentationKind(str, Enum):
     DEVICE_GROUP = "device_group"
     BGP_SESSION = "bgp_session"
     ADVERTISEMENT = "advertisement"
+
+
+@dataclass(frozen=True)
+class IxiaPortPresentation:
+    resource_id: ResourceId
+    endpoint_ixia_port_label: str
+
+    def __post_init__(self) -> None:
+        if self.resource_id.kind is not ResourceKind.IXIA_PORT:
+            raise IxiaPresentationError(
+                f"IXIA port presentation cannot reference {self.resource_id.kind.value}"
+            )
+        if not self.endpoint_ixia_port_label:
+            raise IxiaPresentationError("IXIA endpoint port label is empty")
 
 
 @dataclass(frozen=True)
@@ -69,6 +87,51 @@ class IxiaAdvertisementPresentation:
     def __post_init__(self) -> None:
         if not self.prefix_name:
             raise IxiaPresentationError("IXIA advertisement presentation name is empty")
+
+
+def resolve_ixia_port_presentation(
+    overrides: LegacyIxiaIdentitySidecar,
+    port: IxiaPortPlan,
+) -> IxiaPortPresentation:
+    override = overrides.port_identity(port.resource_id)
+    return IxiaPortPresentation(
+        resource_id=port.resource_id,
+        endpoint_ixia_port_label=(
+            override.endpoint_ixia_port_label
+            if override is not None
+            else default_ixia_port_label(port)
+        ),
+    )
+
+
+def resolve_ixia_port_presentations(
+    plan: IxiaPlan,
+    overrides: LegacyIxiaIdentitySidecar,
+) -> tuple[IxiaPortPresentation, ...]:
+    presentations = tuple(
+        resolve_ixia_port_presentation(overrides, port) for port in plan.ports
+    )
+    for endpoint_id in dict.fromkeys(port.dut_endpoint_id for port in plan.ports):
+        labels = tuple(
+            presentation.endpoint_ixia_port_label
+            for port, presentation in zip(plan.ports, presentations, strict=True)
+            if port.dut_endpoint_id == endpoint_id
+        )
+        if len(frozenset(labels)) != len(labels):
+            raise IxiaPresentationError(
+                f"IXIA endpoint {endpoint_id} has duplicate resolved port labels"
+            )
+    return presentations
+
+
+def default_ixia_port_label(port: IxiaPortPlan) -> str:
+    if port.endpoint_label_style is IxiaEndpointPortLabelStyle.DUT_INTERFACE:
+        return port.dut_interface
+    if port.endpoint_label_style is IxiaEndpointPortLabelStyle.CHASSIS_PORT:
+        return f"{port.chassis_identifier}:{port.ixia_port}"
+    raise IxiaPresentationError(
+        f"IXIA port {port.resource_id} has unsupported endpoint label style"
+    )
 
 
 def resolve_ixia_device_group_presentation(
@@ -178,11 +241,15 @@ _PRESENTATION_KIND_FIELDS = {
 __all__ = (
     "IxiaAdvertisementPresentation",
     "IxiaDeviceGroupPresentation",
+    "IxiaPortPresentation",
     "IxiaPresentationError",
     "IxiaPresentationKind",
     "IxiaSessionPresentation",
     "default_ixia_presentation_name",
+    "default_ixia_port_label",
     "resolve_ixia_advertisement_presentation",
     "resolve_ixia_device_group_presentation",
+    "resolve_ixia_port_presentation",
+    "resolve_ixia_port_presentations",
     "resolve_ixia_session_presentation",
 )

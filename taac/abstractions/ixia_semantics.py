@@ -12,4 +12,12 @@ class IxiaBgpCapability(str, Enum):
     NEXT_HOP_ENCODING = "next_hop_encoding"
 
 
-__all__ = ("IxiaBgpCapability",)
+class IxiaEndpointPortLabelStyle(str, Enum):
+    DUT_INTERFACE = "dut_interface"
+    CHASSIS_PORT = "chassis_port"
+
+
+__all__ = (
+    "IxiaBgpCapability",
+    "IxiaEndpointPortLabelStyle",
+)

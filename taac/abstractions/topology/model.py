@@ -8,7 +8,10 @@ import typing as t
 from dataclasses import dataclass, field, fields, MISSING
 from enum import Enum
 
-from taac.abstractions.ixia_semantics import IxiaBgpCapability
+from taac.abstractions.ixia_semantics import (
+    IxiaBgpCapability,
+    IxiaEndpointPortLabelStyle,
+)
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -74,11 +77,6 @@ class EndpointSpec:
     kind: str = "dut"
     required_os: str | None = None
     setup_mode: str = "full"
-
-
-class IxiaEndpointPortLabelStyle(str, Enum):
-    DUT_INTERFACE = "dut_interface"
-    CHASSIS_PORT = "chassis_port"
 
 
 @dataclass(frozen=True)

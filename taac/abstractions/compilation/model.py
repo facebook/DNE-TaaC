@@ -6,7 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from taac.abstractions.ixia_semantics import IxiaBgpCapability
+from taac.abstractions.ixia_semantics import (
+    IxiaBgpCapability,
+    IxiaEndpointPortLabelStyle,
+)
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -389,6 +392,7 @@ class IxiaPortPlan:
     dut_interface: str
     ixia_port: str
     physical_inventory_index: int
+    endpoint_label_style: IxiaEndpointPortLabelStyle
     reuse_group: str | None = None
 
     def __post_init__(self) -> None:
@@ -398,6 +402,8 @@ class IxiaPortPlan:
         _require_kind(self.traffic_endpoint_id, ResourceKind.ENDPOINT)
         if not self.dut_physical_identifier or not self.chassis_identifier:
             raise ValueError("IXIA port endpoint identifiers must be nonempty")
+        if not isinstance(self.endpoint_label_style, IxiaEndpointPortLabelStyle):
+            raise TypeError("IXIA endpoint label style must be typed")
         _require_non_negative(
             self.physical_inventory_index,
             "physical_inventory_index",
