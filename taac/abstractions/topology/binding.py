@@ -7,6 +7,9 @@ import ipaddress
 import typing as t
 from dataclasses import dataclass, fields, replace
 
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactRef,
+)
 from taac.abstractions.routing_semantics import (
     NetworkRole,
     PeerRelationship,
@@ -16,6 +19,7 @@ from taac.abstractions.topology.model import (
     BgpPeerGroup,
     BoundDeviceGroup,
     BoundIxiaDeviceGroupChild,
+    BoundRoutingConfig,
     BoundTopology,
     DeviceGroupPartition,
     DeviceGroupSpec,
@@ -24,6 +28,7 @@ from taac.abstractions.topology.model import (
     LogicalTopology,
     OpenRMode,
     PrefixAdvertisement,
+    resolve_endpoint_routing_drivers,
     ResolvedDeviceGroupProvenance,
     ResolvedIxiaPortAssignment,
     ResolvedPeer,
@@ -480,6 +485,12 @@ def _build_bound_topology(
         resolved_device_groups=mappings.resolved_device_groups,
         endpoint_os=context.endpoint_os,
         endpoint_network_roles=mappings.endpoint_network_roles,
+        routing_configs=_bound_routing_configs(
+            logical_topology,
+            context.physical_inventory,
+            bound_dgs,
+            mappings.routing_drivers,
+        ),
         routing_drivers=mappings.routing_drivers,
         ixia_ports=mappings.ixia_ports,
         interfaces=mappings.interfaces,
@@ -491,6 +502,48 @@ def _build_bound_topology(
         resolved_prefix_sets=dict(resolved_prefix_sets),
         resolved_route_senders=tuple(resolved_route_senders),
     )
+
+
+def _bound_routing_configs(
+    logical_topology: LogicalTopology,
+    physical_inventory: t.Any,
+    bound_dgs: t.Sequence[BoundDeviceGroup],
+    routing_drivers: t.Mapping[str, str],
+) -> dict[str, BoundRoutingConfig]:
+    artifact_by_driver = getattr(
+        physical_inventory,
+        "routing_config_artifacts",
+        {},
+    )
+    if not isinstance(artifact_by_driver, dict):
+        raise TypeError("routing_config_artifacts must be a dict")
+    configs = {}
+    for endpoint in logical_topology.endpoints:
+        if not _endpoint_is_dut(endpoint):
+            continue
+        drivers = resolve_endpoint_routing_drivers(
+            endpoint.name,
+            bound_dgs,
+            routing_drivers,
+        )
+        if len(drivers) > 1:
+            raise ValueError(
+                f"DUT endpoint {endpoint.name!r} resolves to multiple routing drivers: "
+                f"{drivers!r}"
+            )
+        if not drivers:
+            continue
+        driver = drivers[0]
+        source = artifact_by_driver.get(driver)
+        if source is not None and not isinstance(source, ConfigArtifactRef):
+            raise TypeError(
+                f"routing config artifact for {driver!r} must be a ConfigArtifactRef"
+            )
+        configs[endpoint.name] = BoundRoutingConfig(
+            routing_driver=driver,
+            source=source,
+        )
+    return configs
 
 
 def _resolve_route_senders(

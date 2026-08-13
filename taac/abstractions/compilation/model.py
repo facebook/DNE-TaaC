@@ -6,6 +6,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactRef,
+)
 from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
@@ -359,11 +362,31 @@ class RoutingConfigPlan:
     resource_id: ResourceId
     endpoint_id: ResourceId
     routing_driver: str
+    source: ConfigArtifactRef | None = None
     required_features: tuple[str, ...] = ()
+    variant: None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.ROUTING_CONFIG)
         _require_kind(self.endpoint_id, ResourceKind.ENDPOINT)
+        if not isinstance(self.routing_driver, str):
+            raise TypeError("routing config driver must be a string")
+        if not self.routing_driver:
+            raise ValueError("routing config driver must be nonempty")
+        if self.source is not None and not isinstance(self.source, ConfigArtifactRef):
+            raise TypeError("routing config source must be typed")
+        if not isinstance(self.required_features, tuple) or any(
+            not isinstance(feature, str) for feature in self.required_features
+        ):
+            raise TypeError(
+                "routing config required features must be strings in a tuple"
+            )
+        if any(not feature for feature in self.required_features):
+            raise ValueError("routing config required features must be nonempty")
+        if len(frozenset(self.required_features)) != len(self.required_features):
+            raise ValueError("routing config required features must be unique")
+        if self.variant is not None:
+            raise ValueError("routing config variants are not implemented")
 
 
 @dataclass(frozen=True)

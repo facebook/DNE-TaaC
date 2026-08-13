@@ -7,6 +7,10 @@ from __future__ import annotations
 import typing as t
 from dataclasses import dataclass, field, replace
 
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactProvider,
+    ConfigArtifactRef,
+)
 from taac.abstractions.routing_semantics import NetworkRole
 from taac.abstractions.topology import OpenRStandaloneLink
 from taac.test_as_a_config.types import MockDeviceInfo
@@ -94,6 +98,21 @@ class PhysicalInventory:
     def ixia_chassis_ip(self) -> str:
         """Compatibility alias for factories that consume the primary chassis."""
         return self.primary_ixia_chassis_ip
+
+    @property
+    def routing_config_artifacts(self) -> dict[str, ConfigArtifactRef]:
+        artifacts = {}
+        if self.bgpcpp_configerator_path:
+            artifacts["bgpcpp"] = ConfigArtifactRef(
+                provider=ConfigArtifactProvider.CONFIGERATOR,
+                path=self.bgpcpp_configerator_path,
+            )
+        if self.fboss_agent_configerator_path:
+            artifacts["fboss"] = ConfigArtifactRef(
+                provider=ConfigArtifactProvider.CONFIGERATOR,
+                path=self.fboss_agent_configerator_path,
+            )
+        return artifacts
 
     def __post_init__(self) -> None:
         if self.network_role is not None and not isinstance(

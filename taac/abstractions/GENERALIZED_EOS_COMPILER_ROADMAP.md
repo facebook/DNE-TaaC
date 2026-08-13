@@ -914,6 +914,10 @@ of Phase 1.5:
     profile-free bounded topology with an empty identity sidecar through the
     real EOS endpoint and shared IXIA `BasicPortConfig` composition chains
     while a compatibility stub remains artifact authority.
+20. **Completed Phase 1.6 routing-config prerequisite:** Diff 1.6.2d,
+    normalize a typed Configerator artifact source through binding and common
+    planning, fail closed on malformed ownership, and reject unsupported
+    preloaded EOS lifecycle without changing artifact authority.
 
 #### Resource-derived IXIA presentation
 
@@ -944,6 +948,46 @@ topologies produce identical semantic plans and resource-ordered endpoint and
 `BasicPortConfig` compositions from an empty identity sidecar. The adapter
 returns marker artifacts only, proving that this integration gate does not
 change facade or artifact authority.
+
+#### Bound routing-config source extraction
+
+`ConfigArtifactRef` is a task-free leaf contract containing a typed provider
+and path. `PhysicalInventory.routing_config_artifacts` converts the existing
+BGP++ and FBOSS Configerator fields at the inventory compatibility boundary.
+Binding selects the artifact by the already resolved routing driver and records
+one `BoundRoutingConfig` per routed DUT. The common planner projects that source
+into `RoutingConfigPlan` without reading platform-specific inventory fields,
+install paths, daemon names, topology names, or `legacy_profile`.
+
+The mapping key is the canonical endpoint identity. Unknown, non-DUT,
+untyped, missing, driver-mismatched, and driverless-surplus entries fail
+closed. A source-only binding change changes only the corresponding plan field.
+Independent binding and planning tests prove that topology name and legacy
+profile do not select the source.
+
+EOS/BGP++ preflight requires a Configerator source for full setup before the
+established adapter can run. Skip and verify-only modes do not require one.
+Preloaded setup is rejected until its setup/teardown ownership is defined.
+The variant seam accepts only `None`; a comparison experiment must eventually
+use a typed explicit override instead of an ad hoc BGP++ patch.
+
+Inventory `dut_bgp_as` and `router_id` are intentionally not projected as
+routing-config mutation requirements. The current ASN is EOS native-BGP
+bootstrap identity, while the fetched artifact owns the BGP++ protocol ASN.
+Router-ID application also differs across established BAG topology families.
+Both need explicit typed ownership before a native renderer may consume them.
+Component roles, restart/readiness semantics, installation destination, and a
+non-empty override variant remain later Phase 1.6 work. Structural inventory
+test doubles must expose the typed `routing_config_artifacts` boundary instead
+of relying on the old flat path by accident.
+
+Final local validation passed on 2026-08-08: the full abstraction suite passed
+595/595 tests (TestInfra `7599824738784524`), the factory golden gate passed
+2/2 tests (TestInfra `35747322066548903`), and changed-target Pyre found no
+errors across 12 owning targets. Golden regeneration found 294 unchanged
+configurations, with zero additions, changes, or removals. The manifest
+SHA-256 remained
+`741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
 This completes the IXIA presentation portion of Diff 1.6.2. Native lifecycle,
 EOS setup/teardown task lowering, artifact assembly, and facade authority
@@ -1434,10 +1478,12 @@ binding. All 16 frozen EOS cases satisfy this contract; monitor IPv4 and other
 unsupported mappings fail before any artifact or shadow renderer call.
 
 The preflight does not yet claim that the selected Configerator artifact
-satisfies every `RoutingConfigPlan.required_features` entry. The plan still
-lacks the typed artifact reference, router-ID, experiment variant, and restart
-requirements needed for that check. Those remain explicit routing-config
-extraction work rather than an inferred compatibility rule.
+satisfies every `RoutingConfigPlan.required_features` entry. The plan now
+carries a typed Configerator artifact reference and an explicitly absent
+variant seam. It still lacks a typed non-empty experiment override,
+router-ID mutation ownership, installation destination, and restart/readiness
+requirements. Those remain explicit routing-config and lifecycle work rather
+than inferred compatibility rules.
 
 Established `CompiledTaacArtifacts` identity and the three
 `COMPATIBILITY_DELEGATED` renderer reports remain unchanged. The new gate

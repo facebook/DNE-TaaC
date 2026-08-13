@@ -13,8 +13,12 @@ from taac.abstractions.compilation.model import (
     DesiredPresence,
     DutPlan,
     EndpointPlan,
+    EndpointSetupMode,
     PolicyDirection,
     ResourceId,
+)
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactProvider,
 )
 
 
@@ -55,6 +59,10 @@ def _required_dut_endpoint(plan: DutPlan) -> EndpointPlan:
 
 
 def _validate_routing_config(plan: DutPlan, endpoint: EndpointPlan) -> None:
+    if endpoint.setup_mode is EndpointSetupMode.PRELOADED:
+        raise UnsupportedEosBgpCppCapabilityError(
+            "EOS/BGP++ capability does not support preloaded setup"
+        )
     if len(plan.routing_configs) != 1:
         raise UnsupportedEosBgpCppCapabilityError(
             "EOS/BGP++ capability requires exactly one routing-config plan; "
@@ -70,6 +78,20 @@ def _validate_routing_config(plan: DutPlan, endpoint: EndpointPlan) -> None:
         raise UnsupportedEosBgpCppCapabilityError(
             f"routing config {routing_config.resource_id} has unsupported driver "
             f"{routing_config.routing_driver!r}"
+        )
+    source = routing_config.source
+    if endpoint.setup_mode is EndpointSetupMode.FULL and source is None:
+        raise UnsupportedEosBgpCppCapabilityError(
+            f"routing config {routing_config.resource_id} requires a config "
+            "artifact source for full setup"
+        )
+    if (
+        source is not None
+        and source.provider is not ConfigArtifactProvider.CONFIGERATOR
+    ):
+        raise UnsupportedEosBgpCppCapabilityError(
+            f"routing config {routing_config.resource_id} has unsupported source "
+            f"provider {source.provider.value!r}"
         )
 
 

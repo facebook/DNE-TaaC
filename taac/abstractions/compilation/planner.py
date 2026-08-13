@@ -50,8 +50,10 @@ from taac.abstractions.compilation.resource_ids import (
 )
 from taac.abstractions.topology.model import (
     BoundDeviceGroup,
+    BoundRoutingConfig,
     BoundTopology,
     EndpointSpec,
+    resolve_endpoint_routing_drivers,
     RoutingDeviceConfig,
 )
 
@@ -328,28 +330,71 @@ def _routing_config_plans(
     bound: BoundTopology,
     endpoint_specs: dict[str, EndpointSpec],
 ) -> tuple[RoutingConfigPlan, ...]:
+    _validate_bound_routing_configs(bound, endpoint_specs)
     config = bound.device_config or bound.logical_topology.device_config
     plans: list[RoutingConfigPlan] = []
     for endpoint in bound.logical_topology.endpoints:
         if not is_dut_endpoint(endpoint):
             continue
-        drivers = _endpoint_routing_drivers(bound, endpoint.name)
+        drivers = resolve_endpoint_routing_drivers(
+            endpoint.name,
+            bound.device_groups,
+            bound.routing_drivers,
+        )
         if not drivers:
+            if endpoint.name in bound.routing_configs:
+                raise ValueError(
+                    f"DUT endpoint {endpoint.name!r} has a bound routing config "
+                    "but no routing driver"
+                )
             continue
         if len(drivers) != 1:
             raise ValueError(
                 f"DUT endpoint {endpoint.name!r} resolves to multiple routing "
                 f"drivers: {drivers!r}"
             )
+        bound_config = bound.routing_configs.get(endpoint.name)
+        if bound_config is None:
+            raise ValueError(
+                f"DUT endpoint {endpoint.name!r} has no bound routing config"
+            )
+        if bound_config.routing_driver != drivers[0]:
+            raise ValueError(
+                f"DUT endpoint {endpoint.name!r} bound routing config driver "
+                f"{bound_config.routing_driver!r} does not match {drivers[0]!r}"
+            )
         plans.append(
             RoutingConfigPlan(
                 resource_id=routing_config_resource_id(endpoint.name),
                 endpoint_id=endpoint_resource_id(endpoint.name),
                 routing_driver=drivers[0],
+                source=bound_config.source,
                 required_features=_required_routing_features(config),
             )
         )
     return tuple(plans)
+
+
+def _validate_bound_routing_configs(
+    bound: BoundTopology,
+    endpoint_specs: dict[str, EndpointSpec],
+) -> None:
+    if any(not isinstance(name, str) for name in bound.routing_configs):
+        raise TypeError("bound routing config endpoint names must be strings")
+    dut_endpoint_names = {
+        name for name, endpoint in endpoint_specs.items() if is_dut_endpoint(endpoint)
+    }
+    unknown_endpoint_names = tuple(
+        sorted(set(bound.routing_configs) - dut_endpoint_names)
+    )
+    if unknown_endpoint_names:
+        raise ValueError(
+            "bound routing configs target unknown or non-DUT endpoints: "
+            f"{unknown_endpoint_names!r}"
+        )
+    for endpoint_name, routing_config in bound.routing_configs.items():
+        if not isinstance(routing_config, BoundRoutingConfig):
+            raise TypeError(f"bound routing config for {endpoint_name!r} must be typed")
 
 
 def _openr_plans(
@@ -445,25 +490,6 @@ def _dut_side(
 def _logical_port_role(device_group: BoundDeviceGroup) -> str:
     assignment = device_group.port_assignment
     return assignment.logical_role if assignment is not None else device_group.role
-
-
-def _endpoint_routing_drivers(
-    bound: BoundTopology,
-    endpoint_name: str,
-) -> tuple[str, ...]:
-    drivers: list[str] = []
-    for device_group in bound.device_groups:
-        if endpoint_name not in {
-            device_group.spec.a_endpoint,
-            device_group.spec.z_endpoint,
-        }:
-            continue
-        driver = device_group.routing_driver or bound.routing_drivers.get(
-            device_group.name
-        )
-        if driver is not None and driver not in drivers:
-            drivers.append(driver)
-    return tuple(drivers)
 
 
 def _required_routing_features(config: RoutingDeviceConfig) -> tuple[str, ...]:

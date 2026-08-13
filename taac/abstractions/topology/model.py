@@ -8,6 +8,9 @@ import typing as t
 from dataclasses import dataclass, field, fields, MISSING
 from enum import Enum
 
+from taac.abstractions.config_artifact_semantics import (
+    ConfigArtifactRef,
+)
 from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
@@ -738,6 +741,41 @@ class BoundDeviceGroup:
         )
 
 
+def resolve_endpoint_routing_drivers(
+    endpoint_name: str,
+    device_groups: t.Iterable[BoundDeviceGroup],
+    routing_drivers: t.Mapping[str, str],
+) -> tuple[str, ...]:
+    drivers: list[str] = []
+    for device_group in device_groups:
+        if endpoint_name not in {
+            device_group.spec.a_endpoint,
+            device_group.spec.z_endpoint,
+        }:
+            continue
+        driver = device_group.routing_driver or routing_drivers.get(device_group.name)
+        if driver is not None and driver not in drivers:
+            drivers.append(driver)
+    return tuple(drivers)
+
+
+@dataclass(frozen=True)
+class BoundRoutingConfig:
+    routing_driver: str
+    source: ConfigArtifactRef | None
+    variant: None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.routing_driver, str):
+            raise TypeError("bound routing config driver must be a string")
+        if not self.routing_driver:
+            raise ValueError("bound routing config driver must be nonempty")
+        if self.source is not None and not isinstance(self.source, ConfigArtifactRef):
+            raise TypeError("bound routing config source must be typed")
+        if self.variant is not None:
+            raise ValueError("bound routing config variants are not implemented")
+
+
 @dataclass(frozen=True)
 class BoundTopology:
     """Resolved logical intent bound to a physical inventory."""
@@ -756,6 +794,7 @@ class BoundTopology:
     )
     endpoint_os: t.Mapping[str, str] = field(default_factory=dict)
     endpoint_network_roles: t.Mapping[str, NetworkRole] = field(default_factory=dict)
+    routing_configs: t.Mapping[str, BoundRoutingConfig] = field(default_factory=dict)
     routing_drivers: t.Mapping[str, str] = field(default_factory=dict)
     ixia_ports: t.Mapping[str, str] = field(default_factory=dict)
     interfaces: t.Mapping[str, str] = field(default_factory=dict)
