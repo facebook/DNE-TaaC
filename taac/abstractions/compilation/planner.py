@@ -12,6 +12,10 @@ from taac.abstractions.compilation.ixia_planner import plan_ixia
 from taac.abstractions.compilation.legacy_ixia_identity import (
     LegacyIxiaIdentitySidecar,
 )
+from taac.abstractions.compilation.lifecycle import LifecyclePlan
+from taac.abstractions.compilation.lifecycle_projection import (
+    project_lifecycle,
+)
 from taac.abstractions.compilation.model import (
     AddressFamily,
     BgpAdjacencyPlan,
@@ -80,10 +84,26 @@ class PlanningResult:
     legacy_ixia_identity: LegacyIxiaIdentitySidecar = field(
         default_factory=LegacyIxiaIdentitySidecar
     )
+    lifecycle: LifecyclePlan = field(default_factory=LifecyclePlan)
 
     def __post_init__(self) -> None:
         self.report.validate(self.plan.iter_resource_ids())
         self.legacy_ixia_identity.validate(self.plan.ixia.iter_resource_ids())
+        if not isinstance(self.lifecycle, LifecyclePlan):
+            raise TypeError("planning lifecycle must be a LifecyclePlan")
+        plan_resource_ids = frozenset(self.plan.iter_resource_ids())
+        unexpected_lifecycle_ids = tuple(
+            operation.resource_id
+            for operation in self.lifecycle.operations
+            if operation.resource_id not in plan_resource_ids
+        )
+        if unexpected_lifecycle_ids:
+            raise ValueError(
+                "lifecycle operations target resources absent from the plan: "
+                + ", ".join(
+                    str(resource_id) for resource_id in unexpected_lifecycle_ids
+                )
+            )
 
 
 class UnsupportedTrafficFlowIntentError(ValueError):
@@ -230,6 +250,7 @@ class BoundTopologyPlanner:
             plan=plan,
             report=_compile_report(plan),
             legacy_ixia_identity=ixia.legacy_identity,
+            lifecycle=project_lifecycle(plan),
         )
 
 

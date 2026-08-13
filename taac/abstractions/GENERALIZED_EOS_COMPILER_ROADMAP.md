@@ -929,6 +929,10 @@ of Phase 1.5:
     normalize typed rate/lane profiles at inventory binding and project one
     task-free physical owner per logical port-sharing group without changing
     established EOS rendering, artifact, lifecycle, or task authority.
+23. **Completed Phase 1.6 lifecycle prerequisite:** Diff 1.6.2g, project
+    deterministic full-setup lifecycle operations for aggregate physical
+    interfaces, routing config, and the routing-control-plane component while
+    leaving established artifacts authoritative.
 
 #### Resource-derived IXIA presentation
 
@@ -1060,6 +1064,31 @@ FEC, autonegotiation, wait, snapshot, or daemon tasks. Those remain established
 backend authority. OpenR standalone's separate `400g-8` link is intentionally
 excluded until Phase 1.9 defines helper ownership and lifecycle.
 
+#### Profile-free lifecycle projection
+
+Full setup now projects one task-free, snapshot-restored operation for each
+aggregate `PhysicalInterfacePlan`, followed by the endpoint's routing config
+and routing-control-plane component. Physical operations require exact
+readback. Routing config depends on every physical owner for that endpoint and
+also requires exact readback. The component retains its typed config dependency
+and requires acknowledgement. Stable declaration order breaks independent
+physical-operation ties, and teardown is the exact eligible reverse order.
+
+Logical per-AFI `InterfacePlan` resources remain children of their aggregate
+physical owner. They do not receive independent snapshot operations because
+several logical interfaces can share one bound runtime interface. IXIA ports,
+device groups, sessions, and advertisements remain artifact-owned; only
+explicit traffic-generator mutations use the separate IXIA lifecycle-fragment
+lane. Skip and verify-only setup modes therefore project an empty common
+lifecycle while retaining their existing artifact-realization semantics.
+
+The snapshot contract is intentionally stronger than established cleanup. A
+native renderer must capture physical state before prelink or address mutation,
+capture routing-config bytes or prior absence before installation, and capture
+the component's prior enable/running state before reconciliation. Existing
+profiles remain compatibility-delegated, so this safety contract does not shift
+their returned artifacts or golden output.
+
 Final local validation passed on 2026-08-08: the full abstraction suite passed
 599/599 tests (TestInfra `1407375402294830`), the factory golden gate passed
 2/2 tests (TestInfra `27303072778109275`), and changed-target Pyre found no
@@ -1077,10 +1106,19 @@ manifest SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 Two independent final architecture audits found no remaining P0 blocker.
 
-This completes the task-free routing-config, routing-control-plane, and
-physical-interface prerequisites of Diff 1.6.2. Native lifecycle, EOS
-setup/teardown task lowering, artifact assembly, and facade authority remain
-required for Phase 1.6 exit.
+Phase 1.6.2g final local validation passed on 2026-08-11: the focused lifecycle,
+planner, candidate, import-boundary, capability, and parity targets passed
+74/74 tests (TestInfra `31806672393087913`); the full abstraction suite passed
+680/680 tests (TestInfra `4222125033827932`); and the factory golden gate passed
+2/2 tests (TestInfra `18858823477284245`). Changed-target Pyre found no errors
+across 25 owning targets. Golden regeneration found 294 unchanged
+configurations, with zero additions, changes, or removals. The manifest SHA-256
+remained `b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
+
+This completes the task-free routing-config, routing-control-plane,
+physical-interface, and lifecycle-planning prerequisites of Diff 1.6.2. EOS
+setup/teardown task lowering, snapshot/readback realization, artifact assembly,
+and facade authority remain required for Phase 1.6 exit.
 Initial/tagged and compact/named group, session, and advertisement identities
 remain deferred to their Phase 1.7 profile migrations.
 

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from taac.abstractions.artifacts import CompiledTaacArtifacts
@@ -20,6 +20,7 @@ from taac.abstractions.compilation.endpoint_composition import (
     EndpointCompositionRequest,
     EndpointCompositionResult,
 )
+from taac.abstractions.compilation.lifecycle import LifecyclePlan
 from taac.abstractions.compilation.model import (
     TopologyCompilationPlan,
 )
@@ -130,6 +131,7 @@ class CandidateCompilation:
     basic_port_composition_shadow: BasicPortCompositionResult[object] | None = None
     endpoint_composition_shadow: EndpointCompositionResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
+    lifecycle: LifecyclePlan = field(default_factory=LifecyclePlan)
 
 
 def _traffic_generator_request(
@@ -327,6 +329,7 @@ class CandidateTopologyCompiler:
             basic_port_composition_shadow=basic_port_composition_shadow,
             endpoint_composition_shadow=endpoint_composition_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
+            lifecycle=planning.lifecycle,
         )
 
     def compile(self, bound: BoundTopology) -> CompiledTaacArtifacts:
