@@ -16,6 +16,13 @@ from taac.abstractions.compilation.model import (
     EndpointSetupMode,
     PolicyDirection,
     ResourceId,
+    RoutingConfigPlan,
+)
+from taac.abstractions.component_semantics import (
+    ComponentDesiredState,
+    ComponentReadinessRequirement,
+    ComponentReconcileMode,
+    ComponentRole,
 )
 from taac.abstractions.config_artifact_semantics import (
     ConfigArtifactProvider,
@@ -32,7 +39,8 @@ class EosBgpCppCapabilityPreflight:
 
     def validate(self, plan: DutPlan) -> None:
         endpoint = _required_dut_endpoint(plan)
-        _validate_routing_config(plan, endpoint)
+        routing_config = _validate_routing_config(plan, endpoint)
+        _validate_components(plan, endpoint, routing_config)
         _validate_policy_bindings(plan, endpoint)
 
 
@@ -58,7 +66,10 @@ def _required_dut_endpoint(plan: DutPlan) -> EndpointPlan:
     return endpoint
 
 
-def _validate_routing_config(plan: DutPlan, endpoint: EndpointPlan) -> None:
+def _validate_routing_config(
+    plan: DutPlan,
+    endpoint: EndpointPlan,
+) -> RoutingConfigPlan:
     if endpoint.setup_mode is EndpointSetupMode.PRELOADED:
         raise UnsupportedEosBgpCppCapabilityError(
             "EOS/BGP++ capability does not support preloaded setup"
@@ -92,6 +103,44 @@ def _validate_routing_config(plan: DutPlan, endpoint: EndpointPlan) -> None:
         raise UnsupportedEosBgpCppCapabilityError(
             f"routing config {routing_config.resource_id} has unsupported source "
             f"provider {source.provider.value!r}"
+        )
+    return routing_config
+
+
+def _validate_components(
+    plan: DutPlan,
+    endpoint: EndpointPlan,
+    routing_config: RoutingConfigPlan,
+) -> None:
+    if len(plan.components) != 1:
+        raise UnsupportedEosBgpCppCapabilityError(
+            "EOS/BGP++ capability requires exactly one routing-control-plane "
+            f"component; found {len(plan.components)}"
+        )
+    component = plan.components[0]
+    if component.endpoint_id != endpoint.resource_id:
+        raise UnsupportedEosBgpCppCapabilityError(
+            f"component {component.resource_id} targets {component.endpoint_id}, "
+            f"expected {endpoint.resource_id}"
+        )
+    expected = (
+        ComponentRole.ROUTING_CONTROL_PLANE,
+        ComponentDesiredState.RUNNING,
+        ComponentReconcileMode.RESTART_AFTER_CONFIGURATION,
+        ComponentReadinessRequirement.ACKNOWLEDGED,
+        (routing_config.resource_id,),
+    )
+    actual = (
+        component.role,
+        component.desired_state,
+        component.reconcile_mode,
+        component.readiness,
+        component.depends_on,
+    )
+    if actual != expected:
+        raise UnsupportedEosBgpCppCapabilityError(
+            f"component {component.resource_id} has unsupported routing-control-plane "
+            f"contract {actual!r}"
         )
 
 

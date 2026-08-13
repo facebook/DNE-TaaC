@@ -41,7 +41,8 @@ It is not generalized yet:
   objects;
 - the established EOS `IxiaPlan` contains already-rendered TAAC configs, while
   the new semantic `IxiaPlan` does not yet have a native renderer;
-- component-role and lifecycle dependency intent are not yet projected;
+- one task-free routing-control-plane component role and its routing-config
+  dependency are projected, but executable lifecycle operations are not;
 - the candidate artifact adapter delegates DUT and IXIA rendering as one
   monolithic compatibility operation;
 - IXIA endpoint wiring and route-mutation lifecycle are still embedded in the
@@ -248,12 +249,12 @@ The plan models:
 ```text
 RoutingConfigPlan
   source: ConfigArtifactRef
-  requirements: RoutingConfigRequirements
-  variant: None | RoutingConfigVariant
+  required_features: tuple[str, ...]
+  variant: None
 ```
 
-`RoutingConfigVariant` is the single intentional override seam for A/B
-comparisons such as feature enabled versus disabled:
+A future typed `RoutingConfigVariant` is the single intentional override seam
+for A/B comparisons such as feature enabled versus disabled:
 
 - absent by default;
 - platform-specific, typed, and allowlisted;
@@ -918,6 +919,10 @@ of Phase 1.5:
     normalize a typed Configerator artifact source through binding and common
     planning, fail closed on malformed ownership, and reject unsupported
     preloaded EOS lifecycle without changing artifact authority.
+21. **Completed Phase 1.6 component prerequisite:** Diff 1.6.2e, project one
+    task-free routing-control-plane component per routed DUT, depend on the
+    typed routing config, and fail closed on unsupported EOS component
+    contracts without changing artifact or task authority.
 
 #### Resource-derived IXIA presentation
 
@@ -976,24 +981,51 @@ routing-config mutation requirements. The current ASN is EOS native-BGP
 bootstrap identity, while the fetched artifact owns the BGP++ protocol ASN.
 Router-ID application also differs across established BAG topology families.
 Both need explicit typed ownership before a native renderer may consume them.
-Component roles, restart/readiness semantics, installation destination, and a
-non-empty override variant remain later Phase 1.6 work. Structural inventory
-test doubles must expose the typed `routing_config_artifacts` boundary instead
-of relying on the old flat path by accident.
+Config installation destination, restoration ownership, executable restart
+and readiness realization, and a non-empty override variant remain later
+Phase 1.6 work. Structural inventory test doubles must expose the typed
+`routing_config_artifacts` boundary instead of relying on the old flat path by
+accident.
+
+#### Task-free routing-control-plane component contract
+
+The common planner now projects one `ROUTING_CONTROL_PLANE` component for each
+routed DUT. Its stable ID derives from endpoint identity and semantic role. It
+requests desired state `RUNNING`, reconciliation
+`RESTART_AFTER_CONFIGURATION`, readiness `ACKNOWLEDGED`, and depends on that
+endpoint's `RoutingConfigPlan`.
+
+`ACKNOWLEDGED` means only that the backend accepted the lifecycle command. It
+does not claim daemon health, BGP-session readiness, or permission to remove
+the established fixed wait. EOS/BGP++ preflight accepts only this exact
+contract. A future EOS lifecycle renderer may expand the composite into its
+private BGP++/FibAgent/OpenR daemon ordering, but those daemon names and edges
+do not belong in the common plan.
+
+This slice creates no `LifecycleOperation`, renders no `Task`, changes no
+setup-mode activation, and owns no teardown. Full, skip, and verify-only
+planning retain the same semantic component graph; later lifecycle lowering
+decides which operations each mode executes. Preloaded EOS setup remains
+unsupported.
+
+Physical-interface grouping and typed rate/lane intent, config-install
+snapshot/restoration, component-state restoration, native-BGP and
+`BgpTcpdump` ownership, and a concrete health probe remain prerequisites for
+native lifecycle generation.
 
 Final local validation passed on 2026-08-08: the full abstraction suite passed
-595/595 tests (TestInfra `7599824738784524`), the factory golden gate passed
-2/2 tests (TestInfra `35747322066548903`), and changed-target Pyre found no
-errors across 12 owning targets. Golden regeneration found 294 unchanged
+599/599 tests (TestInfra `1407375402294830`), the factory golden gate passed
+2/2 tests (TestInfra `27303072778109275`), and changed-target Pyre found no
+errors across 15 owning targets. Golden regeneration found 294 unchanged
 configurations, with zero additions, changes, or removals. The manifest
 SHA-256 remained
 `741b81402258cf9feb3047e0e000441d332308823d20a00e909ef3a53cd282bf`.
 
-This completes the IXIA presentation portion of Diff 1.6.2. Native lifecycle,
-EOS setup/teardown task lowering, artifact assembly, and facade authority
-remain required for Phase 1.6 exit. Initial/tagged and compact/named group,
-session, and advertisement identities remain deferred to their Phase 1.7
-profile migrations.
+This completes the task-free routing-config and routing-control-plane
+prerequisites of Diff 1.6.2. Native lifecycle, EOS setup/teardown task lowering,
+artifact assembly, and facade authority remain required for Phase 1.6 exit.
+Initial/tagged and compact/named group, session, and advertisement identities
+remain deferred to their Phase 1.7 profile migrations.
 
 Remaining IXIA families and lifecycle capabilities, EOS
 lifecycle/config/interface rendering, facade cutover, Phase 1.6, Phase 1.7,
@@ -1023,9 +1055,10 @@ populate them safely:
 - `BgpPolicy` does not encode DUT import versus export direction. Diff 1.5.3
   resolves directional DUT bindings from typed network role, relationship,
   AFI, and direction instead of misusing advertisement `BgpPolicy` intent.
-- Current topology intent does not declare semantic component roles or their
-  dependencies. `ComponentPlan` projection remains in Diff 1.5.5 with EOS
-  renderer extraction; the common planner must not infer daemon roles.
+- At the Phase 1.5.2 checkpoint, topology intent did not yet project semantic
+  component roles. Diff 1.6.2e supersedes that deferred state with one generic
+  routing-control-plane composite per routed DUT; the common planner still
+  does not infer EOS daemon roles.
 - Final EOS and IXIA artifact rendering remains compatibility-delegated in the
   Phase 1.5.2 harness composition. Native renderer reports replace those
   delegations in Diffs 1.5.4-1.5.6.

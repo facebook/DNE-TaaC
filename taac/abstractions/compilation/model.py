@@ -6,6 +6,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from taac.abstractions.component_semantics import (
+    ComponentDesiredState,
+    ComponentReadinessRequirement,
+    ComponentReconcileMode,
+    ComponentRole,
+)
 from taac.abstractions.config_artifact_semantics import (
     ConfigArtifactRef,
 )
@@ -391,16 +397,50 @@ class RoutingConfigPlan:
 
 @dataclass(frozen=True)
 class ComponentPlan:
+    """Common prerequisites, not a backend daemon or OpenR lifecycle DAG."""
+
     resource_id: ResourceId
     endpoint_id: ResourceId
-    role: str
-    enabled: bool = True
+    role: ComponentRole
+    desired_state: ComponentDesiredState
+    reconcile_mode: ComponentReconcileMode
+    readiness: ComponentReadinessRequirement
     depends_on: tuple[ResourceId, ...] = ()
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.COMPONENT)
         _require_kind(self.endpoint_id, ResourceKind.ENDPOINT)
-        _require_kinds(self.depends_on, ResourceKind.COMPONENT)
+        if not isinstance(self.role, ComponentRole):
+            raise TypeError("component role must be typed")
+        if self.resource_id.path != (*self.endpoint_id.path, self.role.value):
+            raise ValueError("component resource ID must derive from endpoint and role")
+        if not isinstance(self.desired_state, ComponentDesiredState):
+            raise TypeError("component desired state must be typed")
+        if not isinstance(self.reconcile_mode, ComponentReconcileMode):
+            raise TypeError("component reconcile mode must be typed")
+        if not isinstance(self.readiness, ComponentReadinessRequirement):
+            raise TypeError("component readiness requirement must be typed")
+        if self.desired_state is ComponentDesiredState.STOPPED and (
+            self.reconcile_mode is not ComponentReconcileMode.NONE
+            or self.readiness is not ComponentReadinessRequirement.NONE
+        ):
+            raise ValueError(
+                "stopped component cannot request reconciliation or readiness"
+            )
+        if not isinstance(self.depends_on, tuple):
+            raise TypeError("component dependencies must be a tuple")
+        if len(frozenset(self.depends_on)) != len(self.depends_on):
+            raise ValueError("component dependencies must be unique")
+        for dependency in self.depends_on:
+            if dependency.kind not in {
+                ResourceKind.COMPONENT,
+                ResourceKind.ROUTING_CONFIG,
+            }:
+                raise ValueError(
+                    "component dependencies must target components or routing configs"
+                )
+            if dependency == self.resource_id:
+                raise ValueError("component cannot depend on itself")
 
 
 @dataclass(frozen=True)
@@ -580,6 +620,10 @@ class DutPlan:
     components: tuple[ComponentPlan, ...] = ()
     openr: tuple[OpenRPlan, ...] = ()
 
+    def __post_init__(self) -> None:
+        _validate_unique_resource_ids(self.iter_resources())
+        _validate_component_references(self)
+
     def iter_resources(self) -> tuple[ResourcePlan, ...]:
         return (
             *self.endpoints,
@@ -669,6 +713,26 @@ def _validate_unique_resource_ids(resources: tuple[ResourcePlan, ...]) -> None:
     if duplicates:
         rendered = ", ".join(str(resource_id) for resource_id in duplicates)
         raise ValueError(f"duplicate compilation resource IDs: {rendered}")
+
+
+def _validate_component_references(plan: DutPlan) -> None:
+    dependencies = {
+        resource.resource_id: resource
+        for resource in (*plan.routing_configs, *plan.components)
+    }
+    for component in plan.components:
+        for dependency_id in component.depends_on:
+            dependency = dependencies.get(dependency_id)
+            if dependency is None:
+                raise ValueError(
+                    f"component {component.resource_id} references unknown "
+                    f"dependency {dependency_id}"
+                )
+            if dependency.endpoint_id != component.endpoint_id:
+                raise ValueError(
+                    f"component {component.resource_id} dependency {dependency_id} "
+                    "targets a different endpoint"
+                )
 
 
 def _validate_ixia_internal_references(plan: IxiaPlan) -> None:

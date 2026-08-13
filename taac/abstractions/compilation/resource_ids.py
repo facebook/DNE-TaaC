@@ -10,6 +10,7 @@ from taac.abstractions.compilation.model import (
     ResourceKind,
     RolePolicyKey,
 )
+from taac.abstractions.component_semantics import ComponentRole
 from taac.abstractions.topology.model import EndpointSpec
 
 
@@ -79,6 +80,15 @@ def routing_config_resource_id(endpoint_name: str) -> ResourceId:
     return ResourceId(ResourceKind.ROUTING_CONFIG, (endpoint_name,))
 
 
+def component_resource_id(
+    endpoint_id: ResourceId,
+    role: ComponentRole,
+) -> ResourceId:
+    if endpoint_id.kind is not ResourceKind.ENDPOINT:
+        raise ValueError("component endpoint ID must have endpoint kind")
+    return ResourceId(ResourceKind.COMPONENT, (*endpoint_id.path, role.value))
+
+
 def openr_resource_id(endpoint_name: str) -> ResourceId:
     return ResourceId(ResourceKind.OPENR, (endpoint_name,))
 
@@ -129,6 +139,7 @@ def _ixia_instance_path(
 
 __all__ = (
     "adjacency_resource_id",
+    "component_resource_id",
     "endpoint_resource_id",
     "interface_resource_id",
     "ixia_advertisement_resource_id",

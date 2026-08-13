@@ -15,6 +15,7 @@ from taac.abstractions.compilation.legacy_ixia_identity import (
 from taac.abstractions.compilation.model import (
     AddressFamily,
     BgpAdjacencyPlan,
+    ComponentPlan,
     DesiredPresence,
     DutLinkPlan,
     DutPlan,
@@ -38,6 +39,7 @@ from taac.abstractions.compilation.report import (
 )
 from taac.abstractions.compilation.resource_ids import (
     adjacency_resource_id,
+    component_resource_id,
     endpoint_resource_id,
     interface_resource_id,
     is_dut_endpoint,
@@ -47,6 +49,12 @@ from taac.abstractions.compilation.resource_ids import (
     policy_resource_id,
     role_policy_resource_id,
     routing_config_resource_id,
+)
+from taac.abstractions.component_semantics import (
+    ComponentDesiredState,
+    ComponentReadinessRequirement,
+    ComponentReconcileMode,
+    ComponentRole,
 )
 from taac.abstractions.topology.model import (
     BoundDeviceGroup,
@@ -147,6 +155,7 @@ class BoundTopologyPlanner:
             endpoint_specs,
         )
         routing_configs = _routing_config_plans(bound, endpoint_specs)
+        components = _component_plans(routing_configs)
         openr = _openr_plans(bound, endpoint_specs)
         ixia = plan_ixia(bound, endpoint_specs)
 
@@ -159,7 +168,7 @@ class BoundTopologyPlanner:
                 policies=(*declared_policies, *role_policies),
                 policy_bindings=policy_bindings,
                 routing_configs=routing_configs,
-                components=(),
+                components=components,
                 openr=openr,
             ),
             ixia=ixia.plan,
@@ -412,6 +421,24 @@ def _openr_plans(
         )
         for endpoint in bound.logical_topology.endpoints
         if is_dut_endpoint(endpoint)
+    )
+
+
+def _component_plans(
+    routing_configs: tuple[RoutingConfigPlan, ...],
+) -> tuple[ComponentPlan, ...]:
+    role = ComponentRole.ROUTING_CONTROL_PLANE
+    return tuple(
+        ComponentPlan(
+            resource_id=component_resource_id(routing_config.endpoint_id, role),
+            endpoint_id=routing_config.endpoint_id,
+            role=role,
+            desired_state=ComponentDesiredState.RUNNING,
+            reconcile_mode=ComponentReconcileMode.RESTART_AFTER_CONFIGURATION,
+            readiness=ComponentReadinessRequirement.ACKNOWLEDGED,
+            depends_on=(routing_config.resource_id,),
+        )
+        for routing_config in routing_configs
     )
 
 
