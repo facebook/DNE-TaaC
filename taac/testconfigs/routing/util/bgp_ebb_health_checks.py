@@ -105,6 +105,33 @@ _BGP_SESSION_RETRY_DELAY_SECONDS = 10.0
 _BGP_CONVERGENCE_THRESHOLD_SECONDS = 600
 
 
+def bgp_mon_ignore_prefix(bgp_mon_parent_network: str | None = None) -> str:
+    """Return the BGP-MON parent prefix these checks exclude.
+
+    The monitors sit on a chassis-specific parent network, so the prefix is
+    derived rather than constant. Deriving it in one place is the point: three
+    check factories need the same value, and a copy that drifts would exclude
+    the wrong subnet, silently changing what every standard check counts. That
+    is the same class of duplication that put ixia11 next hops on ixia03.
+
+    Args:
+        bgp_mon_parent_network: Chassis BGP-MON parent network. None selects
+            the ixia11 default, matching the behaviour of the call sites this
+            replaced.
+
+    Returns:
+        The ``/80`` parent prefix to ignore.
+    """
+    # Deferred for the same reason as the call sites this replaced: importing
+    # bgp_ebb_constants at module scope closes an import cycle that only
+    # surfaces under TAAC_OSS=1.
+    from taac.testconfigs.routing.util.bgp_ebb_constants import (
+        IXIA_BGP_MON_IC_PARENT_NETWORK,
+    )
+
+    return f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"
+
+
 def create_standard_prechecks(
     peergroup_ibgp_v6: str,
     peergroup_ibgp_v4: str,
@@ -196,17 +223,11 @@ def create_standard_prechecks(
     # playbook_definitions. Deferring to call-time breaks the cycle. This only
     # surfaced under TAAC_OSS=1, where the internal-module load order that
     # otherwise masks the cycle is absent.
-    from taac.testconfigs.routing.util.bgp_ebb_constants import (
-        IXIA_BGP_MON_IC_PARENT_NETWORK,
-    )
-
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
 
     bgp_mon_ignore = (
-        [f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
-        if exclude_bgp_mon
-        else None
+        [bgp_mon_ignore_prefix(bgp_mon_parent_network)] if exclude_bgp_mon else None
     )
 
     prechecks = [
@@ -413,10 +434,6 @@ def create_standard_postchecks(
     """
     # Lazy import to break a load-time circular import (see
     # create_standard_prechecks); required for TAAC_OSS=1.
-    from taac.testconfigs.routing.util.bgp_ebb_constants import (
-        IXIA_BGP_MON_IC_PARENT_NETWORK,
-    )
-
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
@@ -427,9 +444,7 @@ def create_standard_postchecks(
         daemons_to_check = ["FibBgpGrpc"]
 
     bgp_mon_ignore = (
-        [f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"]
-        if exclude_bgp_mon
-        else None
+        [bgp_mon_ignore_prefix(bgp_mon_parent_network)] if exclude_bgp_mon else None
     )
 
     postchecks: list[PointInTimeHealthCheck] = []
@@ -550,15 +565,9 @@ def create_standard_snapshot_checks(
     """
     # Lazy import to break a load-time circular import (see
     # create_standard_prechecks); required for TAAC_OSS=1.
-    from taac.testconfigs.routing.util.bgp_ebb_constants import (
-        IXIA_BGP_MON_IC_PARENT_NETWORK,
-    )
-
     all_prefixes_to_ignore = list(parent_prefixes_to_ignore or [])
     if exclude_bgp_mon:
-        all_prefixes_to_ignore.append(
-            f"{bgp_mon_parent_network or IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"
-        )
+        all_prefixes_to_ignore.append(bgp_mon_ignore_prefix(bgp_mon_parent_network))
 
     return [
         create_core_dumps_snapshot_check(),
