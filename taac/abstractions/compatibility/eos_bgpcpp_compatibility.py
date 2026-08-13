@@ -211,35 +211,6 @@ def build_update_group_setting_override_cmd(
     return _on_device_python_command(script)
 
 
-UPDATE_GROUP_VERIFICATION_CMD = (
-    "bash sudo bash -c 'set +e; "
-    'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
-    'echo "$out"; '
-    'if echo "$out" | grep -qi DISABLED; then '
-    'echo "FAIL: BGP++ update_group is DISABLED in the deployed baseline"; '
-    "exit 1; fi; "
-    'if echo "$out" | grep -qi "Update group: ENABLED"; then '
-    'echo "PASS: BGP++ update_group is ENABLED"; exit 0; fi; '
-    'echo "FAIL: BGP++ update_group state could not be confirmed -- '
-    'CLI may have failed or returned unexpected output"; '
-    "exit 1'"
-)
-
-UPDATE_GROUP_DISABLED_VERIFICATION_CMD = (
-    "bash sudo bash -c 'set +e; "
-    'out=$(Cli -p15 -c "show bgpcpp update-group" 2>&1); '
-    'echo "$out"; '
-    'if echo "$out" | grep -qi "Update group: ENABLED"; then '
-    'echo "FAIL: BGP++ update_group is ENABLED in the deployed baseline"; '
-    "exit 1; fi; "
-    'if echo "$out" | grep -qi "Update group: DISABLED"; then '
-    'echo "PASS: BGP++ update_group is DISABLED"; exit 0; fi; '
-    'echo "FAIL: BGP++ update_group state could not be confirmed -- '
-    'CLI may have failed or returned unexpected output"; '
-    "exit 1'"
-)
-
-
 # =============================================================================
 # BGP++ Update Group Config (UpdateGroupConfig thrift struct, D100093369)
 # Field names are camelCase to match the on-device JSON serialization of the

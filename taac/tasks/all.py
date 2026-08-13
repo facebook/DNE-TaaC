@@ -79,6 +79,9 @@ from taac.test_as_a_config import types as taac_types
 IPAddress = t.Union[IPv4Address, IPv6Address]
 IPNetwork = t.Union[IPv4Network, IPv6Network]
 
+_BGPCPP_UPDATE_GROUP_STATE_VALIDATION_ATTEMPTS = 3
+_BGPCPP_UPDATE_GROUP_STATE_VALIDATION_RETRY_DELAY_SECONDS = 10
+
 
 class WaitForAgentConvergenceTask(BaseTask):
     NAME = "wait_for_agent_convergence"
@@ -1786,6 +1789,14 @@ class ValidateBgpcppUpdateGroupState(BaseTask):
         if not isinstance(expect_enabled, bool):
             raise ValueError("expect_enabled must be a bool")
 
+        await self._validate_state(hostname, expect_enabled)
+
+    @async_retryable(
+        retries=_BGPCPP_UPDATE_GROUP_STATE_VALIDATION_ATTEMPTS,
+        sleep_time=_BGPCPP_UPDATE_GROUP_STATE_VALIDATION_RETRY_DELAY_SECONDS,
+        exceptions=(Exception,),
+    )
+    async def _validate_state(self, hostname: str, expect_enabled: bool) -> None:
         driver = await async_get_device_driver(hostname)
         try:
             response = await t.cast(t.Any, driver).async_get_update_group_info()
@@ -1795,6 +1806,7 @@ class ValidateBgpcppUpdateGroupState(BaseTask):
             )
             raise
         actual_enabled = response.enable_update_group
+
         self.logger.info(
             f"Observed BGP++ update_group enabled={actual_enabled} on {hostname}; "
             f"expected {expect_enabled}"

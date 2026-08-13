@@ -21,7 +21,6 @@ from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     ADD_INTERN_USER_IDS_CMD,
     BGPCPP_DAEMONS,
-    UPDATE_GROUP_VERIFICATION_CMD,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     _get_control_plane_tasks,
@@ -134,7 +133,6 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
         tasks = _get_control_plane_tasks(
             device_name=_DEVICE,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-            enable_update_group=True,
             consolidate_acl_restart=True,
         )
 
@@ -172,7 +170,6 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
         tasks = _get_control_plane_tasks(
             device_name=_DEVICE,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-            enable_update_group=True,
             consolidate_acl_restart=True,
         )
 
@@ -191,20 +188,9 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             for index, task in enumerate(tasks)
             if task.task_name == "arista_daemon_control"
         )
-        update_group_verification_index = next(
-            index
-            for index, task in enumerate(tasks)
-            if UPDATE_GROUP_VERIFICATION_CMD in _shell_commands(task)
-        )
-
         self.assertLess(acl_patch_index, first_daemon_index)
-        self.assertGreater(update_group_verification_index, last_daemon_index)
-        self.assertEqual("run_commands_on_shell", tasks[-2].task_name)
+        self.assertGreater(len(tasks) - 1, last_daemon_index)
         self.assertEqual("run_commands_on_shell", tasks[-1].task_name)
-        self.assertEqual(
-            [UPDATE_GROUP_VERIFICATION_CMD],
-            _shell_commands(tasks[-1]),
-        )
 
     def test_common_setup_exposes_consolidated_acl_path(self) -> None:
         tasks = get_common_setup_tasks(
@@ -221,6 +207,26 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
         shell_commands = [
             command for task in tasks for command in _shell_commands(task)
         ]
+        validators = [
+            task
+            for task in tasks
+            if task.task_name == "validate_bgpcpp_update_group_state"
+        ]
+        bgp_enable_indices = []
+        for index, task in enumerate(tasks):
+            if task.task_name != "arista_daemon_control":
+                continue
+            json_params = task.params.json_params
+            if json_params is None:
+                raise AssertionError(
+                    "arista_daemon_control task is missing JSON parameters"
+                )
+            params = json.loads(json_params)
+            if params["daemon_name"] == "Bgp" and params["action"] == "enable":
+                bgp_enable_indices.append(index)
+        last_bgp_enable_index = max(bgp_enable_indices)
+        self.assertEqual(1, len(validators))
+        validator_index = tasks.index(validators[0])
 
         for daemon in ("FibAgent", "FibAgentBgp", "Bgp"):
             self.assertEqual(
@@ -229,6 +235,16 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             )
         self.assertFalse(
             any("bgp_setting_config" in command for command in shell_commands)
+        )
+        self.assertGreater(validator_index, last_bgp_enable_index)
+        validator_json_params = validators[0].params.json_params
+        if validator_json_params is None:
+            raise AssertionError(
+                "validate_bgpcpp_update_group_state task is missing JSON parameters"
+            )
+        self.assertEqual(
+            {"hostname": _DEVICE, "expect_enabled": True},
+            json.loads(validator_json_params),
         )
 
     def test_teardown_restores_whole_device_backups_in_reverse_order(self) -> None:

@@ -245,6 +245,44 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
             "bgp_resolve_nexthops_from_interface_state",
         )
 
+    def test_update_group_state_uses_thrift_after_final_bgp_restart(self) -> None:
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            enable_update_group=True,
+        )
+        tasks = config.setup_tasks or []
+        validators = [
+            (index, _task_json_params(task))
+            for index, task in enumerate(tasks)
+            if task.task_name == "validate_bgpcpp_update_group_state"
+        ]
+        bgp_enable_indices = [
+            index
+            for index, task in enumerate(tasks)
+            if task.task_name == "arista_daemon_control"
+            and _task_json_params(task).get("daemon_name") == "Bgp"
+            and _task_json_params(task).get("action") == "enable"
+        ]
+        shell_commands = [
+            command
+            for task in tasks
+            if task.task_name == "run_commands_on_shell"
+            for command in _task_json_params(task).get("cmds", [])
+        ]
+
+        self.assertEqual(1, len(validators))
+        self.assertEqual(
+            {
+                "hostname": BAG010_ASH6.device_name,
+                "expect_enabled": True,
+            },
+            validators[0][1],
+        )
+        self.assertGreater(validators[0][0], max(bgp_enable_indices))
+        self.assertFalse(
+            any("show bgpcpp update-group" in command for command in shell_commands)
+        )
+
     def test_ingress_only_comes_from_having_no_egress_peer(self) -> None:
         """The property that actually makes SC2 ingress-only.
 

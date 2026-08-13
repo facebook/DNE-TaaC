@@ -18,7 +18,6 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     FIBAGENT_BGP_CONF_DEPLOY_CMD,
     FIBAGENT_CONF_DEPLOY_CMD,
     REQUIRE_THRIFT_ACL_FILES_CMD,
-    UPDATE_GROUP_VERIFICATION_CMD,
     VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
 from taac.abstractions.compatibility.legacy_ebb_binding import (
@@ -865,24 +864,13 @@ def _ebb_full_scale_control_plane_tasks(
         )
     )
 
-    if args.enable_update_group:
-        tasks.append(
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[UPDATE_GROUP_VERIFICATION_CMD],
-                set_outer_hostname=True,
-                ixia_needed=True,
-                validate_output=True,
-            )
+    tasks.append(
+        create_validate_bgpcpp_update_group_state_task(
+            hostname=device_name,
+            expect_enabled=args.enable_update_group,
+            ixia_needed=True,
         )
-    else:
-        tasks.append(
-            create_validate_bgpcpp_update_group_state_task(
-                hostname=device_name,
-                expect_enabled=False,
-                ixia_needed=True,
-            )
-        )
+    )
 
     return tasks
 

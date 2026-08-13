@@ -15,6 +15,7 @@ from taac.tasks.all import (
 
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
+RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
 
 
 def _count_chunk_commands(call_args_list) -> int:
@@ -225,6 +226,26 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
         self.assertIn("enabled=False", log_message)
         self.assertIn("bag012.ash6", log_message)
 
+    async def test_accepts_enabled_state_without_active_groups(self) -> None:
+        self.driver.async_get_update_group_info = AsyncMock(
+            return_value=SimpleNamespace(
+                enable_update_group=True,
+                update_groups=[],
+            )
+        )
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=self.driver,
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "expect_enabled": True,
+                }
+            )
+        self.driver.async_get_update_group_info.assert_awaited_once_with()
+
     async def test_rejects_unexpected_enabled_state(self) -> None:
         self.driver.async_get_update_group_info = AsyncMock(
             return_value=SimpleNamespace(enable_update_group=True)
@@ -235,6 +256,7 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
                 new_callable=AsyncMock,
                 return_value=self.driver,
             ),
+            patch(f"{RETRY_UTILS_PATH}.asyncio.sleep", new_callable=AsyncMock),
             self.assertRaisesRegex(RuntimeError, "expected False"),
         ):
             await self.task.run(
@@ -243,10 +265,33 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
                     "expect_enabled": False,
                 }
             )
-        self.logger.info.assert_called_once()
+        self.assertEqual(3, self.logger.info.call_count)
         log_message = self.logger.info.call_args.args[0]
         self.assertIn("enabled=True", log_message)
         self.assertIn("expected False", log_message)
+
+    async def test_retries_until_expected_state_is_observed(self) -> None:
+        self.driver.async_get_update_group_info = AsyncMock(
+            side_effect=[
+                RuntimeError("daemon starting"),
+                SimpleNamespace(enable_update_group=True, update_groups=[]),
+            ]
+        )
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=self.driver,
+            ),
+            patch(f"{RETRY_UTILS_PATH}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "expect_enabled": True,
+                }
+            )
+        self.assertEqual(2, self.driver.async_get_update_group_info.await_count)
 
     async def test_logs_query_failure(self) -> None:
         self.driver.async_get_update_group_info = AsyncMock(
@@ -258,6 +303,7 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
                 new_callable=AsyncMock,
                 return_value=self.driver,
             ),
+            patch(f"{RETRY_UTILS_PATH}.asyncio.sleep", new_callable=AsyncMock),
             self.assertRaisesRegex(RuntimeError, "permission denied"),
         ):
             await self.task.run(
@@ -266,4 +312,4 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
                     "expect_enabled": False,
                 }
             )
-        self.logger.exception.assert_called_once()
+        self.assertEqual(3, self.logger.exception.call_count)

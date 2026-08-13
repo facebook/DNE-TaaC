@@ -41,6 +41,7 @@ from taac.task_definitions import (
     create_interface_ip_configuration_task,
     create_run_commands_on_shell_task,
     create_set_bgp_setting_config_task,
+    create_validate_bgpcpp_update_group_state_task,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     ACL_COMMANDS,
@@ -77,7 +78,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     POST_ACL_RESTART_DAEMONS,
     REQUIRE_THRIFT_ACL_FILES_CMD,
     UPDATE_GROUP_CONFIG,
-    UPDATE_GROUP_VERIFICATION_CMD,
     VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
 from pyre_extensions import none_throws
@@ -336,7 +336,6 @@ def _get_bgpcpp_deployment_tasks(
 def _get_control_plane_tasks(
     device_name: str,
     profile: BgpPlusPlusProfile,
-    enable_update_group: bool = False,
     consolidate_acl_restart: bool = True,
 ) -> t.List[Task]:
     """
@@ -350,12 +349,6 @@ def _get_control_plane_tasks(
     Args:
         device_name: Device hostname
         profile: BGP++ profile -- controls whether the Open/R daemon is enabled.
-        enable_update_group: When True, a final task verifies that BGP++ is
-            running with ``update_group`` enabled (via ``show bgpcpp
-            update-group``). Catches the historical silent-failure mode
-            where the bgpcpp_config patch never landed on disk and
-            ``_UPDATE_GROUP`` test variants ran for hours measuring the
-            NON-UG baseline while claiming UG coverage.
         consolidate_acl_restart: When True, requires and patches all Thrift ACL
             files before stopping the daemons, then performs one
             reverse-stop/forward-start cycle and verifies that startup preserved
@@ -446,30 +439,6 @@ def _get_control_plane_tasks(
                     ixia_needed=True,
                 )
             )
-
-    # Verify ``update_group`` is actually active on the running BGP++
-    # daemon. The Bgp daemon was just re-enabled above and has read
-    # the patched ``/mnt/flash/bgpcpp_config``. ``show bgpcpp
-    # update-group`` reports ``Update group: DISABLED`` if the patch
-    # did not take effect -- fail the setup loudly instead of letting
-    # the playbook measure the NON-UG baseline.
-    #
-    # The check requires BOTH (a) no ``DISABLED`` in the output AND
-    # (b) positive evidence of ``Update group: ENABLED``. Without the
-    # positive match, any CLI failure that doesn't emit ``DISABLED``
-    # (command unavailable, daemon mid-restart, auth error,
-    # connection error, etc.) would fall through to a false PASS --
-    # the exact silent-failure mode this check exists to catch.
-    if enable_update_group:
-        tasks.append(
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[UPDATE_GROUP_VERIFICATION_CMD],
-                set_outer_hostname=True,
-                ixia_needed=True,
-                validate_output=True,
-            )
-        )
 
     return tasks
 
@@ -1373,10 +1342,17 @@ def get_common_setup_tasks(
         _get_control_plane_tasks(
             device_name=device_name,
             profile=profile,
-            enable_update_group=enable_update_group,
             consolidate_acl_restart=consolidate_acl_restart,
         )
     )
+    if enable_update_group:
+        setup_tasks.append(
+            create_validate_bgpcpp_update_group_state_task(
+                hostname=device_name,
+                expect_enabled=True,
+                ixia_needed=True,
+            )
+        )
 
     # 4. Full-scale IP configuration
     setup_tasks.extend(
@@ -1617,7 +1593,6 @@ def get_update_packing_setup_tasks(
         _get_control_plane_tasks(
             device_name=device_name,
             profile=profile,
-            enable_update_group=enable_update_group,
         )
     )
 
@@ -1726,6 +1701,14 @@ def get_update_packing_setup_tasks(
             ixia_needed=True,
         )
     )
+    if enable_update_group:
+        setup_tasks.append(
+            create_validate_bgpcpp_update_group_state_task(
+                hostname=device_name,
+                expect_enabled=True,
+                ixia_needed=True,
+            )
+        )
 
     # 6. OpenR setup (conditional on profile)
     setup_tasks.extend(
