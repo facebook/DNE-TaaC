@@ -9,6 +9,15 @@ from dataclasses import dataclass
 from enum import Enum
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.compilation.ixia_presentation import (
+    IxiaAdvertisementPresentation,
+    IxiaDeviceGroupPresentation,
+    IxiaPresentationError,
+    IxiaSessionPresentation,
+    resolve_ixia_advertisement_presentation,
+    resolve_ixia_device_group_presentation,
+    resolve_ixia_session_presentation,
+)
 from taac.abstractions.compilation.legacy_ixia_identity import (
     LegacyIxiaGroupIdentity,
     LegacyIxiaIdentitySidecar,
@@ -457,6 +466,7 @@ def _validate_partitioned_dual_stack_capability(
     for relationship, groups in groups_by_relationship.items():
         _validate_partitioned_peer_windows(groups, relationship)
     _validate_partitioned_advertisements(request, groups_by_relationship)
+    _validate_partitioned_presentation_uniqueness(request)
 
 
 def _partitioned_groups_by_relationship(
@@ -485,12 +495,12 @@ def _partitioned_groups_by_relationship(
                 "partitioned dual-stack lowering requires one external and one "
                 "internal port"
             )
-        _validate_unique_group_indices(request, port)
+        _validate_unique_partitioned_group_indices(request, port)
         for group in groups:
             session = sessions_by_group[group.resource_id]
             _validate_partitioned_session(group, session, relationship)
             _validate_partitioned_named_identity(
-                request.legacy_identity,
+                request,
                 group,
                 session,
             )
@@ -696,11 +706,7 @@ def _validate_partitioned_advertisement(
             "partitioned dual-stack lowering"
         )
     _validate_partitioned_route_attributes(advertisement)
-    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
-    if identity is None or not identity.prefix_name:
-        _unsupported(
-            f"IXIA advertisement {advertisement.resource_id} has no prefix identity"
-        )
+    _partitioned_advertisement_presentation(legacy_identity, advertisement)
     try:
         source_address = ipaddress.ip_address(prefix_window.source_start)
     except ValueError:
@@ -742,22 +748,96 @@ def _validate_partitioned_route_attributes(
 
 
 def _validate_partitioned_named_identity(
-    legacy_identity: LegacyIxiaIdentitySidecar,
+    request: TrafficGeneratorRenderRequest,
     group: IxiaDeviceGroupPlan,
     session: IxiaBgpSessionPlan,
 ) -> None:
-    identity = _required_group_identity(legacy_identity, group.resource_id)
-    session_identity = legacy_identity.session_identity(session.resource_id)
+    identity = _partitioned_group_presentation(request, group)
+    session_identity = _partitioned_session_presentation(
+        request.legacy_identity,
+        session,
+    )
     if (
         identity.device_group_name is None
         or identity.tag_name is not None
-        or identity.device_group_index is None
-        or session_identity is None
         or not session_identity.bgp_peer_name
     ):
         _unsupported(
             f"IXIA group {group.resource_id} requires named presentation identity"
         )
+
+
+def _partitioned_group_presentation(
+    request: TrafficGeneratorRenderRequest,
+    group: IxiaDeviceGroupPlan,
+) -> IxiaDeviceGroupPresentation:
+    try:
+        return resolve_ixia_device_group_presentation(
+            request.plan,
+            request.legacy_identity,
+            group,
+        )
+    except IxiaPresentationError as error:
+        _unsupported(str(error))
+
+
+def _partitioned_session_presentation(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    session: IxiaBgpSessionPlan,
+) -> IxiaSessionPresentation:
+    try:
+        return resolve_ixia_session_presentation(legacy_identity, session)
+    except IxiaPresentationError as error:
+        _unsupported(str(error))
+
+
+def _partitioned_advertisement_presentation(
+    legacy_identity: LegacyIxiaIdentitySidecar,
+    advertisement: IxiaAdvertisementPlan,
+) -> IxiaAdvertisementPresentation:
+    try:
+        return resolve_ixia_advertisement_presentation(
+            legacy_identity,
+            advertisement,
+        )
+    except IxiaPresentationError as error:
+        _unsupported(str(error))
+
+
+def _validate_partitioned_presentation_uniqueness(
+    request: TrafficGeneratorRenderRequest,
+) -> None:
+    group_names = tuple(
+        presentation.device_group_name
+        for group in request.plan.device_groups
+        if (
+            presentation := _partitioned_group_presentation(request, group)
+        ).device_group_name
+        is not None
+    )
+    session_names = tuple(
+        _partitioned_session_presentation(
+            request.legacy_identity,
+            session,
+        ).bgp_peer_name
+        for session in request.plan.bgp_sessions
+    )
+    advertisement_names = tuple(
+        _partitioned_advertisement_presentation(
+            request.legacy_identity,
+            advertisement,
+        ).prefix_name
+        for advertisement in request.plan.advertisements
+    )
+    for subject, names in (
+        ("device-group", group_names),
+        ("BGP peer", session_names),
+        ("prefix", advertisement_names),
+    ):
+        if len(frozenset(names)) != len(names):
+            _unsupported(
+                f"partitioned IXIA {subject} presentation names must be unique"
+            )
 
 
 def _validate_initial_ipv6_session(
@@ -917,6 +997,19 @@ def _validate_unique_group_indices(
 ) -> None:
     indices = tuple(
         _required_group_index(request.legacy_identity, group.resource_id)
+        for group in request.plan.device_groups
+        if group.port_id == port.resource_id
+    )
+    if len(frozenset(indices)) != len(indices):
+        _unsupported(f"IXIA port {port.resource_id} has duplicate device-group indices")
+
+
+def _validate_unique_partitioned_group_indices(
+    request: TrafficGeneratorRenderRequest,
+    port: IxiaPortPlan,
+) -> None:
+    indices = tuple(
+        _partitioned_group_presentation(request, group).device_group_index
         for group in request.plan.device_groups
         if group.port_id == port.resource_id
     )
@@ -1087,27 +1180,30 @@ def _device_group_config(
     group: IxiaDeviceGroupPlan,
     capability: _IxiaRenderingCapability,
 ) -> taac_types.DeviceGroupConfig:
-    identity = _required_group_identity(
-        request.legacy_identity,
-        group.resource_id,
-    )
     session = next(
         session
         for session in request.plan.bgp_sessions
         if session.device_group_id == group.resource_id
     )
-    session_identity = _required_session_identity(
-        request.legacy_identity,
-        session.resource_id,
-    )
     if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
         return _partitioned_dual_stack_device_group_config(
             request,
             group,
-            identity,
+            _partitioned_group_presentation(request, group),
             session,
-            session_identity,
+            _partitioned_session_presentation(
+                request.legacy_identity,
+                session,
+            ),
         )
+    identity = _required_group_identity(
+        request.legacy_identity,
+        group.resource_id,
+    )
+    session_identity = _required_session_identity(
+        request.legacy_identity,
+        session.resource_id,
+    )
     if capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
         advertisements = tuple(
             advertisement
@@ -1185,9 +1281,9 @@ def _device_group_config(
 def _partitioned_dual_stack_device_group_config(
     request: TrafficGeneratorRenderRequest,
     group: IxiaDeviceGroupPlan,
-    identity: LegacyIxiaGroupIdentity,
+    identity: IxiaDeviceGroupPresentation,
     session: IxiaBgpSessionPlan,
-    session_identity: LegacyIxiaSessionIdentity,
+    session_identity: IxiaSessionPresentation,
 ) -> taac_types.DeviceGroupConfig:
     address_config = _partitioned_address_config(group, session)
     bgp_config = _partitioned_bgp_config(
@@ -1239,7 +1335,7 @@ def _partitioned_bgp_config(
     request: TrafficGeneratorRenderRequest,
     group: IxiaDeviceGroupPlan,
     session: IxiaBgpSessionPlan,
-    session_identity: LegacyIxiaSessionIdentity,
+    session_identity: IxiaSessionPresentation,
 ) -> taac_types.BgpConfig:
     advertisements = tuple(
         advertisement
@@ -1277,9 +1373,12 @@ def _partitioned_dual_stack_route_scale(
     group: IxiaDeviceGroupPlan,
     advertisement: IxiaAdvertisementPlan,
 ) -> taac_types.RouteScaleSpec:
-    identity = legacy_identity.advertisement_identity(advertisement.resource_id)
+    identity = _partitioned_advertisement_presentation(
+        legacy_identity,
+        advertisement,
+    )
     attributes = advertisement.route_attributes
-    if identity is None or attributes is None:
+    if attributes is None:
         raise RuntimeError("validated partitioned route inputs are missing")
     prefix_window = advertisement.prefix_window
     route_scale = taac_types.RouteScale(

@@ -116,9 +116,9 @@ class IxiaDeviceGroupChild:
     ordinal: int
     start_index: int
     peer_count: int
-    legacy_ixia_device_group_name: str
-    legacy_ixia_bgp_peer_name: str
-    legacy_ixia_device_group_index: int
+    legacy_ixia_device_group_name: str | None = None
+    legacy_ixia_bgp_peer_name: str | None = None
+    legacy_ixia_device_group_index: int | None = None
     legacy_ixia_prefix_pool_name: str | None = None
 
 
@@ -595,9 +595,9 @@ class ResolvedIxiaDeviceGroupChild:
     local_asn: int | None
     remote_asn: int | None
     peer_group: BgpPeerGroup | str | None
-    legacy_ixia_device_group_name: str
-    legacy_ixia_bgp_peer_name: str
-    legacy_ixia_device_group_index: int
+    legacy_ixia_device_group_name: str | None
+    legacy_ixia_bgp_peer_name: str | None
+    legacy_ixia_device_group_index: int | None
     legacy_ixia_prefix_pool_name: str | None
     peers: tuple[ResolvedPeer, ...]
     prefix_advertisements: tuple[ResolvedPrefixAdvertisementLike, ...]

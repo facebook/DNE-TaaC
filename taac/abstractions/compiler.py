@@ -3669,6 +3669,17 @@ def _bounded_ecmp_child_device_group_config(
             suffix=f".ixia_children.{child.name}.peers",
             code="missing_bounded_ecmp_input",
         )
+    device_group_name = child.spec.legacy_ixia_device_group_name
+    bgp_peer_name = child.spec.legacy_ixia_bgp_peer_name
+    device_group_index = child.spec.legacy_ixia_device_group_index
+    if device_group_name is None or bgp_peer_name is None or device_group_index is None:
+        _raise_unsupported_group_lowering(
+            bound,
+            parent,
+            f"bounded ECMP child {child.name!r} has no legacy IXIA presentation",
+            suffix=f".ixia_children.{child.name}",
+            code="missing_bounded_ecmp_input",
+        )
     first_peer = child.peers[0]
     address_config = taac_types.IpAddressesConfig(
         starting_ip=first_peer.z_ip,
@@ -3683,7 +3694,7 @@ def _bounded_ecmp_child_device_group_config(
         start_index=0,
     )
     bgp_params: dict[str, t.Any] = {
-        "bgp_peer_name": child.spec.legacy_ixia_bgp_peer_name,
+        "bgp_peer_name": bgp_peer_name,
         "local_as_4_bytes": parent.remote_asn,
         "enable_4_byte_local_as": True,
         "bgp_capabilities": [
@@ -3734,8 +3745,8 @@ def _bounded_ecmp_child_device_group_config(
         bgp_params["enable_graceful_restart"] = False
     bgp_config = taac_types.BgpConfig(**bgp_params)
     return taac_types.DeviceGroupConfig(
-        device_group_name=child.spec.legacy_ixia_device_group_name,
-        device_group_index=child.spec.legacy_ixia_device_group_index,
+        device_group_name=device_group_name,
+        device_group_index=device_group_index,
         multiplier=child.peer_count,
         v4_addresses_config=address_config if parent.afi == "v4" else None,
         v6_addresses_config=address_config if parent.afi == "v6" else None,

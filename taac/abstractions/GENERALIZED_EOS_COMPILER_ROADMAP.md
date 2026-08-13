@@ -904,6 +904,30 @@ of Phase 1.5:
 16. **Completed shadow capability:** Diff 1.5.5j, lower partitioned dual-stack
     IXIA device-group bodies from semantic resources and compose them by
     resource ID for both bounded-ECMP cases.
+17. **Completed Phase 1.6 identity prerequisite:** Diff 1.6.2a, derive
+    partitioned IXIA group, session, and advertisement presentation from
+    stable resource IDs while retaining field-scoped compatibility overrides.
+
+#### Resource-derived partitioned IXIA presentation
+
+Partitioned dual-stack lowering no longer requires group, session, or
+advertisement entries in `LegacyIxiaIdentitySidecar`. A task-free presentation
+resolver derives versioned, fixed-length names from typed `ResourceId` values
+and allocates zero-based device-group indices from per-port plan order.
+Explicit sidecar fields remain resource-keyed overrides. They do not reorder
+resources or shift other defaults, and resolved name or index collisions fail
+closed.
+
+`IxiaDeviceGroupChild` legacy presentation fields are now optional. A
+bounded-ECMP topology with `legacy_profile=None` and those fields omitted
+produces the same semantic IXIA plan, while the existing overrides preserve
+the established artifacts exactly.
+
+This completes only the partitioned IXIA identity-allocation portion of Diff
+1.6.2. Port endpoint labels still depend on `LegacyIxiaPortIdentity`; native
+EOS setup, teardown, endpoint realization, and artifact assembly remain Phase
+1.6 work. Legacy identity requirements for the initial/tagged and compact/named
+IXIA capabilities remain deferred to their Phase 1.7 profile migrations.
 
 Remaining IXIA families and lifecycle capabilities, EOS
 lifecycle/config/interface rendering, facade cutover, Phase 1.6, Phase 1.7,

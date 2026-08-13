@@ -1318,11 +1318,11 @@ def _validate_ixia_child_indices(
 ) -> None:
     owner_by_index: dict[int, int] = {}
     for child_index, child in enumerate(parent.ixia_children):
-        if not isinstance(child, IxiaDeviceGroupChild) or not _is_non_negative_int(
-            child.legacy_ixia_device_group_index
-        ):
+        if not isinstance(child, IxiaDeviceGroupChild):
             continue
         index = child.legacy_ixia_device_group_index
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            continue
         prior_child_index = owner_by_index.get(index)
         if prior_child_index is not None:
             issues.append(
@@ -1384,28 +1384,12 @@ def _validate_ixia_child_metadata(
     parent: DeviceGroupSpec,
     issues: list[ValidationIssue],
 ) -> None:
+    _validate_ixia_child_name(child, path, issues)
     for field_name in (
-        "name",
         "legacy_ixia_device_group_name",
         "legacy_ixia_bgp_peer_name",
     ):
-        value = getattr(child, field_name)
-        if not isinstance(value, str) or not value.strip():
-            issues.append(
-                _issue(
-                    f"{path}.{field_name}",
-                    f"ixia_child_{field_name}_required",
-                    f"IXIA child {field_name} must be a non-empty string",
-                )
-            )
-        elif value != value.strip():
-            issues.append(
-                _issue(
-                    f"{path}.{field_name}",
-                    f"invalid_ixia_child_{field_name}",
-                    f"IXIA child {field_name} cannot contain surrounding whitespace",
-                )
-            )
+        _validate_optional_ixia_child_name(child, path, field_name, issues)
     prefix_pool_name = child.legacy_ixia_prefix_pool_name
     if prefix_pool_name is not None and (
         not isinstance(prefix_pool_name, str)
@@ -1430,7 +1414,6 @@ def _validate_ixia_child_metadata(
     for field_name in (
         "ordinal",
         "start_index",
-        "legacy_ixia_device_group_index",
     ):
         if not _is_non_negative_int(getattr(child, field_name)):
             issues.append(
@@ -1440,12 +1423,72 @@ def _validate_ixia_child_metadata(
                     f"IXIA child {field_name} must be a non-negative integer",
                 )
             )
+    if child.legacy_ixia_device_group_index is not None and not _is_non_negative_int(
+        child.legacy_ixia_device_group_index
+    ):
+        issues.append(
+            _issue(
+                f"{path}.legacy_ixia_device_group_index",
+                "invalid_ixia_child_legacy_ixia_device_group_index",
+                "legacy IXIA child device-group index must be non-negative",
+            )
+        )
     if not _is_non_negative_int(child.peer_count) or child.peer_count == 0:
         issues.append(
             _issue(
                 f"{path}.peer_count",
                 "invalid_ixia_child_peer_count",
                 "IXIA child peer_count must be a positive integer",
+            )
+        )
+
+
+def _validate_ixia_child_name(
+    child: IxiaDeviceGroupChild,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(child.name, str) or not child.name.strip():
+        issues.append(
+            _issue(
+                f"{path}.name",
+                "ixia_child_name_required",
+                "IXIA child name must be a non-empty string",
+            )
+        )
+    elif child.name != child.name.strip():
+        issues.append(
+            _issue(
+                f"{path}.name",
+                "invalid_ixia_child_name",
+                "IXIA child name cannot contain surrounding whitespace",
+            )
+        )
+
+
+def _validate_optional_ixia_child_name(
+    child: IxiaDeviceGroupChild,
+    path: str,
+    field_name: str,
+    issues: list[ValidationIssue],
+) -> None:
+    value = getattr(child, field_name)
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        issues.append(
+            _issue(
+                f"{path}.{field_name}",
+                f"invalid_ixia_child_{field_name}",
+                f"IXIA child {field_name} must be a non-empty string",
+            )
+        )
+    elif value != value.strip():
+        issues.append(
+            _issue(
+                f"{path}.{field_name}",
+                f"invalid_ixia_child_{field_name}",
+                f"IXIA child {field_name} cannot contain surrounding whitespace",
             )
         )
 
