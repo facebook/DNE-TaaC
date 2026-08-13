@@ -26,13 +26,21 @@ from taac.abstractions.compilation.lifecycle import (
 )
 from taac.abstractions.compilation.model import (
     AddressFamily,
+    ComponentPlan,
     DutPlan,
     EndpointPlan,
     EndpointSetupMode,
+    OpenRDesiredMode,
     PhysicalInterfacePlan,
     ResourceId,
     ResourceKind,
     RoutingConfigPlan,
+)
+from taac.abstractions.component_semantics import (
+    ComponentDesiredState,
+    ComponentReadinessRequirement,
+    ComponentReconcileMode,
+    ComponentRole,
 )
 from taac.abstractions.config_artifact_semantics import (
     ConfigArtifactProvider,
@@ -60,6 +68,10 @@ class EosPhysicalLifecycleAction(str, Enum):
 
 class EosRoutingConfigLifecycleAction(str, Enum):
     INSTALL_AND_VERIFY = "install_and_verify"
+
+
+class EosRoutingComponentLifecycleAction(str, Enum):
+    RECONCILE_AND_ACKNOWLEDGE = "reconcile_and_acknowledge"
 
 
 _EOS_BGPCPP_CONFIG_DESTINATION = "/mnt/flash/bgpcpp_config"
@@ -161,6 +173,98 @@ class EosRoutingConfigLifecycleCleanupIntent:
 
 
 @dataclass(frozen=True)
+class EosRoutingDaemonIntent:
+    name: str
+    enabled: bool
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("EOS routing daemon name must be nonempty")
+        if not isinstance(self.enabled, bool):
+            raise TypeError("EOS routing daemon enabled state must be a bool")
+        if not isinstance(self.dependencies, tuple) or any(
+            not isinstance(dependency, str) or not dependency
+            for dependency in self.dependencies
+        ):
+            raise ValueError("EOS routing daemon dependencies must be names")
+        if self.name in self.dependencies:
+            raise ValueError("EOS routing daemon cannot depend on itself")
+        if len(frozenset(self.dependencies)) != len(self.dependencies):
+            raise ValueError("EOS routing daemon dependencies must be unique")
+
+
+@dataclass(frozen=True)
+class EosRoutingStartupOptionIntent:
+    daemon: str
+    name: str
+    value: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(field, str) or not field
+            for field in (self.daemon, self.name, self.value)
+        ):
+            raise ValueError("EOS routing startup option fields must be nonempty")
+
+
+@dataclass(frozen=True)
+class EosRoutingComponentLifecycleTaskIntent:
+    action: EosRoutingComponentLifecycleAction
+    hostname: str
+    operation_id: ResourceId
+    routing_config_id: ResourceId
+    daemons: tuple[EosRoutingDaemonIntent, ...]
+    startup_options: tuple[EosRoutingStartupOptionIntent, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.action
+            is not EosRoutingComponentLifecycleAction.RECONCILE_AND_ACKNOWLEDGE
+        ):
+            raise TypeError("EOS routing-component lifecycle action must be typed")
+        _validate_routing_component_intent_fields(
+            self.hostname,
+            self.operation_id,
+            self.routing_config_id,
+            self.daemons,
+            self.startup_options,
+        )
+
+
+@dataclass(frozen=True)
+class EosRoutingComponentLifecycleCleanupIntent:
+    hostname: str
+    operation_id: ResourceId
+    daemon_names: tuple[str, ...]
+    startup_option_keys: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.hostname, str) or not self.hostname:
+            raise ValueError("EOS routing-component hostname must be nonempty")
+        if self.operation_id.kind is not ResourceKind.COMPONENT:
+            raise ValueError(
+                "EOS routing-component lifecycle operation must target component"
+            )
+        if (
+            not isinstance(self.daemon_names, tuple)
+            or not self.daemon_names
+            or any(not isinstance(name, str) or not name for name in self.daemon_names)
+        ):
+            raise ValueError("EOS routing-component cleanup requires daemon names")
+        if len(frozenset(self.daemon_names)) != len(self.daemon_names):
+            raise ValueError("EOS routing-component cleanup daemons must be unique")
+        if not isinstance(self.startup_option_keys, tuple) or any(
+            len(key) != 2
+            or any(not isinstance(value, str) or not value for value in key)
+            for key in self.startup_option_keys
+        ):
+            raise ValueError("EOS routing-component cleanup option keys are invalid")
+        if len(frozenset(self.startup_option_keys)) != len(self.startup_option_keys):
+            raise ValueError("EOS routing-component cleanup option keys must be unique")
+
+
+@dataclass(frozen=True)
 class EosBgpCppHostOsRenderer:
     """Lowers EOS/BGP++ host-OS metadata in shadow mode."""
 
@@ -236,7 +340,10 @@ class EosBgpCppLifecycleRenderer:
             physical.resource_id: physical for physical in plan.physical_interfaces
         }
         routing_config = _required_routing_config(plan, endpoint)
+        component = _required_routing_component(plan, endpoint, routing_config)
+        _require_openr_none(plan, endpoint)
         supported_kinds = {
+            ResourceKind.COMPONENT,
             ResourceKind.PHYSICAL_INTERFACE,
             ResourceKind.ROUTING_CONFIG,
         }
@@ -246,7 +353,11 @@ class EosBgpCppLifecycleRenderer:
             if operation.resource_id.kind in supported_kinds
         )
         expected_ids = (
-            (*tuple(physical_by_id), routing_config.resource_id)
+            (
+                *tuple(physical_by_id),
+                routing_config.resource_id,
+                component.resource_id,
+            )
             if endpoint.setup_mode is EndpointSetupMode.FULL
             else ()
         )
@@ -265,6 +376,7 @@ class EosBgpCppLifecycleRenderer:
                 hostname,
                 physical_by_id,
                 routing_config,
+                component,
                 operation,
             )
             for operation in operations
@@ -297,8 +409,15 @@ class EosBgpCppLifecycleRenderer:
         hostname: str,
         physical_by_id: dict[ResourceId, PhysicalInterfacePlan],
         routing_config: RoutingConfigPlan,
+        component: ComponentPlan,
         operation: LifecycleOperation,
     ) -> DutLifecycleFragment[object]:
+        if operation.resource_id.kind is ResourceKind.COMPONENT:
+            return self._render_routing_component_fragment(
+                hostname,
+                component,
+                operation,
+            )
         if operation.resource_id.kind is ResourceKind.ROUTING_CONFIG:
             return self._render_routing_config_fragment(
                 plan,
@@ -357,11 +476,41 @@ class EosBgpCppLifecycleRenderer:
             ),
         )
 
+    def _render_routing_component_fragment(
+        self,
+        hostname: str,
+        component: ComponentPlan,
+        operation: LifecycleOperation,
+    ) -> DutLifecycleFragment[object]:
+        _validate_routing_component_operation(operation, component)
+        daemons = _eos_routing_daemons()
+        startup_options = _eos_routing_startup_options()
+        return DutLifecycleFragment(
+            operation_id=component.resource_id,
+            post_ixia_tasks=(
+                EosRoutingComponentLifecycleTaskIntent(
+                    action=(
+                        EosRoutingComponentLifecycleAction.RECONCILE_AND_ACKNOWLEDGE
+                    ),
+                    hostname=hostname,
+                    operation_id=component.resource_id,
+                    routing_config_id=component.depends_on[0],
+                    daemons=daemons,
+                    startup_options=startup_options,
+                ),
+            ),
+        )
+
     def _render_cleanup_fragments(
         self,
         hostname: str,
         teardown_ids: tuple[ResourceId, ...],
     ) -> tuple[DutLifecycleCleanupFragment[object], ...]:
+        component_ids = tuple(
+            operation_id
+            for operation_id in teardown_ids
+            if operation_id.kind is ResourceKind.COMPONENT
+        )
         routing_config_ids = tuple(
             operation_id
             for operation_id in teardown_ids
@@ -372,11 +521,27 @@ class EosBgpCppLifecycleRenderer:
             for operation_id in teardown_ids
             if operation_id.kind is ResourceKind.PHYSICAL_INTERFACE
         )
-        if teardown_ids != (*routing_config_ids, *physical_ids):
+        if teardown_ids != (*component_ids, *routing_config_ids, *physical_ids):
             raise UnsupportedEosBgpCppLifecycleRenderingError(
-                "EOS/BGP++ cleanup must restore routing config before interfaces"
+                "EOS/BGP++ cleanup must restore components, config, then interfaces"
             )
+        daemons = _eos_routing_daemons()
+        startup_options = _eos_routing_startup_options()
         return (
+            *(
+                DutLifecycleCleanupFragment(
+                    operation_ids=(operation_id,),
+                    task=EosRoutingComponentLifecycleCleanupIntent(
+                        hostname=hostname,
+                        operation_id=operation_id,
+                        daemon_names=tuple(daemon.name for daemon in daemons),
+                        startup_option_keys=tuple(
+                            (option.daemon, option.name) for option in startup_options
+                        ),
+                    ),
+                )
+                for operation_id in component_ids
+            ),
             *(
                 DutLifecycleCleanupFragment(
                     operation_ids=(operation_id,),
@@ -438,6 +603,166 @@ def _required_routing_config(
             f"provider {source.provider.value!r}"
         )
     return routing_config
+
+
+def _required_routing_component(
+    plan: DutPlan,
+    endpoint: EndpointPlan,
+    routing_config: RoutingConfigPlan,
+) -> ComponentPlan:
+    if len(plan.components) != 1:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            "EOS/BGP++ lifecycle rendering requires exactly one routing component; "
+            f"found {len(plan.components)}"
+        )
+    component = plan.components[0]
+    expected = (
+        endpoint.resource_id,
+        ComponentRole.ROUTING_CONTROL_PLANE,
+        ComponentDesiredState.RUNNING,
+        ComponentReconcileMode.RESTART_AFTER_CONFIGURATION,
+        ComponentReadinessRequirement.ACKNOWLEDGED,
+        (routing_config.resource_id,),
+    )
+    actual = (
+        component.endpoint_id,
+        component.role,
+        component.desired_state,
+        component.reconcile_mode,
+        component.readiness,
+        component.depends_on,
+    )
+    if actual != expected:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"component {component.resource_id} has unsupported routing-control-plane "
+            f"contract: expected={expected}, actual={actual}"
+        )
+    return component
+
+
+def _require_openr_none(plan: DutPlan, endpoint: EndpointPlan) -> None:
+    openr_plans = tuple(
+        openr for openr in plan.openr if openr.endpoint_id == endpoint.resource_id
+    )
+    if len(openr_plans) != 1 or openr_plans[0].mode is not OpenRDesiredMode.NONE:
+        actual = tuple((openr.resource_id, openr.mode) for openr in openr_plans)
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            "EOS/BGP++ routing-component lifecycle requires one OpenR NONE plan; "
+            f"actual={actual}"
+        )
+
+
+def _validate_routing_component_operation(
+    operation: LifecycleOperation,
+    component: ComponentPlan,
+) -> None:
+    expected = (
+        component.resource_id,
+        OwnershipMode.SNAPSHOT_RESTORED,
+        RestorationMode.FIRST_SNAPSHOT,
+        ReadinessMode.ACKNOWLEDGED,
+        component.depends_on,
+        True,
+    )
+    actual = (
+        operation.resource_id,
+        operation.ownership,
+        operation.restoration,
+        operation.readiness,
+        operation.dependencies,
+        operation.state_changing,
+    )
+    if actual != expected:
+        raise UnsupportedEosBgpCppLifecycleRenderingError(
+            f"routing-component operation {operation.resource_id} has unsupported "
+            f"lifecycle contract: expected={expected}, actual={actual}"
+        )
+
+
+def _eos_routing_daemons() -> tuple[EosRoutingDaemonIntent, ...]:
+    return (
+        EosRoutingDaemonIntent(name="FibGrpc", enabled=True),
+        EosRoutingDaemonIntent(name="FibBgpGrpc", enabled=True),
+        EosRoutingDaemonIntent(
+            name="FibAgent",
+            enabled=True,
+            dependencies=("FibGrpc",),
+        ),
+        EosRoutingDaemonIntent(
+            name="FibAgentBgp",
+            enabled=True,
+            dependencies=("FibBgpGrpc",),
+        ),
+        EosRoutingDaemonIntent(name="Openr", enabled=False),
+        EosRoutingDaemonIntent(
+            name="Bgp",
+            enabled=True,
+            dependencies=("FibAgent", "FibAgentBgp"),
+        ),
+    )
+
+
+def _eos_routing_startup_options() -> tuple[EosRoutingStartupOptionIntent, ...]:
+    return (
+        EosRoutingStartupOptionIntent(
+            daemon="Bgp",
+            name="bgp_resolve_nexthops_from_interface_state",
+            value="true",
+        ),
+    )
+
+
+def _validate_routing_component_intent_fields(
+    hostname: str,
+    operation_id: ResourceId,
+    routing_config_id: ResourceId,
+    daemons: tuple[EosRoutingDaemonIntent, ...],
+    startup_options: tuple[EosRoutingStartupOptionIntent, ...],
+) -> None:
+    if not isinstance(hostname, str) or not hostname:
+        raise ValueError("EOS routing-component hostname must be nonempty")
+    if operation_id.kind is not ResourceKind.COMPONENT:
+        raise ValueError(
+            "EOS routing-component lifecycle operation must target component"
+        )
+    if routing_config_id.kind is not ResourceKind.ROUTING_CONFIG:
+        raise ValueError("EOS routing component must depend on routing config")
+    if (
+        not isinstance(daemons, tuple)
+        or not daemons
+        or any(not isinstance(daemon, EosRoutingDaemonIntent) for daemon in daemons)
+    ):
+        raise ValueError("EOS routing component requires typed daemon intent")
+    daemon_names = tuple(daemon.name for daemon in daemons)
+    if len(frozenset(daemon_names)) != len(daemon_names):
+        raise ValueError("EOS routing daemon names must be unique")
+    seen_daemons: set[str] = set()
+    for daemon in daemons:
+        missing = tuple(
+            dependency
+            for dependency in daemon.dependencies
+            if dependency not in seen_daemons
+        )
+        if missing:
+            raise ValueError(
+                f"EOS routing daemon {daemon.name!r} has unordered dependencies "
+                f"{missing}"
+            )
+        seen_daemons.add(daemon.name)
+    if not isinstance(startup_options, tuple) or any(
+        not isinstance(option, EosRoutingStartupOptionIntent)
+        for option in startup_options
+    ):
+        raise ValueError("EOS routing startup options must be typed")
+    option_keys = tuple((option.daemon, option.name) for option in startup_options)
+    if len(frozenset(option_keys)) != len(option_keys):
+        raise ValueError("EOS routing startup option keys must be unique")
+    enabled_daemons = frozenset(daemon.name for daemon in daemons if daemon.enabled)
+    unknown_options = tuple(key for key in option_keys if key[0] not in enabled_daemons)
+    if unknown_options:
+        raise ValueError(
+            f"EOS routing startup options target disabled daemons {unknown_options}"
+        )
 
 
 def _validate_routing_config_operation(
@@ -614,6 +939,11 @@ __all__ = (
     "EosRoutingConfigLifecycleAction",
     "EosRoutingConfigLifecycleCleanupIntent",
     "EosRoutingConfigLifecycleTaskIntent",
+    "EosRoutingComponentLifecycleAction",
+    "EosRoutingComponentLifecycleCleanupIntent",
+    "EosRoutingComponentLifecycleTaskIntent",
+    "EosRoutingDaemonIntent",
+    "EosRoutingStartupOptionIntent",
     "UnsupportedEosBgpCppEndpointBaseRenderingError",
     "UnsupportedEosBgpCppHostOsRenderingError",
     "UnsupportedEosBgpCppLifecycleRenderingError",

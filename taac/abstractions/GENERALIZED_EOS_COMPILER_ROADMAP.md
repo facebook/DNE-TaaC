@@ -941,6 +941,11 @@ of Phase 1.5:
     1.6.3b, lower Configerator installation, exact-readback, and
     first-snapshot restoration intent after physical realization without
     changing executable tasks or artifact authority.
+26. **Completed Phase 1.6 routing-component lifecycle shadow prerequisite:**
+    Diff 1.6.3c, lower the acknowledged EOS BGP++ daemon reconciliation graph
+    after routing-config installation and restore its snapshot before config
+    and physical cleanup without changing executable tasks or artifact
+    authority.
 
 #### Resource-derived IXIA presentation
 
@@ -1195,13 +1200,47 @@ regeneration found 294 unchanged configurations, with zero additions, changes,
 or removals. The manifest SHA-256 remained
 `b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
 
+#### EOS routing-component lifecycle shadow rendering
+
+The EOS lifecycle renderer now consumes the routed DUT's single
+`ROUTING_CONTROL_PLANE` component after routing-config installation. Full
+setup requires the exact common contract: desired state `RUNNING`, reconcile
+mode `RESTART_AFTER_CONFIGURATION`, acknowledged readiness, a dependency on
+the routed DUT's config, and first-snapshot restoration. The endpoint must
+also have exactly one `OpenRPlan` in `NONE` mode. Component-contract,
+dependency, ownership, readiness, and OpenR drift fail before an intent is
+emitted.
+
+The task-free post-IXIA intent carries an ordered backend-private daemon graph:
+`FibGrpc` and `FibBgpGrpc`; `FibAgent` after `FibGrpc`; `FibAgentBgp` after
+`FibBgpGrpc`; disabled `Openr`; and `Bgp` after both FibAgent variants. It also
+sets the BGP startup option
+`bgp_resolve_nexthops_from_interface_state=true`. Cleanup identifies the same
+daemon and startup-option snapshot surface, then restores component state
+before routing-config and reverse physical restoration. Skip and verify-only
+modes still emit no lifecycle fragments.
+
+This remains an acknowledged shadow contract. It does not snapshot daemon or
+startup-option state, issue EOS component commands, probe daemon or session
+health, restore prior state, construct TAAC tasks, merge fragments into
+artifacts, or change facade authority.
+
+Final local validation passed on 2026-08-11: the focused lifecycle and
+candidate tests passed 26/26 (TestInfra `9288674420601902`), the full
+abstraction suite passed 695/695 tests (TestInfra `9851624374015023`), and the
+factory golden gate passed 2/2 tests (TestInfra `34621422160392463`).
+Changed-target Pyre found no errors across 3 owning targets. Golden
+regeneration found 294 unchanged configurations, with zero additions, changes,
+or removals. The manifest SHA-256 remained
+`b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
+
 Initial/tagged and compact/named group, session, and advertisement identities
 remain deferred to their Phase 1.7 profile migrations.
 
 Remaining IXIA families and lifecycle capabilities, EOS
-lifecycle/config/interface rendering, facade cutover, Phase 1.6, Phase 1.7,
-traffic-item compilation, generalized OpenR/helper behavior, and FBOSS task
-emission remain independently gated.
+executable lifecycle/interface/policy/OpenR/finalization rendering, facade
+cutover, Phase 1.6, Phase 1.7, traffic-item compilation, generalized
+OpenR/helper behavior, and FBOSS task emission remain independently gated.
 Do not substitute topology-selected compatibility constants for missing typed
 inputs merely to make the weekend stack appear complete.
 
