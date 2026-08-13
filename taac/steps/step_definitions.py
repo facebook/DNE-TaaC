@@ -5992,6 +5992,7 @@ def create_drain_convergence_verification_step(
     convergence_signal: str = "global_table_version",
     peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
     expected_min_peers: int = 1,
+    require_updates: bool = True,
 ) -> Step:
     """
     Create a step to verify drain/undrain convergence from PCAP analysis.
@@ -6035,6 +6036,10 @@ def create_drain_convergence_verification_step(
             A peer matches if it satisfies ANY provided key; empty means all peers.
         expected_min_peers: per_peer_rib_version mode: fail unless at least this
             many in-scope established peers with rib_version>0 were seen.
+        require_updates: PCAP mode: fail when the capture holds no BGP UPDATE at
+            all (default True). The drain/undrain captures sit on the interfaces
+            the churn must cross, so an empty one means the stimulus never
+            propagated; only a capture allowed to be silent should clear this.
 
     Returns:
         Step object for drain convergence verification
@@ -6064,12 +6069,163 @@ def create_drain_convergence_verification_step(
         "convergence_signal": convergence_signal,
         "peer_scope": peer_scope or {},
         "expected_min_peers": expected_min_peers,
+        "require_updates": require_updates,
     }
 
     return Step(
         name=StepName.CUSTOM_STEP,
         step_params=Params(json_params=json.dumps(params)),
         description=description,
+    )
+
+
+def create_bgp_restoration_baseline_step(
+    snapshot_key: str,
+    peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
+    expected_min_peers: int = 1,
+    compare_route_count: bool = True,
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a step that captures the pre-drain state an undrain must restore.
+
+    Pairs with ``create_bgp_restoration_verification_step``. Place this before
+    the first drain step of the stage and the verify step after the undrain.
+
+    Args:
+        snapshot_key: Name tying this baseline to its verify step, e.g. "fauu".
+        peer_scope: Optional {"remote_as": [...]} and/or
+            {"egress_policy_names": [...]} filter; empty means all peers. Must
+            match the verify step's scope.
+        expected_min_peers: Fail unless the baseline holds at least this many
+            peers. A baseline of zero peers would let the verify step match
+            trivially, so this is the anti-vacuousness floor.
+        compare_route_count: Also record the BGP++ RIB entry count (default
+            True). Must match the verify step's value.
+        description: Custom description for the step.
+
+    Returns:
+        Step object for the pre-drain restoration baseline
+    """
+    params = {
+        "custom_step_name": "snapshot_bgp_restoration_baseline",
+        "snapshot_key": snapshot_key,
+        "peer_scope": peer_scope or {},
+        "expected_min_peers": expected_min_peers,
+        "compare_route_count": compare_route_count,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=description
+        or f"Snapshot pre-drain {snapshot_key} peer views, policies and route count",
+    )
+
+
+def create_bgp_restoration_verification_step(
+    snapshot_key: str,
+    peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
+    compare_route_count: bool = True,
+    route_count_tolerance: int = 0,
+    settle_timeout_seconds: int = 300,
+    poll_interval_seconds: int = 10,
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a step that requires the post-undrain state to match the baseline.
+
+    The drain/undrain postchecks assert sessions are up and that RIB, FIB Agent
+    and hardware FIB agree with each other; all three stay self-consistent when
+    an undrain restores the wrong state. This step compares absolute values
+    against ``create_bgp_restoration_baseline_step``: per-peer ingress/egress
+    policy names, per-peer pre/post-policy received and sent prefix counts, the
+    peer set, and the total RIB route count.
+
+    Args:
+        snapshot_key: The key used by the matching baseline step.
+        peer_scope: Must match the baseline step's scope.
+        compare_route_count: Must match the baseline step's value.
+        route_count_tolerance: Allowed absolute RIB route-count drift
+            (default 0, i.e. exact restoration).
+        settle_timeout_seconds: Keep re-reading for this long before failing;
+            the last peers can still be draining their AdjRibOut when the step
+            starts (default: 300s).
+        poll_interval_seconds: Gap between re-reads (default: 10s).
+        description: Custom description for the step.
+
+    Returns:
+        Step object for the post-undrain restoration check
+    """
+    params = {
+        "custom_step_name": "verify_bgp_restoration_against_baseline",
+        "snapshot_key": snapshot_key,
+        "peer_scope": peer_scope or {},
+        "compare_route_count": compare_route_count,
+        "route_count_tolerance": route_count_tolerance,
+        "settle_timeout_seconds": settle_timeout_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "report_only": False,
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=description
+        or (
+            f"Verify post-undrain {snapshot_key} peer views, policies and route "
+            f"count match the pre-drain baseline exactly"
+        ),
+    )
+
+
+def create_bgp_restoration_probe_step(
+    snapshot_key: str,
+    peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
+    compare_route_count: bool = True,
+    description: t.Optional[str] = None,
+) -> Step:
+    """
+    Create a report-only mid-stage sample of the restoration comparison.
+
+    The gate at the end of the undrain says the final state is wrong; it cannot
+    say which half of the stage made it wrong, because both the drain and the
+    undrain sit between the baseline and the comparison. Placing one of these at
+    the end of the drain phase splits that window: the same comparison against
+    the same baseline, taken at the same relative position in its own phase.
+
+    Never fails the stage. A differing sample publishes SKIP, a matching one
+    PASS, and the message says it is not a verdict. Takes exactly one sample
+    (no settle window) because it is measuring a moment, not waiting for one.
+
+    Args:
+        snapshot_key: The key used by the matching baseline step.
+        peer_scope: Must match the baseline step's scope.
+        compare_route_count: Also compare the BGP++ RIB entry count. Costs one
+            full-table read; worth it because "did the RIB move during the
+            drain" is the other half of the question.
+        description: Custom description for the step.
+
+    Returns:
+        Step object for the report-only mid-stage sample
+    """
+    params = {
+        "custom_step_name": "verify_bgp_restoration_against_baseline",
+        "snapshot_key": snapshot_key,
+        "peer_scope": peer_scope or {},
+        "compare_route_count": compare_route_count,
+        "route_count_tolerance": 0,
+        "settle_timeout_seconds": 0,
+        "poll_interval_seconds": 0,
+        "report_only": True,
+        "check_name": f"probe_{snapshot_key}_post_drain_drift",
+    }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        step_params=Params(json_params=json.dumps(params)),
+        description=description
+        or (
+            f"Sample post-drain {snapshot_key} peer views, policies and route "
+            f"count against the pre-drain baseline (report-only)"
+        ),
     )
 
 

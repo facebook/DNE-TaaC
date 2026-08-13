@@ -51,6 +51,9 @@ from taac.steps.step_definitions import (
     create_bgp_lifecycle_convergence_step,
     create_bgp_longevity_community_churn_step,
     create_bgp_prefixes_med_value_step,
+    create_bgp_restoration_baseline_step,
+    create_bgp_restoration_probe_step,
+    create_bgp_restoration_verification_step,
     create_bgp_route_storm_step,
     create_change_as_path_length_step,
     create_clear_traffic_stats_step,
@@ -2445,11 +2448,14 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     convergence_signal: str = "per_peer_rib_version",
     peer_convergence_scope: dict | None = None,
     expected_min_peers: int | None = None,
+    verify_restoration: bool = True,
+    restoration_settle_timeout_seconds: int = 300,
 ) -> Stage:
     """
     Create a test stage to verify BGP FAUU drain/undrain behavior on specific peers.
 
     This stage tests BGP's handling of attribute changes at the peer level by:
+    0. Snapshotting the pre-drain peer views, policy names and route count
     1. Starting IXIA packet capture for drain phase on all configured interfaces
     2. Draining: Set local preference to 120 for specified peers
     3. Draining: Set origin to incomplete for specified peers
@@ -2463,6 +2469,8 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     11. Save IXIA packet capture for undrain phase
     12. Verify undrain convergence inline (max 5 minutes)
     13. Generate consolidated convergence report from the core PCAP files
+    14. Verify the final peer views, policy names and route count match the
+        step-0 baseline exactly
 
     Captures on two core interfaces:
     - bgp_fauu_drain_ebgp.pcap / bgp_fauu_undrain_ebgp.pcap (eBGP SOURCE - where attributes originate)
@@ -2477,6 +2485,19 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         tcp_dump_capture_interface_bgpmon: Legacy auxiliary interface input; accepted but intentionally excluded from the stage
         tcp_dump_capture_interface_ibgp: Optional interface for IXIA packet capture on iBGP (RECEIVER) (default: None)
         soak_time_seconds: Soak duration after drain and undrain (default: 1800 / 30 minutes)
+        convergence_mode: "counter", "pcap", or "hybrid" (default); see below.
+        counter_convergence_soak_seconds: Settle soak used in counter/hybrid mode
+        convergence_signal: "per_peer_rib_version" (default) or "global_table_version"
+        peer_convergence_scope: Peers the RIB-version poll watches; defaults to
+            the eBGP remote AS this stage drains
+        expected_min_peers: Anti-vacuousness floor for the convergence poll
+        verify_restoration: Snapshot every peer view, both policy names and the
+            RIB route count before the drain and require an exact match after
+            the undrain (default: True). Closes the case where sessions are up
+            and the RIB, FIB Agent and hardware FIB agree with each other while
+            the restored view itself is wrong.
+        restoration_settle_timeout_seconds: How long the restoration check keeps
+            re-reading before failing (default: 300)
 
     Returns:
         Stage object for BGP FAUU drain/undrain test
@@ -2535,6 +2556,20 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         )
 
         expected_min_peers = EBGP_PEER_COUNT_V4
+
+    # Restoration baseline. Scoped to every peer, not just the drained eBGP set:
+    # the requirement is that all observed peer views come back, and a FAUU
+    # drain that leaks into the iBGP side is exactly what a scoped baseline
+    # would miss. The convergence floor is a conservative reuse here (the full
+    # peer set is far larger), so a baseline that small already means the read
+    # was wrong.
+    if verify_restoration:
+        steps.append(
+            create_bgp_restoration_baseline_step(
+                snapshot_key="fauu_drain_undrain",
+                expected_min_peers=expected_min_peers,
+            ),
+        )
 
     # IXIA capture (bgp_fauu_*drain_*.pcap) feeds only this stage's tshark
     # verification, so it runs only when do_pcap is set.
@@ -2705,6 +2740,15 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
+    # Step 16B: report-only sample of the same comparison the undrain gate makes.
+    # Placed at the end of the drain phase, mirroring the gate's position at the
+    # end of the undrain phase, so the two readings differ only in when they were
+    # taken and a drifted final state can be attributed to one half of the stage.
+    if verify_restoration:
+        steps.append(
+            create_bgp_restoration_probe_step(snapshot_key="fauu_drain_undrain"),
+        )
+
     # Step 17: Start new IXIA packet capture for undrain phase (eBGP)
     if do_pcap and tcp_dump_capture_interface_ebgp:
         steps.append(
@@ -2873,6 +2917,16 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
             ),
         )
 
+    # Step 33: the undrain must land back on the exact pre-drain state, not just
+    # a self-consistent one. Runs last so convergence has already been asserted.
+    if verify_restoration:
+        steps.append(
+            create_bgp_restoration_verification_step(
+                snapshot_key="fauu_drain_undrain",
+                settle_timeout_seconds=restoration_settle_timeout_seconds,
+            ),
+        )
+
     return Stage(steps=steps)
 
 
@@ -2890,6 +2944,8 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     convergence_signal: str = "per_peer_rib_version",
     peer_convergence_scope: dict | None = None,
     expected_min_peers: int | None = None,
+    verify_restoration: bool = True,
+    restoration_settle_timeout_seconds: int = 300,
 ) -> list[Stage]:
     """
     Create a test stage to verify BGP plane drain/undrain behavior.
@@ -2905,6 +2961,7 @@ def create_plane_drain_undrain_stage(  # noqa: C901
        - Measures end-to-end convergence including path selection
 
     The test sequence:
+    0. Snapshot the pre-drain peer views, policy names and route count
     1. Start IXIA packet capture on all configured interfaces for drain phase
     2. Drain: Change origin attribute to incomplete for specified prefixes
     3. Drain: Prepend AS_PATH with ASN 65099
@@ -2917,6 +2974,8 @@ def create_plane_drain_undrain_stage(  # noqa: C901
     10. Soak for specified duration after undrain
     11. Save IXIA packet captures for undrain phase (all interfaces)
     12. Verify undrain convergence inline (max 10 minutes)
+    13. Verify the final plane policy, peer views and route count match the
+        step-0 baseline exactly
 
     Args:
         device_name: Name of the device under test
@@ -2927,6 +2986,20 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         tcp_dump_capture_interface_ebgp: Optional interface for IXIA packet capture on eBGP (FA-UU) to verify best-path changes (default: None)
         tcp_dump_capture_interface_ibgp: Optional interface for IXIA packet capture on iBGP Plane (SOURCE) to measure drain start/end reference point (default: None)
         soak_time_seconds: Soak duration after drain and undrain operations (default: 1800 / 30 minutes)
+        convergence_mode: "counter", "pcap", or "hybrid" (default); see below.
+        counter_convergence_soak_seconds: Settle soak used in counter/hybrid mode
+        convergence_signal: "per_peer_rib_version" (default) or "global_table_version"
+        peer_convergence_scope: Peers the RIB-version poll watches; defaults to
+            the EB-FA/EB-EB egress policies this stage swaps
+        expected_min_peers: Anti-vacuousness floor for the convergence poll
+        verify_restoration: Snapshot every peer view, both policy names and the
+            RIB route count before the drain and require an exact match after
+            the undrain (default: True). This is what proves the four peer
+            groups came off their -DRAIN egress policies: a stage that leaves
+            EB-FA-OUT-DRAIN applied keeps every session up and keeps the RIB,
+            FIB Agent and hardware FIB mutually consistent.
+        restoration_settle_timeout_seconds: How long the restoration check keeps
+            re-reading before failing (default: 300)
 
     Returns:
         List of 6 Stage objects for BGP plane drain/undrain test:
@@ -2992,6 +3065,18 @@ def create_plane_drain_undrain_stage(  # noqa: C901
         expected_min_peers = EBGP_PEER_COUNT_V4
 
     steps_pre_drain = []
+
+    # Step 1: Restoration baseline, taken before any policy is swapped. Scoped
+    # to every peer because the drain applies to four peer groups spanning both
+    # the eBGP (EB-FA) and iBGP (EB-EB) sides, and the requirement covers all
+    # observed views, not only the ones the poll watches.
+    if verify_restoration:
+        steps_pre_drain.append(
+            create_bgp_restoration_baseline_step(
+                snapshot_key="plane_drain_undrain",
+                expected_min_peers=expected_min_peers,
+            ),
+        )
 
     # Step 1B: Start IXIA packet capture on eBGP interface for drain (if provided)
     if do_pcap and tcp_dump_capture_interface_ebgp:
@@ -3177,6 +3262,16 @@ def create_plane_drain_undrain_stage(  # noqa: C901
                 pcap_files=pcap_files_drain,
                 description="Generate consolidated drain convergence report with latency analysis",
             ),
+        )
+
+    # Step 5E: report-only sample of the same comparison the undrain gate makes.
+    # Placed at the end of the drain phase, mirroring the gate's position at the
+    # end of the undrain phase, so the two readings differ only in when they were
+    # taken. Both the -DRAIN policy apply and its revert otherwise sit inside the
+    # baseline-to-gate window, which leaves a drifted final state unattributable.
+    if verify_restoration:
+        steps_after_drain.append(
+            create_bgp_restoration_probe_step(snapshot_key="plane_drain_undrain"),
         )
 
     # Create Stage 3: Post-drain verification (sequential)
@@ -3374,6 +3469,17 @@ def create_plane_drain_undrain_stage(  # noqa: C901
                 phase="undrain",
                 pcap_files=pcap_files_undrain,
                 description="Generate consolidated undrain convergence report with latency analysis",
+            ),
+        )
+
+    # Step 11: the undrain must land back on the exact pre-drain policy and peer
+    # views, not just a self-consistent state. Runs last so convergence has
+    # already been asserted.
+    if verify_restoration:
+        steps_post_undrain.append(
+            create_bgp_restoration_verification_step(
+                snapshot_key="plane_drain_undrain",
+                settle_timeout_seconds=restoration_settle_timeout_seconds,
             ),
         )
 

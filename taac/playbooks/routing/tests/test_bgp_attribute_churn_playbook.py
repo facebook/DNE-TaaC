@@ -299,6 +299,205 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     self.assertEqual(expected_polls, polls)
                     self.assertEqual(expected_pcap_verifiers, pcap_verifiers)
 
+    def test_drain_stages_bracket_the_run_with_a_restoration_gate(self) -> None:
+        """The undrain must be compared against the exact pre-drain state.
+
+        The postcheck chain proves sessions are up and that RIB, FIB Agent and
+        hardware FIB agree with each other; all three stay self-consistent when
+        an undrain restores the wrong view or leaves a -DRAIN egress policy
+        applied. The gate is only meaningful if the baseline is taken before
+        any drain step and the comparison is the last thing the stage does.
+        """
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        for name, stage_factory, prefix_pool_regex in stages:
+            with self.subTest(stage=name):
+                steps = _stage_steps(
+                    stage_factory(
+                        device_name="dut.example.com",
+                        prefix_pool_regex=prefix_pool_regex,
+                        tcp_dump_capture_interface_ebgp="Ethernet1",
+                        tcp_dump_capture_interface_ibgp="Ethernet2",
+                    )
+                )
+                payloads = [
+                    _step_payload(step)
+                    for step in steps
+                    if step.name == taac_types.StepName.CUSTOM_STEP
+                    and step.step_params is not None
+                ]
+                custom_names = [payload.get("custom_step_name") for payload in payloads]
+                self.assertEqual(
+                    1, custom_names.count("snapshot_bgp_restoration_baseline")
+                )
+                self.assertEqual("snapshot_bgp_restoration_baseline", custom_names[0])
+
+                # The probe shares the custom step, so count by role: exactly
+                # one blocking gate and exactly one report-only sample.
+                comparisons = [
+                    payload
+                    for payload in payloads
+                    if payload.get("custom_step_name")
+                    == "verify_bgp_restoration_against_baseline"
+                ]
+                blocking = [p for p in comparisons if not p["report_only"]]
+                report_only = [p for p in comparisons if p["report_only"]]
+                self.assertEqual(1, len(blocking))
+                self.assertEqual(1, len(report_only))
+                # The gate is last; the probe sits between the baseline and it.
+                self.assertIs(blocking[0], comparisons[-1])
+                self.assertEqual(
+                    "verify_bgp_restoration_against_baseline", custom_names[-1]
+                )
+
+    def test_drain_stage_restoration_halves_agree_on_key_and_scope(self) -> None:
+        """A snapshot and a verify that disagree would compare nothing."""
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        for name, stage_factory, prefix_pool_regex in stages:
+            with self.subTest(stage=name):
+                payloads = {}
+                for step in _stage_steps(
+                    stage_factory(
+                        device_name="dut.example.com",
+                        prefix_pool_regex=prefix_pool_regex,
+                    )
+                ):
+                    if (
+                        step.name != taac_types.StepName.CUSTOM_STEP
+                        or step.step_params is None
+                    ):
+                        continue
+                    payload = _step_payload(step)
+                    custom_step_name = payload.get("custom_step_name")
+                    if custom_step_name == "snapshot_bgp_restoration_baseline":
+                        payloads[custom_step_name] = payload
+                    elif custom_step_name == "verify_bgp_restoration_against_baseline":
+                        # Key the two comparisons apart: the probe shares the
+                        # custom step name and would otherwise overwrite the gate.
+                        role = "probe" if payload["report_only"] else "gate"
+                        payloads[role] = payload
+
+                snapshot = payloads["snapshot_bgp_restoration_baseline"]
+                verify = payloads["gate"]
+                probe = payloads["probe"]
+                # The probe is only comparable to the gate if it reads the same
+                # state against the same baseline.
+                self.assertEqual(snapshot["snapshot_key"], probe["snapshot_key"])
+                self.assertEqual(snapshot["peer_scope"], probe["peer_scope"])
+                self.assertEqual(
+                    snapshot["compare_route_count"], probe["compare_route_count"]
+                )
+                self.assertEqual(snapshot["snapshot_key"], verify["snapshot_key"])
+                self.assertEqual(snapshot["peer_scope"], verify["peer_scope"])
+                self.assertEqual(
+                    snapshot["compare_route_count"], verify["compare_route_count"]
+                )
+                # Anything above zero would let the reported 192-route shortfall
+                # through, and a floor of zero peers makes the whole comparison
+                # vacuous.
+                self.assertEqual(0, verify["route_count_tolerance"])
+                self.assertGreater(snapshot["expected_min_peers"], 0)
+
+    def test_mid_stage_probe_can_never_fail_the_stage(self) -> None:
+        """The probe exists to say WHERE the state diverged.
+
+        A diagnostic that can turn a run red is worse than no diagnostic, and a
+        gate that is silently report-only is worse still, so the two roles are
+        pinned here rather than left to the call site.
+        """
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        for name, stage_factory, prefix_pool_regex in stages:
+            with self.subTest(stage=name):
+                comparisons = [
+                    _step_payload(step)
+                    for step in _stage_steps(
+                        stage_factory(
+                            device_name="dut.example.com",
+                            prefix_pool_regex=prefix_pool_regex,
+                        )
+                    )
+                    if step.name == taac_types.StepName.CUSTOM_STEP
+                    and step.step_params is not None
+                    and _step_payload(step).get("custom_step_name")
+                    == "verify_bgp_restoration_against_baseline"
+                ]
+                probe = next(p for p in comparisons if p["report_only"])
+                gate = next(p for p in comparisons if not p["report_only"])
+
+                # One sample, not a settle window: the probe measures a moment.
+                self.assertEqual(0, probe["settle_timeout_seconds"])
+                # A distinct result row, so the probe is never read as a verdict.
+                self.assertIn("probe", probe["check_name"])
+                self.assertNotIn("check_name", gate)
+                # The gate still waits for the drain tail to finish.
+                self.assertGreater(gate["settle_timeout_seconds"], 0)
+
+    def test_drain_stages_can_opt_out_of_the_restoration_gate(self) -> None:
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        for name, stage_factory, prefix_pool_regex in stages:
+            with self.subTest(stage=name):
+                steps = _stage_steps(
+                    stage_factory(
+                        device_name="dut.example.com",
+                        prefix_pool_regex=prefix_pool_regex,
+                        verify_restoration=False,
+                    )
+                )
+                custom_names = {
+                    _step_payload(step).get("custom_step_name")
+                    for step in steps
+                    if step.name == taac_types.StepName.CUSTOM_STEP
+                    and step.step_params is not None
+                }
+                self.assertNotIn("snapshot_bgp_restoration_baseline", custom_names)
+                self.assertNotIn(
+                    "verify_bgp_restoration_against_baseline", custom_names
+                )
+
+    def test_pcap_verifiers_require_their_capture_to_carry_updates(self) -> None:
+        """An empty required capture used to be logged and passed over."""
+        stages = (
+            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
+        )
+        for name, stage_factory, prefix_pool_regex in stages:
+            with self.subTest(stage=name):
+                verifiers = 0
+                for step in _stage_steps(
+                    stage_factory(
+                        device_name="dut.example.com",
+                        prefix_pool_regex=prefix_pool_regex,
+                        tcp_dump_capture_interface_ebgp="Ethernet1",
+                        tcp_dump_capture_interface_ibgp="Ethernet2",
+                    )
+                ):
+                    if (
+                        step.name != taac_types.StepName.CUSTOM_STEP
+                        or step.step_params is None
+                    ):
+                        continue
+                    payload = _step_payload(step)
+                    if payload.get(
+                        "custom_step_name"
+                    ) != "verify_drain_convergence" or not payload.get(
+                        "use_pcap_analysis"
+                    ):
+                        continue
+                    verifiers += 1
+                    self.assertTrue(payload["require_updates"])
+                self.assertEqual(4, verifiers)
+
     def test_step_factory_serializes_locked_contract(self) -> None:
         step = create_bgp_attribute_churn_step(**_locked_step_kwargs())
 
