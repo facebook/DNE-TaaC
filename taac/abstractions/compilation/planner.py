@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 
 from taac.abstractions.compilation.eb_policy_presets import (
@@ -678,23 +679,83 @@ def _dut_side(
         return (
             a_endpoint.name,
             device_group.a_interface,
-            device_group.a_ips,
+            _dut_interface_cidrs(
+                device_group,
+                dut_is_a=True,
+                require_prefix=a_endpoint.setup_mode == "full",
+            ),
             True,
         )
     if device_group.z_interface is not None:
         return (
             z_endpoint.name,
             device_group.z_interface,
-            device_group.z_ips,
+            _dut_interface_cidrs(
+                device_group,
+                dut_is_a=False,
+                require_prefix=z_endpoint.setup_mode == "full",
+            ),
             False,
         )
     if is_dut_endpoint(a_endpoint) and not is_dut_endpoint(z_endpoint):
-        return a_endpoint.name, None, device_group.a_ips, True
+        return (
+            a_endpoint.name,
+            None,
+            _dut_interface_cidrs(
+                device_group,
+                dut_is_a=True,
+                require_prefix=a_endpoint.setup_mode == "full",
+            ),
+            True,
+        )
     if is_dut_endpoint(z_endpoint) and not is_dut_endpoint(a_endpoint):
-        return z_endpoint.name, None, device_group.z_ips, False
+        return (
+            z_endpoint.name,
+            None,
+            _dut_interface_cidrs(
+                device_group,
+                dut_is_a=False,
+                require_prefix=z_endpoint.setup_mode == "full",
+            ),
+            False,
+        )
     raise ValueError(
         f"device group {device_group.name!r} does not identify one DUT endpoint"
     )
+
+
+def _dut_interface_cidrs(
+    device_group: BoundDeviceGroup,
+    *,
+    dut_is_a: bool,
+    require_prefix: bool,
+) -> tuple[str, ...]:
+    cidrs: list[str] = []
+    peers = device_group.peers
+    if not require_prefix and any(peer.peer_cidr is None for peer in peers):
+        return ()
+    for peer in peers:
+        if peer.peer_cidr is None:
+            raise ValueError(
+                f"device group {device_group.name!r} has no exact peer prefix"
+            )
+        network = ipaddress.ip_network(peer.peer_cidr, strict=False)
+        address = peer.a_ip if dut_is_a else peer.z_ip
+        interface = ipaddress.ip_interface(f"{address}/{network.prefixlen}")
+        if interface.version != network.version:
+            raise ValueError(
+                f"device group {device_group.name!r} address {address!r} and "
+                f"peer prefix {peer.peer_cidr!r} have different families"
+            )
+        if interface.ip not in network:
+            raise ValueError(
+                f"device group {device_group.name!r} address {address!r} is not in "
+                f"peer prefix {peer.peer_cidr!r}"
+            )
+        cidr = str(interface)
+        if cidr not in cidrs:
+            cidrs.append(cidr)
+    return tuple(cidrs)
 
 
 def _logical_port_role(device_group: BoundDeviceGroup) -> str:

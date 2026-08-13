@@ -15,6 +15,7 @@ from taac.abstractions.compilation.basic_port_composition import (
 from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
+    DutLifecycleRenderResult,
 )
 from taac.abstractions.compilation.endpoint_composition import (
     EndpointCompositionRequest,
@@ -30,6 +31,7 @@ from taac.abstractions.compilation.protocols import (
     DutCapabilityPreflight,
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
+    DutLifecycleRenderer,
     EndpointComposer,
     TrafficGeneratorEndpointRenderer,
     TrafficGeneratorPortBaseRenderer,
@@ -119,6 +121,7 @@ class CandidateCompilation:
     artifacts: CompiledTaacArtifacts
     dut_endpoint_base_shadow: DutEndpointBaseRenderResult[object] | None = None
     dut_host_os_shadow: DutHostOsRenderResult[object] | None = None
+    dut_lifecycle_shadow: DutLifecycleRenderResult[object] | None = None
     traffic_generator_endpoint_shadow: TrafficGeneratorEndpointRenderResult | None = (
         None
     )
@@ -161,6 +164,7 @@ class CandidateTopologyCompiler:
     artifact_adapter: ArtifactAdapter
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
+    dut_lifecycle_renderer: DutLifecycleRenderer[object] | None = None
     traffic_generator_endpoint_renderer: TrafficGeneratorEndpointRenderer | None = None
     traffic_generator_port_base_renderer: (
         TrafficGeneratorPortBaseRenderer[object] | None
@@ -215,6 +219,16 @@ class CandidateTopologyCompiler:
         if self.dut_host_os_renderer is not None:
             dut_host_os_shadow = self.dut_host_os_renderer.render(planning.plan.dut)
             dut_host_os_shadow.validate(planning.plan.dut)
+        dut_lifecycle_shadow = None
+        if self.dut_lifecycle_renderer is not None:
+            dut_lifecycle_shadow = self.dut_lifecycle_renderer.render(
+                planning.plan.dut,
+                planning.lifecycle,
+            )
+            dut_lifecycle_shadow.validate(
+                planning.plan.dut,
+                planning.lifecycle,
+            )
         traffic_generator_endpoint_request = None
         traffic_generator_endpoint_shadow = None
         if self.traffic_generator_endpoint_renderer is not None:
@@ -321,6 +335,7 @@ class CandidateTopologyCompiler:
             artifacts=adapted.artifacts,
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
+            dut_lifecycle_shadow=dut_lifecycle_shadow,
             traffic_generator_endpoint_shadow=traffic_generator_endpoint_shadow,
             traffic_generator_port_base_shadow=traffic_generator_port_base_shadow,
             traffic_generator_port_device_group_shadow=(

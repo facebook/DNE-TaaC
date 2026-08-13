@@ -933,6 +933,10 @@ of Phase 1.5:
     deterministic full-setup lifecycle operations for aggregate physical
     interfaces, routing config, and the routing-control-plane component while
     leaving established artifacts authoritative.
+24. **Completed Phase 1.6 physical-lifecycle shadow prerequisite:** Diff
+    1.6.3a, lower exact EOS physical-interface realization and reverse-cleanup
+    intent from the common lifecycle while leaving executable tasks and
+    established artifacts authoritative.
 
 #### Resource-derived IXIA presentation
 
@@ -1119,6 +1123,44 @@ This completes the task-free routing-config, routing-control-plane,
 physical-interface, and lifecycle-planning prerequisites of Diff 1.6.2. EOS
 setup/teardown task lowering, snapshot/readback realization, artifact assembly,
 and facade authority remain required for Phase 1.6 exit.
+
+#### EOS physical-lifecycle shadow rendering
+
+The candidate compiler now accepts a separate DUT lifecycle renderer and
+exposes its validated result as a shadow. Generic lifecycle results bind every
+fragment to one consumed operation, preserve common setup order, and require
+cleanup coverage in exact common teardown order. They do not contain TAAC
+tasks and cannot affect returned artifacts.
+
+The EOS/BGP++ shadow consumes only the aggregate physical-interface operations
+from the common lifecycle. Full setup requires the exact
+snapshot-restored/first-snapshot/exact-readback contract with no dependency and
+emits one pre-IXIA realization intent per physical owner. Each intent carries
+the bound hostname and interface, typed aggregate rate and lane count, and
+canonical IPv4/IPv6 interface CIDRs. Cleanup groups the same operation IDs in
+reverse teardown order. Skip and verify-only modes consume no operations and
+emit no lifecycle fragments.
+
+Interface CIDRs now derive from the bound peer prefix instead of carrying a
+prefix-free address. Full setup fails when that exact prefix is absent or does
+not contain the selected DUT address. `InterfacePlan` validates canonical,
+unique CIDRs and their AFI before a renderer can consume them. Logical topology
+renames leave the shadow unchanged; inventory hostname and interface remaps
+change only physical realization fields.
+
+This remains a task-free comparison seam. It does not capture snapshots,
+execute EOS configuration, perform readback, construct cleanup tasks, merge
+fragments into artifacts, or change facade authority. Those executable and
+authority transitions remain later Phase 1.6 work.
+
+Final local validation passed on 2026-08-11: the full abstraction suite passed
+689/689 tests (TestInfra `1407375402910859`), the factory golden gate passed
+2/2 tests (TestInfra `27303072778727256`), and changed-target Pyre found no
+errors across 10 owning targets. Golden regeneration found 294 unchanged
+configurations, with zero additions, changes, or removals. The manifest
+SHA-256 remained
+`b6ec7a338ef8132af61387d3e2f314cede06482d41bb88b5682f0dfd6c99c03f`.
+
 Initial/tagged and compact/named group, session, and advertisement identities
 remain deferred to their Phase 1.7 profile migrations.
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -362,6 +363,18 @@ class InterfacePlan:
         _require_kind(self.resource_id, ResourceKind.INTERFACE)
         _require_kind(self.endpoint_id, ResourceKind.ENDPOINT)
         _require_kinds(self.link_ids, ResourceKind.LINK)
+        if not isinstance(self.addresses, tuple) or any(
+            not isinstance(address, str) for address in self.addresses
+        ):
+            raise TypeError("interface addresses must be strings in a tuple")
+        if len(frozenset(self.addresses)) != len(self.addresses):
+            raise ValueError("interface addresses must be unique")
+        for address in self.addresses:
+            parsed = ipaddress.ip_interface(address)
+            if str(parsed) != address:
+                raise ValueError(
+                    f"interface address {address!r} must be a canonical CIDR"
+                )
         if self.physical_interface_id is not None:
             _require_kind(
                 self.physical_interface_id,
@@ -931,6 +944,12 @@ def _validate_logical_interface_links(
         if interface.afi is not link.afi:
             raise ValueError(
                 f"interface {interface.resource_id} AFI does not match link {link_id}"
+            )
+    expected_version = 4 if interface.afi is AddressFamily.IPV4 else 6
+    for address in interface.addresses:
+        if ipaddress.ip_interface(address).version != expected_version:
+            raise ValueError(
+                f"interface address {address!r} does not match {interface.afi.value}"
             )
 
 

@@ -12,11 +12,13 @@ from taac.abstractions.compilation.basic_port_composition import (
 from taac.abstractions.compilation.dut import (
     DutEndpointBaseRenderResult,
     DutHostOsRenderResult,
+    DutLifecycleRenderResult,
 )
 from taac.abstractions.compilation.endpoint_composition import (
     EndpointCompositionRequest,
     EndpointCompositionResult,
 )
+from taac.abstractions.compilation.lifecycle import LifecyclePlan
 from taac.abstractions.compilation.model import DutPlan
 from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorEndpointRenderRequest,
@@ -35,6 +37,7 @@ TEndpoint_co = t.TypeVar("TEndpoint_co", covariant=True)
 THostOs_co = t.TypeVar("THostOs_co", covariant=True)
 TPortBase_co = t.TypeVar("TPortBase_co", covariant=True)
 TDeviceGroupConfig_co = t.TypeVar("TDeviceGroupConfig_co", covariant=True)
+TLifecycleTask_co = t.TypeVar("TLifecycleTask_co", covariant=True)
 
 
 class DutBackend(t.Protocol[TDutOutput_co]):
@@ -51,6 +54,14 @@ class DutHostOsRenderer(t.Protocol[THostOs_co]):
 
 class DutEndpointBaseRenderer(t.Protocol[TEndpoint_co]):
     def render(self, plan: DutPlan) -> DutEndpointBaseRenderResult[TEndpoint_co]: ...
+
+
+class DutLifecycleRenderer(t.Protocol[TLifecycleTask_co]):
+    def render(
+        self,
+        plan: DutPlan,
+        lifecycle: LifecyclePlan,
+    ) -> DutLifecycleRenderResult[TLifecycleTask_co]: ...
 
 
 class EndpointComposer(t.Protocol):
