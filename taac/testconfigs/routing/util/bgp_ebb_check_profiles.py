@@ -64,6 +64,7 @@ from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCheck
 
 _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS = 1200
+_SOAK_READINESS_STABILITY_WINDOW_SECONDS = 30.0
 RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES = ("EB-FA-V6", "EB-FA-V4")
 
 
@@ -92,10 +93,14 @@ class CheckProfile(enum.Enum):
     # OFF, standard snapshot, plus a BGP tcpdump check whose message-types and
     # last-mod-time window come from the context.
     IGP_INSTABILITY = "igp_instability"
-    # No-precheck stress (nexthop-group-count threshold / longevity soak): NO
-    # prechecks, standard postchecks (convergence toggled by context), and a
-    # snapshot that skips flap + uptime (sessions churn during the workload).
+    # No-precheck longevity stress: standard postchecks and a snapshot that
+    # skips flap + uptime (sessions churn during the workload).
     SOAK_NO_PRECHECK = "soak_no_precheck"
+    # CICD-EBB-16: block route oscillation until required sessions, ingress EOR,
+    # accepted routes, and all three route-programming views are ready. The
+    # postcheck tolerates setup-era EOR expiry because readiness is established
+    # before the workload begins.
+    SOAK_READINESS_GATED = "soak_readiness_gated"
     # Route-registry prefix-list runtime update: standard prechecks plus a
     # route-count verification add-on, postchecks with convergence ON but EOR
     # expiry tolerated (a runtime prefix-list update is not a restart).
@@ -188,14 +193,13 @@ class ProfileContext:
     tcpdump_expected_message_types: t.Optional[t.List[str]] = None
     tcpdump_unexpected_message_types: t.Optional[t.List[str]] = None
     tcpdump_expected_last_mod_time: t.Optional[int] = None
-    # No-precheck soak: whether the convergence postcheck runs (the only policy
-    # difference between the nexthop-threshold and longevity shapes), and an
-    # optional convergence threshold threaded only when set (so the factory keeps
-    # the single source of truth for the default).
+    # Soak profiles: whether the convergence postcheck runs and an optional
+    # convergence threshold threaded only when set (so the factory keeps the
+    # single source of truth for the default).
     check_bgp_convergence: bool = True
     convergence_threshold: t.Optional[int] = None
-    # Runtime-update: expected baseline eBGP route count for the route-count
-    # verification precheck add-on (the only per-call variable in its params).
+    # Expected baseline eBGP route count for readiness and runtime-update
+    # route-count verification prechecks.
     route_count_expected: t.Optional[int] = None
     # Opt-in observe-only characterization postchecks (results land in the
     # POST-HEALTH CHECK RESULTS table). CPU needs the stage START/STOP collector;
@@ -439,7 +443,7 @@ def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
 
 
 def _soak_no_precheck(ctx: ProfileContext) -> ProfileChecks:
-    """No-precheck stress (nexthop-group-count threshold / longevity soak): NO
+    """No-precheck stress (longevity soak): NO
     prechecks, standard postchecks with the convergence check toggled by the
     context (and an optional threaded threshold), and a snapshot that skips flap
     + uptime since sessions intentionally churn during the long workload.
@@ -455,6 +459,74 @@ def _soak_no_precheck(ctx: ProfileContext) -> ProfileChecks:
     return ProfileChecks(
         prechecks=[],
         postchecks=create_standard_postchecks(**postcheck_kwargs),
+        snapshot_checks=create_standard_snapshot_checks(
+            skip_flap_check=True,
+            skip_uptime_check=True,
+            bgp_mon=ctx.bgp_mon,
+        ),
+    )
+
+
+def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
+    """CICD-EBB-16 readiness gate before route oscillation.
+
+    Require the exact non-monitor session count, a continuously observable
+    ALL_EOR_RECEIVED event, the expected per-peer-group accepted-route count,
+    and consistent BGP RIB, FibAgent, and hardware views. The postcheck ignores
+    an EOR expiry recorded during shared setup because this gate proves the late
+    EOR arrived before stimulus.
+    """
+    if ctx.expected_established_sessions <= 0:
+        raise ValueError("SOAK_READINESS_GATED requires expected_established_sessions")
+    if ctx.route_count_expected is None:
+        raise ValueError("SOAK_READINESS_GATED requires route_count_expected")
+
+    convergence_threshold = ctx.convergence_threshold or 600
+    return ProfileChecks(
+        prechecks=[
+            create_bgp_session_establish_check(
+                expected_established_sessions_static=(
+                    ctx.expected_established_sessions
+                ),
+                parent_prefixes_to_ignore=ctx.bgp_mon.ignore_prefixes(),
+                check_id="startup_bgp_session_verification",
+                **get_retry_kwargs(hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK),
+            ),
+            create_bgp_convergence_check(
+                convergence_threshold=convergence_threshold,
+                hard_timeout_seconds=convergence_threshold,
+                stability_window_seconds=_SOAK_READINESS_STABILITY_WINDOW_SECONDS,
+                fail_on_eor_expired=False,
+                validate_sequence=False,
+                extra_json_params={
+                    "start_event": "3",  # PEER_INFO_LOADED
+                    "end_event": "4",  # ALL_EOR_RECEIVED
+                },
+                check_id="startup_all_eor_received",
+            ),
+            create_bgp_route_count_verification_check(
+                json_params={
+                    "exact_peer_group_names": [
+                        *RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
+                    ],
+                    "direction": "received",
+                    "expected_count": ctx.route_count_expected,
+                    "policy_type": "post_policy",
+                },
+                check_id="startup_bgp_route_count_verification",
+            ),
+            create_bgp_rib_fib_consistency_check(
+                check_id="rib_fib_consistency_precheck",
+                **get_retry_kwargs(hc_types.CheckName.BGP_RIB_FIB_CONSISTENCY_CHECK),
+            ),
+        ],
+        postchecks=create_standard_postchecks(
+            postcheck_thresholds=ctx.postcheck_thresholds,
+            convergence_threshold=convergence_threshold,
+            fail_on_eor_expired=False,
+            expected_established_session_count=ctx.expected_established_sessions,
+            bgp_mon=ctx.bgp_mon,
+        ),
         snapshot_checks=create_standard_snapshot_checks(
             skip_flap_check=True,
             skip_uptime_check=True,
@@ -552,6 +624,7 @@ _PROFILE_BUILDERS: t.Dict[CheckProfile, t.Callable[[ProfileContext], ProfileChec
     CheckProfile.CHURN_STORM: _churn_storm,
     CheckProfile.IGP_INSTABILITY: _igp_instability,
     CheckProfile.SOAK_NO_PRECHECK: _soak_no_precheck,
+    CheckProfile.SOAK_READINESS_GATED: _soak_readiness_gated,
     CheckProfile.RUNTIME_UPDATE: _runtime_update,
     CheckProfile.PERF_SCALING_BOUNDED_ECMP: _perf_scaling_bounded_ecmp,
 }

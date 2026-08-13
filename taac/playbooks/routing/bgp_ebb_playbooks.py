@@ -1656,6 +1656,8 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
 
 def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     device_name: str,
+    expected_established_sessions: int,
+    route_count_expected: int,
     nexthop_group_threshold: int = 100,
     prefix_pool_regex: str = ".*EBGP.*",
     prefix_start_index: int = 0,
@@ -1664,6 +1666,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     soak_duration: int = 300,
     convergence_threshold: int = 600,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-16: Nexthop-group count threshold.
@@ -1673,13 +1676,17 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     Monitors nexthop group counts during eBGP route oscillations and fails
     if the count meets or exceeds the configured threshold.
     """
-    # SOAK_NO_PRECHECK has no prechecks (the prechecks field is left unset).
     soak_checks = get_profile_checks(
-        CheckProfile.SOAK_NO_PRECHECK,
+        CheckProfile.SOAK_READINESS_GATED,
         ProfileContext(
             check_bgp_convergence=True,
             convergence_threshold=convergence_threshold,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            expected_established_sessions=expected_established_sessions,
+            route_count_expected=route_count_expected,
+            bgp_mon=BgpMonScope(
+                exclude=exclude_bgp_mon,
+                parent_network=bgp_mon_parent_network,
+            ),
         ),
     )
     return Playbook(
@@ -1687,6 +1694,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
         setup_steps=create_bgp_instability_setup_steps(
             device_name=device_name,
         ),
+        prechecks=soak_checks.prechecks,
         snapshot_checks=soak_checks.snapshot_checks,
         periodic_tasks=create_standard_periodic_tasks(
             device_name=device_name,

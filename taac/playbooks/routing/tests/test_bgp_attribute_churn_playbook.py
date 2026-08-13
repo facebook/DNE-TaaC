@@ -21,6 +21,7 @@ from taac.steps.step_definitions import (
     create_bgp_attribute_churn_step,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
+    _DEFAULT_EBGP_PREFIX_COUNT,
     _get_bgp_ebb_full_scale_playbooks,
     _TC7_PLAYBOOK_NAMES,
     create_bgp_ebb_full_scale_test_config,
@@ -678,6 +679,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
                 bound=MagicMock(),
+                ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                 selected_tc7_playbooks=set(),
             )
 
@@ -714,6 +716,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     inventory,
                     BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
                     bound=MagicMock(),
+                    ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                     selected_tc7_playbooks=set(),
                 )
 

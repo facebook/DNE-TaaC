@@ -94,6 +94,7 @@ from taac.test_as_a_config.types import (
 
 _LONGEVITY_DURATION_SECONDS = 14400
 _NEXTHOP_GROUP_THRESHOLD = 100
+_DEFAULT_EBGP_PREFIX_COUNT = 750
 _RUNTIME_UPDATE_EBGP_PREFIX_COUNT = 850
 _TC7_STATIC_EBGP_PREFIX_COUNT = 650
 _TC7_EXPECTED_SESSION_COUNT = 1272
@@ -617,6 +618,7 @@ def _get_bgp_ebb_full_scale_playbooks(
     profile: BgpPlusPlusProfile,
     *,
     bound: BoundTopology,
+    ebgp_prefix_count: int,
     selected_tc7_playbooks: set[str],
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
@@ -802,7 +804,10 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_nexthop_group_count_threshold_playbook(
             device_name=device_name,
+            expected_established_sessions=session_count,
+            route_count_expected=ebgp_prefix_count,
             nexthop_group_threshold=_NEXTHOP_GROUP_THRESHOLD,
+            bgp_mon_parent_network=bound_bgp_mon_network,
         ),
     ]
     return playbooks
@@ -880,15 +885,18 @@ def create_bgp_ebb_full_scale_test_config(
     include_auxiliary_observers = (
         not selected_tc7_playbooks and len(physical_inventory.ixia_ports) > 2
     )
+    ebgp_prefix_count = (
+        _RUNTIME_UPDATE_EBGP_PREFIX_COUNT
+        if enable_runtime_update
+        else _DEFAULT_EBGP_PREFIX_COUNT
+    )
     topology = ebb_full_scale_topology(
         next_hops=next_hops,
         openr_mode=openr_mode,
         include_bgpmon=include_auxiliary_observers,
         ebgp_graceful_restart=not selected_tc7_playbooks,
         enable_attribute_churn=enable_attribute_churn,
-        ebgp_prefix_count=(
-            _RUNTIME_UPDATE_EBGP_PREFIX_COUNT if enable_runtime_update else 750
-        ),
+        ebgp_prefix_count=ebgp_prefix_count,
         ebgp_static_prefix_count=(
             _TC7_STATIC_EBGP_PREFIX_COUNT if selected_tc7_playbooks else None
         ),
@@ -916,6 +924,7 @@ def create_bgp_ebb_full_scale_test_config(
         physical_inventory,
         profile=profile,
         bound=bound,
+        ebgp_prefix_count=ebgp_prefix_count,
         selected_tc7_playbooks=selected_tc7_playbooks,
     )
     if playbooks_selected:

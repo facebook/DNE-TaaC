@@ -5,10 +5,16 @@ import json
 import unittest
 
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_convergence_check,
+    create_bgp_rib_fib_consistency_check,
     create_bgp_route_count_verification_check,
+    create_bgp_session_establish_check,
     create_core_dumps_snapshot_check,
 )
-from taac.health_checks.retry_policy import DEFAULT_RETRY_SPEC
+from taac.health_checks.retry_policy import (
+    DEFAULT_RETRY_SPEC,
+    get_retry_kwargs,
+)
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     CheckProfile,
     get_profile_checks,
@@ -472,24 +478,65 @@ class CheckProfileRegistryTest(unittest.TestCase):
             ),
         )
 
-    def test_soak_no_precheck_nexthop_matches_factory(self):
-        """SOAK_NO_PRECHECK with convergence ON reproduces the nexthop-group-count
-        threshold playbook (no prechecks, convergence postcheck at the threshold,
-        snapshot skips flap + uptime)."""
+    def test_soak_readiness_gated_nexthop_matches_factory(self):
+        """CICD-EBB-16 blocks stimulus on sessions, EOR, routes, and RIB/FIB."""
         ctx = ProfileContext(
             check_bgp_convergence=True,
             convergence_threshold=600,
-            bgp_mon=BgpMonScope(exclude=True),
+            expected_established_sessions=1272,
+            route_count_expected=750,
+            bgp_mon=BgpMonScope(
+                exclude=True,
+                parent_network="2401:db00:e50d:22:a",
+            ),
         )
-        checks = get_profile_checks(CheckProfile.SOAK_NO_PRECHECK, ctx)
+        checks = get_profile_checks(CheckProfile.SOAK_READINESS_GATED, ctx)
 
-        # No prechecks — the playbook leaves the optional field unset.
-        self.assertEqual(checks.prechecks, [])
+        self.assertEqual(
+            checks.prechecks,
+            [
+                create_bgp_session_establish_check(
+                    expected_established_sessions_static=1272,
+                    parent_prefixes_to_ignore=["2401:db00:e50d:22:a::/80"],
+                    check_id="startup_bgp_session_verification",
+                    **get_retry_kwargs(hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK),
+                ),
+                create_bgp_convergence_check(
+                    convergence_threshold=600,
+                    hard_timeout_seconds=600,
+                    stability_window_seconds=30.0,
+                    fail_on_eor_expired=False,
+                    validate_sequence=False,
+                    extra_json_params={"start_event": "3", "end_event": "4"},
+                    check_id="startup_all_eor_received",
+                ),
+                create_bgp_route_count_verification_check(
+                    json_params={
+                        "exact_peer_group_names": ["EB-FA-V6", "EB-FA-V4"],
+                        "direction": "received",
+                        "expected_count": 750,
+                        "policy_type": "post_policy",
+                    },
+                    check_id="startup_bgp_route_count_verification",
+                ),
+                create_bgp_rib_fib_consistency_check(
+                    check_id="rib_fib_consistency_precheck",
+                    **get_retry_kwargs(
+                        hc_types.CheckName.BGP_RIB_FIB_CONSISTENCY_CHECK
+                    ),
+                ),
+            ],
+        )
         self.assertEqual(
             checks.postchecks,
             create_standard_postchecks(
                 convergence_threshold=600,
-                bgp_mon=BgpMonScope(exclude=True),
+                fail_on_eor_expired=False,
+                expected_established_session_count=1272,
+                bgp_mon=BgpMonScope(
+                    exclude=True,
+                    parent_network="2401:db00:e50d:22:a",
+                ),
             ),
         )
         self.assertEqual(
@@ -497,7 +544,10 @@ class CheckProfileRegistryTest(unittest.TestCase):
             create_standard_snapshot_checks(
                 skip_flap_check=True,
                 skip_uptime_check=True,
-                bgp_mon=BgpMonScope(exclude=True),
+                bgp_mon=BgpMonScope(
+                    exclude=True,
+                    parent_network="2401:db00:e50d:22:a",
+                ),
             ),
         )
 
@@ -629,6 +679,8 @@ class CheckProfileRegistryTest(unittest.TestCase):
         ctx = ProfileContext(
             peergroup_ibgp_v6="EB-FA-V6",
             peergroup_ibgp_v4="EB-FA-V4",
+            expected_established_sessions=1272,
+            route_count_expected=750,
             bgp_mon=BgpMonScope(exclude=True, parent_network=secondary),
         )
 
