@@ -2319,6 +2319,7 @@ def create_bgp_ebb_route_storm_stage(
     communities_per_route: int,
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
+    heavy_setup_hard_timeout_seconds: int = 1_800,
 ) -> Stage:
     """Create CICD-EBB-11 as one failure-safe, audited custom workflow."""
     return Stage(
@@ -2339,6 +2340,7 @@ def create_bgp_ebb_route_storm_stage(
                 poll_interval_seconds=poll_interval_seconds,
                 transition_timeout_seconds=transition_timeout_seconds,
                 convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
+                heavy_setup_hard_timeout_seconds=heavy_setup_hard_timeout_seconds,
                 session_establish_timeout_seconds=session_establish_timeout_seconds,
                 restore_timeout_seconds=restore_timeout_seconds,
                 quiet_window_seconds=quiet_window_seconds,

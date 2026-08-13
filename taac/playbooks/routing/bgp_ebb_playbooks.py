@@ -556,6 +556,7 @@ def get_bgp_ebb_route_storm_playbook(
                 withdraw_seconds=30,
                 poll_interval_seconds=5,
                 transition_timeout_seconds=30,
+                heavy_setup_hard_timeout_seconds=1_800,
                 session_establish_timeout_seconds=300,
                 restore_timeout_seconds=300,
                 quiet_window_seconds=120,

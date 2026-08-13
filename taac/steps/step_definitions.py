@@ -1116,6 +1116,7 @@ def create_bgp_route_storm_step(
     communities_per_route: int,
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
+    heavy_setup_hard_timeout_seconds: int = 1_800,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-11 route-storm workflow."""
@@ -1146,6 +1147,7 @@ def create_bgp_route_storm_step(
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
         "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+        "heavy_setup_hard_timeout_seconds": heavy_setup_hard_timeout_seconds,
         "session_establish_timeout_seconds": session_establish_timeout_seconds,
         "restore_timeout_seconds": restore_timeout_seconds,
         "quiet_window_seconds": quiet_window_seconds,

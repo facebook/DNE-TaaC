@@ -43,6 +43,7 @@ def _locked_step_kwargs() -> dict:
         "poll_interval_seconds": 5,
         "transition_timeout_seconds": 30,
         "convergence_hard_timeout_seconds": 300,
+        "heavy_setup_hard_timeout_seconds": 1_800,
         "session_establish_timeout_seconds": 300,
         "restore_timeout_seconds": 300,
         "quiet_window_seconds": 120,
@@ -77,6 +78,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         self.assertEqual(32, payload["communities_per_route"])
         self.assertEqual(16, payload["extended_communities_per_route"])
         self.assertEqual(300, payload["convergence_hard_timeout_seconds"])
+        self.assertEqual(1_800, payload["heavy_setup_hard_timeout_seconds"])
 
     def test_step_factory_rejects_heavy_attribute_shape_reduction(self) -> None:
         kwargs = _locked_step_kwargs()
@@ -125,6 +127,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                 "advertise_seconds": 30,
                 "withdraw_seconds": 30,
                 "convergence_hard_timeout_seconds": 300,
+                "heavy_setup_hard_timeout_seconds": 1_800,
                 "as_path_pool_size": 10,
                 "as_path_length": 255,
                 "as_set_length": 255,
@@ -138,6 +141,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                     "advertise_seconds",
                     "withdraw_seconds",
                     "convergence_hard_timeout_seconds",
+                    "heavy_setup_hard_timeout_seconds",
                     "as_path_pool_size",
                     "as_path_length",
                     "as_set_length",
