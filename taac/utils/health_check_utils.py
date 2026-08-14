@@ -43,19 +43,13 @@ async def get_fb303_client(host: str):
             "Not yet available in OSS mode."
         )
 
-    from fb303.clients import FacebookService
-    from libfb.py.asyncio.thrift import ClientType, get_direct_client
+    from taac.utils.fb303_counter_utils import make_fb303_client
 
     driver = await async_get_device_driver(host)
     # pyre-fixme[16]: `AbstractSwitch` has no attribute `async_is_multi_switch`.
     is_multi_switch = await driver.async_is_multi_switch()
     port = FBOSS_MNPU_FB303_PORT if is_multi_switch else FBOSS_FB303_PORT
-    return get_direct_client(
-        FacebookService,
-        host=host,
-        port=port,
-        client_type=ClientType.THRIFT_ROCKET_CLIENT_TYPE,
-    )
+    return make_fb303_client(host, port)
 
 
 def ip_ntop(addr):
