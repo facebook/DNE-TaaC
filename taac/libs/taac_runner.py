@@ -168,6 +168,15 @@ DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID: str = "test_case_start"
 DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
 
 
+class HostLog(t.NamedTuple):
+    """One service's log for one host: an everpaste URL, or why collection failed."""
+
+    hostname: str
+    service: str
+    url: str = ""
+    error: str = ""
+
+
 def _start_test_case_time_window(
     jq_vars: t.MutableMapping[str, t.Any], start_time: int
 ) -> None:
@@ -1762,7 +1771,7 @@ class TaacRunner:
     async def async_fboss_collect_and_print_logs(
         self,
         start_time: int,
-    ) -> None:
+    ) -> t.List[HostLog]:
         log_subsection("Collecting Device Logs", logger=self.logger)
         start_timestamp = self.convert_unixtime_to_log_timestamp(start_time)
         end_timestamp = self.convert_unixtime_to_log_timestamp(int(time.time()))
@@ -1775,23 +1784,29 @@ class TaacRunner:
         ]
         # Run all host log collections in parallel
         agent_logs = await asyncio.gather(*coros)
-        flattened_logs = []
+        flattened_logs: t.List[HostLog] = []
         for host_logs in agent_logs:
             flattened_logs.extend(host_logs)
 
         agent_logs_table = tabulate(
-            flattened_logs,
-            headers=["Device", "Service", "Logs URL"],
+            [
+                (log.hostname, log.service, log.url or f"NOT COLLECTED: {log.error}")
+                for log in flattened_logs
+            ],
+            headers=["Device", "Service", "Logs URL or collection error"],
             tablefmt="grid",
         )
         self.logger.info(f"Binary log files:\n {agent_logs_table}")
+        # Returned so a caller at the failure seam can reuse the collected
+        # evidence instead of re-collecting it.
+        return flattened_logs
 
     async def async_collect_logs_for_host(
         self,
         hostname: str,
         start_timestamp: str,
         end_timestamp: str,
-    ) -> list:
+    ) -> t.List[HostLog]:
         rsyslog_services = self.device_to_rsyslog_services.get(hostname, [])
         driver = await async_get_device_driver(hostname)
         # pyre-fixme[16]: `AbstractSwitch` has no attribute `async_is_netos`.
@@ -1800,7 +1815,7 @@ class TaacRunner:
         log_timeout = getattr(self.test_config, "log_collection_timeout", 180)
 
         max_everpaste_size = 50 * 1024 * 1024  # 50MB
-        results = []
+        results: t.List[HostLog] = []
         for service in rsyslog_services:
             service_name = taac_types.SERVICE_NAME_MAP[service]
             try:
@@ -1828,17 +1843,21 @@ class TaacRunner:
                 # don't additionally shorten it through the throttled fburl tier
                 # (this collects per host x service at test-case teardown).
                 everpaste_url = await async_everpaste_str(output)
-                results.append((hostname, service_name, everpaste_url))
+                results.append(HostLog(hostname, service_name, url=everpaste_url))
             except asyncio.TimeoutError:
                 self.logger.error(
                     f"Timeout ({log_timeout}s) while collecting logs for {hostname} {service_name}"
                 )
-                results.append((hostname, service_name, f"Timeout ({log_timeout}s)"))
+                results.append(
+                    HostLog(
+                        hostname, service_name, error=f"timed out after {log_timeout}s"
+                    )
+                )
             except Exception as e:
                 self.logger.error(
                     f"Error collecting logs for {hostname} {service_name}: {e}"
                 )
-                results.append((hostname, service_name, f"Error: {e}"))
+                results.append(HostLog(hostname, service_name, error=str(e)))
         return results
 
     async def async_test_case_tearDown(
