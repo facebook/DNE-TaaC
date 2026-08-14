@@ -35,8 +35,7 @@ Before adding a method here, ask:
 import typing as t
 from abc import ABC, abstractmethod
 
-if t.TYPE_CHECKING:
-    from ixia.ixia import types as ixia_types
+from ixia.ixia import types as ixia_types
 
 
 class AbstractTrafficGenerator(ABC):
@@ -131,6 +130,31 @@ class AbstractTrafficGenerator(ABC):
         Restpy returns restpy TrafficItem objects. OTG returns flow name strings.
         """
         ...
+
+    # -- Declarative configuration (read-only introspection) --
+    #
+    # These expose the thrift IxiaConfig the generator was BUILT from, not live
+    # chassis state, so they involve no REST/API call and cannot block or raise.
+    # Concrete (not abstract) with an empty default so a backend that carries no
+    # declarative config still satisfies the interface.
+
+    def get_port_configs(self) -> t.List[ixia_types.PortConfig]:
+        """
+        Return the thrift port configs this generator was configured with.
+
+        Includes each port's L1 config, notably the PFC priority-to-queue map,
+        which is otherwise only visible as a debug-logged Python repr.
+        """
+        return []
+
+    def get_traffic_item_configs(self) -> t.List[ixia_types.TrafficItem]:
+        """
+        Return the thrift traffic-item configs this generator was configured with.
+
+        Unlike ``get_traffic_items``, this is the declarative source config
+        (endpoints, rate, frame size, QoS) rather than live backend objects.
+        """
+        return []
 
     # -- Protocols / BGP (called by steps) --
 

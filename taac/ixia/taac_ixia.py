@@ -1333,6 +1333,18 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         )
         self.apply_traffic()
 
+    def get_port_configs(self) -> t.List[ixia_types.PortConfig]:
+        """Return the declarative thrift port configs (incl. L1/PFC maps)."""
+        if self.ixia_config is None:
+            return []
+        return list(self.ixia_config.port_configs or [])
+
+    def get_traffic_item_configs(self) -> t.List[ixia_types.TrafficItem]:
+        """Return the declarative thrift traffic-item configs."""
+        if self.ixia_config is None:
+            return []
+        return list(self.ixia_config.traffic_items or [])
+
     def prepare_traffic(self) -> None:
         self.regenerate_traffic_items()
         self.apply_traffic()

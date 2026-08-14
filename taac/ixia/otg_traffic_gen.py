@@ -557,6 +557,14 @@ class OtgTrafficGen(AbstractTrafficGenerator):
         """Return flow names. OTG returns strings (restpy returns restpy objects)."""
         return [f.name for f in self.config.flows]
 
+    def get_port_configs(self) -> t.List[ixia_types.PortConfig]:
+        """Return the declarative thrift port configs (incl. L1/PFC maps)."""
+        return list(self.ixia_config.port_configs or [])
+
+    def get_traffic_item_configs(self) -> t.List[ixia_types.TrafficItem]:
+        """Return the declarative thrift traffic-item configs."""
+        return list(self.ixia_config.traffic_items or [])
+
     # ------------------------------------------------------------------
     # Stats — on demand + background capture
     # ------------------------------------------------------------------
