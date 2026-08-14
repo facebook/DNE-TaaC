@@ -27,9 +27,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     create_bgp_ebb_full_scale_test_config,
 )
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    EBB_BGPCPP_LOGGING_CONFIG,
-)
 
 
 _OPENR_STANDALONE = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
@@ -68,7 +65,6 @@ BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
     playbooks_selected=list(_BAG010_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -77,7 +73,6 @@ BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     playbooks_selected=list(_BAG010_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 # CONVEYOR: dne_routing / bag011_stage1_node
@@ -87,7 +82,6 @@ BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
     playbooks_selected=list(_BAG011_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -96,7 +90,6 @@ BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     playbooks_selected=list(_BAG011_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 # CONVEYOR: dne_routing / bag012_stage1_node
@@ -106,7 +99,6 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
     playbooks_selected=list(_BAG012_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -115,7 +107,6 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     playbooks_selected=list(_BAG012_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 # CONVEYOR: dne_routing / bag013_stage1_node
@@ -125,7 +116,6 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
     playbooks_selected=list(_BAG013_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -134,7 +124,6 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     playbooks_selected=list(_BAG013_STAGE1_PLAYBOOKS),
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
-    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
 )
 
 
