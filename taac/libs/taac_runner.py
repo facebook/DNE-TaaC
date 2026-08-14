@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import typing as t
 import uuid
@@ -403,6 +404,9 @@ class TaacRunner:
         self.parameter_evaluator = ParameterEvaluator(self.jq_vars, self.dynamic_vars)
         self.periodic_task_executor: t.Optional[PeriodicTaskExecutor] = None
         self.test_case_periodic_task_executor: t.Optional[PeriodicTaskExecutor] = None
+        self._test_case_cleanup_pending = False
+        self._test_case_handlers_pending_cleanup: t.List[BaseCustomTestHandler] = []
+        self._test_case_rsyslog_created = False
         # Shared data dictionary that persists across all tasks (setup, test, teardown)
         # This allows tasks to share information (e.g., backup filenames) across execution
         self.shared_task_data: t.Dict[t.Any, t.Any] = {}
@@ -889,12 +893,17 @@ class TaacRunner:
         # list of (status, error_type) where status is "passed"/"failed"/"error"
         npi_iteration_outcomes: t.List[t.Tuple[str, t.Optional[str]]] = []
         self._npi_iteration_outcomes = npi_iteration_outcomes
-        _run_exc: t.Optional[BaseException] = None
+        _run_exc: t.Optional[Exception] = None
         _npi_iteration_count = 0
+        test_case_results: t.List[TestResult] = []
+        test_case_start_time = int(time.time())
+        iteration_count = self._get_test_case_iteration_count(playbook)
 
         try:
-            for _ in range(playbook.iteration if not self.is_autotester_run else 1):
+            for _ in range(iteration_count):
                 _npi_iteration_count += 1
+                test_case_results = []
+                test_case_start_time = int(time.time())
                 self._current_playbook_section = self.test_summary.start_section(
                     f"Playbook: {playbook.name} | {test_device.name}"
                 )
@@ -908,8 +917,6 @@ class TaacRunner:
                     device_name=test_device.name,
                     logger=self.logger,
                 )
-                # results of a single playbook run
-                test_case_results = []
                 # Deprecated - snapshot_checks should be defined at playbook level
                 snapshot_checks = [
                     snapshot_check
@@ -1098,6 +1105,14 @@ class TaacRunner:
                     # check results). Correct it to "error".
                     npi_iteration_outcomes[-1] = ("error", str(e))
         finally:
+            _run_exc = await self._run_test_case_fallback_cleanup(
+                test_case_name,
+                test_case_results,
+                test_device,
+                test_case_start_time,
+                _run_exc,
+                sys.exception(),
+            )
             # Publish NPI result immediately after all iterations complete,
             # before returning to run_tests for the next playbook.
             # This ensures the result reflects the full aggregated outcome
@@ -1107,6 +1122,64 @@ class TaacRunner:
             )
             if _run_exc is not None:
                 raise _run_exc
+
+    def _get_test_case_iteration_count(self, playbook: taac_types.Playbook) -> int:
+        iteration_count = 1 if self.is_autotester_run else playbook.iteration
+        if iteration_count <= 0:
+            raise ValueError(
+                f"Playbook '{playbook.name}' iteration must be a positive integer"
+            )
+        return iteration_count
+
+    async def _run_test_case_fallback_cleanup(
+        self,
+        test_case_name: str,
+        test_case_results: t.List[TestResult],
+        test_device: TestDevice,
+        test_case_start_time: int,
+        run_error: t.Optional[Exception],
+        active_exception: t.Optional[BaseException],
+    ) -> t.Optional[Exception]:
+        fallback_errors: t.List[Exception] = []
+        if self.test_case_periodic_task_executor is not None:
+            orphaned_executor = self._detach_test_case_periodic_task_executor(
+                test_case_name
+            )
+            fallback_errors.extend(
+                await self._finalize_test_case_periodic_task_executor(
+                    orphaned_executor,
+                    test_case_results,
+                    test_device,
+                    test_case_name,
+                    test_case_start_time,
+                )
+            )
+        if self._test_case_cleanup_pending:
+            self._test_case_cleanup_pending = False
+            fallback_errors.extend(await self._run_post_periodic_test_case_cleanup())
+
+        if not fallback_errors:
+            return run_error
+        if run_error is not None:
+            return ExceptionGroup(
+                "test case execution and periodic cleanup both failed",
+                [run_error, *fallback_errors],
+            )
+        if active_exception is None:
+            return ExceptionGroup(
+                "test case fallback cleanup failed",
+                fallback_errors,
+            )
+
+        self.logger.error(
+            "Test case cleanup also failed while propagating "
+            f"{active_exception!r}: {fallback_errors!r}"
+        )
+        active_exception.add_note(
+            "Test case cleanup also failed: "
+            + "; ".join(f"{type(error).__name__}: {error}" for error in fallback_errors)
+        )
+        return None
 
     async def _publish_npi_result(
         self,
@@ -1829,17 +1902,182 @@ class TaacRunner:
             )
             await asyncio.sleep(10)
         # Run custom test case set up logics
+        self._test_case_cleanup_pending = True
+        self._test_case_handlers_pending_cleanup = []
+        self._test_case_rsyslog_created = False
         for handler in self.custom_test_handlers:
             await handler._async_test_case_setUp()
-        if playbook.periodic_tasks:
-            self.test_case_periodic_task_executor = PeriodicTaskExecutor(
-                list(playbook.periodic_tasks),
-                self.logger,
-                t.cast(TaacIxia, self.ixia),
-            )
-            self.test_case_periodic_task_executor.create_periodic_tasks()
+            self._test_case_handlers_pending_cleanup.append(handler)
+        self._start_test_case_periodic_tasks(playbook)
         if not self.skip_fboss_rsyslog:
             await self.async_create_fboss_ryslog_configuration()
+            self._test_case_rsyslog_created = True
+
+    def _start_test_case_periodic_tasks(self, playbook: taac_types.Playbook) -> None:
+        if self.test_case_periodic_task_executor is not None:
+            raise RuntimeError(
+                "Cannot start periodic tasks for "
+                f"'{playbook.name}': the previous playbook still owns an executor"
+            )
+        if self.skip_periodic_tasks or not playbook.periodic_tasks:
+            self.logger.debug(
+                f"No periodic task executor created for playbook '{playbook.name}'"
+            )
+            return
+
+        executor = PeriodicTaskExecutor(
+            list(playbook.periodic_tasks),
+            self.logger,
+            t.cast(TaacIxia, self.ixia),
+        )
+        self.test_case_periodic_task_executor = executor
+        self.logger.debug(
+            f"Created periodic task executor {id(executor)} for "
+            f"playbook '{playbook.name}'"
+        )
+        executor.create_periodic_tasks()
+
+    def _detach_test_case_periodic_task_executor(
+        self, playbook_name: str
+    ) -> t.Optional[PeriodicTaskExecutor]:
+        executor = self.test_case_periodic_task_executor
+        self.test_case_periodic_task_executor = None
+        if executor is None:
+            self.logger.debug(
+                f"No periodic task executor to detach for playbook '{playbook_name}'"
+            )
+        else:
+            self.logger.debug(
+                f"Detached periodic task executor {id(executor)} from "
+                f"playbook '{playbook_name}'"
+            )
+        return executor
+
+    async def _finalize_test_case_periodic_task_executor(
+        self,
+        executor: t.Optional[PeriodicTaskExecutor],
+        test_case_results: t.List[TestResult],
+        test_device: TestDevice,
+        test_case_name: str,
+        test_case_start_time: int,
+        workers_stopped: t.Optional[bool] = None,
+        initial_errors: t.Optional[t.Iterable[Exception]] = None,
+    ) -> t.List[Exception]:
+        if executor is None:
+            return []
+
+        errors = list(initial_errors or [])
+        try:
+            if workers_stopped is None:
+                try:
+                    executor.stop_all_periodic_tasks()
+                    workers_stopped = True
+                except Exception as error:
+                    workers_stopped = False
+                    errors.append(error)
+
+            if workers_stopped:
+                try:
+                    await self.async_run_periodic_task_checks(
+                        test_case_results,
+                        test_device,
+                        test_case_name,
+                        test_case_start_time,
+                        executor,
+                    )
+                except Exception as error:
+                    errors.append(error)
+
+                try:
+                    self.fail_on_periodic_task_error_if_exists(executor)
+                except Exception as error:
+                    errors.append(error)
+        finally:
+            try:
+                await executor.teardown(
+                    skip_log_upload=workers_stopped is True,
+                    stop_tasks=False,
+                )
+            except Exception as error:
+                errors.append(error)
+
+        self.logger.debug(
+            f"Finalized periodic task executor {id(executor)} for "
+            f"playbook '{test_case_name}'"
+        )
+        return errors
+
+    def _stop_test_case_periodic_task_executor(
+        self, executor: t.Optional[PeriodicTaskExecutor]
+    ) -> t.Tuple[t.Optional[bool], t.List[Exception]]:
+        if executor is None:
+            return None, []
+        try:
+            executor.stop_all_periodic_tasks()
+            return True, []
+        except Exception as error:
+            return False, [error]
+
+    def _end_ixia_test_case(
+        self,
+        playbook: taac_types.Playbook,
+        test_case_results: t.List[TestResult],
+        periodic_workers_stopped: t.Optional[bool],
+    ) -> t.Optional[str]:
+        if periodic_workers_stopped is False:
+            self.logger.error(
+                "Skipping IXIA test-case teardown because a periodic IXIA thread "
+                "is still running"
+            )
+            return None
+
+        ixia_config_snapshot = self._snapshot_ixia_config(playbook, test_case_results)
+        ixia = self.ixia
+        if not ixia:
+            return ixia_config_snapshot
+
+        traffic_regexes = (
+            playbook.traffic_items_to_start or self.test_config.traffic_items_to_start
+        )
+        ixia.end_test_case(
+            list(traffic_regexes) if traffic_regexes is not None else None
+        )
+        if playbook.backup_and_restore_ixia_config:
+            if hasattr(ixia, "import_saved_config"):
+                ixia.import_saved_config()  # type: ignore[attr-defined]
+            else:
+                self.logger.warning(
+                    "backup_and_restore_ixia_config is set but the traffic "
+                    "generator backend does not support import_saved_config "
+                    "— skipping config restore"
+                )
+        return ixia_config_snapshot
+
+    async def _run_post_periodic_test_case_cleanup(self) -> t.List[Exception]:
+        errors: t.List[Exception] = []
+        handlers = self._test_case_handlers_pending_cleanup
+        self._test_case_handlers_pending_cleanup = []
+        for handler in handlers:
+            try:
+                await handler._async_test_case_tearDown()
+            except Exception as error:
+                errors.append(error)
+        if not self.skip_fboss_rsyslog and self._test_case_rsyslog_created:
+            self._test_case_rsyslog_created = False
+            try:
+                await self.async_delete_fboss_ryslog_configuration()
+            except Exception as error:
+                errors.append(error)
+        return errors
+
+    def _get_periodic_task_executor_error(
+        self, executor: t.Optional[PeriodicTaskExecutor]
+    ) -> t.Optional[TestCaseFailure]:
+        try:
+            self.fail_on_periodic_task_error_if_exists(executor)
+        except TestCaseFailure as error:
+            return error
+        return None
 
     def convert_unixtime_to_log_timestamp(self, unix_time: int) -> str:
         """
@@ -1955,37 +2193,34 @@ class TaacRunner:
         test_case_start_time: int,
     ) -> None:
         # Executed at the end of each test
-        ixia = self.ixia
         test_case_name = playbook.name
+        periodic_workers_stopped, periodic_stop_errors = (
+            self._stop_test_case_periodic_task_executor(
+                self.test_case_periodic_task_executor
+            )
+        )
         # Taken before the generator is torn down: `end_test_case` pauses and
         # disables traffic and `import_saved_config` rolls the configuration
         # back, so afterwards the live state no longer shows what the test drove.
-        ixia_config_snapshot = self._snapshot_ixia_config(playbook, test_case_results)
-        if ixia:
-            traffic_regexes = (
-                playbook.traffic_items_to_start
-                or self.test_config.traffic_items_to_start
-            )
-            ixia.end_test_case(
-                list(traffic_regexes) if traffic_regexes is not None else None
-            )
-            if playbook.backup_and_restore_ixia_config:
-                if hasattr(ixia, "import_saved_config"):
-                    ixia.import_saved_config()  # type: ignore[attr-defined]
-                else:
-                    self.logger.warning(
-                        "backup_and_restore_ixia_config is set but the traffic "
-                        "generator backend does not support import_saved_config "
-                        "— skipping config restore"
-                    )
-        if self.test_case_periodic_task_executor:
-            await self.async_run_periodic_task_checks(
+        ixia_config_snapshot = self._end_ixia_test_case(
+            playbook,
+            test_case_results,
+            periodic_workers_stopped,
+        )
+        test_case_periodic_task_executor = (
+            self._detach_test_case_periodic_task_executor(test_case_name)
+        )
+        test_case_periodic_task_executor_errors = (
+            await self._finalize_test_case_periodic_task_executor(
+                test_case_periodic_task_executor,
                 test_case_results,
                 test_device,
                 test_case_name,
                 test_case_start_time,
-                self.test_case_periodic_task_executor,
+                workers_stopped=periodic_workers_stopped,
+                initial_errors=periodic_stop_errors,
             )
+        )
         test_case_raise = None
         try:
             if test_case_results:
@@ -2050,33 +2285,20 @@ class TaacRunner:
         except TestCaseFailure as e:
             test_case_raise = e
 
-        # Run custom test case tear down logics
-        for handler in self.custom_test_handlers:
-            await handler._async_test_case_tearDown()
-        if not self.skip_fboss_rsyslog:
-            await self.async_delete_fboss_ryslog_configuration()
-        await self.teardown_period_task_executor_if_exists(
-            self.test_case_periodic_task_executor, skip_log_upload=True
+        self._test_case_cleanup_pending = False
+        post_periodic_teardown_errors = (
+            await self._run_post_periodic_test_case_cleanup()
         )
-        test_case_periodic_task_executor_raise = None
-        try:
-            self.fail_on_periodic_task_error_if_exists(
-                self.test_case_periodic_task_executor
-            )
-        except TestCaseFailure as e:
-            test_case_periodic_task_executor_raise = e
-
-        periodic_task_executor_raise = None
-        try:
-            self.fail_on_periodic_task_error_if_exists(self.periodic_task_executor)
-        except TestCaseFailure as e:
-            periodic_task_executor_raise = e
+        periodic_task_executor_raise = self._get_periodic_task_executor_error(
+            self.periodic_task_executor
+        )
         # Combine all exceptions into a single raise
         exceptions = [
             exc
             for exc in [
                 test_case_raise,
-                test_case_periodic_task_executor_raise,
+                *test_case_periodic_task_executor_errors,
+                *post_periodic_teardown_errors,
                 periodic_task_executor_raise,
             ]
             if exc is not None
@@ -2841,30 +3063,43 @@ class TaacRunner:
         test_case_start_time: int,
         periodic_task_executor: PeriodicTaskExecutor,
     ) -> None:
+        errors: t.List[Exception] = []
         # First, teardown all workers to generate everpaste log URLs
         for periodic_task_worker in periodic_task_executor.periodic_task_workers:
-            await periodic_task_worker.teardown()
+            try:
+                await periodic_task_worker.teardown()
+            except Exception as error:
+                errors.append(error)
 
         # Now run final checks with log URLs available
         for periodic_task_worker in periodic_task_executor.periodic_task_workers:
-            periodic_check_result = await periodic_task_worker.run_final_check()
-            if periodic_check_result:
-                # Append log URL to the message if available
-                message = periodic_check_result.message
-                if periodic_task_worker._log_everpaste_url:
-                    message += f"\nLog: {periodic_task_worker._log_everpaste_url}"
+            try:
+                periodic_check_result = await periodic_task_worker.run_final_check()
+                if periodic_check_result:
+                    # Append log URL to the message if available
+                    message = periodic_check_result.message
+                    if periodic_task_worker._log_everpaste_url:
+                        message += f"\nLog: {periodic_task_worker._log_everpaste_url}"
 
-                result = await async_write_test_result(
-                    test_case_name,
-                    devices=[test_device],
-                    test_status=periodic_check_result.status,
-                    start_time=test_case_start_time,
-                    check_name=periodic_check_result.name,
-                    # async_write_test_result already everpaste-shortens long
-                    # messages (no fburl); pass it through directly instead of
-                    # everpasting + fburl-ing here. This removes a duplicate
-                    # upload and a per-worker fburl-tier call at every test-case
-                    # teardown, and resolves the >100 vs >1000 gate conflict.
-                    message=message,
-                )
-                test_case_results.append(result)
+                    result = await async_write_test_result(
+                        test_case_name,
+                        devices=[test_device],
+                        test_status=periodic_check_result.status,
+                        start_time=test_case_start_time,
+                        check_name=periodic_check_result.name,
+                        # async_write_test_result already everpaste-shortens long
+                        # messages (no fburl); pass it through directly instead of
+                        # everpasting + fburl-ing here. This removes a duplicate
+                        # upload and a per-worker fburl-tier call at every test-case
+                        # teardown, and resolves the >100 vs >1000 gate conflict.
+                        message=message,
+                    )
+                    test_case_results.append(result)
+            except Exception as error:
+                errors.append(error)
+
+        if errors:
+            details = "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+            raise ExceptionGroup(
+                f"Periodic task finalization failed: {details}", errors
+            )
