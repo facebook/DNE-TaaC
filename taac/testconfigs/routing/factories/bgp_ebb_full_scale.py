@@ -820,6 +820,7 @@ def create_bgp_ebb_full_scale_test_config(
     playbooks_selected: list[str] | None = None,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = True,
+    bgpcpp_logging_config_override: str | None = None,
     parent_networks: dict[str, str] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> TestConfig:
@@ -831,6 +832,9 @@ def create_bgp_ebb_full_scale_test_config(
         playbooks_selected: Subset of the suite's playbooks to run; all if None.
         profile: BGP++ profile, which also decides the Open/R mode.
         enable_update_group: Whether to enable BGP Update Group on the device.
+        bgpcpp_logging_config_override: Exact BGP++ logging configuration to
+            apply to the launcher. Pass ``None`` to preserve the launcher
+            without a logging override.
         parent_networks: IXIA-side parent networks, defaulting to
             ``EBB_PARENT_NETWORKS`` (ixia11). Pass ``EBB_PARENT_NETWORKS_IXIA03``
             when the inventory has been swapped with
@@ -916,6 +920,7 @@ def create_bgp_ebb_full_scale_test_config(
         device_config_override=RoutingDeviceConfig(
             openr_mode=openr_mode,
             update_group_enable=enable_update_group,
+            bgpcpp_logging_config_override=bgpcpp_logging_config_override,
         ),
     )
     if selected_tc7_playbooks:

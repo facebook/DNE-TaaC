@@ -414,6 +414,7 @@ class RoutingDeviceConfig:
     bgp_keepalive_timer_s: int = 60
     bgp_connect_retry_timer_s: int = 120
     graceful_restart_timer_s: int | None = None
+    bgpcpp_logging_config_override: str | None = None
     _taac_overridden_fields: tuple[str, ...] = field(
         default=(),
         repr=False,

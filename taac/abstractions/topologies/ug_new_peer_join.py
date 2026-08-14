@@ -1,6 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
+    EBB_BGPCPP_LOGGING_CONFIG,
+)
 from taac.abstractions.compatibility.legacy_ebb_binding import (
     IXIA_EBGP_IC_PARENT_NETWORK_V6,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
@@ -321,6 +324,7 @@ UG_NEW_PEER_JOIN = LogicalTopology(
     ),
     device_config=RoutingDeviceConfig(
         update_group_enable=True,
+        bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
         openr_mode=OpenRMode.NONE,
     ),
     peer_groups=(UG_EBGP_PEER_GROUP, UG_IBGP_PEER_GROUP),

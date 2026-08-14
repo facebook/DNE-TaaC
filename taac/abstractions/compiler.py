@@ -14,7 +14,6 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     ADD_INTERN_USER_IDS_CMD,
     BGPCPP_DAEMONS,
     build_update_group_setting_override_cmd,
-    EBB_BGPCPP_LOGGING_CONFIG,
     FIBAGENT_BGP_CONF_DEPLOY_CMD,
     FIBAGENT_CONF_DEPLOY_CMD,
     REQUIRE_THRIFT_ACL_FILES_CMD,
@@ -573,6 +572,7 @@ class _EbbFullScaleSetupArgs:
     bgp_asn: int
     bgpcpp_configerator_path: str
     enable_update_group: bool
+    bgpcpp_logging_config_override: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1039,11 +1039,18 @@ def _characteristic_component_startup_tasks(
         setup_args,
         OpenRMode.NONE,
     )
+    logging_tasks = (
+        (
+            create_bgpcpp_logging_setup_task(
+                device_name,
+                setup_args.bgpcpp_logging_config_override,
+            ),
+        )
+        if setup_args.bgpcpp_logging_config_override is not None
+        else ()
+    )
     return (
-        create_bgpcpp_logging_setup_task(
-            device_name,
-            EBB_BGPCPP_LOGGING_CONFIG,
-        ),
+        *logging_tasks,
         *get_bgpcpp_startup_tasks_for_openr_mode(
             device_name,
             openr_mode,
@@ -1156,6 +1163,11 @@ def _characteristic_setup_phases(
         bgp_asn=bgp_asn,
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=enable_update_group,
+        bgpcpp_logging_config_override=(
+            bound.device_config.bgpcpp_logging_config_override
+            if bound.device_config is not None
+            else None
+        ),
     )
     return (
         *_characteristic_setup_prefix_phases(
@@ -3956,6 +3968,16 @@ def _ebb_component_runtime_plan(
         if openr_inputs.mode is OpenRMode.NONE
         else ()
     )
+    logging_tasks = (
+        (
+            create_bgpcpp_logging_setup_task(
+                args.interfaces.device_name,
+                args.bgpcpp_logging_config_override,
+            ),
+        )
+        if args.bgpcpp_logging_config_override is not None
+        else ()
+    )
     return MetaComponentRuntimePlan(
         logical_topology_name=bound.logical_topology.name,
         hostname=args.interfaces.device_name,
@@ -3973,10 +3995,7 @@ def _ebb_component_runtime_plan(
             *peer_tasks,
         ),
         startup_tasks=(
-            create_bgpcpp_logging_setup_task(
-                args.interfaces.device_name,
-                EBB_BGPCPP_LOGGING_CONFIG,
-            ),
+            *logging_tasks,
             *get_bgpcpp_startup_tasks_for_openr_mode(
                 args.interfaces.device_name,
                 openr_inputs.mode,
@@ -5483,6 +5502,7 @@ def _ebb_full_scale_setup_args(bound: BoundTopology) -> _EbbFullScaleSetupArgs:
         bgp_asn=bgp_asn,
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=device_config.update_group_enable,
+        bgpcpp_logging_config_override=device_config.bgpcpp_logging_config_override,
     )
 
 

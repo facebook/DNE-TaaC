@@ -54,6 +54,9 @@ from taac.testconfigs.routing.factories.qual_bgp_update_group.tc9_edge_cases imp
     create_bgp_ug_simultaneous_disruptions_test_config,
     create_bgp_ug_staggered_startup_test_config,
 )
+from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    EBB_BGPCPP_LOGGING_CONFIG,
+)
 
 
 # ─── Spec 2.1 Distribution Correctness ──────────────────────────────────
@@ -148,6 +151,7 @@ BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG = (
         ],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         enable_update_group=True,
+        bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
     )
 )
 

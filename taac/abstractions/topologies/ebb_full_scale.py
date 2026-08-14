@@ -8,6 +8,7 @@ import typing as t
 from dataclasses import dataclass, replace
 
 from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
+    EBB_BGPCPP_LOGGING_CONFIG,
     PEERGROUP_BGP_MON,
     PEERGROUP_EBGP_V4,
     PEERGROUP_EBGP_V6,
@@ -239,6 +240,7 @@ _EBB_BGPMON_PORT_ASSIGNMENT = IxiaPortAssignment(logical_role="bgpmon")
 
 EBB_DEVICE_CONFIG = RoutingDeviceConfig(
     update_group_enable=False,
+    bgpcpp_logging_config_override=EBB_BGPCPP_LOGGING_CONFIG,
     enable_next_hop_tracking=True,
     enable_dynamic_policy_evaluation=True,
     openr_mode=OpenRMode.NONE,

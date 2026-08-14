@@ -2382,6 +2382,22 @@ def _validate_routing_device_config(
                 "openr_mode must be an OpenRMode member",
             )
         )
+    logging_config_override = config.bgpcpp_logging_config_override
+    if logging_config_override is not None and (
+        not isinstance(logging_config_override, str)
+        or not logging_config_override
+        or any(char in logging_config_override for char in "\x00\r\n")
+    ):
+        issues.append(
+            _issue(
+                f"{path}.bgpcpp_logging_config_override",
+                "invalid_logging_config",
+                (
+                    "bgpcpp_logging_config_override must be None or a non-empty "
+                    "single-line string"
+                ),
+            )
+        )
     for attr in ("route_limit", "prefix_limit", "per_peer_max_route_limit"):
         value = getattr(config, attr)
         if isinstance(value, bool):
