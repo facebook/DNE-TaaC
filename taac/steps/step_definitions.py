@@ -11482,3 +11482,30 @@ def create_cpu_percentile_stop_step(
             f"(session {session_key})"
         ),
     )
+
+
+def create_be_qos_ixia_api_step(
+    api_name: str,
+    args_dict: t.Optional[t.Dict[str, t.Any]] = None,
+    step_id: t.Optional[str] = None,
+) -> Step:
+    """Build an `INVOKE_IXIA_API_STEP` for the backend (DSF/RTSW) QoS suite.
+
+    Differs from `create_ixia_api_step` in two ways the BE QoS playbooks rely
+    on: it accepts an explicit `step_id` (the BE QoS snapshot checks address
+    checkpoints as `stage.<stage_id>.step.<step_id>.start/.end`), and it omits
+    `args_json` entirely for no-argument APIs rather than sending `"{}"`.
+
+    Args:
+        api_name: IXIA API to invoke, e.g. `start_traffic`.
+        args_dict: Arguments for the API, or None for no-argument APIs.
+        step_id: Explicit step id, used to build checkpoint references.
+    """
+    payload: t.Dict[str, t.Any] = {"api_name": api_name}
+    if args_dict is not None:
+        payload["args_json"] = json.dumps(args_dict)
+    return Step(
+        id=step_id,
+        name=StepName.INVOKE_IXIA_API_STEP,
+        step_params=Params(json_params=json.dumps(payload)),
+    )

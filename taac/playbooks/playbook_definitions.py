@@ -25548,3 +25548,41 @@ def create_dlb_hardening_playbook(
         stages=stages,
         postchecks=postchecks,
     )
+
+
+def create_be_qos_playbook(
+    name: str,
+    traffic_items_to_configure: t.Optional[t.Dict[str, TrafficItemSettings]] = None,
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    stages: t.Optional[t.List[Stage]] = None,
+    cleanup_steps: t.Optional[t.List[Step]] = None,
+) -> Playbook:
+    """Assemble a backend (DSF/RTSW) QoS scheduling `Playbook`.
+
+    Shared by every BE QoS playbook builder in
+    `internal/test_configs/be_qos_scheduling_test_config.py` (scheduling,
+    per-queue congestion, microburst, 2-queue/3-queue priority, and
+    multi-port variants). Those builders compute the stages, checks and
+    traffic items; this factory performs the actual construction so it stays
+    in the canonical definitions file.
+
+    Args:
+        name: Playbook name, e.g. `test_be_qos_scheduling_queue7_nc`.
+        traffic_items_to_configure: IXIA traffic items keyed by name.
+        traffic_items_to_start: Regexes selecting which items to start.
+        postchecks: Point-in-time checks run after the playbook.
+        snapshot_checks: Pre/post snapshot-differencing checks.
+        stages: Ordered stages to execute.
+        cleanup_steps: Steps run unconditionally at teardown.
+    """
+    return Playbook(
+        name=name,
+        traffic_items_to_configure=traffic_items_to_configure or {},
+        traffic_items_to_start=traffic_items_to_start or [],
+        postchecks=postchecks or [],
+        snapshot_checks=snapshot_checks or [],
+        stages=stages or [],
+        cleanup_steps=cleanup_steps or [],
+    )

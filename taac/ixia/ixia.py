@@ -2609,6 +2609,26 @@ class Ixia:
                 Duration=transmission_control.frame_count,
             )
 
+        elif (
+            transmission_control.type
+            == ixia_types.TransmissionControlType.BURST_FIXED_DURATION
+        ):
+            burst_params: t.Dict[str, t.Any] = {
+                "Type": transmission_control_type_raw,
+                "Duration": transmission_control.duration,
+                "EnableInterBurstGap": True,
+            }
+            if transmission_control.burst_packet_count is not None:
+                burst_params["BurstPacketCount"] = (
+                    transmission_control.burst_packet_count
+                )
+            if transmission_control.inter_burst_gap_ms is not None:
+                burst_params["InterBurstGap"] = transmission_control.inter_burst_gap_ms
+                burst_params["InterBurstGapUnits"] = "milliseconds"
+            if transmission_control.min_gap_bytes is not None:
+                burst_params["MinGapBytes"] = transmission_control.min_gap_bytes
+            config_element.TransmissionControl.update(**burst_params)
+
     @staticmethod
     def configure_rate_distribution(
         config_element: "ConfigElement", rate_distribution: ixia_types.RateDistribution
@@ -10104,6 +10124,7 @@ class Ixia:
         line_rate_type: t.Optional[ixia_types.RateType],
         frame_size_setting: t.Optional[ixia_types.FrameSize],
         qos_config: t.Optional[ixia_types.QoSConfig],
+        transmission_control: t.Optional[ixia_types.TransmissionControl] = None,
     ) -> None:
         traffic_item_obj = self.ixnetwork.Traffic.TrafficItem.find(
             Name=traffic_item_name
@@ -10136,7 +10157,105 @@ class Ixia:
                     qos_config,
                     none_throws(ip_address_family),
                 )
+            if transmission_control:
+                self._configure_transmission_control(
+                    config_element, transmission_control
+                )
         traffic_item_obj.Generate()
+
+    @external_api
+    def set_transmission_control(
+        self,
+        traffic_item_regex: str,
+        transmission_type: str,
+        duration: int = 300,
+        inter_burst_gap_ms: t.Optional[float] = None,
+        burst_packet_count: t.Optional[int] = None,
+        min_gap_bytes: t.Optional[int] = None,
+    ) -> None:
+        """Set transmission control mode on matching traffic items.
+
+        Allows switching between continuous and burst modes mid-playbook
+        via INVOKE_IXIA_API_STEP.
+
+        Raises:
+            ValueError: on an unknown ``transmission_type``, or if burst
+                parameters are supplied for a non-burst mode. Accepting them
+                silently would leave the traffic item running the previous
+                pattern with no failure signal.
+        """
+        import re
+
+        type_map = {v: k for k, v in ixia_types.TRANS_CONTROL_TYPE_MAP.items()}
+        if transmission_type not in type_map:
+            raise ValueError(
+                f"Unknown transmission type '{transmission_type}'. "
+                f"Valid: {list(type_map.keys())}"
+            )
+        resolved_type = type_map[transmission_type]
+        burst_args = {
+            "inter_burst_gap_ms": inter_burst_gap_ms,
+            "burst_packet_count": burst_packet_count,
+            "min_gap_bytes": min_gap_bytes,
+        }
+        supplied_burst_args = sorted(k for k, v in burst_args.items() if v is not None)
+        if (
+            supplied_burst_args
+            and resolved_type != ixia_types.TransmissionControlType.BURST_FIXED_DURATION
+        ):
+            raise ValueError(
+                f"{supplied_burst_args} only apply to 'burstFixedDuration'; "
+                f"got '{transmission_type}'."
+            )
+        if (
+            resolved_type == ixia_types.TransmissionControlType.BURST_FIXED_DURATION
+            and burst_packet_count is None
+        ):
+            raise ValueError(
+                "burstFixedDuration needs an explicit burst_packet_count; "
+                "without it IXIA keeps whatever burst size was configured last."
+            )
+        tc = ixia_types.TransmissionControl(
+            type=resolved_type,
+            duration=duration,
+            burst_packet_count=burst_packet_count,
+            inter_burst_gap_ms=inter_burst_gap_ms,
+            min_gap_bytes=min_gap_bytes,
+        )
+
+        # Stop traffic before modifying transmission control to avoid
+        # "stateless traffic item has been unapplied" errors from IXIA.
+        # The IXIA server rejects dynamic TransmissionControl updates on
+        # traffic items that are in unapplied state (e.g. after a
+        # stop/start cycle without regeneration).
+        was_running = self.is_traffic_running()
+        if was_running:
+            self.stop_traffic()
+
+        pattern = re.compile(traffic_item_regex)
+        matched = 0
+        for ti in self.ixnetwork.Traffic.TrafficItem.find():
+            if pattern.search(ti.Name):
+                matched += 1
+                for ce in ti.ConfigElement.find():
+                    self._configure_transmission_control(ce, tc)
+                ti.Generate()
+                self.logger.info(
+                    f"Set transmission control to '{transmission_type}' "
+                    f"on traffic item '{ti.Name}'"
+                )
+
+        # A regex that matches nothing would otherwise leave every traffic item
+        # on its previous pattern and still report success.
+        if not matched:
+            raise ValueError(
+                f"No traffic item matched '{traffic_item_regex}'; transmission "
+                f"control was not changed."
+            )
+
+        if was_running:
+            self.apply_traffic()
+            self.start_traffic()
 
     @staticmethod
     def _validate_control_buffer_percent(control_buffer_percent: int) -> None:

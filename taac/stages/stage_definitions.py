@@ -5534,3 +5534,20 @@ def create_fpf_hardening_concurrent_stage(
         )
 
     return Stage(concurrent=True, concurrent_steps=concurrent_steps)
+
+
+def create_be_qos_stage(stage_id: str, steps: list[Step]) -> Stage:
+    """Build a stage for the backend (DSF/RTSW) QoS scheduling suite.
+
+    The BE QoS playbooks are step-sequence driven: each stage is just an
+    ordered list of IXIA/longevity steps under a stable `stage_id`, which the
+    suite's snapshot checks reference as
+    `stage.<stage_id>.step.<step_id>.start/.end`. Construction lives here so
+    `internal/test_configs/be_qos_scheduling_test_config.py` stays free of
+    inline `Stage()` calls.
+
+    Args:
+        stage_id: Stable stage id used to build checkpoint references.
+        steps: Ordered steps to run in this stage.
+    """
+    return Stage(id=stage_id, steps=steps)

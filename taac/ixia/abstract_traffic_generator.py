@@ -182,6 +182,7 @@ class AbstractTrafficGenerator(ABC):
         line_rate_type: t.Optional["ixia_types.RateType"] = None,
         frame_size_setting: t.Optional["ixia_types.FrameSize"] = None,
         qos_config: t.Optional["ixia_types.QoSConfig"] = None,
+        transmission_control: t.Optional["ixia_types.TransmissionControl"] = None,
     ) -> None:
         """
         Reconfigure a traffic item/flow and commit the change.

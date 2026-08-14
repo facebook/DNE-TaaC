@@ -144,27 +144,33 @@ BGP_RESTART_STEPS = create_service_restart_steps(taac_types.Service.BGP)
 AGENT_RESTART_STEPS = create_service_restart_steps(taac_types.Service.AGENT)
 
 
-def get_rtsw_ixia_peer_group_tasks(device_name):
+def get_ixia_peer_group_tasks(
+    device_name,
+    ixia_peergroup_v6=PEERGROUP_RTSW_IXIA_V6,
+    ixia_route_map_in="PROPAGATE_RTSW_IXIA_IN",
+    ixia_route_map_out="PROPAGATE_RTSW_IXIA_OUT",
+    device_role="RTSW",
+):
     """
-    Returns the common RTSW IXIA peer group configuration tasks for devices with "rtsw" in the name.
-    This is shared between both get_bgp_peer_config_tasks and get_bgp_peer_config_tasks_downlinks.
+    Returns the common IXIA peer group configuration tasks.
+    Parameterized to support any device role (RTSW, GTSW, etc.).
     """
     return [
         create_coop_register_patcher_task(
             hostname=device_name,
             config_name="bgpcpp",
-            patcher_name="add_peer_group_patcher_PEERGROUP_RTSW_IXIA_V6",
+            patcher_name=f"add_peer_group_patcher_{ixia_peergroup_v6}",
             task_name="add_peer_group_patcher",
             py_func_name="add_peer_group_patcher",
             patcher_args={
-                "name": PEERGROUP_RTSW_IXIA_V6,
-                "description": "BGP peering from RTSW to IXIA, IPV6 sessions",
+                "name": ixia_peergroup_v6,
+                "description": f"BGP peering from {device_role} to IXIA, IPV6 sessions",
                 "next_hop_self": "True",
                 "disable_ipv4_afi": "True",
                 "disable_ipv6_afi": "False",
                 "is_confed_peer": "False",
-                "ingress_policy_name": "PROPAGATE_RTSW_IXIA_IN",
-                "egress_policy_name": "PROPAGATE_RTSW_IXIA_OUT",
+                "ingress_policy_name": ixia_route_map_in,
+                "egress_policy_name": ixia_route_map_out,
                 "bgp_peer_timers_hold_time_seconds": "30",
                 "bgp_peer_timers_keep_alive_seconds": "10",
                 "bgp_peer_timers_out_delay_seconds": "7",
@@ -183,50 +189,55 @@ def get_rtsw_ixia_peer_group_tasks(device_name):
         create_coop_register_patcher_task(
             hostname=device_name,
             config_name="bgpcpp",
-            patcher_name="a_add_bgp_policy_statement_PROPAGATE_RTSW_IXIA_IN",
+            patcher_name=f"a_add_bgp_policy_statement_{ixia_route_map_in}",
             task_name="add_bgp_policy_statement",
             py_func_name="add_bgp_policy_statement",
             patcher_args={
-                "name": "PROPAGATE_RTSW_IXIA_IN",
-                "description": "Policy for RTSW IXIA IN",
+                "name": ixia_route_map_in,
+                "description": f"Policy for {device_role} IXIA IN",
             },
         ),
         create_coop_register_patcher_task(
             hostname=device_name,
             config_name="bgpcpp",
-            patcher_name="a_add_bgp_policy_statement_PROPAGATE_RTSW_IXIA_OUT",
+            patcher_name=f"a_add_bgp_policy_statement_{ixia_route_map_out}",
             task_name="add_bgp_policy_statement",
             py_func_name="add_bgp_policy_statement",
             patcher_args={
-                "name": "PROPAGATE_RTSW_IXIA_OUT",
-                "description": "Policy for RTSW IXIA OUT",
+                "name": ixia_route_map_out,
+                "description": f"Policy for {device_role} IXIA OUT",
             },
         ),
         create_coop_register_patcher_task(
             hostname=device_name,
             config_name="bgpcpp",
-            patcher_name="add_bgp_policy_match_prefix_to_propagate_routes_PROPAGATE_RTSW_IXIA_IN_v6",
+            patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{ixia_route_map_in}_v6",
             task_name="add_bgp_policy_match_prefix_to_propagate_routes",
             py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
             patcher_args={
                 "matching_prefix": "6000::/16",
-                "in_stmt_name": "PROPAGATE_RTSW_IXIA_IN",
+                "in_stmt_name": ixia_route_map_in,
                 "out_stmt_name": "RANDOM",
             },
         ),
         create_coop_register_patcher_task(
             hostname=device_name,
             config_name="bgpcpp",
-            patcher_name="add_bgp_policy_match_prefix_to_propagate_routes_PROPAGATE_RTSW_IXIA_OUT_v6",
+            patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{ixia_route_map_out}_v6",
             task_name="add_bgp_policy_match_prefix_to_propagate_routes",
             py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
             patcher_args={
                 "matching_prefix": "7000::/16",
-                "in_stmt_name": "PROPAGATE_RTSW_IXIA_IN",
+                "in_stmt_name": ixia_route_map_in,
                 "out_stmt_name": "RANDOM",
             },
         ),
     ]
+
+
+def get_rtsw_ixia_peer_group_tasks(device_name):
+    """Backward-compatible wrapper for RTSW devices."""
+    return get_ixia_peer_group_tasks(device_name)
 
 
 def get_bgp_peer_config_tasks_downlinks(
@@ -238,6 +249,10 @@ def get_bgp_peer_config_tasks_downlinks(
     route_map_downlink_ingress,
     route_map_downlink_egress,
     ecmp_group_overflow_prefix,
+    ixia_peergroup_v6=None,
+    ixia_route_map_in=None,
+    ixia_route_map_out=None,
+    device_role=None,
 ):
     """
     Returns the list of BGP peer configuration tasks for downlink only configuration.
@@ -245,9 +260,18 @@ def get_bgp_peer_config_tasks_downlinks(
     """
     tasks = []
 
-    # Add RTSW IXIA peer groups if device name contains "rtsw"
     if "rtsw" in device_name:
         tasks.extend(get_rtsw_ixia_peer_group_tasks(device_name))
+    elif ixia_peergroup_v6:
+        tasks.extend(
+            get_ixia_peer_group_tasks(
+                device_name,
+                ixia_peergroup_v6=ixia_peergroup_v6,
+                ixia_route_map_in=ixia_route_map_in or route_map_downlink_ingress,
+                ixia_route_map_out=ixia_route_map_out or route_map_downlink_egress,
+                device_role=device_role or "IXIA",
+            )
+        )
 
     # Add the downlink-only tasks
     tasks.extend(
@@ -303,6 +327,11 @@ def test_config_for_network_ai_hardening_in_conveyor(
     playbooks=None,
     direct_ixia_connections=None,
     basset_pool=None,
+    ixia_peergroup_v6=None,
+    ixia_route_map_in=None,
+    ixia_route_map_out=None,
+    device_role=None,
+    uplink_bgp_peer_type=None,
 ):
     """
     Network AI hardening test configuration.
@@ -313,6 +342,10 @@ def test_config_for_network_ai_hardening_in_conveyor(
     - Removed all rogue-related components (rogue peers, traffic, etc.)
     - Simplified playbooks (can be empty list)
     """
+    _ixia_pg = ixia_peergroup_v6 or PEERGROUP_RTSW_IXIA_V6
+    _rm_in = ixia_route_map_in or "PROPAGATE_RTSW_IXIA_IN"
+    _rm_out = ixia_route_map_out or "PROPAGATE_RTSW_IXIA_OUT"
+
     return TestConfig(
         name=test_config_name,
         ixia_protocol_verification_timeout=10,
@@ -354,9 +387,13 @@ def test_config_for_network_ai_hardening_in_conveyor(
             is_downlink_peer_confed=is_downlink_peer_confed,
             per_peer_max_route_limit=per_peer_max_route_limit,
             downlink_peer_tag="IXIA",
-            route_map_downlink_ingress="PROPAGATE_RTSW_IXIA_IN",
-            route_map_downlink_egress="PROPAGATE_RTSW_IXIA_OUT",
+            route_map_downlink_ingress=_rm_in,
+            route_map_downlink_egress=_rm_out,
             ecmp_group_overflow_prefix="7000",
+            ixia_peergroup_v6=ixia_peergroup_v6,
+            ixia_route_map_in=ixia_route_map_in,
+            ixia_route_map_out=ixia_route_map_out,
+            device_role=device_role,
         )
         + [
             create_coop_register_patcher_task(
@@ -474,7 +511,7 @@ def test_config_for_network_ai_hardening_in_conveyor(
                                 "increment_ip": "0:0:0:0::2",
                                 "prefix_length": 127,
                                 "description": "ECMP Stressor IPv6 Peers",
-                                "peer_group_name": PEERGROUP_RTSW_IXIA_V6,
+                                "peer_group_name": _ixia_pg,
                                 "num_sessions": 2,
                                 "remote_as_4_byte": remote_downlink_as_4byte,
                                 "remote_as_4_byte_step": 0,
@@ -486,7 +523,7 @@ def test_config_for_network_ai_hardening_in_conveyor(
                                 "increment_ip": "0:0:0:0::0",
                                 "prefix_length": 80,
                                 "description": "ECMP NDP stressor",
-                                "peer_group_name": PEERGROUP_RTSW_IXIA_V6,
+                                "peer_group_name": _ixia_pg,
                                 "num_sessions": 1,
                                 "remote_as_4_byte": remote_downlink_as_4byte,
                                 "remote_as_4_byte_step": 0,
@@ -597,7 +634,8 @@ def test_config_for_network_ai_hardening_in_conveyor(
                             local_as_4_bytes=remote_uplink_as_4byte,
                             local_as_increment=0,
                             enable_4_byte_local_as=True,
-                            bgp_peer_type=ixia_types.BgpPeerType.IBGP,
+                            bgp_peer_type=uplink_bgp_peer_type
+                            or ixia_types.BgpPeerType.IBGP,
                             is_confed=is_uplink_peer_confed == "True",
                             bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
                             route_scales=[
@@ -819,7 +857,9 @@ def test_config_for_network_ai_hardening_in_conveyor(
         #     get_ixia_healthcheck_stable_state(device_name),
         #     BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
         # ],
-        playbooks=[
+        playbooks=playbooks
+        if playbooks is not None
+        else [
             create_network_ai_hardening_agent_warmboot_playbook(
                 ixia_stable_state_healthcheck=get_ixia_healthcheck_stable_state(
                     device_name

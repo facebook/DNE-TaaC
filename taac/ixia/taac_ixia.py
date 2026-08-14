@@ -1323,6 +1323,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         line_rate_type: t.Optional[ixia_types.RateType] = None,
         frame_size_setting: t.Optional[ixia_types.FrameSize] = None,
         qos_config: t.Optional[ixia_types.QoSConfig] = None,
+        transmission_control: t.Optional[ixia_types.TransmissionControl] = None,
     ) -> None:
         self.configure_traffic_items_on_the_fly(
             traffic_item_name,
@@ -1330,6 +1331,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             line_rate_type,
             frame_size_setting,
             qos_config,
+            transmission_control,
         )
         self.apply_traffic()
 

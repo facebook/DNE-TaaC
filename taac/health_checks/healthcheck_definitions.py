@@ -3281,3 +3281,33 @@ def create_fpf_ods_counter_check(
         check_params=Params(json_params=json.dumps(params)),
         check_id=check_id,
     )
+
+
+def create_in_congestion_discard_check(
+    priority_groups: t.Optional[t.List[int]] = None,
+) -> PointInTimeHealthCheck:
+    """IN_CONGESTION_DISCARD_CHECK — assert no ASIC in-congestion discards.
+
+    Reads the FBOSS port-level ``in_congestion_discards`` fb303 counter and
+    fails if it incremented. Used by the backend (DSF/RTSW) QoS suite, where
+    traffic is deliberately driven into congestion and the ingress path must
+    stay clean.
+
+    This is an *ingress* ASIC counter exported per port and (optionally) per
+    ingress priority group. It has no per-egress-queue form; use
+    QOS_DSCP_TX_QUEUE_CHECK or BUFFER_UTILIZATION_CHECK for per-queue egress
+    behaviour.
+
+    Args:
+        priority_groups: Ingress priority groups to check in addition to the
+            port total. Omit to check only the port counter.
+    """
+    check_params = (
+        Params(json_params=json.dumps({"priority_groups": priority_groups}))
+        if priority_groups is not None
+        else None
+    )
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.IN_CONGESTION_DISCARD_CHECK,  # pyre-ignore[16]
+        check_params=check_params,
+    )

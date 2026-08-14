@@ -1212,21 +1212,24 @@ class TaacRunner:
                 obj = self.topology
             else:
                 raise
-            checks.append(
+            # pyrefly: ignore [bad-argument-type]
+            check_instance = check_impl(
                 # pyrefly: ignore [bad-argument-type]
-                check_impl(
-                    # pyrefly: ignore [bad-argument-type]
-                    obj=obj,
-                    input=check_input or default_input,
-                    check_params=self.parameter_evaluator.evaluate(check.check_params),
-                    pre_snapshot_checkpoint_id=check.pre_snapshot_checkpoint_id
-                    or DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID,
-                    post_snapshot_checkpoint_id=check.post_snapshot_checkpoint_id
-                    or DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID,
-                    logger=self.logger,
-                )
+                obj=obj,
+                input=check_input or default_input,
+                check_params=self.parameter_evaluator.evaluate(check.check_params),
+                pre_snapshot_checkpoint_id=check.pre_snapshot_checkpoint_id
+                or DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID,
+                post_snapshot_checkpoint_id=check.post_snapshot_checkpoint_id
+                or DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID,
+                logger=self.logger,
             )
-        await asyncio.gather(*[check.setup(obj) for check in checks])  # pyre-ignore
+            checks.append((check_instance, obj))
+        await asyncio.gather(
+            # pyrefly: ignore [bad-argument-type]
+            *[check.setup(obj) for check, obj in checks]
+        )  # pyre-ignore
+        checks = [check for check, _ in checks]
         # pyrefly: ignore [bad-return]
         return checks
 
@@ -1814,6 +1817,7 @@ class TaacRunner:
                         settings.line_rate_type,
                         settings.frame_size_settings,
                         settings.qos_config,
+                        settings.transmission_control,
                     )
             traffic_regexes = (
                 playbook.traffic_items_to_start

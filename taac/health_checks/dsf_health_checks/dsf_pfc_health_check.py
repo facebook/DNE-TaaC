@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import operator
 import typing as t
 
 from taac.constants import TestDevice
@@ -10,6 +11,35 @@ from taac.health_checks.abstract_health_check import (
 from taac.utils.common import async_everpaste_str
 from taac.utils.health_check_utils import get_fb303_client
 from taac.health_check.health_check import types as hc_types
+
+# Maps a ComparisonType onto "is the observed PFC count acceptable?".
+# _compare_pfc() inverts this to report a violation. BETWEEN is deliberately
+# absent: it needs a second bound that DsfPfcThreshold does not carry, so it is
+# rejected up front rather than silently reported as healthy.
+_PFC_COMPARATORS: t.Mapping[hc_types.ComparisonType, t.Callable[[int, int], bool]] = {
+    hc_types.ComparisonType.LESS_THAN: operator.lt,
+    hc_types.ComparisonType.GREATER_THAN: operator.gt,
+    hc_types.ComparisonType.EQUAL_TO: operator.eq,
+    hc_types.ComparisonType.LESS_THAN_EQUAL_TO: operator.le,
+    hc_types.ComparisonType.GREATER_THAN_EQUAL_TO: operator.ge,
+}
+
+
+def _supported_comparison_names() -> t.List[str]:
+    return sorted(c.name for c in _PFC_COMPARATORS)
+
+
+def _validate_comparison(comparison: hc_types.ComparisonType) -> None:
+    """Raise if DSF_PFC_CHECK cannot evaluate ``comparison``.
+
+    Without this, an unimplemented comparison fell through to "no violation",
+    which every caller reads as healthy.
+    """
+    if comparison not in _PFC_COMPARATORS:
+        raise ValueError(
+            f"DSF_PFC_CHECK does not support comparison {comparison.name}; "
+            f"expected one of {_supported_comparison_names()}"
+        )
 
 
 class DsfPfcHealthCheck(AbstractDeviceHealthCheck[hc_types.DsfPfcHealthCheckIn]):
@@ -23,12 +53,75 @@ class DsfPfcHealthCheck(AbstractDeviceHealthCheck[hc_types.DsfPfcHealthCheckIn])
     # transiently returns 0 mid-cycle.
     _snapshots: t.Dict[t.Tuple[str, str, int], t.Tuple[int, int]] = {}
 
+    def _build_thresholds_from_check_params(
+        self,
+        obj: TestDevice,
+        check_params: t.Dict[str, t.Any],
+    ) -> t.List[hc_types.DsfPfcThreshold]:
+        """Build thresholds dynamically from check_params + TestDevice interfaces.
+
+        check_params (JSON):
+            priorities: list[int] — PFC priority classes (default: [0..7])
+            in_pfc_frames: int — max acceptable in PFC frames (default: 0)
+            out_pfc_frames: int — max acceptable out PFC frames (default: 0)
+            comparison: str — a ComparisonType member name (default:
+                "EQUAL_TO"). Unknown or unsupported names are a configuration
+                error, not a silent fallback.
+
+        Raises:
+            ValueError: if ``comparison`` is not a supported ComparisonType.
+        """
+        priorities = check_params.get("priorities", list(range(8)))
+        in_threshold = check_params.get("in_pfc_frames", 0)
+        out_threshold = check_params.get("out_pfc_frames", 0)
+        # check_params comes from JSON, so `comparison` need not be a string.
+        # str() first: .strip() on an int would raise AttributeError past the
+        # KeyError handler and crash the check instead of reporting a config
+        # error.
+        comparison_str = str(check_params.get("comparison", "EQUAL_TO"))
+        try:
+            comparison = hc_types.ComparisonType[comparison_str.strip()]
+        except KeyError as e:
+            raise ValueError(
+                f"Unknown comparison {comparison_str!r}; expected one of "
+                f"{_supported_comparison_names()}"
+            ) from e
+        _validate_comparison(comparison)
+        endpoints = [f"{obj.name}:{intf.interface_name}" for intf in obj.interfaces]
+        return [
+            hc_types.DsfPfcThreshold(
+                interfaces=endpoints,
+                in_pfc=in_threshold,
+                out_pfc=out_threshold,
+                comparison=comparison,
+                priority=hc_types.Priority(priority),
+            )
+            for priority in priorities
+        ]
+
     async def _run(
         self,
         obj: TestDevice,
         input: hc_types.DsfPfcHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
+        try:
+            if not input.thresholds:
+                input = hc_types.DsfPfcHealthCheckIn(
+                    thresholds=self._build_thresholds_from_check_params(
+                        obj, check_params
+                    )
+                )
+            # Reject an unevaluable comparison before reading any counter, so a
+            # misconfigured threshold surfaces as a configuration error rather
+            # than as a passing check.
+            for threshold in input.thresholds:
+                _validate_comparison(threshold.comparison)
+        except ValueError as e:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=str(e),
+            )
         operating_system = obj.attributes.operating_system
         match operating_system:
             case "FBOSS":
@@ -339,15 +432,14 @@ class DsfPfcHealthCheck(AbstractDeviceHealthCheck[hc_types.DsfPfcHealthCheckIn])
         threshold_value: int = 0,
     ) -> bool:
         """
-        Helper function to compare the observed PFC value with the threshold based on the comparison type.
+        Return True when the observed PFC value VIOLATES the threshold.
+
+        Raises:
+            ValueError: if ``comparison`` is not supported. Returning False for
+            an unimplemented comparison would report the check as healthy.
         """
-        if comparison == hc_types.ComparisonType.LESS_THAN:
-            return observed_pfc >= threshold_value
-        elif comparison == hc_types.ComparisonType.GREATER_THAN:
-            return observed_pfc <= threshold_value
-        elif comparison == hc_types.ComparisonType.EQUAL_TO:
-            return observed_pfc != threshold_value
-        return False
+        _validate_comparison(comparison)
+        return not _PFC_COMPARATORS[comparison](observed_pfc, threshold_value)
 
     async def skip_check(self, obj: TestDevice) -> t.Tuple[bool, str | None]:
         supported_roles = ["RDSW", "FDSW", "EDSW", "DTSW", "RTSW", "SUSW", "BAG"]

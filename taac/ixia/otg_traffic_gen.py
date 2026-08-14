@@ -524,7 +524,18 @@ class OtgTrafficGen(AbstractTrafficGenerator):
         line_rate_type: t.Optional[ixia_types.RateType] = None,
         frame_size_setting: t.Optional[ixia_types.FrameSize] = None,
         qos_config: t.Optional[ixia_types.QoSConfig] = None,
+        transmission_control: t.Optional[ixia_types.TransmissionControl] = None,
     ) -> None:
+        if transmission_control is not None:
+            # OTG applies transmission control when the flow is built, in
+            # _configure_flow_duration(), not per reconfigure call. Warning and
+            # continuing would run a burst playbook as continuous traffic and
+            # report it as a pass, so this fails instead.
+            raise NotImplementedError(
+                "[OTG] configure_traffic_item(transmission_control=...) is not "
+                "supported by the OTG backend; set it on the flow's "
+                "traffic_flow_config so _configure_flow_duration() applies it."
+            )
         flow = next((f for f in self.config.flows if f.name == traffic_item_name), None)
         if flow is None:
             self.logger.debug(f"[OTG] Flow {traffic_item_name} not found. Skipping...")
@@ -1081,3 +1092,10 @@ class OtgTrafficGen(AbstractTrafficGenerator):
             flow.duration.fixed_seconds.seconds = tc.duration or 10
         elif tc.type == ixia_types.TransmissionControlType.FIXED_FRAME_COUNT:
             flow.duration.fixed_packets.packets = tc.frame_count or 1000
+        else:
+            # Falling through would leave flow.duration at its default and run
+            # a burst flow as continuous traffic with no failure signal.
+            raise NotImplementedError(
+                f"[OTG] transmission control {tc.type.name} is not supported by "
+                "the OTG backend."
+            )

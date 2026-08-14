@@ -80,6 +80,9 @@ from taac.health_checks.device_health_checks.file_exists_health_check import (
 from taac.health_checks.device_health_checks.hardware_capacity_health_check import (
     HardwareCapacityHealthCheck,
 )
+from taac.health_checks.device_health_checks.in_congestion_discard_health_check import (
+    InCongestionDiscardHealthCheck,
+)
 from taac.health_checks.device_health_checks.l2_entry_threshold_health_check import (
     L2EntryThresholdHealthCheck,
 )
@@ -286,6 +289,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     PortChannelExpectedStateHealthCheck,
     # TmReconciliationFiringHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS
     TmKernelStateSnapshotHealthCheck,
+    InCongestionDiscardHealthCheck,
 ]
 
 if not TAAC_OSS:
