@@ -12,6 +12,9 @@ from taac.utils.common import (  # oss-rewrite (force ShipIt re-export to taac.*
     async_everpaste_str,
     async_get_fburl,
 )
+from taac.utils.investigation_log_marker import (
+    is_investigation_transcript,
+)
 from taac.utils.taac_log_formatter import (
     format_duration,
     log_phase_end,
@@ -39,7 +42,17 @@ class SectionResult:
 
 
 class _SectionLogHandler(logging.Handler):
-    """Logging handler that captures messages into per-section buffers and a global buffer."""
+    """Logging handler that captures messages into per-section buffers and a global buffer.
+
+    The global buffer (``get_all_logs``) is the whole-run rollup: it is uploaded
+    to everpaste, handed to the triage agent, and inlined verbatim into the
+    investigation agent's prompt. The investigation agent's own live transcript
+    is therefore excluded from it, otherwise each investigation's transcript
+    (verdict included) would be replayed into the next investigation's prompt.
+    See ``utils/investigation_log_marker.py``. Per-section buffers keep every
+    record, so the per-section everpaste still carries the full transcript, as
+    do the console and file handlers on the run logger.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -49,7 +62,10 @@ class _SectionLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self._all_logs.append(msg)
+            # Matched on the whole record, not the formatted line: a thinking
+            # block is one multi-line record marked only on its first line.
+            if not is_investigation_transcript(record.getMessage()):
+                self._all_logs.append(msg)
             for section_logs in self._active_sections:
                 section_logs.append(msg)
         except Exception:
@@ -63,6 +79,7 @@ class _SectionLogHandler(logging.Handler):
             self._active_sections.remove(log_lines)
 
     def get_all_logs(self) -> str:
+        """The whole-run framework log, minus investigation-agent transcript records."""
         return "\n".join(self._all_logs)
 
 
@@ -121,6 +138,10 @@ class TaacTestSummary:
         root = logging.getLogger()
         root.addHandler(self._log_handler)
         self._attached_logger = root
+
+    def get_all_logs(self) -> str:
+        """The whole-run framework log, minus investigation-agent transcript records."""
+        return self._log_handler.get_all_logs()
 
     def cleanup(self) -> None:
         """Remove the log capture handler."""
@@ -278,7 +299,10 @@ class TaacTestSummary:
                 and not section.everpaste_url
             ):
                 await self.async_upload_section_logs(section)
+        return self.render_summary()
 
+    def render_summary(self) -> str:
+        """Render the section table without uploading anything."""
         lines = []
         lines.append("=" * 100)
         lines.append(f"{'TEST EXECUTION SUMMARY':^100}")
@@ -315,7 +339,7 @@ class TaacTestSummary:
         """
         summary_text = await self.async_generate_summary()
 
-        all_logs = self._log_handler.get_all_logs()
+        all_logs = self.get_all_logs()
         full_logs_url = ""
         if all_logs:
             try:
