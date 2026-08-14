@@ -12,6 +12,11 @@ from taac.utils.common import async_everpaste_str
 from taac.health_check.health_check import types as hc_types
 from tabulate import tabulate
 
+# Reference bandwidth a PERCENT threshold is scaled against when
+# ``check_params["base_bandwidth_gbps"]`` is absent. 400G for back-compat with
+# configs written against 400G ports.
+DEFAULT_BASE_BANDWIDTH_GBPS: float = 400.0
+
 
 class IxiaTrafficRateHealthCheck(
     AbstractIxiaHealthCheck[hc_types.IxiaTrafficRateHealthCheckIn]
@@ -36,7 +41,9 @@ class IxiaTrafficRateHealthCheck(
         # Callers may override the PERCENT-mode reference bandwidth via
         # ``check_params["base_bandwidth_gbps"]`` (e.g. pass 200 for a 200G
         # port). Omitting the param preserves the historical 400G default.
-        base_bandwidth_gbps = float(check_params.get("base_bandwidth_gbps", 400.0))
+        base_bandwidth_gbps = float(
+            check_params.get("base_bandwidth_gbps", DEFAULT_BASE_BANDWIDTH_GBPS)
+        )
 
         for threshold in all_thresholds:
             less_than_thresholds.extend(
@@ -71,7 +78,7 @@ class IxiaTrafficRateHealthCheck(
         self,
         latest_stats: t.List[t.Dict[str, t.Any]],
         threshold: hc_types.TrafficRateThreshold,
-        base_bandwidth_gbps: float = 400.0,
+        base_bandwidth_gbps: float = DEFAULT_BASE_BANDWIDTH_GBPS,
     ) -> t.List[t.Dict[str, t.Any]]:
         """
         Verify if the port stats exceed the given threshold.
