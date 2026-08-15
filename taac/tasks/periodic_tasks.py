@@ -2,6 +2,8 @@
 # pyre-unsafe
 import asyncio
 import inspect
+import math
+import statistics
 import time
 import typing as t
 from datetime import datetime
@@ -458,6 +460,211 @@ def _unprogrammed_verdict(
     )
 
 
+def _count_multiway_groups(sizes: t.Dict[int, int], min_width: int) -> int:
+    """Number of nexthop groups at least ``min_width`` next-hops wide.
+
+    ``num_groups_configured`` counts EVERY group, including width-1 ones. A
+    width-1 group is not an ECMP set -- it is a single next-hop that happens to
+    be expressed as a group. Conflating the two makes the count report the wrong
+    event: when a DUT sheds its ECMP structure into per-peer singletons the
+    total *rises* sharply, so a "too many ECMP sets" gate fires on what is
+    actually a loss of ECMP.
+
+    Observed on bag013 (release 191): the healthy shape is ``{128: 2}`` -- two
+    real 128-way sets, one per AFI -- and the count is 2. During the collapse
+    the shape became ``{1: 256, 128: 2}`` and then ``{1: 256}``, so the count
+    read 258 and then 256 while the number of genuine ECMP sets went 2 -> 2 -> 0.
+    """
+    return sum(count for width, count in sizes.items() if width >= min_width)
+
+
+def _series_window(series: t.Dict[float, t.Any], count: int, last: bool) -> t.List:
+    """First or last ``count`` values of a timestamp-keyed series, in time order."""
+    ordered = [series[ts] for ts in sorted(series)]
+    if count <= 0 or count >= len(ordered):
+        return ordered
+    return ordered[-count:] if last else ordered[:count]
+
+
+def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
+    """Opt-in params that were requested but cannot produce a verdict.
+
+    Silence is the wrong response to a misconfigured gate: the caller asked for
+    an assertion and would otherwise get a green run with no assertion.
+    """
+    problems: t.List[str] = []
+    if params.get("max_multiway_groups") is not None and (
+        params.get("min_ecmp_width") is None
+    ):
+        problems.append(
+            "max_multiway_groups was set without min_ecmp_width, so the "
+            "ECMP-set ceiling cannot be evaluated"
+        )
+    if params.get("recovery_window_samples") is not None and (
+        params.get("recovery_tolerance") is None
+    ):
+        problems.append(
+            "recovery_window_samples was set without recovery_tolerance, so "
+            "the recovery gate is inert"
+        )
+    window = params.get("recovery_window_samples")
+    if window is not None and int(window) <= 0:
+        problems.append(
+            f"recovery_window_samples must be positive, got {window}",
+        )
+    # The recovery band is baseline/tolerance .. baseline*tolerance, so the
+    # parameter is only meaningful at >= 1. Zero divides; anything in (0, 1)
+    # INVERTS the band (low > high), which no value can satisfy, so the gate
+    # would fail every run for a reason the message would not explain; and a
+    # non-finite tolerance widens the band to admit everything.
+    tolerance = params.get("recovery_tolerance")
+    if tolerance is not None and (
+        not math.isfinite(float(tolerance)) or float(tolerance) < 1
+    ):
+        problems.append(
+            f"recovery_tolerance must be a finite value >= 1, got {tolerance}: "
+            f"0 raises, 0 < tolerance < 1 inverts the recovery band so no "
+            f"value can satisfy it, and an infinite tolerance admits anything"
+        )
+    return problems
+
+
+def _observation_verdict(observed_max: int, floor: int) -> t.Tuple[bool, str]:
+    """Verdict on whether the metric observed anything plausible at all.
+
+    An all-zero series is not empty, so it clears the empty-series guard and
+    then satisfies any ceiling. On bag012 this metric read 0 for all 884
+    samples and the suite passed repeatedly on a structurally blind gate.
+    """
+    if observed_max >= floor:
+        return (
+            False,
+            f"observation OK: peak nexthop-group count {observed_max} reaches "
+            f"the expected floor ({floor})",
+        )
+    return (
+        True,
+        f"observation BREACH: peak nexthop-group count {observed_max} never "
+        f"reached the expected floor ({floor}) -- the metric is reporting "
+        f"values but they are implausible for this topology, so any ceiling "
+        f"above it is vacuous",
+    )
+
+
+def _ecmp_set_verdict(
+    sizes_data: t.Dict[float, t.Dict[int, int]],
+    min_ecmp_width: int,
+    max_multiway_groups: t.Optional[int],
+) -> t.Tuple[bool, str]:
+    """Verdict on the number of REAL (multi-way) ECMP sets.
+
+    Returns ``(is_failure, message)``. With no ceiling supplied this is
+    observe-and-report, so a caller can land the measurement before committing
+    to a number.
+    """
+    # An empty histogram is not evidence of zero ECMP sets -- it is evidence of
+    # nothing parsed. The size table has no found-flag in the parser, so a
+    # wording or column change yields sizes={} for every sample, which would
+    # otherwise read as a confident "0 groups >= N wide" and PASS.
+    if not any(sizes for sizes in sizes_data.values()):
+        return (
+            True,
+            "ecmp-sets NOT EVALUATED: every sample reported an empty "
+            "nexthop-group size histogram, so no ECMP set could be counted -- "
+            "this is a parse or collection failure, not a device with no "
+            "nexthop groups",
+        )
+    multiway = max(
+        _count_multiway_groups(sizes, min_ecmp_width) for sizes in sizes_data.values()
+    )
+    singletons = max(sizes.get(1, 0) for sizes in sizes_data.values())
+    detail = (
+        f"max groups >= {min_ecmp_width}-wide = {multiway}, "
+        f"max width-1 groups = {singletons}"
+    )
+    if multiway == 0:
+        return (
+            True,
+            f"ecmp-sets BREACH: {detail} -- the device reported nexthop groups "
+            f"but not one of them was {min_ecmp_width} next-hops wide, so ECMP "
+            f"was never formed (or was entirely destroyed)",
+        )
+    if max_multiway_groups is None:
+        return False, f"ecmp-sets OBSERVED: {detail}"
+    if multiway <= max_multiway_groups:
+        return False, f"ecmp-sets OK: {detail} (allowed {max_multiway_groups})"
+    return (
+        True,
+        f"ecmp-sets BREACH: {detail} exceeds the allowed maximum "
+        f"({max_multiway_groups})",
+    )
+
+
+def _recovery_verdict(
+    series: t.Dict[float, int], tolerance: float, window: int, metric: str
+) -> t.Tuple[bool, str]:
+    """Verdict on whether ``metric`` returned to its opening baseline.
+
+    A bounded transient collapses back; a structural regression does not. This
+    separates the two by DURATION rather than magnitude, so it needs no
+    calibrated ceiling. Returns ``(is_failure, message)``.
+
+    The two windows must be DISJOINT. ``_series_window`` returns the whole
+    series when the requested count exceeds its length, so on a short series
+    the baseline and closing windows would be the same samples, making
+    ``final == baseline`` and the gate pass for any tolerance >= 1 -- a
+    vacuous pass of exactly the kind this check exists to prevent. Too few
+    samples is therefore a FAILURE to evaluate, not a pass.
+    """
+    ordered = sorted(series)
+    if len(ordered) < 2 * window:
+        return (
+            True,
+            f"recovery NOT EVALUATED: {len(ordered)} samples is fewer than the "
+            f"{2 * window} needed for disjoint baseline and closing windows of "
+            f"{window}, so recovery of {metric} could not be assessed -- "
+            f"failing rather than passing an unevaluated gate",
+        )
+    # Median, not max. A single spike inside the opening window would inflate
+    # the baseline and make the whole gate permissive; a single spike in the
+    # closing window would make a recovered run look broken.
+    baseline = statistics.median(_series_window(series, window, last=False))
+    final = statistics.median(_series_window(series, window, last=True))
+
+    # A zero baseline means the opening window saw nothing to recover TO --
+    # almost always because the poll starts in async_test_case_setUp, before
+    # setup_steps and convergence. Any ratio against 0 is meaningless, so
+    # refuse rather than produce a verdict that looks authoritative.
+    if baseline <= 0:
+        return (
+            True,
+            f"recovery NOT EVALUATED: the baseline window of {metric} is "
+            f"{baseline}, so there is no steady state to compare against -- the "
+            f"opening window most likely predates convergence. Start the poll "
+            f"later or widen recovery_window_samples",
+        )
+
+    # TWO-SIDED. An upper bound alone passes a collapse: on the real bag013
+    # series the multi-way count went 2 -> 0 and "settled at 0", which is every
+    # ECMP set destroyed, yet 0 <= 2 * 1.5 and the gate said OK. Recovery means
+    # returning to the steady state, not merely staying under it.
+    low, high = baseline / tolerance, baseline * tolerance
+    if low <= final <= high:
+        return (
+            False,
+            f"recovery OK: {metric} settled at {final} against a baseline of "
+            f"{baseline} (allowed {low:g}-{high:g}, window {window} samples)",
+        )
+    direction = "below" if final < low else "above"
+    return (
+        True,
+        f"recovery BREACH: {metric} settled at {final}, {direction} the "
+        f"allowed band {low:g}-{high:g} around its baseline of {baseline} -- it "
+        f"never returned to its steady state, so this is a persistent change, "
+        f"not a transient",
+    )
+
+
 class NexthopGroupPoll(PeriodicTask):
     NAME = "nexthop_group_poll"
 
@@ -553,6 +760,10 @@ class NexthopGroupPoll(PeriodicTask):
 
         num_groups_configured_data: t.Dict[float, int] = {}
         num_unprogrammed_groups_data: t.Dict[float, int] = {}
+        # Width histogram per sample, so the verdict can separate real ECMP sets
+        # from width-1 groups. Without it the count conflates the two -- see
+        # _count_multiway_groups.
+        sizes_data: t.Dict[float, t.Dict[int, int]] = {}
 
         for timestamp, summary in self._data.items():
             if isinstance(summary, NexthopGroupSummary):
@@ -560,6 +771,7 @@ class NexthopGroupPoll(PeriodicTask):
                 num_unprogrammed_groups_data[timestamp] = (
                     summary.num_unprogrammed_groups
                 )
+                sizes_data[timestamp] = summary.nexthop_group_sizes or {}
 
         if not num_groups_configured_data:
             return PeriodicCheckResult(
@@ -578,6 +790,26 @@ class NexthopGroupPoll(PeriodicTask):
         self.logger.info(
             f"Final max num_groups_configured across all samples: {max_num_groups_configured}"
         )
+
+        # A gate that was asked for but cannot run must say so, not stay silent.
+        # Each of these combinations previously produced no verdict at all, so a
+        # typo in a TestConfig disabled the gate invisibly.
+        #
+        # This RETURNS rather than accumulating a failure and carrying on: a
+        # parameter that failed validation must not then be used. Reporting
+        # recovery_tolerance=0 as a breach and then passing that same 0 to
+        # _recovery_verdict divides by it, so the config error escaped as a
+        # ZeroDivisionError instead of a verdict. A broken gate needs a
+        # corrected config and a re-run regardless, so the remaining verdicts
+        # would be scored against a configuration nobody intended.
+        problems = _misconfigured_params(self._params)
+        if problems:
+            return PeriodicCheckResult(
+                # pyrefly: ignore [bad-argument-type]
+                name=self.NAME,
+                status=hc_types.HealthCheckStatus.FAIL,
+                message="; ".join(f"config BREACH: {problem}" for problem in problems),
+            )
 
         verdicts: t.List[str] = []
         failures: t.List[str] = []
@@ -604,6 +836,68 @@ class NexthopGroupPoll(PeriodicTask):
         if max_unprogrammed is not None:
             failed, text = _unprogrammed_verdict(
                 num_unprogrammed_groups_data, int(max_unprogrammed)
+            )
+            (failures if failed else verdicts).append(text)
+
+        # Opt-in third verdict: the ECMP-set ceiling measured on REAL sets only.
+        # This is the quantity the "bounded number of programmed ECMP sets"
+        # characteristic is actually about; the raw count above cannot tell a
+        # genuine ECMP-set increase from a collapse into width-1 singletons.
+        min_ecmp_width = self._params.get("min_ecmp_width")
+        multiway_series: t.Optional[t.Dict[float, int]] = None
+        if min_ecmp_width is not None and sizes_data:
+            multiway_series = {
+                ts: _count_multiway_groups(sizes, min_ecmp_width)
+                for ts, sizes in sizes_data.items()
+            }
+            failed, text = _ecmp_set_verdict(
+                sizes_data, min_ecmp_width, self._params.get("max_multiway_groups")
+            )
+            (failures if failed else verdicts).append(text)
+
+        # Opt-in: a floor on what was observed at all. An ALL-ZERO series is not
+        # empty, so it survives the empty-series guard above and then satisfies
+        # any "max below threshold" ceiling -- max(0) < 50 passes. That is not
+        # hypothetical: on bag012 this metric read 0 for all 884 samples and the
+        # suite passed 11 times on a gate that was structurally blind.
+        min_observed = self._params.get("min_observed_groups")
+        if min_observed is not None:
+            failed, text = _observation_verdict(
+                max(num_groups_configured_data.values()), min_observed
+            )
+            (failures if failed else verdicts).append(text)
+
+        # Opt-in: RECOVERY. A bounded transient collapses back to the steady
+        # state; a structural regression does not. Asserting recovery separates
+        # the two by DURATION rather than magnitude, which means it needs no
+        # calibrated ceiling -- deliberately, because the historical ceiling on
+        # this task has never had a hardware derivation.
+        recovery_tolerance = self._params.get("recovery_tolerance")
+        if recovery_tolerance is not None:
+            # Prefer the multi-way series when we have it: a collapse from
+            # {128: 2} to {1: 2} leaves the RAW count at 2 and would "recover"
+            # cleanly while every real ECMP set was destroyed. When
+            # min_ecmp_width is set the multi-way series is always the one used:
+            # sizes_data carries one entry per NexthopGroupSummary sample, so it
+            # is falsy only when there were no summaries at all -- and that case
+            # has already returned above. An all-empty histogram therefore
+            # yields a populated all-zero series, which _ecmp_set_verdict flags
+            # as a parse failure and the zero-baseline guard refuses to score.
+            series = (
+                multiway_series
+                if multiway_series is not None
+                else num_groups_configured_data
+            )
+            metric = (
+                f"groups >= {min_ecmp_width}-wide"
+                if multiway_series is not None
+                else "nexthop-group count"
+            )
+            failed, text = _recovery_verdict(
+                series,
+                recovery_tolerance,
+                int(self._params.get("recovery_window_samples", 10)),
+                metric,
             )
             (failures if failed else verdicts).append(text)
 

@@ -3233,6 +3233,11 @@ def create_nexthop_group_poll_periodic_task(
     interval: int = 5,
     enable_plotting: bool = True,
     max_unprogrammed: t.Optional[int] = None,
+    min_ecmp_width: t.Optional[int] = None,
+    max_multiway_groups: t.Optional[int] = None,
+    recovery_tolerance: t.Optional[float] = None,
+    recovery_window_samples: t.Optional[int] = None,
+    min_observed_groups: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
@@ -3244,9 +3249,16 @@ def create_nexthop_group_poll_periodic_task(
     it is running, so the full series is always recorded. It does, however,
     FAIL the test case at teardown -- `run_final_check` returns a FAIL
     PeriodicCheckResult, `async_run_periodic_task_checks` appends it to
-    `test_case_results`, and `check_failure` raises `TestCaseFailure`. Note
-    `terminate_on_error` is unrelated to this: it is only consulted when the
-    poll itself raises, and `NexthopGroupPoll.run` catches everything.
+    `test_case_results`, and `check_failure` raises `TestCaseFailure`.
+
+    `terminate_on_error` governs a different thing: the worker aborts the run
+    only if the poll ITSELF raises. `NexthopGroupPoll.run` catches almost
+    everything, so it rarely fires -- but not never. The `params["hostname"]`
+    lookup sits above that try, and `ParameterEvaluator.evaluate` plus the
+    shared-dict update in `PeriodicTask._run` execute outside `run` entirely,
+    inside the worker's own handler. Leave it False: a threshold breach should
+    surface as a verdict at teardown with the full series intact, not as a
+    mid-run abort.
 
     Args:
         device_name: Device hostname to poll.
@@ -3264,6 +3276,30 @@ def create_nexthop_group_poll_periodic_task(
             the most direct available expression of "within the hardware
             limit". Omitted (None) = not asserted, preserving existing
             callers' behaviour.
+        min_ecmp_width: Minimum next-hop count for a group to be counted as a
+            real ECMP set. Set it (e.g. `2`) to have the check report, and
+            optionally gate, the number of genuine multi-way sets rather than
+            the raw group count -- the raw count includes width-1 groups, so a
+            DUT that sheds its ECMP structure into per-peer singletons makes the
+            count RISE, and a naive ceiling then fires on a loss of ECMP.
+        max_multiway_groups: Optional ceiling for that multi-way count. Requires
+            `min_ecmp_width`. Omitted = observe-and-report only.
+        recovery_tolerance: Optional multiplier asserting the group count
+            returns to its opening baseline by the end of the run: the final
+            window's max must be <= baseline * tolerance. This separates a
+            bounded transient from a persistent structural change by DURATION
+            rather than magnitude, so it needs no calibrated ceiling. Omitted =
+            not asserted.
+        recovery_window_samples: How many samples define the opening baseline
+            and the closing window for `recovery_tolerance`. Default 10. The
+            run must produce at least twice this many samples, otherwise the
+            two windows would overlap and the check FAILs as unevaluated.
+        min_observed_groups: Optional floor on the peak nexthop-group count. An
+            all-zero series is not empty, so it passes the empty-series guard
+            and then satisfies any ceiling (`max(0) < threshold`). Setting this
+            (e.g. `1`) asserts the metric actually observed something. Not
+            hypothetical: on bag012 this metric read 0 for all 884 samples and
+            the suite passed repeatedly on a structurally blind gate.
 
     Returns:
         A `PeriodicTask` named `"nexthop_group_check"` wrapping
@@ -3276,8 +3312,16 @@ def create_nexthop_group_poll_periodic_task(
     }
     # Emitted only when requested, so every existing caller's serialized config
     # -- and therefore its golden hash -- is unchanged.
-    if max_unprogrammed is not None:
-        json_payload["max_unprogrammed"] = max_unprogrammed
+    for key, value in (
+        ("max_unprogrammed", max_unprogrammed),
+        ("min_ecmp_width", min_ecmp_width),
+        ("max_multiway_groups", max_multiway_groups),
+        ("recovery_tolerance", recovery_tolerance),
+        ("recovery_window_samples", recovery_window_samples),
+        ("min_observed_groups", min_observed_groups),
+    ):
+        if value is not None:
+            json_payload[key] = value
 
     return PeriodicTask(
         name="nexthop_group_check",
