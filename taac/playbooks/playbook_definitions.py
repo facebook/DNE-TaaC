@@ -13,6 +13,7 @@ The runner-side abstract base class lives in `playbooks/playbook.py`.
 import json
 import math
 import typing as t
+import uuid
 from enum import Enum
 
 from ixia.ixia import types as ixia_types
@@ -131,6 +132,7 @@ from taac.steps.step_definitions import (
     create_drain_undrain_step,
     create_ecmp_member_static_route_step,
     create_fpf_rapid_flap_step_lldp,
+    create_hardware_capacity_delta_step,
     create_interface_flap_step,
     create_ixia_api_step,
     create_ixia_device_group_toggle_step,
@@ -25641,14 +25643,82 @@ _SC9_EBGP_PREFIX_POOLS: t.List[str] = [
 
 
 # Ceiling on REAL ECMP sets (>= _SC9_MIN_ECMP_WIDTH wide) at any sample.
-# Calibrated, finally: the first clean single-drain run peaked at 6 total
-# groups (5 multi-way, 1 singleton) for 64 seconds, against a steady state of
-# exactly 2. 32 is ~5x that observation, 8x under the topology's structural
-# maximum of 128*2+2 = 258, and 256x under the device's 8,192-entry EcmpLevel2
-# table -- so it discriminates a real explosion while absorbing the variance a
-# single observation cannot rule out. The raw-count threshold of 8,192 that
-# preceded it could not fail against a peak of 6.
+#
+# Two observations bound this, and neither is a guess. The first fully clean
+# single-drain run peaked at 12 multi-way groups (and zero width-1 groups) for a
+# 75.6s plateau, against a steady state of exactly 2 -- corroborated by the
+# device's own ECMP high watermark moving 7 -> 12 across the same window, an
+# independent max-over-time counter that cannot miss a sub-sample peak. The
+# worst peak ever recorded on this topology is 27, from the ten-cycle run whose
+# cycles re-withdrew mid-recovery; that is a pathological shape this playbook no
+# longer produces, but 32 clears even it.
+#
+# So: 2.7x the clean observation, above the worst contaminated one, 8x under the
+# topology's structural maximum of 128*2+2 = 258, and 256x under the device's
+# 8,192-entry EcmpLevel2 table. Stated plainly because an earlier version of
+# this comment claimed "~5x" against a peak of 6 that a later, cleaner run
+# superseded -- the margin is real but it is 2.7x, not 5x.
 _SC9_MAX_MULTIWAY_GROUPS = 32
+
+# The number of distinct ECMP sets this topology can structurally produce: one
+# per eBGP peer per AFI, plus the two converged sets. Used as the bound on how
+# far the device-maintained ECMP high watermark may climb ACROSS the drain.
+#
+# A structural bound, not a calibrated one, and labelled as such: the clean
+# single-drain run moved that watermark by 5, so 258 is ~50x that observation
+# and cannot false-fail on variance.
+#
+# ★ READ THIS BEFORE TRUSTING A PASS. The watermark is a max-SINCE-BOOT counter
+# that no SC9 step can reset, so this delta only discriminates when SC9's own
+# peak would exceed the peak the box already carried. It usually will not. The
+# 5-cycle run measured `ecmp_high_watermark` 241 -> 241 across the entire drain,
+# because the full-scale run that preceded it on the same boot had already set
+# 241 and a bounded-ECMP drain peaks around a dozen. The gate PASSED and proved
+# nothing -- the same vacuity as a ceiling of 8192 on a topology that cannot
+# reach it.
+#
+# What is NOT vacuous in that step is `max_current_delta` on `ecmp_used`: the
+# same run read 2 before the drain and 2 after, i.e. the steady state is two
+# ECMP sets and it recovered exactly, asserted at the hardware layer rather
+# than from a CLI sample. That is the half of this gate that earns its place.
+# The watermark half is worth keeping only because it costs nothing and becomes
+# meaningful on a freshly reloaded box.
+_SC9_STRUCTURAL_MAX_ECMP_SETS = 258
+
+# Key for the pre/post hardware-capacity capture pair.
+#
+# `create_hardware_capacity_delta_step` rejects anything that is not a UUID
+# (`_validate_persisted_step_key`), so this cannot be a readable slug. uuid5 --
+# not uuid4 -- because the key is SERIALIZED into the TestConfig: a random one
+# would move the golden manifest on every regeneration and make the diff
+# unreviewable. Derived from the device name so two devices running this
+# playbook in one runner cannot share a baseline, matching the `_case_key`
+# idiom in testconfigs/routing/factories/bgp_ug_2_7_suite.py.
+def _sc9_capacity_state_key(device_name: str) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{device_name}:bgp_ebb_bounded_ecmp_sc9:hardware-capacity",
+        )
+    )
+
+# Closing-window size for the settled-state verdict. ODD: statistics.median
+# averages the two middle samples of an even window, so a window straddling 2
+# and 3 medians to 2.5, which can never equal the integer 2 -- a healthy device
+# would BREACH. The first green run logged "settled at 2.0" and survived only
+# because all ten of its closing samples happened to be identical.
+#
+# 31 samples is 155s at the 5s poll interval, comfortably inside the ~527s of
+# genuine steady state that follows the drain (restore + quiet window + Stage C
+# soak) and well before teardown.
+_SC9_CONVERGED_WINDOW_SAMPLES = 31
+
+# Floor on how many samples the poll must collect. The first clean run collected
+# 195 over a run strictly shorter than the multi-cycle shape this playbook now
+# produces, so 150 keeps >=30% margin against the only measured value while
+# still failing a run that lost more than half its reads. A liveness floor, not
+# a completeness assertion -- the exact count is reported eitherway.
+_SC9_MIN_SAMPLES = 150
 
 # The drain step enforces this as a HARD pass/fail on BOTH transitions --
 # `_wait_transition` demands ConvergenceOutcome.WITHIN_SLA and raises otherwise
@@ -25750,9 +25820,16 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
       as Requirement Coverage (the catalog admits only precheck / workload /
       postcheck / snapshot phases), and the task's own baseline window would
       land during setup_steps, before convergence.
-    * Hardware headroom -- the profile's pre/post hardware-capacity checks, on
-      the device-maintained ``ecmp_high_watermark``. Unlike a sampled poll that
-      cannot miss a peak occurring between samples.
+    * Hardware headroom -- two things, which an earlier revision conflated. The
+      profile's pre/post hardware-capacity checks bound the device-maintained
+      ``ecmp_high_watermark`` in ABSOLUTE terms at both ends, so a peak the box
+      arrived carrying is attributed to the testbed rather than to this drain.
+      Separately, the capture/compare pair in Stages A and C is the only thing
+      that COMPARES those two readings: each hardware-capacity check is
+      independent and stateless, so before this the watermark was measured twice
+      and differenced never. That delta is the one gate here immune to sampling
+      -- a max-over-time counter maintained by the device cannot miss a peak
+      that falls between two 5s polls.
     * Instrument liveness -- the periodic task's ``min_observed_groups``, which
       fails a run that reported only zeroes. That is not hypothetical: the
       predecessor suite on bag012 read 0 for all 884 samples and passed eleven
@@ -25809,6 +25886,12 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 # device idling at 5 sets passed identically to one at 2. The
                 # first clean run settled at exactly 2 for its closing 910s.
                 expected_converged_multiway_groups=_SC9_AFI_COUNT,
+                # ODD, and wider than the default -- see the constant.
+                converged_window_samples=_SC9_CONVERGED_WINDOW_SAMPLES,
+                # The poll swallows every collection failure and only an
+                # entirely empty series fails, so without this a run that lost
+                # most of its reads scores every verdict above on the survivors.
+                min_samples=_SC9_MIN_SAMPLES,
             ),
         ],
         stages=[
@@ -25851,6 +25934,30 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                             "next-hops, then record it"
                         ),
                     ),
+                    # Capture the device's own FEC/ECMP peak counters, AFTER the
+                    # baseline has converged so the reading is a steady state
+                    # rather than a mid-convergence one.
+                    #
+                    # This closes the single largest measurement gap in the
+                    # suite. The ECMP high watermark was already being read at
+                    # both the precheck and the postcheck -- it moved 7 -> 12
+                    # across the first clean run -- and NOTHING compared the two
+                    # readings, because each hardware-capacity check is
+                    # independent and stateless. The pair below is the only
+                    # thing in SC9 that compares them, and the only signal here
+                    # that is immune to sampling: a max-over-time counter the
+                    # device maintains itself cannot miss a transient that falls
+                    # between two 5s polls, which is exactly how the nexthop
+                    # group poll could walk past a fragmentation event.
+                    create_hardware_capacity_delta_step(
+                        device_name,
+                        "capture",
+                        _sc9_capacity_state_key(device_name),
+                        description=(
+                            "SC9 Stage A: capture the FEC/ECMP capacity "
+                            "counters at the converged baseline"
+                        ),
+                    ),
                 ],
             ),
             create_validated_bgp_route_oscillations_stage(
@@ -25884,7 +25991,40 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                             "before the recovery postcheck samples it"
                         ),
                     ),
+                    # The other half of the capture above, and the bound the
+                    # constant explains. `max_current_delta` is left at the
+                    # framework default: post-soak the device is back at its
+                    # steady state so the `used` delta should be ~0, but
+                    # recovery is already asserted twice over -- at RIB level by
+                    # the multipath-width postcheck and on the sampled series by
+                    # the converged verdict -- so it is corroboration here, not
+                    # the gate. The watermark INCREASE is the gate.
+                    create_hardware_capacity_delta_step(
+                        device_name,
+                        "compare",
+                        _sc9_capacity_state_key(device_name),
+                        max_high_watermark_increase=_SC9_STRUCTURAL_MAX_ECMP_SETS,
+                        description=(
+                            "SC9 Stage C: compare FEC/ECMP capacity against the "
+                            "pre-drain capture"
+                        ),
+                    ),
                 ],
+            ),
+        ],
+        # Idempotent, and runs in the runner's `finally` so it executes on the
+        # failure path too. Without it the captured baseline outlives the test
+        # case in the runner-scoped jq vars, and `capture` REFUSES to overwrite
+        # an existing key -- so a second attempt in the same runner process
+        # would fail in Stage A for a reason that has nothing to do with SC9.
+        cleanup_steps=[
+            create_hardware_capacity_delta_step(
+                device_name,
+                "clear",
+                _sc9_capacity_state_key(device_name),
+                description=(
+                    "SC9 cleanup: drop the captured hardware-capacity baseline"
+                ),
             ),
         ],
     )

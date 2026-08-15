@@ -22,6 +22,8 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.tasks.periodic_tasks import (
+    _converged_verdict,
+    _DEFAULT_CONVERGED_WINDOW_SAMPLES,
     _unprogrammed_verdict,
     NexthopGroupPoll,
 )
@@ -670,7 +672,7 @@ class NexthopGroupRecoveryToleranceValidationTest(unittest.IsolatedAsyncioTestCa
         result = await self._final_check()
 
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
-        self.assertIn("recovery_window_samples must be positive", result.message)
+        self.assertIn("recovery_window_samples must be >= 1, got 0", result.message)
         self.assertNotIn("recovery OK", result.message)
         # The check returns on a bad config, so no other verdict is scored
         # against a configuration nobody intended.
@@ -815,10 +817,12 @@ class NexthopGroupConvergedValueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
 
     async def test_too_few_samples_refuses_to_evaluate(self) -> None:
+        # 21, not 20: an even window is now rejected as a config breach before
+        # the verdict runs, which would mask the behaviour under test here.
         self._params(
             min_ecmp_width=2,
             expected_converged_multiway_groups=2,
-            converged_window_samples=20,
+            converged_window_samples=21,
         )
         self._shapes([{128: 2}, {128: 2}])
 
@@ -839,3 +843,274 @@ class NexthopGroupConvergedValueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("config BREACH", result.message)
         self.assertIn("expected_converged_multiway_groups", result.message)
+
+
+class NexthopGroupConvergedWindowParityTest(unittest.TestCase):
+    """An EVEN closing window can BREACH on a perfectly healthy device.
+
+    ``statistics.median`` AVERAGES the two middle samples of an even-length
+    window, so a window straddling 2 and 3 yields 2.5 -- and ``2.5 == 2`` is
+    False. This is not theoretical: the first fully green SC9 run on bag013
+    logged ``settled at 2.0``, a float, and passed only because all ten of its
+    closing samples happened to be identical. One sample of 3 anywhere in that
+    window would have failed the run for a device doing exactly the right
+    thing.
+    """
+
+    def test_even_window_medians_to_a_half_integer_and_breaches(self) -> None:
+        # Four closing samples straddling two values. Nothing here is unhealthy:
+        # the device is oscillating between 2 and 3 sets, and 2 is expected.
+        series = {1.0: 2, 2.0: 2, 3.0: 3, 4.0: 3}
+
+        failed, message = _converged_verdict(series, 2, 4, "groups >= 2-wide")
+
+        self.assertTrue(failed)
+        self.assertIn("settled at 2.5", message)
+
+    def test_odd_window_always_medians_to_a_real_observed_sample(self) -> None:
+        series = {1.0: 2, 2.0: 2, 3.0: 3, 4.0: 3}
+
+        failed, message = _converged_verdict(series, 3, 3, "groups >= 2-wide")
+
+        self.assertFalse(failed, message)
+        self.assertIn("settled at 3", message)
+
+    def test_the_default_window_is_odd(self) -> None:
+        """Pins the invariant for every caller that does not set the param.
+
+        ``_misconfigured_params`` rejects an even value, but only when one is
+        supplied -- so the default has to carry the same guarantee itself.
+        """
+        self.assertEqual(1, _DEFAULT_CONVERGED_WINDOW_SAMPLES % 2)
+
+
+class NexthopGroupParamValidationTest(unittest.IsolatedAsyncioTestCase):
+    """A misconfigured gate must produce a VERDICT, never an exception.
+
+    ``_misconfigured_params`` exists to turn "this gate cannot run" into a
+    reported breach. Coercing its own inputs with a bare ``int()`` / ``float()``
+    meant the detector could raise straight out of ``run_final_check`` on the
+    one input class it exists to catch.
+    """
+
+    def setUp(self) -> None:
+        self.task = NexthopGroupPoll(hostname="bag013.ash6", logger=MagicMock())
+        self._plot = patch(_PLOT, new=AsyncMock(return_value=None))
+        self._plot.start()
+        self.addCleanup(self._plot.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {"hostname": "bag013.ash6", "threshold": 10_000, **kwargs}
+        )
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    async def test_even_converged_window_is_rejected(self) -> None:
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=4,
+        )
+        for i, shape in enumerate([{128: 2}] * 6):
+            self.task.add_data(_sized(shape), timestamp=i + 1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("converged_window_samples must be ODD", result.message)
+        # A rejected config must not reach any verdict helper.
+        self.assertNotIn("converged OK", result.message)
+        self.assertNotIn("count OK", result.message)
+
+    async def test_non_numeric_window_is_a_breach_not_a_crash(self) -> None:
+        self._params(recovery_tolerance=1.5, recovery_window_samples="two")
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("recovery_window_samples must be an integer", result.message)
+
+    async def test_non_numeric_tolerance_is_a_breach_not_a_crash(self) -> None:
+        self._params(recovery_tolerance="loose", recovery_window_samples=2)
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("recovery_tolerance must be a number", result.message)
+
+    async def test_non_numeric_converged_window_is_a_breach_not_a_crash(self) -> None:
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples="thirty-one",
+        )
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("converged_window_samples must be an integer", result.message)
+
+    async def test_non_positive_min_samples_is_a_breach(self) -> None:
+        self._params(min_samples=0)
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("min_samples must be >= 1, got 0", result.message)
+
+
+class NexthopGroupMinSamplesTest(unittest.IsolatedAsyncioTestCase):
+    """A run that lost most of its polls scored every verdict on the survivors.
+
+    ``run`` swallows every collection exception and the empty-series guard fires
+    only when the series is ENTIRELY empty, so 5% collection produced a green
+    run indistinguishable from a complete one.
+    """
+
+    def setUp(self) -> None:
+        self.task = NexthopGroupPoll(hostname="bag013.ash6", logger=MagicMock())
+        self._plot = patch(_PLOT, new=AsyncMock(return_value=None))
+        self._plot.start()
+        self.addCleanup(self._plot.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {"hostname": "bag013.ash6", "threshold": 10_000, **kwargs}
+        )
+
+    def _collect(self, count: int) -> None:
+        for i in range(count):
+            self.task.add_data(_sized({128: 2}), timestamp=i + 1)
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    async def test_below_the_floor_fails(self) -> None:
+        self._params(min_samples=10)
+        self._collect(4)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("samples BREACH: collected only 4", result.message)
+
+    async def test_at_the_floor_passes(self) -> None:
+        self._params(min_samples=10)
+        self._collect(10)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("samples OK: collected 10", result.message)
+
+    async def test_unset_leaves_existing_callers_unaffected(self) -> None:
+        """Opt-in: no param, no verdict -- the count is still reported."""
+        self._params()
+        self._collect(1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertNotIn("samples BREACH", result.message)
+        self.assertNotIn("samples OK", result.message)
+        self.assertIn("[samples=1, span=0s]", result.message)
+
+    async def test_the_span_exposes_a_collection_wedge(self) -> None:
+        """Count alone cannot distinguish a full run from one that stopped.
+
+        Both series below have the same length, so `min_samples` passes either
+        way -- but the second stopped collecting a third of the way in, which
+        means the closing window `_converged_verdict` reads is really a mid-run
+        window. The span is what makes the two distinguishable.
+        """
+        self._params(min_samples=5)
+        for i in range(10):
+            self.task.add_data(_sized({128: 2}), timestamp=1000 + i * 60)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("[samples=10, span=540s]", result.message)
+
+
+class NexthopGroupSharedDataKeyTypeTest(unittest.IsolatedAsyncioTestCase):
+    """Production hands back STRING timestamp keys; every other test uses ints.
+
+    `add_data` casts the timestamp to `int`, which is why this looks safe. But a
+    real run passes `shared_data`, so `_data` resolves to a `_SharedDataView`
+    over a multiprocessing Manager dict, which stores each key as
+    `f"{prefix}{key}"` and yields it back as `key[prefix_len:]`. Both operations
+    are string operations. Tests pass `shared_data=None`, take the plain-dict
+    branch, and keep int keys -- so the entire suite exercises a key type that
+    never occurs in production.
+
+    That divergence cost a hardware run: the first code to do ARITHMETIC on a
+    timestamp died at teardown with
+    ``unsupported operand type(s) for -: 'str' and 'str'``, failing a run in
+    which every other gate had passed. This test builds the task the way the
+    runner does, so the coercion boundary under test is the real one.
+    """
+
+    def setUp(self) -> None:
+        # A plain dict is a faithful stand-in for the Manager dict here: the
+        # stringification happens in _SharedDataView, not in the manager.
+        self.shared: dict = {}
+        self.task = NexthopGroupPoll(
+            hostname="bag013.ash6", logger=MagicMock(), shared_data=self.shared
+        )
+        self._plot = patch(_PLOT, new=AsyncMock(return_value=None))
+        self._plot.start()
+        self.addCleanup(self._plot.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {"hostname": "bag013.ash6", "threshold": 10_000, **kwargs}
+        )
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    async def test_production_key_type_is_str(self) -> None:
+        """Pins the premise. If this ever fails the comment above is stale."""
+        self.task.add_data(_sized({128: 2}), timestamp=1000)
+
+        self.assertTrue(
+            all(isinstance(key, str) for key in self.task._data),
+            f"expected str keys from the shared-data view, got "
+            f"{[type(k).__name__ for k in self.task._data]}",
+        )
+
+    async def test_every_verdict_survives_string_keys(self) -> None:
+        self._params(
+            min_samples=5,
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=3,
+            max_unprogrammed=0,
+            min_observed_groups=1,
+        )
+        for i in range(10):
+            self.task.add_data(_sized({128: 2}), timestamp=1000 + i * 60)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        # The span is computed from the keys, so this is the assertion that
+        # would have caught the crash.
+        self.assertIn("[samples=10, span=540s]", result.message)
+        self.assertIn("converged OK", result.message)

@@ -3240,6 +3240,7 @@ def create_nexthop_group_poll_periodic_task(
     min_observed_groups: t.Optional[int] = None,
     expected_converged_multiway_groups: t.Optional[int] = None,
     converged_window_samples: t.Optional[int] = None,
+    min_samples: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
@@ -3305,7 +3306,17 @@ def create_nexthop_group_poll_periodic_task(
             against a literal rather than an opening baseline on purpose:
             periodic tasks start before setup_steps, so the opening window
             predates convergence.
-        converged_window_samples: Size of that closing window (default 10).
+        converged_window_samples: Size of that closing window (default 11).
+            Must be ODD, and is rejected as a config breach otherwise: the
+            median of an even window is the AVERAGE of its two middle samples,
+            so a window straddling two values yields a half-integer that can
+            never equal the integer expectation and a healthy device breaches.
+        min_samples: Optional floor on how many samples the run collected. The
+            poll swallows every collection failure and only an ENTIRELY empty
+            series fails, so without this a run that lost most of its reads
+            still evaluates every verdict above on the survivors and reports
+            them as confidently as a complete series. A liveness floor, not a
+            completeness assertion.
         min_observed_groups: Optional floor on the peak nexthop-group count. An
             all-zero series is not empty, so it passes the empty-series guard
             and then satisfies any ceiling (`max(0) < threshold`). Setting this
@@ -3333,6 +3344,7 @@ def create_nexthop_group_poll_periodic_task(
         ("min_observed_groups", min_observed_groups),
         ("expected_converged_multiway_groups", expected_converged_multiway_groups),
         ("converged_window_samples", converged_window_samples),
+        ("min_samples", min_samples),
     ):
         if value is not None:
             json_payload[key] = value

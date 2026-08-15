@@ -486,6 +486,38 @@ def _series_window(series: t.Dict[float, t.Any], count: int, last: bool) -> t.Li
     return ordered[-count:] if last else ordered[:count]
 
 
+def _checked_int(
+    params: t.Mapping[str, t.Any],
+    name: str,
+    problems: t.List[str],
+    *,
+    minimum: int,
+) -> t.Optional[int]:
+    """``int(params[name])`` with a coercion failure turned into a verdict.
+
+    A bare ``int()`` here was the one place the misconfiguration DETECTOR could
+    itself crash: a non-numeric value raised ValueError straight out of
+    ``run_final_check`` instead of being reported as the config breach it is.
+    That is the exact failure mode this function exists to convert into a
+    verdict, so it must not be the one that escapes as an exception.
+
+    Returns None -- and records a problem -- when the value is unusable, so the
+    caller can skip any further reasoning about it.
+    """
+    value = params.get(name)
+    if value is None:
+        return None
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        problems.append(f"{name} must be an integer, got {value!r}")
+        return None
+    if coerced < minimum:
+        problems.append(f"{name} must be >= {minimum}, got {coerced}")
+        return None
+    return coerced
+
+
 def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
     """Opt-in params that were requested but cannot produce a verdict.
 
@@ -507,16 +539,26 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
             "recovery_window_samples was set without recovery_tolerance, so "
             "the recovery gate is inert"
         )
-    window = params.get("recovery_window_samples")
-    if window is not None and int(window) <= 0:
+    _checked_int(params, "recovery_window_samples", problems, minimum=1)
+    _checked_int(params, "min_samples", problems, minimum=1)
+    _checked_int(params, "expected_converged_multiway_groups", problems, minimum=0)
+    # The closing window must be ODD. statistics.median AVERAGES the two middle
+    # values of an even-length window, so a window straddling 2 and 3 medians to
+    # 2.5 -- and 2.5 never equals an integer expectation, so a HEALTHY device
+    # breaches. This is not theoretical: the first fully green run logged
+    # "settled at 2.0", a float, and passed only because all ten closing samples
+    # happened to be identical. An odd window always medians to a real observed
+    # sample.
+    converged_window = _checked_int(
+        params, "converged_window_samples", problems, minimum=1
+    )
+    if converged_window is not None and converged_window % 2 == 0:
         problems.append(
-            f"recovery_window_samples must be positive, got {window}",
+            f"converged_window_samples must be ODD, got {converged_window}: an "
+            f"even window medians to the average of its two middle samples, so "
+            f"a window straddling two values yields a half-integer that can "
+            f"never equal the expected count -- a healthy device would breach"
         )
-    # The recovery band is baseline/tolerance .. baseline*tolerance, so the
-    # parameter is only meaningful at >= 1. Zero divides; anything in (0, 1)
-    # INVERTS the band (low > high), which no value can satisfy, so the gate
-    # would fail every run for a reason the message would not explain; and a
-    # non-finite tolerance widens the band to admit everything.
     if params.get("expected_converged_multiway_groups") is not None and (
         params.get("min_ecmp_width") is None
     ):
@@ -524,15 +566,25 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
             "expected_converged_multiway_groups was set without min_ecmp_width, "
             "so there is no multi-way series to settle"
         )
+    # The recovery band is baseline/tolerance .. baseline*tolerance, so the
+    # parameter is only meaningful at >= 1. Zero divides; anything in (0, 1)
+    # INVERTS the band (low > high), which no value can satisfy, so the gate
+    # would fail every run for a reason the message would not explain; and a
+    # non-finite tolerance widens the band to admit everything.
     tolerance = params.get("recovery_tolerance")
-    if tolerance is not None and (
-        not math.isfinite(float(tolerance)) or float(tolerance) < 1
-    ):
-        problems.append(
-            f"recovery_tolerance must be a finite value >= 1, got {tolerance}: "
-            f"0 raises, 0 < tolerance < 1 inverts the recovery band so no "
-            f"value can satisfy it, and an infinite tolerance admits anything"
-        )
+    if tolerance is not None:
+        try:
+            numeric_tolerance = float(tolerance)
+        except (TypeError, ValueError):
+            problems.append(f"recovery_tolerance must be a number, got {tolerance!r}")
+        else:
+            if not math.isfinite(numeric_tolerance) or numeric_tolerance < 1:
+                problems.append(
+                    f"recovery_tolerance must be a finite value >= 1, got "
+                    f"{tolerance}: 0 raises, 0 < tolerance < 1 inverts the "
+                    f"recovery band so no value can satisfy it, and an infinite "
+                    f"tolerance admits anything"
+                )
     return problems
 
 
@@ -607,10 +659,23 @@ def _ecmp_set_verdict(
     )
 
 
+# ODD on purpose -- see the converged_window_samples check in
+# _misconfigured_params. An even default would make the half-integer median trap
+# reachable by every caller that does not think to override it.
+_DEFAULT_CONVERGED_WINDOW_SAMPLES = 11
+_DEFAULT_RECOVERY_WINDOW_SAMPLES = 10
+
+
 def _converged_verdict(
     series: t.Dict[float, int], expected: int, window: int, metric: str
 ) -> t.Tuple[bool, str]:
     """Verdict on whether ``metric`` SETTLED at its expected steady-state value.
+
+    ``window`` must be ODD, which ``_misconfigured_params`` enforces for any
+    caller that sets it and ``_DEFAULT_CONVERGED_WINDOW_SAMPLES`` guarantees for
+    every caller that does not. The median of an even window is the AVERAGE of
+    its two middle samples, so a window straddling two values produces a
+    half-integer that cannot equal the integer expectation.
 
     Distinct from ``_recovery_verdict``, and usable where that one is not. The
     recovery check compares the closing window against the OPENING window, and
@@ -767,19 +832,27 @@ class NexthopGroupPoll(PeriodicTask):
         """
         Analyzes collected nexthop group data and generates a multi-series plot.
 
-        Two independent verdicts, reported separately so triage can tell them
-        apart:
+        Independent verdicts, reported separately so triage can tell them apart.
+        Only the first is always on; every other one is opt-in via a param, so
+        existing callers are unaffected until they ask for it:
 
         1. ``max(num_groups_configured) < threshold`` -- the transient ECMP-set
            ceiling.
         2. ``max(num_unprogrammed_groups) <= max_unprogrammed`` -- the device's
            own "I could not program this group" signal, i.e. the closest thing
-           the box reports to "the hardware table is full". Opt-in via the
-           ``max_unprogrammed`` param so existing callers are unaffected.
+           the box reports to "the hardware table is full".
+        3. ``len(samples) >= min_samples`` -- the poll stayed alive.
+        4. multi-way ECMP-set count and ceiling (``min_ecmp_width`` /
+           ``max_multiway_groups``).
+        5. the settled multi-way count (``expected_converged_multiway_groups``).
+        6. a floor on what was observed at all (``min_observed_groups``).
+        7. recovery to the opening baseline (``recovery_tolerance``).
 
         Collecting no data is a FAILURE, not a SKIP. ``run`` swallows every
         collection exception, so an empty series means every single poll failed
-        -- reporting SKIP there let the check pass having proven nothing.
+        -- reporting SKIP there let the check pass having proven nothing. An
+        entirely empty series is caught below; a series that merely lost most of
+        its samples is what ``min_samples`` is for.
 
         Returns:
             PeriodicCheckResult: PASS only when every enabled verdict passes.
@@ -892,6 +965,32 @@ class NexthopGroupPoll(PeriodicTask):
             )
             (failures if failed else verdicts).append(text)
 
+        # Opt-in: a floor on HOW MANY samples the run collected at all. `run`
+        # swallows every collection exception and the guard above fails only on
+        # an ENTIRELY empty series, so a run that lost most of its polls still
+        # evaluates every verdict here on the survivors -- and reports them with
+        # exactly the same confidence as a complete series. The first clean SC9
+        # run recorded 195 samples and nothing remarked on it either way.
+        #
+        # This is a liveness floor, not a completeness assertion: the exact count
+        # is appended to every message regardless, so the number is always
+        # visible even when this gate is not set.
+        min_samples = self._params.get("min_samples")
+        if min_samples is not None:
+            collected = len(num_groups_configured_data)
+            if collected >= min_samples:
+                verdicts.append(
+                    f"samples OK: collected {collected} nexthop-group samples "
+                    f"(floor {min_samples})"
+                )
+            else:
+                failures.append(
+                    f"samples BREACH: collected only {collected} nexthop-group "
+                    f"samples against a floor of {min_samples} -- the poll lost "
+                    f"most of its reads, so every other verdict here was scored "
+                    f"on an unrepresentative subset of the run"
+                )
+
         # Opt-in third verdict: the ECMP-set ceiling measured on REAL sets only.
         # This is the quantity the "bounded number of programmed ECMP sets"
         # characteristic is actually about; the raw count above cannot tell a
@@ -915,7 +1014,12 @@ class NexthopGroupPoll(PeriodicTask):
             failed, text = _converged_verdict(
                 multiway_series,
                 int(expected_converged),
-                int(self._params.get("converged_window_samples", 10)),
+                int(
+                    self._params.get(
+                        "converged_window_samples",
+                        _DEFAULT_CONVERGED_WINDOW_SAMPLES,
+                    )
+                ),
                 f"groups >= {min_ecmp_width}-wide",
             )
             (failures if failed else verdicts).append(text)
@@ -961,7 +1065,12 @@ class NexthopGroupPoll(PeriodicTask):
             failed, text = _recovery_verdict(
                 series,
                 recovery_tolerance,
-                int(self._params.get("recovery_window_samples", 10)),
+                int(
+                    self._params.get(
+                        "recovery_window_samples",
+                        _DEFAULT_RECOVERY_WINDOW_SAMPLES,
+                    )
+                ),
                 metric,
             )
             (failures if failed else verdicts).append(text)
@@ -971,8 +1080,37 @@ class NexthopGroupPoll(PeriodicTask):
             if failures
             else hc_types.HealthCheckStatus.PASS
         )
+        # Sample COUNT is not sample COVERAGE, and `min_samples` only bounds the
+        # former. `_converged_verdict` reads a positional tail -- the last N
+        # samples -- so if collection wedges partway through (every poll raising
+        # and being swallowed by `run`), the series simply stops growing and
+        # that "closing window" is really a mid-run window. A drain-phase window
+        # medians to 0, which reports as `converged BREACH ... settled at 0`:
+        # instrument death wearing the costume of a device that destroyed every
+        # ECMP set. Exactly the misattribution that made the rel-191 triage
+        # wrong.
+        #
+        # Gating on it needs a threshold nobody has measured: workers are torn
+        # down -- including everpaste upload -- BEFORE run_final_check, so even
+        # a perfectly healthy run's newest sample is already minutes old here.
+        # Reporting the SPAN costs nothing and is what makes that threshold
+        # measurable: a span far short of the run's duration is a wedge, and it
+        # is now visible in the message instead of having to be inferred from
+        # the plot. Gate once there is a number.
+        # float() on the keys is NOT defensive padding. In production `_data` is
+        # a `_SharedDataView` over a multiprocessing Manager dict: `add_data`
+        # casts the timestamp to int, but the view stores it as
+        # `f"{prefix}{key}"` and hands it back as `key[prefix_len:]` -- a
+        # concatenation and a slice -- so every key is a STR at runtime. Tests
+        # construct the task with `shared_data=None`, which takes the plain-dict
+        # branch and keeps int keys, so the whole suite exercises a key type
+        # production never uses. Every verdict above survives that because it
+        # only ever SORTS the keys (lexicographic order matches numeric order
+        # for fixed-width epoch seconds); this is the first arithmetic on one.
+        timestamps = sorted(float(ts) for ts in num_groups_configured_data)
+        span_seconds = int(timestamps[-1] - timestamps[0]) if timestamps else 0
         message = "; ".join(failures + verdicts)
-        message += f" [samples={len(num_groups_configured_data)}]"
+        message += f" [samples={len(num_groups_configured_data)}, span={span_seconds}s]"
 
         data_series = {
             "num_groups_configured": num_groups_configured_data,
