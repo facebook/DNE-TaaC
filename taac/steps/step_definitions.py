@@ -5747,6 +5747,7 @@ def create_validated_bgp_route_oscillation_step(
     test_duration_seconds: int,
     parent_prefixes_to_ignore: t.Sequence[str] = (),
     transition_soft_threshold_seconds: t.Optional[float] = None,
+    fail_on_session_flap: t.Optional[bool] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Create route oscillations with IXIA, source, and exact-RIB verdicts.
@@ -5780,6 +5781,12 @@ def create_validated_bgp_route_oscillation_step(
                     )
                 }
                 if transition_soft_threshold_seconds is not None
+                else {}
+            ),
+            # Emitted only when set, so existing callers stay byte-identical.
+            **(
+                {"fail_on_session_flap": fail_on_session_flap}
+                if fail_on_session_flap is not None
                 else {}
             ),
         },

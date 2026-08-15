@@ -419,27 +419,36 @@ class CounterThresholdTask(PeriodicTask):
 
 
 def _unprogrammed_verdict(
-    series: t.Dict[float, int], maximum: int
+    series: t.Dict[float, int],
+    maximum: int,
+    tolerance_samples: t.Optional[int],
 ) -> t.Tuple[bool, str]:
     """Verdict on the device's own "I could not program this group" counter.
 
-    Returns ``(failed, message)``.
+    A max-over-the-run comparison is the wrong SHAPE here, and a hardware run
+    proved it: across 391 samples of a five-cycle drain the counter read 0 in
+    390 and 4 in exactly ONE, caught mid-rebuild with the group widths climbing
+    1, 2, 3, 12, 13 ... 26 as peers returned to the next-hop sets. Five seconds
+    later it was 0 again. Group creation and hardware programming are not
+    atomic, so a poll landing inside a rebuild sees groups in flight, and
+    ``max == 0`` asserts something an asynchronous pipeline cannot promise. One
+    drain cycle hid this; five cycles are five rebuilds and five chances for the
+    poll to land in one.
 
-    A module-level function rather than an inline block for one reason: the
-    empty-series case is not reachable through ``run_final_check``. That series
-    is filled in the same ``isinstance`` arm of the same loop as the count
-    series, and an empty count series already returns before any verdict runs,
-    so no input to the poll can produce it. Left inline it would be a branch no
-    test could execute and no reader could check. Here it is callable with
-    ``{}`` directly.
+    What IS assertable is that groups do not STAY unprogrammed. One in flight
+    for a poll interval is the pipeline working; one still unprogrammed seconds
+    later is blackholing traffic. So this gates on the longest CONSECUTIVE run
+    above the ceiling, not on the peak -- the same duration-not-magnitude
+    principle the converged and recovery verdicts already use.
 
-    That case is a FAILURE, not a skip. Guarding the caller on the series being
-    truthy is the natural way to write this and is wrong: it reads as a safety
-    belt but encodes "silently drop a gate the caller asked for" -- the vacuous
-    pass this whole check exists to close -- and it is indistinguishable at
-    runtime from the correct form precisely BECAUSE the case is unreachable. It
-    stops being unreachable the moment the collection loop stops filling the two
-    series together, and only one of the two forms survives that.
+    With ``tolerance_samples`` unset the behaviour is exactly the old one: any
+    exceedance at all is a breach.
+
+    The empty-series case stays a FAILURE here rather than a guard at the call
+    site. It is unreachable through ``run_final_check`` -- that series is filled
+    in the same ``isinstance`` arm as the count series, whose emptiness already
+    returned -- so at the call site it would be a branch no test could execute,
+    and ``max()`` below would raise on it rather than report it.
     """
     if not series:
         return True, (
@@ -447,16 +456,36 @@ def _unprogrammed_verdict(
             "num_unprogrammed_groups samples were recorded, so the device's "
             "own hardware-rejection signal was never read"
         )
-    observed = max(series.values())
-    if observed <= maximum:
-        return False, (
-            f"unprogrammed OK: max num_unprogrammed_groups ({observed}) is "
-            f"within the allowed maximum ({maximum})"
+    ordered = [series[ts] for ts in sorted(series)]
+    peak = max(ordered)
+    longest = current = 0
+    for value in ordered:
+        current = current + 1 if value > maximum else 0
+        longest = max(longest, current)
+    detail = (
+        f"peak {peak}, longest consecutive run above {maximum} = {longest} of "
+        f"{len(ordered)} samples"
+    )
+    if longest == 0:
+        return False, f"unprogrammed OK: never exceeded {maximum} ({detail})"
+    if tolerance_samples is None:
+        return (
+            True,
+            f"unprogrammed BREACH: {detail} -- the device could not program at "
+            f"least one nexthop group",
         )
-    return True, (
-        f"unprogrammed BREACH: max num_unprogrammed_groups ({observed}) "
-        f"exceeds the allowed maximum ({maximum}) -- the device could not "
-        f"program at least one nexthop group"
+    if longest <= tolerance_samples:
+        return (
+            False,
+            f"unprogrammed OK: exceeded {maximum} only transiently ({detail}), "
+            f"within the {tolerance_samples}-sample tolerance -- consistent "
+            f"with groups in flight during a rebuild",
+        )
+    return (
+        True,
+        f"unprogrammed BREACH: {detail}, beyond the {tolerance_samples}-sample "
+        f"tolerance -- groups STAYED unprogrammed rather than being momentarily "
+        f"in flight, so the device is failing to program them",
     )
 
 
@@ -541,6 +570,16 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
         )
     _checked_int(params, "recovery_window_samples", problems, minimum=1)
     _checked_int(params, "min_samples", problems, minimum=1)
+    # 0 is meaningful here: "no exceedance tolerated", i.e. the pre-tolerance
+    # behaviour stated explicitly rather than by omission.
+    _checked_int(params, "unprogrammed_tolerance_samples", problems, minimum=0)
+    if params.get("unprogrammed_tolerance_samples") is not None and (
+        params.get("max_unprogrammed") is None
+    ):
+        problems.append(
+            "unprogrammed_tolerance_samples was set without max_unprogrammed, "
+            "so there is no unprogrammed ceiling for it to soften"
+        )
     _checked_int(params, "expected_converged_multiway_groups", problems, minimum=0)
     # The closing window must be ODD. statistics.median AVERAGES the two middle
     # values of an even-length window, so a window straddling 2 and 3 medians to
@@ -651,7 +690,15 @@ def _ecmp_set_verdict(
     if max_multiway_groups is None:
         return False, f"ecmp-sets OBSERVED: {detail}"
     if multiway <= max_multiway_groups:
-        return False, f"ecmp-sets OK: {detail} (allowed {max_multiway_groups})"
+        # The bound is rendered NEXT TO the quantity it bounds. Trailing it
+        # after the whole detail put it immediately after the width-1 count,
+        # where it read as a ceiling on singleton groups -- which it is not.
+        return (
+            False,
+            f"ecmp-sets OK: max groups >= {min_ecmp_width}-wide = {multiway} "
+            f"(allowed {max_multiway_groups}), "
+            f"max width-1 groups = {singletons}",
+        )
     return (
         True,
         f"ecmp-sets BREACH: {detail} exceeds the allowed maximum "
@@ -664,6 +711,17 @@ def _ecmp_set_verdict(
 # reachable by every caller that does not think to override it.
 _DEFAULT_CONVERGED_WINDOW_SAMPLES = 11
 _DEFAULT_RECOVERY_WINDOW_SAMPLES = 10
+
+# The fraction of the closing window that must agree with its own median before
+# that median is treated as a SETTLED value. FITTED to observed shapes, not
+# derived: a run that reaches its soak holds one value across the entire window
+# (100%), while SC9 run 9 -- whose drain aborted mid-cycle, so the window
+# covered a drained device, a rebuild and the recovered steady state -- split
+# 17/11/3 across three values and its median held only 55%. Three quarters sits
+# well clear of both and still tolerates a sampling artifact per four samples,
+# which is the whole reason the verdict medians rather than reading the last
+# sample.
+_CONVERGED_WINDOW_DOMINANCE = 0.75
 
 
 def _converged_verdict(
@@ -691,7 +749,10 @@ def _converged_verdict(
     should produce.
 
     Uses the MEDIAN of the closing window so one sampling artifact cannot decide
-    the verdict. Returns ``(is_failure, message)``.
+    the verdict, and requires that median to be DOMINANT within the window --
+    see ``_CONVERGED_WINDOW_DOMINANCE`` -- so that a run which never reached a
+    steady state is reported as unevaluated rather than as a device left in
+    whatever state the run was interrupted in. Returns ``(is_failure, message)``.
     """
     ordered = sorted(series)
     if len(ordered) < window:
@@ -702,7 +763,35 @@ def _converged_verdict(
             f"{metric} could not be assessed -- failing rather than passing an "
             f"unevaluated gate",
         )
-    final = statistics.median(_series_window(series, window, last=True))
+    values = _series_window(series, window, last=True)
+    final = statistics.median(values)
+    # A median is only a SETTLED value if the window it came from had settled.
+    # Without this, an aborted run reports the state it was interrupted in as
+    # though the device had been left there: SC9 run 9's drain failed in cycle 3
+    # of 5, so Stage C's soak never ran, the closing window covered the drained
+    # and rebuilding device, and the verdict read "settled at 0" -- i.e. every
+    # ECMP set destroyed -- about a device that was sitting at the correct
+    # {128: 2} in its final samples.
+    #
+    # This can never convert a real BREACH into a pass. A device genuinely stuck
+    # at the wrong value produces a FLAT closing window, which is dominant by
+    # definition and still evaluated. It only abstains where the run did not end
+    # in a steady state at all -- and per this file's policy, abstaining is
+    # itself a failure, so nothing is laundered into a green run either.
+    agreeing = values.count(final)
+    dominance = agreeing / len(values)
+    if dominance < _CONVERGED_WINDOW_DOMINANCE:
+        return (
+            True,
+            f"converged NOT EVALUATED: only {agreeing} of {len(values)} closing "
+            f"samples hold the median value {final} ({dominance:.0%}, floor "
+            f"{_CONVERGED_WINDOW_DOMINANCE:.0%}), so the window never settled "
+            f"and no steady-state value of {metric} can be read from it. This is "
+            f"what an ABORTED run looks like -- the closing window covers "
+            f"whatever the device was doing when the run stopped, not a "
+            f"post-soak steady state -- so diagnose the step that aborted, not "
+            f"this gate",
+        )
     if final == expected:
         return (
             False,
@@ -960,8 +1049,11 @@ class NexthopGroupPoll(PeriodicTask):
         # the check lives there rather than inline here.
         max_unprogrammed = self._params.get("max_unprogrammed")
         if max_unprogrammed is not None:
+            tolerance = self._params.get("unprogrammed_tolerance_samples")
             failed, text = _unprogrammed_verdict(
-                num_unprogrammed_groups_data, int(max_unprogrammed)
+                num_unprogrammed_groups_data,
+                int(max_unprogrammed),
+                None if tolerance is None else int(tolerance),
             )
             (failures if failed else verdicts).append(text)
 

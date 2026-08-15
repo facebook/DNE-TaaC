@@ -212,18 +212,22 @@ class NexthopGroupUnprogrammedCouplingTest(unittest.IsolatedAsyncioTestCase):
         branch dead again, but the branch itself would still be correct here;
         what this pins is that the verdict never answers "no comment".
         """
-        failed, text = _unprogrammed_verdict({}, 0)
+        failed, text = _unprogrammed_verdict({}, 0, None)
 
         self.assertTrue(failed)
         self.assertIn("unprogrammed NOT EVALUATED", text)
 
     def test_a_populated_series_still_renders_ok_and_breach(self) -> None:
-        """The two reachable arms, asserted on the helper for symmetry."""
-        failed, text = _unprogrammed_verdict({1.0: 0, 2.0: 0}, 0)
+        """The two reachable arms, asserted on the helper for symmetry.
+
+        `tolerance_samples=None` keeps the pre-tolerance behaviour: any
+        exceedance at all is a breach.
+        """
+        failed, text = _unprogrammed_verdict({1.0: 0, 2.0: 0}, 0, None)
         self.assertFalse(failed)
         self.assertIn("unprogrammed OK", text)
 
-        failed, text = _unprogrammed_verdict({1.0: 0, 2.0: 3}, 0)
+        failed, text = _unprogrammed_verdict({1.0: 0, 2.0: 3}, 0, None)
         self.assertTrue(failed)
         self.assertIn("unprogrammed BREACH", text)
 
@@ -865,12 +869,20 @@ class NexthopGroupConvergedWindowParityTest(unittest.TestCase):
         failed, message = _converged_verdict(series, 2, 4, "groups >= 2-wide")
 
         self.assertTrue(failed)
-        self.assertIn("settled at 2.5", message)
+        # The half-integer is now caught one step earlier, by the dominance
+        # floor: no sample can hold a value that lies between two of them, so
+        # the window is reported as never having settled rather than as a
+        # device left at 2.5. Still a failure, and still never a silent pass --
+        # which is what `_misconfigured_params` rejecting an even window is for.
+        self.assertIn("NOT EVALUATED", message)
+        self.assertIn("median value 2.5", message)
 
     def test_odd_window_always_medians_to_a_real_observed_sample(self) -> None:
-        series = {1.0: 2, 2.0: 2, 3.0: 3, 4.0: 3}
+        # Five closing samples, still straddling two values, so the median has
+        # to be a real observation rather than an average of the middle pair.
+        series = {1.0: 2, 2.0: 3, 3.0: 3, 4.0: 3, 5.0: 3}
 
-        failed, message = _converged_verdict(series, 3, 3, "groups >= 2-wide")
+        failed, message = _converged_verdict(series, 3, 5, "groups >= 2-wide")
 
         self.assertFalse(failed, message)
         self.assertIn("settled at 3", message)
@@ -882,6 +894,51 @@ class NexthopGroupConvergedWindowParityTest(unittest.TestCase):
         supplied -- so the default has to carry the same guarantee itself.
         """
         self.assertEqual(1, _DEFAULT_CONVERGED_WINDOW_SAMPLES % 2)
+
+
+class NexthopGroupConvergedWindowSettlingTest(unittest.TestCase):
+    """A median is only a SETTLED value if the window it came from settled.
+
+    SC9 run 9's drain aborted in cycle 3 of 5, so Stage C's soak never ran and
+    the closing window covered a drained device, a rebuild and the recovered
+    steady state -- 17 samples at 0, 11 at 6 and 3 at 2. Its median was 0, so
+    the verdict announced that the device had been LEFT with every ECMP set
+    destroyed, about a device whose final samples were sitting at the correct
+    two 128-wide sets. The run was already failing on the aborted step; what
+    this cost was an hour of chasing the wrong device behaviour.
+    """
+
+    def test_the_run_9_shape_is_reported_as_unevaluated(self) -> None:
+        series = {float(i): v for i, v in enumerate([0] * 17 + [6] * 11 + [2] * 3)}
+
+        failed, message = _converged_verdict(series, 2, 31, "groups >= 2-wide")
+
+        self.assertTrue(failed)
+        self.assertIn("converged NOT EVALUATED", message)
+        self.assertIn("only 17 of 31 closing samples", message)
+        self.assertIn("median value 0", message)
+
+    def test_a_flat_window_at_the_wrong_value_still_breaches(self) -> None:
+        """What the gate exists for -- a terminal collapse to one wide set --
+        produces a FLAT window, which is dominant by definition. The precondition
+        cannot convert that into a pass, or into an abstention."""
+        series = {float(i): 1 for i in range(31)}
+
+        failed, message = _converged_verdict(series, 2, 31, "groups >= 2-wide")
+
+        self.assertTrue(failed)
+        self.assertIn("converged BREACH", message)
+        self.assertIn("settled at 1", message)
+
+    def test_a_lone_artifact_does_not_withhold_the_verdict(self) -> None:
+        """One bad sample in a window must not cost the verdict; that is what
+        taking a median was for in the first place."""
+        series = {1.0: 2, 2.0: 2, 3.0: 9, 4.0: 2, 5.0: 2}
+
+        failed, message = _converged_verdict(series, 2, 5, "groups >= 2-wide")
+
+        self.assertFalse(failed, message)
+        self.assertIn("converged OK", message)
 
 
 class NexthopGroupParamValidationTest(unittest.IsolatedAsyncioTestCase):
@@ -1114,3 +1171,102 @@ class NexthopGroupSharedDataKeyTypeTest(unittest.IsolatedAsyncioTestCase):
         # would have caught the crash.
         self.assertIn("[samples=10, span=540s]", result.message)
         self.assertIn("converged OK", result.message)
+
+
+class NexthopGroupUnprogrammedToleranceTest(unittest.IsolatedAsyncioTestCase):
+    """`max == 0` asserts that group creation and hardware programming are
+    atomic. They are not.
+
+    The first complete five-cycle drain on bag013 read
+    `num_unprogrammed_groups` 0 in 390 of 391 samples and 4 in exactly ONE,
+    caught mid-rebuild with the widths climbing 1,2,3,12,...,26 as peers
+    returned to the next-hop sets, and back to 0 five seconds later. That
+    failed a run whose every other gate passed. What is assertable is that
+    groups do not STAY unprogrammed.
+    """
+
+    def setUp(self) -> None:
+        self.task = NexthopGroupPoll(hostname="bag013.ash6", logger=MagicMock())
+        self._plot = patch(_PLOT, new=AsyncMock(return_value=None))
+        self._plot.start()
+        self.addCleanup(self._plot.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {"hostname": "bag013.ash6", "threshold": 10_000, **kwargs}
+        )
+
+    def _collect(self, unprogrammed: list) -> None:
+        for i, value in enumerate(unprogrammed):
+            self.task.add_data(_summary(2, unprogrammed=value), timestamp=1000 + i * 6)
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    async def test_replays_the_real_five_cycle_series(self) -> None:
+        """The actual shape from the run: one isolated non-zero in 391."""
+        self._params(max_unprogrammed=0, unprogrammed_tolerance_samples=3)
+        series = [0] * 200 + [4] + [0] * 190
+        self._collect(series)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("only transiently", result.message)
+        self.assertIn("peak 4", result.message)
+        self.assertIn("longest consecutive run above 0 = 1", result.message)
+
+    async def test_that_same_series_fails_without_the_tolerance(self) -> None:
+        """Pins that the tolerance is what changed the verdict, and that the
+        pre-existing behaviour is intact for callers that do not opt in."""
+        self._params(max_unprogrammed=0)
+        self._collect([0] * 200 + [4] + [0] * 190)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("unprogrammed BREACH", result.message)
+
+    async def test_sustained_unprogrammed_still_breaches(self) -> None:
+        """The gate must keep its teeth: groups that stay unprogrammed are
+        blackholing traffic, and rel-191 sat at 8 while ECMP collapsed."""
+        self._params(max_unprogrammed=0, unprogrammed_tolerance_samples=3)
+        self._collect([0] * 50 + [8] * 12 + [0] * 50)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("STAYED unprogrammed", result.message)
+        self.assertIn("longest consecutive run above 0 = 12", result.message)
+
+    async def test_exactly_at_the_tolerance_passes(self) -> None:
+        self._params(max_unprogrammed=0, unprogrammed_tolerance_samples=3)
+        self._collect([0] * 20 + [1, 2, 1] + [0] * 20)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+
+    async def test_separate_transients_are_not_summed(self) -> None:
+        """Five cycles means five rebuilds. Each may blip; that is not the same
+        as one sustained failure, and a naive count of non-zero samples would
+        conflate them."""
+        self._params(max_unprogrammed=0, unprogrammed_tolerance_samples=3)
+        self._collect(([0] * 20 + [4]) * 5 + [0] * 20)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("longest consecutive run above 0 = 1", result.message)
+
+    async def test_tolerance_without_a_ceiling_is_a_config_breach(self) -> None:
+        self._params(unprogrammed_tolerance_samples=3)
+        self._collect([0, 0, 0])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("without max_unprogrammed", result.message)

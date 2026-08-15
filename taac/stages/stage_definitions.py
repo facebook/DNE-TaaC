@@ -1979,6 +1979,7 @@ def create_validated_bgp_route_oscillations_stage(
     test_duration_seconds: int = 3600,
     parent_prefixes_to_ignore: Sequence[str] = (),
     transition_soft_threshold_seconds: Optional[float] = None,
+    fail_on_session_flap: Optional[bool] = None,
     description: str = "Run validated dual-stack BGP route oscillations",
 ) -> Stage:
     """Create BGP route oscillations with a verdict for every trigger.
@@ -2002,6 +2003,7 @@ def create_validated_bgp_route_oscillations_stage(
                 test_duration_seconds=test_duration_seconds,
                 parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 transition_soft_threshold_seconds=transition_soft_threshold_seconds,
+                fail_on_session_flap=fail_on_session_flap,
                 description=description,
             )
         ]

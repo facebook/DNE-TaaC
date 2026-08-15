@@ -25658,6 +25658,30 @@ _SC9_EBGP_PREFIX_POOLS: t.List[str] = [
 # 8,192-entry EcmpLevel2 table. Stated plainly because an earlier version of
 # this comment claimed "~5x" against a peak of 6 that a later, cleaner run
 # superseded -- the margin is real but it is 2.7x, not 5x.
+#
+# ★ NOW DERIVED FROM A COMPLETE FIVE-CYCLE RUN, which is the first one there has
+# ever been. Five clean draws peaked at ELEVEN multi-way sets (plus a single
+# width-1), against twelve total nexthop groups; the one earlier clean draw, at
+# one cycle, peaked at 12. So the distribution is tight and -- the part that
+# matters -- the peak does NOT grow with cycle count.
+#
+# That falsified the reasoning behind an interim raise to 64. The argument was
+# that N cycles is N draws so the expected maximum climbs with N, anchored on a
+# reading of 20 from a two-and-a-bit-cycle run. But that 20 was not a clean
+# draw: it was taken while the drain was dying mid-transition with the restore
+# ALSO failing, so the device was in a non-recovered state when the maximum
+# landed. Discard it and the observations are 11 and 12.
+#
+# 32 is ~2.9x the five-cycle peak, still 8x under the topology's structural
+# maximum of 258 and 256x under the device's 8,192-entry table. 64 would need
+# fragmentation to go six-fold worse than anything observed before it said a
+# word, which is not a gate.
+#
+# Being honest about what this number is: it is FITTED to observation, not
+# derived from hardware, and it exists to catch an order-of-magnitude explosion.
+# The claim itself rests on the calibration-free assertions -- settled at exactly
+# 2 per AFI, no groups left unprogrammed, and RIB-level recovery to the
+# discovered baseline.
 _SC9_MAX_MULTIWAY_GROUPS = 32
 
 # The number of distinct ECMP sets this topology can structurally produce: one
@@ -25767,24 +25791,70 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     # Both derived from the first clean bag013 run, not from taste. The
     # withdrawal cleared in ~41s (last 2-group sample 35s after the withdraw,
     # first 0-group sample at 41s) and full recovery took ~73s (first transient
-    # sample 4s after the re-advertise, back to the steady 2 at 73s). These are
-    # 3x and 4x those observations.
+    # sample 4s after the re-advertise, back to the steady 2 at 73s).
     #
-    # They are deliberately ASYMMETRIC, which the previous 600/600 was not. The
-    # windows do different jobs: the withdraw window only has to let the
-    # withdrawal land and hold -- the count sits flat at 0 for its whole
-    # duration and nothing SC9 measures happens there -- while the readvertise
-    # window must contain the ENTIRE transient and let it settle back to 2
-    # before the postchecks read, or recovery fails for a timing reason rather
-    # than a real one. (Stage C's 300s soak follows this window, so the true
-    # post-restore settle is 600s against a 73s observation.)
+    # They are deliberately ASYMMETRIC, which the original 600/600 was not, and
+    # the asymmetry is not cosmetic -- the two windows do different jobs. The
+    # count sits flat at 0 for the whole withdraw window and NOTHING SC9
+    # measures happens there, so that window only has to let the withdrawal land
+    # and hold. The readvertise window is
+    # where the entire characteristic lives -- the clean run's series was
+    # 2 -> 0 -> 12 -> 2 and the 12 is on THIS side -- so it must contain the
+    # whole transient and let it settle before the next cycle withdraws again.
     #
-    # For the record: the stage's own 60/60 default would be too SHORT here --
-    # a 60s readvertise window ends 13s before recovery completes. Ten cycles of
-    # that is the likely mechanism behind run 1's peak of 27 sets and its 20
-    # eBGP session restarts, where each cycle re-withdrew mid-recovery.
+    # 180s for that is 2.5x the 73s observation, and it is chosen to equal
+    # `transition_soft_threshold_seconds` on purpose. The dwell is
+    # `max(0, R - elapsed)` with no error path, so the only way to shrink it to
+    # zero -- and start the next withdraw on top of an unfinished recovery -- is
+    # a transition that took the whole 180s, which has already breached the soft
+    # threshold and hard-failed the run. The overlap that contaminated run 1
+    # therefore cannot happen silently.
+    #
+    # That argument covers the READVERTISE side only, and deliberately so: W is
+    # below the same 180s soft threshold, so a slow withdraw yields a zero dwell
+    # with no failure and the withdraw side has no equivalent guarantee.
+    #
+    # W IS NOW MEASURED, and the first sizing was WRONG. It was set to 60 by
+    # inferring the RIB convergence time from a FIB observation of 41s. The
+    # 5-cycle run -- the first to log the drain step's own record, which every
+    # passing run before it discarded -- reported withdraw `elapsed_seconds` of
+    # 68.5, 59.2, 59.0, 59.4, 59.2. Cycle 1 overran W outright and the other
+    # four cleared it by under a second, so the dwell was effectively ZERO on
+    # all five and the flat-0 window described above did not exist. The
+    # underlying convergence is remarkably stable at 50.2-50.4s; the extra ~9s
+    # is confirmation plus poll granularity.
+    #
+    # 120 is ~1.75x the worst observed elapsed and ~2.4x the convergence, which
+    # buys a real 51-61s drained hold. Sized from the measurement rather than
+    # from the soft threshold on purpose: 180 would be symmetric with R but
+    # would spend five extra minutes covering a tail the data says is not there.
+    #
+    # For the record: the stage's own 60/60 default would be too SHORT -- a 60s
+    # readvertise window ends 13s before recovery completes. Ten cycles of that
+    # is the mechanism behind run 1's peak of 27 sets and its 20 eBGP session
+    # restarts, where each cycle re-withdrew mid-recovery.
     withdraw_seconds: int = 120,
-    readvertise_seconds: int = 300,
+    # Also measured now, and correctly sized: advertise elapsed ran 69.4-75.7s
+    # on four cycles and 113.9s on one outlier (7 convergence attempts against
+    # 3, convergence 104.1s against ~60s). Worst case still leaves a 66s dwell,
+    # and all ten transitions stayed WITHIN_SLA against the 180s soft threshold.
+    readvertise_seconds: int = 180,
+    # FIVE drains, not one.
+    #
+    # One clean draw of 12 against a ceiling of 32 is a realized margin of 2.7x
+    # resting on a single observation, which is not enough to call the count
+    # bounded -- SC9's headline claim. Five gives a distribution: run-to-run
+    # spread, whether the peak grows across cycles (it should not; each cycle
+    # starts from a fully recovered device), and whether the steady state really
+    # returns to 2 every time rather than once.
+    #
+    # The cost is bounded and the risk is understood. Five cycles is 10
+    # transitions rather than 2, so 10 chances to breach the 180s soft threshold
+    # instead of 2 -- that is a real increase in exposure, and it is intended: a
+    # transition that slow IS the finding. `transition_soft_threshold_seconds`
+    # and the 300s hard timeout above it are deliberately NOT relaxed to
+    # compensate.
+    cycles: int = 5,
     soak_duration_seconds: int = 300,
 ) -> Playbook:
     """Build the SC9 bounded-ECMP-sets characteristic playbook.
@@ -25805,16 +25875,16 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
       enough to block: ``ValidationStep.run`` raises only for PRE_TEST and
       POST_TEST, so the unset default (and MID_TEST) would log the failure and
       carry on regardless of ``fail_fast``.
-    * Drain (Stage B) -- ONE withdrawal of every eBGP pool, in one commit.
-      Two separate knobs control that, and an earlier revision only set one of
-      them. ``spread=False`` makes a single cycle's withdraw one commit across
-      every matched pool rather than three sequential batches (``spread=True``
-      also silently ignores ``prefix_pool_regex``). But the NUMBER of cycles
-      comes from ``iterations = test_duration_seconds // (withdraw_time +
-      readvertise_time)``, so passing a 1200s duration against the 60s defaults
-      produced TEN withdraw-readvertise cycles. Holding the two times equal to
-      the total makes it exactly one, and the two waits become the observation
-      windows either side of the restore.
+    * Drain (Stage B) -- ``cycles`` withdrawals of every eBGP pool, each in ONE
+      commit. Two separate knobs control that, and an earlier revision only set
+      one of them. ``spread=False`` makes a single cycle's withdraw one commit
+      across every matched pool rather than three sequential batches
+      (``spread=True`` also silently ignores ``prefix_pool_regex``). The NUMBER
+      of cycles is not a parameter of the stage at all -- it comes out of
+      ``iterations = test_duration_seconds // (withdraw_time +
+      readvertise_time)``, which is why the duration is computed here as an
+      exact multiple rather than passed as a literal. The two waits are the
+      observation windows either side of each restore.
     * Recovery -- asserted by the SC9 profile's postcheck against the discovered
       baseline, not by the periodic task. A task verdict can never be recorded
       as Requirement Coverage (the catalog admits only precheck / workload /
@@ -25835,9 +25905,30 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
       predecessor suite on bag012 read 0 for all 884 samples and passed eleven
       times on a structurally blind gate.
     """
+    # A vacuous drain is the failure mode this suite keeps rediscovering, and
+    # cycles=0 is the cheapest route to one: the derived duration would be 0,
+    # `iterations` would floor to 0, and the stage would withdraw nothing while
+    # every gate below passed on an idle device.
+    if cycles < 1:
+        raise ValueError(f"SC9 requires at least one drain cycle, got {cycles}")
     profile_checks = get_profile_checks(
         CheckProfile.SC9_BOUNDED_ECMP, ProfileContext()
     )
+    # The drain below runs with fail_on_session_flap=False, which hands the
+    # session-stability verdict to the BGP_SESSION_CHECK snapshot. That is only
+    # a sound trade if the snapshot check is actually present -- otherwise a
+    # flapped peer is recorded in the step's log and gates nothing, which is the
+    # silently-inert-gate failure this suite exists to eliminate. Assert the
+    # handoff target rather than documenting it in a comment nobody re-reads.
+    if not any(
+        check.name is hc_types.CheckName.BGP_SESSION_CHECK
+        for check in profile_checks.snapshot_checks
+    ):
+        raise ValueError(
+            "SC9 runs its drain with fail_on_session_flap=False, so the "
+            "SC9_BOUNDED_ECMP profile MUST carry a BGP_SESSION_CHECK snapshot "
+            "check to own the session-stability verdict"
+        )
     return Playbook(
         name="bgp_ebb_bounded_ecmp_sc9_playbook",
         description=(
@@ -25873,6 +25964,26 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 # groups in an 8,192-entry table, so this is a real gate rather
                 # than a threshold picked to pass.
                 max_unprogrammed=0,
+                # Tolerate groups momentarily IN FLIGHT; gate on groups that
+                # stay unprogrammed. The first complete five-cycle run read 0
+                # in 390 of 391 samples and 4 in exactly one, caught mid-rebuild
+                # with widths climbing 1,2,3,12,...,26 and back to 0 five
+                # seconds later. `max_unprogrammed=0` alone asserted that
+                # creation and hardware programming are atomic, which they are
+                # not, so it failed a run whose every other gate passed.
+                #
+                # 3 samples is ~18s at the measured 5.8s cadence, against an
+                # unprogrammed condition that lasted ONE sample (~5s): the poll
+                # read 0 groups for five samples, then 3 groups at widths 1/2/3,
+                # then 12 groups with 4 unprogrammed, then 9 groups with 0. Note
+                # this is the duration of the UNPROGRAMMED state, not of the
+                # rebuild -- the rebuild itself runs ~70s to {128: 2} (76/71/68/
+                # 70s across the four sampled cycles), so a tolerance sized to
+                # the rebuild would be four times too wide and would blind the
+                # gate. Anything genuinely unprogrammed persists far longer than
+                # 18s -- rel-191 sat at 8 while the ECMP structure was
+                # collapsing. Caveat: n=1, one non-zero reading in five cycles.
+                unprogrammed_tolerance_samples=3,
                 # Report real ECMP sets separately from width-1 singletons. No
                 # ceiling yet -- the peak has never been measured on an
                 # uncontaminated run, and the coverage-bearing bound is the
@@ -25970,17 +26081,40 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 parent_prefixes_to_ignore=IBGP_MIMIC_PARENTS,
                 prefix_start_index=0,
                 prefix_end_index=5000,
-                # ONE cycle. The stage computes
+                # The cycle count is DERIVED, never passed. The stage computes
                 #   iterations = test_duration_seconds // (withdraw + readvertise)
-                # so the original 1200/60/60 produced TEN withdraw-readvertise
-                # cycles rather than the single simultaneous drain this test is
-                # about. Holding the total equal to one cycle makes it exactly 1.
+                # so the duration has to be an exact multiple of one cycle or
+                # the floor division silently drops a drain -- the original
+                # 1200/60/60 produced TEN cycles when one was intended, and the
+                # revision that fixed it pinned the total to a single cycle,
+                # which then made a multi-cycle run impossible to ask for.
+                # Multiplying here is the only shape that keeps the requested
+                # count and the derived count equal by construction.
                 withdraw_time=withdraw_seconds,
                 readvertise_time=readvertise_seconds,
-                test_duration_seconds=withdraw_seconds + readvertise_seconds,
+                test_duration_seconds=cycles
+                * (withdraw_seconds + readvertise_seconds),
                 transition_soft_threshold_seconds=(
                     _SC9_TRANSITION_SOFT_THRESHOLD_SECONDS
                 ),
+                # Record a flapped peer instead of aborting the drain on it.
+                #
+                # Reset/flap counters are monotonic and compared against the
+                # pre-transition baseline, so a single flap made the
+                # convergence predicate permanently unsatisfiable: the
+                # transition burned its timeout and so would every transition
+                # after it. Two consecutive runs died that way -- one in cycle
+                # 3, one in cycle 1 of 5 -- and neither produced the multi-cycle
+                # ECMP peak this test exists to measure. It also reported a
+                # session event as `transition NOT_CONVERGED`, which is the
+                # wrong diagnosis of the wrong thing.
+                #
+                # This does NOT make the run green on a flap. The
+                # BGP_SESSION_CHECK snapshot detected the same event
+                # independently on both of those runs, names the peer, and
+                # fails the run on its own -- asserted above, not assumed. What
+                # changes is that the other nine transitions still execute.
+                fail_on_session_flap=False,
             ),
             create_steps_stage(
                 steps=[

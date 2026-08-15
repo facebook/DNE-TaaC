@@ -3233,6 +3233,7 @@ def create_nexthop_group_poll_periodic_task(
     interval: int = 5,
     enable_plotting: bool = True,
     max_unprogrammed: t.Optional[int] = None,
+    unprogrammed_tolerance_samples: t.Optional[int] = None,
     min_ecmp_width: t.Optional[int] = None,
     max_multiway_groups: t.Optional[int] = None,
     recovery_tolerance: t.Optional[float] = None,
@@ -3279,6 +3280,13 @@ def create_nexthop_group_poll_periodic_task(
             the most direct available expression of "within the hardware
             limit". Omitted (None) = not asserted, preserving existing
             callers' behaviour.
+        unprogrammed_tolerance_samples: How many CONSECUTIVE samples may exceed
+            `max_unprogrammed` before it is a breach. Omitted = any exceedance
+            breaches, the original behaviour. Group creation and hardware
+            programming are not atomic, so a poll landing inside a rebuild sees
+            groups legitimately in flight -- a five-cycle drain caught exactly
+            one such sample in 391. Set this to gate on groups STAYING
+            unprogrammed rather than on an instantaneous peak.
         min_ecmp_width: Minimum next-hop count for a group to be counted as a
             real ECMP set. Set it (e.g. `2`) to have the check report, and
             optionally gate, the number of genuine multi-way sets rather than
@@ -3337,6 +3345,7 @@ def create_nexthop_group_poll_periodic_task(
     # -- and therefore its golden hash -- is unchanged.
     for key, value in (
         ("max_unprogrammed", max_unprogrammed),
+        ("unprogrammed_tolerance_samples", unprogrammed_tolerance_samples),
         ("min_ecmp_width", min_ecmp_width),
         ("max_multiway_groups", max_multiway_groups),
         ("recovery_tolerance", recovery_tolerance),
