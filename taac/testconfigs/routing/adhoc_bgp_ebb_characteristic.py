@@ -16,8 +16,10 @@ External consumers import from this member module directly; see
 from taac.abstractions.physical_inventory import (
     BAG010_ASH6,
     BAG012_ASH6,
+    BAG013_ASH6,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
     create_bgp_ebb_characteristic_route_churn_processing_test_config,
@@ -229,6 +231,34 @@ BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
     )
 )
 
+# ═══════════════════════════════════════════════════════════════════════════
+#   SC9 : BOUNDED NUMBER OF PROGRAMMED ECMP SETS  (characteristic 9)
+# ═══════════════════════════════════════════════════════════════════════════
+#   ┌──────────────────────────┬─────────────────────────────────┐
+#   │ 128 eBGP peers per AFI   │ all advertise the SAME 5,000    │
+#   │ next-hop = own /127,/31  │ prefixes -> 1 ECMP set per AFI, │
+#   │ (connected, no IGP)      │ 128 next-hops wide              │
+#   └──────────────────────────┴─────────────────────────────────┘
+#   DRAIN : one commit across every eBGP pool (spread=False), so all 128
+#           peers withdraw together and prefixes transiently resolve over
+#           different surviving subsets -- the allocation the test is about.
+#   GATES : steady-state width 128/AFI (in-sequence discovery step);
+#           hardware headroom on the device-maintained ecmp_high_watermark,
+#           delta bounded by the topology's structural max of 128*2+2 = 258;
+#           recovery to the discovered baseline (postcheck); and instrument
+#           liveness (min_observed_groups) so an all-zero series cannot pass.
+#   NOTE  : ad-hoc, not conveyor-scheduled. The retained
+#           BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG is untouched.
+#   name  : BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG
+#           (DERIVED by _derive_test_config_name as
+#           "{SHORT_NAME}_{workflow}_TEST_CONFIG{_UG}" -- it is NOT the Python
+#           constant below, and it is the value --test-config takes.)
+BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG = (
+    create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
+        BAG013_ASH6, enable_update_group=True
+    )
+)
+
 
 __all__ = [
     "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
@@ -237,4 +267,5 @@ __all__ = [
     "BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG",
+    "BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG",
 ]

@@ -81,6 +81,7 @@ from taac.playbooks.playbook_definitions import (
     create_test_computational_load_for_bgp_plus_plus_playbook,
     create_test_constant_attribute_storage_playbook,
     create_transient_memory_ingress_peer_scale_playbook,
+    get_bgp_ebb_bounded_ecmp_sc9_playbook,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_bounded_ecmp_sets_playbook,
@@ -2423,6 +2424,79 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
         basic_port_configs=compiled.basic_port_configs,
         playbooks=[
             get_bgp_ebb_bounded_ecmp_sets_playbook(
+                device_name=device_name,
+            )
+        ],
+    )
+
+
+def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
+    physical_inventory: PhysicalInventory,
+    name_override: str | None = None,
+    enable_update_group: bool = True,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+) -> taac_types.TestConfig:
+    """Build the SC9 bounded-ECMP characteristic config from DICE intent.
+
+    Sibling of ``create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config``,
+    reusing the BOUNDED_ECMP topology unchanged. It differs only in the playbook
+    it attaches: SC9 asserts the characteristic (steady-state ECMP width, a
+    simultaneous drain, hardware headroom on the device-maintained watermark,
+    and recovery), where the retained config runs a staggered oscillation with a
+    single raw-count ceiling.
+
+    A separate factory rather than a flag on the existing one, so the scheduled
+    bounded-ECMP config stays byte-identical and its golden entry does not move.
+
+    Open/R is OFF (the profile default). SC9 does not need an IGP: every eBGP
+    peer advertises with next-hop = its own session address on a directly
+    attached /127 (v6) or /31 (v4), so all 128 next-hops resolve as connected
+    routes. Open/R would only add background nexthop groups that are noise in a
+    count whose converged value should be 2.
+    """
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
+    )
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    device_name = physical_inventory.device_name
+    bound = BOUNDED_ECMP.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=BOUNDED_ECMP_PORT_MAP,
+        parent_networks=BOUNDED_ECMP_PARENT_NETWORKS,
+        peer_groups=BOUNDED_ECMP_PEER_GROUPS,
+        as_numbers=BOUNDED_ECMP_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=openr_mode_for_bgpcpp_profile(profile),
+            update_group_enable=enable_update_group,
+        ),
+    )
+    compiled = bound.compile()
+
+    return TestConfig(
+        name=name_override
+        or _derive_test_config_name(
+            physical_inventory,
+            "SC9_BOUNDED_ECMP_SETS",
+            enable_update_group=enable_update_group,
+        ),
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_driver_args=physical_inventory.host_driver_args,
+        oss_mock_device_data=physical_inventory.oss_mock_device_data,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=compiled.setup_tasks,
+        teardown_tasks=compiled.teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=[
+            get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 device_name=device_name,
             )
         ],

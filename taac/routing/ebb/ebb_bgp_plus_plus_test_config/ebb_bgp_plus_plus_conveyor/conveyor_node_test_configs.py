@@ -27,6 +27,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
+    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
 )
 
 # The four conveyor bindings and retained Stage 1 UG and scale counterparts live in
@@ -173,6 +174,7 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # (global bgp_setting_config flag; persisted peers are re-grouped on restart).
     # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
+    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag013.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6
