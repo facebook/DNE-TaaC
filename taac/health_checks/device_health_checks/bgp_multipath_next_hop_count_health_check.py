@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
+import dataclasses
 import ipaddress
 import typing as t
 
@@ -8,11 +9,48 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
+from taac.health_checks.convergence_observer import (
+    ConvergenceOutcome,
+    ConvergenceSample,
+    FatalPredicateError,
+    observe_convergence,
+)
 from taac.utils.health_check_utils import (
     ip_ntop,
     is_parent_prefix,
 )
 from taac.health_check.health_check import types as hc_types
+
+
+class _BaselineNotReady(ValueError):
+    """A required AFI has no multipath prefixes YET.
+
+    Distinct from every other ``ValueError`` reachable during a discovery
+    attempt -- an unsupported `required_address_families` entry, or a malformed
+    prefix from the device -- because this one, and only this one, can heal by
+    waiting. The polling path retries it and surfaces the others immediately.
+
+    Subclasses ``ValueError`` on purpose: the one-shot path lets it escape to
+    the caller's broad handler and report ERROR, and that behaviour, along with
+    any caller catching ``ValueError``, must not change.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class _DiscoveryAttempt:
+    """One complete measurement of the eBGP multipath distribution.
+
+    ``not_ready_reason`` is None when the measurement satisfied the sanity
+    bounds. Otherwise it carries the operator-facing explanation, which doubles
+    as the FAIL message on the one-shot path and as the non-converged detail on
+    the polling path -- so both paths report the same thing for the same state.
+    """
+
+    widths: t.Dict[int, int]
+    prefixes: t.Set[str]
+    distribution_summary: t.Dict[int, int]
+    skipped_ibgp_count: int
+    not_ready_reason: t.Optional[str]
 
 
 class BgpMultipathNextHopCountHealthCheck(
@@ -125,82 +163,41 @@ class BgpMultipathNextHopCountHealthCheck(
         Optional sanity bounds catch the case where the measurement is wildly
         outside what the testbed should produce.
         """
-        min_multipath_width = check_params.get("min_multipath_width", 2)
-
         # A failed discovery must never leave a later validation reading state
-        # captured by an earlier run against this device.
+        # captured by an earlier run against this device. Hoisted above the
+        # poll so it fires exactly once, not once per iteration.
         BgpMultipathNextHopCountHealthCheck._discovered_baselines.pop(obj.name, None)
 
         try:
-            (
-                distribution,
-                skipped_ibgp_count,
-                skipped_originated_count,
-            ) = await self._measure_nexthop_distribution(check_params)
-
-            distribution_summary = {
-                width: len(prefixes) for width, prefixes in sorted(distribution.items())
-            }
-            self.logger.info(
-                f"Next-hop count distribution (eBGP only={check_params.get('ebgp_only', True)}, "
-                f"min_multipath_width={min_multipath_width}): {distribution_summary}"
-            )
-            self.logger.info(
-                f"Skipped: {skipped_originated_count} originated, {skipped_ibgp_count} iBGP/local routes"
-            )
-
-            if not distribution:
-                return hc_types.HealthCheckResult(
-                    status=hc_types.HealthCheckStatus.FAIL,
-                    message=(
-                        f"No multipath eBGP prefixes (>= {min_multipath_width}-way) "
-                        f"found in BGP RIB (skipped {skipped_ibgp_count} iBGP/local routes)"
-                    ),
-                )
-
-            required_afis = self._required_address_families(check_params)
-            discovered_widths: t.Dict[int, int]
-            if required_afis:
-                discovered_widths, discovered_prefixes = self._discover_by_afi(
-                    distribution, required_afis
-                )
+            # Opt-in: DETECT steady state instead of assuming it. Without a hard
+            # timeout this is the historical single read, byte-for-byte the same
+            # decisions in the same order.
+            hard_timeout = check_params.get("convergence_hard_timeout_seconds")
+            if hard_timeout is None:
+                attempt = await self._attempt_baseline_discovery(check_params)
             else:
-                discovered_width, discovered_prefixes = max(
-                    distribution.items(), key=lambda kv: len(kv[1])
+                attempt = await self._poll_for_baseline(
+                    check_params, float(hard_timeout)
                 )
-                discovered_widths = {
-                    ipaddress.ip_network(prefix, strict=False).version: discovered_width
-                    for prefix in discovered_prefixes
-                }
 
-            sanity_failures = [
-                f"IPv{afi}: {failure}"
-                for afi, discovered_width in sorted(discovered_widths.items())
-                for failure in self._baseline_sanity_failures(
-                    discovered_width, check_params
-                )
-            ]
-            if sanity_failures:
+            if attempt.not_ready_reason is not None:
                 return hc_types.HealthCheckResult(
                     status=hc_types.HealthCheckStatus.FAIL,
-                    message=(
-                        f"BGP multipath baseline discovery sanity-check FAILED: "
-                        f"{'; '.join(sanity_failures)}. Distribution: {distribution_summary}"
-                    ),
+                    message=attempt.not_ready_reason,
                 )
 
             BgpMultipathNextHopCountHealthCheck._discovered_baselines[obj.name] = (
-                set(discovered_prefixes),
-                dict(discovered_widths),
+                set(attempt.prefixes),
+                dict(attempt.widths),
             )
 
             success_message = (
                 f"BGP multipath baseline discovery PASSED.\n"
-                f"  - Measured baseline widths: {discovered_widths}\n"
-                f"  - Prefixes at baseline width: {len(discovered_prefixes)}\n"
-                f"  - Distribution: {distribution_summary}\n"
-                f"  - Skipped {skipped_ibgp_count} iBGP/local routes\n"
-                f"  - Sample prefixes: {list(discovered_prefixes)[:5]}"
+                f"  - Measured baseline widths: {attempt.widths}\n"
+                f"  - Prefixes at baseline width: {len(attempt.prefixes)}\n"
+                f"  - Distribution: {attempt.distribution_summary}\n"
+                f"  - Skipped {attempt.skipped_ibgp_count} iBGP/local routes\n"
+                f"  - Sample prefixes: {list(attempt.prefixes)[:5]}"
             )
             self.logger.info(success_message)
             return hc_types.HealthCheckResult(
@@ -215,6 +212,193 @@ class BgpMultipathNextHopCountHealthCheck(
                 status=hc_types.HealthCheckStatus.ERROR,
                 message=error_message,
             )
+
+    async def _attempt_baseline_discovery(
+        self,
+        check_params: t.Dict[str, t.Any],
+    ) -> _DiscoveryAttempt:
+        """One complete measurement of the eBGP multipath distribution.
+
+        Reads the device and evaluates the sanity bounds; stores nothing, so it
+        is safe to call repeatedly. ``not_ready_reason`` carries the verbatim
+        message the one-shot path used to return, so wrapping this in a poll
+        does not change what an operator reads for the same device state.
+
+        Deliberately does NOT catch the ``_BaselineNotReady`` that
+        ``_discover_by_afi`` raises when a required AFI has no multipath
+        prefixes yet. On the one-shot path that must keep escaping to the
+        caller's broad handler and reporting ERROR, exactly as before; only the
+        polling path reinterprets it as "not yet", because only there is
+        retrying meaningful -- and it reinterprets ONLY that type, so a
+        deterministic error is not retried into a timeout.
+        """
+        min_multipath_width = check_params.get("min_multipath_width", 2)
+
+        (
+            distribution,
+            skipped_ibgp_count,
+            skipped_originated_count,
+        ) = await self._measure_nexthop_distribution(check_params)
+
+        distribution_summary = {
+            width: len(prefixes) for width, prefixes in sorted(distribution.items())
+        }
+        self.logger.info(
+            f"Next-hop count distribution (eBGP only={check_params.get('ebgp_only', True)}, "
+            f"min_multipath_width={min_multipath_width}): {distribution_summary}"
+        )
+        self.logger.info(
+            f"Skipped: {skipped_originated_count} originated, {skipped_ibgp_count} iBGP/local routes"
+        )
+
+        if not distribution:
+            return _DiscoveryAttempt(
+                widths={},
+                prefixes=set(),
+                distribution_summary=distribution_summary,
+                skipped_ibgp_count=skipped_ibgp_count,
+                not_ready_reason=(
+                    f"No multipath eBGP prefixes (>= {min_multipath_width}-way) "
+                    f"found in BGP RIB (skipped {skipped_ibgp_count} iBGP/local routes)"
+                ),
+            )
+
+        required_afis = self._required_address_families(check_params)
+        discovered_widths: t.Dict[int, int]
+        if required_afis:
+            discovered_widths, discovered_prefixes = self._discover_by_afi(
+                distribution, required_afis
+            )
+        else:
+            discovered_width, discovered_prefixes = max(
+                distribution.items(), key=lambda kv: len(kv[1])
+            )
+            discovered_widths = {
+                ipaddress.ip_network(prefix, strict=False).version: discovered_width
+                for prefix in discovered_prefixes
+            }
+
+        sanity_failures = [
+            f"IPv{afi}: {failure}"
+            for afi, discovered_width in sorted(discovered_widths.items())
+            for failure in self._baseline_sanity_failures(
+                discovered_width, check_params
+            )
+        ]
+        return _DiscoveryAttempt(
+            widths=discovered_widths,
+            prefixes=discovered_prefixes,
+            distribution_summary=distribution_summary,
+            skipped_ibgp_count=skipped_ibgp_count,
+            not_ready_reason=(
+                f"BGP multipath baseline discovery sanity-check FAILED: "
+                f"{'; '.join(sanity_failures)}. Distribution: {distribution_summary}"
+                if sanity_failures
+                else None
+            ),
+        )
+
+    async def _poll_for_baseline(
+        self,
+        check_params: t.Dict[str, t.Any],
+        hard_timeout_seconds: float,
+    ) -> _DiscoveryAttempt:
+        """Poll until the measured width satisfies the sanity bounds and HOLDS.
+
+        Steady state is a property of the device, not of the clock, so this
+        replaces a fixed pre-read settle: too short and the baseline is captured
+        mid-convergence, too long and every run pays for the worst case.
+
+        The holding requirement is the part a plain retry loop cannot express.
+        ``observe_convergence`` resets its confirmation window on any failing
+        observation AND on any predicate error, so a width that touches the
+        expected value once and falls back does not satisfy this.
+        """
+        predicate_timeout = check_params.get("convergence_predicate_timeout_seconds")
+        last: t.Dict[str, _DiscoveryAttempt] = {}
+
+        async def _predicate() -> ConvergenceSample:
+            try:
+                attempt = await self._attempt_baseline_discovery(check_params)
+            except _BaselineNotReady as e:
+                # A required AFI with no multipath prefixes YET is the ordinary
+                # mid-convergence state, not a fault. Returning it as a
+                # non-converged sample keeps the poll going; letting it raise
+                # would burn an entry in predicate_errors and reset the window.
+                return ConvergenceSample(converged=False, detail=str(e))
+            except ValueError as e:
+                # Everything else a discovery attempt can raise is DETERMINISTIC
+                # -- an unsupported `required_address_families` entry, or a
+                # malformed prefix -- so retrying it cannot help. Catching those
+                # as "not yet" spent the whole hard timeout and then reported
+                # `did not reach a steady state`, hiding a config error behind a
+                # timeout; the one-shot path had always reported them as ERROR.
+                # FatalPredicateError propagates straight out of
+                # observe_convergence to the caller's broad handler, which
+                # restores exactly that.
+                raise FatalPredicateError(
+                    f"BGP multipath baseline discovery failed with a "
+                    f"non-retryable {type(e).__name__}: {e}"
+                ) from e
+            last["attempt"] = attempt
+            return ConvergenceSample(
+                converged=attempt.not_ready_reason is None,
+                detail=(
+                    attempt.not_ready_reason
+                    if attempt.not_ready_reason is not None
+                    else f"baseline widths {attempt.widths}"
+                ),
+            )
+
+        result = await observe_convergence(
+            _predicate,
+            # No SLA classification wanted: the question is "did it settle",
+            # not "did it settle fast enough". With this None the success
+            # outcome is CONVERGED and never WITHIN_SLA, so the gate below must
+            # not test for WITHIN_SLA.
+            soft_threshold_seconds=None,
+            hard_timeout_seconds=hard_timeout_seconds,
+            poll_interval_seconds=float(
+                check_params.get("convergence_poll_interval_seconds", 10.0)
+            ),
+            stability_window_seconds=float(
+                check_params.get("convergence_stability_window_seconds", 0.0)
+            ),
+            predicate_timeout_seconds=(
+                float(predicate_timeout) if predicate_timeout is not None else None
+            ),
+        )
+
+        attempt = last.get("attempt")
+        if (
+            result.outcome is not ConvergenceOutcome.NOT_CONVERGED
+            and attempt is not None
+        ):
+            self.logger.info(
+                f"BGP multipath baseline reached a steady state after "
+                f"{result.attempts} polls ({result.convergence_time_seconds}s to "
+                f"first satisfy, confirmed over the stability window)"
+            )
+            return attempt
+
+        # Timed out. Report the last thing actually seen rather than a bare
+        # timeout, and say how many polls errored -- last_observation is not
+        # updated by an errored poll, so it can be stale without that count.
+        reason = (
+            f"BGP multipath baseline did not reach a steady state within "
+            f"{hard_timeout_seconds}s ({result.attempts} polls, "
+            f"{len(result.predicate_errors)} of them errored). "
+            f"Last observation: {result.last_observation or 'none'}"
+        )
+        if attempt is None:
+            return _DiscoveryAttempt(
+                widths={},
+                prefixes=set(),
+                distribution_summary={},
+                skipped_ibgp_count=0,
+                not_ready_reason=reason,
+            )
+        return dataclasses.replace(attempt, not_ready_reason=reason)
 
     def _required_address_families(
         self, check_params: t.Dict[str, t.Any]
@@ -251,7 +435,7 @@ class BgpMultipathNextHopCountHealthCheck(
                 if candidates
             }
             if not family_distribution:
-                raise ValueError(f"no IPv{afi} multipath eBGP baseline prefixes")
+                raise _BaselineNotReady(f"no IPv{afi} multipath eBGP baseline prefixes")
             width, family_prefixes = max(
                 family_distribution.items(), key=lambda item: len(item[1])
             )

@@ -6412,6 +6412,11 @@ def create_multipath_nexthop_count_health_check_step(
     use_discovered_prefixes: bool = False,
     use_discovered_width: bool = False,
     peers_stopped_delta: t.Optional[int] = None,
+    convergence_hard_timeout_seconds: t.Optional[float] = None,
+    convergence_poll_interval_seconds: t.Optional[float] = None,
+    convergence_stability_window_seconds: t.Optional[float] = None,
+    convergence_predicate_timeout_seconds: t.Optional[float] = None,
+    stage: t.Optional[taac_types.ValidationStage] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """
@@ -6446,6 +6451,22 @@ def create_multipath_nexthop_count_health_check_step(
         use_discovered_width: If True, derive expected_nexthop_count from the
             stored baseline width minus peers_stopped_delta
         peers_stopped_delta: Peers currently stopped (default 0 / restore phase)
+        convergence_hard_timeout_seconds: Discovery-only. When set, the step
+            POLLS until the measured width satisfies the sanity bounds and
+            holds, rather than reading once after a fixed settle. Omitted =
+            today's single read.
+        convergence_poll_interval_seconds: Upper bound between polls.
+        convergence_stability_window_seconds: How long the measurement must
+            hold before it is accepted.
+        convergence_predicate_timeout_seconds: Per-read cap.
+        stage: Validation stage. This decides whether a FAILING check aborts
+            the run: ``ValidationStep.run`` maps PRE_TEST to ``TestbedError``
+            and POST_TEST to ``TestCaseFailure``, and everything else --
+            INCLUDING MID_TEST and the default of None -- to no exception at
+            all, so the step logs its failure and the playbook continues.
+            ``fail_fast=True`` does not change that; it is gated on the same
+            mapping. Leave unset for today's non-blocking behaviour; pass
+            POST_TEST when a failure here must stop the test.
         description: Custom description for the step
 
     Returns:
@@ -6519,9 +6540,14 @@ def create_multipath_nexthop_count_health_check_step(
                         expected_nexthop_count=expected_nexthop_count,
                         min_nexthop_count=min_nexthop_count,
                         max_nexthop_count=max_nexthop_count,
+                        convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
+                        convergence_poll_interval_seconds=convergence_poll_interval_seconds,
+                        convergence_stability_window_seconds=convergence_stability_window_seconds,
+                        convergence_predicate_timeout_seconds=convergence_predicate_timeout_seconds,
                     )
                 ],
                 fail_fast=True,
+                stage=stage,
             )
         ),
     )

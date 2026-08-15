@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 from neteng.netcastle.logger import ConsoleFileLogger
 from taac.constants import TestDevice
 from taac.health_checks.device_health_checks.bgp_multipath_next_hop_count_health_check import (
+    _BaselineNotReady,
     BgpMultipathNextHopCountHealthCheck,
 )
 from taac.health_check.health_check import types as hc_types
@@ -479,3 +480,201 @@ class BgpMultipathValidationModeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("no discovered baseline width for IPv6", result.message)
+
+
+class BgpMultipathDiscoveryPollingTest(unittest.IsolatedAsyncioTestCase):
+    """Discovery can DETECT steady state instead of assuming it after a settle.
+
+    These run against the real `observe_convergence` with sub-second budgets,
+    so they exercise the actual integration rather than a patched stand-in.
+
+    What they protect: the baseline stored here is what the SC9 recovery
+    postcheck is scored against. A width captured mid-convergence is worse than
+    a late one, because it lets a genuinely degraded run "recover" to a number
+    that was never the steady state.
+    """
+
+    def setUp(self):
+        _reset_baselines()
+
+    @staticmethod
+    def _poll_params(**kwargs):
+        return {
+            "discover_baseline": True,
+            "expected_min_baseline_width": 8,
+            "expected_max_baseline_width": 8,
+            "convergence_hard_timeout_seconds": 5.0,
+            "convergence_poll_interval_seconds": 0.01,
+            "convergence_stability_window_seconds": 0.0,
+            **kwargs,
+        }
+
+    @staticmethod
+    def _v4(width, count=3):
+        return [
+            _make_entry(f"10.0.{i}.0", 24, [f"10.1.0.{j}" for j in range(width)])
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def _v6(width, count=3):
+        return [
+            _make_entry(
+                f"2001:db8:{i}::", 64, [f"2001:db8:ff::{j}" for j in range(width)]
+            )
+            for i in range(count)
+        ]
+
+    async def test_poll_waits_until_the_width_reaches_the_expected_value(self):
+        """Two mid-convergence reads then a good one: the good one is stored."""
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(
+            side_effect=[self._v4(4), self._v4(4), self._v4(8)]
+        )
+
+        result = await hc._run(device, MagicMock(), self._poll_params())
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        _, widths = _baseline_for(device)
+        self.assertEqual({4: 8}, widths)
+
+    async def test_poll_fails_and_stores_nothing_when_the_width_never_settles(self):
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(return_value=self._v4(4))
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            self._poll_params(convergence_hard_timeout_seconds=0.05),
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("did not reach a steady state", result.message)
+        # The last thing actually observed, not a bare timeout.
+        self.assertIn("sanity-check FAILED", result.message)
+        self.assertNotIn(
+            device.name, BgpMultipathNextHopCountHealthCheck._discovered_baselines
+        )
+
+    async def test_stability_window_rejects_a_width_that_does_not_hold(self):
+        """A width that touches the expected value and falls back is not a
+        steady state. This is the assertion a plain retry loop cannot make:
+        the retry stops at the first PASS."""
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(
+            side_effect=[self._v4(8), self._v4(4)] * 100
+        )
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            self._poll_params(
+                convergence_hard_timeout_seconds=0.4,
+                convergence_stability_window_seconds=0.15,
+            ),
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("did not reach a steady state", result.message)
+        self.assertNotIn(
+            device.name, BgpMultipathNextHopCountHealthCheck._discovered_baselines
+        )
+
+    async def test_missing_address_family_is_retried_not_errored(self):
+        """`_discover_by_afi` raises when a required AFI has no multipath
+        prefixes yet -- the ordinary mid-convergence state on a dual-stack
+        testbed, and the reason SC9 could not simply reuse the one-shot read."""
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(
+            side_effect=[self._v4(8), self._v4(8) + self._v6(8)]
+        )
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            self._poll_params(required_address_families=["ipv4", "ipv6"]),
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        _, widths = _baseline_for(device)
+        self.assertEqual({4: 8, 6: 8}, widths)
+
+    async def test_one_shot_discovery_still_errors_on_a_missing_address_family(self):
+        """Behaviour preservation: without polling the ValueError must keep
+        escaping to ERROR. The refactor must not quietly reclassify it as FAIL,
+        which would also make the framework retry loop start engaging."""
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(return_value=self._v4(8))
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            {"discover_baseline": True, "required_address_families": ["ipv4", "ipv6"]},
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
+        self.assertIn("no IPv6 multipath eBGP baseline prefixes", result.message)
+
+    async def test_one_shot_empty_rib_message_is_unchanged(self):
+        """The one-shot FAIL messages are reused verbatim as the poll's
+        non-converged detail, so they are pinned here."""
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(return_value=[])
+
+        result = await hc._run(device, MagicMock(), {"discover_baseline": True})
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("No multipath eBGP prefixes", result.message)
+
+    async def test_unsupported_address_family_errors_instead_of_polling(self):
+        """A deterministic error must not be retried into a timeout.
+
+        Only `_BaselineNotReady` can heal by waiting. An unsupported
+        `required_address_families` entry never can, so catching every
+        ValueError as "not yet" spent the whole hard timeout and then reported
+        `did not reach a steady state` -- a config typo disguised as a device
+        that would not converge. The one-shot path always reported it as ERROR;
+        the polling path now does too.
+        """
+        hc, device = _make_hc()
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(return_value=self._v4(8))
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            self._poll_params(
+                required_address_families=["ipv4", "ipv7"],
+                convergence_hard_timeout_seconds=30.0,
+            ),
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
+        self.assertIn("unsupported required address family", result.message)
+        self.assertNotIn("did not reach a steady state", result.message)
+        # It also must not have burned the 30s budget getting there.
+        self.assertNotIn(
+            device.name, BgpMultipathNextHopCountHealthCheck._discovered_baselines
+        )
+
+    async def test_malformed_prefix_errors_instead_of_polling(self):
+        """The other non-retryable ValueError reachable from a discovery
+        attempt: `ipaddress.ip_network` on a prefix the device reported."""
+        hc, device = _make_hc()
+        # num_bits is formatted straight into the prefix string, so 99 yields
+        # "10.0.0.0/99" and ip_network rejects it.
+        bad = _make_entry("10.0.0.0", 99, [f"10.1.0.{j}" for j in range(8)])
+        hc.driver.async_get_bgp_rib_entries = AsyncMock(return_value=[bad])
+
+        result = await hc._run(
+            device,
+            MagicMock(),
+            self._poll_params(convergence_hard_timeout_seconds=30.0),
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
+        self.assertNotIn("did not reach a steady state", result.message)
+
+    def test_not_ready_is_a_value_error_subclass(self):
+        """Pins the one-shot contract: the transient still escapes as a
+        ValueError, so any caller catching that type is unaffected."""
+        self.assertTrue(issubclass(_BaselineNotReady, ValueError))

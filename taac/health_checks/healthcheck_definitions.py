@@ -2322,6 +2322,10 @@ def create_next_hop_count_check(
     expected_nexthop_count: t.Optional[int] = None,
     min_nexthop_count: t.Optional[int] = None,
     max_nexthop_count: t.Optional[int] = None,
+    convergence_hard_timeout_seconds: t.Optional[float] = None,
+    convergence_poll_interval_seconds: t.Optional[float] = None,
+    convergence_stability_window_seconds: t.Optional[float] = None,
+    convergence_predicate_timeout_seconds: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """NEXT_HOP_COUNT_CHECK — BGP multipath next-hop count.
@@ -2353,8 +2357,45 @@ def create_next_hop_count_check(
         expected_nexthop_count: Exact number of next-hops to require.
         min_nexthop_count: Minimum acceptable next-hops.
         max_nexthop_count: Maximum acceptable next-hops.
+        convergence_hard_timeout_seconds: Discovery-only. When set, discovery
+            POLLS the measured width until it satisfies the sanity bounds and
+            holds, instead of reading once. Detecting steady state beats
+            guessing it with a fixed settle: too short captures a
+            mid-convergence baseline, too long taxes every run.
+        convergence_poll_interval_seconds: Upper bound on the gap between
+            polls (runtime default 10s). Each poll is a full dual-AFI RIB walk,
+            so keep it generous on high-scale testbeds.
+        convergence_stability_window_seconds: How long the measurement must
+            HOLD before it is accepted (runtime default 0 = accept the first
+            good sample). This is the part a plain retry loop cannot express.
+        convergence_predicate_timeout_seconds: Per-read cap, so one hung RIB
+            walk cannot consume the whole budget.
         check_id: Optional unique identifier for the check.
+
+    Raises:
+        ValueError: if a convergence sub-parameter is supplied without
+            ``convergence_hard_timeout_seconds``. The sub-parameters are inert
+            without it, and a silently inert gate is the failure mode this
+            check exists to prevent.
     """
+    convergence_sub_params = {
+        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+        "convergence_stability_window_seconds": convergence_stability_window_seconds,
+        "convergence_predicate_timeout_seconds": convergence_predicate_timeout_seconds,
+    }
+    if convergence_hard_timeout_seconds is None:
+        orphaned = sorted(k for k, v in convergence_sub_params.items() if v is not None)
+        if orphaned:
+            raise ValueError(
+                f"{', '.join(orphaned)} require convergence_hard_timeout_seconds; "
+                f"without it discovery does not poll and these are ignored"
+            )
+    elif not discover_baseline:
+        raise ValueError(
+            "convergence_hard_timeout_seconds only applies to discovery mode "
+            "(discover_baseline=True); validation mode reads the stored baseline"
+        )
+
     check_params: t.Dict[str, t.Any] = {}
 
     def _set_if_present(key: str, value: t.Any) -> None:
@@ -2368,6 +2409,23 @@ def create_next_hop_count_check(
         _set_if_present("expected_max_baseline_width", expected_max_baseline_width)
         _set_if_present("min_multipath_width", min_multipath_width)
         _set_if_present("required_address_families", required_address_families)
+        # Appended AFTER every pre-existing key: check_params is serialized with
+        # plain json.dumps (no sort_keys) and the golden hashes that string, so
+        # insertion position matters as much as presence.
+        _set_if_present(
+            "convergence_hard_timeout_seconds", convergence_hard_timeout_seconds
+        )
+        _set_if_present(
+            "convergence_poll_interval_seconds", convergence_poll_interval_seconds
+        )
+        _set_if_present(
+            "convergence_stability_window_seconds",
+            convergence_stability_window_seconds,
+        )
+        _set_if_present(
+            "convergence_predicate_timeout_seconds",
+            convergence_predicate_timeout_seconds,
+        )
     if use_discovered_prefixes:
         check_params["use_discovered_prefixes"] = True
     if use_discovered_width:
