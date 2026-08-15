@@ -994,6 +994,35 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     )
 
 
+def _ebb_drained_prefix_descriptors(
+    prefix_end_index: int,
+    prefix_start_index: int = 0,
+    prefix_pool_regex: str = ".*EBGP.*",
+) -> t.List[t.Dict[str, t.Any]]:
+    """Descriptors for the eBGP prefixes a FAUU drain touches.
+
+    Thin wrapper over the topology helper, which owns the definition so the
+    scale TestConfig builds the identical window. Local import keeps the
+    topology constants off this module's import path.
+
+    Args:
+        prefix_end_index: Exclusive end of the drained window.
+        prefix_start_index: Inclusive start of the drained window.
+        prefix_pool_regex: The same regex the drain uses to select IXIA pools,
+            so a single-AFI drain does not demand coverage of the other pool.
+
+    Returns:
+        One descriptor per matching address family.
+    """
+    from taac.abstractions.topologies.ebb_full_scale import (
+        ebb_drained_prefix_descriptors,
+    )
+
+    return ebb_drained_prefix_descriptors(
+        prefix_end_index, prefix_start_index, prefix_pool_regex
+    )
+
+
 def get_bgp_ebb_fauu_drain_undrain_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
@@ -1073,6 +1102,9 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
                 tcp_dump_capture_interface_ebgp=tcp_dump_capture_interface_ebgp,
                 tcp_dump_capture_interface_ibgp=tcp_dump_capture_interface_ibgp,
                 soak_time_seconds=soak_time_seconds,
+                drained_prefix_descriptors=_ebb_drained_prefix_descriptors(
+                    prefix_end_index, prefix_pool_regex=prefix_pool_regex
+                ),
             )
         ],
     )

@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+import functools
 import json
 import unittest
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
+    _ebb_drained_prefix_descriptors,
     get_bgp_ebb_attribute_churn_playbook,
     get_bgp_ebb_fauu_drain_undrain_playbook,
     get_bgp_ebb_plane_drain_undrain_playbook,
@@ -84,6 +86,23 @@ def _locked_step_kwargs() -> dict:
         "openr_mode": "standalone",
         "attribute_matrix": EXPECTED_MATRIX,
     }
+
+
+# The fauu captures assert ORIGIN and LOCAL_PREF on the drained prefixes, so the
+# factory requires the window; the plane factory takes no such argument. Bind it
+# here so the shared loops below can pass identical kwargs to both.
+_DRAINED_WINDOW: list[dict] = [
+    {
+        "start_prefix": "120.0.0.0",
+        "prefix_step": 256,
+        "prefix_length": 24,
+        "start_index": 0,
+        "end_index": 96,
+    }
+]
+_fauu_stage_with_window = functools.partial(
+    create_fauu_drain_undrain_stage, drained_prefix_descriptors=_DRAINED_WINDOW
+)
 
 
 def _step_payload(step: taac_types.Step) -> dict:
@@ -280,7 +299,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         read.
         """
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         # counter: poll only, no capture. pcap: capture only, no poll.
@@ -300,6 +319,130 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     self.assertEqual(expected_polls, polls)
                     self.assertEqual(expected_pcap_verifiers, pcap_verifiers)
 
+    def test_drained_window_follows_the_selected_pools(self) -> None:
+        """A single-AFI drain must not demand coverage of the other pool.
+
+        prefix_pool_regex is configurable and the capture asserts that every
+        described prefix was advertised, so describing both families while
+        draining one would fail a healthy run on the untouched family.
+        """
+        both = _ebb_drained_prefix_descriptors(96)
+        self.assertEqual(
+            ["120.0.0.0", "2402:db00::"],
+            sorted(d["start_prefix"] for d in both),
+        )
+
+        v4_only = _ebb_drained_prefix_descriptors(96, prefix_pool_regex=".*IPV4_EBGP.*")
+        self.assertEqual(["120.0.0.0"], [d["start_prefix"] for d in v4_only])
+
+        v6_only = _ebb_drained_prefix_descriptors(
+            96, prefix_pool_regex="PREFIX_POOL_IPV6_EBGP"
+        )
+        self.assertEqual(["2402:db00::"], [d["start_prefix"] for d in v6_only])
+
+        # A regex matching no pool means the drain touches nothing, which is a
+        # typo rather than a valid narrowing.
+        with self.assertRaises(ValueError) as raised:
+            _ebb_drained_prefix_descriptors(96, prefix_pool_regex=".*IBGP.*")
+
+        self.assertIn("matches none of the EBB", str(raised.exception))
+
+    def test_playbook_scopes_the_window_to_its_own_pool_regex(self) -> None:
+        """The window must follow the regex the playbook hands the drain."""
+        playbook = get_bgp_ebb_fauu_drain_undrain_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            tcp_dump_capture_interface_ebgp="Ethernet1",
+            tcp_dump_capture_interface_ibgp="Ethernet2",
+            prefix_pool_regex=".*IPV4_EBGP.*",
+        )
+        windows = [
+            payload["expected_attribute_prefixes"]
+            for payload in (
+                _step_payload(step)
+                for step in _sequential_steps(playbook)
+                if step.name == taac_types.StepName.CUSTOM_STEP
+                and step.step_params is not None
+            )
+            if payload.get("custom_step_name") == "verify_drain_convergence"
+            and payload.get("use_pcap_analysis")
+        ]
+        self.assertTrue(windows)
+        for window in windows:
+            self.assertEqual(["120.0.0.0"], [d["start_prefix"] for d in window])
+
+    def test_captures_without_a_drained_window_are_rejected_at_construction(
+        self,
+    ) -> None:
+        """A missing window must fail here, not 35 minutes into a hardware run.
+
+        Every pcap step sets an attribute expectation, and an expectation with
+        no window is rejected at verification time as a misconfiguration. That
+        verdict arrives only after the drain has already run, so the factory
+        refuses to build the stage instead.
+        """
+        with self.assertRaises(ValueError) as raised:
+            create_fauu_drain_undrain_stage(
+                device_name="dut.example.com",
+                prefix_pool_regex=".*EBGP.*",
+                tcp_dump_capture_interface_ebgp="Ethernet1",
+                tcp_dump_capture_interface_ibgp="Ethernet2",
+            )
+
+        self.assertIn("drained_prefix_descriptors is required", str(raised.exception))
+
+        # Counter-only mode takes no capture, so it has nothing to scope and
+        # must still build.
+        create_fauu_drain_undrain_stage(
+            device_name="dut.example.com",
+            prefix_pool_regex=".*EBGP.*",
+            tcp_dump_capture_interface_ebgp="Ethernet1",
+            tcp_dump_capture_interface_ibgp="Ethernet2",
+            convergence_mode="counter",
+        )
+
+    def test_pcap_legs_expect_local_pref_per_bgp_semantics(self) -> None:
+        """LOCAL_PREF does not survive the eBGP hop, ORIGIN does.
+
+        RFC 4271 5.1.5: a speaker MUST ignore a LOCAL_PREF received from an
+        external peer and originates its own toward internal peers. So the eBGP
+        capture must carry the value IXIA set (120 while drained) and the iBGP
+        capture the DUT's own default (100 in both phases), while ORIGIN is
+        identical on both legs. Expecting the tester's 120 on the iBGP leg
+        failed a hardware run against a correctly behaving DUT.
+        """
+        expected = {
+            "bgp_fauu_drain_ebgp.pcap": ("incomplete", 120),
+            "bgp_fauu_drain_ibgp.pcap": ("incomplete", 100),
+            "bgp_fauu_undrain_ebgp.pcap": ("igp", 100),
+            "bgp_fauu_undrain_ibgp.pcap": ("igp", 100),
+        }
+        steps = _stage_steps(
+            _fauu_stage_with_window(
+                device_name="dut.example.com",
+                prefix_pool_regex=".*EBGP.*",
+                tcp_dump_capture_interface_ebgp="Ethernet1",
+                tcp_dump_capture_interface_ibgp="Ethernet2",
+            )
+        )
+        payloads = [
+            _step_payload(step)
+            for step in steps
+            if step.name == taac_types.StepName.CUSTOM_STEP
+            and step.step_params is not None
+        ]
+        observed = {
+            payload["pcap_filename"]: (
+                payload.get("expected_origin"),
+                payload.get("expected_local_pref"),
+            )
+            for payload in payloads
+            if payload.get("custom_step_name") == "verify_drain_convergence"
+            and payload.get("use_pcap_analysis")
+        }
+        self.assertEqual(expected, observed)
+
     def test_drain_stages_bracket_the_run_with_a_restoration_gate(self) -> None:
         """The undrain must be compared against the exact pre-drain state.
 
@@ -310,7 +453,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         any drain step and the comparison is the last thing the stage does.
         """
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         for name, stage_factory, prefix_pool_regex in stages:
@@ -356,7 +499,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
     def test_drain_stage_restoration_halves_agree_on_key_and_scope(self) -> None:
         """A snapshot and a verify that disagree would compare nothing."""
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         for name, stage_factory, prefix_pool_regex in stages:
@@ -412,7 +555,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         pinned here rather than left to the call site.
         """
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         for name, stage_factory, prefix_pool_regex in stages:
@@ -443,7 +586,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
     def test_drain_stages_can_opt_out_of_the_restoration_gate(self) -> None:
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         for name, stage_factory, prefix_pool_regex in stages:
@@ -469,7 +612,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
     def test_pcap_verifiers_require_their_capture_to_carry_updates(self) -> None:
         """An empty required capture used to be logged and passed over."""
         stages = (
-            ("fauu", create_fauu_drain_undrain_stage, ".*EBGP.*"),
+            ("fauu", _fauu_stage_with_window, ".*EBGP.*"),
             ("plane", create_plane_drain_undrain_stage, ".*IBGP.*PLANE_.*"),
         )
         for name, stage_factory, prefix_pool_regex in stages:

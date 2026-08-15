@@ -9,6 +9,9 @@ multipath group oscillations, FAUU drain/undrain, cold start, and BGP restart
 stages. Used to longevity-test EBB BGP++ at production peer/route scale.
 """
 
+from taac.abstractions.topologies.ebb_full_scale import (
+    ebb_drained_prefix_descriptors,
+)
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_LOCAL_LINK,
@@ -1094,6 +1097,9 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                         tcp_dump_capture_interface_bgpmon=ixia_interface_mimic_bgp_mon,
                         tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
                         soak_time_seconds=300,
+                        drained_prefix_descriptors=ebb_drained_prefix_descriptors(
+                            96, prefix_pool_regex=".*EBGP.*"
+                        ),
                     )
                 ],
             ),

@@ -2452,6 +2452,7 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     expected_min_peers: int | None = None,
     verify_restoration: bool = True,
     restoration_settle_timeout_seconds: int = 300,
+    drained_prefix_descriptors: Sequence[dict] | None = None,
 ) -> Stage:
     """
     Create a test stage to verify BGP FAUU drain/undrain behavior on specific peers.
@@ -2524,10 +2525,37 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
     #               the capture runs, then tshark verifies path attributes.
     # do_pcap drives capture + tshark verify + report (pcap and hybrid);
     # do_counter_poll drives the RIB-version poll (counter and hybrid).
+    #
+    # Division of labour: the counter poll owns convergence timing, the captures
+    # own attribute correctness. A capture cannot time convergence at all, since
+    # it sits on the wire and never observes RIB recomputation or FIB
+    # programming. Here it is worse still: one capture spans both stimuli of a
+    # phase (local-pref, then origin), so max(UPDATE ts) - min(UPDATE ts) also
+    # covers the idle gap while IXNetwork stages the second attribute. Measured
+    # on bag011, that span came out at the apply-to-apply gap plus ~4s of real
+    # UPDATE flow (drain 175.1s gap / 179.5s span, undrain 364.3s gap / 368.5s
+    # span) while the DUT itself quiesced in 46.2s and 41.1s. What the capture
+    # can prove is that the attribute the stage set reached the peer, which is
+    # what expected_origin / expected_local_pref check below.
     if convergence_mode not in ("counter", "pcap", "hybrid"):
         raise ValueError(f"invalid convergence_mode: {convergence_mode!r}")
     do_pcap = convergence_mode in ("pcap", "hybrid")
     do_counter_poll = convergence_mode in ("counter", "hybrid")
+    # Every pcap step below sets an attribute expectation, and an expectation
+    # without a prefix window is rejected at verification time as a
+    # misconfiguration. Fail at construction instead: a caller that enables
+    # captures without passing descriptors would otherwise only find out after
+    # the whole drain has already run on hardware.
+    if (
+        do_pcap
+        and (tcp_dump_capture_interface_ebgp or tcp_dump_capture_interface_ibgp)
+        and not drained_prefix_descriptors
+    ):
+        raise ValueError(
+            "fauu drain/undrain captures assert ORIGIN and LOCAL_PREF on the "
+            "drained prefixes, so drained_prefix_descriptors is required when "
+            f"convergence_mode={convergence_mode!r} enables a capture interface"
+        )
     # Same value for both the drain and the undrain soak: a short settle in
     # counter/hybrid mode (the RIB-version poll gates the wait instead), the
     # full fixed soak otherwise.
@@ -2635,7 +2663,12 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename=None,
-                max_convergence_time_seconds=300,  # 5 minutes for FAUU
+                # Sized against measured behaviour, not a round number: bag011
+                # at full scale reconverged in 15.4s (drain) and 10.3s
+                # (undrain) of real work, plus the 30s quiescence window this
+                # gate always pays. 200s leaves roughly 4x headroom over the
+                # observed worst phase while still catching a real slowdown.
+                max_convergence_time_seconds=200,
                 phase="drain",
                 convergence_signal=convergence_signal,
                 peer_scope=peer_convergence_scope,
@@ -2711,10 +2744,23 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 expected_as_path_asn=None,
                 phase="drain (eBGP SOURCE)",
                 use_pcap_analysis=True,
+                expected_origin="incomplete",
+                expected_local_pref=120,
+                expected_attribute_prefixes=drained_prefix_descriptors,
             ),
         )
 
     # Step 16: Verify drain convergence (iBGP)
+    #
+    # The two legs expect different LOCAL_PREF values, and that asymmetry is the
+    # protocol, not a discrepancy. ORIGIN is a transitive attribute, so the
+    # value IXIA sets crosses the DUT unchanged and both legs expect it. LOCAL_PREF
+    # does not cross: RFC 4271 5.1.5 says a speaker MUST ignore LOCAL_PREF received
+    # from an external peer, and originates its own value toward internal peers.
+    # So the eBGP leg expects the 120 that IXIA emitted (proof the stimulus was
+    # applied) and the iBGP leg expects the DUT's own default 100 (proof the DUT
+    # ignored the eBGP-supplied 120 rather than leaking it into the iBGP mesh).
+    # Expecting 120 here failed a run against a correctly behaving DUT.
     if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_drain_convergence_verification_step(
@@ -2723,6 +2769,9 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 expected_as_path_asn=None,
                 phase="drain (iBGP RECEIVER)",
                 use_pcap_analysis=True,
+                expected_origin="incomplete",
+                expected_local_pref=100,
+                expected_attribute_prefixes=drained_prefix_descriptors,
             ),
         )
 
@@ -2812,7 +2861,8 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
         steps.append(
             create_drain_convergence_verification_step(
                 pcap_filename=None,
-                max_convergence_time_seconds=300,  # 5 minutes for FAUU
+                # Same sizing as the drain gate above.
+                max_convergence_time_seconds=200,
                 phase="undrain",
                 convergence_signal=convergence_signal,
                 peer_scope=peer_convergence_scope,
@@ -2888,10 +2938,19 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 expected_as_path_asn=None,
                 phase="undrain (eBGP SOURCE)",
                 use_pcap_analysis=True,
+                expected_origin="igp",
+                expected_local_pref=100,
+                expected_attribute_prefixes=drained_prefix_descriptors,
             ),
         )
 
     # Step 32: Verify undrain convergence (iBGP)
+    #
+    # Both undrain legs expect 100, but for different reasons: the eBGP leg
+    # because the stage restored the tester to 100, the iBGP leg because the DUT
+    # always originates its own LOCAL_PREF (see the drain iBGP note above). The
+    # iBGP LOCAL_PREF is therefore identical in both phases and only ORIGIN
+    # discriminates drain from undrain on this leg.
     if do_pcap and tcp_dump_capture_interface_ibgp:
         steps.append(
             create_drain_convergence_verification_step(
@@ -2900,6 +2959,9 @@ def create_fauu_drain_undrain_stage(  # noqa: C901
                 expected_as_path_asn=None,
                 phase="undrain (iBGP RECEIVER)",
                 use_pcap_analysis=True,
+                expected_origin="igp",
+                expected_local_pref=100,
+                expected_attribute_prefixes=drained_prefix_descriptors,
             ),
         )
 

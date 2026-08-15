@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import typing as t
 from dataclasses import dataclass, replace
 
@@ -308,6 +309,72 @@ EBB_ACCEPT_POLICY = BgpPolicy(
     name="ebb_accept",
     communities=("65529:39744",),
 )
+
+
+# IXIA pool name per EBB eBGP prefix set, mirroring the names
+# bgp_ebb_ixia_config.py gives these pools. Needed because a drain selects pools
+# by their IXIA name, while the drained window is defined by the prefix set.
+_EBB_EBGP_IXIA_POOL_NAMES: dict[str, str] = {
+    EBB_EBGP_V4_PREFIX_SET.name: "PREFIX_POOL_IPV4_EBGP",
+    EBB_EBGP_V6_PREFIX_SET.name: "PREFIX_POOL_IPV6_EBGP",
+}
+
+
+def ebb_drained_prefix_descriptors(
+    prefix_end_index: int,
+    prefix_start_index: int = 0,
+    prefix_pool_regex: str = ".*EBGP.*",
+) -> list[dict[str, t.Any]]:
+    """Descriptors for the eBGP prefixes a FAUU drain actually touches.
+
+    Lives beside the pool definitions because it is derived entirely from them:
+    both the playbook and the scale TestConfig build the same drain and must
+    hand the capture steps the same window, or the pcap ORIGIN/LOCAL_PREF check
+    has nothing to scope itself to.
+
+    Scoped two ways, because the capture asserts full coverage of what it is
+    given:
+
+    - By index. A drain rewrites only ``[start, end)`` of each 750-prefix pool,
+      so the untouched majority legitimately keeps the old ORIGIN and LOCAL_PREF.
+    - By pool. ``prefix_pool_regex`` is configurable, so a caller can drain one
+      address family. Describing both would demand capture coverage for a pool
+      the drain never touched and fail a healthy run, so only matching pools are
+      described. Matching mirrors IXIA's own pool selection: ``re.search``
+      against the pool name, case-sensitive.
+
+    Args:
+        prefix_end_index: Exclusive end of the drained window. Clamped to the
+            pool size, since a drain cannot touch more prefixes than exist.
+        prefix_start_index: Inclusive start of the drained window.
+        prefix_pool_regex: The same regex the drain uses to select IXIA pools.
+            Defaults to both eBGP address families.
+
+    Returns:
+        One descriptor per matching address family.
+
+    Raises:
+        ValueError: The regex matches no EBB eBGP pool, so the drain would have
+            nothing to verify and the caller has almost certainly mistyped it.
+    """
+    descriptors = [
+        {
+            "start_prefix": prefix_set.source.start_prefix,
+            "prefix_step": prefix_set.source.prefix_step,
+            "prefix_length": prefix_set.source.prefix_length,
+            "start_index": prefix_start_index,
+            "end_index": min(prefix_end_index, prefix_set.source.count),
+        }
+        for prefix_set in (EBB_EBGP_V4_PREFIX_SET, EBB_EBGP_V6_PREFIX_SET)
+        if re.search(prefix_pool_regex, _EBB_EBGP_IXIA_POOL_NAMES[prefix_set.name])
+    ]
+    if not descriptors:
+        raise ValueError(
+            f"prefix_pool_regex {prefix_pool_regex!r} matches none of the EBB "
+            f"eBGP pools {sorted(_EBB_EBGP_IXIA_POOL_NAMES.values())}, so the "
+            "drain has no prefixes whose attributes could be verified"
+        )
+    return descriptors
 
 
 def _lexical_ip_range(start: str, count: int) -> tuple[str, ...]:

@@ -5995,6 +5995,9 @@ def create_drain_convergence_verification_step(
     peer_scope: t.Optional[t.Dict[str, t.Any]] = None,
     expected_min_peers: int = 1,
     require_updates: bool = True,
+    expected_origin: t.Optional[str] = None,
+    expected_local_pref: t.Optional[int] = None,
+    expected_attribute_prefixes: t.Optional[t.Sequence[t.Mapping[str, t.Any]]] = None,
 ) -> Step:
     """
     Create a step to verify drain/undrain convergence from PCAP analysis.
@@ -6021,9 +6024,11 @@ def create_drain_convergence_verification_step(
             counter-based step that has no capture behind it at all. None is
             not the same as "": an empty name would look like a capture whose
             filename was lost, and the playbook contract tests reject it.
-        max_convergence_time_seconds: Maximum allowed convergence time (default: 600s/10min)
-        expected_as_path_asn: Expected ASN in AS_PATH (default: None, skips AS_PATH check)
-        phase: "drain" or "undrain" for proper ORIGIN verification
+        max_convergence_time_seconds: Counter-based path only: how long the
+            rib_version / table-version poll may run before failing (default:
+            600s/10min). The PCAP path does not time convergence and ignores it.
+        expected_as_path_asn: Reserved; the AS_PATH check is not implemented.
+        phase: "drain" or "undrain", used in log and verdict messages
         description: Custom description for the step
         use_pcap_analysis: When True use the legacy PCAP+tshark path; when False
             (default) use the counter-based path
@@ -6042,28 +6047,61 @@ def create_drain_convergence_verification_step(
             all (default True). The drain/undrain captures sit on the interfaces
             the churn must cross, so an empty one means the stimulus never
             propagated; only a capture allowed to be silent should clear this.
+        expected_origin: PCAP mode: "igp", "egp" or "incomplete". Every route
+            advertisement in the capture must carry it, proving the attribute
+            the stage set is the attribute that reached the peer. Omit to skip.
+            An expectation set against a capture holding no advertisement fails
+            rather than passing vacuously.
+        expected_local_pref: PCAP mode: LOCAL_PREF the drained prefixes must
+            carry. Same semantics as expected_origin, except that the correct
+            value depends on which leg the capture sits on. LOCAL_PREF is not
+            transitive across an eBGP boundary: RFC 4271 5.1.5 requires a
+            speaker to ignore a LOCAL_PREF received from an external peer and to
+            originate its own toward internal peers. On a capture of the tester
+            advertising over eBGP, expect the value the tester set; on a capture
+            of the DUT advertising over iBGP, expect the DUT's own value (its
+            default, typically 100), not the tester's. Omit to skip.
+        expected_attribute_prefixes: PCAP mode: formulaic descriptors for the
+            prefixes the stage actually drained, each with start_prefix,
+            prefix_step, prefix_length, start_index and end_index. Required
+            whenever an attribute expectation is set: a drain touches only part
+            of a pool, so an unscoped assertion would flag the untouched
+            majority as wrong.
 
     Returns:
         Step object for drain convergence verification
     """
     if description is None:
         if use_pcap_analysis:
-            mode = "pcap"
-        elif convergence_signal == "per_peer_rib_version":
-            mode = "per-peer-rib"
+            # The pcap path verifies the capture and its attributes; it does
+            # not time convergence, so no threshold belongs in the label.
+            checked = ", ".join(
+                label
+                for label, value in (
+                    (f"ORIGIN={expected_origin}", expected_origin),
+                    (f"LOCAL_PREF={expected_local_pref}", expected_local_pref),
+                )
+                if value is not None
+            )
+            description = f"Verify {phase} capture via pcap" + (
+                f" ({checked})" if checked else ""
+            )
         else:
-            mode = "counters"
-        description = (
-            f"Verify {phase} convergence via {mode} "
-            f"(max {max_convergence_time_seconds}s)"
-        )
+            mode = (
+                "per-peer-rib"
+                if convergence_signal == "per_peer_rib_version"
+                else "counters"
+            )
+            description = (
+                f"Verify {phase} convergence via {mode} "
+                f"(max {max_convergence_time_seconds}s)"
+            )
 
     params = {
         "custom_step_name": "verify_drain_convergence",
         "pcap_filename": pcap_filename,
         "max_convergence_time_seconds": max_convergence_time_seconds,
         "expected_as_path_asn": expected_as_path_asn,
-        "verify_origin_incomplete": True,
         "phase": phase,
         "use_pcap_analysis": use_pcap_analysis,
         "quiescence_window_seconds": quiescence_window_seconds,
@@ -6072,6 +6110,11 @@ def create_drain_convergence_verification_step(
         "peer_scope": peer_scope or {},
         "expected_min_peers": expected_min_peers,
         "require_updates": require_updates,
+        "expected_origin": expected_origin,
+        "expected_local_pref": expected_local_pref,
+        "expected_attribute_prefixes": [
+            dict(descriptor) for descriptor in (expected_attribute_prefixes or [])
+        ],
     }
 
     return Step(
