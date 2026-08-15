@@ -107,6 +107,7 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
 )
 from taac.stages.stage_definitions import (
     create_route_oscillations_stage,
+    create_validated_bgp_route_oscillations_stage,
     create_longevity_stage,
     create_periodic_service_restart_stage,
     create_port_channel_concurrent_cross_flap_stage,
@@ -164,6 +165,8 @@ from taac.steps.step_definitions import (
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     CheckProfile,
     get_profile_checks,
+    IBGP_MIMIC_PARENTS,
+    SC9_EBGP_SESSION_COUNT,
     ProfileContext,
 )
 from taac.task_definitions import (
@@ -25626,6 +25629,40 @@ _SC9_MIN_ECMP_WIDTH = 2
 # Every prefix should resolve over every peer.
 _SC9_EXPECTED_MULTIPATH_WIDTH = 128
 
+# The eBGP prefix pools BOUNDED_ECMP builds: three per AFI (42/42/44 peers).
+# Named explicitly so the drain stage can assert it mutated the pools it meant
+# to -- a regex that silently matched nothing would otherwise be a green run
+# that withdrew nothing.
+_SC9_EBGP_PREFIX_POOLS: t.List[str] = [
+    f"PREFIX_POOL_{afi}_EBGP_SET{ordinal}"
+    for afi in ("IPV4", "IPV6")
+    for ordinal in (1, 2, 3)
+]
+
+
+# Ceiling on REAL ECMP sets (>= _SC9_MIN_ECMP_WIDTH wide) at any sample.
+# Calibrated, finally: the first clean single-drain run peaked at 6 total
+# groups (5 multi-way, 1 singleton) for 64 seconds, against a steady state of
+# exactly 2. 32 is ~5x that observation, 8x under the topology's structural
+# maximum of 128*2+2 = 258, and 256x under the device's 8,192-entry EcmpLevel2
+# table -- so it discriminates a real explosion while absorbing the variance a
+# single observation cannot rule out. The raw-count threshold of 8,192 that
+# preceded it could not fail against a peak of 6.
+_SC9_MAX_MULTIWAY_GROUPS = 32
+
+# The drain step enforces this as a HARD pass/fail on BOTH transitions --
+# `_wait_transition` demands ConvergenceOutcome.WITHIN_SLA and raises otherwise
+# -- so it is a failure threshold, not a report. Its 60s runtime default is
+# SHORTER than this topology's measured 73s restore, which would have failed a
+# healthy bag013 on the re-advertise. 180s is ~2.5x the observation, matching
+# the margins used for the drain windows; the 300s hard timeout above it is
+# untouched.
+_SC9_TRANSITION_SOFT_THRESHOLD_SECONDS = 180.0
+
+# One ECMP set per address family is the converged expectation -- the spec's
+# "Check that BGP installs 5K routes with 1 ECMP set (NHG)", times two AFIs.
+_SC9_AFI_COUNT = 2
+
 # Steady state is DETECTED, not assumed. The baseline the recovery gate is
 # measured against has to be a converged one, and the only prior timing datum
 # for this testbed -- 382s to INITIALIZED on release 191 -- is both longer than
@@ -25657,8 +25694,27 @@ _SC9_SETUP_SETTLE_SECONDS = 60
 def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     device_name: str,
     expected_multipath_width: int = _SC9_EXPECTED_MULTIPATH_WIDTH,
-    withdraw_seconds: int = 600,
-    readvertise_seconds: int = 600,
+    # Both derived from the first clean bag013 run, not from taste. The
+    # withdrawal cleared in ~41s (last 2-group sample 35s after the withdraw,
+    # first 0-group sample at 41s) and full recovery took ~73s (first transient
+    # sample 4s after the re-advertise, back to the steady 2 at 73s). These are
+    # 3x and 4x those observations.
+    #
+    # They are deliberately ASYMMETRIC, which the previous 600/600 was not. The
+    # windows do different jobs: the withdraw window only has to let the
+    # withdrawal land and hold -- the count sits flat at 0 for its whole
+    # duration and nothing SC9 measures happens there -- while the readvertise
+    # window must contain the ENTIRE transient and let it settle back to 2
+    # before the postchecks read, or recovery fails for a timing reason rather
+    # than a real one. (Stage C's 300s soak follows this window, so the true
+    # post-restore settle is 600s against a 73s observation.)
+    #
+    # For the record: the stage's own 60/60 default would be too SHORT here --
+    # a 60s readvertise window ends 13s before recovery completes. Ten cycles of
+    # that is the likely mechanism behind run 1's peak of 27 sets and its 20
+    # eBGP session restarts, where each cycle re-withdrew mid-recovery.
+    withdraw_seconds: int = 120,
+    readvertise_seconds: int = 300,
     soak_duration_seconds: int = 300,
 ) -> Playbook:
     """Build the SC9 bounded-ECMP-sets characteristic playbook.
@@ -25745,6 +25801,14 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 # uncontaminated run, and the coverage-bearing bound is the
                 # hardware-capacity postcheck.
                 min_ecmp_width=_SC9_MIN_ECMP_WIDTH,
+                # Bound the transient on REAL ECMP sets -- see the constant.
+                max_multiway_groups=_SC9_MAX_MULTIWAY_GROUPS,
+                # SC9's FIRST claim, and until now the only one untested: 5,000
+                # routes from 128 peers install as ONE ECMP set per AFI. Every
+                # other verdict on this task is a maximum over the run, so a
+                # device idling at 5 sets passed identically to one at 2. The
+                # first clean run settled at exactly 2 for its closing 910s.
+                expected_converged_multiway_groups=_SC9_AFI_COUNT,
             ),
         ],
         stages=[
@@ -25789,27 +25853,27 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                     ),
                 ],
             ),
-            create_route_oscillations_stage(
+            create_validated_bgp_route_oscillations_stage(
                 device_name=device_name,
                 prefix_pool_regex=".*EBGP.*",
+                expected_prefix_pool_names=_SC9_EBGP_PREFIX_POOLS,
+                # The eBGP population, after IBGP_MIMIC_PARENTS scopes the mimic
+                # groups out. 128 peers per AFI.
+                expected_established_sessions=SC9_EBGP_SESSION_COUNT,
+                parent_prefixes_to_ignore=IBGP_MIMIC_PARENTS,
                 prefix_start_index=0,
                 prefix_end_index=5000,
                 # ONE cycle. The stage computes
                 #   iterations = test_duration_seconds // (withdraw + readvertise)
-                # so the previous 1200/60/60 produced TEN withdraw-readvertise
-                # cycles, not the single simultaneous drain this test is about --
-                # confirmed on the first bag013 run, whose drain stage ran 25m
-                # for a stimulus that was supposed to happen once. Holding the
-                # times equal to the total makes iterations exactly 1 and turns
-                # the two waits into the observation windows: withdrawn for
-                # `withdraw_seconds`, then restored for `readvertise_seconds` so
-                # recovery has somewhere to happen before the postchecks read it.
+                # so the original 1200/60/60 produced TEN withdraw-readvertise
+                # cycles rather than the single simultaneous drain this test is
+                # about. Holding the total equal to one cycle makes it exactly 1.
                 withdraw_time=withdraw_seconds,
                 readvertise_time=readvertise_seconds,
                 test_duration_seconds=withdraw_seconds + readvertise_seconds,
-                # spread=False is what makes the single withdraw one commit
-                # across every matched pool rather than three sequential batches.
-                spread=False,
+                transition_soft_threshold_seconds=(
+                    _SC9_TRANSITION_SOFT_THRESHOLD_SECONDS
+                ),
             ),
             create_steps_stage(
                 steps=[

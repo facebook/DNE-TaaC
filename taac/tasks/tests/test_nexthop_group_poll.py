@@ -720,3 +720,122 @@ class NexthopGroupEmptyHistogramRecoveryTest(unittest.IsolatedAsyncioTestCase):
         # count, which would have read "recovery OK" on this data.
         self.assertNotIn("recovery OK", result.message)
         self.assertNotIn("nexthop-group count settled", result.message)
+
+
+class NexthopGroupConvergedValueTest(unittest.IsolatedAsyncioTestCase):
+    """The steady state, as opposed to the maximum.
+
+    Every other verdict on this task is a max over the whole run, so a device
+    that idles at the wrong number of ECMP sets is indistinguishable from one
+    that idles at the right number but spiked once. This is the only gate that
+    reads the state the device was LEFT in.
+    """
+
+    def setUp(self) -> None:
+        self.task = NexthopGroupPoll(hostname="bag013.ash6", logger=MagicMock())
+        self._plot = patch(_PLOT, new=AsyncMock(return_value=None))
+        self._plot.start()
+        self.addCleanup(self._plot.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {"hostname": "bag013.ash6", "threshold": 10_000, **kwargs}
+        )
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    def _shapes(self, shapes) -> None:
+        for i, shape in enumerate(shapes):
+            self.task.add_data(_sized(shape), timestamp=i + 1)
+
+    async def test_settling_at_the_expected_value_passes(self) -> None:
+        """The real bag013 shape: steady, drained, transient, recovered."""
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=3,
+        )
+        self._shapes(
+            [{128: 2}, {128: 2}, {}, {}, {64: 6}, {128: 2}, {128: 2}, {128: 2}]
+        )
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("converged OK", result.message)
+
+    async def test_settling_above_the_expected_value_fails(self) -> None:
+        """ECMP sets that never collapsed back. The peak alone cannot see this:
+        max is 6 either way."""
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=3,
+        )
+        self._shapes([{128: 2}, {128: 2}, {}, {}, {64: 6}, {64: 5}, {64: 5}, {64: 5}])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("converged BREACH", result.message)
+        self.assertIn("settled at 5", result.message)
+
+    async def test_settling_below_the_expected_value_fails(self) -> None:
+        """Sets that never formed -- the inverse failure, equally invisible to a
+        maximum."""
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=3,
+        )
+        self._shapes([{128: 2}, {128: 2}, {128: 4}, {1: 9}, {1: 9}, {1: 9}])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("converged BREACH", result.message)
+
+    async def test_uses_the_median_so_one_artifact_cannot_decide(self) -> None:
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=5,
+        )
+        # One spike inside the closing window; the other four are correct.
+        self._shapes(
+            [{128: 2}, {128: 2}, {128: 2}, {64: 9}, {128: 2}, {128: 2}, {128: 2}]
+        )
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+
+    async def test_too_few_samples_refuses_to_evaluate(self) -> None:
+        self._params(
+            min_ecmp_width=2,
+            expected_converged_multiway_groups=2,
+            converged_window_samples=20,
+        )
+        self._shapes([{128: 2}, {128: 2}])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("converged NOT EVALUATED", result.message)
+
+    async def test_without_min_ecmp_width_it_is_reported_not_ignored(self) -> None:
+        """There is no multi-way series to settle, so the gate is inert -- and a
+        silently inert gate is the failure mode this whole task exists to
+        prevent."""
+        self._params(expected_converged_multiway_groups=2)
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("config BREACH", result.message)
+        self.assertIn("expected_converged_multiway_groups", result.message)

@@ -5746,9 +5746,20 @@ def create_validated_bgp_route_oscillation_step(
     readvertise_time: int,
     test_duration_seconds: int,
     parent_prefixes_to_ignore: t.Sequence[str] = (),
+    transition_soft_threshold_seconds: t.Optional[float] = None,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Create route oscillations with IXIA, source, and exact-RIB verdicts."""
+    """Create route oscillations with IXIA, source, and exact-RIB verdicts.
+
+    ``transition_soft_threshold_seconds`` is a HARD gate despite the name:
+    ``_wait_transition`` demands ``ConvergenceOutcome.WITHIN_SLA`` and raises
+    ``TestCaseFailure`` on anything else, so a transition that converges LATE
+    fails the run exactly like one that never converges. The runtime default is
+    60s and it applies to BOTH transitions -- the withdraw and the
+    re-advertise -- so any topology whose restore takes longer than that must
+    raise it or the step fails a healthy device. Omitted = the runtime default,
+    byte-identical for existing callers.
+    """
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_route_oscillation",
@@ -5762,6 +5773,15 @@ def create_validated_bgp_route_oscillation_step(
             "readvertise_time": readvertise_time,
             "test_duration_seconds": test_duration_seconds,
             "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+            **(
+                {
+                    "transition_soft_threshold_seconds": (
+                        transition_soft_threshold_seconds
+                    )
+                }
+                if transition_soft_threshold_seconds is not None
+                else {}
+            ),
         },
         description=description or "Run validated dual-stack BGP route oscillations",
     )

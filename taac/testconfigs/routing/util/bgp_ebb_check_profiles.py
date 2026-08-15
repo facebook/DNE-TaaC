@@ -103,10 +103,15 @@ from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCh
 # entirely inside the fifth hextet -- so /80 is exact there.
 #
 # Net effect of the two masks: exactly the 256 eBGP sessions stay in scope.
-_IBGP_MIMIC_PARENTS: t.List[str] = [
+IBGP_MIMIC_PARENTS: t.List[str] = [
     f"{IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1}::/80",
     f"{IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1}.0/23",
 ]
+
+# 128 eBGP peers per AFI, both AFIs -- the population the masks above leave in
+# scope. Shared with the playbook's drain stage so the session count the drain
+# asserts and the count the postcheck asserts cannot drift apart.
+SC9_EBGP_SESSION_COUNT = 256
 
 # Absolute bound on the device-maintained ECMP peak. DNE's already-sanctioned
 # bar (health_checks/constants.py) rather than a number invented here, and it
@@ -708,12 +713,18 @@ def _sc9_bounded_ecmp(ctx: ProfileContext) -> ProfileChecks:
             ),
         ],
         postchecks=[
-            # Scoped to the eBGP population -- see _IBGP_MIMIC_PARENTS. The
+            # Scoped to the eBGP population -- see IBGP_MIMIC_PARENTS. The
             # drain withdraws routes without tearing down sessions, so an eBGP
             # peer that is not Established at postcheck IS a real finding.
             create_bgp_session_establish_check(
                 check_id="sc9_postcheck_ebgp_sessions_established",
-                parent_prefixes_to_ignore=_IBGP_MIMIC_PARENTS,
+                parent_prefixes_to_ignore=IBGP_MIMIC_PARENTS,
+                # The COUNT, not just the scope. Without it this passes on any
+                # number of in-scope sessions INCLUDING ZERO -- so the very bug
+                # the masks above fix (a mask that accidentally excludes the
+                # population under test) would sail through this check rather
+                # than be caught by it. 128 eBGP peers per AFI, both AFIs.
+                expected_established_sessions=SC9_EBGP_SESSION_COUNT,
                 **get_retry_kwargs(hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK),
             ),
             create_bgp_rib_fib_consistency_check(
@@ -765,7 +776,13 @@ def _sc9_bounded_ecmp(ctx: ProfileContext) -> ProfileChecks:
             # The drain withdraws routes; it does not tear down sessions, so a
             # flap here is a real finding rather than expected churn. Unlike
             # PERF_SCALING_BOUNDED_ECMP the flap and uptime checks stay ON.
-            create_bgp_session_snapshot_check(),
+            # Scoped the SAME way as the postcheck above. Leaving it unscoped
+            # would let the iBGP mimic population -- which this profile argues
+            # at length is outside SC9's subject -- fail the run through the
+            # back door on a flap or a drop the test does not assert on.
+            create_bgp_session_snapshot_check(
+                parent_prefixes_to_ignore=IBGP_MIMIC_PARENTS,
+            ),
         ],
     )
 

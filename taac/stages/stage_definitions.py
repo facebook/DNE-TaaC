@@ -1978,9 +1978,16 @@ def create_validated_bgp_route_oscillations_stage(
     readvertise_time: int = 60,
     test_duration_seconds: int = 3600,
     parent_prefixes_to_ignore: Sequence[str] = (),
+    transition_soft_threshold_seconds: Optional[float] = None,
     description: str = "Run validated dual-stack BGP route oscillations",
 ) -> Stage:
-    """Create BGP route oscillations with a verdict for every trigger."""
+    """Create BGP route oscillations with a verdict for every trigger.
+
+    See ``create_validated_bgp_route_oscillation_step`` for why
+    ``transition_soft_threshold_seconds`` matters: it is enforced as a hard
+    pass/fail on BOTH transitions, and its 60s runtime default is shorter than
+    some topologies take to restore.
+    """
     return Stage(
         steps=[
             create_validated_bgp_route_oscillation_step(
@@ -1994,6 +2001,7 @@ def create_validated_bgp_route_oscillations_stage(
                 readvertise_time=readvertise_time,
                 test_duration_seconds=test_duration_seconds,
                 parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                transition_soft_threshold_seconds=transition_soft_threshold_seconds,
                 description=description,
             )
         ]

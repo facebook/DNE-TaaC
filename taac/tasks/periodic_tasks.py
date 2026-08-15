@@ -517,6 +517,13 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
     # INVERTS the band (low > high), which no value can satisfy, so the gate
     # would fail every run for a reason the message would not explain; and a
     # non-finite tolerance widens the band to admit everything.
+    if params.get("expected_converged_multiway_groups") is not None and (
+        params.get("min_ecmp_width") is None
+    ):
+        problems.append(
+            "expected_converged_multiway_groups was set without min_ecmp_width, "
+            "so there is no multi-way series to settle"
+        )
     tolerance = params.get("recovery_tolerance")
     if tolerance is not None and (
         not math.isfinite(float(tolerance)) or float(tolerance) < 1
@@ -597,6 +604,52 @@ def _ecmp_set_verdict(
         True,
         f"ecmp-sets BREACH: {detail} exceeds the allowed maximum "
         f"({max_multiway_groups})",
+    )
+
+
+def _converged_verdict(
+    series: t.Dict[float, int], expected: int, window: int, metric: str
+) -> t.Tuple[bool, str]:
+    """Verdict on whether ``metric`` SETTLED at its expected steady-state value.
+
+    Distinct from ``_recovery_verdict``, and usable where that one is not. The
+    recovery check compares the closing window against the OPENING window, and
+    the opening window is unreliable here: periodic tasks start in
+    ``async_test_case_setUp``, before ``setup_steps``, so on a scale test the
+    first samples predate convergence and the baseline reads zero. This compares
+    the closing window against a LITERAL expected value instead, which needs no
+    opening baseline at all.
+
+    It is also the only thing that tests the steady state. Every other verdict
+    on this task is a maximum over the whole run, so a device that idles at five
+    ECMP sets is indistinguishable from one that idles at the two the topology
+    should produce.
+
+    Uses the MEDIAN of the closing window so one sampling artifact cannot decide
+    the verdict. Returns ``(is_failure, message)``.
+    """
+    ordered = sorted(series)
+    if len(ordered) < window:
+        return (
+            True,
+            f"converged NOT EVALUATED: {len(ordered)} samples is fewer than the "
+            f"{window} needed for a closing window, so the settled value of "
+            f"{metric} could not be assessed -- failing rather than passing an "
+            f"unevaluated gate",
+        )
+    final = statistics.median(_series_window(series, window, last=True))
+    if final == expected:
+        return (
+            False,
+            f"converged OK: {metric} settled at {final}, the expected steady state",
+        )
+    return (
+        True,
+        f"converged BREACH: {metric} settled at {final}, not the expected "
+        f"{expected}. The closing window is post-soak, so this is the state the "
+        f"device was LEFT in, not a transient -- a value above {expected} means "
+        f"ECMP sets that never collapsed back, and below means sets that never "
+        f"formed",
     )
 
 
@@ -855,6 +908,18 @@ class NexthopGroupPoll(PeriodicTask):
             )
             (failures if failed else verdicts).append(text)
 
+        # Opt-in: the STEADY STATE, as opposed to every other verdict here,
+        # which is a maximum over the whole run.
+        expected_converged = self._params.get("expected_converged_multiway_groups")
+        if expected_converged is not None and multiway_series is not None:
+            failed, text = _converged_verdict(
+                multiway_series,
+                int(expected_converged),
+                int(self._params.get("converged_window_samples", 10)),
+                f"groups >= {min_ecmp_width}-wide",
+            )
+            (failures if failed else verdicts).append(text)
+
         # Opt-in: a floor on what was observed at all. An ALL-ZERO series is not
         # empty, so it survives the empty-series guard above and then satisfies
         # any "max below threshold" ceiling -- max(0) < 50 passes. That is not
@@ -913,6 +978,14 @@ class NexthopGroupPoll(PeriodicTask):
             "num_groups_configured": num_groups_configured_data,
             "num_unprogrammed_groups": num_unprogrammed_groups_data,
         }
+        # The multi-way series is the one that shows the characteristic. The raw
+        # count cannot distinguish "more ECMP sets" from "ECMP collapsed into
+        # width-1 singletons" -- the latter makes it RISE -- so a triager
+        # opening the plot to see the steady -> transient -> steady shape was
+        # looking at the one series that cannot show it. Computed already; it
+        # was simply never plotted.
+        if multiway_series is not None:
+            data_series[f"groups_>={min_ecmp_width}_wide"] = multiway_series
 
         # Create annotations with max num_groups_configured value
         plot_annotations = {

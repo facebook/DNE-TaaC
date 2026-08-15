@@ -3238,6 +3238,8 @@ def create_nexthop_group_poll_periodic_task(
     recovery_tolerance: t.Optional[float] = None,
     recovery_window_samples: t.Optional[int] = None,
     min_observed_groups: t.Optional[int] = None,
+    expected_converged_multiway_groups: t.Optional[int] = None,
+    converged_window_samples: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
@@ -3294,6 +3296,16 @@ def create_nexthop_group_poll_periodic_task(
             and the closing window for `recovery_tolerance`. Default 10. The
             run must produce at least twice this many samples, otherwise the
             two windows would overlap and the check FAILs as unevaluated.
+        expected_converged_multiway_groups: Optional exact steady-state count of
+            multi-way ECMP sets, asserted against the MEDIAN of the closing
+            window. Requires min_ecmp_width. This is the only verdict on this
+            task that looks at the settled state -- every other one is a maximum
+            over the whole run, so without it a device idling at five ECMP sets
+            reads the same as one idling at the expected two. It compares
+            against a literal rather than an opening baseline on purpose:
+            periodic tasks start before setup_steps, so the opening window
+            predates convergence.
+        converged_window_samples: Size of that closing window (default 10).
         min_observed_groups: Optional floor on the peak nexthop-group count. An
             all-zero series is not empty, so it passes the empty-series guard
             and then satisfies any ceiling (`max(0) < threshold`). Setting this
@@ -3319,6 +3331,8 @@ def create_nexthop_group_poll_periodic_task(
         ("recovery_tolerance", recovery_tolerance),
         ("recovery_window_samples", recovery_window_samples),
         ("min_observed_groups", min_observed_groups),
+        ("expected_converged_multiway_groups", expected_converged_multiway_groups),
+        ("converged_window_samples", converged_window_samples),
     ):
         if value is not None:
             json_payload[key] = value
