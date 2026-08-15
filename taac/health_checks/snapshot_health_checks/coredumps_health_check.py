@@ -89,7 +89,22 @@ class CoreDumpsHealthCheck(
             parts = line.split()
             if len(parts) < 9:
                 continue
-            filename = parts[-1]
+            # Take the NAME column, not the last token. On EOS most entries under
+            # /var/core are symlinks into /mnt/flash/archive/current/var/core/, so
+            # the line ends "<name> -> <target>" and the last token is the TARGET.
+            # Keying on it made the name fail EOS_CORE_DUMP_FILENAME_REGEX, so
+            # _parse_eos_core_dump_timestamp fell through to int(time.time()) and
+            # stamped the core with the snapshot time -- i.e. every rotated core
+            # looked like it had just been produced. Observed on bag013 rel 191:
+            # 33 of 37 cores reported with a fabricated mtime and no process/pid,
+            # which is exactly the evidence a new-vs-pre-existing triage depends on.
+            name_tokens = parts[8:]
+            if "->" in name_tokens:
+                name_tokens = name_tokens[: name_tokens.index("->")]
+            # Basename so a symlink and a plain file for the same core produce the
+            # same key; otherwise the pre/post set difference reports a rotation
+            # as a brand-new core.
+            filename = " ".join(name_tokens).strip().rsplit("/", 1)[-1]
             if not filename:
                 continue
             # Extract the real timestamp from the filename pattern
