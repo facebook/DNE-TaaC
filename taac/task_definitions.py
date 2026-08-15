@@ -3232,44 +3232,60 @@ def create_nexthop_group_poll_periodic_task(
     threshold: int = 50,
     interval: int = 5,
     enable_plotting: bool = True,
+    max_unprogrammed: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
     Wraps the `nexthop_group_poll` runtime task in a `PeriodicTask` that
     samples the device's current nexthop-group (ECMP group) count every
     `interval` seconds and records the value for later check / plotting.
-    Non-terminating: a threshold breach is recorded but does not abort the
-    test, by design (test author still has access to the recorded series).
+
+    Non-terminating MID-RUN: a threshold breach does not abort the test while
+    it is running, so the full series is always recorded. It does, however,
+    FAIL the test case at teardown -- `run_final_check` returns a FAIL
+    PeriodicCheckResult, `async_run_periodic_task_checks` appends it to
+    `test_case_results`, and `check_failure` raises `TestCaseFailure`. Note
+    `terminate_on_error` is unrelated to this: it is only consulted when the
+    poll itself raises, and `NexthopGroupPoll.run` catches everything.
 
     Args:
         device_name: Device hostname to poll.
-        threshold: Target / warning threshold for the nexthop-group count.
-            Default `50`.
-        interval: Polling interval in seconds. Default `5`.
+        threshold: Ceiling for the nexthop-group count; the check FAILs when
+            the observed max meets or exceeds it. Default `50`. NB this default
+            has no hardware derivation -- see the SC9 plan; prefer passing a
+            value anchored to the device-reported ECMP capacity.
+        interval: Polling interval in seconds. Default `5`. A transient shorter
+            than this is invisible to the sampler.
         enable_plotting: If True (default), recorded values are published for
             plotting in the test artifact view.
+        max_unprogrammed: Optional ceiling for `num_unprogrammed_groups`, the
+            device's own report that it failed to program a group. `0` asserts
+            that every group the device tried to program was accepted, which is
+            the most direct available expression of "within the hardware
+            limit". Omitted (None) = not asserted, preserving existing
+            callers' behaviour.
 
     Returns:
         A `PeriodicTask` named `"nexthop_group_check"` wrapping
         `task_name="nexthop_group_poll"`.
     """
+    json_payload: t.Dict[str, t.Any] = {
+        "hostname": device_name,
+        "threshold": threshold,
+        "enable_plotting": enable_plotting,
+    }
+    # Emitted only when requested, so every existing caller's serialized config
+    # -- and therefore its golden hash -- is unchanged.
+    if max_unprogrammed is not None:
+        json_payload["max_unprogrammed"] = max_unprogrammed
+
     return PeriodicTask(
         name="nexthop_group_check",
         interval=interval,
         task=Task(task_name="nexthop_group_poll"),
         retryable=False,
         terminate_on_error=False,
-        params_list=[
-            Params(
-                json_params=json.dumps(
-                    {
-                        "hostname": device_name,
-                        "threshold": threshold,
-                        "enable_plotting": enable_plotting,
-                    }
-                )
-            )
-        ],
+        params_list=[Params(json_params=json.dumps(json_payload))],
     )
 
 

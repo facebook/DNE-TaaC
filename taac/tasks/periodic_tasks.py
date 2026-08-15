@@ -416,6 +416,48 @@ class CounterThresholdTask(PeriodicTask):
         )
 
 
+def _unprogrammed_verdict(
+    series: t.Dict[float, int], maximum: int
+) -> t.Tuple[bool, str]:
+    """Verdict on the device's own "I could not program this group" counter.
+
+    Returns ``(failed, message)``.
+
+    A module-level function rather than an inline block for one reason: the
+    empty-series case is not reachable through ``run_final_check``. That series
+    is filled in the same ``isinstance`` arm of the same loop as the count
+    series, and an empty count series already returns before any verdict runs,
+    so no input to the poll can produce it. Left inline it would be a branch no
+    test could execute and no reader could check. Here it is callable with
+    ``{}`` directly.
+
+    That case is a FAILURE, not a skip. Guarding the caller on the series being
+    truthy is the natural way to write this and is wrong: it reads as a safety
+    belt but encodes "silently drop a gate the caller asked for" -- the vacuous
+    pass this whole check exists to close -- and it is indistinguishable at
+    runtime from the correct form precisely BECAUSE the case is unreachable. It
+    stops being unreachable the moment the collection loop stops filling the two
+    series together, and only one of the two forms survives that.
+    """
+    if not series:
+        return True, (
+            "unprogrammed NOT EVALUATED: max_unprogrammed was set but no "
+            "num_unprogrammed_groups samples were recorded, so the device's "
+            "own hardware-rejection signal was never read"
+        )
+    observed = max(series.values())
+    if observed <= maximum:
+        return False, (
+            f"unprogrammed OK: max num_unprogrammed_groups ({observed}) is "
+            f"within the allowed maximum ({maximum})"
+        )
+    return True, (
+        f"unprogrammed BREACH: max num_unprogrammed_groups ({observed}) "
+        f"exceeds the allowed maximum ({maximum}) -- the device could not "
+        f"program at least one nexthop group"
+    )
+
+
 class NexthopGroupPoll(PeriodicTask):
     NAME = "nexthop_group_poll"
 
@@ -465,10 +507,22 @@ class NexthopGroupPoll(PeriodicTask):
         """
         Analyzes collected nexthop group data and generates a multi-series plot.
 
-        Checks if the maximum num_groups_configured is below threshold.
+        Two independent verdicts, reported separately so triage can tell them
+        apart:
+
+        1. ``max(num_groups_configured) < threshold`` -- the transient ECMP-set
+           ceiling.
+        2. ``max(num_unprogrammed_groups) <= max_unprogrammed`` -- the device's
+           own "I could not program this group" signal, i.e. the closest thing
+           the box reports to "the hardware table is full". Opt-in via the
+           ``max_unprogrammed`` param so existing callers are unaffected.
+
+        Collecting no data is a FAILURE, not a SKIP. ``run`` swallows every
+        collection exception, so an empty series means every single poll failed
+        -- reporting SKIP there let the check pass having proven nothing.
 
         Returns:
-            PeriodicCheckResult with PASS if max is above/equal to threshold, FAIL otherwise
+            PeriodicCheckResult: PASS only when every enabled verdict passes.
         """
         self.logger.info(
             f"NexthopGroupPoll run_final_check: self._data has {len(self._data)} entries"
@@ -478,8 +532,13 @@ class NexthopGroupPoll(PeriodicTask):
             return PeriodicCheckResult(
                 # pyrefly: ignore [bad-argument-type]
                 name=self.NAME,
-                status=hc_types.HealthCheckStatus.SKIP,
-                message="No data collected during periodic task execution",
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    "No nexthop-group data collected during the run. run() logs "
+                    "and swallows every collection failure, so an empty series "
+                    "means every poll failed and the ceiling was never measured "
+                    "-- failing rather than reporting an unverified pass."
+                ),
             )
 
         threshold = self._params.get("threshold")
@@ -506,8 +565,11 @@ class NexthopGroupPoll(PeriodicTask):
             return PeriodicCheckResult(
                 # pyrefly: ignore [bad-argument-type]
                 name=self.NAME,
-                status=hc_types.HealthCheckStatus.SKIP,
-                message="No valid NexthopGroupSummary data collected",
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    "Samples were recorded but none was a NexthopGroupSummary, "
+                    "so no nexthop-group count could be evaluated."
+                ),
             )
 
         max_num_groups_configured = max(num_groups_configured_data.values())
@@ -517,18 +579,41 @@ class NexthopGroupPoll(PeriodicTask):
             f"Final max num_groups_configured across all samples: {max_num_groups_configured}"
         )
 
+        verdicts: t.List[str] = []
+        failures: t.List[str] = []
+
         if max_num_groups_configured < threshold:
-            status = hc_types.HealthCheckStatus.PASS
-            message = (
-                f"Max num_groups_configured ({max_num_groups_configured}) "
-                f"is below threshold ({threshold})"
+            verdicts.append(
+                f"count OK: max num_groups_configured "
+                f"({max_num_groups_configured}) is below threshold ({threshold})"
             )
         else:
-            status = hc_types.HealthCheckStatus.FAIL
-            message = (
-                f"Max num_groups_configured ({max_num_groups_configured}) "
-                f"meets or exceeds threshold ({threshold})"
+            failures.append(
+                f"count BREACH: max num_groups_configured "
+                f"({max_num_groups_configured}) meets or exceeds threshold "
+                f"({threshold})"
             )
+
+        # Opt-in second verdict. `num_unprogrammed_groups` is the device's own
+        # report that it could not program a group -- the most direct signal
+        # available that a hardware table was exceeded. It has always been
+        # sampled and plotted; until now nothing asserted on it. See
+        # `_unprogrammed_verdict` for why the empty case is a failure and why
+        # the check lives there rather than inline here.
+        max_unprogrammed = self._params.get("max_unprogrammed")
+        if max_unprogrammed is not None:
+            failed, text = _unprogrammed_verdict(
+                num_unprogrammed_groups_data, int(max_unprogrammed)
+            )
+            (failures if failed else verdicts).append(text)
+
+        status = (
+            hc_types.HealthCheckStatus.FAIL
+            if failures
+            else hc_types.HealthCheckStatus.PASS
+        )
+        message = "; ".join(failures + verdicts)
+        message += f" [samples={len(num_groups_configured_data)}]"
 
         data_series = {
             "num_groups_configured": num_groups_configured_data,

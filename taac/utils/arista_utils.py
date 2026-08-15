@@ -935,6 +935,32 @@ async def get_bgpcpp_version(driver: t.Any) -> str:
     return await driver.async_get_bgpcpp_version()
 
 
+def _assert_nhg_counters_found(
+    found_configured: bool, found_unprogrammed: bool
+) -> None:
+    """Raise unless both counter lines were seen in the command output.
+
+    Both counts start at 0, so a change to the EOS output wording would
+    otherwise yield a well-formed summary reporting zero nexthop groups --
+    indistinguishable from a healthy idle device, and passing any
+    "count below threshold" assertion forever.
+    """
+    missing = [
+        name
+        for name, found in (
+            ("Number of Nexthop Groups configured", found_configured),
+            ("Number of unprogrammed Nexthop Groups", found_unprogrammed),
+        )
+        if not found
+    ]
+    if missing:
+        raise ValueError(
+            "show nexthop-group summary did not contain the expected counter "
+            f"line(s): {', '.join(missing)}. Refusing to report a zero count "
+            "that was never read."
+        )
+
+
 async def get_nexthop_group_summary(driver: t.Any) -> NexthopGroupSummary:
     """
     Get and parse nexthop group summary from Arista device.
@@ -972,6 +998,13 @@ async def get_nexthop_group_summary(driver: t.Any) -> NexthopGroupSummary:
 
         num_groups_configured = 0
         num_unprogrammed_groups = 0
+        # Whether the counter lines were actually present. Without this, a
+        # change to the EOS output wording leaves both counts at their 0
+        # initialisers and the function returns a well-formed summary reporting
+        # zero groups -- which reads as a healthy device and passes any
+        # "count below threshold" check forever.
+        found_configured = False
+        found_unprogrammed = False
         nexthop_group_sizes: t.Dict[int, int] = {}
         nexthop_group_types: t.Dict[str, int] = {}
 
@@ -988,6 +1021,7 @@ async def get_nexthop_group_summary(driver: t.Any) -> NexthopGroupSummary:
                 match = re.search(r"configured:\s*(\d+)", line)
                 if match:
                     num_groups_configured = int(match.group(1))
+                    found_configured = True
                     logger.debug(
                         f"[ARISTA_UTILS] Found num_groups_configured: {num_groups_configured}"
                     )
@@ -998,6 +1032,7 @@ async def get_nexthop_group_summary(driver: t.Any) -> NexthopGroupSummary:
                 match = re.search(r"unprogrammed Nexthop Groups:\s*(\d+)", line)
                 if match:
                     num_unprogrammed_groups = int(match.group(1))
+                    found_unprogrammed = True
                     logger.debug(
                         f"[ARISTA_UTILS] Found num_unprogrammed_groups: {num_unprogrammed_groups}"
                     )
@@ -1031,6 +1066,8 @@ async def get_nexthop_group_summary(driver: t.Any) -> NexthopGroupSummary:
                     count = int(parts[1])
                     nexthop_group_sizes[size] = count
                     logger.debug(f"[ARISTA_UTILS] Found group size: {size} = {count}")
+
+        _assert_nhg_counters_found(found_configured, found_unprogrammed)
 
         logger.info(
             f"[ARISTA_UTILS] Parsed nexthop group summary: "
