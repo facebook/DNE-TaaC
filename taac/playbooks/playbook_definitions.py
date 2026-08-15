@@ -25626,6 +25626,33 @@ _SC9_MIN_ECMP_WIDTH = 2
 # Every prefix should resolve over every peer.
 _SC9_EXPECTED_MULTIPATH_WIDTH = 128
 
+# Steady state is DETECTED, not assumed. The baseline the recovery gate is
+# measured against has to be a converged one, and the only prior timing datum
+# for this testbed -- 382s to INITIALIZED on release 191 -- is both longer than
+# the stock 300s settle and inflated by EOR wait on 132 IDLE iBGP peers that
+# cannot affect multipath width. That number is therefore useless for sizing a
+# blind sleep in either direction, which is the argument for not using one.
+#
+# A ceiling, not a duration: the step returns as soon as the width holds, so a
+# healthy run never pays this. 600s is the SC9 profile's own already-sanctioned
+# BGP convergence SLA (`convergence_threshold`), reused rather than invented.
+# This predicate is strictly cheaper to satisfy than that check -- it reads the
+# multipath width directly and never waits on EOR, which is what made 87% of
+# that 382s dead time -- so the same bound is generous here.
+_SC9_BASELINE_HARD_TIMEOUT_SECONDS = 600.0
+# Each poll is a full dual-AFI RIB walk over 5,000 prefixes x 128 peers, and
+# the underlying fetch is itself @async_retryable(retries=50, sleep_time=1).
+_SC9_BASELINE_POLL_INTERVAL_SECONDS = 15.0
+# Must clear several poll intervals: observe_convergence restarts this window
+# on ANY failing observation and on any predicate error, so a value near the
+# poll interval would be satisfied by a single lucky read.
+_SC9_BASELINE_STABILITY_WINDOW_SECONDS = 30.0
+# One hung RIB read must not consume the whole budget.
+_SC9_BASELINE_PREDICATE_TIMEOUT_SECONDS = 120.0
+# The poll does the waiting now. This is only enough for sessions to start
+# coming up so the first read is not certainly wasted; the stock default is 300.
+_SC9_SETUP_SETTLE_SECONDS = 60
+
 
 def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     device_name: str,
@@ -25638,12 +25665,20 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
 
     Gates, and why each sits where it does:
 
-    * Steady state (Stage A) -- an in-sequence discovery step records the modal
-      multipath width per AFI and the prefix set at that width, and fails if the
-      measured width is not ``expected_multipath_width``. It is a Stage step
+    * Steady state (Stage A) -- an in-sequence discovery step POLLS the modal
+      multipath width per AFI until it reads ``expected_multipath_width`` and
+      HOLDS there for the stability window, then records it together with the
+      prefix set at that width; it fails if that never happens inside the hard
+      timeout. Detected rather than assumed: the recovery postcheck is scored
+      against this baseline, so a width captured mid-convergence would let a
+      genuinely degraded run "recover" to the wrong number. It is a Stage step
       rather than a precheck because ``--continue-on-precheck-failure`` (used by
       the canonical dev run command) swallows precheck failures wholesale, which
-      would silently skip the baseline the recovery gate depends on.
+      would silently skip the baseline the recovery gate depends on -- and it
+      passes ``stage=POST_TEST`` because being a Stage step is NOT by itself
+      enough to block: ``ValidationStep.run`` raises only for PRE_TEST and
+      POST_TEST, so the unset default (and MID_TEST) would log the failure and
+      carry on regardless of ``fail_fast``.
     * Drain (Stage B) -- ONE withdrawal of every eBGP pool, in one commit.
       Two separate knobs control that, and an earlier revision only set one of
       them. ``spread=False`` makes a single cycle's withdraw one commit across
@@ -25676,7 +25711,12 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
             "SC9: programmed ECMP sets stay within the hardware table during a "
             "simultaneous 128-peer drain, and collapse back afterwards"
         ),
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+        setup_steps=create_bgp_instability_setup_steps(
+            device_name=device_name,
+            # Trimmed from the stock 300s because Stage A now polls: the wait
+            # that matters is the one with a predicate behind it.
+            convergence_wait_seconds=_SC9_SETUP_SETTLE_SECONDS,
+        ),
         prechecks=profile_checks.prechecks,
         postchecks=profile_checks.postchecks,
         snapshot_checks=profile_checks.snapshot_checks,
@@ -25715,10 +25755,36 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                         expected_min_baseline_width=expected_multipath_width,
                         expected_max_baseline_width=expected_multipath_width,
                         required_address_families=["ipv4", "ipv6"],
+                        # POLL for steady state rather than trusting a settle.
+                        # A baseline captured mid-convergence is worse than a
+                        # late one: the recovery postcheck compares against it,
+                        # so an under-measured width would let a genuinely
+                        # degraded run "recover" to the wrong number.
+                        convergence_hard_timeout_seconds=(
+                            _SC9_BASELINE_HARD_TIMEOUT_SECONDS
+                        ),
+                        convergence_poll_interval_seconds=(
+                            _SC9_BASELINE_POLL_INTERVAL_SECONDS
+                        ),
+                        convergence_stability_window_seconds=(
+                            _SC9_BASELINE_STABILITY_WINDOW_SECONDS
+                        ),
+                        convergence_predicate_timeout_seconds=(
+                            _SC9_BASELINE_PREDICATE_TIMEOUT_SECONDS
+                        ),
+                        # BLOCKING. Without a stage, ValidationStep.run leaves
+                        # exception_cls None and the step merely logs its
+                        # failure -- so an unusable baseline would sail into the
+                        # drain and only surface later as "no baseline width
+                        # discovered" from the recovery postcheck, pointing at
+                        # the wrong thing. POST_TEST is the value that maps to
+                        # TestCaseFailure; the name is about the exception, not
+                        # about where the step sits.
+                        stage=taac_types.ValidationStage.POST_TEST,
                         description=(
-                            "SC9 Stage A: record the converged per-AFI multipath "
-                            f"baseline and assert it is {expected_multipath_width} "
-                            "next-hops wide"
+                            "SC9 Stage A: poll until the per-AFI multipath "
+                            f"baseline holds at {expected_multipath_width} "
+                            "next-hops, then record it"
                         ),
                     ),
                 ],
