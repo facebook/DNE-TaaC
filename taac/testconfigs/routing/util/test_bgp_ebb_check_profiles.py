@@ -684,9 +684,19 @@ class CheckProfileRegistryTest(unittest.TestCase):
             bgp_mon=BgpMonScope(exclude=True, parent_network=secondary),
         )
 
-        standard_profiles = [
-            p for p in CheckProfile if p != CheckProfile.PERF_SCALING_BOUNDED_ECMP
-        ]
+        # The bounded-ECMP characteristic profiles are the exception, and both
+        # for the same reason: their playbooks build them from a bare
+        # `ProfileContext()`, so no BGP-MON chassis is ever configured for the
+        # checks to thread. They scope to the eBGP population via
+        # IBGP_MIMIC_PARENTS instead, which is why their phases DO carry ignored
+        # parent prefixes and so cannot simply be skipped by the `not ignored`
+        # guard below. Every other profile is standard-shape and must honour a
+        # configured secondary chassis.
+        bounded_ecmp_profiles = {
+            CheckProfile.PERF_SCALING_BOUNDED_ECMP,
+            CheckProfile.SC9_BOUNDED_ECMP,
+        }
+        standard_profiles = [p for p in CheckProfile if p not in bounded_ecmp_profiles]
         for profile in standard_profiles:
             with self.subTest(profile=profile):
                 checks = get_profile_checks(profile, ctx)

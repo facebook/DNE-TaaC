@@ -106,6 +106,7 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.stages.stage_definitions import (
+    create_route_oscillations_stage,
     create_longevity_stage,
     create_periodic_service_restart_stage,
     create_port_channel_concurrent_cross_flap_stage,
@@ -119,6 +120,8 @@ from taac.stages.stage_definitions import (
     create_steps_stage,
 )
 from taac.steps.step_definitions import (
+    create_bgp_instability_setup_steps,
+    create_multipath_nexthop_count_health_check_step,
     COLD_START_PREFIX_OSCILLATIONS,
     CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
@@ -158,7 +161,13 @@ from taac.steps.step_definitions import (
     TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY,
     wait_time_after_disable_churn_s,
 )
+from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
+    CheckProfile,
+    get_profile_checks,
+    ProfileContext,
+)
 from taac.task_definitions import (
+    create_nexthop_group_poll_periodic_task,
     create_thrift_stress_periodic_task,
 )
 from taac.tasks.thrift_stress_payloads import (
@@ -25585,4 +25594,167 @@ def create_be_qos_playbook(
         snapshot_checks=snapshot_checks or [],
         stages=stages or [],
         cleanup_steps=cleanup_steps or [],
+    )
+
+
+# ── SC9: bounded number of programmed ECMP sets (characteristic 9) ───────────
+#
+# 128 eBGP peers per AFI all advertise the SAME 5,000 prefixes, so each prefix
+# should install as ONE ECMP set per AFI, 128 next-hops wide. Draining every
+# peer in a single commit makes prefixes transiently resolve over different
+# surviving subsets, which is what allocates extra sets. The characteristic is
+# that the peak stays inside the hardware table and the structure collapses
+# back afterwards.
+#
+# NOT in playbooks/routing/bgp_ebb_playbooks.py on purpose: a catalog
+# governance test pins that module's __all__ to exactly twenty names in order,
+# so an addition there forces editing the test. SC1-SC6 set the precedent of
+# living here instead.
+
+# The device's own EcmpLevel2 (Routing) capacity on bag013.ash6, read from
+# `show hardware capacity`. Used as the raw-count ceiling so the periodic task
+# has a hardware-anchored bound rather than the historical literal 50, which is
+# 0.6% of it and has no derivation.
+_SC9_ECMP_LEVEL2_CAPACITY = 8192
+
+# A group must be at least this wide to count as a real ECMP set. The raw
+# nexthop-group count includes width-1 groups, so a collapse into per-peer
+# singletons makes it RISE -- a ceiling on the raw count therefore fires on a
+# LOSS of ECMP. Observed on bag013: healthy {128: 2}, collapsed {1: 256}.
+_SC9_MIN_ECMP_WIDTH = 2
+
+# Every prefix should resolve over every peer.
+_SC9_EXPECTED_MULTIPATH_WIDTH = 128
+
+
+def get_bgp_ebb_bounded_ecmp_sc9_playbook(
+    device_name: str,
+    expected_multipath_width: int = _SC9_EXPECTED_MULTIPATH_WIDTH,
+    withdraw_seconds: int = 600,
+    readvertise_seconds: int = 600,
+    soak_duration_seconds: int = 300,
+) -> Playbook:
+    """Build the SC9 bounded-ECMP-sets characteristic playbook.
+
+    Gates, and why each sits where it does:
+
+    * Steady state (Stage A) -- an in-sequence discovery step records the modal
+      multipath width per AFI and the prefix set at that width, and fails if the
+      measured width is not ``expected_multipath_width``. It is a Stage step
+      rather than a precheck because ``--continue-on-precheck-failure`` (used by
+      the canonical dev run command) swallows precheck failures wholesale, which
+      would silently skip the baseline the recovery gate depends on.
+    * Drain (Stage B) -- ONE withdrawal of every eBGP pool, in one commit.
+      Two separate knobs control that, and an earlier revision only set one of
+      them. ``spread=False`` makes a single cycle's withdraw one commit across
+      every matched pool rather than three sequential batches (``spread=True``
+      also silently ignores ``prefix_pool_regex``). But the NUMBER of cycles
+      comes from ``iterations = test_duration_seconds // (withdraw_time +
+      readvertise_time)``, so passing a 1200s duration against the 60s defaults
+      produced TEN withdraw-readvertise cycles. Holding the two times equal to
+      the total makes it exactly one, and the two waits become the observation
+      windows either side of the restore.
+    * Recovery -- asserted by the SC9 profile's postcheck against the discovered
+      baseline, not by the periodic task. A task verdict can never be recorded
+      as Requirement Coverage (the catalog admits only precheck / workload /
+      postcheck / snapshot phases), and the task's own baseline window would
+      land during setup_steps, before convergence.
+    * Hardware headroom -- the profile's pre/post hardware-capacity checks, on
+      the device-maintained ``ecmp_high_watermark``. Unlike a sampled poll that
+      cannot miss a peak occurring between samples.
+    * Instrument liveness -- the periodic task's ``min_observed_groups``, which
+      fails a run that reported only zeroes. That is not hypothetical: the
+      predecessor suite on bag012 read 0 for all 884 samples and passed eleven
+      times on a structurally blind gate.
+    """
+    profile_checks = get_profile_checks(
+        CheckProfile.SC9_BOUNDED_ECMP, ProfileContext()
+    )
+    return Playbook(
+        name="bgp_ebb_bounded_ecmp_sc9_playbook",
+        description=(
+            "SC9: programmed ECMP sets stay within the hardware table during a "
+            "simultaneous 128-peer drain, and collapse back afterwards"
+        ),
+        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+        prechecks=profile_checks.prechecks,
+        postchecks=profile_checks.postchecks,
+        snapshot_checks=profile_checks.snapshot_checks,
+        periodic_tasks=create_standard_periodic_tasks(
+            device_name=device_name,
+            memory_threshold=Gigabyte.GIG_5.value,
+            cpu_util_terminate_on_error=False,
+            memory_terminate_on_error=False,
+        )
+        + [
+            create_nexthop_group_poll_periodic_task(
+                device_name=device_name,
+                # Hardware-anchored rather than the historical literal 50.
+                threshold=_SC9_ECMP_LEVEL2_CAPACITY,
+                # Blocking: a run that only ever reported zero measured nothing.
+                min_observed_groups=1,
+                # The device's own report that it could not program a group --
+                # the most direct hardware-exhaustion signal available, and the
+                # one number that does not need calibrating. Measured 0 on all
+                # 728 readings of the first bag013 run, against a peak of 27
+                # groups in an 8,192-entry table, so this is a real gate rather
+                # than a threshold picked to pass.
+                max_unprogrammed=0,
+                # Report real ECMP sets separately from width-1 singletons. No
+                # ceiling yet -- the peak has never been measured on an
+                # uncontaminated run, and the coverage-bearing bound is the
+                # hardware-capacity postcheck.
+                min_ecmp_width=_SC9_MIN_ECMP_WIDTH,
+            ),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_multipath_nexthop_count_health_check_step(
+                        discover_baseline=True,
+                        expected_min_baseline_width=expected_multipath_width,
+                        expected_max_baseline_width=expected_multipath_width,
+                        required_address_families=["ipv4", "ipv6"],
+                        description=(
+                            "SC9 Stage A: record the converged per-AFI multipath "
+                            f"baseline and assert it is {expected_multipath_width} "
+                            "next-hops wide"
+                        ),
+                    ),
+                ],
+            ),
+            create_route_oscillations_stage(
+                device_name=device_name,
+                prefix_pool_regex=".*EBGP.*",
+                prefix_start_index=0,
+                prefix_end_index=5000,
+                # ONE cycle. The stage computes
+                #   iterations = test_duration_seconds // (withdraw + readvertise)
+                # so the previous 1200/60/60 produced TEN withdraw-readvertise
+                # cycles, not the single simultaneous drain this test is about --
+                # confirmed on the first bag013 run, whose drain stage ran 25m
+                # for a stimulus that was supposed to happen once. Holding the
+                # times equal to the total makes iterations exactly 1 and turns
+                # the two waits into the observation windows: withdrawn for
+                # `withdraw_seconds`, then restored for `readvertise_seconds` so
+                # recovery has somewhere to happen before the postchecks read it.
+                withdraw_time=withdraw_seconds,
+                readvertise_time=readvertise_seconds,
+                test_duration_seconds=withdraw_seconds + readvertise_seconds,
+                # spread=False is what makes the single withdraw one commit
+                # across every matched pool rather than three sequential batches.
+                spread=False,
+            ),
+            create_steps_stage(
+                steps=[
+                    create_longevity_step(
+                        duration=soak_duration_seconds,
+                        description=(
+                            "SC9 Stage C: soak so the transient can collapse "
+                            "before the recovery postcheck samples it"
+                        ),
+                    ),
+                ],
+            ),
+        ],
     )

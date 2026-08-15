@@ -41,6 +41,10 @@ import dataclasses
 import enum
 import typing as t
 
+from taac.abstractions.compatibility.legacy_ebb_binding import (
+    IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+    IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+)
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_convergence_check,
     create_bgp_rib_fib_consistency_check,
@@ -50,6 +54,8 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_tcpdump_check,
     create_core_dumps_snapshot_check,
     create_cpu_percentile_observe_check,
+    create_hardware_capacity_check,
+    create_next_hop_count_check,
     create_rss_delta_observe_check,
 )
 from taac.health_checks.retry_policy import get_retry_kwargs
@@ -63,6 +69,56 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCheck
 
+# SC9 asserts on the eBGP population and nothing else: the 128 eBGP peers per
+# AFI are what advertise the 5,000 prefixes, and the ECMP sets under test are
+# built entirely from them. The topology's iBGP "mimic" groups carry
+# ``bgp_prefix_configs=[]`` -- they advertise NOTHING and contribute no path to
+# any ECMP set -- so a shortfall there cannot affect a single SC9 assertion.
+#
+# Scoping them out is therefore correct, not convenient. It is also necessary:
+# on the first bag013 run 22 of the 128 IPv6 iBGP peers sat in IDLE from before
+# the prechecks through every retry (all 256 eBGP were Established), which fails
+# the run on a population the test does not measure. Those 22 are a real open
+# question about the lab topology and are tracked separately; they are not an
+# SC9 result, and SC9 should not be the thing that reports them.
+#
+# The constants are bare prefixes, so the masks are applied here.
+#
+# The v6 mask is /80, NOT /64. eBGP and iBGP differ only in the FIFTH hextet
+# ("...:11:8::" vs "...:11:9::"), which sits beyond a /64 boundary --
+# `is_parent_prefix` calls `ip_network(prefix, strict=False)`, so
+# "2401:db00:e50d:11:9::/64" silently normalises to "2401:db00:e50d:11::/64"
+# and swallows the eBGP range as well. That is not theoretical: with /64 the
+# first clean bag013 run reported "All 133 BGP sessions are established" --
+# 128 eBGP v4 plus 5 others, with all 128 eBGP v6 sessions quietly out of
+# scope. /80 covers exactly the five hextets that distinguish the two.
+#
+# The v4 mask is /23, NOT /24, because the peer range ROLLS OVER. iBGP v4
+# starts at 10.164.28.11 and steps by 2 for 128 peers, so the last five land at
+# 10.164.29.1 .. .9 -- past the /24 boundary. A /24 leaves exactly those five in
+# scope, which is the other half of the 133 the first clean run reported:
+# 128 eBGP v4 (correctly in scope) + 5 iBGP v4 stragglers (wrongly in scope).
+# /23 covers 10.164.28.0-10.164.29.255 and still excludes eBGP, which lives in
+# 10.163.28.0/23. The v6 peers do not roll over -- they run ::11 to ::10f,
+# entirely inside the fifth hextet -- so /80 is exact there.
+#
+# Net effect of the two masks: exactly the 256 eBGP sessions stay in scope.
+_IBGP_MIMIC_PARENTS: t.List[str] = [
+    f"{IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1}::/80",
+    f"{IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1}.0/23",
+]
+
+# Absolute bound on the device-maintained ECMP peak. DNE's already-sanctioned
+# bar (health_checks/constants.py) rather than a number invented here, and it
+# has to be ABSOLUTE: the watermark cannot be reset in-test, so bag013 carried a
+# pre-existing peak of 416 into the first SC9 run and will carry one into every
+# run until it is reloaded. A bound below that would fail on lab history rather
+# than on anything SC9 did.
+_SC9_MAX_ECMP_HIGH_WATERMARK = 1000
+
+# EcmpLevel2 (Routing) is the level BGP multipath actually consumes on this
+# platform; the aggregate ECMP row is the sum of all three levels.
+_SC9_MAX_ECMP_LEVEL2 = 500
 _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS = 1200
 _SOAK_READINESS_STABILITY_WINDOW_SECONDS = 30.0
 RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES = ("EB-FA-V6", "EB-FA-V4")
@@ -109,6 +165,7 @@ class CheckProfile(enum.Enum):
     # Minimal-shape (accept the context for a uniform API, but ignore it):
     # bag012 perf-scaling, bounded-ECMP-sets (case9).
     PERF_SCALING_BOUNDED_ECMP = "perf_scaling_bounded_ecmp"
+    SC9_BOUNDED_ECMP = "sc9_bounded_ecmp"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -614,6 +671,105 @@ def _perf_scaling_bounded_ecmp(ctx: ProfileContext) -> ProfileChecks:
     )
 
 
+def _sc9_bounded_ecmp(ctx: ProfileContext) -> ProfileChecks:
+    """Profile for the SC9 bounded-ECMP-sets characteristic on bag013.
+
+    SC9 asserts that 5,000 routes learned from 128 eBGP peers install as ONE
+    ECMP set per AFI, that a simultaneous drain does not push the programmed
+    set count past what the hardware can hold, and that the structure collapses
+    back afterwards.
+
+    Only the claims that can be recorded as Requirement Coverage live here.
+    ``_VALIDATION_PHASES`` admits precheck / workload / postcheck / snapshot
+    only, so a periodic-task verdict can never be counted as coverage -- the
+    nexthop-group poll therefore carries the transient series and the
+    instrument-liveness guards, while the coverage-bearing assertions are the
+    postchecks below.
+
+    Deliberately additive: ``PERF_SCALING_BOUNDED_ECMP`` is left byte-identical
+    so the retained bounded-ECMP TestConfig is unaffected.
+    """
+    return ProfileChecks(
+        prechecks=[
+            # Hardware headroom BEFORE the drain, recorded so a postcheck
+            # breach can be read against where the device started.
+            #
+            # Nothing in the framework compares the two readings -- each
+            # hardware-capacity check is independent and stateless -- so this is
+            # documentation of the starting point, not half of a delta. An
+            # earlier revision of this profile claimed it "establishes the floor
+            # the post reading is compared against"; that mechanism does not
+            # exist. check_watermarks=False keeps the within-reading delta check
+            # off, because bag013 carries a large stale FEC peak that no SC9 run
+            # can reset or influence.
+            create_hardware_capacity_check(
+                check_id="sc9_precheck_hw_capacity_baseline",
+                check_watermarks=False,
+            ),
+        ],
+        postchecks=[
+            # Scoped to the eBGP population -- see _IBGP_MIMIC_PARENTS. The
+            # drain withdraws routes without tearing down sessions, so an eBGP
+            # peer that is not Established at postcheck IS a real finding.
+            create_bgp_session_establish_check(
+                check_id="sc9_postcheck_ebgp_sessions_established",
+                parent_prefixes_to_ignore=_IBGP_MIMIC_PARENTS,
+                **get_retry_kwargs(hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK),
+            ),
+            create_bgp_rib_fib_consistency_check(
+                **get_retry_kwargs(hc_types.CheckName.BGP_RIB_FIB_CONSISTENCY_CHECK),
+            ),
+            create_bgp_convergence_check(
+                convergence_threshold=ctx.convergence_threshold or 600,
+                # Unlike PERF_SCALING_BOUNDED_ECMP this does NOT fail on an
+                # expired EOR timer. SC9 drains peers on purpose, so peers that
+                # never re-send EOR are the stimulus, not a defect; failing on
+                # it reports the workload as a fault. This matches the fleet
+                # standard (BGP_STANDARD_POSTCHECKS).
+                fail_on_eor_expired=False,
+                check_id="sc9_postcheck_convergence",
+                **get_retry_kwargs(hc_types.CheckName.BGP_CONVERGENCE_CHECK),
+            ),
+            # RECOVERY, at RIB level: every prefix discovered at baseline must
+            # be back at its baseline multipath width. peers_stopped_delta=0
+            # because the drain is a route withdrawal followed by a restore --
+            # no peer is left administratively down at postcheck time.
+            create_next_hop_count_check(
+                check_id="sc9_postcheck_multipath_width_restored",
+                use_discovered_prefixes=True,
+                use_discovered_width=True,
+                peers_stopped_delta=0,
+            ),
+            # Hardware headroom AFTER the drain.
+            #
+            # This deliberately does NOT use watermark_delta_threshold, which an
+            # earlier revision set to the topology's structural max. That knob
+            # does not mean what the name suggests: validate_hardware_capacity
+            # computes abs(high_watermark - used) WITHIN A SINGLE READING, so it
+            # never compares the precheck to the postcheck, and the same knob
+            # gates FEC as well as ECMP. The first bag013 run failed on exactly
+            # that -- "FEC high watermark delta (19398) exceeds threshold (258)"
+            # -- where 19398 is a stale FEC peak (hwm 24271 vs 4873 used) that
+            # was identical at precheck and postcheck and has nothing to do with
+            # SC9. check_watermarks=False turns the delta checks off; the
+            # absolute watermark bounds below are evaluated independently of it.
+            create_hardware_capacity_check(
+                check_id="sc9_postcheck_hw_capacity",
+                check_watermarks=False,
+                ecmp_high_watermark_threshold=_SC9_MAX_ECMP_HIGH_WATERMARK,
+                max_ecmp_level2=_SC9_MAX_ECMP_LEVEL2,
+            ),
+        ],
+        snapshot_checks=[
+            create_core_dumps_snapshot_check(),
+            # The drain withdraws routes; it does not tear down sessions, so a
+            # flap here is a real finding rather than expected churn. Unlike
+            # PERF_SCALING_BOUNDED_ECMP the flap and uptime checks stay ON.
+            create_bgp_session_snapshot_check(),
+        ],
+    )
+
+
 # Explicit profile -> builder mapping (no decorator/registration side effects, per
 # the lazy-import guidance). Builders are referenced, not called, at import time.
 _PROFILE_BUILDERS: t.Dict[CheckProfile, t.Callable[[ProfileContext], ProfileChecks]] = {
@@ -627,6 +783,7 @@ _PROFILE_BUILDERS: t.Dict[CheckProfile, t.Callable[[ProfileContext], ProfileChec
     CheckProfile.SOAK_READINESS_GATED: _soak_readiness_gated,
     CheckProfile.RUNTIME_UPDATE: _runtime_update,
     CheckProfile.PERF_SCALING_BOUNDED_ECMP: _perf_scaling_bounded_ecmp,
+    CheckProfile.SC9_BOUNDED_ECMP: _sc9_bounded_ecmp,
 }
 
 
