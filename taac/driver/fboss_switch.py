@@ -82,6 +82,7 @@ from neteng.fboss.bgp_thrift.types import (
     TBgpSession,
     TGetUpdateGroupInfoRequest,
     TGetUpdateGroupInfoResponse,
+    TGetUpdateGroupSummariesResponse,
     TOriginatedRoute,
 )
 from neteng.fboss.ctrl.clients import FbossCtrl
@@ -1877,10 +1878,25 @@ class FbossSwitch(AbstractSwitch):
     async def async_get_update_group_info(
         self, group_id: t.Optional[int] = None
     ) -> TGetUpdateGroupInfoResponse:
-        """Get BGP++ Update Group info (the API behind ``show bgpcpp update-group``)."""
-        request = TGetUpdateGroupInfoRequest(group_id=group_id)
+        """Get one update-group detail, or enumerate and retrieve all details."""
         async with await self._get_bgp_client() as bgp_client:
-            return await bgp_client.getUpdateGroupInfo(request)
+            if group_id is not None:
+                request = TGetUpdateGroupInfoRequest(group_id=group_id)
+                return await bgp_client.getUpdateGroupInfo(request)
+
+            summaries: TGetUpdateGroupSummariesResponse = (
+                await bgp_client.getUpdateGroupSummaries()
+            )
+            update_groups = []
+            for summary in summaries.update_groups:
+                request = TGetUpdateGroupInfoRequest(group_id=summary.group_id)
+                response = await bgp_client.getUpdateGroupInfo(request)
+                update_groups.extend(response.update_groups)
+
+            return TGetUpdateGroupInfoResponse(
+                update_groups=update_groups,
+                enable_update_group=summaries.enable_update_group,
+            )
 
     @async_retryable(
         retries=30,

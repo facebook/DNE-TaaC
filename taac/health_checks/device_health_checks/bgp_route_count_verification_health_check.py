@@ -19,6 +19,7 @@ from taac.health_checks.abstract_health_check import (
 )
 from taac.utils.bgp_route_count_utils import (
     filter_bgp_sessions,
+    format_update_group_diagnostics,
     get_route_counts_for_peers,
     select_peer_addresses_by_exact_peer_group,
     validate_all_peer_route_counts,
@@ -251,7 +252,8 @@ class BgpRouteCountVerificationHealthCheck(
                 f"Exact BGP peer-group selection failed on {hostname}: "
                 f"requested={sorted(set(exact_peer_group_names))}, "
                 f"missing={sorted(missing)}, observed={sorted(observed)}, "
-                f"selected_peers={len(selected)}"
+                f"selected_peers={len(selected)}, "
+                f"update_groups={format_update_group_diagnostics(update_groups)}"
             )
         return selected
 

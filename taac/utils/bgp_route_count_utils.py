@@ -11,6 +11,7 @@ and BgpVerifyReceivedRoutesTask.
 """
 
 import asyncio
+import json
 import typing as t
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ VALID_DIRECTIONS = [DIRECTION_RECEIVED, DIRECTION_ADVERTISED]
 POLICY_TYPE_PRE_POLICY = "pre_policy"
 POLICY_TYPE_POST_POLICY = "post_policy"
 VALID_POLICY_TYPES = [POLICY_TYPE_PRE_POLICY, POLICY_TYPE_POST_POLICY]
+
+_UPDATE_GROUP_DIAGNOSTIC_LIMIT = 20
 
 
 @dataclass
@@ -220,6 +223,51 @@ def select_peer_addresses_by_exact_peer_group(
         )
 
     return selected_addresses, observed_names
+
+
+def format_update_group_diagnostics(update_group_response: t.Any) -> str:
+    """Format bounded diagnostics from a structured update-group response."""
+    groups = list(getattr(update_group_response, "update_groups", None) or [])
+    formatted_groups = []
+    for group in groups[:_UPDATE_GROUP_DIAGNOSTIC_LIMIT]:
+        group_key = getattr(group, "group_key", None)
+        peers = list(getattr(group, "peers", None) or [])
+        formatted_groups.append(
+            {
+                "group_id": getattr(group, "group_id", None),
+                "group_key": {
+                    "afi_ipv4_negotiated": getattr(
+                        group_key, "afi_ipv4_negotiated", None
+                    ),
+                    "afi_ipv6_negotiated": getattr(
+                        group_key, "afi_ipv6_negotiated", None
+                    ),
+                    "egress_policy_name": getattr(
+                        group_key, "egress_policy_name", None
+                    ),
+                    "peer_group_name": getattr(group_key, "peer_group_name", None),
+                    "route_filter_stmt_name": getattr(
+                        group_key, "route_filter_stmt_name", None
+                    ),
+                    "session_type": getattr(group_key, "session_type", None),
+                },
+                "group_state": getattr(group, "group_state", None),
+                "member_count": getattr(group, "member_count", None),
+                "in_sync_peer_count": getattr(group, "in_sync_peer_count", None),
+                "detached_peer_count": getattr(group, "detached_peer_count", None),
+                "peer_count": len(peers),
+            }
+        )
+
+    diagnostics = {
+        "enable_update_group": getattr(
+            update_group_response, "enable_update_group", None
+        ),
+        "group_count": len(groups),
+        "groups": formatted_groups,
+        "omitted_group_count": max(0, len(groups) - _UPDATE_GROUP_DIAGNOSTIC_LIMIT),
+    }
+    return json.dumps(diagnostics, sort_keys=True)
 
 
 async def get_route_count_for_peer(

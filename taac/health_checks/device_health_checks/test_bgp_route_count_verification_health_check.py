@@ -3,6 +3,7 @@
 # pyre-unsafe
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from neteng.netcastle.logger import ConsoleFileLogger
@@ -75,6 +76,36 @@ class BgpRouteCountVerificationHealthCheckTest(unittest.IsolatedAsyncioTestCase)
             self.assertIn("mutually exclusive", result.message)
             driver.async_get_bgp_sessions.assert_not_awaited()
             driver.async_execute_show_json_on_shell.assert_not_awaited()
+
+    async def test_exact_peer_group_failure_includes_structured_diagnostics(
+        self,
+    ) -> None:
+        health_check, driver = self._health_check()
+        driver.async_get_update_group_info.return_value = SimpleNamespace(
+            enable_update_group=True,
+            update_groups=[
+                SimpleNamespace(
+                    group_id=17,
+                    group_key=SimpleNamespace(peer_group_name="EB-FA-V6"),
+                    group_state="READY",
+                    member_count=1,
+                    in_sync_peer_count=1,
+                    detached_peer_count=0,
+                    peers=[SimpleNamespace(peer_addr="2001:db8::1")],
+                )
+            ],
+        )
+
+        with self.assertRaises(RuntimeError) as error:
+            await health_check._resolve_peer_group_addresses(
+                "dut.example.com",
+                ["EB-FA-V6", "EB-FA-V4"],
+            )
+
+        message = str(error.exception)
+        self.assertIn('"enable_update_group": true', message)
+        self.assertIn('"group_id": 17', message)
+        self.assertIn('"peer_group_name": "EB-FA-V6"', message)
 
     async def test_arista_exact_selector_reports_no_matching_peers_as_error(
         self,
