@@ -127,6 +127,7 @@ from taac.steps.step_definitions import (
     COLD_START_PREFIX_OSCILLATIONS,
     CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
+    create_clear_port_stats_step,
     create_clear_traffic_stats_step,
     create_custom_step,
     create_drain_undrain_step,
@@ -148,6 +149,7 @@ from taac.steps.step_definitions import (
     create_set_bgp_prefixes_local_preference_step,
     create_service_interruption_step,
     create_service_restart_steps,
+    create_snake_rapid_a_end_flap_step,
     create_start_traffic_step,
     create_stop_traffic_step,
     create_system_reboot_step,
@@ -12967,6 +12969,11 @@ def gen_snake_playbooks(
     link_flap_longevity_recovery_wait_s: int = 300,
     link_flap_longevity_soak_s: int = 3600,
     link_flap_longevity_interface_slice: t.Optional[str] = None,
+    include_rapid_a_end_flap_stress: bool = False,
+    rapid_a_end_flap_duration_s: int = 3600,
+    rapid_a_end_flap_interval_s: int = 6,
+    rapid_a_end_flap_rest_s: int = 120,
+    rapid_a_end_flap_longevity_s: int = 300,
     common_prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     common_postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
@@ -13641,6 +13648,66 @@ def gen_snake_playbooks(
                     create_ixia_packet_loss_check(clear_traffic_stats=True),
                 ]
                 + gen_ptp_health_checks(),
+            ),
+        )
+
+    if include_rapid_a_end_flap_stress:
+        playbooks.append(
+            taac_types.Playbook(
+                name="test_snake_rapid_a_end_flap_stress",
+                prechecks=_prechecks,
+                stages=[
+                    # Stage 1: rapidly flap every snake circuit's A-end
+                    # continuously for the whole window (wedge_qsfp_util
+                    # tx_disable/tx_enable via async_do_rapid_interface_flaps).
+                    # duration_s is a wall-clock deadline; the flap count that
+                    # fits in it depends on per-flap cost (the two
+                    # wedge_qsfp_util invocations dominate interval_s on wide
+                    # snakes) and is logged by the handler.
+                    create_steps_stage(
+                        steps=[
+                            create_snake_rapid_a_end_flap_step(
+                                duration_sec=rapid_a_end_flap_duration_s,
+                                flap_interval_sec=rapid_a_end_flap_interval_s,
+                            )
+                        ]
+                    ),
+                    # Stage 2: rest so all links settle UP after the flap storm.
+                    create_steps_stage(
+                        steps=[create_longevity_step(duration=rapid_a_end_flap_rest_s)]
+                    ),
+                    # Stage 3: clear device port counters + IXIA traffic stats so
+                    # the mid-test and the following longevity measure a CLEAN
+                    # post-stress window (the common IXIA_PACKET_LOSS postcheck runs
+                    # with clear_traffic_stats=False, so it reports loss accumulated
+                    # from this clear through the end -- i.e. only the recovered
+                    # fabric, not the flap storm).
+                    create_steps_stage(
+                        steps=[
+                            create_clear_traffic_stats_step(),
+                            create_clear_port_stats_step(),
+                        ]
+                    ),
+                    # Stage 4: mid-test validation -- all links UP, LLDP correct.
+                    create_steps_stage(
+                        steps=[
+                            create_validation_step(
+                                point_in_time_checks=[
+                                    create_port_state_check(),
+                                    create_lldp_check(),
+                                ],
+                                stage=taac_types.ValidationStage.MID_TEST,
+                            ),
+                        ]
+                    ),
+                    # Stage 5: longevity soak on the recovered fabric.
+                    create_steps_stage(
+                        steps=[
+                            create_longevity_step(duration=rapid_a_end_flap_longevity_s)
+                        ]
+                    ),
+                ],
+                postchecks=_postchecks + gen_ptp_health_checks(),
             ),
         )
 
@@ -25709,6 +25776,7 @@ _SC9_MAX_MULTIWAY_GROUPS = 32
 # meaningful on a freshly reloaded box.
 _SC9_STRUCTURAL_MAX_ECMP_SETS = 258
 
+
 # Key for the pre/post hardware-capacity capture pair.
 #
 # `create_hardware_capacity_delta_step` rejects anything that is not a UUID
@@ -25725,6 +25793,7 @@ def _sc9_capacity_state_key(device_name: str) -> str:
             f"{device_name}:bgp_ebb_bounded_ecmp_sc9:hardware-capacity",
         )
     )
+
 
 # Closing-window size for the settled-state verdict. ODD: statistics.median
 # averages the two middle samples of an even window, so a window straddling 2
@@ -25911,9 +25980,7 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     # every gate below passed on an idle device.
     if cycles < 1:
         raise ValueError(f"SC9 requires at least one drain cycle, got {cycles}")
-    profile_checks = get_profile_checks(
-        CheckProfile.SC9_BOUNDED_ECMP, ProfileContext()
-    )
+    profile_checks = get_profile_checks(CheckProfile.SC9_BOUNDED_ECMP, ProfileContext())
     # The drain below runs with fail_on_session_flap=False, which hands the
     # session-stability verdict to the BGP_SESSION_CHECK snapshot. That is only
     # a sound trade if the snapshot check is actually present -- otherwise a
@@ -26092,8 +26159,7 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 # count and the derived count equal by construction.
                 withdraw_time=withdraw_seconds,
                 readvertise_time=readvertise_seconds,
-                test_duration_seconds=cycles
-                * (withdraw_seconds + readvertise_seconds),
+                test_duration_seconds=cycles * (withdraw_seconds + readvertise_seconds),
                 transition_soft_threshold_seconds=(
                     _SC9_TRANSITION_SOFT_THRESHOLD_SECONDS
                 ),

@@ -146,6 +146,11 @@ def gen_snake_test_config(
     link_flap_longevity_recovery_wait_s: int = 300,
     link_flap_longevity_soak_s: int = 3600,
     link_flap_longevity_interface_slice: t.Optional[str] = None,
+    include_rapid_a_end_flap_stress: bool = False,
+    rapid_a_end_flap_duration_s: int = 3600,
+    rapid_a_end_flap_interval_s: int = 6,
+    rapid_a_end_flap_rest_s: int = 120,
+    rapid_a_end_flap_longevity_s: int = 300,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     ixia_ports: t.Optional[t.List[str]] = None,
     precheck_packet_loss_clear_stats: bool = False,
@@ -206,6 +211,15 @@ def gen_snake_test_config(
                 recovery wait, 1-hour soak). ``_interface_slice`` is a
                 positional slice expression (e.g. ``":3"`` = first 3
                 interfaces) to flap a subset; ``None`` flaps all.
+            include_rapid_a_end_flap_stress: When True, include the
+                ``test_snake_rapid_a_end_flap_stress`` playbook -- a rapid
+                optical (wedge_qsfp_util tx_disable/tx_enable) flap of every
+                snake circuit's A-end, run continuously for
+                ``rapid_a_end_flap_duration_s`` with
+                ``rapid_a_end_flap_interval_s`` between flaps, then a
+                ``rapid_a_end_flap_rest_s`` rest, a stats clear, a mid-test
+                validation, and a ``rapid_a_end_flap_longevity_s`` soak.
+                Defaults: 1h continuous / 6s gap / 2m rest / 5m soak.
             manual_test_interfaces: Optional explicit interface list
                 forwarded to ``gen_snake_playbooks`` for tests that
                 need an operator-pinned target set.
@@ -325,6 +339,11 @@ def gen_snake_test_config(
             link_flap_longevity_recovery_wait_s=link_flap_longevity_recovery_wait_s,
             link_flap_longevity_soak_s=link_flap_longevity_soak_s,
             link_flap_longevity_interface_slice=link_flap_longevity_interface_slice,
+            include_rapid_a_end_flap_stress=include_rapid_a_end_flap_stress,
+            rapid_a_end_flap_duration_s=rapid_a_end_flap_duration_s,
+            rapid_a_end_flap_interval_s=rapid_a_end_flap_interval_s,
+            rapid_a_end_flap_rest_s=rapid_a_end_flap_rest_s,
+            rapid_a_end_flap_longevity_s=rapid_a_end_flap_longevity_s,
             common_prechecks=common_prechecks,
             common_postchecks=common_postchecks,
             manual_test_interfaces=manual_test_interfaces,
@@ -721,19 +740,23 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # iteration=1 for the first full Phase 3/4 sweep (validate each disruption once);
     # bump later once a clean single-iteration sweep is confirmed.
     iteration=1,
-    # test_snake_link_flap_with_longevity: enabled as a SMALL first-pass to assess the
-    # test-case quality on this box before running the full-scale timeline. Scaled down
-    # from the defaults (33 iters, all interfaces, 300s enable delay, 5m recovery, 1h
-    # soak) to a quick ~8-minute run: 1 flap cycle over just the first 3 interfaces
-    # (30s spacing each way), 2-minute recovery wait, 2-minute longevity soak. Bump
-    # these to the production timeline once the small run looks clean.
+    # test_snake_link_flap_with_longevity: full production timeline. The small first-pass
+    # (1 cycle / first 3 interfaces / 2m recovery / 2m soak) passed cleanly with 0 packet
+    # loss on 2026-08-12, so this now runs the real test at the playbook defaults: 33 flap
+    # cycles over ALL interfaces (30s disable / 300s enable per-interface spacing) ~= 3h,
+    # then a 5-minute recovery wait and a 1-hour longevity soak (~4h total).
     include_link_flap_longevity=True,
-    link_flap_longevity_iterations=1,
-    link_flap_longevity_interface_slice=":3",
-    link_flap_longevity_disable_delay_s=30,
-    link_flap_longevity_enable_delay_s=30,
-    link_flap_longevity_recovery_wait_s=120,
-    link_flap_longevity_soak_s=120,
+    # test_snake_rapid_a_end_flap_stress: rapid OPTICAL flap (wedge_qsfp_util
+    # tx_disable/tx_enable) of every snake circuit's A-end, continuously for 1 hour
+    # of wall time with a 6s hold between flaps, then a 2-minute rest, a device+IXIA
+    # stats clear, a mid-test validation (all links UP + LLDP), and a 5-minute
+    # longevity soak measured clean. Complements the admin-disable (thrift) link-flap
+    # test with an optical-laser stress on one end per circuit (gearbox sibling-lane
+    # safe). Values are the playbook defaults (3600s / 6s / 120s / 300s).
+    # The flap COUNT is not 3600/6: each flap also pays two wedge_qsfp_util
+    # invocations across all A-ends, measured at ~18.7s/flap on this box's 94
+    # A-ends, so expect roughly 190 flaps in the hour rather than 600.
+    include_rapid_a_end_flap_stress=True,
 )
 
 

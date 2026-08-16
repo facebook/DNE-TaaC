@@ -1232,9 +1232,11 @@ def create_snapshot_bgp_sent_route_counts_step(
         _who = (
             f"peers under {peer_parent_prefixes}"
             if peer_parent_prefixes
-            else f"peer-group ~{peer_group_filter!r}"
-            if peer_group_filter
-            else f"{len(peer_addrs or [])} peer(s)"
+            else (
+                f"peer-group ~{peer_group_filter!r}"
+                if peer_group_filter
+                else f"{len(peer_addrs or [])} peer(s)"
+            )
         )
         description = (
             f"Snapshot BGP sent-count for {_who} on {hostname} (key={snapshot_key})"
@@ -1825,9 +1827,11 @@ def create_verify_bgp_sent_route_counts_uniform_step(
         _who = (
             f"peers under {peer_parent_prefixes}"
             if peer_parent_prefixes
-            else f"peer-group ~{peer_group_filter!r}"
-            if peer_group_filter
-            else f"{len(peer_addrs or [])} peer(s)"
+            else (
+                f"peer-group ~{peer_group_filter!r}"
+                if peer_group_filter
+                else f"{len(peer_addrs or [])} peer(s)"
+            )
         )
         description = (
             f"Verify BGP sent-count uniform (>= {min_count}, spread <= {max_spread}) "
@@ -2085,9 +2089,11 @@ def create_verify_bgp_notification_occurred_step(
         _who = (
             f"peers under {peer_parent_prefixes}"
             if peer_parent_prefixes
-            else f"peer-group ~{peer_group_filter!r}"
-            if peer_group_filter
-            else f"{len(peer_addrs or [])} peer(s)"
+            else (
+                f"peer-group ~{peer_group_filter!r}"
+                if peer_group_filter
+                else f"{len(peer_addrs or [])} peer(s)"
+            )
         )
         if mode == "snapshot":
             description = (
@@ -2157,9 +2163,11 @@ def create_verify_bgp_peers_joined_running_step(
         _who = (
             f"peers under {peer_parent_prefixes}"
             if peer_parent_prefixes
-            else f"peer-group ~{peer_group_filter!r}"
-            if peer_group_filter
-            else f"{len(peer_addrs or [])} peer(s)"
+            else (
+                f"peer-group ~{peer_group_filter!r}"
+                if peer_group_filter
+                else f"{len(peer_addrs or [])} peer(s)"
+            )
         )
         description = (
             f"Verify update-group state {expected_state} on {_who} on {hostname} "
@@ -2973,6 +2981,78 @@ def create_fpf_rapid_flap_step(
                     "flap_interval_sec": flap_interval_sec,
                 }
             )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_snake_rapid_a_end_flap_step(
+    duration_sec: int,
+    flap_interval_sec: int = 6,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Rapidly flap the A-end of every snake circuit over a window.
+
+    CUSTOM_STEP wrapping the driver's ``async_do_rapid_interface_flaps``
+    (wedge_qsfp_util tx_disable/tx_enable). At run time the handler
+    (``snake_rapid_a_end_flap``) resolves this DUT's snake circuits from LLDP
+    (device-to-device self-loops between front-panel ``INTERFACE_PORT``s only --
+    IXIA taps and management ports excluded, so no IXIA-LLDP dependency),
+    selects each circuit's A-end, and flaps that set repeatedly until
+    ``duration_sec`` of WALL TIME has elapsed, holding ``flap_interval_sec`` s
+    between flaps. tx_disabling the A-end downs the whole circuit, so only one
+    end per circuit is toggled (gearbox sibling-lane safe).
+
+    ``duration_sec`` is a deadline, not a flap count. A flap costs
+    ``flap_interval_sec`` PLUS two ``wedge_qsfp_util`` invocations across every
+    A-end, which dominates on wide snakes (measured ~18.7s per flap against a 6s
+    interval on fboss159's 95 A-ends). The achieved flap count is therefore a
+    dependent variable and is logged by the handler; the step may overrun the
+    deadline by at most one flap, since the final flap is never interrupted
+    mid-cycle.
+
+    Args:
+        duration_sec: wall-clock flap window in seconds.
+        flap_interval_sec: seconds to hold the link UP between flaps
+            (== interval_to_link_up, default 6). NOT the per-flap cost.
+        device_regexes: Optional device-regex scope.
+        description: Custom step description.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"Rapid-flap snake A-ends for {duration_sec}s "
+        f"(interval={flap_interval_sec}s)",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "snake_rapid_a_end_flap",
+                    "duration_sec": duration_sec,
+                    "flap_interval_sec": flap_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_clear_port_stats_step(
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Clear all device port counters on the DUT (CUSTOM_STEP).
+
+    Wraps the driver's ``async_clear_all_port_counters`` via the
+    ``snake_clear_port_stats`` handler. Distinct from
+    ``create_clear_traffic_stats_step`` (which clears IXIA traffic-generator
+    stats); this clears the device's own interface/port counters.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Clear all device port counters",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "snake_clear_port_stats"})
         ),
         device_regexes=device_regexes,
     )
