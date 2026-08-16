@@ -195,15 +195,39 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         system_logs = await arista_utils.check_eos_system_logs(
             self.driver, params.get("start_time"), params.get("end_time")
         )
-        if system_logs:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.FAIL,
-                message=f"Found {len(system_logs)} system log issues: {system_logs}",
+        classification = arista_utils.classify_eos_system_log_entries(system_logs)
+        recovery_context = list(classification.excluded)
+        system_log_issues = list(classification.issues)
+
+        if recovery_context:
+            self.logger.warning(
+                "Observed excluded EOS recovery logs: %s",
+                recovery_context,
             )
 
+        if system_log_issues:
+            recovery_suffix = (
+                f"; recovery context: {recovery_context}" if recovery_context else ""
+            )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    f"Found {len(system_log_issues)} system log issues: "
+                    f"{system_log_issues}{recovery_suffix}"
+                ),
+            )
+
+        recovery_suffix = (
+            f"; observed recovery context: {recovery_context}"
+            if recovery_context
+            else ""
+        )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
-            message="No emergency/critical/error logs found in EOS system logs",
+            message=(
+                "No emergency/critical/error issues found in EOS system logs"
+                f"{recovery_suffix}"
+            ),
         )
 
     def _filter_log_content_with_time_filter(

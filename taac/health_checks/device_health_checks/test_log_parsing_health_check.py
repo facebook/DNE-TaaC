@@ -249,3 +249,49 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
         self.assertIn("must not be earlier", result.message)
         get_pid.assert_not_awaited()
+
+    async def test_arista_system_log_recovery_is_context_not_failure(self) -> None:
+        recovery = (
+            "[ERROR] switch: %SAND-3-L3_HOST_RESOURCE_NORMAL: "
+            "All host entries are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[recovery]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {"check_system_logs": True},
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        self.assertIn("recovery context", result.message)
+        self.assertIn("L3_HOST_RESOURCE_NORMAL", result.message)
+
+    async def test_arista_other_resource_full_fails_with_recovery_context(
+        self,
+    ) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-L3_HOST_RESOURCE_FULL: "
+            "Hardware resources are insufficient"
+        )
+        recovery = (
+            "[ERROR] switch: %SAND-3-L3_HOST_RESOURCE_NORMAL: "
+            "All host entries are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[issue, recovery]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {"check_system_logs": True},
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("L3_HOST_RESOURCE_FULL", result.message)
+        self.assertIn("recovery context", result.message)

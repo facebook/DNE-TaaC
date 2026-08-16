@@ -21,6 +21,17 @@ ARCHIVED_AGENT_LOGS_PATH = "/mnt/flash/archive/current/var/log/agents"
 _ARCHIVED_LOG_ROTATION_EPOCH_RE = re.compile(r"_(\d{10})\.gz$")
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SHELL_PROMPT_RE = re.compile(r"^(?:bash-[\d.]+|[\w.-]+)#(?:\s|$)")
+_EOS_SHOW_LOGGING_ERRORS_COMMAND = "show logging errors"
+_EOS_LOG_MNEMONIC_RE = re.compile(r"%[A-Z0-9_]+-\d+-([A-Z0-9_]+):", re.IGNORECASE)
+_EOS_EXCLUDED_MNEMONIC_SUFFIXES = ("_NORMAL",)
+
+
+@dataclass(frozen=True)
+class EosSystemLogClassification:
+    """EOS system-log entries partitioned by explicit exclusion rules."""
+
+    issues: tuple[str, ...]
+    excluded: tuple[str, ...]
 
 
 def find_pid_in_output(output: str) -> t.Optional[str]:
@@ -328,7 +339,7 @@ async def check_eos_system_logs(
     log_commands = [
         ("show logging emergencies", "emergency"),
         ("show logging critical", "critical"),
-        ("show logging errors", "error"),
+        (_EOS_SHOW_LOGGING_ERRORS_COMMAND, "error"),
     ]
 
     all_entries = []
@@ -383,6 +394,36 @@ def parse_eos_log_output(
 
     # Format the entries
     return [f"[{log_type.upper()}] {line}" for line in raw_entries]
+
+
+def classify_eos_system_log_entries(
+    entries: t.Sequence[str],
+) -> EosSystemLogClassification:
+    """Exclude recovery mnemonics and classify every other entry as an issue."""
+    issues: list[str] = []
+    excluded: list[str] = []
+    for entry in entries:
+        mnemonic_match = _EOS_LOG_MNEMONIC_RE.search(entry)
+        mnemonic = mnemonic_match.group(1).upper() if mnemonic_match else ""
+        if any(mnemonic.endswith(suffix) for suffix in _EOS_EXCLUDED_MNEMONIC_SUFFIXES):
+            excluded.append(entry)
+        else:
+            issues.append(entry)
+    return EosSystemLogClassification(
+        issues=tuple(issues),
+        excluded=tuple(excluded),
+    )
+
+
+async def get_eos_error_log_classification(
+    driver: t.Any,
+    start_time: t.Optional[int] = None,
+    end_time: t.Optional[int] = None,
+) -> EosSystemLogClassification:
+    """Read EOS error logs and apply the shared exclusion policy."""
+    output = await driver.async_run_cmd_on_shell(_EOS_SHOW_LOGGING_ERRORS_COMMAND)
+    entries = parse_eos_log_output(output, "error", start_time, end_time)
+    return classify_eos_system_log_entries(entries)
 
 
 # Daemon status monitoring utilities
