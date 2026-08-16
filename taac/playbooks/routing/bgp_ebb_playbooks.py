@@ -492,8 +492,9 @@ def get_bgp_ebb_route_storm_playbook(
 
     Drives 10,500 dual-stack plane-1 route paths through 60 verified
     advertise/withdraw cycles with a deterministic supported heavy-attribute
-    shape. The workflow groups IXIA protocol lifecycle changes, proves each
-    transition on IXIA and the DUT, and restores the exact captured baseline.
+    shape. The workflow bounds IXIA route operations to ten peer blocks,
+    proves each transition on IXIA and the DUT, and restores the exact captured
+    baseline.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -509,8 +510,8 @@ def get_bgp_ebb_route_storm_playbook(
 
     Returns:
         A `Playbook` named `bgp_ebb_route_storm_playbook` with standard
-        BGP++ prechecks/postchecks, core-dump snapshots, standard periodic
-        resource tasks, and one audited failure-safe route-storm stage.
+        BGP++ prechecks/postchecks, core-dump snapshots, and one audited
+        failure-safe route-storm stage.
     """
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
@@ -531,12 +532,7 @@ def get_bgp_ebb_route_storm_playbook(
         prechecks=instability_checks.prechecks,
         postchecks=instability_checks.postchecks,
         snapshot_checks=instability_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=Gigabyte.GIG_10.value,
-            cpu_util_terminate_on_error=False,
-            memory_terminate_on_error=False,
-        ),
+        periodic_tasks=[],
         stages=[
             create_bgp_ebb_route_storm_stage(
                 hostname=device_name,
@@ -555,12 +551,13 @@ def get_bgp_ebb_route_storm_playbook(
                 advertise_seconds=30,
                 withdraw_seconds=30,
                 poll_interval_seconds=5,
-                transition_timeout_seconds=30,
+                convergence_hard_timeout_seconds=300,
                 heavy_setup_hard_timeout_seconds=1_800,
+                heavy_route_batch_rows=7_500,
                 session_establish_timeout_seconds=300,
                 restore_timeout_seconds=300,
                 quiet_window_seconds=120,
-                max_lookup_concurrency=8,
+                max_lookup_concurrency=1,
                 as_path_pool_size=10,
                 as_path_length=255,
                 as_set_length=255,

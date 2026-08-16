@@ -125,6 +125,16 @@ warnings.filterwarnings(action="ignore", category=ResourceWarning)
 warnings.filterwarnings(action="ignore", category=DeprecationWarning)
 
 
+def _filter_bgp_stats_by_port(
+    stats: t.Iterable[t.Mapping[str, t.Any]], port: str
+) -> t.List[t.Dict[str, t.Any]]:
+    return [
+        dict(stat)
+        for stat in stats
+        if port in str(stat.get("Port Name") or stat.get("Port", ""))
+    ]
+
+
 def _normalize_ixia_boolean(value: t.Any) -> t.Optional[bool]:
     """Return accepted IXIA boolean encodings, or None to fail readback closed."""
     if isinstance(value, bool):
@@ -7381,9 +7391,7 @@ class Ixia:
             # Filter statistics by port if specified
             filtered_stats = combined_stats
             if port:
-                filtered_stats = [
-                    stat for stat in combined_stats if port in stat.get("Port", "")
-                ]
+                filtered_stats = _filter_bgp_stats_by_port(combined_stats, port)
                 self.logger.info(
                     f"Filtered statistics for port {port}: {len(filtered_stats)} entries"
                 )
@@ -7391,9 +7399,7 @@ class Ixia:
             elif hostname and interface:
                 # Construct port identifier
                 port_id = self.get_port_identifier(f"{hostname}:{interface}")
-                filtered_stats = [
-                    stat for stat in combined_stats if port_id in stat.get("Port", "")
-                ]
+                filtered_stats = _filter_bgp_stats_by_port(combined_stats, port_id)
                 self.logger.info(
                     f"Filtered statistics for {hostname}:{interface} (port ID: {port_id}): {len(filtered_stats)} entries"
                 )
@@ -7407,7 +7413,8 @@ class Ixia:
                 filter_desc = port if port else f"{hostname}:{interface}"
                 self.logger.warning(
                     f"No BGP statistics found for {filter_desc} in any view. "
-                    f"Available ports: {{stat.get('Port', '') for stat in combined_stats if 'Port' in stat}}"
+                    "Available ports: "
+                    f"{sorted({str(stat.get('Port Name', stat.get('Port', ''))) for stat in combined_stats})}"
                 )
 
             return filtered_stats

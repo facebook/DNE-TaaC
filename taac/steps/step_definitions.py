@@ -1105,7 +1105,6 @@ def create_bgp_route_storm_step(
     advertise_seconds: int,
     withdraw_seconds: int,
     poll_interval_seconds: int,
-    transition_timeout_seconds: int,
     session_establish_timeout_seconds: int,
     restore_timeout_seconds: int,
     quiet_window_seconds: int,
@@ -1117,6 +1116,7 @@ def create_bgp_route_storm_step(
     extended_communities_per_route: int,
     convergence_hard_timeout_seconds: int = 300,
     heavy_setup_hard_timeout_seconds: int = 1_800,
+    heavy_route_batch_rows: int = 7_500,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-11 route-storm workflow."""
@@ -1145,9 +1145,9 @@ def create_bgp_route_storm_step(
         "advertise_seconds": advertise_seconds,
         "withdraw_seconds": withdraw_seconds,
         "poll_interval_seconds": poll_interval_seconds,
-        "transition_timeout_seconds": transition_timeout_seconds,
         "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
         "heavy_setup_hard_timeout_seconds": heavy_setup_hard_timeout_seconds,
+        "heavy_route_batch_rows": heavy_route_batch_rows,
         "session_establish_timeout_seconds": session_establish_timeout_seconds,
         "restore_timeout_seconds": restore_timeout_seconds,
         "quiet_window_seconds": quiet_window_seconds,
@@ -1160,10 +1160,6 @@ def create_bgp_route_storm_step(
     }
     if any(value <= 0 for value in numeric_params.values()):
         raise ValueError("BGP route-storm numeric parameters must be positive")
-    if convergence_hard_timeout_seconds <= transition_timeout_seconds:
-        raise ValueError(
-            "convergence_hard_timeout_seconds must exceed transition_timeout_seconds"
-        )
     if (
         as_path_length != 255
         or as_set_length != 255

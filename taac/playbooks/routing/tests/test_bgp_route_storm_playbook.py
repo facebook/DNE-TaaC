@@ -41,7 +41,6 @@ def _locked_step_kwargs() -> dict:
         "advertise_seconds": 30,
         "withdraw_seconds": 30,
         "poll_interval_seconds": 5,
-        "transition_timeout_seconds": 30,
         "convergence_hard_timeout_seconds": 300,
         "heavy_setup_hard_timeout_seconds": 1_800,
         "session_establish_timeout_seconds": 300,
@@ -87,13 +86,11 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "16 extended communities"):
             create_bgp_route_storm_step(**kwargs)
 
-    def test_step_factory_requires_hard_timeout_above_transition_timeout(
-        self,
-    ) -> None:
+    def test_step_factory_requires_positive_hard_timeout(self) -> None:
         kwargs = _locked_step_kwargs()
-        kwargs["convergence_hard_timeout_seconds"] = 30
+        kwargs["convergence_hard_timeout_seconds"] = 0
 
-        with self.assertRaisesRegex(ValueError, "must exceed"):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
             create_bgp_route_storm_step(**kwargs)
 
     def test_stage_contains_only_the_failure_safe_custom_step(self) -> None:
