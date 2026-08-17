@@ -876,6 +876,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     oscillation_interval_seconds: int = 280,
     min_peers_to_stop: int = 1,
     max_peers_to_stop: int = 11,
+    cycle_count: int | None = None,
     expected_min_baseline_width: t.Optional[int] = None,
     expected_max_baseline_width: t.Optional[int] = None,
     min_multipath_width: t.Optional[int] = None,
@@ -918,6 +919,8 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         oscillation_interval_seconds: Interval between oscillations (default: 280s)
         min_peers_to_stop: Minimum peers to stop per cycle (default: 1)
         max_peers_to_stop: Maximum peers to stop per cycle (default: 11)
+        cycle_count: Optional cycle count for a bounded validation run. The
+            cataloged playbook uses six cycles when this value is not set.
         expected_min_baseline_width: Optional sanity lower bound on the measured
             multipath width. Discovery fails if the measurement is below.
         expected_max_baseline_width: Optional sanity upper bound.
@@ -965,6 +968,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         ),
         stages=[
             create_multipath_group_oscillation_stage(
+                hostname=device_name,
                 ipv4_peer_regex=ipv4_peer_regex,
                 ipv6_peer_regex=ipv6_peer_regex,
                 ipv4_session_count=ipv4_session_count,
@@ -973,6 +977,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
                 oscillation_interval_seconds=oscillation_interval_seconds,
                 min_peers_to_stop=min_peers_to_stop,
                 max_peers_to_stop=max_peers_to_stop,
+                cycle_count=cycle_count,
                 expected_min_baseline_width=expected_min_baseline_width,
                 expected_max_baseline_width=expected_max_baseline_width,
                 min_multipath_width=min_multipath_width,
@@ -981,7 +986,8 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         cleanup_steps=create_multipath_group_oscillation_cleanup_steps(
             ipv4_peer_regex=ipv4_peer_regex,
             ipv6_peer_regex=ipv6_peer_regex,
-            max_peers_to_restore=max_peers_to_stop,
+            ipv4_session_count_to_restore=ipv4_session_count,
+            ipv6_session_count_to_restore=ipv6_session_count,
             expected_established_sessions=expected_established_sessions,
             convergence_wait_seconds=oscillation_interval_seconds // 2,
             parent_prefixes_to_ignore=(

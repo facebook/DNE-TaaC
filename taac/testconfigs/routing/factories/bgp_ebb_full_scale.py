@@ -620,6 +620,9 @@ def _get_bgp_ebb_full_scale_playbooks(
     bound: BoundTopology,
     ebgp_prefix_count: int,
     selected_tc7_playbooks: set[str],
+    multipath_test_duration_seconds: int = 1800,
+    multipath_oscillation_interval_seconds: int = 280,
+    multipath_cycle_count: int | None = None,
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
         playbooks = []
@@ -700,6 +703,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            test_duration_seconds=multipath_test_duration_seconds,
+            oscillation_interval_seconds=multipath_oscillation_interval_seconds,
+            cycle_count=multipath_cycle_count,
         ),
         get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             device_name=device_name,
@@ -823,6 +829,9 @@ def create_bgp_ebb_full_scale_test_config(
     bgpcpp_logging_config_override: str | None = None,
     parent_networks: dict[str, str] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    multipath_test_duration_seconds: int = 1800,
+    multipath_oscillation_interval_seconds: int = 280,
+    multipath_cycle_count: int | None = None,
 ) -> TestConfig:
     """Build one selectable test suite on the canonical EBB full-scale topology.
 
@@ -931,6 +940,9 @@ def create_bgp_ebb_full_scale_test_config(
         bound=bound,
         ebgp_prefix_count=ebgp_prefix_count,
         selected_tc7_playbooks=selected_tc7_playbooks,
+        multipath_test_duration_seconds=multipath_test_duration_seconds,
+        multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
+        multipath_cycle_count=multipath_cycle_count,
     )
     if playbooks_selected:
         playbooks_by_name = {playbook.name: playbook for playbook in playbooks}

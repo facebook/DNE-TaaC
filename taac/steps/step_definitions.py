@@ -1184,6 +1184,59 @@ def create_bgp_route_storm_step(
     )
 
 
+def create_bgp_multipath_oscillation_step(
+    *,
+    hostname: str,
+    ipv4_peer_regex: str,
+    ipv6_peer_regex: str,
+    ipv4_session_count: int,
+    ipv6_session_count: int,
+    test_duration_seconds: int,
+    oscillation_interval_seconds: int,
+    min_peers_to_stop: int,
+    max_peers_to_stop: int,
+    cycle_count: int | None = None,
+    expected_min_baseline_width: int | None = None,
+    expected_max_baseline_width: int | None = None,
+    min_multipath_width: int | None = None,
+    prefix_subnets: t.Sequence[str] | None = None,
+    probe_prefixes_per_afi: int = 2,
+    poll_interval_seconds: float = 5,
+    stable_sample_count: int = 2,
+    bgp_read_timeout_seconds: float = 30,
+    description: str | None = None,
+) -> Step:
+    """Create the path-aware CICD-EBB-09 multipath workflow."""
+    if not hostname or not ipv4_peer_regex or not ipv6_peer_regex:
+        raise ValueError("hostname and both IXIA peer regexes must be non-empty")
+    params: dict[str, t.Any] = {
+        "custom_step_name": "bgp_multipath_oscillation",
+        "hostname": hostname,
+        "ipv4_peer_regex": ipv4_peer_regex,
+        "ipv6_peer_regex": ipv6_peer_regex,
+        "ipv4_session_count": ipv4_session_count,
+        "ipv6_session_count": ipv6_session_count,
+        "test_duration_seconds": test_duration_seconds,
+        "oscillation_interval_seconds": oscillation_interval_seconds,
+        "min_peers_to_stop": min_peers_to_stop,
+        "max_peers_to_stop": max_peers_to_stop,
+        "expected_min_baseline_width": expected_min_baseline_width,
+        "expected_max_baseline_width": expected_max_baseline_width,
+        "min_multipath_width": min_multipath_width,
+        "prefix_subnets": list(prefix_subnets or ()),
+        "probe_prefixes_per_afi": probe_prefixes_per_afi,
+        "poll_interval_seconds": poll_interval_seconds,
+        "stable_sample_count": stable_sample_count,
+        "bgp_read_timeout_seconds": bgp_read_timeout_seconds,
+    }
+    if cycle_count is not None:
+        params["cycle_count"] = cycle_count
+    return create_custom_step(
+        params_dict=params,
+        description=description or "Run path-aware dual-stack multipath oscillation",
+    )
+
+
 def create_snapshot_bgp_sent_route_counts_step(
     hostname: str,
     snapshot_key: str,
