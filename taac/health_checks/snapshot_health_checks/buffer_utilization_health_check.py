@@ -34,13 +34,9 @@ def _bytes_to_mb(val: int) -> float:
 
 
 class BufferUtilizationHealthCheck(
-    AbstractTopologySnapshotHealthCheck[
-        hc_types.BufferUtilizationHealthCheckIn
-    ]  # pyre-ignore[11]
+    AbstractTopologySnapshotHealthCheck[hc_types.BufferUtilizationHealthCheckIn]
 ):
-    CHECK_NAME: hc_types.CheckName = (
-        hc_types.CheckName.BUFFER_UTILIZATION_CHECK
-    )  # pyre-ignore[16]
+    CHECK_NAME: hc_types.CheckName = hc_types.CheckName.BUFFER_UTILIZATION_CHECK
 
     async def _collect_fb303_counters(
         self, input: hc_types.BufferUtilizationHealthCheckIn

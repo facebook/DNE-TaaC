@@ -164,7 +164,7 @@ def _make_buffer_utilization_check(
     """Helper to create a BUFFER_UTILIZATION_CHECK SnapshotHealthCheck."""
     return create_buffer_utilization_snapshot_check(
         thresholds=[
-            hc_types.BufferUtilizationThreshold(  # pyre-ignore[16]
+            hc_types.BufferUtilizationThreshold(
                 hostname=device_name,
                 interfaces=interfaces,
                 active_cos_list=[int(c) for c in active_cos_list],
