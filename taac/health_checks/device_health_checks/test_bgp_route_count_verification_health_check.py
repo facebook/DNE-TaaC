@@ -51,7 +51,7 @@ class BgpRouteCountVerificationHealthCheckTest(unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(expected, result)
         thrift_check.assert_awaited_once()
-        driver.async_get_update_group_info.assert_not_awaited()
+        driver.bgp.assert_not_awaited()
 
     async def test_raw_payload_rejects_mixed_peer_selectors(self) -> None:
         device = MagicMock(spec=TestDevice)
@@ -77,21 +77,43 @@ class BgpRouteCountVerificationHealthCheckTest(unittest.IsolatedAsyncioTestCase)
             driver.async_get_bgp_sessions.assert_not_awaited()
             driver.async_execute_show_json_on_shell.assert_not_awaited()
 
-    async def test_exact_peer_group_failure_includes_structured_diagnostics(
+    async def test_exact_peer_groups_resolve_without_update_group_api(self) -> None:
+        health_check, driver = self._health_check()
+        bgp_helper = driver.bgp.return_value
+        bgp_helper.async_get_running_config_struct.return_value = SimpleNamespace(
+            peers=[
+                SimpleNamespace(
+                    peer_group_name="EB-FA-V6",
+                    peer_addr="2001:db8::1",
+                ),
+                SimpleNamespace(
+                    peer_group_name="EB-FA-V4",
+                    peer_addr="192.0.2.1",
+                ),
+            ],
+        )
+        bgp_helper.async_get_update_group_info = AsyncMock()
+
+        selected = await health_check._resolve_peer_group_addresses(
+            "dut.example.com",
+            ["EB-FA-V6", "EB-FA-V4"],
+        )
+
+        self.assertEqual({"2001:db8::1", "192.0.2.1"}, selected)
+        driver.bgp.assert_awaited_once_with()
+        bgp_helper.async_get_running_config_struct.assert_awaited_once_with()
+        bgp_helper.async_get_update_group_info.assert_not_awaited()
+
+    async def test_exact_peer_group_failure_includes_config_diagnostics(
         self,
     ) -> None:
         health_check, driver = self._health_check()
-        driver.async_get_update_group_info.return_value = SimpleNamespace(
-            enable_update_group=True,
-            update_groups=[
+        bgp_helper = driver.bgp.return_value
+        bgp_helper.async_get_running_config_struct.return_value = SimpleNamespace(
+            peers=[
                 SimpleNamespace(
-                    group_id=17,
-                    group_key=SimpleNamespace(peer_group_name="EB-FA-V6"),
-                    group_state="READY",
-                    member_count=1,
-                    in_sync_peer_count=1,
-                    detached_peer_count=0,
-                    peers=[SimpleNamespace(peer_addr="2001:db8::1")],
+                    peer_group_name="EB-FA-V6",
+                    peer_addr="2001:db8::1",
                 )
             ],
         )
@@ -103,9 +125,9 @@ class BgpRouteCountVerificationHealthCheckTest(unittest.IsolatedAsyncioTestCase)
             )
 
         message = str(error.exception)
-        self.assertIn('"enable_update_group": true', message)
-        self.assertIn('"group_id": 17', message)
-        self.assertIn('"peer_group_name": "EB-FA-V6"', message)
+        self.assertIn("missing=['EB-FA-V4']", message)
+        self.assertIn("observed=['EB-FA-V6']", message)
+        self.assertIn("configured_peers=1", message)
 
     async def test_arista_exact_selector_reports_no_matching_peers_as_error(
         self,

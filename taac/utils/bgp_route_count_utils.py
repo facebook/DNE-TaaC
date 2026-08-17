@@ -225,6 +225,28 @@ def select_peer_addresses_by_exact_peer_group(
     return selected_addresses, observed_names
 
 
+def select_peer_addresses_by_exact_config_peer_group(
+    bgp_config: t.Any,
+    peer_group_names: t.Sequence[str],
+) -> t.Tuple[t.Set[str], t.Set[str]]:
+    """Resolve exact peer-group names to addresses from structured BGP config."""
+    requested_names = set(peer_group_names)
+    selected_addresses: t.Set[str] = set()
+    observed_names: t.Set[str] = set()
+
+    for peer in getattr(bgp_config, "peers", None) or []:
+        peer_group_name = str(getattr(peer, "peer_group_name", "") or "")
+        if peer_group_name:
+            observed_names.add(peer_group_name)
+        if peer_group_name not in requested_names:
+            continue
+        peer_address = getattr(peer, "peer_addr", None)
+        if peer_address:
+            selected_addresses.add(str(peer_address))
+
+    return selected_addresses, observed_names
+
+
 def format_update_group_diagnostics(update_group_response: t.Any) -> str:
     """Format bounded diagnostics from a structured update-group response."""
     groups = list(getattr(update_group_response, "update_groups", None) or [])

@@ -19,9 +19,8 @@ from taac.health_checks.abstract_health_check import (
 )
 from taac.utils.bgp_route_count_utils import (
     filter_bgp_sessions,
-    format_update_group_diagnostics,
     get_route_counts_for_peers,
-    select_peer_addresses_by_exact_peer_group,
+    select_peer_addresses_by_exact_config_peer_group,
     validate_all_peer_route_counts,
     validate_direction,
     validate_policy_type,
@@ -241,9 +240,10 @@ class BgpRouteCountVerificationHealthCheck(
             return None
 
         # pyrefly: ignore [missing-attribute]
-        update_groups = await self.driver.async_get_update_group_info()
-        selected, observed = select_peer_addresses_by_exact_peer_group(
-            update_groups,
+        bgp_helper = await self.driver.bgp()
+        bgp_config = await bgp_helper.async_get_running_config_struct()
+        selected, observed = select_peer_addresses_by_exact_config_peer_group(
+            bgp_config,
             exact_peer_group_names,
         )
         missing = set(exact_peer_group_names) - observed
@@ -253,7 +253,7 @@ class BgpRouteCountVerificationHealthCheck(
                 f"requested={sorted(set(exact_peer_group_names))}, "
                 f"missing={sorted(missing)}, observed={sorted(observed)}, "
                 f"selected_peers={len(selected)}, "
-                f"update_groups={format_update_group_diagnostics(update_groups)}"
+                f"configured_peers={len(getattr(bgp_config, 'peers', None) or [])}"
             )
         return selected
 
