@@ -1746,8 +1746,20 @@ def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
     delete_count: int = 20,
     update_timeout_seconds: int = 60,
     stability_duration_seconds: int = 1800,
+    convergence_stability_polls: int = 3,
+    convergence_stability_max_seconds: int = 300,
 ) -> Stage:
-    """Create the failure-safe validated CICD-EBB-08 stage."""
+    """Create the failure-safe validated CICD-EBB-08 stage.
+
+    The convergence window closes on quiescence rather than on
+    ``update_timeout_seconds`` alone. On bag013 with update groups off, BGP++
+    is still draining its per-peer UPDATE queue at T0+60s -- measured runs put
+    the drain between 60s and 120s -- so a fixed 60s window records the
+    baseline mid-flight and the soak then fails on ~30k UPDATEs that were
+    ordinary convergence traffic. Waiting for the counter to stop moving fixes
+    that without hard-coding a larger timeout that would break again at a
+    different scale.
+    """
     return Stage(
         steps=[
             create_validated_igp_unresolvable_pnh_step(
@@ -1763,6 +1775,8 @@ def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
                 delete_count=delete_count,
                 update_timeout_seconds=update_timeout_seconds,
                 stability_duration_seconds=stability_duration_seconds,
+                convergence_stability_polls=convergence_stability_polls,
+                convergence_stability_max_seconds=(convergence_stability_max_seconds),
             )
         ]
     )

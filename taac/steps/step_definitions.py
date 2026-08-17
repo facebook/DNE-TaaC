@@ -5965,8 +5965,18 @@ def create_validated_igp_unresolvable_pnh_step(
     delete_count: int,
     update_timeout_seconds: int,
     stability_duration_seconds: int,
+    convergence_stability_polls: int = 0,
+    convergence_stability_max_seconds: int = 300,
 ) -> Step:
-    """Create a failure-safe, acknowledged unresolvable-PNH workflow."""
+    """Create a failure-safe, acknowledged unresolvable-PNH workflow.
+
+    Args:
+        convergence_stability_polls: Consecutive unchanged sent-UPDATE reads
+            required before the convergence window closes. 0 keeps the legacy
+            fixed-timer behaviour, where the baseline is whatever the counter
+            reads when ``update_timeout_seconds`` expires.
+        convergence_stability_max_seconds: Cap on waiting for that stability.
+    """
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_igp_unresolvable_pnh",
@@ -5982,6 +5992,8 @@ def create_validated_igp_unresolvable_pnh_step(
             "delete_count": delete_count,
             "update_timeout_seconds": update_timeout_seconds,
             "stability_duration_seconds": stability_duration_seconds,
+            "convergence_stability_polls": convergence_stability_polls,
+            "convergence_stability_max_seconds": (convergence_stability_max_seconds),
         },
         description="Run validated unresolvable Open/R PNH workflow",
     )
