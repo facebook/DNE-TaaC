@@ -6,7 +6,7 @@
 # `Ixnetwork` classes from `ixnetwork_restpy`. Constructing a real instance
 # in a unit test is prohibitive, so the tests inject `SimpleNamespace` / `MagicMock`
 # stubs that are structurally compatible but nominally incompatible. Targeted
-# `# pyre-ignore[8]` per assignment would triple the noise without adding
+# `
 # safety. Aligns with `test_ixia_fallback.py` for the same reason.
 
 import unittest

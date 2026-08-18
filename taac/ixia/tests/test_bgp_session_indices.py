@@ -70,9 +70,7 @@ def _ixia_with_pools(pools: list[_PrefixPool]) -> tuple[Ixia, MagicMock]:
         ixia = Ixia()
     ixia.logger = MagicMock()
     get_pools = MagicMock(return_value=pools)
-    # pyre-ignore[8]
     ixia.get_prefix_pools_by_regexes = get_pools
-    # pyre-ignore[8]
     ixia.apply_changes = MagicMock()
     return ixia, get_pools
 
@@ -81,7 +79,6 @@ def _ixia(peers: list[_BgpPeer]) -> Ixia:
     with patch.object(Ixia, "__init__", lambda self: None):
         ixia = Ixia()
     ixia.logger = MagicMock()
-    # pyre-ignore[8]
     ixia.find_bgp_peers = MagicMock(return_value=peers)
     return ixia
 
