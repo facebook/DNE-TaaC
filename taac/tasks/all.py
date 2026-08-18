@@ -424,9 +424,7 @@ class CoopUnregisterPatchersTask(BaseTask):
                 f"Unregistering patchers {patchers_to_unregister} from {hostname}:{config_name}"
             )
             for patcher in patchers_to_unregister:
-                # pyre-fixme[28]: Unexpected keyword argument `auto_remediate_failure`.
                 await driver.async_coop_unregister_patchers(
-                    # pyrefly: ignore [unexpected-keyword]
                     patcher,
                     config_name,
                     # pyrefly: ignore [unexpected-keyword]
@@ -498,7 +496,6 @@ class CoopApplyPatchersTask(BaseTask):
             wait_for_convergence_coroutines = []
             for hostname in hostnames:
                 driver = await async_get_device_driver(hostname)
-                # pyre-fixme[16]: `AbstractSwitch` has no attribute
                 #  `async_create_cold_boot_file`.
                 create_cold_boot_file_coroutines.append(
                     driver.async_create_cold_boot_file()
@@ -2127,7 +2124,6 @@ class DeployEosImageTask(BaseTask):
         # operations get fresh driver connections after the device reload
         if hasattr(async_get_device_driver, "cache_clear"):
             self.logger.info("  Clearing driver cache after reload...")
-            # pyre-fixme[16]: Callable `async_get_device_driver` has no attribute
             #  `cache_clear`.
             async_get_device_driver.cache_clear()
 
@@ -2401,7 +2397,6 @@ except Exception as e:
         hostname = params["hostname"]
         driver = await async_get_device_driver(hostname)
         probe_cmd = self._build_probe_cmd()
-        # pyre-ignore[16]: AbstractSwitch has no attribute `async_run_cmd_on_shell`
         raw = await driver.async_run_cmd_on_shell(probe_cmd)
         raw_str = raw or ""
         # Tolerate stderr noise (DeprecationWarning, locale banners) that

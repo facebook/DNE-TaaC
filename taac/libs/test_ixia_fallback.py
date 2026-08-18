@@ -7,7 +7,7 @@
 # in the tree. The stub returns `ModuleType` rather than the concrete module
 # type, and the extensive mock injections (`SimpleNamespace`, `MagicMock`,
 # `AsyncMock`) into orchestrator/runner attributes are structurally
-# compatible but nominally not. Targeted `# pyre-ignore` per line would add
+# compatible but nominally not. Targeted `
 # ~40 markers without meaningful safety gain.
 
 import logging

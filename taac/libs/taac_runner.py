@@ -1285,7 +1285,6 @@ class TaacRunner:
                 obj = self.topology
             else:
                 raise
-            # pyrefly: ignore [bad-argument-type]
             check_instance = check_impl(
                 # pyrefly: ignore [bad-argument-type]
                 obj=obj,
@@ -1301,7 +1300,7 @@ class TaacRunner:
         await asyncio.gather(
             # pyrefly: ignore [bad-argument-type]
             *[check.setup(obj) for check, obj in checks]
-        )  # pyre-ignore
+        )
         checks = [check for check, _ in checks]
         # pyrefly: ignore [bad-return]
         return checks
@@ -2926,7 +2925,6 @@ class TaacRunner:
                     if isinstance(ixia, TaacIxia):
                         await self._async_collect_ixia_diagnostics_if_enabled(ixia)
                 await self.run_tasks(
-                    # pyrefly: ignore [bad-argument-type]
                     (
                         self.selected_ixia_candidate.teardown_tasks
                         if self.selected_ixia_candidate is not None

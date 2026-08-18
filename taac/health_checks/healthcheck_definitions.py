@@ -1768,11 +1768,9 @@ def create_buffer_utilization_snapshot_check(
     binds a hostname + interface set + active/other queue byte ceilings).
     """
     return SnapshotHealthCheck(
-        name=hc_types.CheckName.BUFFER_UTILIZATION_CHECK,  # pyre-ignore[16]
+        name=hc_types.CheckName.BUFFER_UTILIZATION_CHECK,
         input_json=thrift_to_json(
-            hc_types.BufferUtilizationHealthCheckIn(
-                thresholds=thresholds
-            )  # pyre-ignore[16]
+            hc_types.BufferUtilizationHealthCheckIn(thresholds=thresholds)
         ),
         pre_snapshot_checkpoint_id=pre_snapshot_checkpoint_id,
         post_snapshot_checkpoint_id=post_snapshot_checkpoint_id,
@@ -3366,6 +3364,6 @@ def create_in_congestion_discard_check(
         else None
     )
     return PointInTimeHealthCheck(
-        name=hc_types.CheckName.IN_CONGESTION_DISCARD_CHECK,  # pyre-ignore[16]
+        name=hc_types.CheckName.IN_CONGESTION_DISCARD_CHECK,
         check_params=check_params,
     )

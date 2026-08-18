@@ -2414,7 +2414,6 @@ class Ixia:
         self,
         endpoint: ixia_types.Endpoint,
         traffic_type: ixia_types.TrafficType,
-        # pyre-fixme[7]: Expected `t.Union[IxnIpv6, IxnNetworkGroup, IxnVport, UhdIpv6,
         #  UhdNetworkGroup, UhdVport]` but got implicit return value of `None`.
     ) -> t.Union["Ipv6", "NetworkGroup", "Vport", "Ipv4"]:
         port_identifier: str = Ixia.get_port_identifier(endpoint.port_name)
@@ -3291,20 +3290,17 @@ class Ixia:
             bgp_peer_cls = ip_addr_obj.BgpIpv6Peer  # pyre-ignore
 
         bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"] = bgp_peer_cls.find(
-            # pyre-fixme[61]: `desired_bgp_name` may not be initialized here.
             Name=desired_bgp_name
         )
         if bgp_peer_obj:
             self.logger.info(
                 f"[{port_identifier}] There is already an existing IPv6 "
-                # pyre-fixme[61]: `desired_bgp_name` may not be initialized here.
                 f"instance of the BGP prefix {desired_bgp_name}. Hence "
                 "not creating a new one!"
             )
             return bgp_peer_obj
 
         bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"] = bgp_peer_cls.add(
-            # pyre-fixme[61]: `desired_bgp_name` may not be initialized here.
             Name=desired_bgp_name
         )
         bgp_peer_obj.DutIp.Increment(
@@ -3374,7 +3370,6 @@ class Ixia:
             )
 
         self.logger.info(
-            # pyre-fixme[61]: `desired_bgp_name` may not be initialized here.
             f"[{port_identifier}] Successfully created BGP peer {desired_bgp_name}"
         )
         return bgp_peer_obj
@@ -6191,7 +6186,7 @@ class Ixia:
                 f"({len(port_configs)} port(s))...{_RESET}"
             )
             _step_start = time.time()
-            # pyrefly: ignore [not-iterable, bad-argument-type]
+            # pyrefly: ignore [bad-argument-type]
             self._build_topologies_and_device_groups(port_configs, _log)
             _log(
                 f"{_GREEN}[IXIA]{_RESET} Topologies & device groups created in "

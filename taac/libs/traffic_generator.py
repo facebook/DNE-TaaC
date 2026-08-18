@@ -132,7 +132,7 @@ class TrafficGenerator:
         self.tear_down_session = tear_down_session
         self.cleanup_failed_setup = cleanup_failed_setup
         self.override_traffic_items = override_traffic_items
-        self.ixia: t.Optional[AbstractTrafficGenerator] = None  # pyre-ignore[8]
+        self.ixia: t.Optional[AbstractTrafficGenerator] = None
         self.logger = logger or get_root_logger()
         self.session_name = session_name
         self.basic_traffic_item_configs = basic_traffic_item_configs or []
@@ -751,7 +751,6 @@ class TrafficGenerator:
                     f"ignoring value: {bgp_config.as_set_mode}"
                 )
 
-        # pyre-ignore[6]: Pyre can't infer types from dict unpacking
         return ixia_types.BgpPeerConfig(**peer_config_kwargs)
 
     def get_matching_basic_port_config(
@@ -760,7 +759,7 @@ class TrafficGenerator:
     ) -> taac_types.BasicPortConfig:
         if not self.basic_port_configs:
             return self.default_basic_port_config
-        for basic_port_config in self.basic_port_configs:  # pyre-ignore
+        for basic_port_config in self.basic_port_configs:
             if basic_port_config.endpoint == endpoint_str:
                 return basic_port_config
         return self.default_basic_port_config
@@ -1192,10 +1191,9 @@ class TrafficGenerator:
     async def async_get_primary_ixia_chassis_ip(self) -> str:
         if self.primary_chassis_ip:
             if string_is_ip(self.primary_chassis_ip):
-                return self.primary_chassis_ip  # pyre-ignore
+                return self.primary_chassis_ip
             else:
                 try:
-                    # pyre-fixme[6]: For 1st argument expected `str` but got
                     #  `Optional[str]`.
                     return await async_get_ip_from_hostname(self.primary_chassis_ip)
                 except Exception as error:

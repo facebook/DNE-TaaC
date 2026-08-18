@@ -190,7 +190,6 @@ class OssTestBedChunker:
         self.logger.info(
             f"Created TestTopology with {len(test_devices)} device(s) from CSV data"
         )
-        # pyre-fixme[7]: Expected `TestTopology` but got `Optional[TestTopology]`.
         return self.test_topology
 
     async def async_isolate_test_bed_connectivity(self) -> None:

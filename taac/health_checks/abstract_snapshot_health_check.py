@@ -59,7 +59,7 @@ class AbstractSnapshotHealthCheck(t.Generic[HealthCheckIn, Object], ABC):
     async def setup(self, obj: Object) -> None:
         pass
 
-    @async_retryable(retries=3, exceptions=(Exception,))  # pyre-ignore[56]
+    @async_retryable(retries=3, exceptions=(Exception,))
     async def _capture_pre_snapshot(
         self,
         obj: Object,
@@ -86,7 +86,7 @@ class AbstractSnapshotHealthCheck(t.Generic[HealthCheckIn, Object], ABC):
     ) -> Snapshot:
         return Snapshot(timestamp=timestamp)
 
-    @async_retryable(retries=3, exceptions=(Exception,))  # pyre-ignore[56]
+    @async_retryable(retries=3, exceptions=(Exception,))
     async def _capture_post_snapshot(
         self,
         obj: Object,
@@ -113,7 +113,7 @@ class AbstractSnapshotHealthCheck(t.Generic[HealthCheckIn, Object], ABC):
     ) -> Snapshot:
         return Snapshot(timestamp=timestamp)
 
-    @async_retryable(retries=3, exceptions=(Exception,))  # pyre-ignore[56]
+    @async_retryable(retries=3, exceptions=(Exception,))
     async def _compare_snapshots(
         self,
         obj: Object,

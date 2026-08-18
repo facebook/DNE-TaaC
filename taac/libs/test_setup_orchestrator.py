@@ -625,7 +625,6 @@ class TestSetupOrchestrator:
                 logger=self.logger,
             )
             try:
-                # pyre-fixme[16]: `t.Optional` has no attribute `teardown_ixia_setup`
                 await convert_to_async(self.traffic_generator.teardown_ixia_setup)()
             except Exception as ex:
                 self.logger.exception(

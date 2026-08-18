@@ -543,7 +543,6 @@ class FbossSwitch(AbstractSwitch):
         self, aggregated_interface_name: str
     ) -> bool:
         all_aggregated_port_info = (
-            # pyre-ignore: currently it only supports fboss devices
             await self.async_get_all_aggregated_port_info()
         )
         for agg_port_info in all_aggregated_port_info:

@@ -113,16 +113,16 @@ class BufferWatermarkData:
         self.global_headroom: t.List[int] = []
 
         # Per-port per-queue: {port -> {queue_label -> [values]}}
-        self.ucast_wm: t.Dict[str, t.Dict[str, t.List[int]]] = (  # pyre-ignore[8]
-            defaultdict(lambda: defaultdict(list))
+        self.ucast_wm: t.Dict[str, t.Dict[str, t.List[int]]] = defaultdict(
+            lambda: defaultdict(list)
         )
 
         # Per-port per-PG: {port -> {pg_label -> [values]}}
-        self.pg_headroom: t.Dict[str, t.Dict[str, t.List[int]]] = (  # pyre-ignore[8]
-            defaultdict(lambda: defaultdict(list))
+        self.pg_headroom: t.Dict[str, t.Dict[str, t.List[int]]] = defaultdict(
+            lambda: defaultdict(list)
         )
-        self.pg_shared: t.Dict[str, t.Dict[str, t.List[int]]] = (  # pyre-ignore[8]
-            defaultdict(lambda: defaultdict(list))
+        self.pg_shared: t.Dict[str, t.Dict[str, t.List[int]]] = defaultdict(
+            lambda: defaultdict(list)
         )
 
         # CPU queue watermarks: {queue_label -> [values]}
@@ -132,9 +132,9 @@ class BufferWatermarkData:
         self.fabric_wm: t.Dict[str, t.List[int]] = defaultdict(list)
 
         # Per-port per-queue congestion drops: {port -> {queue_label -> [values]}}
-        self.congestion_drops: t.Dict[  # pyre-ignore[8]
-            str, t.Dict[str, t.List[int]]
-        ] = defaultdict(lambda: defaultdict(list))
+        self.congestion_drops: t.Dict[str, t.Dict[str, t.List[int]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         # Per-port total congestion drops: {port -> [values]}
         self.congestion_drops_port: t.Dict[str, t.List[int]] = defaultdict(list)
 

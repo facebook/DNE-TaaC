@@ -36,8 +36,8 @@ else:
         def __getattr__(self, attr: str) -> t.Any:  # pragma: no cover - guard
             raise RuntimeError("Skynet Query/Struct types are unavailable in OSS mode")
 
-    query_types = cast(t.Any, _UnavailableSkynetTypes())  # pyre-ignore[31]
-    skynet_types = cast(t.Any, _UnavailableSkynetTypes())  # pyre-ignore[31]
+    query_types = cast(t.Any, _UnavailableSkynetTypes())
+    skynet_types = cast(t.Any, _UnavailableSkynetTypes())
 
 
 SKYNET_TIER: str = "skynet_thrift"

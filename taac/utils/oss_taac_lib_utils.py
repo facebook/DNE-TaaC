@@ -169,7 +169,7 @@ def retryable(
                             actual_sleep = min(actual_sleep, remaining)
                         if print_ex or debug:
                             LOGGER.warning(
-                                f"Attempt {attempt + 1}/{num_tries} failed for {func.__name__}: {e}. "  # pyre-ignore[16]
+                                f"Attempt {attempt + 1}/{num_tries} failed for {func.__name__}: {e}. "
                                 f"Retrying in {actual_sleep:.2f}s..."
                             )
                         time.sleep(actual_sleep)
@@ -252,7 +252,7 @@ def async_retryable(
                     elapsed = time.time() - start_time
                     if elapsed >= max_duration:
                         timeout_message = (
-                            f"Retry operation for {func.__name__} exceeded max duration "  # pyre-ignore[16]
+                            f"Retry operation for {func.__name__} exceeded max duration "
                             f"of {max_duration}s after {attempt} attempts"
                         )
                         if last_exception is not None:
@@ -653,7 +653,6 @@ def convert_to_async(func: Callable[..., T]) -> Callable[..., t.Coroutine[Any, A
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,  # Use default executor
-            # pyre-fixme[6]: For 2nd argument expected `(*(*asyncio.events._Ts)) ->
             #  _T` but got `partial[T]`.
             functools.partial(func, *args, **kwargs),
         )
@@ -696,7 +695,6 @@ def await_sync(coro: t.Coroutine[Any, Any, T]) -> T:
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            # pyre-fixme[6]: For 1st argument expected `(_P) -> _T` but got `(main:
             #  Coroutine[Any, Any, _T], debug: Optional[bool] = ..., loop_factory:
             #  Optional[() -> AbstractEventLoop] = ...) -> _T`.
             future = executor.submit(asyncio.run, coro)
@@ -771,10 +769,7 @@ def memoize_timed_herd(
 # `TAAC_OSS` is defined at the top of this module (it gates behaviour above
 # this point too). Only import the Meta-internal logger when not in OSS mode.
 if not TAAC_OSS:
-    from neteng.netcastle.logger import (  # pyre-ignore[21]
-        ConsoleFileLogger,
-        get_root_logger,
-    )
+    from neteng.netcastle.logger import ConsoleFileLogger, get_root_logger
 else:
     # OSS fallback implementation
     DEFAULT_LOG_FMT = "%(asctime)s.%(msecs)03d|%(process)d|%(threadName)s|%(levelname).1s|%(module)s: %(message)s"

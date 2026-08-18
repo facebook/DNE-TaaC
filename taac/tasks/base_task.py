@@ -85,7 +85,6 @@ class BaseTask:
             # No nested dict needed - use the task_key as prefix for all data keys
         else:
             # No shared data provided - create local dictionary (backward compatibility)
-            # pyrefly: ignore [bad-assignment]
             self._task_key = None
             self._local_data: t.Dict[t.Any, t.Any] = {}
         self._driver = None
