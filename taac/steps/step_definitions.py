@@ -10721,7 +10721,7 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
             checks_to_run = []
             for check in checks:
                 check_impl = NAME_TO_POINT_IN_TIME_HEALTH_CHECK[check.name]
-                check_impl_obj = check_impl(self.logger, self.ixia)  # pyre-ignore
+                check_impl_obj = check_impl(self.logger, self.ixia)
                 input_struct = HEALTH_CHECK_NAME_TO_INPUT[check.name]
                 check_input = (
                     json_to_thrift(check.input_json, input_struct)
@@ -10758,9 +10758,7 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
                     checks_to_run.extend(
                         [
                             (
-                                check_impl(  # pyre-ignore[45]
-                                    self.logger, self.ixia
-                                ).run_wrapper(
+                                check_impl(self.logger, self.ixia).run_wrapper(
                                     device, check_input, default_input, check_params
                                 ),
                                 [device],
@@ -10797,7 +10795,7 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
                     message=check_result.message,
                 )
                 self.test_case_results.append(test_result)
-            failed_checks = self.check_failure(check_results)  # pyre-ignore[6]
+            failed_checks = self.check_failure(check_results)
             if failed_checks and input.fail_fast and exception_cls:
                 raise exception_cls(
                     f"Health check(s) {[check.name for check in failed_checks]} failed."

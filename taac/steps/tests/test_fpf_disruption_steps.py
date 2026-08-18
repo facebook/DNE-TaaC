@@ -61,7 +61,6 @@ def _params(step: Step) -> dict:
     # `step.step_params` and `.json_params` are typed as Optional in the
     # generated Thrift; assert both exist in test context (factories always
     # populate them).
-    # pyrefly: ignore [missing-attribute]
     assert step.step_params is not None
     assert step.step_params.json_params is not None
     return json.loads(step.step_params.json_params)
