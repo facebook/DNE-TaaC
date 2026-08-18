@@ -724,14 +724,16 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     #  * fsdb restart/crash: fsdb is not deployed on this manually brought-up box (no
     #    fsdb.service), so they time out on fsdb-thrift -- an environment gap, not a bug.
     #  * transceiver/fiber removal: require physical optic/fiber manipulation at the rack.
-    #  * system reboots (bmc/userver): run separately/last (heavy; box is hand-deployed).
+    # The three system-reboot playbooks (bmc_full / bmc_microserver / microserver) are
+    # now ENABLED. They were skipped out of concern that this hand-brought-up box (no
+    # COOP to re-provision it) would not come back cleanly, but all three passed on
+    # 2026-08-16 with 0.0% packet loss: wedge_agent and qsfp_service are systemd-enabled
+    # and the agent config + packages live on disk, so the snake restores itself on boot
+    # (agent config sha unchanged across all three reboots, 193/193 links back up).
     playbooks_to_skip=[
         "test_one_min_longevity",
         "test_one_hour_longevity",
         "test_72hr_longevity",
-        "test_snake_system_reboot_bmc_full",
-        "test_snake_system_reboot_bmc_microserver",
-        "test_snake_system_reboot_microserver",
         "test_snake_transceiver_removal",
         "test_snake_fiber_removal",
         "test_snake_fsdb_restart",
