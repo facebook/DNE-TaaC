@@ -551,6 +551,30 @@ class CheckProfileRegistryTest(unittest.TestCase):
             ),
         )
 
+    def test_soak_readiness_gated_no_ug_uses_initialized(self):
+        """CICD-EBB-16 NO_UG gates on its guaranteed startup milestone."""
+        checks = get_profile_checks(
+            CheckProfile.SOAK_READINESS_GATED,
+            ProfileContext(
+                expected_established_sessions=1272,
+                route_count_expected=750,
+                enable_update_group=False,
+            ),
+        )
+
+        self.assertEqual(
+            checks.prechecks[1],
+            create_bgp_convergence_check(
+                convergence_threshold=600,
+                hard_timeout_seconds=600,
+                stability_window_seconds=30.0,
+                fail_on_eor_expired=False,
+                validate_sequence=False,
+                extra_json_params={"start_event": "3", "end_event": "9"},
+                check_id="startup_bgp_initialized",
+            ),
+        )
+
     def test_runtime_update_matches_factory(self):
         """RUNTIME_UPDATE reproduces the route-registry prefix-list runtime-update
         playbook (standard prechecks + a route-count verification add-on,

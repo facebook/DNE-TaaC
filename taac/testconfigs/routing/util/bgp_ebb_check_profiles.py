@@ -262,6 +262,8 @@ class ProfileContext:
     # Expected baseline eBGP route count for readiness and runtime-update
     # route-count verification prechecks.
     route_count_expected: t.Optional[int] = None
+    # EBB-16 requires the aggregate EOR milestone only with Update Group.
+    enable_update_group: bool = True
     # Opt-in observe-only characterization postchecks (results land in the
     # POST-HEALTH CHECK RESULTS table). CPU needs the stage START/STOP collector;
     # RSS is self-soaking (postcheck only). None => not added.
@@ -532,10 +534,10 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
     """CICD-EBB-16 readiness gate before route oscillation.
 
     Require the exact non-monitor session count, a continuously observable
-    ALL_EOR_RECEIVED event, the expected per-peer-group accepted-route count,
-    and consistent BGP RIB, FibAgent, and hardware views. The postcheck ignores
-    an EOR expiry recorded during shared setup because this gate proves the late
-    EOR arrived before stimulus.
+    mode-specific initialization milestone, the expected per-peer-group
+    accepted-route count, and consistent BGP RIB, FibAgent, and hardware views.
+    Update Group uses ALL_EOR_RECEIVED. Non-Update Group uses INITIALIZED
+    because it is the guaranteed terminal startup milestone for that mode.
     """
     if ctx.expected_established_sessions <= 0:
         raise ValueError("SOAK_READINESS_GATED requires expected_established_sessions")
@@ -543,6 +545,12 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
         raise ValueError("SOAK_READINESS_GATED requires route_count_expected")
 
     convergence_threshold = ctx.convergence_threshold or 600
+    if ctx.enable_update_group:
+        readiness_end_event = "4"  # ALL_EOR_RECEIVED
+        readiness_check_id = "startup_all_eor_received"
+    else:
+        readiness_end_event = "9"  # INITIALIZED
+        readiness_check_id = "startup_bgp_initialized"
     return ProfileChecks(
         prechecks=[
             create_bgp_session_establish_check(
@@ -561,9 +569,9 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
                 validate_sequence=False,
                 extra_json_params={
                     "start_event": "3",  # PEER_INFO_LOADED
-                    "end_event": "4",  # ALL_EOR_RECEIVED
+                    "end_event": readiness_end_event,
                 },
-                check_id="startup_all_eor_received",
+                check_id=readiness_check_id,
             ),
             create_bgp_route_count_verification_check(
                 json_params={

@@ -830,6 +830,30 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "observer_peer_parent_prefix", playbook_factory.call_args.kwargs
         )
 
+    def test_full_scale_factory_wires_update_group_mode_to_ebb16(self) -> None:
+        inventory = MagicMock()
+        inventory.device_name = "dut.example.com"
+        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
+        inventory.openr_standalone_link.owner = "owner"
+        inventory.openr_standalone_link.helper = "helper"
+        inventory.openr_standalone_link.kv_link.return_value = {}
+        target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.get_bgp_ebb_nexthop_group_count_threshold_playbook"
+        )
+
+        with patch(target, return_value=MagicMock()) as playbook_factory:
+            _get_bgp_ebb_full_scale_playbooks(
+                inventory,
+                BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                bound=MagicMock(),
+                ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
+                selected_tc7_playbooks=set(),
+                enable_update_group=False,
+            )
+
+        self.assertFalse(playbook_factory.call_args.kwargs["enable_update_group"])
+
     def test_full_scale_factory_wires_optional_bgp_monitor_port(self) -> None:
         fauu_target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."

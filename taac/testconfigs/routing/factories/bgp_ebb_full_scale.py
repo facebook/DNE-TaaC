@@ -620,6 +620,7 @@ def _get_bgp_ebb_full_scale_playbooks(
     bound: BoundTopology,
     ebgp_prefix_count: int,
     selected_tc7_playbooks: set[str],
+    enable_update_group: bool = True,
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
@@ -813,6 +814,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             route_count_expected=ebgp_prefix_count,
             nexthop_group_threshold=_NEXTHOP_GROUP_THRESHOLD,
+            enable_update_group=enable_update_group,
             bgp_mon_parent_network=bound_bgp_mon_network,
         ),
     ]
@@ -940,6 +942,7 @@ def create_bgp_ebb_full_scale_test_config(
         bound=bound,
         ebgp_prefix_count=ebgp_prefix_count,
         selected_tc7_playbooks=selected_tc7_playbooks,
+        enable_update_group=enable_update_group,
         multipath_test_duration_seconds=multipath_test_duration_seconds,
         multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
         multipath_cycle_count=multipath_cycle_count,
