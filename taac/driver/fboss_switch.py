@@ -3224,6 +3224,55 @@ class FbossSwitch(AbstractSwitch):
         # pyrefly: ignore [bad-return]
         return result.stdout if result else None
 
+    async def async_write_file_on_device(
+        self, contents: str, remote_path: str, create_parent_dir: bool = True
+    ) -> None:
+        """Write ``contents`` to ``remote_path`` on this device.
+
+        The OSS equivalent of the ``scp_file`` task, which cannot run under
+        TAAC_OSS because it needs netcastle's ParamikoClient. Use this whenever a
+        generated config has to land on a device.
+
+        The write is atomic at the destination (staged sibling + rename), so a
+        daemon reading ``remote_path`` concurrently sees either the old file or
+        the new one, never a partial write.
+
+        Args:
+            contents: file body, written byte-for-byte with no newline translation.
+            remote_path: absolute destination path on the device.
+            create_parent_dir: mkdir -p the parent first. Turn off if the parent
+                is known to exist and you want the write to fail loudly if not.
+        """
+        if create_parent_dir:
+            parent = os.path.dirname(remote_path)
+            if parent:
+                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+
+        self.logger.info(
+            f"Writing {len(contents)} bytes to {self.hostname}:{remote_path}"
+        )
+        async with AsyncSSHClient(self.hostname, port=22, username=None) as client:
+            await client.async_write_file(contents, remote_path)
+
+    async def async_copy_file_to_device(
+        self, local_path: str, remote_path: str, create_parent_dir: bool = True
+    ) -> None:
+        """Copy a local file to ``remote_path`` on this device.
+
+        Same atomicity guarantee as ``async_write_file_on_device``; use this when
+        the payload is already a file rather than a string in memory.
+        """
+        if create_parent_dir:
+            parent = os.path.dirname(remote_path)
+            if parent:
+                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+
+        self.logger.info(
+            f"Copying {local_path} to {self.hostname}:{remote_path}"
+        )
+        async with AsyncSSHClient(self.hostname, port=22, username=None) as client:
+            await client.async_put_file(local_path, remote_path)
+
     async def async_create_dir_if_not_exists(self, file_path: str) -> None:
         from taac.utils.oss_driver_utils import (
             create_dir_if_not_exists,

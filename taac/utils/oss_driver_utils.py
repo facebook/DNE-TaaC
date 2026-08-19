@@ -29,8 +29,8 @@ SSH auth configured via environment variables:
 import asyncio
 import logging
 import os
-import shlex
 import subprocess
+import tempfile
 import time
 import typing as t
 from types import TracebackType
@@ -60,6 +60,10 @@ def _get_ssh_username(override: t.Optional[str] = None) -> str:
 
 def _get_ssh_password() -> t.Optional[str]:
     return os.environ.get("TAAC_SSH_PASSWORD")
+
+
+# Sibling suffix for the stage-then-rename file transfer in AsyncSSHClient.
+_TRANSFER_STAGING_SUFFIX: str = ".taac_tmp"
 
 
 # =============================================================================
@@ -202,12 +206,104 @@ class AsyncSSHClient:
         )
 
     async def async_exists_and_isfile(self, remote_path: str) -> bool:
-        result = await self.async_run(f"test -f {shlex.quote(remote_path)}")
+        result = await self.async_run(f"test -f {remote_path}")
         return result.returncode == 0
 
     async def async_exists_and_isdir(self, remote_path: str) -> bool:
-        result = await self.async_run(f"test -d {shlex.quote(remote_path)}")
+        result = await self.async_run(f"test -d {remote_path}")
         return result.returncode == 0
+
+    async def async_put_file(self, local_path: str, remote_path: str) -> None:
+        """Copy a local file to the remote host.
+
+        The OSS counterpart of netcastle's ``ParamikoClient.scp``, which is not
+        importable outside Meta.
+
+        Transfers into a sibling temp path and renames into place, so a transfer
+        that dies partway leaves the destination either untouched or complete --
+        never truncated. That matters when the destination is a config a daemon
+        may read at any moment.
+
+        SFTP is tried first and ``scp`` is the fallback: SFTP needs the remote
+        sshd to enable the sftp subsystem, scp needs the ``scp`` binary on the
+        remote, and neither is guaranteed on a stripped image.
+        """
+        if not self._conn:
+            await self.async_connect()
+
+        staging_path = f"{remote_path}{_TRANSFER_STAGING_SUFFIX}"
+        try:
+            await self._async_sftp_put(local_path, staging_path)
+        except Exception as sftp_exc:
+            logger.debug(
+                f"SFTP put to {self._hostname}:{staging_path} failed ({sftp_exc}); "
+                "falling back to scp"
+            )
+            try:
+                await self._async_scp_put(local_path, staging_path)
+            except Exception as scp_exc:
+                # SFTP writes incrementally, so it can leave a partial file at
+                # the staging path even though neither transport succeeded.
+                # Without this the sibling accumulates next to a config a daemon
+                # reads, one stray .taac_tmp per failed attempt.
+                await self._remove_staging_file(staging_path)
+                raise OSError(
+                    f"Could not copy {local_path} to {self._hostname}:{remote_path}. "
+                    f"SFTP failed with: {sftp_exc}. scp failed with: {scp_exc}."
+                ) from scp_exc
+
+        # mv -f is rename(2) on the same filesystem, hence atomic; the staging
+        # path is a sibling specifically so that holds.
+        result = await self.async_run(f"mv -f {staging_path} {remote_path}")
+        if result.returncode != 0:
+            await self._remove_staging_file(staging_path)
+            raise OSError(
+                f"Copied {local_path} to {self._hostname}:{staging_path} but could "
+                f"not move it to {remote_path}: {result.stderr.strip()}"
+            )
+
+    async def _remove_staging_file(self, staging_path: str) -> None:
+        """Best-effort cleanup of the staging sibling.
+
+        Swallows its own failure on purpose: every caller is already unwinding a
+        transfer error, and a dead connection here would otherwise replace that
+        diagnosis with a less useful one.
+        """
+        try:
+            await self.async_run(f"rm -f {staging_path}")
+        except Exception as exc:
+            logger.debug(
+                f"Could not remove staging file {self._hostname}:{staging_path}: {exc}"
+            )
+
+    async def _async_sftp_put(self, local_path: str, remote_path: str) -> None:
+        # pyrefly: ignore [missing-attribute]
+        async with self._conn.start_sftp_client() as sftp:
+            await sftp.put(local_path, remote_path)
+
+    async def _async_scp_put(self, local_path: str, remote_path: str) -> None:
+        import asyncssh
+
+        await asyncssh.scp(local_path, (self._conn, remote_path))
+
+    async def async_write_file(self, contents: str, remote_path: str) -> None:
+        """Write ``contents`` to ``remote_path`` on the remote host.
+
+        Staged through a local temp file so the transfer reuses the same
+        atomic-rename path as ``async_put_file``. ``newline=""`` keeps the bytes
+        exactly as given -- a config rewritten with translated line endings is a
+        painful thing to debug.
+        """
+        with tempfile.NamedTemporaryFile(
+            mode="w", delete=False, newline=""
+        ) as tmp_file:
+            tmp_file.write(contents)
+            local_path = tmp_file.name
+
+        try:
+            await self.async_put_file(local_path, remote_path)
+        finally:
+            os.unlink(local_path)
 
 
 # =============================================================================
@@ -394,15 +490,15 @@ class ParamikoClient:
         )
 
     def exists_and_isfile(self, remote_path: str) -> bool:
-        result = self.run(f"test -f {shlex.quote(remote_path)}")
+        result = self.run(f"test -f {remote_path}")
         return result.returncode == 0
 
     def exists_and_isdir(self, remote_path: str) -> bool:
-        result = self.run(f"test -d {shlex.quote(remote_path)}")
+        result = self.run(f"test -d {remote_path}")
         return result.returncode == 0
 
     def makedirs(self, directory: str) -> None:
-        self.run(f"mkdir -p {shlex.quote(directory)}")
+        self.run(f"mkdir -p {directory}")
 
 
 # =============================================================================
