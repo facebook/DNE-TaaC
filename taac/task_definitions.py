@@ -3831,3 +3831,38 @@ def create_fpf_withdraw_stale_prefixes_task(
             )
         ),
     )
+
+
+def create_setup_base_configs_task(
+    hostname: t.Optional[str] = None,
+    restart_bgp: bool = True,
+) -> Task:
+    """Create a task that generates a device's live and soft-drain BGP configs.
+
+    Installs a generalized BGP policy set so a drain produces an observable
+    signal, and writes the two config files that ``DRAIN_UNDRAIN_STEP`` selects
+    between. Run it before any drain in the same test -- drain/undrain fail if
+    the files are missing.
+
+    OSS-only in practice: the underlying driver call rejects non-FBOSS drivers,
+    and on a Meta-internal device COOP owns the config it writes.
+
+    Normally there is no need to call this directly. It is in the default OSS
+    setup-task list, so an OSS run gets it for free; declare it explicitly only
+    to retune it -- for one device, or with ``restart_bgp=False``.
+
+    Args:
+        hostname: Device to configure. Leave unset when declaring this in
+            ``TestConfig.oss_setup_tasks`` and it runs on every endpoint.
+        restart_bgp: Restart bgpd so the live config takes effect. False stages
+            both files without disturbing a running session, for batching
+            several changes before one restart.
+
+    Returns:
+        Task object to generate the base BGP configs.
+    """
+    return Task(
+        task_name="setup_base_configs",
+        hostname=hostname,
+        params=Params(json_params=json.dumps({"restart_bgp": restart_bgp})),
+    )

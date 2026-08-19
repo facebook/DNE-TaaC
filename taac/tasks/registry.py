@@ -150,6 +150,9 @@ from taac.tasks.periodic_tasks import (
     ProcessMonitorTask,
     ThriftStressPeriodicTask,
 )
+from taac.tasks.setup_base_configs_task import (
+    SetupBaseConfigsTask,
+)
 from taac.tasks.verify_best_path_changes_task import (
     VerifyBestPathChangesTask,
 )
@@ -202,6 +205,7 @@ TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     ConfigureBgpcppStartupTask,
     VerifyBestPathChangesTask,
     SetPortChannelMinLinkPatcherTask,
+    SetupBaseConfigsTask,
 ]
 
 # Add internal tasks only when not in OSS mode
