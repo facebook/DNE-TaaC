@@ -100,6 +100,7 @@ else:
         )
 
 
+from taac.libs.oss_setup_tasks import resolve_oss_setup_tasks
 from taac.steps.all_steps import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     NAME_TO_STEP,
     STEP_NAME_TO_INPUT,
@@ -278,6 +279,7 @@ class TaacRunner:
         override_ixia_traffic_items: bool = False,
         cleanup_failed_setup: bool = True,
         skip_setup_tasks: bool = False,
+        skip_oss_setup_tasks: bool = False,
         skip_teardown_tasks: bool = False,
         skip_all_tasks: bool = False,
         skip_periodic_tasks: bool = False,
@@ -328,6 +330,7 @@ class TaacRunner:
         self.skip_package_update = skip_package_update
         self.dsf_sequential_update = dsf_sequential_update
         self.skip_setup_tasks = skip_setup_tasks
+        self.skip_oss_setup_tasks = skip_oss_setup_tasks
         self.skip_teardown_tasks = skip_teardown_tasks
         self.skip_all_tasks = skip_all_tasks
         self.skip_periodic_tasks = skip_periodic_tasks
@@ -498,6 +501,28 @@ class TaacRunner:
                 f"[Task {idx}/{total}] Completed: {task_desc} ({elapsed:.1f}s)"
             )
 
+    async def _async_run_oss_setup_tasks(self) -> None:
+        """Run the OSS setup-task stage.
+
+        Its own stage rather than part of the IXIA candidate's setup_tasks:
+        that list feeds the IXIA topology-cache key, so folding these in would
+        silently change caching behaviour for every OSS run.
+
+        `--skip-setup-tasks` suppresses these too. They are setup tasks, and
+        someone asking for no setup tasks would be surprised to still get a
+        bgpd restart; `--skip-oss-setup-tasks` is for skipping only these.
+        """
+        if self.skip_all_tasks or self.skip_setup_tasks or self.skip_oss_setup_tasks:
+            return
+        tasks = resolve_oss_setup_tasks(self.test_config)
+        if not tasks:
+            return
+        self.logger.warning(
+            f"Running {len(tasks)} OSS setup task(s) across "
+            f"{len(self.test_config.endpoints)} endpoint(s)"
+        )
+        await self.run_tasks(tasks)
+
     async def _async_prepare_ixia_candidate(self, candidate: IxiaCandidate) -> None:
         if self.skip_all_tasks or self.skip_setup_tasks:
             return
@@ -523,6 +548,11 @@ class TaacRunner:
         self._add_oss_mock_device_data()
         self._add_host_to_device_os_type_data()
         self._add_host_driver_args_data()
+
+        log_section("OSS SETUP TASKS", logger=self.logger)
+        with self.test_summary.tracked_section("OSS setup tasks"):
+            with suppress_console_logs(self.logger):
+                await self._async_run_oss_setup_tasks()
 
         log_section("PRE-IXIA SETUP TASKS", logger=self.logger)
         with self.test_summary.tracked_section("Pre-IXIA setup tasks"):

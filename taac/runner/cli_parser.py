@@ -108,6 +108,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Skip setup tasks",
     )
     parser.add_argument(
+        "--skip-oss-setup-tasks",
+        action="store_true",
+        help=(
+            "Skip the OSS setup-task stage, including its implicit defaults. "
+            "--skip-setup-tasks already covers these; use this to skip only "
+            "the OSS ones and still run the config's own setup tasks."
+        ),
+    )
+    parser.add_argument(
         "--skip-teardown-tasks",
         action="store_true",
         help="Skip teardown tasks",

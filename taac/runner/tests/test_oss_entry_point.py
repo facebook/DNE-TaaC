@@ -119,6 +119,7 @@ class TestCLIParser(TestCase):
         self.assertTrue(hasattr(args, "skip_ixia_cleanup"))
         self.assertTrue(hasattr(args, "skip_testbed_isolation"))
         self.assertTrue(hasattr(args, "skip_setup_tasks"))
+        self.assertTrue(hasattr(args, "skip_oss_setup_tasks"))
         self.assertTrue(hasattr(args, "skip_teardown_tasks"))
         self.assertTrue(hasattr(args, "log_level"))
         self.assertTrue(hasattr(args, "log_file"))
