@@ -142,12 +142,18 @@ class ConfigModifierError(Exception):
 def _fboss_switch_cls() -> type:
     """Resolve FbossSwitch lazily.
 
-    Imported inside a function rather than at module scope for two reasons: it
-    keeps ``config_modifiers_lib`` from pulling the driver in at import time, and
-    it stays cycle-safe if drain/undrain is ever exposed as a driver method. By
-    the time this runs the class is already imported anyway -- the caller is
-    holding an instance of it.
+    Imported inside a function rather than at module scope because drain/undrain
+    *are* now exposed as driver methods: ``FbossSwitch.async_onbox_drain_device``
+    calls into this module, so fboss_switch_lib depends on config_modifiers_lib
+    and the reverse dep cannot be declared -- Buck rejects the cycle. Hence the
+    suppression below: pyre resolves imports through the Buck source database and
+    cannot see a dep that is deliberately absent.
+
+    Safe regardless of the missing dep. Anything that reaches this guard is
+    holding an FbossSwitch, so the module is already in sys.modules by the time
+    the import runs.
     """
+    # pyre-ignore[21]: see above -- declaring this dep would create a Buck cycle.
     from taac.driver.fboss_switch import FbossSwitch
 
     return FbossSwitch

@@ -144,7 +144,7 @@ def _make_switch(device: _Device) -> AbstractSwitch:
     return t.cast(AbstractSwitch, switch)
 
 
-def _make_fboss_switch(device: _Device) -> AbstractSwitch:
+def _make_fboss_switch(device: _Device) -> FbossSwitch:
     """Build a driver double specced against the concrete FBOSS driver.
 
     ``setup_base_configs`` calls ``async_write_file_on_device``, which lives on
@@ -152,6 +152,10 @@ def _make_fboss_switch(device: _Device) -> AbstractSwitch:
     would raise AttributeError on it. Speccing against ``FbossSwitch`` also
     satisfies ``_assert_fboss_device`` for real, so these tests exercise the
     guard rather than patching it out.
+
+    Typed as ``FbossSwitch``, not ``AbstractSwitch``: ``OnboxDrainDriverMethodsTest``
+    passes the result as ``self`` to unbound ``FbossSwitch`` methods, which the
+    wider type would reject. Callers wanting the ABC get it by subtyping.
     """
     switch = AsyncMock(spec=FbossSwitch)
     switch.hostname = "test-switch"
@@ -160,7 +164,7 @@ def _make_fboss_switch(device: _Device) -> AbstractSwitch:
     switch.async_restart_service.side_effect = device.restart_service
     switch.async_read_file.side_effect = device.read_file
     switch.async_write_file_on_device.side_effect = device.write_file
-    return t.cast(AbstractSwitch, switch)
+    return t.cast(FbossSwitch, switch)
 
 
 class DrainUndrainTest(TestCase):
@@ -773,6 +777,78 @@ class SetupBaseConfigsTest(TestCase):
         self.assertIn("FbossSwitch", str(ctx.exception))
         self.assertEqual([], self.device.commands)
         self.assertEqual([], self.device.writes)
+
+
+class OnboxDrainDriverMethodsTest(TestCase):
+    """The FbossSwitch methods DrainUndrainStep calls for DrainHandler.LOCAL_DRAINER.
+
+    Invoked unbound with a spec'd mock as ``self`` so the real method bodies run
+    -- the point is to exercise them, not a double of them.
+    """
+
+    def setUp(self) -> None:
+        self.device = _Device()
+        self.switch = _make_fboss_switch(self.device)
+
+        # async_onbox_drain_device delegates to self.async_onbox_softdrain_device,
+        # which on a spec'd mock is a mock rather than the real method. Point it
+        # back at the real one so the delegation actually executes. The side
+        # effect has to be a coroutine function, not a lambda returning one --
+        # AsyncMock awaits the former and merely returns the latter.
+        async def real_softdrain() -> None:
+            await FbossSwitch.async_onbox_softdrain_device(self.switch)
+
+        # self.switch is typed as the real class so it can be passed as `self`
+        # above; reach through to the mock to set a side effect on it.
+        t.cast(
+            AsyncMock, self.switch
+        ).async_onbox_softdrain_device.side_effect = real_softdrain
+
+    async def test_softdrain_selects_the_softdrain_config(self) -> None:
+        await FbossSwitch.async_onbox_softdrain_device(self.switch)
+
+        self.assertEqual(SOFTDRAIN_CONFIG_PATH, self.device.symlink_target)
+        self.assertEqual(
+            [FbossSystemctlServiceName.BGP], self.device.restarted_services
+        )
+
+    async def test_undrain_selects_the_live_config(self) -> None:
+        await FbossSwitch.async_onbox_undrain_device(self.switch)
+
+        self.assertEqual(LIVE_CONFIG_PATH, self.device.symlink_target)
+
+    async def test_drain_and_softdrain_do_the_same_thing(self) -> None:
+        # OSS has no hard drain; the two names must not diverge into one of them
+        # quietly doing nothing.
+        await FbossSwitch.async_onbox_drain_device(self.switch)
+        via_drain = self.device.symlink_target
+
+        self.device.symlink_target = ""
+        await FbossSwitch.async_onbox_softdrain_device(self.switch)
+
+        self.assertEqual(SOFTDRAIN_CONFIG_PATH, via_drain)
+        self.assertEqual(via_drain, self.device.symlink_target)
+
+    async def test_drain_warns_that_oss_drain_is_soft(self) -> None:
+        # Internally this method name is a hard drain. The divergence has to be
+        # visible in the logs of any run that hits it, not just in a docstring.
+        with self.assertLogs("test_config_modifiers", level="WARNING") as logs:
+            await FbossSwitch.async_onbox_drain_device(self.switch)
+
+        self.assertTrue(
+            any("SOFT" in line for line in logs.output),
+            f"expected a soft-drain warning, got {logs.output}",
+        )
+
+    def test_overrides_the_abstract_no_ops(self) -> None:
+        # AbstractSwitch declares both with `...` as the body, so losing these
+        # overrides would not fail -- a LOCAL_DRAINER drain step would silently
+        # succeed having done nothing. That is the failure this guards.
+        for name in ("async_onbox_drain_device", "async_onbox_undrain_device"):
+            with self.subTest(method=name):
+                self.assertIsNot(
+                    getattr(AbstractSwitch, name), getattr(FbossSwitch, name)
+                )
 
 
 # The policy section exactly as it is serialized into both config files. Kept at

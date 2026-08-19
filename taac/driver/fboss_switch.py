@@ -3617,6 +3617,60 @@ class FbossSwitch(AbstractSwitch):
         )
         return on_box_drain_state
 
+    async def async_onbox_drain_device(self) -> None:
+        """Drain the whole device on-box, without any Meta-internal service.
+
+        **In OSS this is a SOFT drain.** Internally the same method name is a
+        hard drain -- ``fboss_local_drainer drain``, which brings the data plane
+        down -- but OSS has no local drainer service to ask, and the mechanism
+        available here (swapping which BGP config bgpd loads) re-tags routes
+        rather than withdrawing them. Traffic keeps flowing over this device
+        until neighbours prefer someone else. A test that drains and then
+        expects the link to go down will behave differently in the two
+        environments, so it should assert on route preference, not on loss.
+
+        ``async_onbox_softdrain_device`` is the same call under the name that
+        matches the behaviour; both exist so a caller can say what it means.
+
+        Only reachable in OSS in practice: ``driver_factory`` hands out
+        ``FbossSwitchInternal`` internally, and ``FbossSwitchInternalMixin``
+        precedes ``FbossSwitch`` in its MRO, so the internal (hard) drain wins
+        there. There is deliberately no TAAC_OSS guard here -- the on-device
+        validation scripts build a bare ``FbossSwitch`` from a devserver with
+        TAAC_OSS unset, and a guard would break exactly the path used to test
+        this.
+        """
+        self.logger.warning(
+            f"{self.hostname}: OSS device drain is a SOFT drain -- routes are "
+            "re-tagged DRAIN rather than withdrawn and the data plane stays up. "
+            "Internally this same call is a hard drain."
+        )
+        await self.async_onbox_softdrain_device()
+
+    async def async_onbox_softdrain_device(self) -> None:
+        """Soft-drain the whole device: advertise DRAIN-tagged routes, not LIVE.
+
+        Points bgpd at the soft-drain config and restarts it. Both configs must
+        already exist -- ``config_modifiers.setup_base_configs`` generates them.
+        """
+        # Imported here rather than at module scope: config_modifiers resolves
+        # FbossSwitch for its own guard, so a module-level import either way
+        # would be a cycle.
+        from taac.driver.config_modifiers import drain_device
+
+        await drain_device(self)
+
+    async def async_onbox_undrain_device(self) -> None:
+        """Undrain the whole device: return to advertising LIVE-tagged routes.
+
+        Reverses ``async_onbox_drain_device`` / ``async_onbox_softdrain_device``.
+        It does not reverse a per-interface drain -- see
+        ``async_undrain_interface`` for that.
+        """
+        from taac.driver.config_modifiers import undrain_device
+
+        await undrain_device(self)
+
     async def async_softdrain_interface(self, interface: str, task_id: int = 0) -> None:
         """
         Soft-drain a single interface on this FBOSS switch via the on-box
