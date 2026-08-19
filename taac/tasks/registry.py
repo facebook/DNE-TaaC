@@ -51,6 +51,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.internal.tasks.device_provisioning_task import (
         DeviceProvisioningTask,
     )
+    from taac.internal.tasks.eos_compiler_lifecycle_task import (
+        EosCompilerLifecycleTask,
+    )
     from taac.internal.tasks.ixia_preflight_task import (
         IxiaPreflightTask,
     )
@@ -207,6 +210,7 @@ if not TAAC_OSS:
         [
             OpenRRouteActionTask,
             DeviceProvisioningTask,
+            EosCompilerLifecycleTask,
             BgpQueueBackpressurePoll,
             BgpRouteRegistryCleanupTask,
             BgpSetRouteFilterTask,

@@ -1167,6 +1167,26 @@ def create_device_provisioning_task(
     )
 
 
+def create_eos_compiler_lifecycle_task(
+    hostname: str,
+    action: str = "physical_apply",
+    ixia_needed: bool = False,
+    **action_params: object,
+) -> Task:
+    """Create one backend-owned EOS compiler lifecycle operation."""
+    return Task(
+        task_name="eos_compiler_lifecycle",
+        hostname=hostname,
+        ixia_needed=ixia_needed,
+        params=Params(
+            json_params=json.dumps(
+                {"action": action, "hostname": hostname, **action_params},
+                sort_keys=True,
+            )
+        ),
+    )
+
+
 def create_scp_file_task(
     hostname: str,
     source_path: str,

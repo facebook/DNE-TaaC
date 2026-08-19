@@ -756,6 +756,10 @@ and non-null tasks before it is exposed for later assembly work.
 **DICE 32: physical lifecycle tasks.** Materialize snapshot, realization,
 exact-readback, and restoration tasks for aggregate EOS physical interfaces.
 
+Status: implemented with first-snapshot reuse, exact EOS interface readback,
+and reverse-order restoration. Routing-config and routing-component values
+remain typed deferred intent in the shadow result.
+
 **DICE 33: routing-config lifecycle tasks.** Materialize first-snapshot
 capture, atomic Configerator installation, exact readback, and restoration of
 prior bytes or prior absence.
