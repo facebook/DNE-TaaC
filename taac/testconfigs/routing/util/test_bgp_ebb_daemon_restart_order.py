@@ -246,8 +246,19 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             {"hostname": _DEVICE, "expect_enabled": True},
             json.loads(validator_json_params),
         )
+        interface_tasks = [
+            task for task in tasks if task.task_name == "interface_ip_configuration"
+        ]
+        self.assertTrue(interface_tasks)
+        for task in interface_tasks:
+            json_params = task.params.json_params
+            if json_params is None:
+                raise AssertionError(
+                    "interface_ip_configuration task is missing JSON parameters"
+                )
+            self.assertFalse(json.loads(json_params)["save_running_config_backup"])
 
-    def test_teardown_restores_whole_device_backups_in_reverse_order(self) -> None:
+    def test_teardown_cleans_interfaces_in_reverse_order(self) -> None:
         tasks = get_teardown_tasks(
             ixia_interface_mimic_ebgp="Ethernet1/1",
             ixia_interface_mimic_ibgp="Ethernet1/2",
@@ -259,7 +270,10 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             json_params = task.params.json_params
             if json_params is None:
                 raise AssertionError("teardown task is missing JSON parameters")
-            interfaces.append(json.loads(json_params)["interfaces"][0])
+            params = json.loads(json_params)
+            interfaces.append(params["interfaces"][0])
+            self.assertNotIn("restore_from_backup", params)
+            self.assertFalse(params["keep_primary"])
         self.assertEqual(["Ethernet1/3", "Ethernet1/2", "Ethernet1/1"], interfaces)
 
         tasks = get_teardown_tasks(
@@ -272,5 +286,8 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             json_params = task.params.json_params
             if json_params is None:
                 raise AssertionError("teardown task is missing JSON parameters")
-            interfaces.append(json.loads(json_params)["interfaces"][0])
+            params = json.loads(json_params)
+            interfaces.append(params["interfaces"][0])
+            self.assertNotIn("restore_from_backup", params)
+            self.assertFalse(params["keep_primary"])
         self.assertEqual(["Ethernet1/2", "Ethernet1/1"], interfaces)

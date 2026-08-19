@@ -305,6 +305,91 @@ class InterfaceIpConfigurationTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(call_kwargs["ipv6_addresses"]), 3)
         mock_restore.assert_not_awaited()
 
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_backup_can_be_disabled_for_explicit_teardown(
+        self, mock_get_driver, mock_save, mock_configure, mock_restore
+    ) -> None:
+        await self.task.run(
+            {
+                "interface": "Ethernet3/36/1",
+                "ipv6_base_network": "2401:db00:e50d:11:8",
+                "peer_count": 1,
+                "address_families": ["ipv6"],
+                "clear_existing": True,
+                "save_running_config_backup": False,
+            }
+        )
+
+        mock_save.assert_not_awaited()
+        mock_configure.assert_awaited_once()
+        mock_restore.assert_not_awaited()
+        self.assertEqual({}, self.shared_data)
+
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_failed_configuration_without_backup_removes_interface_addresses(
+        self, mock_get_driver, mock_save, mock_configure, mock_restore
+    ) -> None:
+        mock_configure.side_effect = RuntimeError("configuration failed")
+
+        with self.assertRaisesRegex(RuntimeError, "configuration failed"):
+            await self.task.run(
+                {
+                    "interface": "Ethernet3/36/1",
+                    "ipv6_base_network": "2401:db00:e50d:11:8",
+                    "peer_count": 1,
+                    "address_families": ["ipv6"],
+                    "clear_existing": True,
+                    "save_running_config_backup": False,
+                }
+            )
+
+        mock_save.assert_not_awaited()
+        mock_restore.assert_not_awaited()
+        mock_get_driver.return_value.async_run_cmd_on_shell.assert_awaited_once_with(
+            "configure\ninterface Ethernet3/36/1\nno ip address\nno ipv6 address\nend"
+        )
+
+    @patch(f"{ARISTA_UTILS_PATH}.restore_running_config", new_callable=AsyncMock)
+    @patch(
+        f"{ARISTA_UTILS_PATH}.configure_interface_secondary_ips", new_callable=AsyncMock
+    )
+    @patch(f"{ARISTA_UTILS_PATH}.save_running_config", new_callable=AsyncMock)
+    @patch(f"{TASK_PATH}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_failed_cleanup_preserves_configuration_error_type(
+        self, mock_get_driver, mock_save, mock_configure, mock_restore
+    ) -> None:
+        mock_configure.side_effect = RuntimeError("configuration failed")
+        mock_get_driver.return_value.async_run_cmd_on_shell.side_effect = RuntimeError(
+            "cleanup failed"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "configuration failed") as context:
+            await self.task.run(
+                {
+                    "interface": "Ethernet3/36/1",
+                    "ipv6_base_network": "2401:db00:e50d:11:8",
+                    "peer_count": 1,
+                    "address_families": ["ipv6"],
+                    "clear_existing": True,
+                    "save_running_config_backup": False,
+                }
+            )
+
+        self.assertIsNotNone(context.exception.__cause__)
+        self.assertEqual("cleanup failed", str(context.exception.__cause__))
+        mock_save.assert_not_awaited()
+        mock_restore.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

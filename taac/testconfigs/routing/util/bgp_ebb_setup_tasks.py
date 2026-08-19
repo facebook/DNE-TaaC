@@ -489,6 +489,7 @@ def _get_full_scale_ip_config_tasks(
             ipv6_start_offset=IXIA_IPV6_START_OFFSET,
             hostname=device_name,
             ixia_needed=True,
+            save_running_config_backup=False,
         )
     )
 
@@ -541,6 +542,7 @@ def _get_full_scale_ip_config_tasks(
                 ipv6_start_offset=IXIA_IPV6_START_OFFSET,
                 hostname=device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
 
@@ -560,6 +562,7 @@ def _get_full_scale_ip_config_tasks(
                 ipv6_start_offset=IXIA_IPV6_START_OFFSET,
                 hostname=device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
 
@@ -1618,6 +1621,7 @@ def get_update_packing_setup_tasks(
                 ipv6_start_offset=IXIA_IPV6_START_OFFSET,
                 hostname=device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
         setup_tasks.append(
@@ -1632,6 +1636,7 @@ def get_update_packing_setup_tasks(
                 ipv6_start_offset=IXIA_IPV6_START_OFFSET,
                 hostname=device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
 
@@ -1769,7 +1774,7 @@ def get_teardown_tasks(
     """
     Generate common teardown tasks for an EBB BGP++ conveyor test config.
 
-    Restores interface IP configurations from backup for all IXIA interfaces.
+    Removes interface IP configurations from all IXIA interfaces.
 
     Args:
         ixia_interface_mimic_ebgp: eBGP IXIA interface
@@ -1787,7 +1792,7 @@ def get_teardown_tasks(
     return [
         create_interface_ip_cleanup_task(
             interfaces=[interface],
-            restore_from_backup=True,
+            restore_from_backup=False,
             hostname=device_name,
         )
         for interface in reversed(interfaces)

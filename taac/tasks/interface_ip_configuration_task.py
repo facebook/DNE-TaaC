@@ -17,6 +17,16 @@ from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import ConsoleFileLogger
 
 
+async def _remove_all_interface_ip_addresses(
+    driver: t.Any,
+    interface: str,
+    logger: ConsoleFileLogger,
+) -> None:
+    config_block = f"interface {interface}\nno ip address\nno ipv6 address"
+    logger.info(f"    Applying cleanup:\n{config_block}")
+    await driver.async_run_cmd_on_shell(f"configure\n{config_block}\nend")
+
+
 class InterfaceIpConfigurationTask(BaseTask):
     """
     Task to configure secondary IP addresses on Arista interfaces.
@@ -25,15 +35,15 @@ class InterfaceIpConfigurationTask(BaseTask):
     500+ IBGP peers), where manual IP configuration is error-prone.
 
     The task:
-    1. Saves or reuses the interface's original running config backup
+    1. Optionally saves or reuses a running config backup
     2. Clears existing IP addresses on the interface (optional)
     3. Generates secondary IP addresses based on peer count
     4. Applies configuration using Arista driver
     5. Validates configuration succeeded
-    6. Auto-restores backup on failure
+    6. Restores the optional backup or removes interface addresses on failure
 
-    The first task for an interface saves the backup; repeated tasks reuse that
-    original snapshot. The backup file is stored in task data for cleanup tasks.
+    When backup is enabled, the first task for an interface saves the backup.
+    Repeated tasks reuse that snapshot. The task stores the file for cleanup.
 
     Example Usage:
         In test config setup_tasks:
@@ -146,6 +156,33 @@ class InterfaceIpConfigurationTask(BaseTask):
             self._data["backup_file"] = backup_file
         return backup_file
 
+    async def _recover_from_configuration_failure(
+        self,
+        driver: t.Any,
+        interface: str,
+        backup_file: str | None,
+        configuration_error: Exception,
+    ) -> None:
+        if backup_file is not None:
+            self.logger.error("Configuration failed, restoring backup...")
+            try:
+                await arista_utils.restore_running_config(
+                    driver, backup_file, self.logger
+                )
+                self.logger.info(f"  Restored config from: {backup_file}")
+            except Exception as restore_error:
+                self.logger.error(f"Failed to restore backup: {restore_error}")
+            return
+
+        self.logger.error("Configuration failed, removing interface IP addresses...")
+        try:
+            await _remove_all_interface_ip_addresses(driver, interface, self.logger)
+        except Exception as cleanup_error:
+            self.logger.error(
+                f"Failed to remove interface IP addresses: {cleanup_error}"
+            )
+            raise configuration_error from cleanup_error
+
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
         Configure secondary IP addresses on an interface.
@@ -163,13 +200,16 @@ class InterfaceIpConfigurationTask(BaseTask):
                     has a primary address. (default: False)
                 - ipv4_start_offset: Starting offset for IPv4 addresses (default: 10)
                 - ipv6_start_offset: Starting offset for IPv6 addresses (default: 0x10)
+                - save_running_config_backup: Save the running configuration before
+                    applying addresses (default: True)
 
         Raises:
             ValueError: If required parameters are missing or configuration fails
 
         Note:
-            This task saves the first running-config backup for each interface. The
-            backup can be used by cleanup tasks to restore the original configuration.
+            By default, this task saves the first running-config backup for each
+            interface. Set save_running_config_backup=False when teardown removes
+            the configured addresses directly.
         """
         # Extract parameters
         interface = params.get("interface")
@@ -192,7 +232,16 @@ class InterfaceIpConfigurationTask(BaseTask):
         # pyre-fixme[6]: For 1st argument expected `str` but got `Optional[str]`.
         driver = await async_get_device_driver(self.hostname)
 
-        backup_file = await self._get_or_create_backup(driver, interface)
+        save_running_config_backup = params.get("save_running_config_backup", True)
+        backup_file = (
+            await self._get_or_create_backup(driver, interface)
+            if save_running_config_backup
+            else None
+        )
+        if not save_running_config_backup:
+            self.logger.info(
+                "Skipping running config backup; interface teardown owns cleanup"
+            )
 
         try:
             self.logger.info("=" * 80)
@@ -238,16 +287,10 @@ class InterfaceIpConfigurationTask(BaseTask):
             )
             self.logger.info("=" * 80)
 
-        except Exception:
-            # If backup was created and config failed, restore it automatically
-            self.logger.error("Configuration failed, restoring backup...")
-            try:
-                await arista_utils.restore_running_config(
-                    driver, backup_file, self.logger
-                )
-                self.logger.info(f"  Restored config from: {backup_file}")
-            except Exception as restore_error:
-                self.logger.error(f"Failed to restore backup: {restore_error}")
+        except Exception as configuration_error:
+            await self._recover_from_configuration_failure(
+                driver, interface, backup_file, configuration_error
+            )
             raise
 
 
@@ -317,6 +360,122 @@ class InterfaceIpCleanupTask(BaseTask):
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
+    async def _restore_from_backup(
+        self, params: t.Dict[str, t.Any], delete_backup_after: bool
+    ) -> None:
+        interfaces = params.get("interfaces", [])
+        if not interfaces:
+            raise ValueError(
+                "restore_from_backup=True requires 'interfaces' parameter "
+                "to identify which backup to restore"
+            )
+
+        interface = interfaces[0] if isinstance(interfaces, list) else interfaces
+        backup_file = None
+        backup_key = None
+        if self._shared_data is not None:
+            backup_key = f"interface_ip_backup__{interface}"
+            backup_file = self._shared_data.get(backup_key)
+            if backup_file:
+                self.logger.info(f"  Found backup via shared data: {backup_key}")
+
+        if not backup_file:
+            backup_file = self._data.get("backup_file")
+        if not backup_file:
+            raise ValueError(
+                f"No backup file found for interface {interface}. "
+                "restore_from_backup=True requires InterfaceIpConfigurationTask "
+                "to have run first."
+            )
+
+        self.logger.info("=" * 80)
+        self.logger.info("Restoring Configuration from Backup")
+        self.logger.info("=" * 80)
+        self.logger.info(f"  Backup file: {backup_file}")
+
+        # pyre-fixme[6]: For 1st argument expected `str` but got `Optional[str]`.
+        driver = await async_get_device_driver(self.hostname)
+        try:
+            await arista_utils.restore_running_config(driver, backup_file, self.logger)
+            self.logger.info(f"✓ Successfully restored config from: {backup_file}")
+
+            if delete_backup_after:
+                await arista_utils.delete_backup_config(
+                    driver, backup_file, self.logger
+                )
+                self.logger.info(f"✓ Deleted backup file: {backup_file}")
+                if self._shared_data is not None and backup_key is not None:
+                    self._shared_data.pop(backup_key, None)
+
+            self.logger.info("=" * 80)
+        except Exception as error:
+            error_msg = f"Failed to restore from backup: {error}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg) from error
+
+    @staticmethod
+    def _extract_secondary_addresses(
+        config_output: str,
+    ) -> tuple[list[str], list[str]]:
+        secondary_ipv4s = []
+        secondary_ipv6s = []
+        for raw_line in config_output.split("\n"):
+            line = raw_line.strip()
+            parts = line.split()
+            if "ip address" in line and "secondary" in line and len(parts) >= 3:
+                secondary_ipv4s.append(parts[2])
+            if "ipv6 address" in line and len(parts) >= 3:
+                secondary_ipv6s.append(parts[2])
+        return secondary_ipv4s, secondary_ipv6s
+
+    async def _cleanup_interface(
+        self, driver: t.Any, interface: str, keep_primary: bool
+    ) -> None:
+        if not keep_primary:
+            self.logger.info("    Removing all IP addresses")
+            await _remove_all_interface_ip_addresses(driver, interface, self.logger)
+            self.logger.info(f"    Cleaned up {interface}")
+            return
+
+        self.logger.info(
+            "    Reading current configuration to identify secondary IPs..."
+        )
+        # pyre-fixme[16]: `AbstractSwitch` has no attribute `run_command`.
+        config_output = await driver.run_command(
+            f"show running-config interface {interface}"
+        )
+        secondary_ipv4s, secondary_ipv6s = self._extract_secondary_addresses(
+            config_output
+        )
+        commands = [f"interface {interface}"]
+
+        if secondary_ipv4s:
+            self.logger.info(
+                f"    Removing {len(secondary_ipv4s)} secondary IPv4 addresses"
+            )
+            commands.extend(
+                f"no ip address {address} secondary" for address in secondary_ipv4s
+            )
+
+        if len(secondary_ipv6s) > 1:
+            self.logger.info(
+                f"    Removing {len(secondary_ipv6s) - 1} secondary IPv6 addresses"
+            )
+            commands.extend(
+                f"no ipv6 address {address}" for address in secondary_ipv6s[1:]
+            )
+        elif secondary_ipv6s:
+            self.logger.info("    Keeping single IPv6 address (primary)")
+
+        if not secondary_ipv4s and len(secondary_ipv6s) <= 1:
+            self.logger.info("    No secondary IPs to remove")
+            return
+
+        config_block = "\n".join(commands)
+        self.logger.info(f"    Applying cleanup:\n{config_block}")
+        await driver.async_run_cmd_on_shell(f"configure\n{config_block}\nend")
+        self.logger.info(f"    Cleaned up {interface}")
+
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
         Clean up IP addresses from interfaces or restore from backup.
@@ -331,78 +490,13 @@ class InterfaceIpCleanupTask(BaseTask):
         Raises:
             ValueError: If required parameters are missing or cleanup fails
         """
-        # Check if we should restore from backup
         restore_from_backup = params.get("restore_from_backup", False)
         delete_backup_after = params.get("delete_backup", True)
 
         if restore_from_backup:
-            # Restore from backup saved by InterfaceIpConfigurationTask
-            # Need to determine which interface to restore
-            interfaces = params.get("interfaces", [])
-            if not interfaces:
-                raise ValueError(
-                    "restore_from_backup=True requires 'interfaces' parameter "
-                    "to identify which backup to restore"
-                )
+            await self._restore_from_backup(params, delete_backup_after)
+            return
 
-            # Use first interface to look up backup (assuming one backup per config task)
-            interface = interfaces[0] if isinstance(interfaces, list) else interfaces
-
-            # Look for backup in shared data first, then fall back to local _data
-            backup_file = None
-            backup_key = None
-            if self._shared_data is not None:
-                backup_key = f"interface_ip_backup__{interface}"
-                backup_file = self._shared_data.get(backup_key)
-                if backup_file:
-                    self.logger.info(f"  Found backup via shared data: {backup_key}")
-
-            # Fallback to local _data for backward compatibility
-            if not backup_file:
-                backup_file = self._data.get("backup_file")
-
-            if not backup_file:
-                raise ValueError(
-                    f"No backup file found for interface {interface}. "
-                    "restore_from_backup=True requires InterfaceIpConfigurationTask "
-                    "to have run first."
-                )
-
-            self.logger.info("=" * 80)
-            self.logger.info("Restoring Configuration from Backup")
-            self.logger.info("=" * 80)
-            self.logger.info(f"  Backup file: {backup_file}")
-
-            # Get device driver
-            # pyre-fixme[6]: For 1st argument expected `str` but got `Optional[str]`.
-            driver = await async_get_device_driver(self.hostname)
-
-            # Restore the backup
-            try:
-                await arista_utils.restore_running_config(
-                    driver, backup_file, self.logger
-                )
-                self.logger.info(f"✓ Successfully restored config from: {backup_file}")
-
-                # Delete backup file if requested
-                if delete_backup_after:
-                    await arista_utils.delete_backup_config(
-                        driver, backup_file, self.logger
-                    )
-                    self.logger.info(f"✓ Deleted backup file: {backup_file}")
-                    if self._shared_data is not None and backup_key is not None:
-                        self._shared_data.pop(backup_key, None)
-
-                self.logger.info("=" * 80)
-                return
-
-            except Exception as e:
-                error_msg = f"Failed to restore from backup: {e}"
-                self.logger.error(error_msg)
-                raise ValueError(error_msg) from e
-
-        # Otherwise, do manual cleanup
-        # Extract parameters
         interfaces = params.get("interfaces")
         if not interfaces:
             raise ValueError("Missing required parameter: interfaces (list)")
@@ -418,99 +512,16 @@ class InterfaceIpCleanupTask(BaseTask):
         self.logger.info(f"  Interfaces to clean: {', '.join(interfaces)}")
         self.logger.info(f"  Keep primary IP: {keep_primary}")
 
-        # Get device driver
         # pyre-fixme[6]: For 1st argument expected `str` but got `Optional[str]`.
         driver = await async_get_device_driver(self.hostname)
 
-        # Clean up each interface
         for interface in interfaces:
             self.logger.info(f"\n  Cleaning up {interface}...")
-
             try:
-                # Build cleanup commands
-                commands = [
-                    f"interface {interface}",
-                ]
-
-                if keep_primary:
-                    # Remove only secondary IPs - need to parse current config
-                    self.logger.info(
-                        "    Reading current configuration to identify secondary IPs..."
-                    )
-
-                    # Get current interface configuration
-                    show_cmd = f"show running-config interface {interface}"
-                    # pyre-fixme[16]: `AbstractSwitch` has no attribute `run_command`.
-                    config_output = await driver.run_command(show_cmd)
-
-                    # Parse for secondary IP addresses
-                    secondary_ipv4s = []
-                    secondary_ipv6s = []
-
-                    for line in config_output.split("\n"):
-                        line = line.strip()
-
-                        # IPv4 secondary: "ip address 10.1.1.2/31 secondary"
-                        if "ip address" in line and "secondary" in line:
-                            # Extract IP address from line
-                            parts = line.split()
-                            if len(parts) >= 3:
-                                ip_addr = parts[2]  # "ip address X.X.X.X/YY secondary"
-                                secondary_ipv4s.append(ip_addr)
-
-                        # IPv6: All IPv6 addresses after first are secondary
-                        # We'll remove all IPv6 except the first one
-                        if "ipv6 address" in line and "ipv6 address" in line:
-                            parts = line.split()
-                            if len(parts) >= 3:
-                                ipv6_addr = parts[2]
-                                secondary_ipv6s.append(ipv6_addr)
-
-                    # Remove secondary IPs
-                    if secondary_ipv4s:
-                        self.logger.info(
-                            f"    Removing {len(secondary_ipv4s)} secondary IPv4 addresses"
-                        )
-                        for ip in secondary_ipv4s:
-                            commands.append(f"no ip address {ip} secondary")
-
-                    if len(secondary_ipv6s) > 1:
-                        # Keep first IPv6 (primary), remove others
-                        self.logger.info(
-                            f"    Removing {len(secondary_ipv6s) - 1} secondary IPv6 addresses"
-                        )
-                        for ip in secondary_ipv6s[1:]:  # Skip first (primary)
-                            commands.append(f"no ipv6 address {ip}")
-                    elif len(secondary_ipv6s) == 1:
-                        self.logger.info("    Keeping single IPv6 address (primary)")
-
-                    if len(secondary_ipv4s) == 0 and len(secondary_ipv6s) <= 1:
-                        self.logger.info("    No secondary IPs to remove")
-                        continue
-
-                else:
-                    # Remove all IP addresses
-                    self.logger.info("    Removing all IP addresses")
-                    commands.extend(
-                        [
-                            "no ip address",
-                            "no ipv6 address",
-                        ]
-                    )
-
-                # Apply cleanup configuration
-                config_block = "\n".join(commands)
-                self.logger.info(f"    Applying cleanup:\n{config_block}")
-
-                await driver.async_run_cmd_on_shell(f"configure\n{config_block}\nend")
-
-                self.logger.info(f"    Cleaned up {interface}")
-
-            except Exception as e:
-                error_msg = f"Failed to clean up {interface}: {e}"
+                await self._cleanup_interface(driver, interface, keep_primary)
+            except Exception as error:
+                error_msg = f"Failed to clean up {interface}: {error}"
                 self.logger.error(error_msg)
-                # Don't raise - try to clean up other interfaces
-                continue
 
         self.logger.info("\n" + "=" * 80)
         self.logger.info(

@@ -959,6 +959,7 @@ def _ebb_full_scale_interface_ip_config_tasks(
             clear_existing=True,
             hostname=interfaces.device_name,
             ixia_needed=True,
+            save_running_config_backup=False,
         )
     ]
 
@@ -976,6 +977,7 @@ def _ebb_full_scale_interface_ip_config_tasks(
                 all_secondary=plane_index > 0,
                 hostname=interfaces.device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
 
@@ -1005,6 +1007,7 @@ def _ebb_full_scale_interface_ip_config_tasks(
                 clear_existing=True,
                 hostname=interfaces.device_name,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
 
@@ -4451,6 +4454,7 @@ def _characteristic_interface_ip_tasks(
                 ),
                 hostname=hostname,
                 ixia_needed=True,
+                save_running_config_backup=False,
             )
         )
     return tasks
@@ -4626,7 +4630,7 @@ def _eos_bgpcpp_teardown_plan(
         tasks.append(
             create_interface_ip_cleanup_task(
                 interfaces=[interface],
-                restore_from_backup=True,
+                restore_from_backup=False,
                 hostname=hostname,
             )
         )
@@ -4636,7 +4640,7 @@ def _eos_bgpcpp_teardown_plan(
     tasks.append(_teardown_cleanup_task(hostname))
     return TeardownPlan(
         tasks=tuple(tasks),
-        restored_interfaces=tuple(reversed(configured_interfaces)),
+        cleaned_interfaces=tuple(reversed(configured_interfaces)),
         disabled_components=tuple(reversed(enabled_components)),
     )
 

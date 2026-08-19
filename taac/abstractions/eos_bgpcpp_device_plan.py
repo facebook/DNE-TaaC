@@ -111,7 +111,7 @@ class OpenRFeaturePlan:
 @dataclass(frozen=True)
 class TeardownPlan:
     tasks: tuple[t.Any, ...]
-    restored_interfaces: tuple[str, ...] = ()
+    cleaned_interfaces: tuple[str, ...] = ()
     disabled_components: tuple[str, ...] = ()
 
 

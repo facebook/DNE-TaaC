@@ -1767,6 +1767,7 @@ def create_interface_ip_configuration_task(
     ixia_needed: bool = False,
     hostname: t.Optional[str] = None,
     all_secondary: t.Optional[bool] = None,
+    save_running_config_backup: bool = True,
 ) -> Task:
     """
     Create a task to configure secondary IP addresses on an Arista interface.
@@ -1785,6 +1786,9 @@ def create_interface_ip_configuration_task(
         ipv4_start_offset: Starting offset for IPv4 addresses (default: 10)
         ipv6_start_offset: Starting offset for IPv6 addresses (default: 0x10)
         task_name: Custom task name (default: "configure_<interface>_ips")
+        save_running_config_backup: Save the full running configuration before
+            changing the interface. Disable this when teardown removes the
+            interface addresses directly.
 
     Returns:
         Task object for interface IP configuration
@@ -1807,6 +1811,8 @@ def create_interface_ip_configuration_task(
         params["ipv6_base_network"] = ipv6_base_network
     if all_secondary is not None:
         params["all_secondary"] = all_secondary
+    if not save_running_config_backup:
+        params["save_running_config_backup"] = False
 
     # Generate default task name from interface if not provided
     if task_name is None:
