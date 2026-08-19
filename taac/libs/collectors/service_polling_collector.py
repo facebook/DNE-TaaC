@@ -74,6 +74,17 @@ class ServicePollingCollector(BaseCollector):
     and ``_extract_value``.
     """
 
+    # Whether to filter LoadState-not-loaded or ActiveState-not-active units
+    # to ``None`` before ``_extract_value`` runs. True (the default) matches
+    # the semantics CPU / memory want: unmeasurable units → no sample.
+    # Subclasses whose signal-of-interest IS the state itself
+    # (``SystemdStateCollector``: detects ActiveState=failed and Result=core-
+    # dump, which by definition means the unit is not ``active``) set this to
+    # False so ``_extract_value`` sees every polled unit and the domain query
+    # APIs can distinguish "healthy" from "failed" instead of collapsing both
+    # to "no sample".
+    _SKIP_INACTIVE_UNITS: t.ClassVar[bool] = True
+
     def __init__(
         self,
         driver: t.Any,
@@ -220,10 +231,20 @@ class ServicePollingCollector(BaseCollector):
                 notes.append(f"{service}=ssh-error")
                 continue
             load_state = unit_data.get("LoadState")
-            if load_state != "loaded" or unit_data.get("ActiveState") != "active":
+            # Always record a note when a monitored unit isn't loaded on this
+            # DUT image, regardless of whether the subclass filters those
+            # samples out. Subclasses like ``SystemdStateCollector`` override
+            # ``_SKIP_INACTIVE_UNITS = False`` so their ``_extract_value``
+            # runs on not-loaded/inactive units too; without hoisting the
+            # note out here, the row's ``notes`` field silently drops the
+            # ``coop=not-found`` / ``fboss_hw_agent@1=not-found`` annotations
+            # a caller reading the ``.log`` would expect.
+            if load_state and load_state != "loaded":
+                notes.append(f"{service}={load_state}")
+            if self._SKIP_INACTIVE_UNITS and (
+                load_state != "loaded" or unit_data.get("ActiveState") != "active"
+            ):
                 raw_per_service[service] = None
-                if load_state and load_state != "loaded":
-                    notes.append(f"{service}={load_state}")
                 continue
             raw_per_service[service] = self._extract_value(unit_data, service)
 

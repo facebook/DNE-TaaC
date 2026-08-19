@@ -6,28 +6,32 @@
 """Custom test handler that starts + stops OSS collectors around a test config.
 
 Runs for EVERY test config under ``TAAC_OSS`` (see ``should_run``): continuous
-CPU + memory sampling is part of the baseline OSS environment, not a per-test
-opt-in, since the OSS path has no ODS to fall back on. Internal mode keeps the
-tag-based opt-in, so the ``oss_collectors`` tag also selects this handler there.
-A test config that needs collectors off — e.g. one where the extra SSH polling
-would perturb what it measures — can tag itself ``no_oss_collectors``.
+CPU + memory + systemd-state sampling is part of the baseline OSS environment,
+not a per-test opt-in, since the OSS path has no ODS to fall back on. Internal
+mode keeps the tag-based opt-in, so the ``oss_collectors`` tag also selects
+this handler there. A test config that needs collectors off — e.g. one where
+the extra SSH polling would perturb what it measures — can tag itself
+``no_oss_collectors``.
 
 Runs as a sibling to the test config's own ``setup_tasks`` /
 ``teardown_tasks``, so it survives ``--skip-setup-tasks`` /
 ``--skip-teardown-tasks``.
 
-Starts a ``CpuUtilizationCollector`` + ``MemoryUtilizationCollector`` per DUT
-in ``async_test_setUp`` and registers each under a well-known name so the
-existing OSS-path CPU / memory health checks pick them up and use
-MAX-over-window semantics instead of a single delta / single sample.
+Starts a ``CpuUtilizationCollector`` + ``MemoryUtilizationCollector`` +
+``SystemdStateCollector`` per DUT in ``async_test_setUp`` and registers each
+under a well-known name so the existing OSS-path health checks pick them up
+and use window-based semantics instead of a single point-in-time SSH read.
 
-Stops both in ``async_test_tearDown`` and clears the registry — critical
+Stops all in ``async_test_tearDown`` and clears the registry — critical
 for tests that run back-to-back in the same runner process.
 
 Registry key convention (matches what the health checks look for):
 
 * ``"cpu_utilization"``  → the CPU collector
 * ``"memory_utilization"`` → the memory collector
+* ``"systemd_state"`` → the systemd unit-state collector
+  (``UncleanExitHealthCheck`` today; future: ``SystemctlActiveState`` /
+  ``ServiceRestart``)
 
 Only the first DUT with ``operating_system == "FBOSS"`` gets collectors
 attached; the health checks are per-device and only one collector is
@@ -49,6 +53,9 @@ from taac.libs.collectors.memory_utilization_collector import (
 from taac.libs.collectors.registry import (
     register_collector,
     unregister_collector,
+)
+from taac.libs.collectors.systemd_state_collector import (
+    SystemdStateCollector,
 )
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_constants import TAAC_OSS
@@ -89,6 +96,7 @@ class CollectorsTestHandler(BaseCustomTestHandler):
         ]
         self._cpu_collector: t.Optional[CpuUtilizationCollector] = None
         self._memory_collector: t.Optional[MemoryUtilizationCollector] = None
+        self._systemd_state_collector: t.Optional[SystemdStateCollector] = None
 
     async def async_test_setUp(self) -> None:
         if not self._fboss_devices:
@@ -107,7 +115,8 @@ class CollectorsTestHandler(BaseCustomTestHandler):
         services = list(DEFAULT_SERVICE_NAMES)
 
         self.logger.info(
-            f"CollectorsTestHandler: starting CPU + memory collectors on {dut} "
+            f"CollectorsTestHandler: starting CPU + memory + systemd-state "
+            f"collectors on {dut} "
             f"(services={services}, interval={DEFAULT_POLL_INTERVAL_SEC}s)"
         )
 
@@ -130,6 +139,16 @@ class CollectorsTestHandler(BaseCustomTestHandler):
         mem.start()
         register_collector("memory_utilization", mem)
         self._memory_collector = mem
+
+        systemd_state = SystemdStateCollector(
+            driver=driver,
+            services=services,
+            host=dut,
+            interval_sec=DEFAULT_POLL_INTERVAL_SEC,
+        )
+        systemd_state.start()
+        register_collector("systemd_state", systemd_state)
+        self._systemd_state_collector = systemd_state
 
     async def async_test_tearDown(self) -> None:
         # Stop the collectors first, THEN unregister — stopping while they're
@@ -156,5 +175,15 @@ class CollectorsTestHandler(BaseCustomTestHandler):
                 )
             self._memory_collector = None
 
+        if self._systemd_state_collector is not None:
+            try:
+                await self._systemd_state_collector.stop()
+            except Exception as e:
+                self.logger.warning(
+                    f"CollectorsTestHandler: systemd_state collector stop() failed: {e}"
+                )
+            self._systemd_state_collector = None
+
         unregister_collector("cpu_utilization")
         unregister_collector("memory_utilization")
+        unregister_collector("systemd_state")

@@ -447,7 +447,10 @@ class AbstractDeviceHealthCheck(
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.driver = ...
+        # Sentinel until run_wrapper() resolves the concrete driver. Typed
+        # Any because subclasses reach for methods that live on the concrete
+        # switch drivers, not on the AbstractSwitch base.
+        self.driver: t.Any = ...
         self.data_to_log = {}
 
     async def run_wrapper(
