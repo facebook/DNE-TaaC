@@ -64,6 +64,15 @@ class DutLifecycleRenderer(t.Protocol[TLifecycleTask_co]):
     ) -> DutLifecycleRenderResult[TLifecycleTask_co]: ...
 
 
+class DutLifecycleTaskMaterializer(t.Protocol):
+    def materialize(
+        self,
+        plan: DutPlan,
+        lifecycle: LifecyclePlan,
+        intents: DutLifecycleRenderResult[object],
+    ) -> DutLifecycleRenderResult[object]: ...
+
+
 class EndpointComposer(t.Protocol):
     def compose(
         self,

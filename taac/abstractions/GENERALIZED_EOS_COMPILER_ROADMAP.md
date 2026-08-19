@@ -40,11 +40,11 @@ It is not generalized yet:
 - established setup phases and component plans contain rendered TAAC `Task`
   objects;
 - the established EOS `IxiaPlan` contains already-rendered TAAC configs, while
-  the new semantic `IxiaPlan` does not yet have a native renderer;
-- one task-free routing-control-plane component role and its routing-config
-  dependency are projected, but executable lifecycle operations are not;
-- typed physical rate/lane intent and logical port-sharing ownership are
-  projected, but executable EOS interface operations are not;
+  the new semantic `IxiaPlan` does not yet have a complete authoritative
+  renderer;
+- physical-interface, routing-config, and routing-component lifecycle intent
+  is lowered in shadow mode, but it is not materialized into executable TAAC
+  tasks;
 - the candidate artifact adapter delegates DUT and IXIA rendering as one
   monolithic compatibility operation;
 - IXIA endpoint wiring and route-mutation lifecycle are still embedded in the
@@ -737,6 +737,62 @@ A profile-free EOS topology compiles completely through the generalized path.
 The compatibility adapter is still allowed for production profiles whose
 capabilities are not yet covered. Existing catalog TestConfigs and the golden
 manifest remain unchanged.
+
+### Bounded implementation stack: DICE 31-38
+
+This is the stopping point for the generalized setup-task compiler before
+playbook-model work resumes. It proves one complete profile-free EOS/BGP++
+capability set; it does not migrate every existing topology.
+
+**DICE 31: lifecycle task-materialization boundary.** Define the backend-owned
+intent-to-task protocol and fail closed if materialization changes operation
+coverage, pre/post-IXIA placement, cleanup grouping, or teardown order. Keep
+the common plan task-free and keep the established adapter authoritative.
+
+Status: implemented as a shadow-only boundary. Materialized output must
+preserve fragment order, lane presence, intent cardinality, cleanup grouping,
+and non-null tasks before it is exposed for later assembly work.
+
+**DICE 32: physical lifecycle tasks.** Materialize snapshot, realization,
+exact-readback, and restoration tasks for aggregate EOS physical interfaces.
+
+**DICE 33: routing-config lifecycle tasks.** Materialize first-snapshot
+capture, atomic Configerator installation, exact readback, and restoration of
+prior bytes or prior absence.
+
+**DICE 34: routing-component lifecycle tasks.** Materialize the ordered
+BGP++/FibAgent daemon reconciliation, startup option, acknowledged readiness,
+and component-state restoration.
+
+**DICE 35: baseline shared IXIA rendering.** Complete native endpoint, port,
+device-group, BGP-session, advertisement, and cleanup output for the
+profile-free acceptance capability without a legacy identity sidecar.
+
+**DICE 36: lifecycle scheduling and artifact assembly.** Schedule native DUT
+and IXIA fragments from stable dependencies and assemble a complete shadow
+`CompiledTaacArtifacts`. Reject missing, duplicate, or mixed native/delegated
+ownership.
+
+**DICE 37: profile-free acceptance.** Freeze a dual-stack eBGP+iBGP fixture
+with `legacy_profile=None`, no `legacy_ixia_*` identity, exact setup/teardown
+coverage, topology-name independence, inventory-only realization changes, and
+a second equivalent topology requiring no compiler edit.
+
+**DICE 38: capability-gated cutover.** Return the native artifact for the
+accepted capability set and retain the established compiler only as the
+fail-closed fallback for unsupported profiles. Remove temporary shadow gates
+that have durable semantic and golden coverage.
+
+For DICE 31-37, returned artifacts and all renderer reports remain
+compatibility-delegated. Every diff must preserve the existing golden manifest
+and pass focused drift tests, the complete abstraction suite, lint, and type
+checking. DICE 38 may change authority but must preserve consumer-visible
+serialization exactly.
+
+The following remain explicitly outside this stopping point: migration of all
+catalog profiles, traffic-item and playbook compilation, generalized
+OpenR/helper behavior, multi-DUT transactions, FBOSS emission, and additional
+routing or traffic-generator backends.
 
 ## Phase 1.7 implementation plan: EOS route and policy capabilities
 

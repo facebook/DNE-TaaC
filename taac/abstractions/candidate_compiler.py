@@ -22,7 +22,11 @@ from taac.abstractions.compilation.endpoint_composition import (
     EndpointCompositionResult,
 )
 from taac.abstractions.compilation.lifecycle import LifecyclePlan
+from taac.abstractions.compilation.lifecycle_materialization import (
+    validate_lifecycle_task_materialization,
+)
 from taac.abstractions.compilation.model import (
+    DutPlan,
     TopologyCompilationPlan,
 )
 from taac.abstractions.compilation.planner import PlanningResult
@@ -32,6 +36,7 @@ from taac.abstractions.compilation.protocols import (
     DutEndpointBaseRenderer,
     DutHostOsRenderer,
     DutLifecycleRenderer,
+    DutLifecycleTaskMaterializer,
     EndpointComposer,
     TrafficGeneratorEndpointRenderer,
     TrafficGeneratorPortBaseRenderer,
@@ -122,6 +127,7 @@ class CandidateCompilation:
     dut_endpoint_base_shadow: DutEndpointBaseRenderResult[object] | None = None
     dut_host_os_shadow: DutHostOsRenderResult[object] | None = None
     dut_lifecycle_shadow: DutLifecycleRenderResult[object] | None = None
+    dut_lifecycle_task_shadow: DutLifecycleRenderResult[object] | None = None
     traffic_generator_endpoint_shadow: TrafficGeneratorEndpointRenderResult | None = (
         None
     )
@@ -157,6 +163,26 @@ def _require_traffic_generator_request(
     return request
 
 
+def _materialize_dut_lifecycle(
+    materializer: DutLifecycleTaskMaterializer | None,
+    plan: DutPlan,
+    lifecycle: LifecyclePlan,
+    intents: DutLifecycleRenderResult[object] | None,
+) -> DutLifecycleRenderResult[object] | None:
+    if materializer is None:
+        return None
+    if intents is None:
+        raise RuntimeError("DUT lifecycle intent was not rendered")
+    tasks = materializer.materialize(plan, lifecycle, intents)
+    validate_lifecycle_task_materialization(
+        plan,
+        lifecycle,
+        intents,
+        tasks,
+    )
+    return tasks
+
+
 @dataclass(frozen=True)
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
@@ -165,6 +191,7 @@ class CandidateTopologyCompiler:
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
     dut_lifecycle_renderer: DutLifecycleRenderer[object] | None = None
+    dut_lifecycle_task_materializer: DutLifecycleTaskMaterializer | None = None
     traffic_generator_endpoint_renderer: TrafficGeneratorEndpointRenderer | None = None
     traffic_generator_port_base_renderer: (
         TrafficGeneratorPortBaseRenderer[object] | None
@@ -177,6 +204,13 @@ class CandidateTopologyCompiler:
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.dut_lifecycle_task_materializer is not None
+            and self.dut_lifecycle_renderer is None
+        ):
+            raise ValueError(
+                "DUT lifecycle task materializer requires lifecycle renderer"
+            )
         if self.endpoint_composer is not None and (
             self.dut_endpoint_base_renderer is None
             or self.traffic_generator_endpoint_renderer is None
@@ -229,6 +263,12 @@ class CandidateTopologyCompiler:
                 planning.plan.dut,
                 planning.lifecycle,
             )
+        dut_lifecycle_task_shadow = _materialize_dut_lifecycle(
+            self.dut_lifecycle_task_materializer,
+            planning.plan.dut,
+            planning.lifecycle,
+            dut_lifecycle_shadow,
+        )
         traffic_generator_endpoint_request = None
         traffic_generator_endpoint_shadow = None
         if self.traffic_generator_endpoint_renderer is not None:
@@ -336,6 +376,7 @@ class CandidateTopologyCompiler:
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
             dut_lifecycle_shadow=dut_lifecycle_shadow,
+            dut_lifecycle_task_shadow=dut_lifecycle_task_shadow,
             traffic_generator_endpoint_shadow=traffic_generator_endpoint_shadow,
             traffic_generator_port_base_shadow=traffic_generator_port_base_shadow,
             traffic_generator_port_device_group_shadow=(
