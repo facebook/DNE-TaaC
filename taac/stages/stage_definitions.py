@@ -114,6 +114,15 @@ from taac.steps.step_definitions import (
     create_verify_received_routes_step,
     create_wait_for_bgp_update_sent_step,
 )
+from taac.utils.characterization import (
+    characterization_session_key,
+    CharacterizationConfig,
+    CPU_SUMMARY_JQ_VAR,
+    KIND_CPU_PERCENTILE,
+    KIND_RSS_DELTA,
+    PHASE_CONVERGENCE,
+    RSS_SUMMARY_JQ_VAR,
+)
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
@@ -347,6 +356,7 @@ def create_cold_start_test_stage(
     cpu_characterization_interval_seconds: float = 2.0,
     enable_rss_delta_characterization: bool = False,
     rss_characterization_interval_seconds: float = 3.0,
+    characterization_playbook_name: str = "bgp_ebb_cold_start_playbook",
 ) -> Stage:
     """
     Create a BGP cold start test stage.
@@ -577,7 +587,12 @@ def create_cold_start_test_stage(
     cpu_start_steps = []
     cpu_stop_steps = []
     if enable_cpu_percentile_characterization:
-        session_key = f"cold_start_convergence:{device_name}"
+        session_key = characterization_session_key(
+            KIND_CPU_PERCENTILE,
+            characterization_playbook_name,
+            PHASE_CONVERGENCE,
+            device_name,
+        )
         cpu_start_steps = [
             create_cpu_percentile_start_step(
                 device_name=device_name,
@@ -590,7 +605,7 @@ def create_cold_start_test_stage(
         cpu_stop_steps = [
             create_cpu_percentile_stop_step(
                 session_key=session_key,
-                summary_jq_var="cpu_percentile_summary",
+                summary_jq_var=CPU_SUMMARY_JQ_VAR,
             )
         ]
 
@@ -600,7 +615,12 @@ def create_cold_start_test_stage(
     rss_start_steps = []
     rss_stop_steps = []
     if enable_rss_delta_characterization:
-        rss_session_key = f"cold_start_rss:{device_name}"
+        rss_session_key = characterization_session_key(
+            KIND_RSS_DELTA,
+            characterization_playbook_name,
+            PHASE_CONVERGENCE,
+            device_name,
+        )
         rss_start_steps = [
             create_rss_start_step(
                 device_name=device_name,
@@ -611,7 +631,7 @@ def create_cold_start_test_stage(
         rss_stop_steps = [
             create_rss_stop_step(
                 session_key=rss_session_key,
-                summary_jq_var="rss_delta_summary",
+                summary_jq_var=RSS_SUMMARY_JQ_VAR,
             )
         ]
 
@@ -4293,6 +4313,120 @@ def _derive_stage_id(steps: list[Step]) -> str:
         remaining = len(parts) - _MAX_DERIVED_STAGE_ID_STEPS
         parts = parts[:_MAX_DERIVED_STAGE_ID_STEPS] + [f"and_{remaining}_more"]
     return "__".join(parts)
+
+
+def create_characterization_bracket_stages(
+    *,
+    playbook_name: str,
+    phase: str,
+    device_name: str,
+    config: CharacterizationConfig,
+) -> tuple[list[Stage], list[Stage]]:
+    """Build the START and STOP stages for a bgpcpp CPU/RSS characterization span.
+
+    Returns two lists to place around the stages being measured, so the span is
+    declared at the playbook level and is visible in one place:
+
+        start_stages, stop_stages = create_characterization_bracket_stages(
+            playbook_name="bgp_ebb_attribute_churn_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=OBSERVE_ONLY,
+        )
+        stages = [*start_stages, create_attribute_churn_stage(...), *stop_stages]
+
+    Separate stages, rather than steps spliced into the measured stage, for three
+    reasons. A measured stage with ``iteration > 1`` would otherwise re-run START
+    each pass and collide with its own live session. A ``concurrent`` stage keeps
+    its work in ``concurrent_steps``, so prepending to ``steps`` would silently
+    measure nothing. And a span often needs to cover several stages, which
+    splicing cannot express.
+
+    Both measurements are collected only if enabled in ``config``; disabling both
+    returns two empty lists, so a caller can wire the bracket unconditionally and
+    let configuration decide.
+
+    Placement determines what the numbers mean, so choose ``phase`` to match:
+    PHASE_CONVERGENCE baselines pre-toggle and measures the cost of reaching the
+    converged state; PHASE_WORKLOAD and PHASE_SOAK baseline the already-settled
+    footprint and measure what the workload adds on top.
+
+    Args:
+        playbook_name: Playbook name, recorded in the session key and log line.
+        phase: One of PHASE_CONVERGENCE, PHASE_WORKLOAD, PHASE_SOAK.
+        device_name: DUT hostname.
+        config: Which brackets to place and how densely to sample.
+
+    Returns:
+        (start_stages, stop_stages), each empty or holding one Stage.
+    """
+    start_steps: list[Step] = []
+    stop_steps: list[Step] = []
+
+    if config.enable_rss:
+        rss_key = characterization_session_key(
+            KIND_RSS_DELTA, playbook_name, phase, device_name
+        )
+        start_steps.append(
+            create_rss_start_step(
+                device_name=device_name,
+                session_key=rss_key,
+                interval_seconds=config.rss_interval_seconds,
+                baseline_settle_max_seconds=config.rss_baseline_settle_max_seconds,
+            )
+        )
+        stop_steps.append(
+            create_rss_stop_step(
+                session_key=rss_key,
+                summary_jq_var=RSS_SUMMARY_JQ_VAR,
+            )
+        )
+
+    if config.enable_cpu:
+        cpu_key = characterization_session_key(
+            KIND_CPU_PERCENTILE, playbook_name, phase, device_name
+        )
+        # CPU START goes after RSS START: the RSS baseline settle poll can hold
+        # for up to rss_baseline_settle_max_seconds, and that idle wait must not
+        # be inside the CPU sampling window or it drags the percentiles down.
+        start_steps.append(
+            create_cpu_percentile_start_step(
+                device_name=device_name,
+                session_key=cpu_key,
+                interval_seconds=config.cpu_interval_seconds,
+            )
+        )
+        # CPU STOP goes before RSS STOP for the mirror-image reason: the RSS stop
+        # samples a settled current footprint, and that settle wait belongs
+        # outside the CPU window.
+        stop_steps.insert(
+            0,
+            create_cpu_percentile_stop_step(
+                session_key=cpu_key,
+                summary_jq_var=CPU_SUMMARY_JQ_VAR,
+            ),
+        )
+
+    if not start_steps:
+        return ([], [])
+
+    label = f"{phase}_characterization"
+    return (
+        [
+            create_steps_stage(
+                steps=start_steps,
+                stage_id=f"{label}_start",
+                description=f"Start bgpcpp CPU/RSS characterization ({phase})",
+            )
+        ],
+        [
+            create_steps_stage(
+                steps=stop_steps,
+                stage_id=f"{label}_stop",
+                description=f"Stop bgpcpp CPU/RSS characterization ({phase})",
+            )
+        ],
+    )
 
 
 def create_steps_stage(

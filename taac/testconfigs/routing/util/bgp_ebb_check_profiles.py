@@ -66,6 +66,10 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     create_standard_snapshot_checks,
     DEFAULT_BGP_MON_SCOPE,
 )
+from taac.utils.characterization import (
+    CPU_SUMMARY_JQ_VAR,
+    RSS_SUMMARY_JQ_VAR,
+)
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCheck
 
@@ -182,7 +186,7 @@ class CpuCharacterizationConfig:
     results table); set it to gate on the raw ``gate_percentile``.
     """
 
-    summary_jq_var: str = "cpu_percentile_summary"
+    summary_jq_var: str = CPU_SUMMARY_JQ_VAR
     gate_percentile: float = 95.0
     gate_threshold_pct: t.Optional[float] = None
 
@@ -197,7 +201,7 @@ class RssDeltaConfig:
     set it to gate on steady-state RSS growth over the in-run baseline.
     """
 
-    summary_jq_var: str = "rss_delta_summary"
+    summary_jq_var: str = RSS_SUMMARY_JQ_VAR
     max_growth_pct: t.Optional[float] = None
 
 
@@ -354,21 +358,18 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
             check_ibgp_pnh=ctx.check_ibgp_pnh,
             bgp_mon=ctx.bgp_mon,
         ),
-        postchecks=_append_characterization_postchecks(
-            create_standard_postchecks(
-                postcheck_thresholds=ctx.postcheck_thresholds,
-                convergence_hard_timeout_seconds=(
-                    _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
-                ),
-                fail_on_eor_expired=ctx.fail_on_eor_expired,
-                expected_established_session_count=(
-                    ctx.expected_established_sessions or None
-                ),
-                expected_restarted_services=["Bgp"],
-                restart_start_time_jq_var="daemon_restart_time",
-                bgp_mon=ctx.bgp_mon,
+        postchecks=create_standard_postchecks(
+            postcheck_thresholds=ctx.postcheck_thresholds,
+            convergence_hard_timeout_seconds=(
+                _LIFECYCLE_CONVERGENCE_HARD_TIMEOUT_SECONDS
             ),
-            ctx,
+            fail_on_eor_expired=ctx.fail_on_eor_expired,
+            expected_established_session_count=(
+                ctx.expected_established_sessions or None
+            ),
+            expected_restarted_services=["Bgp"],
+            restart_start_time_jq_var="daemon_restart_time",
+            bgp_mon=ctx.bgp_mon,
         ),
         snapshot_checks=create_standard_snapshot_checks(
             expected_peer_identity=ctx.expected_peer_identity,
@@ -846,4 +847,13 @@ def get_profile_checks(profile: CheckProfile, ctx: ProfileContext) -> ProfileChe
     builder = _PROFILE_BUILDERS.get(profile)
     if builder is None:
         raise ValueError(f"Unknown CheckProfile: {profile}")
-    return builder(ctx)
+    checks = builder(ctx)
+    # Characterization reporting is profile-independent. Any playbook that
+    # brackets a span (see create_characterization_bracket_stages) sets these
+    # configs on the context, and the matching postcheck is appended here rather
+    # than in each of the 20+ profile builders. Without it the bracket would
+    # collect a measurement and stash it into a jq var that nothing reads.
+    # No-op when neither config is set, which is every playbook that has not
+    # opted in.
+    _append_characterization_postchecks(checks.postchecks, ctx)
+    return checks

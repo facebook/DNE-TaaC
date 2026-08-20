@@ -25,6 +25,7 @@ from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
     create_bgp_ebb_route_storm_stage,
     create_bgp_restart_test_stage,
+    create_characterization_bracket_stages,
     create_cold_start_test_stage,
     create_fauu_drain_undrain_stage,
     create_longevity_churn_stage,
@@ -68,12 +69,19 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
+from taac.utils.characterization import (
+    CharacterizationConfig,
+    DISABLED,
+    PHASE_CONVERGENCE,
+    PHASE_SOAK,
+    PHASE_WORKLOAD,
+)
 from taac.utils.hardware_capacity_utils import (
     get_postcheck_thresholds,
     get_precheck_thresholds,
     HardwareCapacityThresholds,
 )
-from taac.test_as_a_config.types import Playbook
+from taac.test_as_a_config.types import Playbook, Stage
 
 
 __all__ = [
@@ -98,6 +106,33 @@ __all__ = [
     "get_bgp_ebb_constant_attribute_storage_playbook",
     "get_bgp_ebb_bounded_ecmp_sets_playbook",
 ]
+
+
+def _characterized(
+    stages: t.List[Stage],
+    *,
+    playbook_name: str,
+    phase: str,
+    device_name: str,
+    config: CharacterizationConfig,
+) -> t.List[Stage]:
+    """Wrap the measured stages in a bgpcpp CPU/RSS characterization bracket.
+
+    Thin adapter over create_characterization_bracket_stages so each playbook
+    spends one call, not a start/stop dance. Returns ``stages`` unchanged when
+    the config disables both measurements.
+
+    The bracket encloses ALL the stages passed in, so the caller decides the
+    span by choosing what to hand over: pass only the workload stage to exclude
+    setup and teardown from the measurement.
+    """
+    start_stages, stop_stages = create_characterization_bracket_stages(
+        playbook_name=playbook_name,
+        phase=phase,
+        device_name=device_name,
+        config=config,
+    )
+    return [*start_stages, *stages, *stop_stages]
 
 
 def get_bgp_ebb_daemon_restart_playbook(
