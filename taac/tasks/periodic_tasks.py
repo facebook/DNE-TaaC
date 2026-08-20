@@ -284,6 +284,19 @@ class CounterThresholdBreach(Exception):
 
 class CounterThresholdTask(PeriodicTask):
     NAME = "counter_utilization"
+    _COLLECTION_ERROR_COUNT = "__collection_error_count"
+    _LAST_COLLECTION_ERROR = "__last_collection_error"
+
+    async def _run(self, params: t.Dict[str, t.Any]) -> None:
+        error_count = self._params.get(self._COLLECTION_ERROR_COUNT, 0)
+        last_error = self._params.get(self._LAST_COLLECTION_ERROR)
+        self._params.clear()
+        self._params.update(params)
+        if error_count:
+            self._params[self._COLLECTION_ERROR_COUNT] = error_count
+        if last_error is not None:
+            self._params[self._LAST_COLLECTION_ERROR] = last_error
+        await self.run(params)
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
@@ -328,6 +341,10 @@ class CounterThresholdTask(PeriodicTask):
 
             self.add_data(counter)
         except Exception as e:
+            self._params[self._COLLECTION_ERROR_COUNT] = (
+                int(self._params.get(self._COLLECTION_ERROR_COUNT, 0)) + 1
+            )
+            self._params[self._LAST_COLLECTION_ERROR] = f"{type(e).__name__}: {e}"
             self.logger.error(
                 f"Error collecting counter data for {key}: {e}", exc_info=True
             )
@@ -367,8 +384,10 @@ class CounterThresholdTask(PeriodicTask):
             return PeriodicCheckResult(
                 # pyrefly: ignore [bad-argument-type]
                 name=self.NAME,
-                status=hc_types.HealthCheckStatus.SKIP,
-                message="No data collected during periodic task execution",
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=self._collection_summary(
+                    "No data collected during periodic task execution"
+                ),
             )
 
         max_counter = max(self._data.values())
@@ -391,6 +410,8 @@ class CounterThresholdTask(PeriodicTask):
         else:
             status = hc_types.HealthCheckStatus.PASS
             message = f"Max {key} value {max_counter} is within threshold {threshold}"
+
+        message = self._collection_summary(message)
 
         # Generate plot if enabled via params
         enable_plotting = self._params.get("enable_plotting", False)
@@ -415,6 +436,16 @@ class CounterThresholdTask(PeriodicTask):
             name=self.NAME,
             status=status,
             message=message,
+        )
+
+    def _collection_summary(self, message: str) -> str:
+        error_count = int(self._params.get(self._COLLECTION_ERROR_COUNT, 0))
+        if not error_count:
+            return message
+        last_error = self._params.get(self._LAST_COLLECTION_ERROR, "unknown")
+        return (
+            f"{message}; collection_errors={error_count}; "
+            f"last_collection_error={last_error}"
         )
 
 

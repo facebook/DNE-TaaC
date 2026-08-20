@@ -14,6 +14,10 @@ from taac.ixia.taac_ixia import (  # oss-rewrite (force ShipIt re-export to taac
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.tasks.utils import get_task_obj
 from taac.utils.common import async_everpaste_file
+from taac.utils.driver_factory import (
+    DriverBootstrapPayload,
+    install_driver_bootstrap_data,
+)
 from taac.utils.oss_taac_lib_utils import ConsoleFileLogger
 from taac.test_as_a_config import types as taac_types
 
@@ -110,6 +114,7 @@ def _run_periodic_task_loop(
 
 def run_periodic_task_process(
     periodic_task: taac_types.PeriodicTask,
+    driver_bootstrap: DriverBootstrapPayload,
     shared_data: t.Any,
     shared_params: t.Any,
     shared_state: t.Any,
@@ -123,6 +128,7 @@ def run_periodic_task_process(
             multiprocessing.current_process().name,
             shared_state,
         )
+        install_driver_bootstrap_data(driver_bootstrap, logger)
         task_obj = get_task_obj(
             periodic_task.task,
             logger=logger,

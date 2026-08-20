@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import json
+import logging
 import os
 import typing as t
 
@@ -98,6 +99,11 @@ else:
 HOST_TO_DEVICE_OS_TYPE_MAP = {}
 HOST_TO_DRIVER_ARGS_MAP = {}
 
+DriverBootstrapPayload = t.Tuple[
+    t.Dict[str, taac_types.DeviceOsType],
+    t.Dict[str, t.Any],
+]
+
 
 def add_host_to_device_os_type_data(
     hostname: str, device_os_type: taac_types.DeviceOsType
@@ -109,6 +115,32 @@ def add_host_to_driver_args_data(
     hostname: str, driver_args: t.Dict[str, t.Any]
 ) -> None:
     HOST_TO_DRIVER_ARGS_MAP[hostname] = driver_args
+
+
+def capture_driver_bootstrap_data() -> DriverBootstrapPayload:
+    return (
+        dict(HOST_TO_DEVICE_OS_TYPE_MAP),
+        dict(HOST_TO_DRIVER_ARGS_MAP),
+    )
+
+
+def install_driver_bootstrap_data(
+    payload: DriverBootstrapPayload,
+    logger: logging.Logger,
+) -> None:
+    host_os_type_map, host_driver_args = payload
+    HOST_TO_DEVICE_OS_TYPE_MAP.update(host_os_type_map)
+    HOST_TO_DRIVER_ARGS_MAP.update(host_driver_args)
+    for hostname, device_os_type in host_os_type_map.items():
+        driver_class = DEVICE_OS_DRIVER_CLASS_MAP.get(device_os_type)
+        driver_class_name = driver_class.__name__ if driver_class is not None else None
+        logger.info(
+            "Installed periodic-worker driver bootstrap: "
+            f"hostname={hostname} classification_source=test_config.host_os_type_map "
+            f"device_os_type={device_os_type.name} "
+            f"selected_driver_class={driver_class_name} "
+            f"driver_args_present={hostname in host_driver_args}"
+        )
 
 
 def register_driver_class(

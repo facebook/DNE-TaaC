@@ -15,6 +15,9 @@ from taac.libs.periodic_task_worker import (
     PeriodicTaskWorker,
     run_periodic_task_process,
 )
+from taac.utils.driver_factory import (
+    capture_driver_bootstrap_data,
+)
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
     get_root_logger,
@@ -37,6 +40,7 @@ class PeriodicTaskExecutor:
         self.processes = []
         self.threads = []
         self.ixia = ixia
+        self._driver_bootstrap = capture_driver_bootstrap_data()
         self._mp_context = multiprocessing.get_context("forkserver")
         self._manager = None
         self._manager_lock = threading.Lock()
@@ -159,6 +163,7 @@ class PeriodicTaskExecutor:
                     name=f"PeriodicTask-{periodic_task.name}",
                     args=(
                         periodic_task,
+                        self._driver_bootstrap,
                         worker.shared_data,
                         worker.shared_params,
                         worker.shared_state,

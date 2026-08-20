@@ -7,6 +7,7 @@ from taac.tasks.periodic_tasks import (
     CounterThresholdBreach,
     CounterThresholdTask,
 )
+from taac.health_check.health_check import types as hc_types
 
 PERIODIC_TASKS_PATH = "neteng.test_infra.dne.taac.tasks.periodic_tasks"
 
@@ -70,3 +71,33 @@ class CounterThresholdTaskTest(unittest.IsolatedAsyncioTestCase):
             await self.task.run(self._params(fail_on_breach=True))
         self.logger.error.assert_called()
         self.assertEqual(len(self.task._data), 0)
+
+        result = await self.task.run_final_check()
+        if result is None:
+            raise AssertionError("counter final check returned no result")
+        self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
+        self.assertIn("collection_errors=1", result.message)
+        self.assertIn("ConnectionError: device unreachable", result.message)
+
+    async def test_transient_collection_error_is_retained_after_valid_sample(
+        self,
+    ) -> None:
+        params = self._params(fail_on_breach=False)
+        with patch(
+            f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+            AsyncMock(side_effect=ConnectionError("transient")),
+        ):
+            await self.task._run(params)
+
+        with patch(
+            f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+            AsyncMock(return_value=_driver_returning(_FIVE_GB - 1)),
+        ):
+            await self.task._run(params)
+
+        result = await self.task.run_final_check()
+        if result is None:
+            raise AssertionError("counter final check returned no result")
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        self.assertIn("collection_errors=1", result.message)
+        self.assertIn("ConnectionError: transient", result.message)
