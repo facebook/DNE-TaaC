@@ -18,7 +18,7 @@ from ixnetwork_restpy.files import Files
 from taac.ixia.abstract_traffic_generator import (
     AbstractTrafficGenerator,
 )
-from taac.ixia.ixia import Ixia
+from neteng.test_infra.dne.taac.ixia.ixia import Ixia, IxiaOperationTimeoutError
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
     retryable,
@@ -84,7 +84,6 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.paused = False
         self._in_flight = False
         self.saved_configs = {}
-        self._snapshot_lock = threading.Lock()
 
         self.traffic_item_view_assistant = None
         self.ptp_drill_down_view_assistant = None
@@ -129,9 +128,9 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         - `timeout` is honored ONLY on the first call for a given view_name.
           Subsequent callers receive the cached assistant constructed with the
           original timeout. If you need a different timeout, invalidate first.
-        - Concurrent first-time accesses to DIFFERENT views proceed in parallel
-          (each view has its own construction lock); only same-view first-time
-          accesses serialize.
+        - Per-view locks deduplicate construction. The session snapshot lock
+          serializes first-time construction across view names because IXIA uses
+          one snapshot resource for the session.
 
         Use this instead of `StatViewAssistant(self.ixnetwork, view_name)` from
         any code path that runs more than once per test (HCs, periodic tasks,
@@ -155,7 +154,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             stat_view_cls = (
                 UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
             )
-            assistant = stat_view_cls(self.ixnetwork, view_name, Timeout=timeout)
+            with self.stat_view_snapshot():
+                assistant = stat_view_cls(self.ixnetwork, view_name, Timeout=timeout)
             with self._stat_view_index_lock:
                 self._stat_view_cache[view_name] = assistant
             return assistant
@@ -188,7 +188,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                     self._in_flight = True
                     timestamp = int(time.time())
                     uuid = none_throws(self.test_case_uuid)
-                    with self._snapshot_lock:
+                    with self.stat_view_snapshot():
                         # Capture traffic rate statistics
                         self._capture_traffic_rate_stats(
                             self.traffic_item_view_assistant, uuid, timestamp
@@ -273,6 +273,13 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self,
         view: StatViewAssistant,
     ) -> t.List:
+        with self.stat_view_snapshot():
+            return self._get_packet_loss_statistics_unlocked(view)
+
+    def _get_packet_loss_statistics_unlocked(
+        self,
+        view: StatViewAssistant,
+    ) -> t.List:
         stats = []
         view_name = view._ViewName
         for row in view.Rows:
@@ -298,15 +305,16 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     ) -> t.List:
         stats = []
         view_name = view._ViewName
-        for row in view.Rows:
-            stat = {}
-            stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
-            if "Tx Rate (Mbps)" in row.Columns:
-                stat["Tx Rate"] = float(row["Tx Rate (Mbps)"])
-            if "Rx Rate (Mbps)" in row.Columns:
-                stat["Rx Rate"] = float(row["Rx Rate (Mbps)"])
-            stat["view"] = view_name
-            stats.append(stat)
+        with self.stat_view_snapshot():
+            for row in view.Rows:
+                stat = {}
+                stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
+                if "Tx Rate (Mbps)" in row.Columns:
+                    stat["Tx Rate"] = float(row["Tx Rate (Mbps)"])
+                if "Rx Rate (Mbps)" in row.Columns:
+                    stat["Rx Rate"] = float(row["Rx Rate (Mbps)"])
+                stat["view"] = view_name
+                stats.append(stat)
         return stats
 
     @retryable(sleep_time=2, num_tries=100)
@@ -314,14 +322,15 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self, ptp_drill_down_view: StatViewAssistant
     ) -> t.Dict:
         ptp_stats = {}
-        for row in ptp_drill_down_view.Rows:
-            id = f"{row[PTP_PROTOCOL]}_{row[PTP_DEVICE_NUM]}"
-            stat = {
-                "clock_role": row[PTP_CONFIGURED_ROLE],
-                "offset_ns": int(row[PTP_OFFSET_NS]),
-                "ptp_state": row[PTP_STATE],
-            }
-            ptp_stats[id] = stat
+        with self.stat_view_snapshot():
+            for row in ptp_drill_down_view.Rows:
+                id = f"{row[PTP_PROTOCOL]}_{row[PTP_DEVICE_NUM]}"
+                stat = {
+                    "clock_role": row[PTP_CONFIGURED_ROLE],
+                    "offset_ns": int(row[PTP_OFFSET_NS]),
+                    "ptp_state": row[PTP_STATE],
+                }
+                ptp_stats[id] = stat
         return ptp_stats
 
     def log_to_scuba_ixia_packet_loss(self, test_case_uuid: str) -> None:
@@ -397,15 +406,19 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             # TakeCsvSnapshot calls. The IXIA chassis only allows one snapshot
             # at a time ("Snapshot DefaultSnapshotSettings already in progress").
             # Use a timeout to avoid blocking the asyncio event loop indefinitely.
-            if not self._snapshot_lock.acquire(timeout=600):
-                self.logger.warning(
-                    "Timed out waiting for IXIA snapshot lock, proceeding without lock"
-                )
-                return self.get_packet_loss_statistics(self.traffic_item_view_assistant)
             try:
-                return self.get_packet_loss_statistics(self.traffic_item_view_assistant)
-            finally:
-                self._snapshot_lock.release()
+                with self.stat_view_snapshot():
+                    return self._get_packet_loss_statistics_unlocked(
+                        self.traffic_item_view_assistant
+                    )
+            except IxiaOperationTimeoutError as error:
+                self.logger.warning(
+                    "Timed out waiting for the IXIA snapshot lock; proceeding "
+                    f"with the best-effort unlocked packet-loss read: {error}"
+                )
+                return self._get_packet_loss_statistics_unlocked(
+                    self.traffic_item_view_assistant
+                )
 
     def get_latest_stats_traffic(
         self,
@@ -567,20 +580,23 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
         )
         ptp_enabled = False
-        protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
-        for row in protocols_summary.Rows:
-            if row["Protocol Type"] == "PTP":
-                self.logger.info("PTP is enabled in the ixia setup")
-                ptp_enabled = True
-                break
+        with self.stat_view_snapshot():
+            protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
+            for row in protocols_summary.Rows:
+                if row["Protocol Type"] == "PTP":
+                    self.logger.info("PTP is enabled in the ixia setup")
+                    ptp_enabled = True
+                    break
         if not ptp_enabled:
             self.logger.debug("PTP is not enabled in the ixia setup")
             return
         try:
-            _view = self.ixnetwork.Statistics.View.find(Caption=PTP_DRILL_DOWN_VIEW)
-            _view.Refresh()
-            view = StatViewAssistant(self.ixnetwork, PTP_DRILL_DOWN_VIEW, Timeout=60)
-            return view
+            with self.stat_view_snapshot():
+                _view = self.ixnetwork.Statistics.View.find(Caption=PTP_DRILL_DOWN_VIEW)
+                _view.Refresh()
+                return StatViewAssistant(
+                    self.ixnetwork, PTP_DRILL_DOWN_VIEW, Timeout=60
+                )
         except Exception as e:
             if "has no data available" in str(e):
                 raise e
@@ -614,10 +630,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             )
             return
         try:
-            traffic_item_view = StatViewAssistant(
-                self.ixnetwork, TRAFFIC_ITEM_VIEW, Timeout=60
-            )
-            return traffic_item_view
+            with self.stat_view_snapshot():
+                return StatViewAssistant(self.ixnetwork, TRAFFIC_ITEM_VIEW, Timeout=60)
         except Exception as e:
             self.logger.error(f"Error getting traffic item views: {e}")
             raise e

@@ -485,6 +485,9 @@ def get_bgp_ebb_route_storm_playbook(
     observer_peer_parent_prefix: str,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
+    cycles: int = 60,
+    quiet_window_seconds: int = 120,
+    bounded_validation: bool = False,
 ) -> Playbook:
     """Build CICD-EBB-11: BGP route storm.
 
@@ -547,7 +550,7 @@ def get_bgp_ebb_route_storm_playbook(
                 selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
                 routes_per_peer=750,
                 samples_per_block=2,
-                cycles=60,
+                cycles=cycles,
                 advertise_seconds=30,
                 withdraw_seconds=30,
                 poll_interval_seconds=5,
@@ -556,7 +559,8 @@ def get_bgp_ebb_route_storm_playbook(
                 heavy_route_batch_rows=7_500,
                 session_establish_timeout_seconds=300,
                 restore_timeout_seconds=300,
-                quiet_window_seconds=120,
+                quiet_window_seconds=quiet_window_seconds,
+                bounded_validation=bounded_validation,
                 max_lookup_concurrency=1,
                 as_path_pool_size=10,
                 as_path_length=255,

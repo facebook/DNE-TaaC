@@ -2342,6 +2342,7 @@ def create_bgp_ebb_route_storm_stage(
     as_set_length: int,
     communities_per_route: int,
     extended_communities_per_route: int,
+    bounded_validation: bool = False,
     convergence_hard_timeout_seconds: int = 300,
     heavy_setup_hard_timeout_seconds: int = 1_800,
     heavy_route_batch_rows: int = 7_500,
@@ -2375,6 +2376,7 @@ def create_bgp_ebb_route_storm_stage(
                 as_set_length=as_set_length,
                 communities_per_route=communities_per_route,
                 extended_communities_per_route=extended_communities_per_route,
+                bounded_validation=bounded_validation,
             )
         ]
     )

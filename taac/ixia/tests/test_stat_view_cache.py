@@ -7,7 +7,10 @@ import typing as t
 import unittest
 from unittest.mock import MagicMock, patch
 
-from taac.ixia.taac_ixia import TaacIxia
+from taac.ixia.taac_ixia import (
+    IxiaOperationTimeoutError,
+    TaacIxia,
+)
 
 
 def _create_taac_ixia():
@@ -18,6 +21,7 @@ def _create_taac_ixia():
     ixia.session = MagicMock()
     ixia.ixnetwork = MagicMock()
     ixia.is_uhd_chassis = False
+    ixia._snapshot_lock = threading.RLock()
     ixia._stat_view_cache = {}
     ixia._stat_view_index_lock = threading.Lock()
     ixia._stat_view_construction_locks = {}
@@ -29,6 +33,41 @@ class GetOrCreateStatViewTest(unittest.TestCase):
 
     def setUp(self):
         self.ixia = _create_taac_ixia()
+
+    def test_latest_stats_lock_timeout_preserves_best_effort_fallback(self):
+        self.ixia.test_case_uuid = "test-case"
+        self.ixia.captured_stats = {"test-case": {}}
+        self.ixia.capturing = False
+        view = MagicMock()
+        view._ViewName = "Traffic Item Statistics"
+        row = MagicMock()
+        row.Columns = ["Loss %", "Frames Delta"]
+        row.__getitem__.side_effect = {
+            "Traffic Item": "traffic",
+            "Loss %": "1.5",
+            "Frames Delta": "3",
+        }.__getitem__
+        view.Rows = [row]
+        self.ixia.traffic_item_view_assistant = view
+        self.ixia.stat_view_snapshot = MagicMock(
+            side_effect=IxiaOperationTimeoutError("snapshot busy")
+        )
+
+        result = self.ixia.get_latest_stats()
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "identifier": "traffic",
+                    "packet_loss_percentage": 1.5,
+                    "frame_delta": 3.0,
+                    "view": "Traffic Item Statistics",
+                }
+            ],
+        )
+        self.ixia.stat_view_snapshot.assert_called_once_with()
+        self.ixia.logger.warning.assert_called_once()
 
     def test_first_call_constructs_assistant(self):
         """First call instantiates StatViewAssistant and caches it."""
@@ -163,13 +202,8 @@ class GetOrCreateStatViewTest(unittest.TestCase):
         self.assertEqual(construct_count["n"], 1)
         self.assertEqual(len(self.ixia._stat_view_cache), 1)
 
-    def test_concurrent_first_call_distinct_views_run_in_parallel(self):
-        """Construction of two DIFFERENT views happens in parallel, not serial.
-
-        Validates the per-view-name lock fix: a slow construction of view A
-        must NOT block construction of view B. Without per-view locks, both
-        constructions would serialize on the single shared lock.
-        """
+    def test_concurrent_first_call_distinct_views_share_session_lock(self):
+        """Construction of different views serializes on the IXIA session."""
         import time
 
         SLEEP = 0.2
@@ -204,16 +238,14 @@ class GetOrCreateStatViewTest(unittest.TestCase):
                 thread.join()
         # Both constructions occurred.
         self.assertEqual(len(timings), 2)
-        # Overlap check: the second-to-start began BEFORE the first-to-finish ended.
-        # If they ran serially, second.start would be after first.end.
         port_start, port_end = timings["Port Statistics"]
         proto_start, proto_end = timings["Protocols Summary"]
         first_end = min(port_end, proto_end)
         last_start = max(port_start, proto_start)
-        self.assertLess(
+        self.assertGreaterEqual(
             last_start,
             first_end,
-            "Distinct-view constructions must overlap (per-view lock); "
+            "Distinct-view construction must serialize on the session lock; "
             f"port=({port_start:.3f},{port_end:.3f}) "
             f"proto=({proto_start:.3f},{proto_end:.3f})",
         )

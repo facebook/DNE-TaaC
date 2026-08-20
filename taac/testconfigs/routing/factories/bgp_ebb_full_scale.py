@@ -624,6 +624,9 @@ def _get_bgp_ebb_full_scale_playbooks(
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
+    route_storm_cycles: int = 60,
+    route_storm_quiet_window_seconds: int = 120,
+    route_storm_bounded_validation: bool = False,
 ) -> list[Playbook]:
     if selected_tc7_playbooks:
         playbooks = []
@@ -690,6 +693,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
             observer_peer_parent_prefix=bgp_mon_parent_prefix,
             profile=profile,
+            cycles=route_storm_cycles,
+            quiet_window_seconds=route_storm_quiet_window_seconds,
+            bounded_validation=route_storm_bounded_validation,
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(
             device_name=device_name,
@@ -834,6 +840,9 @@ def create_bgp_ebb_full_scale_test_config(
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
+    route_storm_cycles: int = 60,
+    route_storm_quiet_window_seconds: int = 120,
+    route_storm_bounded_validation: bool = False,
 ) -> TestConfig:
     """Build one selectable test suite on the canonical EBB full-scale topology.
 
@@ -946,6 +955,9 @@ def create_bgp_ebb_full_scale_test_config(
         multipath_test_duration_seconds=multipath_test_duration_seconds,
         multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
         multipath_cycle_count=multipath_cycle_count,
+        route_storm_cycles=route_storm_cycles,
+        route_storm_quiet_window_seconds=route_storm_quiet_window_seconds,
+        route_storm_bounded_validation=route_storm_bounded_validation,
     )
     if playbooks_selected:
         playbooks_by_name = {playbook.name: playbook for playbook in playbooks}

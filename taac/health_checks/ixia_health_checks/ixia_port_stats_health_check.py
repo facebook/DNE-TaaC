@@ -32,7 +32,8 @@ class IxiaPortStatsHealthCheck(AbstractIxiaHealthCheck[hc_types.BaseHealthCheckI
         # per test run, not on every HC invocation. ~10-15s saved per call after
         # the first.
         port_statistics_view = obj.get_or_create_stat_view("Port Statistics")
-        latest_stats = self.get_port_statistics(port_statistics_view)
+        with obj.stat_view_snapshot():
+            latest_stats = self.get_port_statistics(port_statistics_view)
         exceeded_thresholds = self.verify_port_stats_threshold(latest_stats)
 
         if exceeded_thresholds:

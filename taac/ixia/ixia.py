@@ -979,6 +979,7 @@ class Ixia:
         """
 
         self.logger = logger if logger else get_logger()
+        self._snapshot_lock = threading.RLock()
 
         if not (ixia_config or session_id):
             raise InvalidInputError("Either ixia_config or session_id is required")
@@ -7305,6 +7306,18 @@ class Ixia:
             f"Successfully configured same prefixes across all peers for {hostname}:{interface}"
         )
 
+    @contextmanager
+    def stat_view_snapshot(self, timeout_seconds: float = 600) -> t.Iterator[None]:
+        if not self._snapshot_lock.acquire(timeout=timeout_seconds):
+            raise IxiaOperationTimeoutError(
+                f"Timed out after {timeout_seconds}s waiting for IXIA statistics "
+                "snapshot lock"
+            )
+        try:
+            yield
+        finally:
+            self._snapshot_lock.release()
+
     @retryable(num_tries=20, sleep_time=10, debug=True)
     def get_bgp_update_statistics(
         self,
@@ -7327,61 +7340,46 @@ class Ixia:
             List[Dict[str, Any]]: List of dictionaries containing BGP update statistics
                                  filtered by port if specified
         """
-        try:
-            # Define the views we want to collect statistics from
-            views = ["BGP Peer Per Port", "BGP+ Peer Per Port"]
-            combined_stats = []
+        return self._get_bgp_update_statistics(
+            port=port,
+            hostname=hostname,
+            interface=interface,
+            require_all_views=False,
+        )
 
-            # Select the appropriate StatViewAssistant class based on chassis type
+    @retryable(num_tries=3, sleep_time=2, debug=True)
+    def get_bgp_update_statistics_strict(
+        self,
+        port: t.Optional[str] = None,
+        hostname: t.Optional[str] = None,
+        interface: t.Optional[str] = None,
+    ) -> t.List[t.Dict[str, t.Any]]:
+        return self._get_bgp_update_statistics(
+            port=port,
+            hostname=hostname,
+            interface=interface,
+            require_all_views=True,
+        )
+
+    def _get_bgp_update_statistics(
+        self,
+        *,
+        port: t.Optional[str],
+        hostname: t.Optional[str],
+        interface: t.Optional[str],
+        require_all_views: bool,
+    ) -> t.List[t.Dict[str, t.Any]]:
+        try:
+            views = ["BGP Peer Per Port", "BGP+ Peer Per Port"]
             StatViewAssistant = (
                 UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
             )
-
-            # Collect statistics from both views
-            for view_name in views:
-                self.logger.info(
-                    f"Getting BGP update statistics from view: {view_name}"
+            with self.stat_view_snapshot():
+                combined_stats = self._read_bgp_update_views(
+                    views,
+                    StatViewAssistant,
+                    require_all_views=require_all_views,
                 )
-
-                try:
-                    # Get the BGP protocol statistics view
-                    stats_view = StatViewAssistant(self.ixnetwork, view_name)
-
-                    # Check a condition to ensure the view is ready
-                    # This will wait until the view is fully populated
-                    try:
-                        stats_view.CheckCondition(
-                            "Port Name",
-                            StatViewAssistant.NOT_EQUAL,
-                            "DUMMY_VALUE_THAT_WONT_MATCH",
-                        )
-                    except Exception as e:
-                        # This exception is expected and just ensures the view is ready
-                        self.logger.debug(
-                            f"CheckCondition exception (expected): {str(e)}"
-                        )
-
-                    # Get the statistics from this view
-                    view_stats = []
-                    for row in stats_view.Rows:
-                        stat_entry = {}
-                        # Copy all columns to the stat entry
-                        for column_name in row.Columns:
-                            stat_entry[column_name] = row[column_name]
-                        # Add the view name to identify which view this came from
-                        stat_entry["View"] = view_name
-                        view_stats.append(stat_entry)
-
-                    self.logger.info(
-                        f"Retrieved {len(view_stats)} entries from {view_name}"
-                    )
-                    combined_stats.extend(view_stats)
-
-                except Exception as e:
-                    # If one view fails, log the error but continue with the other view
-                    self.logger.warning(
-                        f"Error getting statistics from {view_name}: {str(e)}"
-                    )
 
             # Filter statistics by port if specified
             filtered_stats = combined_stats
@@ -7398,6 +7396,9 @@ class Ixia:
                 self.logger.info(
                     f"Filtered statistics for {hostname}:{interface} (port ID: {port_id}): {len(filtered_stats)} entries"
                 )
+
+            if require_all_views:
+                self._validate_complete_bgp_update_statistics(filtered_stats, views)
 
             self.logger.info(
                 f"Retrieved a total of {len(filtered_stats)} BGP statistics entries from all views"
@@ -7416,7 +7417,89 @@ class Ixia:
 
         except Exception as e:
             self.logger.error(f"Error getting BGP update statistics: {str(e)}")
+            if require_all_views:
+                raise
             return []
+
+    def _read_bgp_update_views(
+        self,
+        views: t.Sequence[str],
+        stat_view_assistant: t.Any,
+        *,
+        require_all_views: bool,
+    ) -> t.List[t.Dict[str, t.Any]]:
+        combined_stats: t.List[t.Dict[str, t.Any]] = []
+        view_errors: t.Dict[str, str] = {}
+        for view_name in views:
+            self.logger.info(f"Getting BGP update statistics from view: {view_name}")
+            try:
+                stats_view = stat_view_assistant(self.ixnetwork, view_name)
+                try:
+                    stats_view.CheckCondition(
+                        "Port Name",
+                        stat_view_assistant.NOT_EQUAL,
+                        "DUMMY_VALUE_THAT_WONT_MATCH",
+                    )
+                except Exception as error:
+                    if require_all_views and "Snapshot DefaultSnapshotSettings" in str(
+                        error
+                    ):
+                        raise
+                    self.logger.debug(
+                        f"CheckCondition exception (expected): {str(error)}"
+                    )
+
+                view_stats = []
+                for row in stats_view.Rows:
+                    stat_entry = {
+                        column_name: row[column_name] for column_name in row.Columns
+                    }
+                    stat_entry["View"] = view_name
+                    view_stats.append(stat_entry)
+                self.logger.info(
+                    f"Retrieved {len(view_stats)} entries from {view_name}"
+                )
+                combined_stats.extend(view_stats)
+            except Exception as error:
+                view_errors[view_name] = f"{type(error).__name__}: {error}"
+                self.logger.warning(
+                    f"Error getting statistics from {view_name}: {str(error)}"
+                )
+
+        if require_all_views and view_errors:
+            raise RuntimeError(
+                f"Incomplete IXIA BGP statistics snapshot: {view_errors}"
+            )
+        return combined_stats
+
+    @staticmethod
+    def _validate_complete_bgp_update_statistics(
+        stats: t.Sequence[t.Mapping[str, t.Any]],
+        views: t.Sequence[str],
+    ) -> None:
+        required_counters = (
+            "Updates Tx",
+            "Routes Advertised",
+            "Routes Withdrawn",
+        )
+        failures: t.Dict[str, t.Any] = {}
+        for view_name in views:
+            rows = [row for row in stats if row.get("View") == view_name]
+            if not rows:
+                failures[view_name] = "missing rows"
+                continue
+            missing = {
+                counter
+                for counter in required_counters
+                if any(
+                    row.get(counter) is None or str(row.get(counter, "")).strip() == ""
+                    for row in rows
+                )
+            }
+            if missing:
+                failures[view_name] = {"missing_counters": sorted(missing)}
+        if failures:
+            raise RuntimeError(f"Incomplete IXIA BGP statistics snapshot: {failures}")
 
     def _build_bgp_peer_ip_mapping(self) -> t.Dict[str, t.Dict[str, str]]:
         """Build ``{peer_key -> {Remote IP, Local IP}}`` by walking the
