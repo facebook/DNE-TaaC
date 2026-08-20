@@ -557,8 +557,8 @@ EB04_LAB_ASH6 = PhysicalInventory(
 
 # ─── Dev-only EB test device ──────────────────────────────────────────────
 # ``bgp.eb.test.ash6`` is a per-developer BGP++ test switch — a lab box like
-# the eb0x boxes above, but with an extra ``bgp_ip`` host-driver kwarg
-# (thrift-over-IPv6 to a non-loopback address). Only used by the queue-memory
+# the eb0x boxes above, but with IPv6 endpoint overrides because its regular
+# loopback is not reachable from devservers. Only used by the queue-memory
 # monitor testconfig.
 EB_TEST_DEVICE = PhysicalInventory(
     usage=frozenset({"qual"}),
@@ -587,6 +587,7 @@ EB_TEST_DEVICE = PhysicalInventory(
     ),
     peer_groups=_ebb_peer_groups(),
     extras={
+        "eapi_endpoint": "2401:db00:2066:304a::1001",
         # Retained for ``factories/bgp_update_group.py`` which still reads
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
