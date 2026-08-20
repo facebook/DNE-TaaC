@@ -142,8 +142,7 @@ def gen_snake_test_config(
     include_link_flap_longevity: bool = False,
     link_flap_longevity_iterations: int = 33,
     link_flap_longevity_disable_delay_s: int = 30,
-    link_flap_longevity_enable_delay_s: int = 300,
-    link_flap_longevity_recovery_wait_s: int = 300,
+    link_flap_longevity_enable_delay_s: int = 10,
     link_flap_longevity_soak_s: int = 3600,
     link_flap_longevity_interface_slice: t.Optional[str] = None,
     include_rapid_a_end_flap_stress: bool = False,
@@ -203,14 +202,17 @@ def gen_snake_test_config(
             include_link_flap_longevity: When True, include the long
                 link-flap longevity playbook variant.
             link_flap_longevity_iterations / _disable_delay_s /
-                _enable_delay_s / _recovery_wait_s / _soak_s /
-                _interface_slice: Tuning knobs for that playbook (only
-                meaningful when ``include_link_flap_longevity=True``).
-                Defaults reproduce the original hardcoded behavior (33
-                cycles over all interfaces, 30s/300s flap delays, 5-min
-                recovery wait, 1-hour soak). ``_interface_slice`` is a
-                positional slice expression (e.g. ``":3"`` = first 3
-                interfaces) to flap a subset; ``None`` flaps all.
+                _enable_delay_s / _soak_s / _interface_slice: Tuning
+                knobs for that playbook (33 cycles over all interfaces,
+                1-hour soak). ``_interface_slice`` is a positional slice
+                expression (e.g. ``":3"`` = first 3 interfaces) to flap a
+                subset; ``None`` flaps all. ``_disable_delay_s`` /
+                ``_enable_delay_s`` also set the per-interface spacing of
+                every interface-disruptive playbook in the suite (thrift
+                toggle, qsfp_util disable / low-power, qsfp reset), not
+                just the link-flap longevity one. ``_enable_delay_s``
+                defaults to 10s; ZR optics need ~5 minutes to relock, so
+                the ZR4 800G configs pass 300.
             include_rapid_a_end_flap_stress: When True, include the
                 ``test_snake_rapid_a_end_flap_stress`` playbook -- a rapid
                 optical (wedge_qsfp_util tx_disable/tx_enable) flap of every
@@ -336,7 +338,6 @@ def gen_snake_test_config(
             link_flap_longevity_iterations=link_flap_longevity_iterations,
             link_flap_longevity_disable_delay_s=link_flap_longevity_disable_delay_s,
             link_flap_longevity_enable_delay_s=link_flap_longevity_enable_delay_s,
-            link_flap_longevity_recovery_wait_s=link_flap_longevity_recovery_wait_s,
             link_flap_longevity_soak_s=link_flap_longevity_soak_s,
             link_flap_longevity_interface_slice=link_flap_longevity_interface_slice,
             include_rapid_a_end_flap_stress=include_rapid_a_end_flap_stress,
@@ -511,6 +512,7 @@ MINIPACK3_STANDALONE_TEST_CONFIG_ZR4_800G = gen_snake_test_config(
     ],
     iteration=10,
     include_link_flap_longevity=True,
+    link_flap_longevity_enable_delay_s=300,
 )
 
 KODIAK3_STANDALONE_TEST_CONFIG_100G = gen_snake_test_config(
@@ -745,8 +747,8 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     # test_snake_link_flap_with_longevity: full production timeline. The small first-pass
     # (1 cycle / first 3 interfaces / 2m recovery / 2m soak) passed cleanly with 0 packet
     # loss on 2026-08-12, so this now runs the real test at the playbook defaults: 33 flap
-    # cycles over ALL interfaces (30s disable / 300s enable per-interface spacing) ~= 3h,
-    # then a 5-minute recovery wait and a 1-hour longevity soak (~4h total).
+    # cycles over ALL interfaces (30s disable / 10s enable per-interface spacing),
+    # then a 1-hour longevity soak.
     include_link_flap_longevity=True,
     # test_snake_rapid_a_end_flap_stress: rapid OPTICAL flap (wedge_qsfp_util
     # tx_disable/tx_enable) of every snake circuit's A-end, continuously for 1 hour
@@ -797,6 +799,7 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G = gen_snake_test_config(
     ],
     iteration=10,
     include_link_flap_longevity=True,
+    link_flap_longevity_enable_delay_s=300,
 )
 
 

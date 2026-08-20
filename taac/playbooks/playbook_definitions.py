@@ -12965,8 +12965,7 @@ def gen_snake_playbooks(
     include_link_flap_longevity: bool = False,
     link_flap_longevity_iterations: int = 33,
     link_flap_longevity_disable_delay_s: int = 30,
-    link_flap_longevity_enable_delay_s: int = 300,
-    link_flap_longevity_recovery_wait_s: int = 300,
+    link_flap_longevity_enable_delay_s: int = 10,
     link_flap_longevity_soak_s: int = 3600,
     link_flap_longevity_interface_slice: t.Optional[str] = None,
     include_rapid_a_end_flap_stress: bool = False,
@@ -13026,14 +13025,14 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=1,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially disable all interfaces",
                             ),
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=1,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={
                                     "interfaces": f'."{hostname}".interfaces',
                                 },
@@ -13052,7 +13051,7 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=1,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 transform_params={
                                     "interfaces": [
@@ -13103,7 +13102,7 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=1,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 transform_params={
                                     "interfaces": [
@@ -13151,7 +13150,7 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=1,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 transform_params={
                                     "interfaces": [
@@ -13166,7 +13165,7 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=1,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 transform_params={
                                     "interfaces": [
@@ -13214,7 +13213,7 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=1,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 transform_params={
                                     "interfaces": [
@@ -13245,14 +13244,14 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=2,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially disable all interfaces",
                             ),
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=2,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially enable all interfaces",
                             ),
@@ -13275,14 +13274,14 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=3,
-                                delay=30,
+                                delay=link_flap_longevity_disable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially disable all interfaces",
                             ),
                             create_interface_flap_step(
                                 enable=True,
                                 interface_flap_method=3,
-                                delay=300,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially enable all interfaces",
                             ),
@@ -13306,12 +13305,10 @@ def gen_snake_playbooks(
                             create_interface_flap_step(
                                 enable=False,
                                 interface_flap_method=5,
-                                delay=30,
+                                delay=link_flap_longevity_enable_delay_s,
                                 jq_params={"interfaces": f'."{hostname}".interfaces'},
                                 description="Sequentially reset all interfaces",
                             ),
-                            # Wait some additional time for ZR optics to reset which takes around 5 mins
-                            create_longevity_step(duration=300),
                         ]
                     )
                 ],
@@ -13594,7 +13591,7 @@ def gen_snake_playbooks(
                 stages=[
                     # Stage 1: Flap links repeatedly. Each cycle takes
                     # ~(disable_delay + enable_delay) s; total ~= iterations x that.
-                    # Defaults (33 iters, 30s/300s) => ~3 hours over all interfaces.
+                    # Defaults (33 iters, 30s/10s) => ~22 min over all interfaces.
                     create_steps_stage(
                         steps=[
                             create_interface_flap_step(
@@ -13616,15 +13613,7 @@ def gen_snake_playbooks(
                         ],
                         iteration=link_flap_longevity_iterations,
                     ),
-                    # Stage 2: Wait for links to come UP.
-                    create_steps_stage(
-                        steps=[
-                            create_longevity_step(
-                                duration=link_flap_longevity_recovery_wait_s
-                            )
-                        ]
-                    ),
-                    # Stage 3: Validate links are UP and LLDP is correct
+                    # Stage 2: Validate links are UP and LLDP is correct
                     create_steps_stage(
                         steps=[
                             create_validation_step(
@@ -13636,7 +13625,7 @@ def gen_snake_playbooks(
                             ),
                         ]
                     ),
-                    # Stage 4: Longevity soak
+                    # Stage 3: Longevity soak
                     create_steps_stage(
                         steps=[
                             create_longevity_step(duration=link_flap_longevity_soak_s)
