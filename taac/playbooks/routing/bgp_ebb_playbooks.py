@@ -156,6 +156,7 @@ def get_bgp_ebb_daemon_restart_playbook(
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-01: BGP daemon restart.
@@ -211,6 +212,10 @@ def get_bgp_ebb_daemon_restart_playbook(
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             expected_established_sessions=expected_established_sessions,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -230,21 +235,27 @@ def get_bgp_ebb_daemon_restart_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_bgp_restart_test_stage(
-                device_name=device_name,
-                enable_thread_cpu_monitoring=enable_thread_cpu_monitoring,
-                thread_name_filter=thread_name_filter,
-                enable_offcpu_profiling=enable_offcpu_profiling,
-                enable_perf_profiling=enable_perf_profiling,
-                enable_bgp_events=enable_bgp_events,
-                enable_socket_monitoring=enable_socket_monitoring,
-                reactivate_device_groups=False,
-                adaptive_convergence=True,
-                expected_established_sessions=expected_established_sessions,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            ),
-        ],
+        stages=_characterized(
+            [
+                create_bgp_restart_test_stage(
+                    device_name=device_name,
+                    enable_thread_cpu_monitoring=enable_thread_cpu_monitoring,
+                    thread_name_filter=thread_name_filter,
+                    enable_offcpu_profiling=enable_offcpu_profiling,
+                    enable_perf_profiling=enable_perf_profiling,
+                    enable_bgp_events=enable_bgp_events,
+                    enable_socket_monitoring=enable_socket_monitoring,
+                    reactivate_device_groups=False,
+                    adaptive_convergence=True,
+                    expected_established_sessions=expected_established_sessions,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                ),
+            ],
+            playbook_name="bgp_ebb_daemon_restart_playbook",
+            phase=PHASE_CONVERGENCE,
+            device_name=device_name,
+            config=characterization,
+        ),
     )
 
 
