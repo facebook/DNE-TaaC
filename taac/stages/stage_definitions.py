@@ -1761,11 +1761,13 @@ def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
     restore_start_ipv6s: list[str],
     local_link: dict[str, Any],
     other_link: dict[str, Any],
+    expected_in_scope_sessions: int,
     count: int = 63,
     step: int = 2,
     delete_count: int = 20,
     update_timeout_seconds: int = 60,
     stability_duration_seconds: int = 1800,
+    parent_prefixes_to_ignore: Sequence[str] = (),
     convergence_stability_polls: int = 3,
     convergence_stability_max_seconds: int = 300,
 ) -> Stage:
@@ -1795,6 +1797,8 @@ def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
                 delete_count=delete_count,
                 update_timeout_seconds=update_timeout_seconds,
                 stability_duration_seconds=stability_duration_seconds,
+                expected_in_scope_sessions=expected_in_scope_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 convergence_stability_polls=convergence_stability_polls,
                 convergence_stability_max_seconds=(convergence_stability_max_seconds),
             )

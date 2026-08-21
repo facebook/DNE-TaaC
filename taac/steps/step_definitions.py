@@ -5967,6 +5967,8 @@ def create_validated_igp_unresolvable_pnh_step(
     delete_count: int,
     update_timeout_seconds: int,
     stability_duration_seconds: int,
+    expected_in_scope_sessions: int,
+    parent_prefixes_to_ignore: t.Sequence[str] = (),
     convergence_stability_polls: int = 0,
     convergence_stability_max_seconds: int = 300,
 ) -> Step:
@@ -5979,6 +5981,8 @@ def create_validated_igp_unresolvable_pnh_step(
             reads when ``update_timeout_seconds`` expires.
         convergence_stability_max_seconds: Cap on waiting for that stability.
     """
+    if expected_in_scope_sessions <= 0:
+        raise ValueError("expected_in_scope_sessions must be positive")
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_igp_unresolvable_pnh",
@@ -5994,6 +5998,8 @@ def create_validated_igp_unresolvable_pnh_step(
             "delete_count": delete_count,
             "update_timeout_seconds": update_timeout_seconds,
             "stability_duration_seconds": stability_duration_seconds,
+            "expected_in_scope_sessions": expected_in_scope_sessions,
+            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
             "convergence_stability_polls": convergence_stability_polls,
             "convergence_stability_max_seconds": (convergence_stability_max_seconds),
         },

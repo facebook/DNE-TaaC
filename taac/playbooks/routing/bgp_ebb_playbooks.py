@@ -1470,7 +1470,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     peergroup_ibgp_v4: str,
     local_link: t.Dict[str, t.Any],
     other_link: t.Dict[str, t.Any],
-    expected_established_sessions: int = 0,
+    expected_in_scope_sessions: int,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     cpu_baseline: float = 8.0,
     memory_threshold: int = Gigabyte.GIG_5.value,
@@ -1484,6 +1484,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     exclude_bgp_mon: bool = True,
+    bgp_mon_parent_network: t.Optional[str] = None,
     tcp_dump_capture_interface: t.Optional[str] = None,
 ) -> Playbook:
     """
@@ -1495,7 +1496,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     1. Setting up BGP instability prerequisites
     2. Running standard prechecks
     3. Executing the unresolvable PNHs stage (deleting Open/R routes)
-    4. Validating BGP++ UPDATE sends, no withdrawals, and sustained stability
+    4. Validating BGP++ UPDATE sends, no non-monitor withdrawals, and sustained stability
     5. Cleanup: re-injecting deleted routes to restore original state
 
     ``tcp_dump_capture_interface`` is retained as an ignored compatibility
@@ -1520,6 +1521,11 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    # Readiness and withdrawal snapshots must count the same scoped peer set.
     igp_checks = get_profile_checks(
         CheckProfile.IGP_INSTABILITY,
         ProfileContext(
@@ -1527,11 +1533,11 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             peergroup_ibgp_v4=peergroup_ibgp_v4,
             precheck_thresholds=precheck_thresholds,
             postcheck_thresholds=postcheck_thresholds,
-            expected_established_sessions=expected_established_sessions,
+            expected_established_sessions=expected_in_scope_sessions,
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
         ),
     )
     return Playbook(
@@ -1557,6 +1563,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
                 other_link=other_link,
                 count=count,
                 step=step_size,
+                expected_in_scope_sessions=expected_in_scope_sessions,
+                parent_prefixes_to_ignore=bgp_mon_scope.ignore_prefixes() or (),
             )
         ],
         cleanup_steps=[

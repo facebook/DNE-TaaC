@@ -814,9 +814,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             local_link=local_link,
             other_link=other_link,
-            expected_established_sessions=session_count,
+            expected_in_scope_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
+            bgp_mon_parent_network=bound_bgp_mon_network,
         ),
         get_bgp_ebb_nexthop_group_count_threshold_playbook(
             device_name=device_name,

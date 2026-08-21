@@ -38,10 +38,11 @@ class BgpIgpUnresolvablePnhPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v4="IBGP_V4",
             local_link=local_link,
             other_link=other_link,
-            expected_established_sessions=1272,
+            expected_in_scope_sessions=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
             count=63,
             step_size=2,
+            bgp_mon_parent_network="2401:db00:e50d:22:a",
         )
 
         self.assertEqual(1, len(playbook.stages))
@@ -51,6 +52,11 @@ class BgpIgpUnresolvablePnhPlaybookTest(unittest.TestCase):
         self.assertEqual(63, payload["count"])
         self.assertEqual(2, payload["step"])
         self.assertEqual(20, payload["delete_count"])
+        self.assertEqual(1272, payload["expected_in_scope_sessions"])
+        self.assertEqual(
+            ["2401:db00:e50d:22:a::/80"],
+            payload["parent_prefixes_to_ignore"],
+        )
         self.assertEqual(4, len(payload["restore_start_ipv4s"]))
         self.assertEqual(4, len(payload["restore_start_ipv6s"]))
         self.assertEqual(local_link, payload["local_link"])
@@ -58,3 +64,16 @@ class BgpIgpUnresolvablePnhPlaybookTest(unittest.TestCase):
         self.assertIsNotNone(playbook.cleanup_steps)
         assert playbook.cleanup_steps is not None
         self.assertEqual(1, len(playbook.cleanup_steps))
+
+    def test_playbook_rejects_nonpositive_in_scope_session_count(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "expected_in_scope_sessions must be positive"
+        ):
+            get_bgp_ebb_igp_unresolvable_pnh_playbook(
+                device_name="dut.example.com",
+                peergroup_ibgp_v6="IBGP_V6",
+                peergroup_ibgp_v4="IBGP_V4",
+                local_link={},
+                other_link={},
+                expected_in_scope_sessions=0,
+            )
