@@ -7,7 +7,7 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
-from neteng.test_infra.dne.taac.utils.common import async_everpaste_str, async_get_fburl
+from taac.utils.common import async_everpaste_str, async_get_fburl
 from taac.utils.health_check_utils import get_fb303_client
 from taac.health_check.health_check import types as hc_types
 
