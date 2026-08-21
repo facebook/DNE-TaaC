@@ -791,6 +791,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name=device_name,
