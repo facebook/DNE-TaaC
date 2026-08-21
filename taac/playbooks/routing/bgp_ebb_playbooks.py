@@ -399,6 +399,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
     duration_seconds: int = 3_600,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
 
@@ -438,6 +439,10 @@ def get_bgp_ebb_attribute_churn_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             full_session_snapshot=True,
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -454,60 +459,66 @@ def get_bgp_ebb_attribute_churn_playbook(
             cpu_util_terminate_on_error=False,
             memory_terminate_on_error=False,
         ),
-        stages=[
-            create_bgp_ebb_attribute_churn_stage(
-                hostname=device_name,
-                prefix_pool_names={
-                    "ipv4": {
-                        "1": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
-                        "2": "PREFIX_POOL_IBGP_IPV4_PLANE_2_REMOTE_EB",
-                        "3": "PREFIX_POOL_IBGP_IPV4_PLANE_3_REMOTE_EB",
-                        "4": "PREFIX_POOL_IBGP_IPV4_PLANE_4_REMOTE_EB",
+        stages=_characterized(
+            [
+                create_bgp_ebb_attribute_churn_stage(
+                    hostname=device_name,
+                    prefix_pool_names={
+                        "ipv4": {
+                            "1": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+                            "2": "PREFIX_POOL_IBGP_IPV4_PLANE_2_REMOTE_EB",
+                            "3": "PREFIX_POOL_IBGP_IPV4_PLANE_3_REMOTE_EB",
+                            "4": "PREFIX_POOL_IBGP_IPV4_PLANE_4_REMOTE_EB",
+                        },
+                        "ipv6": {
+                            "1": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+                            "2": "PREFIX_POOL_IBGP_IPV6_PLANE_2_REMOTE_EB",
+                            "3": "PREFIX_POOL_IBGP_IPV6_PLANE_3_REMOTE_EB",
+                            "4": "PREFIX_POOL_IBGP_IPV6_PLANE_4_REMOTE_EB",
+                        },
                     },
-                    "ipv6": {
-                        "1": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
-                        "2": "PREFIX_POOL_IBGP_IPV6_PLANE_2_REMOTE_EB",
-                        "3": "PREFIX_POOL_IBGP_IPV6_PLANE_3_REMOTE_EB",
-                        "4": "PREFIX_POOL_IBGP_IPV6_PLANE_4_REMOTE_EB",
+                    peer_count_per_plane=62,
+                    selected_block_count_per_afi=7,
+                    samples_per_block=2,
+                    routes_per_block=750,
+                    duration_seconds=duration_seconds,
+                    max_iterations=100_000,
+                    cadence_seconds=60,
+                    poll_interval_seconds=5,
+                    transition_timeout_seconds=60,
+                    reference_setup_timeout_seconds=120,
+                    restore_timeout_seconds=120,
+                    quiet_window_seconds=120,
+                    max_lookup_concurrency=8,
+                    openr_mode=(
+                        "standalone"
+                        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+                        else "none"
+                    ),
+                    attribute_matrix={
+                        "local_pref": {
+                            "plane_1_preferred": 200,
+                            "reference": 100,
+                            "plane_1_nonpreferred": 50,
+                        },
+                        "med": {
+                            "plane_1_preferred": 100,
+                            "reference": 200,
+                            "plane_1_nonpreferred": 300,
+                        },
+                        "origin": {
+                            "plane_1_preferred": "igp",
+                            "reference": "egp",
+                            "plane_1_nonpreferred": "incomplete",
+                        },
                     },
-                },
-                peer_count_per_plane=62,
-                selected_block_count_per_afi=7,
-                samples_per_block=2,
-                routes_per_block=750,
-                duration_seconds=duration_seconds,
-                max_iterations=100_000,
-                cadence_seconds=60,
-                poll_interval_seconds=5,
-                transition_timeout_seconds=60,
-                reference_setup_timeout_seconds=120,
-                restore_timeout_seconds=120,
-                quiet_window_seconds=120,
-                max_lookup_concurrency=8,
-                openr_mode=(
-                    "standalone"
-                    if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-                    else "none"
-                ),
-                attribute_matrix={
-                    "local_pref": {
-                        "plane_1_preferred": 200,
-                        "reference": 100,
-                        "plane_1_nonpreferred": 50,
-                    },
-                    "med": {
-                        "plane_1_preferred": 100,
-                        "reference": 200,
-                        "plane_1_nonpreferred": 300,
-                    },
-                    "origin": {
-                        "plane_1_preferred": "igp",
-                        "reference": "egp",
-                        "plane_1_nonpreferred": "incomplete",
-                    },
-                },
-            )
-        ],
+                )
+            ],
+            playbook_name="bgp_ebb_attribute_churn_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
     )
 
 

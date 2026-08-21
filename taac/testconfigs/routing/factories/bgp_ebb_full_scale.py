@@ -84,6 +84,7 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_expected_peer_identity,
 )
+from taac.utils.characterization import OBSERVE_ONLY
 from taac.test_as_a_config.types import (
     Playbook,
     PointInTimeHealthCheck,
@@ -684,6 +685,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
             profile=profile,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_route_storm_playbook(
             device_name=device_name,
