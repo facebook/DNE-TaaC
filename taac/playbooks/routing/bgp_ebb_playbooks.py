@@ -1463,6 +1463,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-06: iBGP route oscillation.
@@ -1491,6 +1492,10 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             expected_peer_identity=expected_peer_identity,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -1505,17 +1510,23 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_validated_bgp_route_oscillations_stage(
-                device_name=device_name,
-                expected_established_sessions=expected_established_sessions,
-                prefix_pool_regex=prefix_pool_regex,
-                expected_prefix_pool_names=expected_prefix_pool_names,
-                prefix_start_index=prefix_start_index,
-                prefix_end_index=prefix_end_index,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
-            )
-        ],
+        stages=_characterized(
+            [
+                create_validated_bgp_route_oscillations_stage(
+                    device_name=device_name,
+                    expected_established_sessions=expected_established_sessions,
+                    prefix_pool_regex=prefix_pool_regex,
+                    expected_prefix_pool_names=expected_prefix_pool_names,
+                    prefix_start_index=prefix_start_index,
+                    prefix_end_index=prefix_end_index,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                )
+            ],
+            playbook_name="bgp_ebb_ibgp_route_oscillation_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
     )
 
 

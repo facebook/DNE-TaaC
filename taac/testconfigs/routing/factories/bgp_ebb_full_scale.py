@@ -812,6 +812,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_igp_unresolvable_pnh_playbook(
             device_name=device_name,
