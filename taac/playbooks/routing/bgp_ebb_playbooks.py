@@ -545,6 +545,7 @@ def get_bgp_ebb_route_storm_playbook(
     cycles: int = 60,
     quiet_window_seconds: int = 120,
     bounded_validation: bool = False,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """Build CICD-EBB-11: BGP route storm.
 
@@ -582,6 +583,10 @@ def get_bgp_ebb_route_storm_playbook(
             check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -593,39 +598,45 @@ def get_bgp_ebb_route_storm_playbook(
         postchecks=instability_checks.postchecks,
         snapshot_checks=instability_checks.snapshot_checks,
         periodic_tasks=[],
-        stages=[
-            create_bgp_ebb_route_storm_stage(
-                hostname=device_name,
-                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-                expected_established_sessions=total_session_count,
-                observer_peer_parent_prefix=observer_peer_parent_prefix,
-                prefix_pool_names={
-                    "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
-                    "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
-                },
-                peer_count_per_plane=62,
-                selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
-                routes_per_peer=750,
-                samples_per_block=2,
-                cycles=cycles,
-                advertise_seconds=30,
-                withdraw_seconds=30,
-                poll_interval_seconds=5,
-                convergence_hard_timeout_seconds=300,
-                heavy_setup_hard_timeout_seconds=1_800,
-                heavy_route_batch_rows=7_500,
-                session_establish_timeout_seconds=300,
-                restore_timeout_seconds=300,
-                quiet_window_seconds=quiet_window_seconds,
-                bounded_validation=bounded_validation,
-                max_lookup_concurrency=1,
-                as_path_pool_size=10,
-                as_path_length=255,
-                as_set_length=255,
-                communities_per_route=32,
-                extended_communities_per_route=16,
-            ),
-        ],
+        stages=_characterized(
+            [
+                create_bgp_ebb_route_storm_stage(
+                    hostname=device_name,
+                    ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                    expected_established_sessions=total_session_count,
+                    observer_peer_parent_prefix=observer_peer_parent_prefix,
+                    prefix_pool_names={
+                        "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+                        "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+                    },
+                    peer_count_per_plane=62,
+                    selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
+                    routes_per_peer=750,
+                    samples_per_block=2,
+                    cycles=cycles,
+                    advertise_seconds=30,
+                    withdraw_seconds=30,
+                    poll_interval_seconds=5,
+                    convergence_hard_timeout_seconds=300,
+                    heavy_setup_hard_timeout_seconds=1_800,
+                    heavy_route_batch_rows=7_500,
+                    session_establish_timeout_seconds=300,
+                    restore_timeout_seconds=300,
+                    quiet_window_seconds=quiet_window_seconds,
+                    bounded_validation=bounded_validation,
+                    max_lookup_concurrency=1,
+                    as_path_pool_size=10,
+                    as_path_length=255,
+                    as_set_length=255,
+                    communities_per_route=32,
+                    extended_communities_per_route=16,
+                ),
+            ],
+            playbook_name="bgp_ebb_route_storm_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
     )
 
 

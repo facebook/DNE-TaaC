@@ -698,6 +698,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             cycles=route_storm_cycles,
             quiet_window_seconds=route_storm_quiet_window_seconds,
             bounded_validation=route_storm_bounded_validation,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(
             device_name=device_name,
