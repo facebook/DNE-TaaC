@@ -70,8 +70,11 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.utils.characterization import (
+    characterization_summary_jq_var,
     CharacterizationConfig,
     DISABLED,
+    KIND_CPU_PERCENTILE,
+    KIND_RSS_DELTA,
     PHASE_CONVERGENCE,
     PHASE_SOAK,
     PHASE_WORKLOAD,
@@ -125,6 +128,9 @@ def _characterized(
     The bracket encloses ALL the stages passed in, so the caller decides the
     span by choosing what to hand over: pass only the workload stage to exclude
     setup and teardown from the measurement.
+
+    Pair every call with _characterization_profile_configs() on the SAME phase:
+    this places the producer, that builds the matching consumer.
     """
     start_stages, stop_stages = create_characterization_bracket_stages(
         playbook_name=playbook_name,
@@ -133,6 +139,45 @@ def _characterized(
         config=config,
     )
     return [*start_stages, *stages, *stop_stages]
+
+
+def _characterization_profile_configs(
+    phase: str,
+    config: CharacterizationConfig,
+) -> tuple[t.Optional[CpuCharacterizationConfig], t.Optional[RssDeltaConfig]]:
+    """Build the postcheck configs that read what a bracket on ``phase`` wrote.
+
+    The bracket's STOP steps stash their summaries into jq variables named from
+    (kind, span); these postcheck configs must name the same variables or the
+    checks read nothing and report an empty measurement. Both sides derive the
+    names from characterization_summary_jq_var() rather than repeating a literal,
+    so the only way to desync them is to pass a different ``phase`` here than to
+    _characterized() on the same playbook.
+
+    Args:
+        phase: The phase passed to _characterized() for this playbook.
+        config: The same CharacterizationConfig passed to _characterized(); a
+            disabled measurement yields None so no postcheck is added for it.
+
+    Returns:
+        (cpu_characterization, rss_delta), each None when that measurement is
+        disabled. Feed straight into the matching ProfileContext fields.
+    """
+    cpu = (
+        CpuCharacterizationConfig(
+            summary_jq_var=characterization_summary_jq_var(KIND_CPU_PERCENTILE, phase),
+        )
+        if config.enable_cpu
+        else None
+    )
+    rss = (
+        RssDeltaConfig(
+            summary_jq_var=characterization_summary_jq_var(KIND_RSS_DELTA, phase),
+        )
+        if config.enable_rss
+        else None
+    )
+    return (cpu, rss)
 
 
 def get_bgp_ebb_daemon_restart_playbook(
@@ -199,6 +244,11 @@ def get_bgp_ebb_daemon_restart_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_CONVERGENCE, characterization
+    )
     restart_checks = get_profile_checks(
         CheckProfile.DAEMON_RESTART,
         ProfileContext(
@@ -212,10 +262,8 @@ def get_bgp_ebb_daemon_restart_playbook(
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             expected_established_sessions=expected_established_sessions,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -357,8 +405,20 @@ def get_bgp_ebb_cold_start_playbook(
             # POST-HEALTH CHECK RESULTS table). CPU percentile is reported from
             # the stage START/STOP collector's stashed summary; RSS delta is a
             # self-soaking postcheck. Both observe-only (no threshold) for now.
-            cpu_characterization=CpuCharacterizationConfig(),
-            rss_delta=(RssDeltaConfig() if enable_rss_delta_gate else None),
+            cpu_characterization=CpuCharacterizationConfig(
+                summary_jq_var=characterization_summary_jq_var(
+                    KIND_CPU_PERCENTILE, PHASE_CONVERGENCE
+                ),
+            ),
+            rss_delta=(
+                RssDeltaConfig(
+                    summary_jq_var=characterization_summary_jq_var(
+                        KIND_RSS_DELTA, PHASE_CONVERGENCE
+                    ),
+                )
+                if enable_rss_delta_gate
+                else None
+            ),
         ),
     )
     stages = [
@@ -381,6 +441,11 @@ def get_bgp_ebb_cold_start_playbook(
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             enable_cpu_percentile_characterization=True,
             enable_rss_delta_characterization=enable_rss_delta_gate,
+            # Must match the Playbook name below: it is the identity embedded
+            # in the characterization session key and every TAAC_CHAR log line.
+            # The catalog audit pins that name to the factory name, so this is
+            # the string to keep in step with, not the other way round.
+            characterization_playbook_name="bgp_ebb_cold_start_playbook",
         ),
     ]
     return Playbook(
@@ -441,6 +506,11 @@ def get_bgp_ebb_attribute_churn_playbook(
         tasks (CPU/memory @ 9 GiB, non-terminating), and one audited custom
         attribute-churn stage.
     """
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
         ProfileContext(
@@ -450,10 +520,8 @@ def get_bgp_ebb_attribute_churn_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             full_session_snapshot=True,
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -574,6 +642,11 @@ def get_bgp_ebb_route_storm_playbook(
         BGP++ prechecks/postchecks, core-dump snapshots, and one audited
         failure-safe route-storm stage.
     """
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
         ProfileContext(
@@ -583,10 +656,8 @@ def get_bgp_ebb_route_storm_playbook(
             check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -710,6 +781,11 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     igp_checks = get_profile_checks(
         CheckProfile.IGP_INSTABILITY,
         ProfileContext(
@@ -722,10 +798,8 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -1023,6 +1097,11 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
         ProfileContext(
@@ -1036,10 +1115,8 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -1319,16 +1396,19 @@ def get_bgp_ebb_longevity_playbook(
         Playbook configured for BGP longevity soak testing
     """
     # SOAK_NO_PRECHECK has no prechecks (the prechecks field is left unset).
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_SOAK, characterization
+    )
     soak_checks = get_profile_checks(
         CheckProfile.SOAK_NO_PRECHECK,
         ProfileContext(
             postcheck_thresholds=postcheck_thresholds,
             check_bgp_convergence=False,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -1385,6 +1465,11 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
         ProfileContext(
@@ -1398,10 +1483,8 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             expected_peer_identity=expected_peer_identity,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -1479,6 +1562,11 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
         ProfileContext(
@@ -1492,10 +1580,8 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             expected_peer_identity=expected_peer_identity,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(
@@ -1592,6 +1678,11 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
         exclude=exclude_bgp_mon,
         parent_network=bgp_mon_parent_network,
     )
+    # Same phase as the _characterized() bracket below: the bracket writes
+    # these jq vars and these configs read them back.
+    cpu_characterization, rss_delta = _characterization_profile_configs(
+        PHASE_WORKLOAD, characterization
+    )
     # Readiness and withdrawal snapshots must count the same scoped peer set.
     igp_checks = get_profile_checks(
         CheckProfile.IGP_INSTABILITY,
@@ -1605,10 +1696,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             bgp_mon=bgp_mon_scope,
-            cpu_characterization=(
-                CpuCharacterizationConfig() if characterization.enable_cpu else None
-            ),
-            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
+            cpu_characterization=cpu_characterization,
+            rss_delta=rss_delta,
         ),
     )
     return Playbook(

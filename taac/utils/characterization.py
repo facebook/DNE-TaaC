@@ -41,12 +41,21 @@ CHARACTERIZATION_LOG_TOKEN: str = "TAAC_CHAR"
 KIND_CPU_PERCENTILE: str = "cpu_percentile"
 KIND_RSS_DELTA: str = "rss_delta"
 
-# jq variable names the STOP steps stash summaries into, read back by the
+# Base jq variable names the STOP steps stash summaries into, read back by the
 # CPU_PERCENTILE_CHECK / RSS_DELTA_CHECK postchecks. jq-safe: no dots or colons.
-# One bracket of each kind per playbook, so a fixed name per kind is sufficient;
-# a second concurrent bracket of the same kind would need distinct names.
+#
+# These name a KIND, not a span. Do not hand one to a bracket directly: two
+# brackets of the same kind in one playbook would write the same var and the
+# second would silently overwrite the first, with the postcheck reporting one
+# span's number under both. Call characterization_summary_jq_var(), which
+# qualifies the base name with the span.
 CPU_SUMMARY_JQ_VAR: str = "cpu_percentile_summary"
 RSS_SUMMARY_JQ_VAR: str = "rss_delta_summary"
+
+_SUMMARY_JQ_VAR_BY_KIND: t.Mapping[str, str] = {
+    KIND_CPU_PERCENTILE: CPU_SUMMARY_JQ_VAR,
+    KIND_RSS_DELTA: RSS_SUMMARY_JQ_VAR,
+}
 
 # Canonical phase names. The phase says WHICH part of the playbook the bracket
 # encloses, so measurements are comparable across tests that share a shape.
@@ -108,6 +117,48 @@ OBSERVE_ONLY: CharacterizationConfig = CharacterizationConfig()
 DISABLED: CharacterizationConfig = CharacterizationConfig(
     enable_cpu=False, enable_rss=False
 )
+
+
+def characterization_summary_jq_var(kind: str, span: str) -> str:
+    """Build the jq variable name one bracket's STOP step writes and its
+    postcheck reads.
+
+    Both sides MUST call this with the same (kind, span) pair. That is the whole
+    point of it existing: the producer is a Step built in the stage layer and the
+    consumer is a postcheck built in the check-profile layer, and nothing else
+    ties the two strings together.
+
+    Qualifying by span is what makes more than one bracket of a kind safe in a
+    single playbook. ``span`` is normally the phase (PHASE_CONVERGENCE,
+    PHASE_WORKLOAD, PHASE_SOAK); pass a distinct label when one playbook brackets
+    the same phase twice, e.g. "workload_pre" and "workload_post".
+
+    Args:
+        kind: KIND_CPU_PERCENTILE or KIND_RSS_DELTA.
+        span: Span label, normally a PHASE_* value. Must be jq-safe: letters,
+            digits, and underscores only.
+
+    Returns:
+        "<base var for kind>_<span>", e.g. "cpu_percentile_summary_workload".
+
+    Raises:
+        ValueError: Unknown kind, or a span that is empty or not jq-safe.
+    """
+    base = _SUMMARY_JQ_VAR_BY_KIND.get(kind)
+    if base is None:
+        raise ValueError(
+            f"Unknown characterization kind {kind!r}: "
+            f"expected one of {sorted(_SUMMARY_JQ_VAR_BY_KIND)}"
+        )
+    # A dot or colon in a jq var silently changes how the expression parses, so
+    # reject anything outside the safe set at construction instead of shipping a
+    # postcheck that reads nothing.
+    if not span or not span.replace("_", "").isalnum():
+        raise ValueError(
+            f"Characterization span {span!r} is not jq-safe: "
+            "expected a non-empty string of letters, digits, and underscores"
+        )
+    return f"{base}_{span}"
 
 
 def characterization_session_key(

@@ -116,12 +116,11 @@ from taac.steps.step_definitions import (
 )
 from taac.utils.characterization import (
     characterization_session_key,
+    characterization_summary_jq_var,
     CharacterizationConfig,
-    CPU_SUMMARY_JQ_VAR,
     KIND_CPU_PERCENTILE,
     KIND_RSS_DELTA,
     PHASE_CONVERGENCE,
-    RSS_SUMMARY_JQ_VAR,
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
@@ -356,7 +355,7 @@ def create_cold_start_test_stage(
     cpu_characterization_interval_seconds: float = 2.0,
     enable_rss_delta_characterization: bool = False,
     rss_characterization_interval_seconds: float = 3.0,
-    characterization_playbook_name: str = "bgp_ebb_cold_start_playbook",
+    characterization_playbook_name: str | None = None,
 ) -> Stage:
     """
     Create a BGP cold start test stage.
@@ -415,9 +414,19 @@ def create_cold_start_test_stage(
         rss_characterization_interval_seconds: Background VmRSS sampling interval
             (seconds) for the RSS START step (default: 3.0). Only used when
             enable_rss_delta_characterization is True.
+        characterization_playbook_name: Name of the calling playbook, embedded in
+            the characterization session key and in every TAAC_CHAR log line.
+            Required when either characterization flag is True, and deliberately
+            has no default: this stage has more than one caller, and a wrong name
+            files the run's measurements under another playbook. Ignored when
+            both flags are False.
 
     Returns:
         Stage object for BGP cold start test.
+
+    Raises:
+        ValueError: Either characterization flag is True and
+            characterization_playbook_name is unset.
 
     Note:
         When thread CPU monitoring is enabled, it runs for the entire convergence period
@@ -584,12 +593,27 @@ def create_cold_start_test_stage(
     # during the toggle); STOP goes after Step 6, which blocks until convergence
     # completes -- so the window is exactly the convergence phase. Fully
     # sequential; the thread monitor stays a separate step.
+    # Bound once, non-optional, so the session-key calls below take a str. Unused
+    # when neither bracket is enabled, which is why the parameter stays optional.
+    characterization_playbook: str = ""
+    if enable_cpu_percentile_characterization or enable_rss_delta_characterization:
+        if not characterization_playbook_name:
+            # The name is embedded in the session key and every TAAC_CHAR log
+            # line, so a wrong one silently files this run's numbers under
+            # another playbook. Refuse rather than guess: there is no default
+            # that is correct for more than one caller.
+            raise ValueError(
+                "characterization_playbook_name is required when cold-start "
+                "CPU-percentile or RSS-delta characterization is enabled"
+            )
+        characterization_playbook = characterization_playbook_name
+
     cpu_start_steps = []
     cpu_stop_steps = []
     if enable_cpu_percentile_characterization:
         session_key = characterization_session_key(
             KIND_CPU_PERCENTILE,
-            characterization_playbook_name,
+            characterization_playbook,
             PHASE_CONVERGENCE,
             device_name,
         )
@@ -605,7 +629,9 @@ def create_cold_start_test_stage(
         cpu_stop_steps = [
             create_cpu_percentile_stop_step(
                 session_key=session_key,
-                summary_jq_var=CPU_SUMMARY_JQ_VAR,
+                summary_jq_var=characterization_summary_jq_var(
+                    KIND_CPU_PERCENTILE, PHASE_CONVERGENCE
+                ),
             )
         ]
 
@@ -617,7 +643,7 @@ def create_cold_start_test_stage(
     if enable_rss_delta_characterization:
         rss_session_key = characterization_session_key(
             KIND_RSS_DELTA,
-            characterization_playbook_name,
+            characterization_playbook,
             PHASE_CONVERGENCE,
             device_name,
         )
@@ -631,7 +657,9 @@ def create_cold_start_test_stage(
         rss_stop_steps = [
             create_rss_stop_step(
                 session_key=rss_session_key,
-                summary_jq_var=RSS_SUMMARY_JQ_VAR,
+                summary_jq_var=characterization_summary_jq_var(
+                    KIND_RSS_DELTA, PHASE_CONVERGENCE
+                ),
             )
         ]
 
@@ -4325,6 +4353,7 @@ def create_characterization_bracket_stages(
     phase: str,
     device_name: str,
     config: CharacterizationConfig,
+    span_label: str | None = None,
 ) -> tuple[list[Stage], list[Stage]]:
     """Build the START and STOP stages for a bgpcpp CPU/RSS characterization span.
 
@@ -4355,15 +4384,26 @@ def create_characterization_bracket_stages(
     converged state; PHASE_WORKLOAD and PHASE_SOAK baseline the already-settled
     footprint and measure what the workload adds on top.
 
+    The span, ``span_label`` or ``phase``, scopes both the jq variables the STOP
+    steps write and the stage ids, so a playbook can carry more than one bracket.
+    Two brackets sharing a span in one playbook is a collision: the second
+    overwrites the first's summary and the stage ids clash. Give the second one a
+    distinct ``span_label`` and read it back with the matching
+    ``characterization_summary_jq_var(kind, span_label)``.
+
     Args:
         playbook_name: Playbook name, recorded in the session key and log line.
         phase: One of PHASE_CONVERGENCE, PHASE_WORKLOAD, PHASE_SOAK.
         device_name: DUT hostname.
         config: Which brackets to place and how densely to sample.
+        span_label: Overrides ``phase`` as the span identity in jq variables and
+            stage ids. Only needed when one playbook brackets the same phase more
+            than once. Must be jq-safe: letters, digits, and underscores.
 
     Returns:
         (start_stages, stop_stages), each empty or holding one Stage.
     """
+    span = span_label or phase
     start_steps: list[Step] = []
     stop_steps: list[Step] = []
 
@@ -4382,7 +4422,7 @@ def create_characterization_bracket_stages(
         stop_steps.append(
             create_rss_stop_step(
                 session_key=rss_key,
-                summary_jq_var=RSS_SUMMARY_JQ_VAR,
+                summary_jq_var=characterization_summary_jq_var(KIND_RSS_DELTA, span),
             )
         )
 
@@ -4407,27 +4447,29 @@ def create_characterization_bracket_stages(
             0,
             create_cpu_percentile_stop_step(
                 session_key=cpu_key,
-                summary_jq_var=CPU_SUMMARY_JQ_VAR,
+                summary_jq_var=characterization_summary_jq_var(
+                    KIND_CPU_PERCENTILE, span
+                ),
             ),
         )
 
     if not start_steps:
         return ([], [])
 
-    label = f"{phase}_characterization"
+    label = f"{span}_characterization"
     return (
         [
             create_steps_stage(
                 steps=start_steps,
                 stage_id=f"{label}_start",
-                description=f"Start bgpcpp CPU/RSS characterization ({phase})",
+                description=f"Start bgpcpp CPU/RSS characterization ({span})",
             )
         ],
         [
             create_steps_stage(
                 steps=stop_steps,
                 stage_id=f"{label}_stop",
-                description=f"Stop bgpcpp CPU/RSS characterization ({phase})",
+                description=f"Stop bgpcpp CPU/RSS characterization ({span})",
             )
         ],
     )

@@ -1965,6 +1965,11 @@ def create_service_restart_check(
 
 
 def create_cpu_percentile_observe_check(
+    # Defaulted only so this factory stays introspectable by the
+    # factory-coverage and snapshot tests, which exercise every factory that
+    # takes no required argument. The base name is NOT what a real bracket
+    # writes: every caller passes the span-qualified name from
+    # characterization_summary_jq_var().
     summary_jq_var: str = CPU_SUMMARY_JQ_VAR,
     gate_percentile: float = 95.0,
     gate_threshold_pct: t.Optional[float] = None,
@@ -1996,6 +2001,8 @@ def create_cpu_percentile_observe_check(
 
 
 def create_rss_delta_observe_check(
+    # Defaulted for factory introspection only; see
+    # create_cpu_percentile_observe_check above.
     summary_jq_var: str = RSS_SUMMARY_JQ_VAR,
     max_growth_pct: t.Optional[float] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
