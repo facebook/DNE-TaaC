@@ -662,6 +662,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     exclude_bgp_mon: bool = True,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-07: IGP PNH metric oscillation.
@@ -721,6 +722,10 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -735,23 +740,29 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_steps_stage(
-                steps=[
-                    create_validated_igp_pnh_metric_oscillation_step(
-                        device_name=device_name,
-                        start_ipv4s=start_ipv4s,
-                        start_ipv6s=start_ipv6s,
-                        local_link=local_link,
-                        other_link=other_link,
-                        count=count,
-                        step=step_size,
-                        duration=duration,
-                        frequency=frequency,
-                    ),
-                ],
-            )
-        ],
+        stages=_characterized(
+            [
+                create_steps_stage(
+                    steps=[
+                        create_validated_igp_pnh_metric_oscillation_step(
+                            device_name=device_name,
+                            start_ipv4s=start_ipv4s,
+                            start_ipv6s=start_ipv6s,
+                            local_link=local_link,
+                            other_link=other_link,
+                            count=count,
+                            step=step_size,
+                            duration=duration,
+                            frequency=frequency,
+                        ),
+                    ],
+                )
+            ],
+            playbook_name="bgp_ebb_igp_pnh_metric_oscillation_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
         cleanup_steps=[
             create_openr_route_action_step(
                 device_name=device_name,

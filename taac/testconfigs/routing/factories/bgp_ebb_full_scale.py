@@ -726,6 +726,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             expected_peer_identity=expected_peer_identity,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_fauu_drain_undrain_playbook(
             device_name=device_name,
