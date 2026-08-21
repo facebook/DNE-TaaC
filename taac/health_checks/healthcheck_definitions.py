@@ -1978,14 +1978,20 @@ def create_cpu_percentile_observe_check(
     """CPU_PERCENTILE_CHECK — report bgpcpp CPU percentiles into the results table.
 
     Reads the percentile summary stashed as a jq var by the START/STOP collector
-    (``summary_jq_var``) and reports it. Observe-only when ``gate_threshold_pct``
-    is None (always PASS, value in the message); supply a threshold to gate on
-    the raw ``gate_percentile``.
+    (``summary_jq_var``) and reports it. ``gate_threshold_pct`` gates the raw
+    ``gate_percentile``; leave it None to report the value without gating it.
+
+    "Observe-only" applies to the LEVEL comparison only, and the check is not
+    inert without a threshold. It FAILs unconditionally when the collector
+    stashed nothing usable, meaning no summary, zero samples, or non-finite
+    percentiles, because a signal that cannot be measured must not read as a
+    silent pass. See device_health_checks/cpu_percentile_health_check.py.
 
     Args:
         summary_jq_var: jq var holding the percentile summary dict from STOP.
         gate_percentile: raw percentile to gate on when a threshold is set.
-        gate_threshold_pct: gate threshold; None => observe-only.
+        gate_threshold_pct: level gate threshold. None leaves the CPU level
+            ungated; it does not make the check unable to fail.
     """
     json_payload: t.Dict[str, t.Any] = {"gate_percentile": gate_percentile}
     if gate_threshold_pct is not None:
@@ -2010,9 +2016,21 @@ def create_rss_delta_observe_check(
     """RSS_DELTA_CHECK — report the bgpcpp RSS delta bracket into the results table.
 
     Reads the {baseline, current, peak, growth%} summary stashed as a jq var by
-    the START/STOP bracket (``summary_jq_var``) and reports it. Observe-only when
-    ``max_growth_pct`` is None (always PASS, value in the message); supply a
-    threshold to gate on steady-state growth over the in-run baseline.
+    the START/STOP bracket (``summary_jq_var``) and reports it.
+    ``max_growth_pct`` gates steady-state growth over the in-run baseline; leave
+    it None to report the growth without gating it.
+
+    "Observe-only" applies to the GROWTH comparison only, and the check is not
+    inert without a threshold. Two paths FAIL unconditionally, both evaluated
+    before ``max_growth_pct`` is consulted: a missing summary, and a bgpcpp
+    restart mid-span, which invalidates the steady-state comparison rather than
+    being reported as the negative growth a restart would otherwise produce.
+    See device_health_checks/rss_delta_health_check.py.
+
+    Args:
+        summary_jq_var: jq var holding the RSS summary dict from STOP.
+        max_growth_pct: growth gate threshold. None leaves growth ungated; it
+            does not make the check unable to fail.
     """
     json_payload: t.Dict[str, t.Any] = {}
     if max_growth_pct is not None:
