@@ -299,8 +299,8 @@ class DrainUndrainTest(TestCase):
         self.assertIn("<nothing>", str(ctx.exception))
 
     async def test_verification_reads_link_without_resolving_it(self) -> None:
-        # readlink -f would follow the coop "current" symlink through to the
-        # versioned file and never match the path we set.
+        # readlink -f would follow a coop config symlink through to the file it
+        # resolves to and never match the path we set.
         await drain_device(self.switch)
 
         self.assertEqual(
@@ -350,6 +350,23 @@ class FbossDeviceGuardTest(TestCase):
         from taac.driver.config_modifiers import _fboss_switch_cls
 
         self.assertIs(FbossSwitch, _fboss_switch_cls())
+
+
+class ConfigPathTest(TestCase):
+    """The two on-device config paths, pinned to their literal values.
+
+    Every other test here refers to them through the constants, so a wrong path
+    would propagate into the expectations and pass unnoticed while drain/undrain
+    reads and writes files bgpd never looks at.
+    """
+
+    def test_live_config_is_the_path_bgpd_is_launched_against(self) -> None:
+        # bgpd's provisioned --config, which fboss2's config session keeps as a
+        # symlink into the CLI-managed bgpcpp/bgpcpp.conf.
+        self.assertEqual("/etc/coop/bgpcpp.conf", LIVE_CONFIG_PATH)
+
+    def test_softdrain_config_sits_beside_the_live_one(self) -> None:
+        self.assertEqual("/etc/coop/bgpcpp_softdrain.conf", SOFTDRAIN_CONFIG_PATH)
 
 
 _T = t.TypeVar("_T")

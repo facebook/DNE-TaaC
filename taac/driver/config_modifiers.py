@@ -103,8 +103,8 @@ MARKER_UNDRAINED: str = f"{FBOSS_DRAIN_DIR}/UNDRAINED"
 MARKER_SOFT_DRAINED: str = f"{FBOSS_DRAIN_DIR}/SOFT_DRAINED"
 
 COOP_DIR: str = "/etc/coop"
-LIVE_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp/current"
-SOFTDRAIN_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp_softdrain/current"
+LIVE_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp.conf"
+SOFTDRAIN_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp_softdrain.conf"
 
 _UNDRAIN: str = "undrain"
 _SOFT_DRAIN: str = "soft-drain"
@@ -211,7 +211,9 @@ async def _verify_startup_config(
     measured nothing.
     """
     # Plain readlink, not readlink -f: we want the literal target we set, and the
-    # coop "current" paths are themselves symlinks that -f would resolve through.
+    # coop config paths can themselves be symlinks that -f would resolve through
+    # (fboss2's config session keeps /etc/coop/bgpcpp.conf pointing into
+    # bgpcpp/bgpcpp.conf).
     actual = await switch.async_run_cmd_on_shell(f"readlink {STARTUP_CONFIG_SYMLINK}")
     actual = (actual or "").strip()
 
@@ -698,8 +700,8 @@ async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -
     the two files this produces.
 
     Note that the live config is written back to the same path it was read from,
-    replacing it. On a device where COOP manages ``/etc/coop/bgpcpp/current``,
-    COOP may re-materialize its own version later and undo this.
+    replacing it. On a device where COOP manages ``/etc/coop/bgpcpp.conf``, COOP
+    may re-materialize its own version later and undo this.
 
     Args:
         switch: driver for the device to configure.
