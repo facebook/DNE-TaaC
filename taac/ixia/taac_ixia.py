@@ -18,7 +18,10 @@ from ixnetwork_restpy.files import Files
 from taac.ixia.abstract_traffic_generator import (
     AbstractTrafficGenerator,
 )
-from neteng.test_infra.dne.taac.ixia.ixia import Ixia, IxiaOperationTimeoutError
+from taac.ixia.ixia import (  # oss-rewrite (force ShipIt re-export to taac.* root)
+    Ixia,
+    IxiaOperationTimeoutError,
+)
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
     retryable,
