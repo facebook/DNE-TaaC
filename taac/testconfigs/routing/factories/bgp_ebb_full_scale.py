@@ -824,6 +824,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             bgp_mon_parent_network=bound_bgp_mon_network,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_nexthop_group_count_threshold_playbook(
             device_name=device_name,

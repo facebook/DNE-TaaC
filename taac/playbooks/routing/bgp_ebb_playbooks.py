@@ -1552,6 +1552,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     exclude_bgp_mon: bool = True,
     bgp_mon_parent_network: t.Optional[str] = None,
     tcp_dump_capture_interface: t.Optional[str] = None,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-08: IGP unresolvable PNH.
@@ -1604,6 +1605,10 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             bgp_mon=bgp_mon_scope,
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -1618,21 +1623,27 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
-                device_name=device_name,
-                start_ipv4s=start_ipv4s,
-                start_ipv6s=start_ipv6s,
-                restore_start_ipv4s=cleanup_start_ipv4s,
-                restore_start_ipv6s=cleanup_start_ipv6s,
-                local_link=local_link,
-                other_link=other_link,
-                count=count,
-                step=step_size,
-                expected_in_scope_sessions=expected_in_scope_sessions,
-                parent_prefixes_to_ignore=bgp_mon_scope.ignore_prefixes() or (),
-            )
-        ],
+        stages=_characterized(
+            [
+                create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
+                    device_name=device_name,
+                    start_ipv4s=start_ipv4s,
+                    start_ipv6s=start_ipv6s,
+                    restore_start_ipv4s=cleanup_start_ipv4s,
+                    restore_start_ipv6s=cleanup_start_ipv6s,
+                    local_link=local_link,
+                    other_link=other_link,
+                    count=count,
+                    step=step_size,
+                    expected_in_scope_sessions=expected_in_scope_sessions,
+                    parent_prefixes_to_ignore=bgp_mon_scope.ignore_prefixes() or (),
+                )
+            ],
+            playbook_name="bgp_ebb_igp_unresolvable_pnh_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
         cleanup_steps=[
             create_openr_route_action_step(
                 device_name=device_name,
