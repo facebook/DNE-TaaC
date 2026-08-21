@@ -829,6 +829,41 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G = gen_snake_test_config(
 )
 
 
+ICEPACK_MP3_CROSS_DEVICE_SNAKE_TEST_CONFIG = gen_snake_test_config(
+    name="ICEPACK_MP3_CROSS_DEVICE_SNAKE_TEST_CONFIG",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss336024506.ash6:eth1/1/1",
+            destination="fboss336024506.ash6:eth1/64/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss336024506.ash6",
+    precheck_packet_loss_clear_stats=True,
+    skip_lldp_check=True,
+    direct_ixia_connections=[
+        taac_types.DirectIxiaConnection(
+            interface="eth1/1/1",
+            ixia_chassis_ip="2401:db00:2066:3223::3027",
+            ixia_port="1/49",
+        ),
+        taac_types.DirectIxiaConnection(
+            interface="eth1/64/5",
+            ixia_chassis_ip="2401:db00:2066:3223::3027",
+            ixia_port="1/53",
+        ),
+    ],
+    ixia_ports=["eth1/1/1", "eth1/64/5"],
+    playbooks_to_skip=[
+        "test_snake_half_interface_toggle_with_thrift_api",
+        "test_snake_interface_toggle_with_qsfp_util_low_power",
+    ],
+    iteration=1,
+)
+
+
 # Throughput benchmark: the 10-point packet-size sweep at 100% line rate, 12
 # mins per size (~2h). Kept as its own TestConfig rather than folded into
 # MINIPACK3_STANDALONE so the standard snake suites keep their current runtime;
@@ -868,6 +903,7 @@ SNAKE_TEST_CONFIGS = [
     KODIAK3_STANDALONE_TEST_CONFIG_400G_200G,
     KODIAK3_STANDALONE_TEST_CONFIG_200G,
     KODIAK3_STANDALONE_TEST_CONFIG_ZR4_800G,
+    ICEPACK_MP3_CROSS_DEVICE_SNAKE_TEST_CONFIG,
     ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G,
     ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G,
 ]
