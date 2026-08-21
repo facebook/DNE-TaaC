@@ -966,6 +966,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-09: Multipath-group oscillation.
@@ -1035,6 +1036,10 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -1049,23 +1054,29 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             cpu_util_terminate_on_error=cpu_util_terminate_on_error,
             memory_terminate_on_error=memory_terminate_on_error,
         ),
-        stages=[
-            create_multipath_group_oscillation_stage(
-                hostname=device_name,
-                ipv4_peer_regex=ipv4_peer_regex,
-                ipv6_peer_regex=ipv6_peer_regex,
-                ipv4_session_count=ipv4_session_count,
-                ipv6_session_count=ipv6_session_count,
-                test_duration_seconds=test_duration_seconds,
-                oscillation_interval_seconds=oscillation_interval_seconds,
-                min_peers_to_stop=min_peers_to_stop,
-                max_peers_to_stop=max_peers_to_stop,
-                cycle_count=cycle_count,
-                expected_min_baseline_width=expected_min_baseline_width,
-                expected_max_baseline_width=expected_max_baseline_width,
-                min_multipath_width=min_multipath_width,
-            ),
-        ],
+        stages=_characterized(
+            [
+                create_multipath_group_oscillation_stage(
+                    hostname=device_name,
+                    ipv4_peer_regex=ipv4_peer_regex,
+                    ipv6_peer_regex=ipv6_peer_regex,
+                    ipv4_session_count=ipv4_session_count,
+                    ipv6_session_count=ipv6_session_count,
+                    test_duration_seconds=test_duration_seconds,
+                    oscillation_interval_seconds=oscillation_interval_seconds,
+                    min_peers_to_stop=min_peers_to_stop,
+                    max_peers_to_stop=max_peers_to_stop,
+                    cycle_count=cycle_count,
+                    expected_min_baseline_width=expected_min_baseline_width,
+                    expected_max_baseline_width=expected_max_baseline_width,
+                    min_multipath_width=min_multipath_width,
+                ),
+            ],
+            playbook_name="bgp_ebb_multipath_group_oscillation_playbook",
+            phase=PHASE_WORKLOAD,
+            device_name=device_name,
+            config=characterization,
+        ),
         cleanup_steps=create_multipath_group_oscillation_cleanup_steps(
             ipv4_peer_regex=ipv4_peer_regex,
             ipv6_peer_regex=ipv6_peer_regex,

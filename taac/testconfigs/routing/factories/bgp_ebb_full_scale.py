@@ -716,6 +716,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             test_duration_seconds=multipath_test_duration_seconds,
             oscillation_interval_seconds=multipath_oscillation_interval_seconds,
             cycle_count=multipath_cycle_count,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             device_name=device_name,
