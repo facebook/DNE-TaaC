@@ -752,6 +752,7 @@ def _get_bgp_ebb_full_scale_playbooks(
         get_bgp_ebb_longevity_playbook(
             device_name=device_name,
             duration=_LONGEVITY_DURATION_SECONDS,
+            characterization=OBSERVE_ONLY,
         ),
         get_bgp_ebb_daemon_restart_playbook(
             device_name=device_name,

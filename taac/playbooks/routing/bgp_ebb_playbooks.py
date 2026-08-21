@@ -1294,6 +1294,7 @@ def get_bgp_ebb_longevity_playbook(
     community_churn_frequency: int = 60,
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
+    characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """
     Build CICD-EBB-15: Longevity.
@@ -1324,6 +1325,10 @@ def get_bgp_ebb_longevity_playbook(
             postcheck_thresholds=postcheck_thresholds,
             check_bgp_convergence=False,
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            cpu_characterization=(
+                CpuCharacterizationConfig() if characterization.enable_cpu else None
+            ),
+            rss_delta=(RssDeltaConfig() if characterization.enable_rss else None),
         ),
     )
     return Playbook(
@@ -1331,12 +1336,18 @@ def get_bgp_ebb_longevity_playbook(
         setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
         postchecks=soak_checks.postchecks,
         snapshot_checks=soak_checks.snapshot_checks,
-        stages=[
-            create_longevity_churn_stage(
-                test_duration_seconds=duration,
-                churn_interval_seconds=community_churn_frequency,
-            )
-        ],
+        stages=_characterized(
+            [
+                create_longevity_churn_stage(
+                    test_duration_seconds=duration,
+                    churn_interval_seconds=community_churn_frequency,
+                )
+            ],
+            playbook_name="bgp_ebb_longevity_playbook",
+            phase=PHASE_SOAK,
+            device_name=device_name,
+            config=characterization,
+        ),
     )
 
 
