@@ -1650,6 +1650,7 @@ def create_validated_plane_bgp_session_oscillation_stage(
                 downtime_seconds=downtime_seconds,
                 parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 description="Run validated per-plane iBGP session oscillations",
+                ixia_restore_timeout_floor_seconds=600,
             )
         ]
     )
