@@ -5629,20 +5629,26 @@ def create_validated_bgp_session_oscillation_step(
     downtime_seconds: int,
     parent_prefixes_to_ignore: t.Sequence[str] = (),
     description: t.Optional[str] = None,
+    ixia_restore_timeout_floor_seconds: float | None = None,
 ) -> Step:
     """Create a blocking session-oscillation workload with per-trigger checks."""
+    params_dict: dict[str, t.Any] = {
+        "custom_step_name": "bgp_session_oscillation",
+        "hostname": device_name,
+        "session_groups": list(session_groups),
+        "cycle_schedule": [list(groups) for groups in cycle_schedule],
+        "expected_established_sessions": expected_established_sessions,
+        "test_duration_seconds": test_duration_seconds,
+        "uptime_seconds": uptime_seconds,
+        "downtime_seconds": downtime_seconds,
+        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+    }
+    if ixia_restore_timeout_floor_seconds is not None:
+        params_dict["ixia_restore_timeout_floor_seconds"] = (
+            ixia_restore_timeout_floor_seconds
+        )
     return create_custom_step(
-        params_dict={
-            "custom_step_name": "bgp_session_oscillation",
-            "hostname": device_name,
-            "session_groups": list(session_groups),
-            "cycle_schedule": [list(groups) for groups in cycle_schedule],
-            "expected_established_sessions": expected_established_sessions,
-            "test_duration_seconds": test_duration_seconds,
-            "uptime_seconds": uptime_seconds,
-            "downtime_seconds": downtime_seconds,
-            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
-        },
+        params_dict=params_dict,
         description=description or "Run validated BGP session oscillations",
     )
 
