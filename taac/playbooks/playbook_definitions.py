@@ -178,12 +178,14 @@ from taac.task_definitions import (
     create_thrift_stress_periodic_task,
 )
 from taac.tasks.thrift_stress_payloads import (
-    fboss_with_qsfp_flaps,
+    fboss_qsfp_flaps_only,
+    READ_ONLY_FBOSS_APIS,
     ThriftStressCall,
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
+    PeriodicTask,
     Playbook,
     PointInTimeHealthCheck,
     Service,
@@ -1408,23 +1410,72 @@ def _scale_payload_per_call(
     return scaled
 
 
+def _build_thft_periodic_tasks(
+    device_name: str,
+    stsw_flap_ports: list[str],
+    requests_per_burst: int,
+    burst_timeout_s: float,
+    flap_burst_timeout_s: float,
+) -> list[PeriodicTask]:
+    """Build the THFT background as TWO independent periodic tasks.
+
+    The thrift storm and the qsfp flap used to share one payload, and
+    therefore one `asyncio.gather` and one burst timeout. They have wildly
+    different runtimes, so no single timeout works:
+
+      - the read-only thrift calls are capped by the agent's
+        `thriftApiToRateLimitInQps` (1-2 qps for most APIs), so the excess is
+        rejected in microseconds and a burst finishes in seconds;
+      - the flap needs `total_flaps` x (interval_to_link_up + wedge_qsfp_util
+        runtime), measured at ~7.2s per flap = ~720s for the default 100.
+
+    Sized for the thrift calls (the old 60s default) every burst was
+    cancelled mid-flap-loop: the storm never completed a cycle and only ~15
+    of the 100 flaps landed, while all postchecks still passed. Sized for the
+    flap, the thrift cadence collapses to one burst per ~12 min.
+
+    `PeriodicTaskExecutor.create_periodic_tasks` starts each entry in its own
+    `multiprocessing.Process`, so two tasks run concurrently and neither can
+    cancel the other.
+    """
+    return [
+        create_thrift_stress_periodic_task(
+            device_name=device_name,
+            calls=_scale_payload_per_call(
+                list(READ_ONLY_FBOSS_APIS), requests_per_burst
+            ),
+            interval=5,
+            burst_timeout_s=burst_timeout_s,
+            name="thrift_stress_check",
+        ),
+        create_thrift_stress_periodic_task(
+            device_name=device_name,
+            calls=fboss_qsfp_flaps_only(stsw_flap_ports),
+            interval=5,
+            burst_timeout_s=flap_burst_timeout_s,
+            name="qsfp_flap_check",
+        ),
+    ]
+
+
 def create_thft_baseline_playbook(
     device_name: str,
     stsw_flap_ports: list[str],
     test_duration_s: int = 600,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 900.0,
 ) -> Playbook:
     """THFT_001 baseline — Pavan-design thrift stress (qsfp port flap is
     assumed in the background and always present in the periodic-task
     payload; to disable, omit `stsw_flap_ports`).
 
-    Faithful to `scripts/pavanpatil/thrift_call_disruptive.py`: each
-    PeriodicTask burst fires a single `asyncio.gather` of read-only thrift
-    calls (`requests_per_burst` each of 7 APIs) + one
-    `async_do_rapid_interface_flaps(stsw_flap_ports, 4, 100)` call which
-    internally loops 100 flaps × 4s = ~6.7 min. Outer `PeriodicTaskWorker`
-    loops with `interval=5` between bursts.
+    Faithful to `scripts/pavanpatil/thrift_call_disruptive.py`, but split
+    across TWO periodic tasks so the flap and the thrift storm no longer
+    share a burst timeout — see `_build_thft_periodic_tasks`. One task fires
+    `requests_per_burst` each of the read-only APIs; the other runs
+    `async_do_rapid_interface_flaps(stsw_flap_ports, 4, 100)`. Both loop with
+    `interval=5` between bursts, in separate processes.
 
     THFT_002..005 layer foreground per-daemon restart triggers on top of
     this same background — see `create_thft_restart_playbook` +
@@ -1439,15 +1490,17 @@ def create_thft_baseline_playbook(
         requests_per_burst: Concurrent calls per read-only API per burst.
             Default 10000 matches Pavan's original. Dial down (e.g. 1000)
             to find the breaking-point ceiling without crashing the agent.
-        burst_timeout_s: Wall-clock cap on a single burst's gather(). If
-            the agent stops responding, the gather is cancelled, a timed-
-            out burst recorded, and the worker continues. Default 60s.
+        burst_timeout_s: Wall-clock cap on the THRIFT burst's gather(). The
+            calls are rate-limited server-side and return in microseconds, so
+            60s is generous; if the agent stops responding the gather is
+            cancelled, a timed-out burst recorded, and the worker continues.
+        flap_burst_timeout_s: Wall-clock cap on the FLAP burst's gather().
+            Must exceed `total_flaps` x per-flap time (~7.2s measured), so
+            the 100-flap default needs ~720s. Default 900s adds ~25% headroom.
 
     Returns:
         Single `Playbook` for THFT_001.
     """
-    payload = fboss_with_qsfp_flaps(stsw_flap_ports)
-    payload = _scale_payload_per_call(payload, requests_per_burst)
     return Playbook(
         name="npi_thft_001_baseline_thrift_stress",
         description=(
@@ -1456,23 +1509,23 @@ def create_thft_baseline_playbook(
             f"(requests_per_burst={requests_per_burst}). Mirrors "
             f"scripts/pavanpatil/thrift_call_disruptive.py."
         ),
-        periodic_tasks=[
-            create_thrift_stress_periodic_task(
-                device_name=device_name,
-                calls=payload,
-                interval=5,
-                burst_timeout_s=burst_timeout_s,
-            )
-        ],
+        periodic_tasks=_build_thft_periodic_tasks(
+            device_name=device_name,
+            stsw_flap_ports=stsw_flap_ports,
+            requests_per_burst=requests_per_burst,
+            burst_timeout_s=burst_timeout_s,
+            flap_burst_timeout_s=flap_burst_timeout_s,
+        ),
         stages=[create_longevity_stage(duration=test_duration_s)],
     )
 
 
 # =============================================================================
 # THFT 002-005 — restart-trigger variants on top of THFT_001 background.
-# Each variant shares the same `fboss_with_qsfp_flaps` periodic-task
-# background (thrift storm + 100-flap qsfp burst), and adds a FOREGROUND
-# sequence of `systemctl restart <service>` triggers fired every 5 min.
+# Each variant shares the same `_build_thft_periodic_tasks` background (a
+# thrift-storm task and a 100-flap qsfp task, running as two independent
+# periodic tasks), and adds a FOREGROUND sequence of
+# `systemctl restart <service>` triggers fired every 5 min.
 # Concurrency model:
 #   - periodic_tasks runs in its own multiprocessing.Process (continuous)
 #   - foreground stages run sequentially in the test worker process
@@ -1544,13 +1597,14 @@ def create_thft_restart_playbook(
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 900.0,
 ) -> Playbook:
     """THFT_002..005 — THFT_001 background + 5-min systemctl-restart trigger.
 
-    Same `fboss_with_qsfp_flaps` periodic-task background as THFT_001
-    (thrift storm + 100-flap qsfp burst every 5s). Adds a foreground
-    sequence of `systemctl restart <service>` triggers fired every
-    `restart_period_s` for the full `test_duration_s` window.
+    Same two-task periodic background as THFT_001 (thrift storm + 100-flap
+    qsfp burst, each on its own 5s loop — see `_build_thft_periodic_tasks`).
+    Adds a foreground sequence of `systemctl restart <service>` triggers
+    fired every `restart_period_s` for the full `test_duration_s` window.
 
     Args:
         device_name: DUT hostname (FBOSS-only).
@@ -1566,8 +1620,6 @@ def create_thft_restart_playbook(
         requests_per_burst / burst_timeout_s: Same semantics as
             `create_thft_baseline_playbook`.
     """
-    payload = fboss_with_qsfp_flaps(stsw_flap_ports)
-    payload = _scale_payload_per_call(payload, requests_per_burst)
     name = f"npi_thft_{playbook_number:03d}_thrift_stress_with_restart_{service_label}"
     description = (
         f"THFT_{playbook_number:03d} — THFT_001 background "
@@ -1578,14 +1630,13 @@ def create_thft_restart_playbook(
     return Playbook(
         name=name,
         description=description,
-        periodic_tasks=[
-            create_thrift_stress_periodic_task(
-                device_name=device_name,
-                calls=payload,
-                interval=5,
-                burst_timeout_s=burst_timeout_s,
-            )
-        ],
+        periodic_tasks=_build_thft_periodic_tasks(
+            device_name=device_name,
+            stsw_flap_ports=stsw_flap_ports,
+            requests_per_burst=requests_per_burst,
+            burst_timeout_s=burst_timeout_s,
+            flap_burst_timeout_s=flap_burst_timeout_s,
+        ),
         stages=_build_periodic_restart_stages(
             service=service,
             service_label=service_label,
@@ -1603,6 +1654,7 @@ def create_thft_playbooks(
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 900.0,
 ) -> list[Playbook]:
     """Return the full THFT_001..005 playbook list — standard NPI THFT
     testcase set for any FBOSS DUT.
@@ -1624,6 +1676,7 @@ def create_thft_playbooks(
             test_duration_s=test_duration_s,
             requests_per_burst=requests_per_burst,
             burst_timeout_s=burst_timeout_s,
+            flap_burst_timeout_s=flap_burst_timeout_s,
         )
     ]
     for (
@@ -1643,6 +1696,7 @@ def create_thft_playbooks(
                 restart_period_s=restart_period_s,
                 requests_per_burst=requests_per_burst,
                 burst_timeout_s=burst_timeout_s,
+                flap_burst_timeout_s=flap_burst_timeout_s,
             )
         )
     return playbooks

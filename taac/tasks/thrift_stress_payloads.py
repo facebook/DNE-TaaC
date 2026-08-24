@@ -107,45 +107,42 @@ READ_ONLY_FBOSS_APIS: t.List[ThriftStressCall] = [
 # =============================================================================
 
 
-def fboss_with_qsfp_flaps(
+def fboss_qsfp_flaps_only(
     interfaces: t.Sequence[str],
     interval_to_link_up: int = 4,
     total_flaps: int = 100,
 ) -> t.List[ThriftStressCall]:
-    """Standard THFT background payload — Pavan's design, any FBOSS platform.
+    """The qsfp-flap entry, with NO read-only thrift baseline attached.
 
-    Combines the read-only thrift baseline with ONE call to
-    `async_do_rapid_interface_flaps` per burst, which internally loops
-    `total_flaps` times with `interval_to_link_up` seconds between
-    iterations. With defaults (4, 100) that's ~6.7 min of continuous
-    flapping per burst — bottleneck and longest-running entry in the gather.
+    Runs as its OWN `PeriodicTask`, separate from the thrift storm. There used
+    to be a combined `fboss_with_qsfp_flaps` builder that returned
+    `READ_ONLY_FBOSS_APIS + this`; it was removed because putting both in one
+    `asyncio.gather` means one burst timeout has to cover two workloads whose
+    runtimes differ by two orders of magnitude:
 
-    The wrapping `PeriodicTaskWorker` then sleeps `interval` (default 5 s)
-    and starts the next burst, so one outer cycle ≈ 6.7 min flap + ~10 s
-    thrift gather (overlapped) + 5 s inter-burst sleep.
+      - the read-only calls are capped by the agent's
+        `thriftApiToRateLimitInQps` (1-2 qps for most APIs), so excess is
+        rejected in microseconds and a burst finishes in seconds;
+      - the flap needs `total_flaps` x (interval_to_link_up +
+        wedge_qsfp_util runtime), measured at ~7.2s per flap on Kodiak3 =
+        ~720s for the default 100.
 
-    Works on any FBOSS platform — the flap method (`wedge_qsfp_util`) is
-    universal across TH4/TH5/TH6/Janga/Tahan. Platform-specificity lives in
-    the `interfaces` argument: each testconfig declares its own target port
-    list (IcePack GTSW → STSW-adjacent uplinks, STSW → GTSW-adjacent
-    uplinks, MP3/KO3 → their respective fabric uplinks, etc.).
-
-    Faithful to `scripts/pavanpatil/thrift_call_disruptive.py`
-    (`THRIFT_REQUEST_API_COUNTS` flap entry).
+    Sized for the thrift calls, every burst was cancelled mid-flap-loop —
+    the storm never completed a cycle and only ~15 of 100 flaps landed, while
+    every postcheck still passed (a silent false green). Sized for the flap,
+    the thrift cadence collapses to one burst per ~12 min. Two tasks, two
+    timeouts, two independent processes is the only shape that works, so the
+    combined builder is deliberately gone rather than left as a footgun.
 
     Args:
-        interfaces: DUT-side ports to flap. The flap method shell-escapes
-            these so order doesn't matter, but EXCLUDE ports carrying test
-            IXIA traffic — flapping those breaks the IxiaPacketLossCheck
-            postcheck.
+        interfaces: DUT-side ports to flap. EXCLUDE ports carrying test IXIA
+            traffic — flapping those breaks the IxiaPacketLossCheck postcheck.
         interval_to_link_up: Sleep inside the flap method between consecutive
             flap iterations. Default 4 matches Pavan's original.
         total_flaps: Flap iterations executed by ONE driver call. Default 100
-            matches Pavan's original (so the entry's `requests_per_burst=1`
-            means "one outer call that internally flaps 100 times").
+            matches Pavan's original.
     """
     return [
-        *READ_ONLY_FBOSS_APIS,
         ThriftStressCall(
             method="async_do_rapid_interface_flaps",
             args=(tuple(interfaces), interval_to_link_up, total_flaps),
@@ -162,5 +159,5 @@ def fboss_with_qsfp_flaps(
 
 PAYLOAD_BUILDERS: t.Dict[str, t.Callable[..., t.List[ThriftStressCall]]] = {
     "fboss_readonly": lambda **_: list(READ_ONLY_FBOSS_APIS),
-    "fboss_with_qsfp_flaps": fboss_with_qsfp_flaps,
+    "fboss_qsfp_flaps_only": fboss_qsfp_flaps_only,
 }

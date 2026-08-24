@@ -106,6 +106,7 @@ def create_npi_thrift_hardening_test_config(
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 900.0,
     direct_ixia_connections=None,
     basset_pool: str | None = None,
     service_restart_services: list | None = None,
@@ -143,6 +144,15 @@ def create_npi_thrift_hardening_test_config(
             (each restart-variant). Default 3600s (1 hr) so the 4 restart
             variants total ~4hr — matches the THFT_001 4hr soak instead of
             blowing the campaign wall-time up to 5×4=20hr.
+        burst_timeout_s: Wall-clock cap on the THRIFT burst. Those calls are
+            rate-limited server-side (`thriftApiToRateLimitInQps` — 1-2 qps
+            for most APIs), so excess is rejected in microseconds and 60s is
+            generous.
+        flap_burst_timeout_s: Wall-clock cap on the QSFP-FLAP burst, which
+            runs as a SEPARATE periodic task so it cannot cancel the thrift
+            storm (and vice versa). Must exceed total_flaps x per-flap time
+            (~7.2s measured on Kodiak3 = ~720s for the 100-flap default);
+            900s adds ~25% headroom.
         direct_ixia_connections: Optional explicit direct-IXIA mapping.
         basset_pool: Optional override pool selection. Default "dne.test".
         service_restart_services: Override default service-restart-check list.
@@ -555,6 +565,7 @@ def create_npi_thrift_hardening_test_config(
                 restart_period_s=restart_period_s,
                 requests_per_burst=requests_per_burst,
                 burst_timeout_s=burst_timeout_s,
+                flap_burst_timeout_s=flap_burst_timeout_s,
             ),
             service_restart_services=service_restart_services,
         ),

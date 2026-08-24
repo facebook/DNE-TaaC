@@ -3451,6 +3451,7 @@ def create_thrift_stress_periodic_task(
     requests_per_api: int = 10000,
     apis: t.Optional[t.List[str]] = None,
     burst_timeout_s: float = 60.0,
+    name: str = "thrift_stress_check",
 ) -> PeriodicTask:
     """Periodic task that drives a sustained thrift workload.
 
@@ -3486,10 +3487,14 @@ def create_thrift_stress_periodic_task(
         apis: Legacy. List of no-arg driver method names. Mutually exclusive
             with `calls`. Each name is wrapped in a default `ThriftStressCall`
             using `requests_per_api`.
+        name: `PeriodicTask.name`, used for the log line and thread/process
+            label. Override when a playbook attaches MORE THAN ONE of these
+            (e.g. THFT runs a thrift-storm task and a qsfp-flap task side by
+            side) so the two are distinguishable in the logs.
 
     Returns:
-        A `PeriodicTask` named `"thrift_stress_check"` wrapping
-        `task_name="thrift_stress"`.
+        A `PeriodicTask` named `name` (default `"thrift_stress_check"`)
+        wrapping `task_name="thrift_stress"`.
 
     Raises:
         ValueError: If both `calls` and `apis` are supplied.
@@ -3510,7 +3515,7 @@ def create_thrift_stress_periodic_task(
     else:
         params["requests_per_api"] = requests_per_api
     return PeriodicTask(
-        name="thrift_stress_check",
+        name=name,
         interval=interval,
         task=Task(task_name="thrift_stress"),
         retryable=False,

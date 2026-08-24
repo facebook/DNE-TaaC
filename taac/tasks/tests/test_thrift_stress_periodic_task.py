@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.tasks.periodic_tasks import ThriftStressPeriodicTask
 from taac.tasks.thrift_stress_payloads import (
-    fboss_with_qsfp_flaps,
+    fboss_qsfp_flaps_only,
     PAYLOAD_BUILDERS,
     READ_ONLY_FBOSS_APIS,
     ThriftStressCall,
@@ -78,42 +78,48 @@ class ThriftStressPayloadCatalogTest(unittest.TestCase):
             self.assertEqual(call.args, ())
             self.assertEqual(call.requests_per_burst, 10000)
 
-    def test_fboss_with_qsfp_flaps_appends_flap_entry(self) -> None:
-        interfaces = ["eth1/13/1", "eth1/13/3"]
-        payload = fboss_with_qsfp_flaps(interfaces)
-        # All 7 baseline + 1 flap = 8
-        self.assertEqual(len(payload), 8)
-        # First 7 == baseline
-        self.assertEqual(payload[:7], list(READ_ONLY_FBOSS_APIS))
-        # Last is the flap entry. Defaults match Pavan's original —
-        # interval_to_link_up=4s, total_flaps=100 (~6.7 min of continuous
-        # flapping per burst).
-        flap = payload[-1]
+    def test_fboss_qsfp_flaps_only_has_no_thrift_baseline(self) -> None:
+        """The flap-only builder backs THFT's dedicated flap periodic task, so
+        it must carry the flap and NOTHING else — any read-only API leaking in
+        would re-couple the two workloads under one burst timeout, which is the
+        exact bug the split removed (flap ~720s vs rate-limited thrift calls in
+        microseconds; no single timeout serves both)."""
+        payload = fboss_qsfp_flaps_only(["eth1/5/1", "eth1/8/1"])
+        self.assertEqual(len(payload), 1)
+        flap = payload[0]
         self.assertEqual(flap.method, "async_do_rapid_interface_flaps")
-        self.assertEqual(flap.args, (("eth1/13/1", "eth1/13/3"), 4, 100))
+        # Defaults match Pavan's original — interval_to_link_up=4s,
+        # total_flaps=100, requests_per_burst=1 ("one outer call that
+        # internally flaps 100 times").
+        self.assertEqual(flap.args, (("eth1/5/1", "eth1/8/1"), 4, 100))
         self.assertEqual(flap.requests_per_burst, 1)
+        methods = {c.method for c in payload}
+        self.assertEqual(methods & {c.method for c in READ_ONLY_FBOSS_APIS}, set())
 
-    def test_fboss_with_qsfp_flaps_overrides(self) -> None:
-        payload = fboss_with_qsfp_flaps(
+    def test_fboss_qsfp_flaps_only_overrides(self) -> None:
+        payload = fboss_qsfp_flaps_only(
             ["eth1/1/1"], interval_to_link_up=8, total_flaps=50
         )
-        flap = payload[-1]
-        self.assertEqual(flap.args, (("eth1/1/1",), 8, 50))
+        self.assertEqual(payload[0].args, (("eth1/1/1",), 8, 50))
 
-    def test_fboss_with_qsfp_flaps_works_for_any_platform(self) -> None:
-        """Universality: same builder works for IcePack/STSW/MP3/KO3 etc."""
+    def test_fboss_qsfp_flaps_only_works_for_any_platform(self) -> None:
+        """Universality: same builder works for IcePack/STSW/MP3/KO3 etc.
+        Platform-specificity lives entirely in the `interfaces` argument."""
         icepack_ports = ["eth1/3/1", "eth1/3/3"]  # IcePack STSW-adjacent
-        stsw_ports = ["eth1/5/1", "eth1/5/3"]  # STSW GTSW-adjacent
-        ipayload = fboss_with_qsfp_flaps(icepack_ports)
-        spayload = fboss_with_qsfp_flaps(stsw_ports)
-        # Same structure, different interface tuples in the flap entry
-        self.assertEqual(ipayload[:7], spayload[:7])
-        self.assertEqual(ipayload[-1].args[0], tuple(icepack_ports))
-        self.assertEqual(spayload[-1].args[0], tuple(stsw_ports))
+        ko3_ports = ["eth1/5/1", "eth1/8/1"]  # Kodiak3 RBB fabric uplinks
+        ipayload = fboss_qsfp_flaps_only(icepack_ports)
+        kpayload = fboss_qsfp_flaps_only(ko3_ports)
+        self.assertEqual(ipayload[0].method, kpayload[0].method)
+        self.assertEqual(ipayload[0].args[0], tuple(icepack_ports))
+        self.assertEqual(kpayload[0].args[0], tuple(ko3_ports))
 
     def test_payload_builders_keys(self) -> None:
         self.assertIn("fboss_readonly", PAYLOAD_BUILDERS)
-        self.assertIn("fboss_with_qsfp_flaps", PAYLOAD_BUILDERS)
+        self.assertIn("fboss_qsfp_flaps_only", PAYLOAD_BUILDERS)
+        # The combined `fboss_with_qsfp_flaps` builder was deliberately
+        # removed — it put the flap and the thrift storm in one gather under
+        # one burst timeout, which cannot work. Guard against reintroduction.
+        self.assertNotIn("fboss_with_qsfp_flaps", PAYLOAD_BUILDERS)
         # All builders are callable
         for k, builder in PAYLOAD_BUILDERS.items():
             self.assertTrue(callable(builder), f"{k} builder not callable")
