@@ -84,7 +84,7 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_expected_peer_identity,
 )
-from taac.utils.characterization import OBSERVE_ONLY
+from neteng.test_infra.dne.taac.utils.characterization import DISABLED, OBSERVE_ONLY
 from taac.test_as_a_config.types import (
     Playbook,
     PointInTimeHealthCheck,
@@ -762,7 +762,16 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
-            characterization=OBSERVE_ONLY,
+            # Deliberately unmeasured. Restarting bgpcpp replaces the PID
+            # mid-bracket, and both collectors resolve the PID once at START:
+            # CPU then reads a dead /proc entry and silently drops every
+            # sample, and RSS fails outright because `restarted` invalidates a
+            # steady-state comparison by construction. Beyond the mechanism,
+            # the numbers would not be worth having: this is a lifecycle
+            # recovery test, not a sustained-load test, so a CPU percentile or
+            # an RSS delta measured across a process boundary describes two
+            # different processes rather than one workload.
+            characterization=DISABLED,
         ),
         get_bgp_ebb_cold_start_playbook(
             device_name=device_name,
