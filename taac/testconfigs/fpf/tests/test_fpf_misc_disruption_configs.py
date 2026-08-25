@@ -81,6 +81,19 @@ _V2_STABLE_REQUIRED_IDS = {
     "fpf_hrt_postcheck",
 }
 
+# Remote-failure DISRUPT check IDs that a config passing ``rf_vf_groups`` produces.
+# The unsuffixed "fpf_remote_failure_impacted" is minted only on the non-grouped
+# branch; with rf_vf_groups the check is split per VF group. tc36 and tc37 impact
+# lane 0, which fpf_rf_vf_groups() places in VF1 (lanes 0-3), so VF1 carries the
+# impacted check and both groups carry an unimpacted-stable one.
+_RF_DISRUPT_VF_GROUP_IDS = frozenset(
+    {
+        "fpf_remote_failure_impacted_vf1",
+        "fpf_remote_failure_unimpacted_stable_vf1",
+        "fpf_remote_failure_unimpacted_stable_vf2",
+    }
+)
+
 
 class TestTc36StswAllConnectionsDown(unittest.TestCase):
     def test_name_tags_and_two_playbook_shape(self):
@@ -157,7 +170,10 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         ids = _check_ids(TC36.playbooks[0])
         # Impacted lane is withdrawn from bulk and rises in remote-failure.
         self.assertIn("fpf_hrt_bulk_disrupt", ids)
-        self.assertIn("fpf_remote_failure_impacted", ids)
+        missing_rf = _RF_DISRUPT_VF_GROUP_IDS - ids
+        self.assertFalse(
+            missing_rf, f"disrupt missing remote-failure check IDs: {missing_rf}"
+        )
         # Prod-prefix transition (reachable->unreachable on impacted plane).
         self.assertIn("fpf_prod_hrt_prefix_transition", ids)
         # flip_fsdb_session=False -> sessions stay CONNECTED (the "stable"
@@ -271,7 +287,10 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         failing in_discard loss assertion is present (real packet loss)."""
         ids = _check_ids(TC37.playbooks[0])
         self.assertIn("fpf_hrt_bulk_disrupt", ids)
-        self.assertIn("fpf_remote_failure_impacted", ids)
+        missing_rf = _RF_DISRUPT_VF_GROUP_IDS - ids
+        self.assertFalse(
+            missing_rf, f"disrupt missing remote-failure check IDs: {missing_rf}"
+        )
         # flip_fsdb_session=True -> per-GPU reconciliation session check.
         self.assertIn("fpf_hrt_fsdb_session_disrupt", ids)
         self.assertNotIn("fpf_hrt_fsdb_session_stable", ids)
