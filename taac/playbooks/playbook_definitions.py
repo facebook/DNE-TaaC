@@ -8070,8 +8070,18 @@ def create_hardening_of_ndp_overload_entries_playbook(
     good_ndp_entries_uplink: int,
     rogue_ndp_entries: int,
     ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    sleep_time_between_toggle_s: t.Optional[int] = None,
 ) -> Playbook:
     """Platform hardening playbook: NDP overload table test."""
+    # None keeps configure_ipv*_entries' default toggle sleeps. On
+    # testbeds where the toggles are known no-ops (see
+    # docs/rsw_new_playbooks_failure_analysis.md) a small value cuts
+    # ~2min of dead wait per toggled device group per step.
+    toggle_kwargs = (
+        {"sleep_time_between_toggle_s": sleep_time_between_toggle_s}
+        if sleep_time_between_toggle_s is not None
+        else {}
+    )
     return Playbook(
         name="test_hardening_of_ndp_overload_entries",
         cleanup_steps=[
@@ -8081,6 +8091,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": good_ndp_entries_downlink,
                     "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                 },
             ),
         ],
@@ -8093,6 +8104,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": good_ndp_entries_downlink,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8101,6 +8113,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_ndp_entries_uplink,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8109,6 +8122,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_ndp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_longevity_step(duration=600),
@@ -8133,8 +8147,18 @@ def create_hardening_of_arp_overload_entries_playbook(
     good_arp_entries: int,
     rogue_arp_entries: int,
     arp_entry_limit: int = ARP_SOFT_LIMIT,
+    sleep_time_between_toggle_s: t.Optional[int] = None,
 ) -> Playbook:
     """Platform hardening playbook: ARP overload table test."""
+    # None keeps configure_ipv*_entries' default toggle sleeps. On
+    # testbeds where the toggles are known no-ops (see
+    # docs/rsw_new_playbooks_failure_analysis.md) a small value cuts
+    # ~2min of dead wait per toggled device group per step.
+    toggle_kwargs = (
+        {"sleep_time_between_toggle_s": sleep_time_between_toggle_s}
+        if sleep_time_between_toggle_s is not None
+        else {}
+    )
     return Playbook(
         name="test_hardening_of_arp_overload_entries",
         cleanup_steps=[
@@ -8144,6 +8168,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": 1,
                     "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                 },
             ),
         ],
@@ -8156,6 +8181,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": 1,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8164,6 +8190,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_arp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8172,6 +8199,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_arp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_longevity_step(duration=600),
@@ -8752,8 +8780,19 @@ def create_hardening_of_mac_overload_with_agent_churn_playbook(
     )
 
 
-def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
-    """Platform hardening playbook: BGP malformed packet handling test."""
+def create_bgp_malformed_packet_test_playbook(
+    device_name,
+    network_group_regex: str = "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+) -> Playbook:
+    """Platform hardening playbook: BGP malformed packet handling test.
+
+    ``network_group_regex``: which IXIA network groups get their routes'
+    NEXT_HOP attribute withheld (the malformed UPDATE under test). The
+    default matches the Meta factory's tag-derived group names; configs
+    whose groups are named differently (e.g. the OSS single-DUT RSW config's
+    ``BGP_PREFIX_V6_*`` groups) must pass a matching regex or every step
+    silently no-ops.
+    """
     return Playbook(
         name="test_bgp_malformed_packet_test",
         iteration=1,
@@ -8768,14 +8807,14 @@ def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": False,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_ixia_api_step(
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": False,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_longevity_step(duration=1000),
@@ -8783,14 +8822,14 @@ def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": True,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_ixia_api_step(
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": True,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_longevity_step(duration=200),
@@ -8911,24 +8950,38 @@ def create_ecmp_group_overload_limit_playbook() -> Playbook:
 def create_cpu_high_priority_queue_overload_playbook(
     ixia_rogue_ic_parent_network_v6,
     ixia_rogue_ic_parent_network_v4,
+    bgp_cp_traffic_regex: str = "HIGH_QUEUE_BGP_CP_TRAFFIC",
+    background_traffic_regex: t.Optional[str] = None,
 ) -> Playbook:
-    """Platform hardening playbook: CPU high-priority queue overload test."""
+    """Platform hardening playbook: CPU high-priority queue overload test.
+
+    ``bgp_cp_traffic_regex``: the traffic item flooding the CPU high queue.
+    NOTE ``enable_traffic(enable=True, regexes=...)`` also DISABLES every
+    non-matching item, so a regex that matches nothing doesn't just no-op —
+    it switches off all running traffic for the overload window. Configs
+    whose BGP-CP item is named differently (e.g. the OSS single-DUT RSW
+    config's ``TEST_RAW_BGP_CP_TRAFFIC``) must pass their own regex.
+
+    The rogue-network args feed the snapshot check's ignore list (Meta's
+    churn peers, expected to flap); pass ``None`` for both on configs with
+    no rogue peers and the ignore list is omitted.
+    """
+    parent_prefixes_to_ignore = None
+    if ixia_rogue_ic_parent_network_v6 or ixia_rogue_ic_parent_network_v4:
+        parent_prefixes_to_ignore = [
+            f"{ixia_rogue_ic_parent_network_v6}::/80",
+            f"{ixia_rogue_ic_parent_network_v4}.0/16",
+        ]
     return Playbook(
         name="test_cpu_high_priority_queue_overload",
         snapshot_checks=[
             create_bgp_session_snapshot_check(
-                parent_prefixes_to_ignore=[
-                    f"{ixia_rogue_ic_parent_network_v6}::/80",
-                    f"{ixia_rogue_ic_parent_network_v4}.0/16",
-                ],
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 pre_snapshot_checkpoint_id="stage.test_cpu_high_priority_queue_overload.step.sleep_120_secs_after_disabling_bgp_cp_traffic.end",
             ),
             create_bgp_session_snapshot_check(
                 skip_flap_check=True,
-                parent_prefixes_to_ignore=[
-                    f"{ixia_rogue_ic_parent_network_v6}::/80",
-                    f"{ixia_rogue_ic_parent_network_v4}.0/16",
-                ],
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 post_snapshot_checkpoint_id="stage.test_cpu_high_priority_queue_overload.step.sleep_120_secs_after_disabling_bgp_cp_traffic.end",
             ),
         ],
@@ -8939,17 +8992,34 @@ def create_cpu_high_priority_queue_overload_playbook(
                     create_ixia_api_step(
                         api_name="enable_traffic",
                         args_dict={
-                            "regexes": ["HIGH_QUEUE_BGP_CP_TRAFFIC"],
+                            "regexes": [bgp_cp_traffic_regex],
                             "enable": True,
                         },
                     ),
                     create_longevity_step(duration=150),
-                    create_ixia_api_step(
-                        api_name="enable_traffic",
-                        args_dict={
-                            "regexes": ["HIGH_QUEUE_BGP_CP_TRAFFIC"],
-                            "enable": False,
-                        },
+                    # Turn the CP flood off. With ``background_traffic_regex``
+                    # set this is done by switching TO the background item
+                    # (enable=True enables it and disables everything else,
+                    # incl. the CP item) — a plain disable would leave ZERO
+                    # enabled traffic items, dropping IXIA's traffic module to
+                    # kUnapplied and failing the following hold on configs
+                    # where the CP item was the only one running.
+                    (
+                        create_ixia_api_step(
+                            api_name="enable_traffic",
+                            args_dict={
+                                "regexes": [background_traffic_regex],
+                                "enable": True,
+                            },
+                        )
+                        if background_traffic_regex
+                        else create_ixia_api_step(
+                            api_name="enable_traffic",
+                            args_dict={
+                                "regexes": [bgp_cp_traffic_regex],
+                                "enable": False,
+                            },
+                        )
                     ),
                     create_longevity_step(
                         duration=120,
@@ -18779,6 +18849,7 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
     post_warmboot_wait_seconds: int = 300,
     tx_down_seconds: int = 30,
     post_flap_settle_seconds: int = 300,
+    interfaces: t.Optional[t.List[str]] = None,
 ) -> Playbook:
     """Build the `test_qsfp_service_warmboot_and_tx_flap` Playbook.
 
@@ -18796,10 +18867,20 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
         post_warmboot_wait_seconds: Hold between the warmboot and the flap.
         tx_down_seconds: How long the lasers stay disabled.
         post_flap_settle_seconds: Hold after re-enabling TX for links to recover.
+        interfaces: Explicit interface list to flap. Default ``None`` resolves
+            the DUT's interfaces at runtime via jq over the topology's
+            per-device data — which is empty on OSS topologies (the flap step
+            then crashes on a ``None`` interface list), so OSS callers must
+            pass the list explicitly.
 
     Returns:
         A `Playbook` named `test_qsfp_service_warmboot_and_tx_flap`.
     """
+    flap_kwargs: t.Dict[str, t.Any] = (
+        {"interfaces": list(interfaces)}
+        if interfaces
+        else {"jq_params": {"interfaces": '."{dut}".interfaces'}}
+    )
     return Playbook(
         name="test_qsfp_service_warmboot_and_tx_flap",
         postchecks=[
@@ -18828,22 +18909,22 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
                             taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
                         ),
                         delay=tx_down_seconds,
-                        jq_params={"interfaces": '."{dut}".interfaces'},
                         description=(
                             "Disable TX on all transceivers in one "
                             "`wedge_qsfp_util --tx_disable` invocation"
                         ),
+                        **flap_kwargs,
                     ),
                     create_interface_flap_step(
                         enable=True,
                         interface_flap_method=int(
                             taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
                         ),
-                        jq_params={"interfaces": '."{dut}".interfaces'},
                         description=(
                             "Re-enable TX on all transceivers in one "
                             "`wedge_qsfp_util --tx_enable` invocation"
                         ),
+                        **flap_kwargs,
                     ),
                     create_longevity_step(
                         duration=post_flap_settle_seconds,
