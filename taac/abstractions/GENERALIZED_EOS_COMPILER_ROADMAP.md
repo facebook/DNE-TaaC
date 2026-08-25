@@ -764,6 +764,10 @@ remain typed deferred intent in the shadow result.
 capture, atomic Configerator installation, exact readback, and restoration of
 prior bytes or prior absence.
 
+Status: implemented with a pre-install presence/byte snapshot, the existing
+verified Configerator transfer, exact source-byte comparison, and restoration
+of either the prior file or its absence.
+
 **DICE 34: routing-component lifecycle tasks.** Materialize the ordered
 BGP++/FibAgent daemon reconciliation, startup option, acknowledged readiness,
 and component-state restoration.

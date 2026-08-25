@@ -133,7 +133,6 @@ class EosRoutingConfigLifecycleTaskIntent:
     operation_id: ResourceId
     source: ConfigArtifactRef
     destination: str
-    required_features: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if self.action is not EosRoutingConfigLifecycleAction.INSTALL_AND_VERIFY:
@@ -147,15 +146,6 @@ class EosRoutingConfigLifecycleTaskIntent:
             raise TypeError("EOS routing-config source must be typed")
         if self.source.provider is not ConfigArtifactProvider.CONFIGERATOR:
             raise ValueError("EOS routing-config source must be Configerator-owned")
-        if not isinstance(self.required_features, tuple) or any(
-            not isinstance(feature, str) or not feature
-            for feature in self.required_features
-        ):
-            raise ValueError(
-                "EOS routing-config required features must be nonempty strings"
-            )
-        if len(frozenset(self.required_features)) != len(self.required_features):
-            raise ValueError("EOS routing-config required features must be unique")
 
 
 @dataclass(frozen=True)
@@ -471,7 +461,6 @@ class EosBgpCppLifecycleRenderer:
                     operation_id=routing_config.resource_id,
                     source=source,
                     destination=_EOS_BGPCPP_CONFIG_DESTINATION,
-                    required_features=routing_config.required_features,
                 ),
             ),
         )

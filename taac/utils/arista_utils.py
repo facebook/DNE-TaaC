@@ -16,6 +16,8 @@ from taac.utils import log_parsing_utils
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+ARISTA_FILE_TRANSFER_CHUNK_SIZE = 30000
+ARISTA_FILE_TRANSFER_MAX_RETRIES = 3
 AGENT_LOGS_PATH = "/var/log/agents"
 ARCHIVED_AGENT_LOGS_PATH = "/mnt/flash/archive/current/var/log/agents"
 _ARCHIVED_LOG_ROTATION_EPOCH_RE = re.compile(r"_(\d{10})\.gz$")

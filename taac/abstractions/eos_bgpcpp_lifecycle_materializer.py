@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import typing as t
 from dataclasses import dataclass
 
 from taac.abstractions.compilation.dut import (
@@ -19,9 +20,13 @@ from taac.abstractions.compilation.model import (
 from taac.abstractions.eos_bgpcpp_renderer import (
     EosPhysicalLifecycleCleanupIntent,
     EosPhysicalLifecycleTaskIntent,
+    EosRoutingConfigLifecycleCleanupIntent,
+    EosRoutingConfigLifecycleTaskIntent,
 )
 from taac.task_definitions import (
+    create_arista_create_file_from_config_task,
     create_eos_compiler_lifecycle_task,
+    create_validate_bgpcpp_config_on_device_task,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -39,7 +44,7 @@ def _task(
     action: str,
     hostname: str,
     ixia_needed: bool,
-    params: dict[str, object],
+    params: t.Mapping[str, object],
 ) -> taac_types.Task:
     return create_eos_compiler_lifecycle_task(
         hostname=hostname,
@@ -71,6 +76,49 @@ def _materialize_physical_intent(
     )
 
 
+def _materialize_routing_config_intent(
+    intent: EosRoutingConfigLifecycleTaskIntent,
+) -> tuple[taac_types.Task, ...]:
+    common_params = {
+        "operation_id": _operation_key(intent.operation_id),
+        "destination": intent.destination,
+    }
+    return (
+        _task(
+            action="routing_config_snapshot",
+            hostname=intent.hostname,
+            ixia_needed=True,
+            params=common_params,
+        ),
+        create_arista_create_file_from_config_task(
+            hostname=intent.hostname,
+            configerator_path=intent.source.path,
+            file_path=intent.destination,
+            ixia_needed=True,
+        ),
+        create_validate_bgpcpp_config_on_device_task(
+            hostname=intent.hostname,
+            config_path=intent.destination,
+            ixia_needed=True,
+        ),
+        _task(
+            action="routing_config_verify",
+            hostname=intent.hostname,
+            ixia_needed=True,
+            params={
+                **common_params,
+                "source_path": intent.source.path,
+            },
+        ),
+    )
+
+
+def _materialize_post_ixia_task(task: object) -> tuple[object, ...]:
+    if isinstance(task, EosRoutingConfigLifecycleTaskIntent):
+        return _materialize_routing_config_intent(task)
+    return (task,)
+
+
 def _materialize_fragment(
     fragment: DutLifecycleFragment[object],
 ) -> DutLifecycleFragment[object]:
@@ -82,7 +130,11 @@ def _materialize_fragment(
             else task
             for task in fragment.pre_ixia_tasks
         ),
-        post_ixia_tasks=fragment.post_ixia_tasks,
+        post_ixia_tasks=tuple(
+            materialized
+            for task in fragment.post_ixia_tasks
+            for materialized in _materialize_post_ixia_task(task)
+        ),
     )
 
 
@@ -116,13 +168,23 @@ def _materialize_cleanup_fragment(
     fragment: DutLifecycleCleanupFragment[object],
 ) -> DutLifecycleCleanupFragment[object]:
     task = fragment.task
+    if isinstance(task, EosPhysicalLifecycleCleanupIntent):
+        materialized_task: object = _materialize_physical_cleanup(plan, task)
+    elif isinstance(task, EosRoutingConfigLifecycleCleanupIntent):
+        materialized_task = _task(
+            action="routing_config_restore",
+            hostname=task.hostname,
+            ixia_needed=False,
+            params={
+                "operation_id": _operation_key(task.operation_id),
+                "destination": task.destination,
+            },
+        )
+    else:
+        materialized_task = task
     return DutLifecycleCleanupFragment(
         operation_ids=fragment.operation_ids,
-        task=(
-            _materialize_physical_cleanup(plan, task)
-            if isinstance(task, EosPhysicalLifecycleCleanupIntent)
-            else task
-        ),
+        task=materialized_task,
     )
 
 

@@ -31,6 +31,7 @@ from taac.driver.driver_constants import (
 )
 from taac.file_templates import FILE_TEMPLATES
 from taac.tasks.base_task import BaseTask
+from taac.utils import arista_utils
 from taac.utils.common import (
     get_default_bgp_configs,
     get_default_configs,
@@ -1576,7 +1577,7 @@ class AristaCreateFileFromConfig(BaseTask):
     """
 
     NAME = "arista_create_file_from_config"
-    MAX_RETRIES = 3
+    MAX_RETRIES = arista_utils.ARISTA_FILE_TRANSFER_MAX_RETRIES
     # Each base64 chunk is pushed as a single `echo '<chunk>'` argument inside a
     # `bash sudo sh -c "echo '<chunk>' > <path>.b64"` command. The hard ceiling
     # is NOT the Linux per-argument cap (MAX_ARG_STRLEN = 131072) — it is the
@@ -1594,7 +1595,7 @@ class AristaCreateFileFromConfig(BaseTask):
     # below 30000 unless and until the transport is switched off in-shell echo
     # (e.g. scp/sftp — see internal/tasks/bgp_weight_policy_task.py for the
     # scp pattern).
-    DEFAULT_CHUNK_SIZE = 30000
+    DEFAULT_CHUNK_SIZE = arista_utils.ARISTA_FILE_TRANSFER_CHUNK_SIZE
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
