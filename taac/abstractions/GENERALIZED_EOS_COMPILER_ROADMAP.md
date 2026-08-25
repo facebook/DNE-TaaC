@@ -789,6 +789,10 @@ and IXIA fragments from stable dependencies and assemble a complete shadow
 `CompiledTaacArtifacts`. Reject missing, duplicate, or mixed native/delegated
 ownership.
 
+Status: implemented with exact endpoint, host-OS, lifecycle, and IXIA ownership
+reconciliation. Setup tasks are scheduled in pre-IXIA, IXIA-configuration, then
+post-IXIA order; teardown follows the validated lifecycle restoration order.
+
 **DICE 37: profile-free acceptance.** Freeze a dual-stack eBGP+iBGP fixture
 with `legacy_profile=None`, no `legacy_ixia_*` identity, exact setup/teardown
 coverage, topology-name independence, inventory-only realization changes, and

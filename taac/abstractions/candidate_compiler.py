@@ -59,6 +59,9 @@ from taac.abstractions.compilation.traffic_generator import (
     TrafficGeneratorRenderRequest,
     TrafficGeneratorRenderResult,
 )
+from taac.abstractions.native_artifact_assembler import (
+    NativeArtifactAssemblyRequest,
+)
 from taac.abstractions.topology.model import BoundTopology
 
 
@@ -85,6 +88,13 @@ class ArtifactAdapter(Protocol):
         bound: BoundTopology,
         plan: TopologyCompilationPlan,
     ) -> AdaptedArtifacts: ...
+
+
+class ArtifactAssembler(Protocol):
+    def assemble(
+        self,
+        request: NativeArtifactAssemblyRequest,
+    ) -> CompiledTaacArtifacts: ...
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,7 @@ class CandidateCompilation:
     basic_port_composition_shadow: BasicPortCompositionResult[object] | None = None
     endpoint_composition_shadow: EndpointCompositionResult[object] | None = None
     traffic_generator_shadow: TrafficGeneratorRenderResult | None = None
+    native_artifact_shadow: CompiledTaacArtifacts | None = None
     lifecycle: LifecyclePlan = field(default_factory=LifecyclePlan)
 
 
@@ -183,6 +194,38 @@ def _materialize_dut_lifecycle(
     return tasks
 
 
+def _assemble_native_artifacts(
+    assembler: ArtifactAssembler | None,
+    planning: PlanningResult,
+    endpoint_composition: EndpointCompositionResult[object] | None,
+    host_os: DutHostOsRenderResult[object] | None,
+    dut_lifecycle: DutLifecycleRenderResult[object] | None,
+    basic_ports: BasicPortCompositionResult[object] | None,
+    traffic_generator: TrafficGeneratorRenderResult | None,
+) -> CompiledTaacArtifacts | None:
+    if assembler is None:
+        return None
+    if (
+        endpoint_composition is None
+        or host_os is None
+        or dut_lifecycle is None
+        or basic_ports is None
+        or traffic_generator is None
+    ):
+        raise RuntimeError("artifact assembler dependencies were not rendered")
+    return assembler.assemble(
+        NativeArtifactAssemblyRequest(
+            plan=planning.plan,
+            lifecycle=planning.lifecycle,
+            endpoints=endpoint_composition,
+            host_os=host_os,
+            dut_lifecycle=dut_lifecycle,
+            basic_ports=basic_ports,
+            traffic_generator=traffic_generator,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
@@ -202,6 +245,7 @@ class CandidateTopologyCompiler:
     basic_port_composer: BasicPortComposer | None = None
     endpoint_composer: EndpointComposer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
+    artifact_assembler: ArtifactAssembler | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -225,6 +269,17 @@ class CandidateTopologyCompiler:
         ):
             raise ValueError(
                 "basic-port composer requires port-base and device-group renderers"
+            )
+        if self.artifact_assembler is not None and (
+            self.dut_host_os_renderer is None
+            or self.dut_lifecycle_task_materializer is None
+            or self.endpoint_composer is None
+            or self.basic_port_composer is None
+            or self.traffic_generator_renderer is None
+        ):
+            raise ValueError(
+                "artifact assembler requires host-OS, materialized lifecycle, "
+                "endpoint, basic-port, and traffic-generator outputs"
             )
 
     def analyze(self, bound: BoundTopology) -> PlanningResult:
@@ -364,6 +419,15 @@ class CandidateTopologyCompiler:
                 traffic_generator_request
             )
             traffic_generator_shadow.validate(traffic_generator_request)
+        native_artifact_shadow = _assemble_native_artifacts(
+            self.artifact_assembler,
+            planning,
+            endpoint_composition_shadow,
+            dut_host_os_shadow,
+            dut_lifecycle_task_shadow,
+            basic_port_composition_shadow,
+            traffic_generator_shadow,
+        )
         report = planning.report.with_renderer_reports(*adapted.renderer_reports)
         report.assert_renderable(
             resource_ids,
@@ -385,6 +449,7 @@ class CandidateTopologyCompiler:
             basic_port_composition_shadow=basic_port_composition_shadow,
             endpoint_composition_shadow=endpoint_composition_shadow,
             traffic_generator_shadow=traffic_generator_shadow,
+            native_artifact_shadow=native_artifact_shadow,
             lifecycle=planning.lifecycle,
         )
 
