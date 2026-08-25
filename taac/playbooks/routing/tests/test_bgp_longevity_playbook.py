@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import later.unittest
+from taac.playbooks.routing import bgp_ebb_playbooks as _bgp_ebb_playbooks
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_longevity_playbook,
 )
@@ -72,10 +73,9 @@ class BgpLongevityPlaybookTest(later.unittest.TestCase):
         self.assertIn("Quiesce 300s", description)
 
     def test_playbook_duration_is_the_churn_window(self) -> None:
-        target = (
-            "neteng.test_infra.dne.taac.playbooks.routing."
-            "bgp_ebb_playbooks.get_profile_checks"
-        )
+        # ShipIt rewrites import statements but not string literals, so the
+        # patch target is read off the imported module's __name__.
+        target = f"{_bgp_ebb_playbooks.__name__}.get_profile_checks"
         with patch(target) as get_checks:
             get_checks.return_value = SimpleNamespace(
                 prechecks=[], postchecks=[], snapshot_checks=[]
