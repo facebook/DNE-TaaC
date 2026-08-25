@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-unsafe
 import typing as t
 
 from taac.constants import TestDevice
@@ -29,7 +28,7 @@ class OpenrSparkNeighborHealthCheck(
     """
 
     CHECK_NAME = hc_types.CheckName.OPENR_SPARK_NEIGHBOR_CHECK
-    OPERATING_SYSTEMS = ["FBOSS"]
+    OPERATING_SYSTEMS = ["FBOSS", "EOS"]
 
     async def _run(
         self,

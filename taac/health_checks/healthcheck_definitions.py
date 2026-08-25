@@ -191,6 +191,57 @@ def create_bgp_session_establish_check(
     )
 
 
+def create_openr_spark_neighbor_check(
+    expected_neighbor_count: t.Optional[int] = None,
+    expected_neighbors: t.Optional[t.List[str]] = None,
+    allow_zero: bool = False,
+    check_id: t.Optional[str] = None,
+    check_scope: t.Optional["hc_types.Scope"] = None,
+    retry_count: t.Optional[int] = None,
+    retry_delay_seconds: t.Optional[float] = None,
+    retry_delay_multiplier: t.Optional[float] = None,
+) -> PointInTimeHealthCheck:
+    """OPENR_SPARK_NEIGHBOR_CHECK — verifies Open/R Spark neighbors are ESTABLISHED.
+
+    Args:
+        expected_neighbor_count: Exact number of ESTABLISHED neighbors expected.
+            When set, the check FAILs if the count differs. If omitted, the
+            count is derived from ``expected_neighbors`` or the device topology.
+        expected_neighbors: Optional list of expected neighbor node names. Each
+            must be present and ESTABLISHED, otherwise the check FAILs.
+        allow_zero: Set True to allow 0 neighbors (e.g. isolated-node test).
+            Defaults to False, so an empty neighbor set FAILs.
+        retry_count: Number of retries after the initial attempt when the check
+            returns FAIL. 0 (default) = single-shot. Each attempt re-fetches
+            live data from the device.
+        retry_delay_seconds: Base delay in seconds before the first retry.
+        retry_delay_multiplier: Exponential backoff multiplier applied to the
+            delay after each retry.
+    """
+    json_payload: t.Dict[str, t.Any] = {}
+    if expected_neighbor_count is not None:
+        json_payload["expected_neighbor_count"] = expected_neighbor_count
+    if expected_neighbors is not None:
+        json_payload["expected_neighbors"] = expected_neighbors
+    if allow_zero:
+        json_payload["allow_zero"] = True
+    if retry_count is not None:
+        json_payload["retry_count"] = retry_count
+    if retry_delay_seconds is not None:
+        json_payload["retry_delay_seconds"] = retry_delay_seconds
+    if retry_delay_multiplier is not None:
+        json_payload["retry_delay_multiplier"] = retry_delay_multiplier
+    check_params = None
+    if json_payload:
+        check_params = Params(json_params=json.dumps(json_payload))
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.OPENR_SPARK_NEIGHBOR_CHECK,
+        check_params=check_params,
+        check_id=check_id,
+        check_scope=check_scope,
+    )
+
+
 def create_bgp_rib_fib_consistency_check(
     extra_json_params: t.Optional[t.Dict[str, t.Any]] = None,
     check_id: t.Optional[str] = None,
