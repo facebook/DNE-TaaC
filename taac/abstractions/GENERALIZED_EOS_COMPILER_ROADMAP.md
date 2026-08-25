@@ -780,6 +780,10 @@ exact component rollback. The lifecycle shadow is now fully task-materialized.
 device-group, BGP-session, advertisement, and cleanup output for the
 profile-free acceptance capability without a legacy identity sidecar.
 
+Status: implemented with full partitioned dual-stack port, device-group,
+session, advertisement, and endpoint rendering. Default presentation identity
+is derived from stable resource IDs, so no legacy IXIA sidecar is required.
+
 **DICE 36: lifecycle scheduling and artifact assembly.** Schedule native DUT
 and IXIA fragments from stable dependencies and assemble a complete shadow
 `CompiledTaacArtifacts`. Reject missing, duplicate, or mixed native/delegated

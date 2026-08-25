@@ -125,7 +125,7 @@ class SharedIxiaPortDeviceGroupRenderer:
         self,
         request: TrafficGeneratorPortDeviceGroupRenderRequest,
     ) -> TrafficGeneratorPortDeviceGroupRenderResult[taac_types.DeviceGroupConfig]:
-        capability = _validated_device_group_capability(request)
+        capability = _validated_capability(request)
         fragments = tuple(
             _port_device_group_fragment(request, port, capability)
             for port in request.active_ports()
@@ -146,7 +146,7 @@ class SharedIxiaRenderer:
         self,
         request: TrafficGeneratorRenderRequest,
     ) -> TrafficGeneratorRenderResult:
-        capability = _validated_full_capability(request)
+        capability = _validated_capability(request)
         activation_by_endpoint = {
             activation.endpoint_id: activation
             for activation in request.endpoint_activations
@@ -221,21 +221,11 @@ def _port_device_group_fragment(
     )
 
 
-def _validated_device_group_capability(
+def _validated_capability(
     request: TrafficGeneratorRenderRequest,
 ) -> _IxiaRenderingCapability:
     capability = _select_capability(request)
     _validate_capability(request, capability)
-    return capability
-
-
-def _validated_full_capability(
-    request: TrafficGeneratorRenderRequest,
-) -> _IxiaRenderingCapability:
-    capability = _select_capability(request)
-    _validate_capability(request, capability)
-    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
-        _unsupported("partitioned dual-stack IXIA lowering is field-scoped only")
     return capability
 
 
@@ -1125,7 +1115,7 @@ def _basic_port_config(
     port: IxiaPortPlan,
     capability: _IxiaRenderingCapability,
 ) -> taac_types.BasicPortConfig:
-    groups = _ordered_port_groups(request, port)
+    groups = _capability_port_groups(request, port, capability)
     return taac_types.BasicPortConfig(
         endpoint=f"{port.dut_physical_identifier}:{port.dut_interface}",
         device_group_configs=[
