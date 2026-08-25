@@ -798,6 +798,11 @@ with `legacy_profile=None`, no `legacy_ixia_*` identity, exact setup/teardown
 coverage, topology-name independence, inventory-only realization changes, and
 a second equivalent topology requiring no compiler edit.
 
+Status: implemented with a production compiler factory and two profile-free
+bounded-ECMP logical fixtures. Acceptance freezes exact lifecycle coverage,
+topology-name independence, inventory-only physical drift, and generic handling
+of an equivalent topology with different logical resource identities.
+
 **DICE 38: capability-gated cutover.** Return the native artifact for the
 accepted capability set and retain the established compiler only as the
 fail-closed fallback for unsupported profiles. Remove temporary shadow gates

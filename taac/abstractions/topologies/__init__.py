@@ -49,6 +49,10 @@ from taac.abstractions.topologies.ipv6_update_packing import (
     IPV6_UPDATE_PACKING_PORT_MAP,
     IPV6_UPDATE_PACKING_PREFIX_SET,
 )
+from taac.abstractions.topologies.profile_free_bounded_ecmp import (
+    PROFILE_FREE_BOUNDED_ECMP,
+    PROFILE_FREE_BOUNDED_ECMP_VARIANT,
+)
 from taac.abstractions.topologies.ug_backpressure import (
     UG_BACKPRESSURE,
     UG_BACKPRESSURE_AS_NUMBERS,
@@ -102,6 +106,8 @@ __all__ = (
     "IPV6_UPDATE_PACKING_PEER_GROUPS",
     "IPV6_UPDATE_PACKING_PORT_MAP",
     "IPV6_UPDATE_PACKING_PREFIX_SET",
+    "PROFILE_FREE_BOUNDED_ECMP",
+    "PROFILE_FREE_BOUNDED_ECMP_VARIANT",
     "UG_BACKPRESSURE",
     "UG_BACKPRESSURE_AS_NUMBERS",
     "UG_BACKPRESSURE_PARENT_NETWORKS",
