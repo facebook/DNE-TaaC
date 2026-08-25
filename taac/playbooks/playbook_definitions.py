@@ -52,6 +52,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
     create_bgp_session_snapshot_check,
     create_clear_counters_check,
+    create_openr_spark_neighbor_check,
     create_core_dumps_snapshot_check,
     create_cpu_queue_snapshot_check,
     create_cpu_utilization_check,
@@ -3064,6 +3065,47 @@ def create_case2_tcp_socket_data_collection_playbook(
                     "Restart BGP++ and collect TCP data"
                     " (ss + egress) during convergence"
                 ),
+            ),
+        ],
+    )
+
+
+def create_openr_subif_adjacency_scale_playbook(
+    expected_neighbor_count: int,
+    convergence_wait_seconds: int,
+    postcheck_retry_count: int,
+    postcheck_retry_delay_seconds: float,
+) -> Playbook:
+    """Open/R sub-interface adjacency scaling playbook.
+
+    Verifies Open/R responds, waits for convergence, then asserts the DUT has
+    exactly ``expected_neighbor_count`` ESTABLISHED Open/R Spark adjacencies.
+
+    - precheck: Open/R Thrift is reachable on the EOS endpoints (allow_zero).
+    - stage: wait for adjacencies to form on the freshly-created sub-interfaces.
+    - postcheck: exactly ``expected_neighbor_count`` ESTABLISHED adjacencies,
+      retried to absorb convergence lag; a mismatch is a FAIL verdict.
+    """
+    return Playbook(
+        name="openr_subif_adjacency_scale_playbook",
+        prechecks=[
+            create_openr_spark_neighbor_check(allow_zero=True),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_longevity_step(duration=convergence_wait_seconds),
+                ],
+                description=(
+                    "Wait for Open/R adjacencies to form on the new sub-interfaces"
+                ),
+            ),
+        ],
+        postchecks=[
+            create_openr_spark_neighbor_check(
+                expected_neighbor_count=expected_neighbor_count,
+                retry_count=postcheck_retry_count,
+                retry_delay_seconds=postcheck_retry_delay_seconds,
             ),
         ],
     )

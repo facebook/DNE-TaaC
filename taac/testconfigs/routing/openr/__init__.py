@@ -37,4 +37,10 @@ References
 - Requirements & Design: https://docs.google.com/document/d/1F1pkyhYx2sVxJxADitWBZVVpRIs-LoYFM87zkeHYb_8/edit?usp=sharing
 """
 
-__all__: list[str] = []
+from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
+    OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG,
+)
+
+__all__ = [
+    "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
+]
