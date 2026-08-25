@@ -772,6 +772,10 @@ of either the prior file or its absence.
 BGP++/FibAgent daemon reconciliation, startup option, acknowledged readiness,
 and component-state restoration.
 
+Status: implemented with launcher and running-config snapshots, reverse-order
+disable, dependency-order enable, explicit daemon/startup acknowledgement, and
+exact component rollback. The lifecycle shadow is now fully task-materialized.
+
 **DICE 35: baseline shared IXIA rendering.** Complete native endpoint, port,
 device-group, BGP-session, advertisement, and cleanup output for the
 profile-free acceptance capability without a legacy identity sidecar.

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, call, MagicMock, patch
 from later.unittest import TestCase
 from taac.driver.drivers_common import CommandExecutionError
 from taac.internal.tasks.eos_compiler_lifecycle_task import (
+    _has_exact_startup_option,
     EosCompilerLifecycleTask,
 )
 
@@ -62,7 +63,63 @@ def _routing_config_params(action: str) -> dict[str, object]:
     return params
 
 
+def _routing_component_params(action: str) -> dict[str, object]:
+    params: dict[str, object] = {
+        "action": action,
+        "hostname": "dut.example.com",
+        "operation_id": "component:dut0/routing_control_plane",
+        "startup_path": "/usr/sbin/run_bgpcpp.sh",
+    }
+    if action == "routing_component_acknowledge":
+        params["daemons"] = [
+            {"name": "FibGrpc", "enabled": True, "dependencies": []},
+            {"name": "FibBgpGrpc", "enabled": True, "dependencies": []},
+            {
+                "name": "FibAgent",
+                "enabled": True,
+                "dependencies": ["FibGrpc"],
+            },
+            {
+                "name": "FibAgentBgp",
+                "enabled": True,
+                "dependencies": ["FibBgpGrpc"],
+            },
+            {"name": "Openr", "enabled": False, "dependencies": []},
+            {
+                "name": "Bgp",
+                "enabled": True,
+                "dependencies": ["FibAgent", "FibAgentBgp"],
+            },
+        ]
+        params["startup_options"] = [
+            {
+                "daemon": "Bgp",
+                "name": "bgp_resolve_nexthops_from_interface_state",
+                "value": "true",
+            }
+        ]
+    return params
+
+
 class EosCompilerLifecycleTaskTest(TestCase):
+    def test_startup_option_rejects_space_separated_value(self) -> None:
+        self.assertFalse(
+            _has_exact_startup_option(
+                "--bgp_resolve_nexthops_from_interface_state true",
+                "bgp_resolve_nexthops_from_interface_state",
+                "true",
+            )
+        )
+
+    def test_startup_option_rejects_bare_flag_followed_by_flag(self) -> None:
+        self.assertFalse(
+            _has_exact_startup_option(
+                "--bgp_resolve_nexthops_from_interface_state --verbose",
+                "bgp_resolve_nexthops_from_interface_state",
+                "--verbose",
+            )
+        )
+
     async def test_physical_apply_captures_once_and_verifies_exact_readback(
         self,
     ) -> None:
@@ -518,3 +575,319 @@ class EosCompilerLifecycleTaskTest(TestCase):
             for item in driver.async_execute_show_or_configure_cmd_on_shell.await_args_list
         )
         self.assertFalse(any("rm -f" in command for command in commands))
+
+    async def test_routing_component_restores_startup_and_running_config(self) -> None:
+        driver = MagicMock()
+        driver.async_read_file = AsyncMock(return_value="original startup")
+
+        async def execute(command: str, *, configure: bool = False) -> str:
+            if "stat -c" in command:
+                return "taac-file-metadata:755:0:0"
+            if "sha256sum" in command:
+                return hashlib.sha256(b"original startup").hexdigest()
+            return ""
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=execute
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+        restore = AsyncMock()
+        delete = AsyncMock()
+
+        with (
+            patch(
+                f"{_MODULE}.async_get_device_driver",
+                AsyncMock(return_value=driver),
+            ),
+            patch(
+                f"{_MODULE}.arista_utils.save_running_config",
+                AsyncMock(return_value="flash:component-original"),
+            ),
+            patch(f"{_MODULE}.arista_utils.restore_running_config", restore),
+            patch(f"{_MODULE}.arista_utils.delete_backup_config", delete),
+        ):
+            await task.run(_routing_component_params("routing_component_snapshot"))
+            await task.run(_routing_component_params("routing_component_restore"))
+
+        commands = tuple(
+            item.args[0]
+            for item in driver.async_execute_show_or_configure_cmd_on_shell.await_args_list
+        )
+        self.assertTrue(
+            any("b3JpZ2luYWwgc3RhcnR1cA==" in command for command in commands)
+        )
+        self.assertTrue(any("chown 0:0" in command for command in commands))
+        self.assertTrue(any("chmod '755'" in command for command in commands))
+        restore.assert_awaited_once_with(
+            driver,
+            "flash:component-original",
+            logger_instance=task.logger,
+        )
+        delete.assert_awaited_once_with(
+            driver,
+            "flash:component-original",
+            logger_instance=task.logger,
+        )
+
+    async def test_routing_component_snapshot_cleans_backup_on_failure(self) -> None:
+        driver = MagicMock()
+        driver.async_read_file = AsyncMock(return_value="original startup")
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            return_value="malformed metadata"
+        )
+        shared_data: dict[object, object] = {}
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data=shared_data,
+        )
+        delete = AsyncMock()
+
+        with (
+            patch(
+                f"{_MODULE}.async_get_device_driver",
+                AsyncMock(return_value=driver),
+            ),
+            patch(
+                f"{_MODULE}.arista_utils.save_running_config",
+                AsyncMock(return_value="flash:component-original"),
+            ),
+            patch(f"{_MODULE}.arista_utils.delete_backup_config", delete),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "metadata readback"):
+                await task.run(_routing_component_params("routing_component_snapshot"))
+
+        delete.assert_awaited_once_with(
+            driver,
+            "flash:component-original",
+            logger_instance=task.logger,
+        )
+        self.assertEqual({}, shared_data)
+
+    async def test_routing_component_restore_retains_backup_on_failure(self) -> None:
+        driver = MagicMock()
+        driver.async_read_file = AsyncMock(side_effect=FileNotFoundError)
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(return_value="")
+        logger = MagicMock()
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=logger,
+            shared_data={},
+        )
+        restore = AsyncMock(side_effect=ValueError("restore failed"))
+        delete = AsyncMock()
+
+        with (
+            patch(
+                f"{_MODULE}.async_get_device_driver",
+                AsyncMock(return_value=driver),
+            ),
+            patch(
+                f"{_MODULE}.arista_utils.save_running_config",
+                AsyncMock(return_value="flash:component-original"),
+            ),
+            patch(f"{_MODULE}.arista_utils.restore_running_config", restore),
+            patch(f"{_MODULE}.arista_utils.delete_backup_config", delete),
+        ):
+            await task.run(_routing_component_params("routing_component_snapshot"))
+            with self.assertRaisesRegex(ValueError, "restore failed"):
+                await task.run(_routing_component_params("routing_component_restore"))
+
+        delete.assert_not_awaited()
+        logger.warning.assert_called_once()
+
+    async def test_routing_component_acknowledges_daemons_and_startup_option(
+        self,
+    ) -> None:
+        driver = MagicMock()
+
+        async def daemon_status(command: str) -> str:
+            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            name = next(name for name in names if name in command)
+            state = "not running" if name == "Openr" else "running with PID 123"
+            return f"Process: {name} ({state})"
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=daemon_status
+        )
+        driver.async_read_file = AsyncMock(
+            return_value="\n".join(
+                (
+                    "--bgp_resolve_nexthops_from_interface_state=\\",
+                    "true",
+                )
+            )
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            await task.run(_routing_component_params("routing_component_acknowledge"))
+
+        self.assertEqual(
+            6,
+            driver.async_execute_show_or_configure_cmd_on_shell.await_count,
+        )
+        driver.async_read_file.assert_awaited_once_with("/usr/sbin/run_bgpcpp.sh")
+
+    async def test_routing_component_acknowledge_skips_unused_startup_file(
+        self,
+    ) -> None:
+        driver = MagicMock()
+
+        async def daemon_status(command: str) -> str:
+            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            name = next(name for name in names if name in command)
+            state = "not running" if name == "Openr" else "running with PID 123"
+            return f"Process: {name} ({state})"
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=daemon_status
+        )
+        driver.async_read_file = AsyncMock()
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+        params = _routing_component_params("routing_component_acknowledge")
+        params["startup_options"] = []
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            await task.run(params)
+
+        driver.async_read_file.assert_not_awaited()
+
+    async def test_routing_component_acknowledge_reports_startup_read_failure(
+        self,
+    ) -> None:
+        driver = MagicMock()
+
+        async def daemon_status(command: str) -> str:
+            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            name = next(name for name in names if name in command)
+            state = "not running" if name == "Openr" else "running with PID 123"
+            return f"Process: {name} ({state})"
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=daemon_status
+        )
+        driver.async_read_file = AsyncMock(
+            side_effect=CommandExecutionError("transport failed")
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "failed to read EOS routing component startup file ",
+            ):
+                await task.run(
+                    _routing_component_params("routing_component_acknowledge")
+                )
+
+    async def test_routing_component_rejects_unacknowledged_daemon(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            return_value="Process: FibGrpc (not running)"
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "acknowledgement mismatch"):
+                await task.run(
+                    _routing_component_params("routing_component_acknowledge")
+                )
+
+    async def test_routing_component_rejects_inexact_startup_option(self) -> None:
+        driver = MagicMock()
+
+        async def daemon_status(command: str) -> str:
+            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            name = next(name for name in names if name in command)
+            state = "not running" if name == "Openr" else "running with PID 123"
+            return f"Process: {name} ({state})"
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=daemon_status
+        )
+        driver.async_read_file = AsyncMock(
+            return_value=(
+                "# --bgp_resolve_nexthops_from_interface_state=true\n"
+                "--bgp_resolve_nexthops_from_interface_state=true0"
+            )
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "was not acknowledged"):
+                await task.run(
+                    _routing_component_params("routing_component_acknowledge")
+                )
+
+    async def test_routing_component_rejects_duplicate_startup_option(self) -> None:
+        driver = MagicMock()
+
+        async def daemon_status(command: str) -> str:
+            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            name = next(name for name in names if name in command)
+            state = "not running" if name == "Openr" else "running with PID 123"
+            return f"Process: {name} ({state})"
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=daemon_status
+        )
+        driver.async_read_file = AsyncMock(
+            return_value=(
+                "--bgp_resolve_nexthops_from_interface_state=false "
+                "--bgp_resolve_nexthops_from_interface_state=true"
+            )
+        )
+        task = EosCompilerLifecycleTask(
+            hostname="dut.example.com",
+            logger=MagicMock(),
+            shared_data={},
+        )
+
+        with patch(
+            f"{_MODULE}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "was not acknowledged"):
+                await task.run(
+                    _routing_component_params("routing_component_acknowledge")
+                )
