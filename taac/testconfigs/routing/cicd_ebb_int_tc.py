@@ -31,38 +31,21 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
 
 _OPENR_STANDALONE = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
 
-_BAG010_STAGE1_PLAYBOOKS = (
-    "bgp_ebb_route_registry_runtime_update_playbook",
-    "bgp_ebb_daemon_restart_playbook",
-    "bgp_ebb_cold_start_playbook",
-    "bgp_ebb_longevity_playbook",
-)
-_BAG011_STAGE1_PLAYBOOKS = (
-    "bgp_ebb_attribute_churn_playbook",
-    "bgp_ebb_fauu_drain_undrain_playbook",
-    "bgp_ebb_plane_drain_undrain_playbook",
-    "bgp_ebb_ibgp_route_oscillation_playbook",
-)
-_BAG012_STAGE1_PLAYBOOKS = (
-    "bgp_ebb_route_storm_playbook",
-    "bgp_ebb_multipath_group_oscillation_playbook",
-    "bgp_ebb_igp_pnh_metric_oscillation_playbook",
-    "bgp_ebb_ebgp_session_oscillation_playbook",
-)
-_BAG013_STAGE1_PLAYBOOKS = (
-    "bgp_ebb_ebgp_route_oscillation_playbook",
-    "bgp_ebb_ibgp_plane_session_oscillation_playbook",
-    "bgp_ebb_igp_unresolvable_pnh_playbook",
-    "bgp_ebb_nexthop_group_count_threshold_playbook",
-)
-
 
 # Stage 1: four full-scale playbooks per device. BAG010 runs longevity last.
+# Each config lists its playbooks inline so what a Conveyor node runs is
+# readable at the node, without resolving a shared constant. The UG and Non-UG
+# configs for a device are expected to list the same playbooks, BAG011 aside.
 # CONVEYOR: dne_routing / bag010_stage1_node
 BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    playbooks_selected=list(_BAG010_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_route_registry_runtime_update_playbook",
+        "bgp_ebb_daemon_restart_playbook",
+        "bgp_ebb_cold_start_playbook",
+        "bgp_ebb_longevity_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
 )
@@ -70,16 +53,31 @@ BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
 BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     BAG010_ASH6,
     name="BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
-    playbooks_selected=list(_BAG010_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_route_registry_runtime_update_playbook",
+        "bgp_ebb_daemon_restart_playbook",
+        "bgp_ebb_cold_start_playbook",
+        "bgp_ebb_longevity_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
 )
 
 # CONVEYOR: dne_routing / bag011_stage1_node
+# The one Stage 1 config that does not match its UG counterpart: plane
+# drain/undrain is omitted here because it is a known failure without update
+# groups. This node is a non-blocking Conveyor leaf, so that failure gated
+# nothing and only cost IXIA and DUT setup time on every run. Coverage is
+# unaffected: bag011_stage1_ug_node gates tagging and RPM promotion, and the UG
+# config below still runs the playbook.
 BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
     BAG011_ASH6,
     name="BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    playbooks_selected=list(_BAG011_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_attribute_churn_playbook",
+        "bgp_ebb_fauu_drain_undrain_playbook",
+        "bgp_ebb_ibgp_route_oscillation_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
 )
@@ -87,7 +85,12 @@ BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
 BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     BAG011_ASH6,
     name="BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
-    playbooks_selected=list(_BAG011_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_attribute_churn_playbook",
+        "bgp_ebb_fauu_drain_undrain_playbook",
+        "bgp_ebb_plane_drain_undrain_playbook",
+        "bgp_ebb_ibgp_route_oscillation_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
 )
@@ -96,7 +99,12 @@ BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
 BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
     BAG012_ASH6,
     name="BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    playbooks_selected=list(_BAG012_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_route_storm_playbook",
+        "bgp_ebb_multipath_group_oscillation_playbook",
+        "bgp_ebb_igp_pnh_metric_oscillation_playbook",
+        "bgp_ebb_ebgp_session_oscillation_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
 )
@@ -104,7 +112,12 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
 BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     BAG012_ASH6,
     name="BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
-    playbooks_selected=list(_BAG012_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_route_storm_playbook",
+        "bgp_ebb_multipath_group_oscillation_playbook",
+        "bgp_ebb_igp_pnh_metric_oscillation_playbook",
+        "bgp_ebb_ebgp_session_oscillation_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
 )
@@ -113,7 +126,12 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
 BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
     BAG013_ASH6,
     name="BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    playbooks_selected=list(_BAG013_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_ebgp_route_oscillation_playbook",
+        "bgp_ebb_ibgp_plane_session_oscillation_playbook",
+        "bgp_ebb_igp_unresolvable_pnh_playbook",
+        "bgp_ebb_nexthop_group_count_threshold_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
 )
@@ -121,7 +139,12 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
 BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     BAG013_ASH6,
     name="BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
-    playbooks_selected=list(_BAG013_STAGE1_PLAYBOOKS),
+    playbooks_selected=[
+        "bgp_ebb_ebgp_route_oscillation_playbook",
+        "bgp_ebb_ibgp_plane_session_oscillation_playbook",
+        "bgp_ebb_igp_unresolvable_pnh_playbook",
+        "bgp_ebb_nexthop_group_count_threshold_playbook",
+    ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
 )
