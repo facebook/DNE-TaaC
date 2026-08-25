@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import logging
+
+from taac.abstractions.artifacts import CompiledTaacArtifacts
 from taac.abstractions.candidate_compiler import (
     ArtifactAdapter,
     CandidateTopologyCompiler,
@@ -10,22 +13,29 @@ from taac.abstractions.candidate_compiler import (
 from taac.abstractions.compilation.planner import (
     BoundTopologyPlanner,
 )
+from taac.abstractions.compilation.report import (
+    UnsupportedRequiredIntentError,
+)
 from taac.abstractions.eos_bgpcpp_capabilities import (
     EosBgpCppCapabilityPreflight,
+    UnsupportedEosBgpCppCapabilityError,
 )
 from taac.abstractions.eos_bgpcpp_lifecycle_materializer import (
     EosBgpCppLifecycleTaskMaterializer,
+    UnsupportedEosBgpCppLifecycleMaterializationError,
 )
 from taac.abstractions.eos_bgpcpp_renderer import (
     EosBgpCppEndpointBaseRenderer,
     EosBgpCppHostOsRenderer,
     EosBgpCppLifecycleRenderer,
+    UnsupportedEosBgpCppLifecycleRenderingError,
 )
 from taac.abstractions.ixia_renderer import (
     SharedIxiaEndpointRenderer,
     SharedIxiaPortBaseRenderer,
     SharedIxiaPortDeviceGroupRenderer,
     SharedIxiaRenderer,
+    UnsupportedIxiaRenderingError,
 )
 from taac.abstractions.native_artifact_assembler import (
     NativeTaacArtifactAssembler,
@@ -36,10 +46,16 @@ from taac.abstractions.taac_basic_port_composer import (
 from taac.abstractions.taac_endpoint_composer import (
     TaacEndpointComposer,
 )
+from taac.abstractions.topology.model import BoundTopology
+
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 def build_eos_bgpcpp_candidate_compiler(
-    artifact_adapter: ArtifactAdapter,
+    artifact_adapter: ArtifactAdapter | None = None,
+    *,
+    native_artifacts_authoritative: bool = False,
 ) -> CandidateTopologyCompiler:
     return CandidateTopologyCompiler(
         planner=BoundTopologyPlanner(),
@@ -58,7 +74,37 @@ def build_eos_bgpcpp_candidate_compiler(
         endpoint_composer=TaacEndpointComposer(),
         traffic_generator_renderer=SharedIxiaRenderer(),
         artifact_assembler=NativeTaacArtifactAssembler(),
+        native_artifacts_authoritative=native_artifacts_authoritative,
     )
 
 
-__all__ = ("build_eos_bgpcpp_candidate_compiler",)
+def compile_profile_free_eos_if_supported(
+    bound: BoundTopology,
+) -> CompiledTaacArtifacts | None:
+    if bound.logical_topology.legacy_profile is not None:
+        return None
+    try:
+        return build_eos_bgpcpp_candidate_compiler(
+            native_artifacts_authoritative=True,
+        ).compile(bound)
+    except (
+        UnsupportedEosBgpCppCapabilityError,
+        UnsupportedEosBgpCppLifecycleMaterializationError,
+        UnsupportedEosBgpCppLifecycleRenderingError,
+        UnsupportedIxiaRenderingError,
+        UnsupportedRequiredIntentError,
+    ) as error:
+        if bound.logical_topology.task_compatibility_profile is not None:
+            raise
+        logger.warning(
+            "Falling back from native profile-free EOS compilation for %s: %s",
+            bound.logical_topology.name,
+            error,
+        )
+        return None
+
+
+__all__ = (
+    "build_eos_bgpcpp_candidate_compiler",
+    "compile_profile_free_eos_if_supported",
+)

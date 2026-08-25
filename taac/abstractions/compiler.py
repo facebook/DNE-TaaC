@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ixia.ixia import types as ixia_types
 from taac.abstractions.artifacts import CompiledTaacArtifacts
@@ -31,6 +31,9 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
     IBGP_PEER_SCALE_PER_PLANE,
     IBGP_REMOTE_AS,
+)
+from taac.abstractions.eos_bgpcpp_candidate_factory import (
+    compile_profile_free_eos_if_supported,
 )
 from taac.abstractions.eos_bgpcpp_component_runtime import (
     ComponentRuntime,
@@ -73,6 +76,7 @@ from taac.abstractions.topology.model import (
     ResolvedIxiaPortAssignment,
     ResolvedPeer,
     RoutingDeviceConfig,
+    TaskCompatibilityProfile,
 )
 from taac.abstractions.topology.prefix import (
     NextHopMode,
@@ -4677,6 +4681,21 @@ class TopologyCompiler:
         return []
 
 
+@dataclass(frozen=True)
+class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
+    """EOS BGP++ compiler that prefers native profile-free artifacts."""
+
+    def compile(self, bound: BoundTopology) -> CompiledTaacArtifacts:
+        native_artifacts = compile_profile_free_eos_if_supported(bound)
+        if native_artifacts is None:
+            return EosBgpCppCompiler().compile(bound)
+        return (
+            _preserve_bounded_ecmp_task_artifacts(bound, native_artifacts)
+            if _is_profile_free_bounded_ecmp(bound)
+            else native_artifacts
+        )
+
+
 class EosBgpCppCompiler(TopologyCompiler):
     """EOS BGP++ compiler with a typed device-plan rendering boundary."""
 
@@ -5019,6 +5038,172 @@ class FbossCoopCompiler(TopologyCompiler):
     """
 
 
+_GroupMapValue = t.TypeVar("_GroupMapValue")
+
+
+def _remap_device_group_keys(
+    values: t.Mapping[str, _GroupMapValue],
+    group_names: t.Mapping[str, str],
+) -> dict[str, _GroupMapValue]:
+    remapped = {group_names.get(name, name): value for name, value in values.items()}
+    if len(remapped) != len(values):
+        raise RuntimeError(
+            "bounded-ECMP task compatibility projection collapsed map keys"
+        )
+    return remapped
+
+
+def _preserve_bounded_ecmp_task_artifacts(
+    bound: BoundTopology,
+    native_artifacts: CompiledTaacArtifacts,
+) -> CompiledTaacArtifacts:
+    projected_groups = tuple(
+        _bounded_ecmp_task_compatibility_group(group) for group in bound.device_groups
+    )
+    projected_names = tuple(group.name for group in projected_groups)
+    if len(frozenset(projected_names)) != len(projected_names):
+        raise RuntimeError(
+            "bounded-ECMP task compatibility projection requires unique role/AFI groups"
+        )
+    group_names = {
+        original.name: projected.name
+        for original, projected in zip(
+            bound.device_groups,
+            projected_groups,
+            strict=True,
+        )
+    }
+    task_bound = replace(
+        bound,
+        logical_topology=replace(
+            bound.logical_topology,
+            name=_BOUNDED_ECMP_TOPOLOGY,
+            legacy_profile=_BOUNDED_ECMP_PROFILE,
+            task_compatibility_profile=None,
+            device_groups=tuple(group.spec for group in projected_groups),
+            route_senders=tuple(
+                replace(
+                    sender,
+                    device_group=group_names.get(
+                        sender.device_group,
+                        sender.device_group,
+                    ),
+                )
+                for sender in bound.logical_topology.route_senders
+            ),
+        ),
+        device_groups=projected_groups,
+        resolved_device_groups=_remap_device_group_keys(
+            bound.resolved_device_groups,
+            group_names,
+        ),
+        routing_drivers=_remap_device_group_keys(
+            bound.routing_drivers,
+            group_names,
+        ),
+        ixia_ports=_remap_device_group_keys(bound.ixia_ports, group_names),
+        interfaces=_remap_device_group_keys(bound.interfaces, group_names),
+        as_numbers=_remap_device_group_keys(bound.as_numbers, group_names),
+        resolved_route_senders=tuple(
+            replace(
+                sender,
+                device_group=group_names.get(
+                    sender.device_group,
+                    sender.device_group,
+                ),
+            )
+            for sender in bound.resolved_route_senders
+        ),
+        peer_groups_by_device_group={
+            group.name: group.peer_group
+            for group in projected_groups
+            if group.peer_group is not None
+        },
+        legacy_names=_remap_device_group_keys(bound.legacy_names, group_names),
+        parent_networks=_remap_device_group_keys(bound.parent_networks, group_names),
+    )
+    established = EosBgpCppCompiler()
+    return replace(
+        native_artifacts,
+        setup_tasks=established.build_setup_tasks(task_bound),
+        teardown_tasks=established.build_teardown_tasks(task_bound),
+    )
+
+
+def _is_profile_free_bounded_ecmp(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.BOUNDED_ECMP
+    )
+
+
+# The legacy BOUNDED_ECMP task config places IPv4 iBGP at index 1 and its
+# three IPv4 eBGP sets at indices 3-5; IPv6 groups start at index 0.
+_BOUNDED_ECMP_LEGACY_V4_NON_EBGP_DEVICE_GROUP_INDEX = 1
+_BOUNDED_ECMP_LEGACY_V4_EBGP_DEVICE_GROUP_OFFSET = 3
+
+
+def _bounded_ecmp_legacy_device_group_index(
+    role: str,
+    afi: str,
+    ordinal: int,
+) -> int:
+    if role == "ebgp":
+        return ordinal + (
+            _BOUNDED_ECMP_LEGACY_V4_EBGP_DEVICE_GROUP_OFFSET if afi == "v4" else 0
+        )
+    return _BOUNDED_ECMP_LEGACY_V4_NON_EBGP_DEVICE_GROUP_INDEX if afi == "v4" else 0
+
+
+def _bounded_ecmp_task_compatibility_group(
+    group: BoundDeviceGroup,
+) -> BoundDeviceGroup:
+    legacy_afi = "IPV4" if group.afi == "v4" else "IPV6"
+    group_name = f"dg_bounded_ecmp_{group.role}_{group.afi}"
+    projected_children = []
+    for child in group.ixia_children:
+        suffix = f"_SET{child.spec.ordinal + 1}" if group.role == "ebgp" else ""
+        child_name = f"bounded_ecmp_{group.role}_{group.afi}"
+        if group.role == "ebgp":
+            child_name = f"{child_name}_set{child.spec.ordinal + 1}"
+        projected_spec = replace(
+            child.spec,
+            name=child_name,
+            legacy_ixia_device_group_name=(
+                f"DEVICE_GROUP_{legacy_afi}_{group.role.upper()}{suffix}"
+            ),
+            legacy_ixia_bgp_peer_name=(
+                f"BGP_PEER_{legacy_afi}_{group.role.upper()}{suffix}"
+            ),
+            legacy_ixia_prefix_pool_name=(
+                f"PREFIX_POOL_{legacy_afi}_{group.role.upper()}{suffix}"
+                if group.role == "ebgp"
+                else None
+            ),
+            legacy_ixia_device_group_index=_bounded_ecmp_legacy_device_group_index(
+                group.role,
+                group.afi,
+                child.spec.ordinal,
+            ),
+        )
+        projected_children.append(replace(child, spec=projected_spec))
+    projected_child_names = tuple(child.name for child in projected_children)
+    if len(frozenset(projected_child_names)) != len(projected_child_names):
+        raise RuntimeError(
+            "bounded-ECMP task compatibility projection requires unique child names"
+        )
+    return replace(
+        group,
+        spec=replace(
+            group.spec,
+            name=group_name,
+            ixia_children=tuple(child.spec for child in projected_children),
+        ),
+        ixia_children=tuple(projected_children),
+    )
+
+
 def select_topology_compiler(bound: BoundTopology) -> TopologyCompiler:
     primary_dut_os = _primary_dut_os(bound)
     key = CompilerKey(
@@ -5026,7 +5211,11 @@ def select_topology_compiler(bound: BoundTopology) -> TopologyCompiler:
         routing_driver=_primary_routing_driver(bound, primary_dut_os),
     )
     if key == CompilerKey(endpoint_os="eos", routing_driver="bgpcpp"):
-        return EosBgpCppCompiler()
+        return (
+            ProfileFreeEosBgpCppCompiler()
+            if _is_profile_free_bounded_ecmp(bound)
+            else EosBgpCppCompiler()
+        )
     if key == CompilerKey(endpoint_os="fboss", routing_driver="fboss"):
         return FbossCoopCompiler()
     raise TopologyValidationError(

@@ -23,6 +23,7 @@ from taac.abstractions.topology.model import (
     IxiaEndpointPortLabelStyle,
     IxiaPortAssignment,
     OpenRMode,
+    TaskCompatibilityProfile,
 )
 from taac.abstractions.topology.prefix import (
     NextHopDistribution,
@@ -166,6 +167,24 @@ def _validate_logical_topology_identity(
                 f"unsupported legacy profile {logical_topology.legacy_profile!r}",
             )
         )
+    compatibility_profile = logical_topology.task_compatibility_profile
+    if compatibility_profile is not None:
+        if not isinstance(compatibility_profile, TaskCompatibilityProfile):
+            issues.append(
+                _issue(
+                    "task_compatibility_profile",
+                    "invalid_task_compatibility_profile",
+                    "task compatibility profile must be typed",
+                )
+            )
+        elif logical_topology.legacy_profile is not None:
+            issues.append(
+                _issue(
+                    "task_compatibility_profile",
+                    "legacy_task_compatibility_conflict",
+                    "task compatibility projection requires a profile-free topology",
+                )
+            )
 
 
 def _validate_logical_topology_endpoints(

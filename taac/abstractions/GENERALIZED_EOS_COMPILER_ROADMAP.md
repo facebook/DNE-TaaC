@@ -808,6 +808,11 @@ accepted capability set and retain the established compiler only as the
 fail-closed fallback for unsupported profiles. Remove temporary shadow gates
 that have durable semantic and golden coverage.
 
+Status: implemented. Profile-free EOS/BGP++ topologies now select the native
+candidate pipeline and return its assembled artifact with native renderer
+reports. Legacy-profile topologies continue to select the established compiler,
+and native authority rejects any mixed delegated adapter.
+
 For DICE 31-37, returned artifacts and all renderer reports remain
 compatibility-delegated. Every diff must preserve the existing golden manifest
 and pass focused drift tests, the complete abstraction suite, lint, and type

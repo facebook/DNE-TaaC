@@ -4,12 +4,16 @@
 from dataclasses import replace
 
 from taac.abstractions.topologies.bounded_ecmp import BOUNDED_ECMP
+from taac.abstractions.topology.model import (
+    TaskCompatibilityProfile,
+)
 
 
 PROFILE_FREE_BOUNDED_ECMP = replace(
     BOUNDED_ECMP,
     name="profile_free_bounded_ecmp",
     legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.BOUNDED_ECMP,
     device_groups=tuple(
         replace(
             group,

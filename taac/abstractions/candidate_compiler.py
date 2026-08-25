@@ -226,11 +226,47 @@ def _assemble_native_artifacts(
     )
 
 
+def _adapt_artifacts(
+    adapter: ArtifactAdapter | None,
+    bound: BoundTopology,
+    plan: TopologyCompilationPlan,
+) -> AdaptedArtifacts | None:
+    return adapter.render(bound, plan) if adapter is not None else None
+
+
+def _renderer_reports(
+    adapted: AdaptedArtifacts | None,
+) -> tuple[RendererReport, ...]:
+    if adapted is not None:
+        return adapted.renderer_reports
+    return tuple(
+        RendererReport(
+            lane=lane,
+            disposition=RendererDisposition.NATIVE,
+        )
+        for lane in _REQUIRED_RENDERER_LANES
+    )
+
+
+def _select_artifacts(
+    native_authoritative: bool,
+    native: CompiledTaacArtifacts | None,
+    adapted: AdaptedArtifacts | None,
+) -> CompiledTaacArtifacts:
+    if native_authoritative:
+        if native is None:
+            raise RuntimeError("native artifact authority emitted no artifact")
+        return native
+    if adapted is None:
+        raise RuntimeError("delegated artifact authority emitted no artifact")
+    return adapted.artifacts
+
+
 @dataclass(frozen=True)
 class CandidateTopologyCompiler:
     planner: CandidatePlanner
     dut_capability_preflight: DutCapabilityPreflight
-    artifact_adapter: ArtifactAdapter
+    artifact_adapter: ArtifactAdapter | None
     dut_endpoint_base_renderer: DutEndpointBaseRenderer[object] | None = None
     dut_host_os_renderer: DutHostOsRenderer[object] | None = None
     dut_lifecycle_renderer: DutLifecycleRenderer[object] | None = None
@@ -246,8 +282,18 @@ class CandidateTopologyCompiler:
     endpoint_composer: EndpointComposer | None = None
     traffic_generator_renderer: TrafficGeneratorRenderer | None = None
     artifact_assembler: ArtifactAssembler | None = None
+    native_artifacts_authoritative: bool = False
 
     def __post_init__(self) -> None:
+        if self.native_artifacts_authoritative:
+            if self.artifact_adapter is not None:
+                raise ValueError(
+                    "native artifact authority must not mix a delegated adapter"
+                )
+            if self.artifact_assembler is None:
+                raise ValueError("native artifact authority requires an assembler")
+        elif self.artifact_adapter is None:
+            raise ValueError("delegated artifact authority requires an adapter")
         if (
             self.dut_lifecycle_task_materializer is not None
             and self.dut_lifecycle_renderer is None
@@ -290,7 +336,7 @@ class CandidateTopologyCompiler:
         resource_ids = planning.plan.iter_resource_ids()
         planning.report.assert_renderable(resource_ids)
         self.dut_capability_preflight.validate(planning.plan.dut)
-        adapted = self.artifact_adapter.render(bound, planning.plan)
+        adapted = _adapt_artifacts(self.artifact_adapter, bound, planning.plan)
         traffic_generator_request = _traffic_generator_request(
             planning,
             self.traffic_generator_endpoint_renderer,
@@ -428,15 +474,20 @@ class CandidateTopologyCompiler:
             basic_port_composition_shadow,
             traffic_generator_shadow,
         )
-        report = planning.report.with_renderer_reports(*adapted.renderer_reports)
+        report = planning.report.with_renderer_reports(*_renderer_reports(adapted))
         report.assert_renderable(
             resource_ids,
             _REQUIRED_RENDERER_LANES,
         )
+        artifacts = _select_artifacts(
+            self.native_artifacts_authoritative,
+            native_artifact_shadow,
+            adapted,
+        )
         return CandidateCompilation(
             plan=planning.plan,
             report=report,
-            artifacts=adapted.artifacts,
+            artifacts=artifacts,
             dut_endpoint_base_shadow=dut_endpoint_base_shadow,
             dut_host_os_shadow=dut_host_os_shadow,
             dut_lifecycle_shadow=dut_lifecycle_shadow,

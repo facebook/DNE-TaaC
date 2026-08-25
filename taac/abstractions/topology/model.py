@@ -288,6 +288,10 @@ class OpenRMode(str, Enum):
     PEER = "peer"
 
 
+class TaskCompatibilityProfile(str, Enum):
+    BOUNDED_ECMP = "bounded_ecmp"
+
+
 class OpenRSetupSequence(str, Enum):
     NONE = "none"
     STANDALONE_SYNTHETIC_INJECTION = "standalone_synthetic_injection"
@@ -530,6 +534,7 @@ class LogicalTopology:
     prefix_sets: tuple[PrefixSet, ...] = ()
     traffic_flows: tuple[TrafficFlowSpec, ...] = ()
     legacy_profile: str | None = None
+    task_compatibility_profile: TaskCompatibilityProfile | None = None
     route_senders: tuple[RouteSender, ...] = ()
 
     @property

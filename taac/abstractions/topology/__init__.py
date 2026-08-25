@@ -47,6 +47,7 @@ from taac.abstractions.topology.model import (
     ResolvedPeer,
     RouteSender,
     RoutingDeviceConfig,
+    TaskCompatibilityProfile,
     TrafficFlowSpec,
 )
 from taac.abstractions.topology.prefix import (
@@ -130,5 +131,6 @@ __all__ = (
     "RoutingDeviceConfig",
     "SelfNextHopRealization",
     "StandardCommunity",
+    "TaskCompatibilityProfile",
     "TrafficFlowSpec",
 )
