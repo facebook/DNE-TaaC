@@ -119,7 +119,10 @@ class CharacterizationConfig:
         rss_interval_seconds: VmRSS sampling interval, which sets the
             resolution of the reported peak. Honored on both paths: the DUT
             loop's sleep when rss_on_device is set, the background sampler's
-            interval otherwise.
+            interval otherwise. Matches cpu_interval_seconds so the two
+            brackets measure the same span on the same grid; they used to
+            differ (3.0 vs 2.0) only because this value was ignored on the
+            on-device path.
         rss_baseline_settle_max_seconds: Cap on how long START waits for RSS to
             plateau before taking the baseline. Raise it for spans whose entry
             point is still climbing; the bracket takes the baseline early rather
@@ -133,7 +136,7 @@ class CharacterizationConfig:
     cpu_on_device_compare: bool = False
     rss_on_device: bool = False
     keep_ondevice_log: bool = False
-    rss_interval_seconds: float = 3.0
+    rss_interval_seconds: float = 2.0
     rss_baseline_settle_max_seconds: float = 90.0
 
 

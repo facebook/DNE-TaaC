@@ -11567,7 +11567,7 @@ def create_fpf_continuous_collector_step(
 def create_rss_start_step(
     device_name: str,
     session_key: str,
-    interval_seconds: float = 3.0,
+    interval_seconds: float = 2.0,
     process_name: str = "bgpcpp",
     baseline_settle_max_seconds: float = 90.0,
     on_device: bool = False,
