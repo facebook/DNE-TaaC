@@ -1219,9 +1219,13 @@ def _with_ebb_route_intent(
     )
 
 
-EBB_FULL_SCALE_WITH_BGPMON = _with_ebb_route_intent(
-    _EBB_FULL_SCALE_WITH_BGPMON_BASE,
-    openr_mode=OpenRMode.NONE,
+EBB_FULL_SCALE_WITH_BGPMON = replace(
+    _with_ebb_route_intent(
+        _EBB_FULL_SCALE_WITH_BGPMON_BASE,
+        openr_mode=OpenRMode.NONE,
+    ),
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.EBB_FULL_SCALE_WITH_BGPMON,
 )
 
 # Variant B: without bgpmon - 2 physical interfaces, 18 DeviceGroups total.

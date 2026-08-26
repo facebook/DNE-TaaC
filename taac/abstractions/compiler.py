@@ -4691,7 +4691,7 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return EosBgpCppCompiler().compile(bound)
         if _is_profile_free_bounded_ecmp(bound):
             return _preserve_bounded_ecmp_task_artifacts(bound, native_artifacts)
-        if _is_profile_free_ebb_full_scale_no_bgpmon(bound):
+        if _is_profile_free_ebb_full_scale(bound):
             return _preserve_ebb_full_scale_task_artifacts(bound, native_artifacts)
         return native_artifacts
 
@@ -5138,11 +5138,14 @@ def _is_profile_free_bounded_ecmp(bound: BoundTopology) -> bool:
     )
 
 
-def _is_profile_free_ebb_full_scale_no_bgpmon(bound: BoundTopology) -> bool:
+def _is_profile_free_ebb_full_scale(bound: BoundTopology) -> bool:
     return (
         bound.logical_topology.legacy_profile is None
         and bound.logical_topology.task_compatibility_profile
-        is TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON
+        in {
+            TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON,
+            TaskCompatibilityProfile.EBB_FULL_SCALE_WITH_BGPMON,
+        }
     )
 
 
@@ -5167,9 +5170,9 @@ def _preserve_ebb_full_scale_task_artifacts(
 
 
 def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
-    return _is_profile_free_bounded_ecmp(
+    return _is_profile_free_bounded_ecmp(bound) or _is_profile_free_ebb_full_scale(
         bound
-    ) or _is_profile_free_ebb_full_scale_no_bgpmon(bound)
+    )
 
 
 # The legacy BOUNDED_ECMP task config places IPv4 iBGP at index 1 and its

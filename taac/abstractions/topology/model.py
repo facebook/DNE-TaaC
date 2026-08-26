@@ -291,6 +291,7 @@ class OpenRMode(str, Enum):
 class TaskCompatibilityProfile(str, Enum):
     BOUNDED_ECMP = "bounded_ecmp"
     EBB_FULL_SCALE_NO_BGPMON = "ebb_full_scale_no_bgpmon"
+    EBB_FULL_SCALE_WITH_BGPMON = "ebb_full_scale_with_bgpmon"
 
 
 class OpenRSetupSequence(str, Enum):

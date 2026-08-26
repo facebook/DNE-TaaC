@@ -71,6 +71,16 @@ class _IxiaRenderingCapability(str, Enum):
     INITIAL_IPV6 = "initial_ipv6"
     COMPACT_NAMED_IPV6 = "compact_named_ipv6"
     PARTITIONED_DUAL_STACK = "partitioned_dual_stack"
+    PARTITIONED_DUAL_STACK_WITH_MONITOR = "partitioned_dual_stack_with_monitor"
+
+
+_MONITOR_BGP_CAPABILITIES = (
+    IxiaBgpCapability.IPV6_UNICAST,
+    IxiaBgpCapability.IPV4_UNICAST,
+    IxiaBgpCapability.IPV4_UNICAST_ADD_PATH,
+    IxiaBgpCapability.IPV6_UNICAST_ADD_PATH,
+    IxiaBgpCapability.NEXT_HOP_ENCODING,
+)
 
 
 _PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY = {
@@ -196,7 +206,7 @@ def _traffic_generator_lifecycle_fragments(
     )
     if not requires_configuration:
         return ()
-    if capability is not _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+    if not _is_partitioned_dual_stack_capability(capability):
         _unsupported("formulaic IXIA route setup requires partitioned dual-stack")
     return (
         TrafficGeneratorLifecycleFragment(
@@ -275,7 +285,13 @@ def _validate_capability(
     elif capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
         _validate_compact_named_ipv6_capability(request)
     else:
-        _validate_partitioned_dual_stack_capability(request)
+        _validate_partitioned_dual_stack_capability(
+            request,
+            include_monitor=(
+                capability
+                is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK_WITH_MONITOR
+            ),
+        )
 
 
 def _select_capability(
@@ -299,12 +315,26 @@ def _select_capability(
         ),
     }:
         return _IxiaRenderingCapability.COMPACT_NAMED_IPV6
-    if session_shapes == {
+    partitioned_dual_stack_shapes = {
         ((IxiaBgpCapability.IPV6_UNICAST,), 64),
         ((IxiaBgpCapability.IPV4_UNICAST,), 31),
-    }:
+    }
+    if session_shapes == partitioned_dual_stack_shapes:
         return _IxiaRenderingCapability.PARTITIONED_DUAL_STACK
+    if session_shapes == partitioned_dual_stack_shapes | {
+        (_MONITOR_BGP_CAPABILITIES, 64),
+    }:
+        return _IxiaRenderingCapability.PARTITIONED_DUAL_STACK_WITH_MONITOR
     _unsupported("IXIA plan is outside the shared renderer semantic capabilities")
+
+
+def _is_partitioned_dual_stack_capability(
+    capability: _IxiaRenderingCapability,
+) -> bool:
+    return capability in {
+        _IxiaRenderingCapability.PARTITIONED_DUAL_STACK,
+        _IxiaRenderingCapability.PARTITIONED_DUAL_STACK_WITH_MONITOR,
+    }
 
 
 def _validate_initial_ipv6_capability(
@@ -471,9 +501,12 @@ def _validate_compact_relationship_geometry(
 
 def _validate_partitioned_dual_stack_capability(
     request: TrafficGeneratorRenderRequest,
+    *,
+    include_monitor: bool,
 ) -> None:
+    expected_port_count = 3 if include_monitor else 2
     if (
-        len(request.plan.ports) != 2
+        len(request.plan.ports) != expected_port_count
         or not request.plan.device_groups
         or len(request.plan.bgp_sessions) != len(request.plan.device_groups)
         or any(
@@ -482,8 +515,8 @@ def _validate_partitioned_dual_stack_capability(
         )
     ):
         _unsupported(
-            "partitioned dual-stack lowering requires two active ports and "
-            "one session per group"
+            "partitioned dual-stack lowering requires "
+            f"{expected_port_count} active ports and one session per group"
         )
     sessions_by_group = _sessions_by_group(request)
     if tuple(session.device_group_id for session in request.plan.bgp_sessions) != tuple(
@@ -493,9 +526,13 @@ def _validate_partitioned_dual_stack_capability(
     groups_by_relationship = _partitioned_groups_by_relationship(
         request,
         sessions_by_group,
+        include_monitor=include_monitor,
     )
     for relationship, groups in groups_by_relationship.items():
-        _validate_partitioned_peer_windows(groups, relationship)
+        if relationship is PeerRelationship.MONITOR:
+            _validate_partitioned_monitor_group(request, groups)
+        else:
+            _validate_partitioned_peer_windows(groups, relationship)
     _validate_partitioned_advertisements(request, sessions_by_group)
     _validate_partitioned_presentation_uniqueness(request)
 
@@ -503,6 +540,8 @@ def _validate_partitioned_dual_stack_capability(
 def _partitioned_groups_by_relationship(
     request: TrafficGeneratorRenderRequest,
     sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
+    *,
+    include_monitor: bool,
 ) -> dict[PeerRelationship, tuple[IxiaDeviceGroupPlan, ...]]:
     groups_by_relationship: dict[
         PeerRelationship,
@@ -518,13 +557,19 @@ def _partitioned_groups_by_relationship(
         if len(relationships) != 1:
             _unsupported(f"IXIA port {port.resource_id} mixes peer relationships")
         relationship = next(iter(relationships))
+        allowed_relationships = {
+            PeerRelationship.EXTERNAL,
+            PeerRelationship.INTERNAL,
+        }
+        if include_monitor:
+            allowed_relationships.add(PeerRelationship.MONITOR)
         if (
-            relationship not in {PeerRelationship.EXTERNAL, PeerRelationship.INTERNAL}
+            relationship not in allowed_relationships
             or relationship in groups_by_relationship
         ):
             _unsupported(
-                "partitioned dual-stack lowering requires one external and one "
-                "internal port"
+                "partitioned dual-stack lowering requires one port per supported "
+                "peer relationship"
             )
         _validate_unique_partitioned_group_indices(request, port)
         for group in groups:
@@ -536,14 +581,33 @@ def _partitioned_groups_by_relationship(
                 session,
             )
         groups_by_relationship[relationship] = groups
-    if set(groups_by_relationship) != {
+    expected_relationships = {
         PeerRelationship.EXTERNAL,
         PeerRelationship.INTERNAL,
-    }:
-        _unsupported(
-            "partitioned dual-stack lowering requires external and internal ports"
-        )
+    }
+    if include_monitor:
+        expected_relationships.add(PeerRelationship.MONITOR)
+    if set(groups_by_relationship) != expected_relationships:
+        _unsupported("partitioned dual-stack lowering has the wrong peer relationships")
     return groups_by_relationship
+
+
+def _validate_partitioned_monitor_group(
+    request: TrafficGeneratorRenderRequest,
+    groups: tuple[IxiaDeviceGroupPlan, ...],
+) -> None:
+    if (
+        len(groups) != 1
+        or groups[0].afi is not AddressFamily.IPV6
+        or groups[0].peer_start_index != 0
+        or any(
+            advertisement.device_group_id == groups[0].resource_id
+            for advertisement in request.plan.advertisements
+        )
+    ):
+        _unsupported(
+            "partitioned dual-stack monitor lowering requires one route-free IPv6 group"
+        )
 
 
 def _validate_partitioned_peer_windows(
@@ -587,17 +651,23 @@ def _validate_partitioned_session(
     session: IxiaBgpSessionPlan,
     relationship: PeerRelationship,
 ) -> None:
-    expected_capability = (
-        IxiaBgpCapability.IPV4_UNICAST
-        if group.afi is AddressFamily.IPV4
-        else IxiaBgpCapability.IPV6_UNICAST
+    expected_capabilities = (
+        _MONITOR_BGP_CAPABILITIES
+        if relationship is PeerRelationship.MONITOR
+        else (
+            (
+                IxiaBgpCapability.IPV4_UNICAST
+                if group.afi is AddressFamily.IPV4
+                else IxiaBgpCapability.IPV6_UNICAST
+            ),
+        )
     )
     expected_prefix_length = 31 if group.afi is AddressFamily.IPV4 else 64
     if (
         group.peer_count <= 1
         or group.local_asn is None
         or session.relationship is not relationship
-        or session.capabilities != (expected_capability,)
+        or session.capabilities != expected_capabilities
         or session.address_prefix_length != expected_prefix_length
         or session.address_step != 2
         or session.address_start_index != 0
@@ -1358,7 +1428,7 @@ def _capability_port_groups(
     port: IxiaPortPlan,
     capability: _IxiaRenderingCapability,
 ) -> tuple[IxiaDeviceGroupPlan, ...]:
-    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+    if _is_partitioned_dual_stack_capability(capability):
         if _port_has_flat_route_scale(request, port):
             return tuple(
                 sorted(
@@ -1417,7 +1487,7 @@ def _device_group_config(
         for session in request.plan.bgp_sessions
         if session.device_group_id == group.resource_id
     )
-    if capability is _IxiaRenderingCapability.PARTITIONED_DUAL_STACK:
+    if _is_partitioned_dual_stack_capability(capability):
         return _partitioned_dual_stack_device_group_config(
             request,
             group,
@@ -1576,7 +1646,11 @@ def _partitioned_address_config(
         ),
         start_index=(
             session.address_start_index
-            if not port_has_flat_route_plan or group_advertises
+            if (
+                not port_has_flat_route_plan
+                or group_advertises
+                or session.relationship is PeerRelationship.MONITOR
+            )
             else None
         ),
     )
@@ -2043,11 +2117,21 @@ def _unsupported(message: str) -> t.NoReturn:
 _BGP_CAPABILITIES = {
     IxiaBgpCapability.IPV4_UNICAST: ixia_types.BgpCapability.IpV4Unicast,
     IxiaBgpCapability.IPV6_UNICAST: ixia_types.BgpCapability.IpV6Unicast,
+    IxiaBgpCapability.IPV4_UNICAST_ADD_PATH: (
+        ixia_types.BgpCapability.Ipv4UnicastAddPath
+    ),
+    IxiaBgpCapability.IPV6_UNICAST_ADD_PATH: (
+        ixia_types.BgpCapability.Ipv6UnicastAddPath
+    ),
+    IxiaBgpCapability.NEXT_HOP_ENCODING: (
+        ixia_types.BgpCapability.NHEncodingCapabilities
+    ),
 }
 
 _BGP_PEER_TYPES = {
     PeerRelationship.EXTERNAL: ixia_types.BgpPeerType.EBGP,
     PeerRelationship.INTERNAL: ixia_types.BgpPeerType.IBGP,
+    PeerRelationship.MONITOR: ixia_types.BgpPeerType.EBGP,
 }
 
 
