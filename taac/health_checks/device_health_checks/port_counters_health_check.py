@@ -7,6 +7,7 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from taac.utils.common import async_everpaste_str
+from taac.utils.driver_factory import async_get_device_driver
 from taac.health_check.health_check import types as hc_types
 
 
@@ -14,7 +15,25 @@ class PortCountersHealthCheck(
     AbstractDeviceHealthCheck[hc_types.PortCountersHealthCheckIn]
 ):
     CHECK_NAME: hc_types.CheckName = hc_types.CheckName.PORT_COUNTERS_CHECK
-    OPERATING_SYSTEMS = ["EOS"]
+    OPERATING_SYSTEMS = ["FBOSS", "EOS"]
+
+    @staticmethod
+    def _normalize_device_name(device_name: str) -> str:
+        normalized = device_name.rstrip(".").casefold()
+        for suffix in (".facebook.com", ".tfbnw.net"):
+            if normalized.endswith(suffix):
+                return normalized[: -len(suffix)]
+        return normalized
+
+    @classmethod
+    def _is_same_device(cls, left: str, right: str) -> bool:
+        normalized_left = cls._normalize_device_name(left)
+        normalized_right = cls._normalize_device_name(right)
+        if normalized_left == normalized_right:
+            return True
+        if "." not in normalized_left or "." not in normalized_right:
+            return normalized_left.split(".", 1)[0] == normalized_right.split(".", 1)[0]
+        return False
 
     async def _run(
         self,
@@ -24,16 +43,34 @@ class PortCountersHealthCheck(
     ) -> hc_types.HealthCheckResult:
         try:
             for threshold in input.thresholds:
-                interfaces = [
-                    endpoint.split(":")[1] for endpoint in threshold.interfaces
-                ]
-                # pyrefly: ignore [missing-attribute]
-                port_counters = await self.driver.async_get_multiple_port_stats(
-                    interfaces
+                interfaces_by_device: t.Dict[str, t.List[str]] = {}
+                for endpoint in threshold.interfaces:
+                    if ":" in endpoint:
+                        device, interface = endpoint.split(":", 1)
+                    else:
+                        device, interface = obj.name, endpoint
+                    interfaces_by_device.setdefault(device, []).append(interface)
+
+                for device, interfaces in interfaces_by_device.items():
+                    driver = self.driver
+                    if not self._is_same_device(device, obj.name):
+                        # The factory is process-cached for one hour, so callers
+                        # must not close the shared driver returned here.
+                        driver = await async_get_device_driver(device)
+                    # pyrefly: ignore [missing-attribute]
+                    port_counters = await driver.async_get_multiple_port_stats(
+                        interfaces
+                    )
+                    result = await self._evaluate_port_counters(
+                        port_counters, threshold
+                    )
+                    if result is not None:
+                        return result
+            if not input.thresholds:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.SKIP,
+                    message="No port-counter thresholds were configured",
                 )
-                result = await self._evaluate_port_counters(port_counters, threshold)
-                if result is not None:
-                    return result
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.PASS,
             )
@@ -113,7 +150,7 @@ class PortCountersHealthCheck(
             raise ValueError(f"Unsupported comparison type: {comparison}")
 
     async def skip_check(self, obj: TestDevice) -> t.Tuple[bool, t.Optional[str]]:
-        supported_roles = ["BAG"]
+        supported_roles = ["BAG", "GTSW"]
         if obj.attributes.role not in supported_roles:
             return True, f"{obj.name}'s device role is not in {supported_roles}"
         return False, None

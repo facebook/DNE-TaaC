@@ -442,7 +442,16 @@ class DsfPfcHealthCheck(AbstractDeviceHealthCheck[hc_types.DsfPfcHealthCheckIn])
         return not _PFC_COMPARATORS[comparison](observed_pfc, threshold_value)
 
     async def skip_check(self, obj: TestDevice) -> t.Tuple[bool, str | None]:
-        supported_roles = ["RDSW", "FDSW", "EDSW", "DTSW", "RTSW", "SUSW", "BAG"]
+        supported_roles = [
+            "RDSW",
+            "FDSW",
+            "EDSW",
+            "DTSW",
+            "RTSW",
+            "SUSW",
+            "BAG",
+            "GTSW",
+        ]
         if obj.attributes.role not in supported_roles:
             return True, f"{obj.name}'s device role is not in {supported_roles}"
         return False, None

@@ -5578,16 +5578,21 @@ def create_pfc_wd_check(
     )
 
 
-def create_packet_loss_check(traffic_item_name: str) -> PointInTimeHealthCheck:
+def create_packet_loss_check(
+    traffic_item_name: str,
+    metric: hc_types.PacketLossMetric = hc_types.PacketLossMetric.PERCENTAGE,
+    sleep_time: int = 10,
+) -> PointInTimeHealthCheck:
     """Create a packet loss health check for a specific traffic item."""
     return create_ixia_packet_loss_check(
         thresholds=[
             hc_types.PacketLossThreshold(
                 names=[traffic_item_name],
                 str_value="0",
-                metric=hc_types.PacketLossMetric.PERCENTAGE,
+                metric=metric,
             ),
-        ]
+        ],
+        sleep_time=sleep_time,
     )
 
 
@@ -5814,6 +5819,35 @@ def create_playbook_pfc_congestion_non_pfc_traffic(
     )
 
 
+def _create_pfc_platform_hardening_checks(
+    enabled: bool,
+) -> tuple[list[PointInTimeHealthCheck], t.Optional[list[SnapshotHealthCheck]]]:
+    if not enabled:
+        return [], None
+
+    return (
+        [
+            create_device_core_dumps_check()(priority=50),
+            create_unclean_exit_check()(priority=50),
+            create_memory_utilization_check(
+                threshold=Gigabyte.GIG_10.value,
+                start_time_jq_var="test_case_start_time",
+            )(priority=50),
+            create_cpu_utilization_check(
+                threshold=400.0,
+                start_time_jq_var="test_case_start_time",
+            )(priority=50),
+            create_service_restart_check(
+                services=SERVICES_TO_MONITOR_DURING_OPENR_RESTART
+            )(priority=50),
+        ],
+        [
+            create_bgp_session_snapshot_check(),
+            create_core_dumps_snapshot_check(),
+        ],
+    )
+
+
 def create_playbook_wd(
     name: str,
     interfaces_to_check: list[TrafficEndpoint],
@@ -5822,7 +5856,10 @@ def create_playbook_wd(
     traffic_items_to_start: list[str],
     description: str = "",
     packetlosscheck: bool = False,
+    packet_loss_metric: hc_types.PacketLossMetric = hc_types.PacketLossMetric.PERCENTAGE,
+    packet_loss_sleep_time: int = 10,
     priority: hc_types.Priority = hc_types.Priority.PRIORITY_2,
+    enable_platform_hardening_checks: bool = False,
 ) -> Playbook:
     """Create a PFC watchdog playbook to verify PFC pause frame handling."""
     postchecks = [
@@ -5831,7 +5868,17 @@ def create_playbook_wd(
     ]
 
     if packetlosscheck:
-        postchecks.append(create_packet_loss_check(traffic_items_to_start[1]))
+        postchecks.append(
+            create_packet_loss_check(
+                traffic_items_to_start[1],
+                metric=packet_loss_metric,
+                sleep_time=packet_loss_sleep_time,
+            )
+        )
+
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
 
     return Playbook(
         name=name,
@@ -5846,7 +5893,8 @@ def create_playbook_wd(
         prechecks=[
             create_clear_counters_check(),
         ],
-        postchecks=postchecks,
+        postchecks=postchecks + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
     )
 
@@ -6168,8 +6216,8 @@ def _build_uplink_flap_cycle_steps(
             the ``up_stage_checks`` measure.
         device_name: Device to flap on; ``None`` targets the DUT.
         verify_port_state: Whether to assert operational state after each
-            transition. Disabled for remote-device legs, where
-            ``create_verify_port_operational_state_step`` cannot be retargeted.
+            transition. Callers may disable it for a concurrent leg when they
+            intentionally want validation to run only on the primary leg.
         interface_flap_method: Mechanism used to bounce the ports.
 
     Returns:
@@ -6492,8 +6540,8 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
 
     Both legs run in a concurrent Stage so the two sides flap simultaneously
     rather than in the runner's sequential per-device order. Port-state
-    verification runs on the DUT leg only —
-    ``create_verify_port_operational_state_step`` has no device targeting.
+    verification runs on the DUT leg only; the neighbor leg disables it
+    explicitly so the concurrent cycle has a single validation owner.
 
     Args:
         dut_device_name: DUT hostname (drives the first N/2).
@@ -21655,16 +21703,19 @@ def create_pfc_functionality_congestion_non_pfc_traffic(
     traffic_duration: int,
     priority: hc_types.Priority = hc_types.Priority.PRIORITY_2,
     base_bandwidth_gbps: t.Optional[int] = None,
+    packet_loss_sleep_time: int = 10,
+    packet_loss_duration_only: bool = False,
+    enable_platform_hardening_checks: bool = False,
 ) -> Playbook:
     """Build a PFC-functionality Playbook for congestion in a non-PFC queue.
 
     Runs `traffic_duration` seconds of mixed traffic where the PFC items
     flow at their priority and a Best-Effort item competes on the same
-    egress port at 24% line rate. Asserts zero loss on PFC items, ~65%
-    loss on BE (BE caps at 10% line rate), the PFC items still see
-    ~29% TX rate, no outbound PFC pauses from the source endpoints, and
-    nonzero out_discards on the destination endpoints (proving
-    congestion).
+    egress port at 24% line rate. Asserts zero loss on PFC items, nonzero loss
+    on BE, the PFC items still see ~29% TX rate, no outbound PFC pauses from
+    the source endpoints, and nonzero out_discards on the destination
+    endpoints (proving congestion). When ``packet_loss_duration_only`` is set,
+    both loss assertions use the duration metric in milliseconds.
 
     Args:
         name: Playbook name.
@@ -21687,6 +21738,34 @@ def create_pfc_functionality_congestion_non_pfc_traffic(
         A `Playbook` with one longevity stage, the above postchecks, and
         all PFC + BE traffic items started.
     """
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
+    packet_loss_thresholds = [
+        hc_types.PacketLossThreshold(
+            names=pfc_traffic_items_names,
+            str_value="0",
+            metric=hc_types.PacketLossMetric.PERCENTAGE,
+        ),
+        hc_types.PacketLossThreshold(
+            names=[be_traffic_item_name],
+            str_value="65",
+            metric=hc_types.PacketLossMetric.PERCENTAGE,
+        ),
+    ]
+    if packet_loss_duration_only:
+        packet_loss_thresholds = [
+            hc_types.PacketLossThreshold(
+                names=pfc_traffic_items_names,
+                str_value="0",
+                metric=hc_types.PacketLossMetric.DURATION,
+            ),
+            hc_types.PacketLossThreshold(
+                names=[be_traffic_item_name],
+                metric=hc_types.PacketLossMetric.DURATION,
+                expect_packet_loss=True,
+            ),
+        ]
     return Playbook(
         name=name,
         description=description,
@@ -21702,20 +21781,8 @@ def create_pfc_functionality_congestion_non_pfc_traffic(
         ],
         postchecks=[
             create_ixia_packet_loss_check(
-                thresholds=[
-                    hc_types.PacketLossThreshold(
-                        names=pfc_traffic_items_names,
-                        str_value="0",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                    # BE traffic gets 10% line rate (40 Gbps)
-                    # Tx 24% line rate is 96 Gbps, (96-40)/96 = ~58%
-                    hc_types.PacketLossThreshold(
-                        names=[be_traffic_item_name],
-                        str_value="65",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                ]
+                thresholds=packet_loss_thresholds,
+                sleep_time=packet_loss_sleep_time,
             ),
             create_ixia_traffic_rate_check(
                 thresholds=[
@@ -21747,7 +21814,9 @@ def create_pfc_functionality_congestion_non_pfc_traffic(
                     ),
                 ]
             ),
-        ],
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=pfc_traffic_items_names + [be_traffic_item_name],
     )
 
@@ -21989,6 +22058,9 @@ def create_pfc_functionality_incast_4port_playbook(
     dst_endpoints: t.List[TrafficEndpoint],
     traffic_duration: int,
     base_bandwidth_gbps: t.Optional[int] = None,
+    packet_loss_sleep_time: int = 10,
+    packet_loss_duration_only: bool = False,
+    enable_platform_hardening_checks: bool = False,
 ) -> Playbook:
     """Playbook factory for `test_pfc_functionality_incast_voq_credit_fairness`
     (4-port variant).
@@ -22006,6 +22078,24 @@ def create_pfc_functionality_incast_4port_playbook(
       against the actual port speed (matches sibling voq/non_congestion
       factories).
     """
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
+    packet_loss_thresholds = [
+        hc_types.PacketLossThreshold(
+            names=rdma_90pct_traffic_items_names,
+            str_value="0",
+            metric=hc_types.PacketLossMetric.DURATION,
+        )
+    ]
+    if not packet_loss_duration_only:
+        packet_loss_thresholds.append(
+            hc_types.PacketLossThreshold(
+                names=rdma_90pct_traffic_items_names,
+                str_value="5",
+                metric=hc_types.PacketLossMetric.PERCENTAGE,
+            )
+        )
     return Playbook(
         name="test_pfc_functionality_incast_voq_credit_fairness",
         description="Many-to-one in-cast at 90% per source; TC2 lossless with ~33% fair convergence.",
@@ -22032,22 +22122,12 @@ def create_pfc_functionality_incast_4port_playbook(
                 base_bandwidth_gbps=base_bandwidth_gbps,
             ),
             create_ixia_packet_loss_check(
-                thresholds=[
-                    # Pavan-canonical: loss duration in ms (0 = steady-state lossless).
-                    hc_types.PacketLossThreshold(
-                        names=rdma_90pct_traffic_items_names,
-                        str_value="0",
-                        metric=hc_types.PacketLossMetric.DURATION,
-                    ),
-                    # Loose PERCENTAGE floor kept as a backstop.
-                    hc_types.PacketLossThreshold(
-                        names=rdma_90pct_traffic_items_names,
-                        str_value="5",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                ],
+                thresholds=packet_loss_thresholds,
+                sleep_time=packet_loss_sleep_time,
             ),
-        ],
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=rdma_90pct_traffic_items_names,
         enabled=True,
     )
@@ -22112,6 +22192,9 @@ def create_pfc_functionality_congestion_voq_credit_fairness_playbook(
     dst_endpoints: t.List[TrafficEndpoint],
     traffic_duration: int,
     base_bandwidth_gbps: t.Optional[int] = None,
+    packet_loss_sleep_time: int = 10,
+    packet_loss_duration_only: bool = False,
+    enable_platform_hardening_checks: bool = False,
 ) -> Playbook:
     """Playbook factory for
     `test_pfc_functionality_congestion_and_voq_credit_fairness`.
@@ -22139,6 +22222,22 @@ def create_pfc_functionality_congestion_voq_credit_fairness_playbook(
             priority=hc_types.Priority.PRIORITY_6,
         ),
     ]
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
+    packet_loss_thresholds = [
+        hc_types.PacketLossThreshold(
+            str_value="0",
+            metric=hc_types.PacketLossMetric.DURATION,
+        )
+    ]
+    if not packet_loss_duration_only:
+        packet_loss_thresholds.append(
+            hc_types.PacketLossThreshold(
+                str_value="5",
+                metric=hc_types.PacketLossMetric.PERCENTAGE,
+            )
+        )
     return Playbook(
         name="test_pfc_functionality_congestion_and_voq_credit_fairness",
         description="""Equal slowdown and no packet loss in congestion
@@ -22160,21 +22259,9 @@ def create_pfc_functionality_congestion_voq_credit_fairness_playbook(
         ],
         postchecks=[
             create_ixia_packet_loss_check(
-                thresholds=[
-                    # Pavan-canonical: loss duration in ms (0 = steady-state lossless).
-                    # Frames/% are misleading for lossless class assertion — DURATION
-                    # is the standard TAAC metric for PFC-protected traffic.
-                    hc_types.PacketLossThreshold(
-                        str_value="0",
-                        metric=hc_types.PacketLossMetric.DURATION,
-                    ),
-                    # Loose PERCENTAGE floor kept as a "your test blew up" backstop.
-                    hc_types.PacketLossThreshold(
-                        str_value="5",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                ],
+                thresholds=packet_loss_thresholds,
                 clear_traffic_stats=True,
+                sleep_time=packet_loss_sleep_time,
             ),
             create_ixia_traffic_rate_check(
                 thresholds=[
@@ -22215,7 +22302,9 @@ def create_pfc_functionality_congestion_voq_credit_fairness_playbook(
                     ),
                 ]
             ),
-        ],
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=rdma_90pct_traffic_items_names,
     )
 
@@ -22287,6 +22376,10 @@ def create_pfc_functionality_non_congestion_4port_playbook(
     dst_endpoints: t.List[TrafficEndpoint],
     traffic_duration: int,
     base_bandwidth_gbps: t.Optional[int] = None,
+    packet_loss_metric: t.Optional[hc_types.PacketLossMetric] = None,
+    packet_loss_sleep_time: int = 10,
+    enable_platform_hardening_checks: bool = False,
+    enable_pfc_counter_baseline_checks: bool = False,
 ) -> Playbook:
     """Playbook factory for `test_pfc_functionality_non_congestion` (4port
     variant).
@@ -22298,29 +22391,73 @@ def create_pfc_functionality_non_congestion_4port_playbook(
     ``base_bandwidth_gbps`` is forwarded to `create_ixia_traffic_rate_check`
     so the PERCENT-mode threshold resolves against the real port speed
     (defaults to the check's built-in 400 Gbps when unset).
+
+    When ``packet_loss_metric`` is unset, the threshold retains the legacy
+    percentage metric. Callers that require an exact interruption budget can
+    select the IXIA loss-duration metric, whose unit is milliseconds.
+
+    When ``enable_platform_hardening_checks`` is set, the playbook also guards
+    BGP-session stability, core dumps, unclean exits, process memory/CPU, and
+    unexpected service restarts. This is opt-in so existing PFC configurations
+    retain their current runtime and health-check surface.
+
+    When ``enable_pfc_counter_baseline_checks`` is set, the playbook clears
+    IXIA statistics before measurement and snapshots PFC counters so the
+    postcheck compares the same counter set after traffic completes.
     """
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
+
+    measurement_steps: list[Step] = []
+    if enable_pfc_counter_baseline_checks:
+        measurement_steps.append(create_clear_traffic_stats_step())
+    measurement_steps.append(create_longevity_step(duration=traffic_duration))
+
+    packet_loss_threshold = hc_types.PacketLossThreshold(
+        names=rdma_90pct_traffic_items_names[:1],
+        str_value="0",
+        metric=hc_types.PacketLossMetric.PERCENTAGE,
+    )
+    if packet_loss_metric is not None:
+        packet_loss_threshold = packet_loss_threshold(metric=packet_loss_metric)
+
+    pfc_thresholds = [
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in src_endpoints[:1]],
+            out_pfc=0,
+            comparison=hc_types.ComparisonType.EQUAL_TO,
+        ),
+    ]
+    if enable_pfc_counter_baseline_checks:
+        prechecks = [
+            create_clear_counters_check()(priority=1),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                mode="snapshot",
+            )(priority=2),
+        ]
+        pfc_postcheck = _create_dsf_pfc_check_central(
+            thresholds=pfc_thresholds,
+            mode="check",
+        )
+    else:
+        prechecks = [create_clear_counters_check()]
+        pfc_postcheck = _create_dsf_pfc_check_central(thresholds=pfc_thresholds)
+
     return Playbook(
         name="test_pfc_functionality_non_congestion",
         description="No PFC frame dispersion and zero packet loss in non-congestion",
-        prechecks=[
-            create_clear_counters_check(),
-        ],
+        prechecks=prechecks,
         stages=[
             create_steps_stage(
-                steps=[
-                    create_longevity_step(duration=traffic_duration),
-                ]
+                steps=measurement_steps
             )
         ],
         postchecks=[
             create_ixia_packet_loss_check(
-                thresholds=[
-                    hc_types.PacketLossThreshold(
-                        names=rdma_90pct_traffic_items_names[:1],
-                        str_value="0",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                ]
+                thresholds=[packet_loss_threshold],
+                sleep_time=packet_loss_sleep_time,
             ),
             create_ixia_traffic_rate_check(
                 thresholds=[
@@ -22333,15 +22470,7 @@ def create_pfc_functionality_non_congestion_4port_playbook(
                 ],
                 base_bandwidth_gbps=base_bandwidth_gbps,
             ),
-            _create_dsf_pfc_check_central(
-                thresholds=[
-                    hc_types.DsfPfcThreshold(
-                        interfaces=[endpoint.name for endpoint in src_endpoints[:1]],
-                        out_pfc=0,
-                        comparison=hc_types.ComparisonType.EQUAL_TO,
-                    ),
-                ]
-            ),
+            pfc_postcheck,
             create_port_counters_check(
                 thresholds=[
                     hc_types.PortCountersThreshold(
@@ -22351,7 +22480,9 @@ def create_pfc_functionality_non_congestion_4port_playbook(
                     ),
                 ]
             ),
-        ],
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=rdma_90pct_traffic_items_names[:1],
     )
 
@@ -22362,6 +22493,10 @@ def create_pfc_functionality_port_flap_4port_playbook(
     interface_to_flap: str,
     device_name_of_interface_flap: str,
     base_bandwidth_gbps: t.Optional[int] = None,
+    packet_loss_sleep_time: int = 10,
+    packet_loss_duration_only: bool = False,
+    enable_platform_hardening_checks: bool = False,
+    verify_port_state_transitions: bool = False,
 ) -> Playbook:
     """Playbook factory for `test_pfc_functionality_port_flap` (4port variant).
 
@@ -22373,6 +22508,60 @@ def create_pfc_functionality_port_flap_4port_playbook(
     so the PERCENT-mode 49%-threshold resolves against the real port speed
     (defaults to the check's built-in 400 Gbps when unset).
     """
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+    )
+    packet_loss_thresholds = [
+        hc_types.PacketLossThreshold(
+            names=rdma_90pct_traffic_items_names[:1],
+            str_value="0",
+            metric=hc_types.PacketLossMetric.PERCENTAGE,
+        ),
+        hc_types.PacketLossThreshold(
+            names=rdma_90pct_traffic_items_names[1:2],
+            str_value="3",
+            metric=hc_types.PacketLossMetric.PERCENTAGE,
+        ),
+    ]
+    if packet_loss_duration_only:
+        packet_loss_thresholds = [
+            hc_types.PacketLossThreshold(
+                names=rdma_90pct_traffic_items_names[:1],
+                str_value="0",
+                metric=hc_types.PacketLossMetric.DURATION,
+            ),
+            hc_types.PacketLossThreshold(
+                names=rdma_90pct_traffic_items_names[1:2],
+                metric=hc_types.PacketLossMetric.DURATION,
+                expect_packet_loss=True,
+            ),
+        ]
+    def create_targeted_port_state_verification(
+        operational_state: bool,
+        description: str,
+    ) -> list[Step]:
+        if not verify_port_state_transitions:
+            return []
+        verification = create_verify_port_operational_state_step(
+            interfaces=[interface_to_flap],
+            operational_state=operational_state,
+            description=description,
+            device_regexes=[device_name_of_interface_flap],
+        )
+        return [verification]
+
+    down_verification_steps = create_targeted_port_state_verification(
+        operational_state=False,
+        description="Verify the flapped source port is down",
+    )
+    remaining_down_verification_steps = create_targeted_port_state_verification(
+        operational_state=False,
+        description="Verify the flapped source port remains down",
+    )
+    up_verification_steps = create_targeted_port_state_verification(
+        operational_state=True,
+        description="Verify the flapped source port is up",
+    )
     return Playbook(
         name="test_pfc_functionality_port_flap",
         description="""Zero packet loss on the undisturbed traffic, and equal
@@ -22389,6 +22578,7 @@ def create_pfc_functionality_port_flap_4port_playbook(
                         device_name=device_name_of_interface_flap,
                         interface_flap_method=4,  # InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
                     ),
+                    *down_verification_steps,
                     create_longevity_step(duration=120),
                     create_interface_flap_step(
                         enable=False,
@@ -22396,6 +22586,7 @@ def create_pfc_functionality_port_flap_4port_playbook(
                         device_name=device_name_of_interface_flap,
                         interface_flap_method=4,  # InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
                     ),
+                    *remaining_down_verification_steps,
                     create_longevity_step(duration=120),
                     create_interface_flap_step(
                         enable=True,
@@ -22403,24 +22594,15 @@ def create_pfc_functionality_port_flap_4port_playbook(
                         device_name=device_name_of_interface_flap,
                         interface_flap_method=4,
                     ),
+                    *up_verification_steps,
                     create_longevity_step(duration=600),
                 ]
             )
         ],
         postchecks=[
             create_ixia_packet_loss_check(
-                thresholds=[
-                    hc_types.PacketLossThreshold(
-                        names=rdma_90pct_traffic_items_names[:1],
-                        str_value="0",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                    hc_types.PacketLossThreshold(
-                        names=rdma_90pct_traffic_items_names[1:2],
-                        str_value="3",
-                        metric=hc_types.PacketLossMetric.PERCENTAGE,
-                    ),
-                ]
+                thresholds=packet_loss_thresholds,
+                sleep_time=packet_loss_sleep_time,
             ),
             create_ixia_traffic_rate_check(
                 thresholds=[
@@ -22443,7 +22625,9 @@ def create_pfc_functionality_port_flap_4port_playbook(
                     ),
                 ]
             ),
-        ],
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=rdma_90pct_traffic_items_names[:2],
     )
 

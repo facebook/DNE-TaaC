@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from taac.ixia.taac_ixia import (
     IxiaOperationTimeoutError,
+    IxiaSetupError,
     TaacIxia,
 )
 
@@ -25,6 +26,8 @@ def _create_taac_ixia():
     ixia._stat_view_cache = {}
     ixia._stat_view_index_lock = threading.Lock()
     ixia._stat_view_construction_locks = {}
+    ixia._latest_packet_loss_sample_time = {}
+    ixia._latest_traffic_rate_sample_time = {}
     return ixia
 
 
@@ -66,8 +69,49 @@ class GetOrCreateStatViewTest(unittest.TestCase):
                 }
             ],
         )
-        self.ixia.stat_view_snapshot.assert_called_once_with()
+        timeout_seconds = self.ixia.stat_view_snapshot.call_args.kwargs[
+            "timeout_seconds"
+        ]
+        self.assertGreater(timeout_seconds, 0)
+        self.assertLessEqual(timeout_seconds, 180)
         self.ixia.logger.warning.assert_called_once()
+
+    def test_sampler_timeout_falls_back_to_direct_packet_loss_read(self):
+        self.ixia.test_case_uuid = "test-case"
+        self.ixia.captured_stats = {"test-case": {}}
+        self.ixia.capturing = True
+        self.ixia.traffic_item_view_assistant = MagicMock()
+        expected = [{"identifier": "traffic", "packet_loss_duration": 0.0}]
+
+        with patch.object(
+            self.ixia,
+            "_get_packet_loss_statistics_unlocked",
+            return_value=expected,
+        ) as mock_get_loss:
+            result = self.ixia.get_latest_stats(max_timeout_sec=0)
+
+        self.assertEqual(expected, result)
+        mock_get_loss.assert_called_once_with(self.ixia.traffic_item_view_assistant)
+        self.ixia.logger.warning.assert_called_once()
+
+    def test_packet_loss_freshness_is_scoped_to_test_case(self):
+        self.ixia.test_case_uuid = "current-test"
+        self.ixia.capturing = True
+        stale = [{"identifier": "stale", "packet_loss_duration": 1.0}]
+        expected = [{"identifier": "fresh", "packet_loss_duration": 0.0}]
+        self.ixia.captured_stats = {"current-test": {"latest": stale}}
+        self.ixia._latest_packet_loss_sample_time = {"other-test": 100.0}
+        self.ixia.traffic_item_view_assistant = MagicMock()
+
+        with patch.object(
+            self.ixia,
+            "_get_packet_loss_statistics_unlocked",
+            return_value=expected,
+        ) as mock_get_loss:
+            result = self.ixia.get_latest_stats(max_timeout_sec=0, since_time=50.0)
+
+        self.assertEqual(expected, result)
+        mock_get_loss.assert_called_once_with(self.ixia.traffic_item_view_assistant)
 
     def test_first_call_constructs_assistant(self):
         """First call instantiates StatViewAssistant and caches it."""
@@ -266,3 +310,115 @@ class GetOrCreateStatViewTest(unittest.TestCase):
             mock_cls.assert_called_once_with(
                 self.ixia.ixnetwork, "Port Statistics", Timeout=30
             )
+
+
+class GetLatestTrafficStatsTest(unittest.TestCase):
+    def test_disabled_sampler_uses_direct_snapshot(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = False
+        ixia.test_case_uuid = "test-case"
+        ixia.captured_stats_traffic = {"test-case": {}}
+        ixia.traffic_item_view_assistant = MagicMock()
+        ixia._snapshot_lock = threading.Lock()
+        expected = [{"identifier": "traffic", "tx_rate": 180}]
+
+        with patch.object(
+            ixia, "_get_traffic_rate_statistics_unlocked", return_value=expected
+        ) as mock_get_rate:
+            result = ixia.get_latest_stats_traffic()
+
+        self.assertEqual(expected, result)
+        mock_get_rate.assert_called_once_with(ixia.traffic_item_view_assistant)
+
+    def test_sampler_timeout_falls_back_to_direct_traffic_rate_read(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = True
+        ixia.test_case_uuid = "test-case"
+        ixia.captured_stats_traffic = {"test-case": {}}
+        ixia.traffic_item_view_assistant = MagicMock()
+        expected = [{"identifier": "traffic", "Tx Rate": 180.0}]
+
+        with patch.object(
+            ixia, "_get_traffic_rate_statistics_unlocked", return_value=expected
+        ) as mock_get_rate:
+            result = ixia.get_latest_stats_traffic(max_timeout_sec=0)
+
+        self.assertEqual(expected, result)
+        mock_get_rate.assert_called_once_with(ixia.traffic_item_view_assistant)
+        ixia.logger.warning.assert_called_once()
+
+    def test_sampler_lock_timeout_does_not_return_stale_traffic_rate_sample(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = True
+        ixia.test_case_uuid = "test-case"
+        ixia.captured_stats_traffic = {
+            "test-case": {"latest": [{"identifier": "stale", "Tx Rate": 0.0}]}
+        }
+        ixia.traffic_item_view_assistant = MagicMock()
+        ixia.stat_view_snapshot = MagicMock(
+            side_effect=IxiaOperationTimeoutError("snapshot busy")
+        )
+
+        with (
+            patch.object(
+                ixia, "_get_traffic_rate_statistics_unlocked"
+            ) as mock_get_rate,
+            self.assertRaises(IxiaOperationTimeoutError),
+        ):
+            ixia.get_latest_stats_traffic(max_timeout_sec=0)
+
+        mock_get_rate.assert_not_called()
+
+    def test_traffic_rate_freshness_is_scoped_to_test_case(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = True
+        ixia.test_case_uuid = "current-test"
+        stale = [{"identifier": "stale", "Tx Rate": 0.0}]
+        expected = [{"identifier": "fresh", "Tx Rate": 180.0}]
+        ixia.captured_stats_traffic = {"current-test": {"latest": stale}}
+        ixia._latest_traffic_rate_sample_time = {"other-test": 100.0}
+        ixia.traffic_item_view_assistant = MagicMock()
+
+        with patch.object(
+            ixia, "_get_traffic_rate_statistics_unlocked", return_value=expected
+        ) as mock_get_rate:
+            result = ixia.get_latest_stats_traffic(max_timeout_sec=0, since_time=50.0)
+
+        self.assertEqual(expected, result)
+        mock_get_rate.assert_called_once_with(ixia.traffic_item_view_assistant)
+
+    def test_direct_traffic_read_requires_initialized_view(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = False
+        ixia.test_case_uuid = "test-case"
+        ixia.captured_stats_traffic = {"test-case": {}}
+        ixia.traffic_item_view_assistant = None
+
+        with self.assertRaisesRegex(
+            IxiaSetupError,
+            "traffic-item statistics view is not initialized",
+        ):
+            ixia.get_latest_stats_traffic()
+
+    def test_direct_traffic_read_uses_unlocked_fallback_on_lock_timeout(self):
+        ixia = _create_taac_ixia()
+        ixia.capturing = False
+        ixia.test_case_uuid = "test-case"
+        ixia.captured_stats_traffic = {"test-case": {}}
+        ixia.traffic_item_view_assistant = MagicMock()
+        ixia.stat_view_snapshot = MagicMock(
+            side_effect=IxiaOperationTimeoutError("snapshot busy")
+        )
+        expected = [{"identifier": "traffic", "Tx Rate": 180.0}]
+
+        with patch.object(
+            ixia, "_get_traffic_rate_statistics_unlocked", return_value=expected
+        ) as mock_get_rate:
+            result = ixia.get_latest_stats_traffic(max_timeout_sec=7)
+
+        self.assertEqual(expected, result)
+        timeout_seconds = ixia.stat_view_snapshot.call_args.kwargs["timeout_seconds"]
+        self.assertGreater(timeout_seconds, 0)
+        self.assertLessEqual(timeout_seconds, 7)
+        mock_get_rate.assert_called_once_with(ixia.traffic_item_view_assistant)
+        ixia.logger.warning.assert_called_once()

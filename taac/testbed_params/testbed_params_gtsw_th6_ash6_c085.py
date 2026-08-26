@@ -33,6 +33,15 @@ GTSW001_L1001_C085_IXIA_SRC_PORTS = [
     "eth1/17/5",
 ]
 
+# Alternate source ports cabled to IXIA19. Focused PFC reruns use these ports
+# while IXIA19 and IXIA20 are attached as resources to the primary IxNetwork
+# session on IXIA08.
+GTSW001_L1001_C085_IXIA19_PFC_SRC_PORTS = [
+    "eth1/1/1",
+    "eth1/1/3",
+    "eth1/1/5",
+]
+
 # 1× IXIA destination port on gtsw001.l1002.c085.ash6 (sibling pod).
 # Verified via ``fboss2 show lldp`` — l1002 has 2 IXIA-facing ports up
 # (``eth1/1/1``, ``eth1/1/3``) cabled to ixia20.netcastle.ash6. Only one

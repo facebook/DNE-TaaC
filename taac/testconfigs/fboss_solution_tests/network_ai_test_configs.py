@@ -527,6 +527,7 @@ def create_dsf_proto_ipv6_traffic_config(
     traffic_item_headers_map: t.Optional[
         t.Dict[str, t.List[taac_types.PacketHeader]]
     ] = None,
+    skip_default_l4_protocol: bool = False,
 ) -> taac_types.BasicTrafficItemConfig:
     """Build a DSF protocol-tagged IPv6 traffic-item config (RDMA / NC / BE / Monitoring).
 
@@ -540,6 +541,8 @@ def create_dsf_proto_ipv6_traffic_config(
         dest_endpoints: Destination traffic endpoints (1:1 with sources).
         name: Traffic-item name to assign.
         line_rate: Percent line rate to drive the traffic item at.
+        skip_default_l4_protocol: Do not add IXIA's default TCP stack after
+            the explicitly supplied packet headers.
 
     Returns:
         BasicTrafficItemConfig: Configured DSF protocol traffic item.
@@ -554,6 +557,7 @@ def create_dsf_proto_ipv6_traffic_config(
         traffic_type=ixia_types.TrafficType.IPV6,
         bidirectional=False,
         packet_headers=headers_map.get(proto),
+        skip_default_l4_protocol=skip_default_l4_protocol,
         full_mesh=False,
         src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
         frame_size_settings=DSF_FRAME_SIZES,
@@ -600,6 +604,53 @@ def create_pfc_pause_traffic_config(
     )
 
 
+class _PfcWatchdogSettings(t.NamedTuple):
+    pause_frame_rates: t.List[int]
+    tc2_traffic_item_high: str
+    tc2_traffic_item_low: str
+    tc6_traffic_item_high: str
+    tc6_traffic_item_low: str
+    pfc_threshold_high: int
+    pfc_threshold_low: int
+
+
+def _get_pfc_watchdog_settings(port_speed: int) -> _PfcWatchdogSettings:
+    if port_speed == 200:
+        return _PfcWatchdogSettings(
+            [7500, 5000],
+            "TRAFFIC_TC2_PFC_PAUSE_7500FPS",
+            "TRAFFIC_TC2_PFC_PAUSE_5000FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_7500FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_5000FPS",
+            # 7500/5000 FPS for 60 seconds yields about 450k/300k frames.
+            400000,
+            250000,
+        )
+    if port_speed == 400:
+        return _PfcWatchdogSettings(
+            [15000, 10000],
+            "TRAFFIC_TC2_PFC_PAUSE_15000FPS",
+            "TRAFFIC_TC2_PFC_PAUSE_10000FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_15000FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_10000FPS",
+            # 15000/10000 FPS for 60 seconds yields about 900k/600k frames.
+            800000,
+            500000,
+        )
+    if port_speed == 800:
+        return _PfcWatchdogSettings(
+            [30000, 20000],
+            "TRAFFIC_TC2_PFC_PAUSE_30000FPS",
+            "TRAFFIC_TC2_PFC_PAUSE_20000FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_30000FPS",
+            "TRAFFIC_TC6_PFC_PAUSE_20000FPS",
+            # Preserve the same margin as the 400G thresholds at twice the rate.
+            1600000,
+            1000000,
+        )
+    raise ValueError(f"Port speed {port_speed} is not supported by PFC watchdog test")
+
+
 def gen_pfc_functionality_test_generic_4port_configs(
     test_config_name: str,
     endpoints: t.List[Endpoint],
@@ -613,6 +664,15 @@ def gen_pfc_functionality_test_generic_4port_configs(
     traffic_item_headers_map: t.Optional[
         t.Dict[str, t.List[taac_types.PacketHeader]]
     ] = None,
+    non_congestion_packet_loss_metric: t.Optional[hc_types.PacketLossMetric] = None,
+    non_congestion_packet_loss_sleep_time: t.Optional[int] = None,
+    enable_non_congestion_platform_hardening_checks: bool = False,
+    enable_pfc_counter_baseline_checks: bool = False,
+    packet_loss_sleep_time: int = 10,
+    packet_loss_duration_only: bool = False,
+    enable_platform_hardening_checks: bool = False,
+    verify_port_state_transitions: bool = False,
+    skip_default_l4_protocol: bool = False,
 ) -> TestConfig:
     """
     Tests traffic rate and PFC packet dispersion in mixed-traffic congestion,
@@ -626,6 +686,26 @@ def gen_pfc_functionality_test_generic_4port_configs(
         src_endpoints: [P1, P2, P3, P1]
         dst_endpoints: [P4]
         basic_port_configs: None if no BGP config required (e.g. RDSW-FDSW labs)
+        enable_non_congestion_platform_hardening_checks: Add BGP/core-dump
+            snapshot checks and process health postchecks only to the
+            non-congestion playbook.
+        enable_pfc_counter_baseline_checks: Clear IXIA statistics and snapshot
+            PFC counters before the non-congestion measurement stage.
+        non_congestion_packet_loss_metric: IXIA packet-loss metric used by the
+            non-congestion playbook.
+        non_congestion_packet_loss_sleep_time: Seconds to wait after stopping
+            traffic before reading IXIA packet-loss statistics. Defaults to
+            ``packet_loss_sleep_time`` when omitted.
+        packet_loss_sleep_time: Seconds to wait after stopping traffic before
+            reading IXIA packet-loss statistics in the other PFC playbooks.
+        packet_loss_duration_only: Use only loss-duration thresholds for the
+            mapped PFC playbooks; intended for strict lossless validation.
+        enable_platform_hardening_checks: Add BGP/core-dump snapshot checks and
+            process health postchecks to the mapped PFC playbooks.
+        verify_port_state_transitions: Verify that the PFC port-flap trigger
+            drives the selected source port down and restores it up.
+        skip_default_l4_protocol: Do not append IXIA's default TCP stack to
+            generated IPv6 traffic items.
     """
     headers_map = traffic_item_headers_map or TRAFFIC_ITEM_HEADERS_MAP
     traffic_items_configs = []
@@ -636,6 +716,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
     be_24pct_traffic_item_name = "TEST_BE_24_TRAFFIC"
     qos_traffic_item_names = {}
     qos_traffic_items = {}
+    src_endpoints = list(src_endpoints)
     if len(src_endpoints) == 3:
         src_endpoints.append(src_endpoints[0])
 
@@ -647,34 +728,14 @@ def gen_pfc_functionality_test_generic_4port_configs(
     # It takes PORT_SPEED_BPS / (512*65535) PFC frames per second to keep PFC
     # continuously asserted. This comes down to ~6000 frames per sec for 200G,
     # ~12000 frames per sec for 400G, and ~24000 frames per sec for 800G.
-    if port_speed == 200:
-        PFC_PAUSE_FRAME_RATES = [7500, 5000]
-        tc2_wd_traffic_item_high = "TRAFFIC_TC2_PFC_PAUSE_7500FPS"
-        tc2_wd_traffic_item_low = "TRAFFIC_TC2_PFC_PAUSE_5000FPS"
-        tc6_wd_traffic_item_high = "TRAFFIC_TC6_PFC_PAUSE_7500FPS"
-        tc6_wd_traffic_item_low = "TRAFFIC_TC6_PFC_PAUSE_5000FPS"
-        wd_pfc_threshold_high = 400000  # with 7500 frames per sec, 60s duration, ~450k pfc frames should be received; setting to 400k to avoid flakiness
-        wd_pfc_threshold_low = 250000  # with 5000 frames per sec, 60s duration, ~300k pfc frames should be received; setting to 250k to avoid flakiness
-    elif port_speed == 400:
-        PFC_PAUSE_FRAME_RATES = [15000, 10000]
-        tc2_wd_traffic_item_high = "TRAFFIC_TC2_PFC_PAUSE_15000FPS"
-        tc2_wd_traffic_item_low = "TRAFFIC_TC2_PFC_PAUSE_10000FPS"
-        tc6_wd_traffic_item_high = "TRAFFIC_TC6_PFC_PAUSE_15000FPS"
-        tc6_wd_traffic_item_low = "TRAFFIC_TC6_PFC_PAUSE_10000FPS"
-        wd_pfc_threshold_high = 800000  # with 15000 frames per sec, 60s duration, ~900k pfc frames should be received; setting to 800k to avoid flakiness
-        wd_pfc_threshold_low = 500000  # with 10000 frames per sec, 60s duration, ~600k pfc frames should be received; setting to 500k to avoid flakiness
-    elif port_speed == 800:
-        PFC_PAUSE_FRAME_RATES = [30000, 20000]
-        tc2_wd_traffic_item_high = "TRAFFIC_TC2_PFC_PAUSE_30000FPS"
-        tc2_wd_traffic_item_low = "TRAFFIC_TC2_PFC_PAUSE_20000FPS"
-        tc6_wd_traffic_item_high = "TRAFFIC_TC6_PFC_PAUSE_30000FPS"
-        tc6_wd_traffic_item_low = "TRAFFIC_TC6_PFC_PAUSE_20000FPS"
-        wd_pfc_threshold_high = 1600000  # double of 400G threshold
-        wd_pfc_threshold_low = 1000000
-    else:
-        raise ValueError(
-            f"Port speed {port_speed} is not supported by PFC watchdog test"
-        )
+    watchdog_settings = _get_pfc_watchdog_settings(port_speed)
+    PFC_PAUSE_FRAME_RATES = watchdog_settings.pause_frame_rates
+    tc2_wd_traffic_item_high = watchdog_settings.tc2_traffic_item_high
+    tc2_wd_traffic_item_low = watchdog_settings.tc2_traffic_item_low
+    tc6_wd_traffic_item_high = watchdog_settings.tc6_traffic_item_high
+    tc6_wd_traffic_item_low = watchdog_settings.tc6_traffic_item_low
+    wd_pfc_threshold_high = watchdog_settings.pfc_threshold_high
+    wd_pfc_threshold_low = watchdog_settings.pfc_threshold_low
 
     # Create 3 RDMA 90% line rate and 3 RDMA 30% line rate traffics
     # from first 3 source ports
@@ -687,6 +748,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
                 name=f"TEST_RDMA_TRAFFIC_90PCT_P{iter}_TO_P4",
                 line_rate=90,
                 traffic_item_headers_map=headers_map,
+                skip_default_l4_protocol=skip_default_l4_protocol,
             )
         )
         rdma_90pct_traffic_items_names.append(f"TEST_RDMA_TRAFFIC_90PCT_P{iter}_TO_P4")
@@ -699,6 +761,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
                 name=f"TEST_RDMA_TRAFFIC_30PCT_P{iter}_TO_P4",
                 line_rate=30,
                 traffic_item_headers_map=headers_map,
+                skip_default_l4_protocol=skip_default_l4_protocol,
             )
         )
         rdma_30pct_traffic_items_names.append(f"TEST_RDMA_TRAFFIC_30PCT_P{iter}_TO_P4")
@@ -715,6 +778,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
                 name=f"TEST_MONITORING_TRAFFIC_90PCT_P{iter}_TO_P4",
                 line_rate=90,
                 traffic_item_headers_map=headers_map,
+                skip_default_l4_protocol=skip_default_l4_protocol,
             )
         )
         monitoring_90pct_traffic_items_names.append(
@@ -729,6 +793,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
                 name=f"TEST_MONITORING_TRAFFIC_30PCT_P{iter}_TO_P4",
                 line_rate=30,
                 traffic_item_headers_map=headers_map,
+                skip_default_l4_protocol=skip_default_l4_protocol,
             )
         )
         monitoring_30pct_traffic_items_names.append(
@@ -744,6 +809,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             name=be_24pct_traffic_item_name,
             line_rate=24,
             traffic_item_headers_map=headers_map,
+            skip_default_l4_protocol=skip_default_l4_protocol,
         )
     )
 
@@ -759,6 +825,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             name=f"TEST_{proto}_TRAFFIC_70PCT_P{p_it}_TO_P4",
             line_rate=70,
             traffic_item_headers_map=headers_map,
+            skip_default_l4_protocol=skip_default_l4_protocol,
         )
         traffic_items_configs.append(dsf_proto_ipv6_traffic_config)
         qos_traffic_items[proto] = dsf_proto_ipv6_traffic_config
@@ -802,6 +869,9 @@ def gen_pfc_functionality_test_generic_4port_configs(
             traffic_duration=traffic_duration,
             priority=hc_types.Priority.PRIORITY_2,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            packet_loss_duration_only=packet_loss_duration_only,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -816,8 +886,16 @@ def gen_pfc_functionality_test_generic_4port_configs(
             traffic_duration=traffic_duration,
             priority=hc_types.Priority.PRIORITY_6,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            packet_loss_duration_only=packet_loss_duration_only,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
+
+    if non_congestion_packet_loss_metric is None and packet_loss_duration_only:
+        non_congestion_packet_loss_metric = hc_types.PacketLossMetric.DURATION
+    if non_congestion_packet_loss_sleep_time is None:
+        non_congestion_packet_loss_sleep_time = packet_loss_sleep_time
 
     PLAYBOOK_PFC_CONGESTION = [
         create_pfc_functionality_congestion_voq_credit_fairness_playbook(
@@ -826,6 +904,9 @@ def gen_pfc_functionality_test_generic_4port_configs(
             dst_endpoints=dst_endpoints,
             traffic_duration=traffic_duration,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            packet_loss_duration_only=packet_loss_duration_only,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
         create_pfc_functionality_non_congestion_4port_playbook(
             rdma_90pct_traffic_items_names=rdma_90pct_traffic_items_names,
@@ -833,6 +914,13 @@ def gen_pfc_functionality_test_generic_4port_configs(
             dst_endpoints=dst_endpoints,
             traffic_duration=traffic_duration,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=non_congestion_packet_loss_sleep_time,
+            enable_platform_hardening_checks=(
+                enable_non_congestion_platform_hardening_checks
+                or enable_platform_hardening_checks
+            ),
+            enable_pfc_counter_baseline_checks=enable_pfc_counter_baseline_checks,
+            packet_loss_metric=non_congestion_packet_loss_metric,
         ),
     ]
 
@@ -843,6 +931,9 @@ def gen_pfc_functionality_test_generic_4port_configs(
             dst_endpoints=dst_endpoints,
             traffic_duration=traffic_duration,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            packet_loss_duration_only=packet_loss_duration_only,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -856,6 +947,10 @@ def gen_pfc_functionality_test_generic_4port_configs(
             interface_to_flap=interface_to_flap,
             device_name_of_interface_flap=device_name_of_interface_flap,
             base_bandwidth_gbps=port_speed,
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            packet_loss_duration_only=packet_loss_duration_only,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
+            verify_port_state_transitions=verify_port_state_transitions,
         ),
     ]
 
@@ -867,6 +962,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             min_in_pfc_value=wd_pfc_threshold_high,
             wd_metric_comparison_type=hc_types.ComparisonType.GREATER_THAN,
             traffic_items_to_start=[tc2_wd_traffic_item_high],
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -878,6 +974,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             min_in_pfc_value=wd_pfc_threshold_low,
             wd_metric_comparison_type=hc_types.ComparisonType.EQUAL_TO,
             traffic_items_to_start=[tc2_wd_traffic_item_low],
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -890,6 +987,13 @@ def gen_pfc_functionality_test_generic_4port_configs(
             wd_metric_comparison_type=hc_types.ComparisonType.GREATER_THAN,
             traffic_items_to_start=[tc2_wd_traffic_item_high, "TEST_BE_24_TRAFFIC"],
             packetlosscheck=True,
+            packet_loss_metric=(
+                hc_types.PacketLossMetric.DURATION
+                if packet_loss_duration_only
+                else hc_types.PacketLossMetric.PERCENTAGE
+            ),
+            packet_loss_sleep_time=packet_loss_sleep_time,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -901,6 +1005,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             wd_metric_comparison_type=hc_types.ComparisonType.GREATER_THAN,
             traffic_items_to_start=[tc6_wd_traffic_item_high],
             priority=hc_types.Priority.PRIORITY_6,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -912,6 +1017,7 @@ def gen_pfc_functionality_test_generic_4port_configs(
             wd_metric_comparison_type=hc_types.ComparisonType.EQUAL_TO,
             traffic_items_to_start=[tc6_wd_traffic_item_low],
             priority=hc_types.Priority.PRIORITY_6,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 
@@ -923,7 +1029,14 @@ def gen_pfc_functionality_test_generic_4port_configs(
             wd_metric_comparison_type=hc_types.ComparisonType.GREATER_THAN,
             traffic_items_to_start=[tc6_wd_traffic_item_high, "TEST_BE_24_TRAFFIC"],
             packetlosscheck=True,
+            packet_loss_metric=(
+                hc_types.PacketLossMetric.DURATION
+                if packet_loss_duration_only
+                else hc_types.PacketLossMetric.PERCENTAGE
+            ),
+            packet_loss_sleep_time=packet_loss_sleep_time,
             priority=hc_types.Priority.PRIORITY_6,
+            enable_platform_hardening_checks=enable_platform_hardening_checks,
         ),
     ]
 

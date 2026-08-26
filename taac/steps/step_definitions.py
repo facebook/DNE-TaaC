@@ -4119,6 +4119,7 @@ def create_verify_port_operational_state_step(
     interfaces: t.List[str],
     operational_state: bool,
     description: t.Optional[str] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
 ) -> Step:
     """
     Create a step to verify port operational state.
@@ -4127,6 +4128,7 @@ def create_verify_port_operational_state_step(
         interfaces: List of interface names to verify
         operational_state: Expected operational state (True=up, False=down)
         description: Custom description for the step
+        device_regexes: Optional device patterns that scope the verification
 
     Returns:
         Step object for port state verification
@@ -4142,6 +4144,7 @@ def create_verify_port_operational_state_step(
             )
         ),
         description=description,
+        device_regexes=device_regexes,
     )
 
 

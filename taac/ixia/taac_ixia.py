@@ -21,6 +21,7 @@ from taac.ixia.abstract_traffic_generator import (
 from taac.ixia.ixia import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     Ixia,
     IxiaOperationTimeoutError,
+    IxiaSetupError,
 )
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
@@ -73,6 +74,8 @@ PTP_PROTOCOL = "Protocol"
 PTP_DEVICE_NUM = "Device#"
 PTP_OFFSET_NS = "Offset [ns]"
 
+_DIRECT_STATS_LOCK_TIMEOUT_MAX_S = 30
+
 
 class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     def __init__(self, *args, **kwargs):
@@ -82,6 +85,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.captured_stats = defaultdict(dict)
         self.captured_stats_traffic = defaultdict(dict)
         self.captured_ptp_drill_down_stats = defaultdict(dict)
+        self._latest_packet_loss_sample_time: t.Dict[str, float] = defaultdict(float)
+        self._latest_traffic_rate_sample_time: t.Dict[str, float] = defaultdict(float)
         self.sample_time: int = DEFAULT_SAMPLE_RATE
         self.test_case_uuid: t.Optional[str] = None
         self.paused = False
@@ -223,6 +228,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             latest_stats_traffic = self.get_traffic_rate_statistics(view_assistant)
             self.captured_stats_traffic[uuid][timestamp] = latest_stats_traffic
             self.captured_stats_traffic[uuid]["latest"] = latest_stats_traffic
+            self._latest_traffic_rate_sample_time[uuid] = time.time()
         except Exception as e:
             self.logger.debug(
                 f"Encountered error when capturing traffic rate statistics: {e}"
@@ -243,6 +249,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             latest_stats = self.get_packet_loss_statistics(view_assistant)
             self.captured_stats[uuid][timestamp] = latest_stats
             self.captured_stats[uuid]["latest"] = latest_stats
+            self._latest_packet_loss_sample_time[uuid] = time.time()
         except Exception as e:
             self.logger.debug(
                 f"Encountered error when capturing packet loss statistics: {e}"
@@ -306,18 +313,24 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self,
         view: StatViewAssistant,
     ) -> t.List:
+        with self.stat_view_snapshot():
+            return self._get_traffic_rate_statistics_unlocked(view)
+
+    def _get_traffic_rate_statistics_unlocked(
+        self,
+        view: StatViewAssistant,
+    ) -> t.List:
         stats = []
         view_name = view._ViewName
-        with self.stat_view_snapshot():
-            for row in view.Rows:
-                stat = {}
-                stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
-                if "Tx Rate (Mbps)" in row.Columns:
-                    stat["Tx Rate"] = float(row["Tx Rate (Mbps)"])
-                if "Rx Rate (Mbps)" in row.Columns:
-                    stat["Rx Rate"] = float(row["Rx Rate (Mbps)"])
-                stat["view"] = view_name
-                stats.append(stat)
+        for row in view.Rows:
+            stat = {}
+            stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
+            if "Tx Rate (Mbps)" in row.Columns:
+                stat["Tx Rate"] = float(row["Tx Rate (Mbps)"])
+            if "Rx Rate (Mbps)" in row.Columns:
+                stat["Rx Rate"] = float(row["Rx Rate (Mbps)"])
+            stat["view"] = view_name
+            stats.append(stat)
         return stats
 
     @retryable(sleep_time=2, num_tries=100)
@@ -377,7 +390,6 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             except Exception as ex:
                 self.logger.error(f"Error logging result to scuba: {ex}")
 
-    @retryable(sleep_time=2, num_tries=3)
     def get_latest_stats(
         self,
         max_timeout_sec: int = 180,
@@ -389,39 +401,46 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             max_timeout_sec (int, optional): Maximum timeout in seconds. Defaults to 120.
             since_time (float, optional): If provided, only return stats with a timestamp >= since_time.
         """
+        test_case_uuid = none_throws(self.test_case_uuid)
         timeout_time = time.time() + max_timeout_sec
-        packet_loss_stats = self.captured_stats[self.test_case_uuid]
-        try:
-            # Short-circuit when the background sampler is disabled
-            # (sample_time=0 → self.capturing never gets set). The cached
-            # stats will never refresh, so don't waste max_timeout_sec waiting.
-            if not self.capturing:
-                raise Exception("Periodic sampler disabled; using direct snapshot")
+        packet_loss_stats = self.captured_stats[test_case_uuid]
+        if self.capturing:
             while not (
-                packet_loss_stats and next(reversed(packet_loss_stats)) > since_time
+                packet_loss_stats
+                and self._latest_packet_loss_sample_time.get(test_case_uuid, 0)
+                > since_time
             ):
                 if time.time() > timeout_time:
-                    raise Exception("Timeout waiting for stats")
-                time.sleep(0.1)
-            return packet_loss_stats["latest"]
-        except Exception:
-            # Acquire lock to serialize with the background capture thread's
-            # TakeCsvSnapshot calls. The IXIA chassis only allows one snapshot
-            # at a time ("Snapshot DefaultSnapshotSettings already in progress").
-            # Use a timeout to avoid blocking the asyncio event loop indefinitely.
-            try:
-                with self.stat_view_snapshot():
-                    return self._get_packet_loss_statistics_unlocked(
-                        self.traffic_item_view_assistant
+                    self.logger.warning(
+                        "Background IXIA packet-loss statistics did not refresh "
+                        f"within {max_timeout_sec}s; falling back to a direct read"
                     )
-            except IxiaOperationTimeoutError as error:
-                self.logger.warning(
-                    "Timed out waiting for the IXIA snapshot lock; proceeding "
-                    f"with the best-effort unlocked packet-loss read: {error}"
-                )
+                    break
+                time.sleep(0.1)
+            else:
+                return packet_loss_stats["latest"]
+
+        traffic_item_view_assistant = self.traffic_item_view_assistant
+        if traffic_item_view_assistant is None:
+            raise IxiaSetupError("IXIA traffic-item statistics view is not initialized")
+        lock_timeout_sec = max(
+            1, min(max_timeout_sec, _DIRECT_STATS_LOCK_TIMEOUT_MAX_S)
+        )
+        try:
+            with self.stat_view_snapshot(timeout_seconds=lock_timeout_sec):
                 return self._get_packet_loss_statistics_unlocked(
-                    self.traffic_item_view_assistant
+                    traffic_item_view_assistant
                 )
+        except IxiaOperationTimeoutError as error:
+            if self.capturing:
+                raise
+            self.logger.warning(
+                "Timed out waiting for the IXIA snapshot lock; proceeding "
+                f"with the best-effort unlocked packet-loss read: {error}"
+            )
+            return self._get_packet_loss_statistics_unlocked(
+                traffic_item_view_assistant
+            )
 
     def get_latest_stats_traffic(
         self,
@@ -434,15 +453,46 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             max_timeout_sec (int, optional): Maximum timeout in seconds. Defaults to 120.
             since_time (float, optional): If provided, only return stats with a timestamp >= since_time.
         """
+        test_case_uuid = none_throws(self.test_case_uuid)
         timeout_time = time.time() + max_timeout_sec
-        traffic_rate_stats = self.captured_stats_traffic[self.test_case_uuid]
-        while not (
-            traffic_rate_stats and next(reversed(traffic_rate_stats)) > since_time
-        ):
-            if time.time() > timeout_time:
-                raise Exception("Timeout waiting for stats")
-            time.sleep(0.1)
-        return self.captured_stats_traffic[self.test_case_uuid]["latest"]
+        traffic_rate_stats = self.captured_stats_traffic[test_case_uuid]
+        if self.capturing:
+            while not (
+                traffic_rate_stats
+                and self._latest_traffic_rate_sample_time.get(test_case_uuid, 0)
+                > since_time
+            ):
+                if time.time() > timeout_time:
+                    self.logger.warning(
+                        "Background IXIA traffic-rate statistics did not refresh "
+                        f"within {max_timeout_sec}s; falling back to a direct read"
+                    )
+                    break
+                time.sleep(0.1)
+            else:
+                return traffic_rate_stats["latest"]
+
+        traffic_item_view_assistant = self.traffic_item_view_assistant
+        if traffic_item_view_assistant is None:
+            raise IxiaSetupError("IXIA traffic-item statistics view is not initialized")
+        lock_timeout_sec = max(
+            1, min(max_timeout_sec, _DIRECT_STATS_LOCK_TIMEOUT_MAX_S)
+        )
+        try:
+            with self.stat_view_snapshot(timeout_seconds=lock_timeout_sec):
+                return self._get_traffic_rate_statistics_unlocked(
+                    traffic_item_view_assistant
+                )
+        except IxiaOperationTimeoutError as error:
+            if self.capturing:
+                raise
+            self.logger.warning(
+                "Timed out waiting for the IXIA snapshot lock; proceeding "
+                f"with the best-effort unlocked traffic-rate read: {error}"
+            )
+            return self._get_traffic_rate_statistics_unlocked(
+                traffic_item_view_assistant
+            )
 
     def run(self):
         # sample_time=0 disables the background periodic sampler entirely.
