@@ -621,9 +621,10 @@ def get_bgp_ebb_route_storm_playbook(
 
     Drives 10,500 dual-stack plane-1 route paths through 60 verified
     advertise/withdraw cycles with a deterministic supported heavy-attribute
-    shape. The workflow bounds IXIA route operations to ten peer blocks,
-    proves each transition on IXIA and the DUT, and restores the exact captured
-    baseline.
+    shape. The workflow uses direct IXIA route operations in batches of ten
+    peer blocks. It does not restart the parent network group or apply route
+    state through the global topology update. It proves each transition on
+    IXIA and the DUT, and restores the exact captured baseline.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).

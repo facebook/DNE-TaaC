@@ -22,6 +22,10 @@ from taac.stages.stage_definitions import (
 from taac.steps.step_definitions import (
     create_bgp_attribute_churn_step,
 )
+from taac.testconfigs.routing.cicd_ebb_int_tc import (
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _DEFAULT_EBGP_PREFIX_COUNT,
     _get_bgp_ebb_full_scale_playbooks,
@@ -830,6 +834,58 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "observer_peer_parent_prefix", playbook_factory.call_args.kwargs
         )
 
+    def test_full_scale_factory_rejects_missing_port_map_roles(self) -> None:
+        inventory = MagicMock()
+        inventory.device_name = "dut.example.com"
+        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
+
+        for port_map, missing_role in (
+            ({"uplink": 0}, "ibgp"),
+            ({"ibgp": 1}, "uplink"),
+        ):
+            with (
+                self.subTest(missing_role=missing_role),
+                self.assertRaisesRegex(
+                    ValueError,
+                    rf"missing required roles: \['{missing_role}'\]",
+                ),
+            ):
+                _get_bgp_ebb_full_scale_playbooks(
+                    inventory,
+                    BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                    bound=MagicMock(),
+                    ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
+                    selected_tc7_playbooks=set(),
+                    port_map=port_map,
+                )
+
+    def test_full_scale_factory_rejects_out_of_range_port_map_indices(
+        self,
+    ) -> None:
+        inventory = MagicMock()
+        inventory.device_name = "dut.example.com"
+        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
+
+        for port_map, role, index in (
+            ({"uplink": -1, "ibgp": 1}, "uplink", -1),
+            ({"uplink": 0, "ibgp": 2}, "ibgp", 2),
+        ):
+            with (
+                self.subTest(role=role, index=index),
+                self.assertRaisesRegex(
+                    ValueError,
+                    rf"out-of-range indices.*'{role}': {index}",
+                ),
+            ):
+                _get_bgp_ebb_full_scale_playbooks(
+                    inventory,
+                    BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                    bound=MagicMock(),
+                    ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
+                    selected_tc7_playbooks=set(),
+                    port_map=port_map,
+                )
+
     def test_full_scale_factory_wires_update_group_mode_to_ebb16(self) -> None:
         inventory = MagicMock()
         inventory.device_name = "dut.example.com"
@@ -1002,6 +1058,49 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     expected_auxiliary_observers,
                     topology_factory.call_args.kwargs["include_bgpmon"],
                 )
+
+    def test_bag012_stage1_uses_port_8_1_for_heavy_ibgp_routes(self) -> None:
+        for config in (
+            BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+            BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+        ):
+            with self.subTest(config=config.name):
+                endpoint = next(
+                    endpoint
+                    for endpoint in config.endpoints
+                    if endpoint.name == "bag012.ash6"
+                )
+                connections = endpoint.direct_ixia_connections
+                self.assertIsNotNone(connections)
+                assert connections is not None
+                self.assertEqual(
+                    [
+                        ("Ethernet3/36/2", "8/2"),
+                        ("Ethernet3/36/1", "8/1"),
+                        ("Ethernet3/36/3", "8/3"),
+                    ],
+                    [
+                        (connection.interface, connection.ixia_port)
+                        for connection in connections
+                    ],
+                )
+
+        route_storm = next(
+            playbook
+            for playbook in BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
+            if playbook.name == "bgp_ebb_route_storm_playbook"
+        )
+        payload = next(
+            payload
+            for payload in (
+                _step_payload(step)
+                for step in _sequential_steps(route_storm)
+                if step.step_params is not None
+                and step.step_params.json_params is not None
+            )
+            if payload.get("custom_step_name") == "bgp_route_storm"
+        )
+        self.assertEqual("Ethernet3/36/1", payload["ixia_interface_mimic_ibgp"])
 
     def test_full_scale_factory_rejects_invalid_playbook_selections(self) -> None:
         inventory = MagicMock()

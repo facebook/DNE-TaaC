@@ -624,6 +624,7 @@ def _get_bgp_ebb_full_scale_playbooks(
     bound: BoundTopology,
     ebgp_prefix_count: int,
     selected_tc7_playbooks: set[str],
+    port_map: t.Mapping[str, int] | None = None,
     enable_update_group: bool = True,
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
@@ -665,8 +666,30 @@ def _get_bgp_ebb_full_scale_playbooks(
         return playbooks
 
     device_name = physical_inventory.device_name
-    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]
-    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[1][0]
+    resolved_port_map = EBB_FULL_SCALE_PORT_MAP if port_map is None else port_map
+    missing_port_roles = sorted({"uplink", "ibgp"} - resolved_port_map.keys())
+    if missing_port_roles:
+        raise ValueError(
+            "BGP EBB full-scale port_map is missing required roles: "
+            f"{missing_port_roles}"
+        )
+    port_count = len(physical_inventory.ixia_ports)
+    invalid_port_roles = {
+        role: resolved_port_map[role]
+        for role in ("uplink", "ibgp")
+        if not 0 <= resolved_port_map[role] < port_count
+    }
+    if invalid_port_roles:
+        raise ValueError(
+            "BGP EBB full-scale port_map has out-of-range indices for "
+            f"{port_count} IXIA ports: {invalid_port_roles}"
+        )
+    ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[
+        resolved_port_map["uplink"]
+    ][0]
+    ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[
+        resolved_port_map["ibgp"]
+    ][0]
     session_count = _expected_established_session_count()
     # Derive from the bound topology rather than the module constants, so the
     # checks describe the chassis the run is actually wired to. A config using
@@ -860,6 +883,7 @@ def create_bgp_ebb_full_scale_test_config(
     bgpcpp_logging_config_override: str | None = None,
     parent_networks: dict[str, str] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    port_map: t.Mapping[str, int] | None = None,
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
@@ -891,6 +915,8 @@ def create_bgp_ebb_full_scale_test_config(
             ``EBB_PARENT_NETWORKS_IXIA03``. Mismatched pairs are rejected,
             because peers on one chassis' subnets advertising next hops on
             another's produce routes the DUT cannot resolve.
+        port_map: Optional mapping from logical IXIA roles to ordered physical
+            inventory entries. Use this for a testbed-specific role assignment.
     """
     resolved_parent_networks = parent_networks or EBB_PARENT_NETWORKS
     if resolved_parent_networks.get("ebgp_v4") != next_hops.ebgp_v4_network:
@@ -932,6 +958,12 @@ def create_bgp_ebb_full_scale_test_config(
     include_auxiliary_observers = (
         not selected_tc7_playbooks and len(physical_inventory.ixia_ports) > 2
     )
+    default_port_map = (
+        EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON
+        if include_auxiliary_observers
+        else EBB_FULL_SCALE_PORT_MAP
+    )
+    resolved_port_map = dict(default_port_map if port_map is None else port_map)
     ebgp_prefix_count = (
         _RUNTIME_UPDATE_EBGP_PREFIX_COUNT
         if enable_runtime_update
@@ -952,11 +984,7 @@ def create_bgp_ebb_full_scale_test_config(
     )
     bound = topology.bind_to_inventory(
         physical_inventory=physical_inventory,
-        port_map=(
-            EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON
-            if include_auxiliary_observers
-            else EBB_FULL_SCALE_PORT_MAP
-        ),
+        port_map=resolved_port_map,
         parent_networks=resolved_parent_networks,
         peer_groups=EBB_PEER_GROUPS,
         as_numbers=EBB_AS_NUMBERS,
@@ -974,6 +1002,7 @@ def create_bgp_ebb_full_scale_test_config(
         bound=bound,
         ebgp_prefix_count=ebgp_prefix_count,
         selected_tc7_playbooks=selected_tc7_playbooks,
+        port_map=resolved_port_map,
         enable_update_group=enable_update_group,
         multipath_test_duration_seconds=multipath_test_duration_seconds,
         multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
