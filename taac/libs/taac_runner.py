@@ -186,6 +186,7 @@ if not TAAC_OSS:
     from taac.internal.tasks.ixia_diagnostics_collection_task import (
         IxiaDiagnosticsCollectionTask,
     )
+    from taac.internal.utils import ondevice_sampler
 
 DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID: str = "test_case_start"
 DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
@@ -1090,6 +1091,19 @@ class TaacRunner:
                                 duration_secs=time.time() - _cleanup_start,
                                 logger=self.logger,
                             )
+                        # Last resort for the CPU/RSS characterization brackets.
+                        # Meta-internal: the brackets and their sampler live
+                        # under internal/, so there is nothing to reap in OSS.
+                        # Their STOP steps are a sibling Stage placed after the
+                        # measured work, so a failing workload stage skips them
+                        # and leaves a detached sampling loop running on the DUT
+                        # to its 24-hour iteration cap. This is the only point
+                        # that runs no matter which stage failed. A no-op on a
+                        # passing run, and it never raises: an exception here
+                        # would escape the finally and displace the stage
+                        # failure that is the run's actual result.
+                        if not TAAC_OSS:
+                            await ondevice_sampler.reap_all(self.logger)
                         self.jq_vars["test_case_end_time"] = int(time.time())
 
                     # Log POST_TEST health check results table
