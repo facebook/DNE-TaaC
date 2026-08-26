@@ -42,6 +42,7 @@ from tabulate import tabulate
 
 LOGGER: ConsoleFileLogger = get_root_logger()
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+_EVERPASTE_HANDLE_URL = "https://www.internalfb.com/intern/everpaste/?handle={handle}"
 
 
 def get_fburl(url: str) -> str:
@@ -64,6 +65,21 @@ def get_fburl(url: str) -> str:
 async def async_get_fburl(url: str) -> str:
     """Async version of get_fburl."""
     return get_fburl(url)
+
+
+def format_everpaste_url(upload_result: str) -> str:
+    """Return a clickable URL for an Everpaste/Everstore upload result.
+
+    Internal binary uploads return an opaque handle, while OSS uploads return a
+    local path and some upload implementations already return a URL. Preserve
+    paths and URLs; expand only opaque internal handles.
+    """
+    if not upload_result:
+        raise ValueError("Everpaste upload returned an empty result")
+
+    if TAAC_OSS or upload_result.startswith(("http://", "https://", "/")):
+        return upload_result
+    return _EVERPASTE_HANDLE_URL.format(handle=upload_result)
 
 
 async def async_get_fburl_retry(

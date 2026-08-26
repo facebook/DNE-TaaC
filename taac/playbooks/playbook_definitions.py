@@ -2240,19 +2240,19 @@ def create_performance_scaling_egress_peer_sweep_playbook(
 
     Generates one Stage per entry in `egress_peer_counts` that (a) tears
     down prior IBGP sessions and brings up `n` v6 + `n` v4 IBGP egress
-    peers, then (b) runs a convergence step against `prefix_count`
-    prefixes. After the per-N Stages, a trailing aggregator Stage
-    consolidates per-Stage convergence results into a single plot of
-    convergence-time vs total-peer-count. Used by the BGP++ performance-
-    scaling Case 1 TestConfig.
+    peers, then (b) measures advertisement-burst and stable CPU/RSS for
+    `prefix_count` prefixes per address family. After the per-N Stages, a
+    trailing aggregator Stage
+    consolidates peak/stable CPU and RSS across the peer-count sweep. Used by
+    the BGP++ performance-scaling Case 1 TestConfig.
 
     Args:
-        device_name: DUT hostname (used by setup, periodic tasks, and
-            convergence step).
+        device_name: DUT hostname (used by setup, periodic tasks, and the
+            resource-measurement step).
         egress_peer_counts: IBGP egress peer counts to sweep (each entry
             `n` becomes `2*n` total IBGP peers since v6 and v4 are
             started in parallel).
-        prefix_count: Prefixes advertised per peer for the convergence
+        prefix_count: Prefixes advertised per address family for the resource
             measurement.
         ebgp_peer_count: Constant EBGP peer count present in every Stage
             (also contributes `2 * ebgp_peer_count` to total peer count).
@@ -2325,12 +2325,13 @@ def create_performance_scaling_egress_peer_sweep_playbook(
         create_steps_stage(
             stage_id="egress_sweep_aggregator",
             description=(
-                "Aggregate per-Stage convergence results into one plot of"
-                f" convergence-time vs total-peer-count @ prefix_count={prefix_count}"
+                "Aggregate peak/stable CPU and RSS across the peer-count sweep"
+                f" @ prefix_count={prefix_count}"
             ),
             steps=[
                 create_performance_scaling_egress_sweep_aggregator_step(
                     prefix_count=prefix_count,
+                    apply_sc1_gates=True,
                 ),
             ],
         )
@@ -2529,14 +2530,13 @@ def create_performance_scaling_ingress_peer_sweep_playbook(
             )
         )
 
-    # Final aggregator Stage -- one consolidated plot across all Stages (the
-    # aggregator is axis-agnostic: it plots convergence-time vs total-peer-count).
+    # Final aggregator Stage -- one consolidated resource plot across all Stages.
     stages.append(
         create_steps_stage(
             stage_id="ingress_sweep_aggregator",
             description=(
-                "Aggregate per-Stage convergence results into one plot of"
-                f" convergence-time vs total-peer-count @ prefix_count={prefix_count}"
+                "Aggregate peak/stable CPU and RSS across the peer-count sweep"
+                f" @ prefix_count={prefix_count}"
             ),
             steps=[
                 create_performance_scaling_egress_sweep_aggregator_step(

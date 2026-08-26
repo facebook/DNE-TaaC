@@ -136,6 +136,7 @@ async def async_collect_peak_cpu_memory(
         - avg_cpu_percent: Full-window mean CPU% across all samples
         - avg_memory_mb: Full-window mean memory (MB) across all samples --
           the robust steady/stable value (vs a single flaky snapshot)
+        - process_pid: Most recently observed PID for the measured process
 
     Example:
         >>> peak_stats = await async_collect_peak_cpu_memory(
@@ -151,6 +152,7 @@ async def async_collect_peak_cpu_memory(
 
     max_cpu = 0.0
     max_memory_mb = 0.0
+    process_pid = 0.0
     sample_count = 0
     # Monotonic clock: all elapsed-duration math below (loop bound, sustained-CPU
     # timestamps, inter-sample sleep) must be immune to wall-clock/NTP steps.
@@ -178,9 +180,19 @@ async def async_collect_peak_cpu_memory(
             processes = output.get("processes", {})
 
             # Find the target process and get its metrics
-            for _pid, process_data in processes.items():
+            for pid, process_data in processes.items():
                 cmd = process_data.get("cmd", "")
                 if process_name in cmd:
+                    observed_pid = float(pid)
+
+                    if process_pid and observed_pid != process_pid:
+                        LOGGER.warning(
+                            f"{process_name} PID changed from {int(process_pid)} "
+                            f"to {int(observed_pid)} during monitoring; "
+                            "reporting the latest PID"
+                        )
+
+                    process_pid = observed_pid
                     cpu_pct = float(process_data.get("cpuPct", 0))
                     resident_mem_str = str(process_data.get("residentMem", "0"))
 
@@ -257,6 +269,7 @@ async def async_collect_peak_cpu_memory(
         "steady_memory_mb": steady_memory,
         "high_cpu_sample_count": float(high_cpu_sample_count),
         "high_cpu_duration_seconds": high_cpu_duration_seconds,
+        "process_pid": process_pid,
     }
 
 

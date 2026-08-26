@@ -146,13 +146,21 @@ def registered_gates() -> t.Dict[str, str]:
     return _DEFAULT_REGISTRY.registered_gates()
 
 
-def format_registered_gates(registry: t.Optional[GateRegistry] = None) -> str:
+def format_registered_gates(
+    registry: t.Optional[GateRegistry] = None,
+    gate_names: t.Optional[t.Collection[str]] = None,
+) -> str:
     """A human-readable block listing every registered gate and its mode.
 
     Lets a test surface -- at a glance -- exactly which checks BLOCK vs OBSERVE,
     instead of hunting through per-gate log lines.
     """
     gates = (registry or _DEFAULT_REGISTRY).registered_gates()
+    if gate_names is not None:
+        missing = sorted(set(gate_names) - set(gates))
+        if missing:
+            raise ValueError(f"Unregistered gate name(s): {', '.join(missing)}")
+        gates = {name: gates[name] for name in gate_names}
     if not gates:
         return "Registered gates: (none)"
 
@@ -164,10 +172,12 @@ def format_registered_gates(registry: t.Optional[GateRegistry] = None) -> str:
 
 
 def log_registered_gates(
-    logger: t.Any, registry: t.Optional[GateRegistry] = None
+    logger: t.Any,
+    registry: t.Optional[GateRegistry] = None,
+    gate_names: t.Optional[t.Collection[str]] = None,
 ) -> None:
     """Log the registered-gate summary as a single INFO block."""
-    logger.info(format_registered_gates(registry))
+    logger.info(format_registered_gates(registry, gate_names))
 
 
 def apply_flatness_gate(

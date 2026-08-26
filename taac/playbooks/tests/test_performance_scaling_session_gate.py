@@ -15,7 +15,9 @@ import unittest
 
 from taac.playbooks.playbook_definitions import (
     create_performance_scaling_egress_peer_sweep_playbook,
+    create_performance_scaling_ingress_peer_sweep_playbook,
 )
+from taac.utils.gate_catalog import SC1_HIGH_CPU_BUDGET_SECONDS
 from taac.test_as_a_config.types import StepName
 
 _AGGREGATOR_STAGE_ID = "egress_sweep_aggregator"
@@ -33,6 +35,11 @@ class PerfScalingSessionGateTest(unittest.TestCase):
 
     def _sweep_stages(self, playbook):
         return [s for s in playbook.stages if s.id != _AGGREGATOR_STAGE_ID]
+
+    def _step_params(self, step):
+        if step.step_params is None:
+            raise AssertionError("expected custom-step params")
+        return json.loads(step.step_params.json_params)
 
     def test_each_sweep_stage_gates_on_expected_session_count(self) -> None:
         counts = [100, 200, 300]
@@ -63,6 +70,31 @@ class PerfScalingSessionGateTest(unittest.TestCase):
 
     def test_cpu_burst_observation_exceeds_two_minute_gate(self) -> None:
         stage = self._sweep_stages(self._sweep_playbook([100]))[0]
-        params = json.loads(stage.steps[-1].step_params.json_params)
+        params = self._step_params(stage.steps[-1])
 
         self.assertEqual(180, params["advertisement_settle_seconds"])
+        self.assertGreater(
+            params["advertisement_settle_seconds"], SC1_HIGH_CPU_BUDGET_SECONDS
+        )
+
+    def test_only_egress_sweep_applies_sc1_gates(self) -> None:
+        egress = self._sweep_playbook([100])
+        egress_aggregator = egress.stages[-1]
+        egress_params = self._step_params(egress_aggregator.steps[0])
+        self.assertTrue(egress_params["apply_sc1_gates"])
+
+        ingress = create_performance_scaling_ingress_peer_sweep_playbook(
+            device_name="bag010.ash6",
+            ingress_peer_counts=[1],
+            prefix_count=50000,
+            ibgp_peer_count=500,
+            per_iteration_setup_steps_factory=lambda _v6, _v4: [],
+            address_families=["ipv6"],
+        )
+        ingress_params = self._step_params(ingress.stages[-1].steps[0])
+        self.assertNotIn("apply_sc1_gates", ingress_params)
+
+    def test_aggregator_description_names_resource_scaling(self) -> None:
+        aggregator = self._sweep_playbook([100]).stages[-1]
+        self.assertIn("peak/stable CPU and RSS", aggregator.description)
+        self.assertNotIn("convergence-time", aggregator.description)

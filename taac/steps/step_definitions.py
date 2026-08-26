@@ -6754,8 +6754,8 @@ def create_performance_scaling_convergence_step(
     description: t.Optional[str] = None,
 ) -> Step:
     """
-    Create a custom step that iterates all prefix counts for a given peer count,
-    measures BGP convergence time for each, and plots convergence time vs prefix count.
+    Create a custom step that measures peak/stable CPU and RSS while iterating
+    prefix counts for a fixed peer count.
 
     This replaces separate per-prefix-count playbooks with a single step that
     sequentially tests each prefix count and generates consolidated results.
@@ -6777,7 +6777,8 @@ def create_performance_scaling_convergence_step(
         total_peer_count: Total peer count for labeling/Scuba
         ibgp_peer_count: IBGP peer count for Scuba logging
         ebgp_peer_count: EBGP peer count for Scuba logging
-        convergence_wait_seconds: Maximum wait for convergence per iteration (default: 600)
+        convergence_wait_seconds: Legacy serialized parameter retained for
+            compatibility; convergence timing is not measured by this step.
         advertisement_settle_seconds: Burst observation window before the soak.
             When omitted, the custom step uses its default.
         soak_seconds: Soak period after convergence per iteration (default: 120)
@@ -6785,11 +6786,11 @@ def create_performance_scaling_convergence_step(
         description: Custom description for the step
 
     Returns:
-        Step object for the performance scaling convergence custom step
+        Step object for the performance-scaling resource measurement.
     """
     if description is None:
         description = (
-            f"Measure convergence across prefix counts "
+            f"Measure peak/stable CPU and RSS across prefix counts "
             f"{prefix_counts} with {total_peer_count} peers"
         )
 
@@ -6821,12 +6822,12 @@ def create_performance_scaling_convergence_step(
 def create_performance_scaling_egress_sweep_aggregator_step(
     test_name: str = "BGP_PLUS_PLUS_PERFORMANCE_SCALING_CONVERGENCE",
     prefix_count: t.Optional[int] = None,
+    apply_sc1_gates: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
     """
-    Create a custom step that aggregates per-stage convergence results from
-    a single Playbook's egress-peer sweep and produces ONE consolidated plot
-    showing convergence-time vs total-peer-count.
+    Create a custom step that aggregates per-stage resource measurements from
+    a peer sweep and produces one consolidated resource-scaling plot.
 
     The companion ``aggregate_performance_scaling_egress_sweep_plot`` custom
     step reads every ``performance_scaling_<N>_peers`` entry from
@@ -6841,22 +6842,23 @@ def create_performance_scaling_egress_sweep_aggregator_step(
             prefix counts, pick which one to plot. When ``None`` (default)
             and only one prefix count was tested per Stage, that single
             value is used automatically.
+        apply_sc1_gates: Apply the SC1 egress-sweep gates to the aggregated
+            measurements. The shared ingress-sweep caller leaves this false.
         description: Custom description for the step.
 
     Returns:
         Step object for the egress-sweep aggregator custom step.
     """
     if description is None:
-        description = (
-            "Aggregate per-Stage convergence results into a single plot"
-            " of convergence-time vs total-peer-count"
-        )
+        description = "Aggregate peak/stable CPU and RSS across the peer-count sweep"
     step_params: t.Dict[str, t.Any] = {
         "custom_step_name": "aggregate_performance_scaling_egress_sweep_plot",
         "test_name": test_name,
     }
     if prefix_count is not None:
         step_params["prefix_count"] = prefix_count
+    if apply_sc1_gates:
+        step_params["apply_sc1_gates"] = True
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description,

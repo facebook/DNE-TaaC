@@ -18,7 +18,10 @@ from taac.utils.arista_utils import (
     get_nexthop_group_summary,
     NexthopGroupSummary,
 )
-from taac.utils.common import async_everpaste_file
+from taac.utils.common import (
+    async_everpaste_file,
+    format_everpaste_url,
+)
 from taac.utils.driver_factory import async_get_device_driver
 from taac.health_check.health_check import types as hc_types
 
@@ -39,6 +42,7 @@ try:
     import matplotlib
 
     matplotlib.use("Agg")  # Non-interactive backend
+    import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
     MATPLOTLIB_AVAILABLE = True
@@ -72,6 +76,17 @@ def _parse_memory_value(mem_str: str) -> int:
     else:
         # Already in KB
         return int(mem_str)
+
+
+def _process_lifetime_label(process_key: str) -> str:
+    """Format a ``command_pid`` key for monitored-lifetime plot labels."""
+    if process_key.isdigit():
+        return f"PID {process_key} — full monitored PID lifetime"
+
+    command, separator, pid = process_key.rpartition("_")
+    if not separator or not pid.isdigit():
+        return f"{process_key} — full monitored PID lifetime"
+    return f"{command} PID {pid} — full monitored PID lifetime"
 
 
 async def _generate_multi_series_plot(
@@ -195,6 +210,7 @@ async def _generate_plot(
     ylabel: str,
     threshold: t.Optional[float] = None,
     output_path: t.Optional[str] = None,
+    y_axis_starts_at_zero: bool = False,
 ) -> t.Optional[str]:
     """
     Generate a time-series plot from collected data.
@@ -205,6 +221,7 @@ async def _generate_plot(
         ylabel: Y-axis label
         threshold: Optional threshold line to draw
         output_path: Optional path to save plot (default: temp file)
+        y_axis_starts_at_zero: Anchor the Y axis at zero.
 
     Returns:
         Path to saved plot file, or None if matplotlib unavailable or no data
@@ -248,6 +265,9 @@ async def _generate_plot(
         plt.ylabel(ylabel, fontsize=12)
         plt.title(title, fontsize=14, fontweight="bold")
         plt.grid(True, alpha=0.3, linestyle=":", linewidth=0.5)
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%b %d %H:%M"))
+        if y_axis_starts_at_zero:
+            plt.ylim(bottom=0)
         plt.xticks(rotation=45, ha="right")
         plt.legend(loc="best")
         plt.tight_layout()
@@ -421,11 +441,14 @@ class CounterThresholdTask(PeriodicTask):
                 title=f"Counter Utilization Over Time: {key}",
                 ylabel=key,
                 threshold=threshold,
+                y_axis_starts_at_zero=True,
             )
             if plot_path:
                 # Upload to everpaste
                 try:
-                    plot_url = await async_everpaste_file(plot_path)
+                    plot_url = format_everpaste_url(
+                        await async_everpaste_file(plot_path, extension="png")
+                    )
                     message += f"\nPlot: {plot_url}"
                     self.logger.info(f"Plot uploaded to: {plot_url}")
                 except Exception as e:
@@ -1264,7 +1287,9 @@ class NexthopGroupPoll(PeriodicTask):
 
         if plot_path:
             try:
-                plot_url = await async_everpaste_file(plot_path)
+                plot_url = format_everpaste_url(
+                    await async_everpaste_file(plot_path, extension="png")
+                )
                 message += f"\nPlot: {plot_url}"
                 self.logger.info(f"Plot uploaded to: {plot_url}")
             except Exception as e:
@@ -1481,21 +1506,22 @@ class ProcessMonitorTask(PeriodicTask):
             String containing plot URLs to append to message
         """
         plot_urls = ""
-
         # Generate CPU plot for each process
         for process_name, cpu_data in process_cpu_data.items():
+            process_label = _process_lifetime_label(process_name)
             cpu_plot_path = await _generate_plot(
                 data=cpu_data,
-                title=f"CPU Usage Over Time: {process_name}",
+                title=f"CPU Usage — {process_label}",
                 ylabel="CPU %",
+                y_axis_starts_at_zero=True,
             )
             if cpu_plot_path:
                 try:
-                    cpu_plot_url = await async_everpaste_file(cpu_plot_path)
-                    plot_urls += f"\n\nCPU Plot [{process_name}]: {cpu_plot_url}"
-                    self.logger.info(
-                        f"CPU plot for {process_name} uploaded to: {cpu_plot_url}"
+                    cpu_plot_url = format_everpaste_url(
+                        await async_everpaste_file(cpu_plot_path, extension="png")
                     )
+                    plot_urls += f"\n\nCPU Plot [{process_label}]: {cpu_plot_url}"
+                    self.logger.info(f"CPU plot [{process_label}]: {cpu_plot_url}")
                 except Exception as e:
                     self.logger.warning(
                         f"Failed to upload CPU plot for {process_name}: {e}"
@@ -1503,17 +1529,21 @@ class ProcessMonitorTask(PeriodicTask):
 
         # Generate resident memory plot for each process
         for process_name, mem_data in process_mem_data.items():
+            process_label = _process_lifetime_label(process_name)
             mem_plot_path = await _generate_plot(
                 data=mem_data,
-                title=f"Resident Memory Usage Over Time: {process_name}",
+                title=f"Resident Memory — {process_label}",
                 ylabel="Resident Memory (MB)",
+                y_axis_starts_at_zero=True,
             )
             if mem_plot_path:
                 try:
-                    mem_plot_url = await async_everpaste_file(mem_plot_path)
-                    plot_urls += f"\nMemory Plot [{process_name}]: {mem_plot_url}"
+                    mem_plot_url = format_everpaste_url(
+                        await async_everpaste_file(mem_plot_path, extension="png")
+                    )
+                    plot_urls += f"\nMemory Plot [{process_label}]: {mem_plot_url}"
                     self.logger.info(
-                        f"Resident memory plot for {process_name} uploaded to: {mem_plot_url}"
+                        f"Resident memory plot [{process_label}]: {mem_plot_url}"
                     )
                 except Exception as e:
                     self.logger.warning(
@@ -1657,11 +1687,14 @@ class CpuLoadAverageTask(PeriodicTask):
                 title="CPU Load Average Over Time",
                 ylabel="CPU Load Average",
                 threshold=threshold,
+                y_axis_starts_at_zero=True,
             )
             if plot_path:
                 # Upload to everpaste
                 try:
-                    plot_url = await async_everpaste_file(plot_path)
+                    plot_url = format_everpaste_url(
+                        await async_everpaste_file(plot_path, extension="png")
+                    )
                     message += f"\nPlot: {plot_url}"
                     self.logger.info(f"Plot uploaded to: {plot_url}")
                 except Exception as e:
@@ -1932,7 +1965,9 @@ class OpticsTemperatureTask(PeriodicTask):
         )
         if plot_path:
             try:
-                plot_url = await async_everpaste_file(plot_path)
+                plot_url = format_everpaste_url(
+                    await async_everpaste_file(plot_path, extension="png")
+                )
                 message += f"\nPlot: {plot_url}"
                 self.logger.info(f"Plot uploaded to: {plot_url}")
             except Exception as e:
