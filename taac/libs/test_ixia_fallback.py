@@ -150,7 +150,7 @@ class TaacRunnerFailurePrecedenceTest(unittest.IsolatedAsyncioTestCase):
         runner.inject_validation_stages = MagicMock(return_value=[stage])
         runner.async_run_snapshot_checks = AsyncMock()
         runner.async_run_stage = AsyncMock(side_effect=primary)
-        runner._log_post_test_results = AsyncMock()
+        runner._log_stage_health_results = AsyncMock()
         runner.async_test_case_tearDown = AsyncMock(side_effect=teardown)
         runner._publish_npi_result = AsyncMock()
 

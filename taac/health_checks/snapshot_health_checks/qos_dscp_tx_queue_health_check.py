@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import re
 import typing as t
 
 from taac.constants import TestTopology
@@ -9,6 +10,7 @@ from taac.health_checks.abstract_snapshot_health_check import (
 )
 from taac.health_checks.common_utils import evaluate_comparison
 from taac.health_checks.constants import Snapshot
+from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.health_check_utils import get_fb303_client
 from taac.utils.qos_constants import ClassOfService
 from taac.health_check.health_check import types as hc_types
@@ -31,6 +33,9 @@ DEFAULT_QUEUE_OFFSET_BYTES = 1 * 1024 * 1024  # 1 MB
 
 NC_QUEUE_DESC = "queue7.nc"
 
+# Leading queue id of a descriptor like "queue2.silver" / "queue0.be".
+RE_QUEUE_INDEX = re.compile(r"^queue(\d+)\.")
+
 
 class QoSDscpTxQueueHealthCheck(
     AbstractTopologySnapshotHealthCheck[hc_types.QoSDscpTxQueueHealthCheckIn]
@@ -45,16 +50,65 @@ class QoSDscpTxQueueHealthCheck(
         )
         counters = await asyncio.gather(
             *[
-                self._get_all_fb303_counters(hostname)
+                self._get_all_fb303_counters(hostname, input)
                 for hostname in hosts_to_collect_counters
             ]
         )
         return dict(zip(hosts_to_collect_counters, counters))
 
-    async def _get_all_fb303_counters(self, hostname: str) -> dict:
+    async def _get_all_fb303_counters(
+        self,
+        hostname: str,
+        input: t.Optional[hc_types.QoSDscpTxQueueHealthCheckIn] = None,
+    ) -> dict:
         async with await get_fb303_client(hostname) as client:
-            # pyrefly: ignore [bad-return]
-            return await client.getCounters()
+            counters = dict(await client.getCounters())
+        if input is not None:
+            counters.update(await self._queue_byte_counters(hostname, input))
+        return counters
+
+    async def _queue_byte_counters(
+        self, hostname: str, input: hc_types.QoSDscpTxQueueHealthCheckIn
+    ) -> t.Dict[str, int]:
+        """Supply the per-queue byte counters fb303 does not export.
+
+        FBOSS exports per-queue buffer watermarks but no per-queue out_bytes,
+        while getHwPortStats() carries queueOutBytes_ keyed by queue id. Emit
+        the same keys the filters look up so they need not know the source.
+        Absent stats yield nothing, keeping "unexported" distinct from zero.
+        """
+        infos = [i for i in input.tx_queue_info_list if i.hostname == hostname]
+        if not infos:
+            return {}
+        descs = set(COS_QUEUE_FB303_COUNTER_DESC.values())
+        for info in infos:
+            descs.update(info.queue_desc_list or [])
+        try:
+            driver = await async_get_device_driver(hostname)
+            async with driver.async_agent_client as client:
+                port_stats = await client.getHwPortStats()
+        except Exception as e:
+            self.logger.warning(
+                f"{hostname}: per-queue byte stats unavailable ({e}); "
+                "falling back to fb303 counters only"
+            )
+            return {}
+
+        synthesized: t.Dict[str, int] = {}
+        for info in infos:
+            stats = port_stats.get(info.interface)
+            queue_bytes = getattr(stats, "queueOutBytes_", None) if stats else None
+            if not queue_bytes:
+                continue
+            for desc in descs:
+                m = RE_QUEUE_INDEX.match(desc)
+                if m is None:
+                    continue
+                value = queue_bytes.get(int(m.group(1)))
+                if value is None:
+                    continue
+                synthesized[f"{info.interface}.{desc}.{info.key_desc}"] = value
+        return synthesized
 
     async def capture_pre_snapshot(
         self,

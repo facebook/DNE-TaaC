@@ -8,6 +8,7 @@ event loop as setUp/tearDown, so these tests use IsolatedAsyncioTestCase
 and async mocks for run_tests to match the production call shape.
 """
 
+import asyncio
 import unittest
 from unittest import mock
 
@@ -147,6 +148,44 @@ class TestOSSTestExecutor(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, OSSTestStatus.ERROR)
         self.assertFalse(result.is_transient)
+
+    async def test_base_exception_group_is_caught_not_propagated(self):
+        """A BaseExceptionGroup must not escape execute_playbook.
+
+        TaacRunner.run_test_case raises BaseExceptionGroup when the test case
+        and its teardown both fail. Python keeps it a BaseExceptionGroup (rather
+        than the Exception-derived ExceptionGroup) if ANY member is a
+        BaseException -- asyncio.CancelledError, raised when a health check
+        blows up inside the postcheck gather and cancels its siblings. Such a
+        group is not caught by `except Exception`, so it used to escape the
+        playbook loop in oss_entry_point and silently abandon every remaining
+        playbook in a batch.
+        """
+        group = BaseExceptionGroup(
+            "test case execution and teardown both failed",
+            [asyncio.CancelledError(), TestCaseFailure("health check failed")],
+        )
+        # Guard the premise: if this is not a BaseExceptionGroup the test is
+        # vacuous, because `except Exception` would already have caught it.
+        self.assertNotIsInstance(group, Exception)
+
+        self.mock_runner.run_tests = self._async_raise(group)
+        result = await self.executor.execute_playbook(
+            playbook=self.mock_playbook,
+            dut="device1",
+            test_config="test_config",
+        )
+        self.assertTrue(result.status.failed)
+
+    async def test_bare_cancelled_error_still_propagates(self):
+        """Genuine task cancellation must not be swallowed."""
+        self.mock_runner.run_tests = self._async_raise(asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await self.executor.execute_playbook(
+                playbook=self.mock_playbook,
+                dut="device1",
+                test_config="test_config",
+            )
 
 
 if __name__ == "__main__":

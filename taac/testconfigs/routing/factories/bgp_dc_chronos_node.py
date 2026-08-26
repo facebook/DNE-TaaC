@@ -25,9 +25,22 @@ unchanged from the pre-Wave-3B source; Wave 3C-3E will split them further.
 from __future__ import annotations
 
 import json
+import typing as t
 
 from ixia.ixia import types as ixia_types
-from taac.abstractions.physical_inventory import PhysicalInventory
+
+if t.TYPE_CHECKING:
+    # ``taac.abstractions`` is Meta-internal and is not shipped to OSS, but the
+    # only thing this module needs from it is the ``PhysicalInventory`` name for
+    # the annotation on ``create_bgp_dc_chronos_node_test_config``. ``from
+    # __future__ import annotations`` above makes annotations lazy strings, so
+    # the name is never resolved at runtime and the guard costs nothing in Meta
+    # mode. Importing it eagerly made this module — and therefore every config
+    # that imports it, e.g. ``wedge800_npi_test_config`` — unimportable under
+    # TAAC_OSS with ``No module named 'taac.abstractions'``. The sibling entry
+    # point ``build_bgp_dc_test_config`` takes plain kwargs and never touches
+    # the type, so OSS callers are unaffected.
+    from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.health_checks.healthcheck_definitions import (
     create_core_dumps_snapshot_check,
 )

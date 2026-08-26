@@ -9359,6 +9359,18 @@ class ServiceConvergenceStep(StepBase[taac_types.ServiceConvergenceInput]):
             )
 
 
+# Services whose start consumes the agent's cold-boot flag. qsfp_service owns a
+# separate `cold_boot_once_qsfp_service` and is deliberately absent.
+_COLD_BOOT_FLAG_SERVICES: t.FrozenSet[taac_types.Service] = frozenset(
+    {
+        taac_types.Service.AGENT,
+        taac_types.Service.FBOSS_SW_AGENT,
+        taac_types.Service.FBOSS_HW_AGENT_0,
+        taac_types.Service.FBOSS_HW_AGENT_1,
+    }
+)
+
+
 class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
     STEP_NAME = taac_types.StepName.SERVICE_INTERRUPTION_STEP
 
@@ -9393,10 +9405,14 @@ class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
         service = self.service_factory(input.name)
         agents = list(input.agents) if input.agents is not None else None
 
-        if input.create_cold_boot_file and self.is_fboss:
-            await self.driver.async_run_cmd_on_shell(
-                "touch /dev/shm/fboss/warm_boot/cold_boot_once_0"
-            )
+        # Only the agent reads cold_boot_once_<idx>, so interrupting qsfp_service
+        # or fsdb has no business touching it. Clear before starting the agent so
+        # it is only ever as cold as this step asked for -- the flag is one-shot
+        # but the agent does not reliably delete it once honoured.
+        if self.is_fboss and input.name in _COLD_BOOT_FLAG_SERVICES:
+            await self.driver.async_remove_cold_boot_file()
+            if input.create_cold_boot_file:
+                await self.driver.async_create_cold_boot_file()
         match input.trigger:
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP:
                 await self.driver.async_stop_service(service, agents)
@@ -10122,13 +10138,20 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
         enable: bool,
         sequential: bool,
     ) -> None:
-        # Lazy import of internal driver class.
-        from taac.internal.driver.arista_switch import (
-            AristaSwitch,
-        )
+        # Lazy import of internal driver class (keeps the BUCK target light).
+        # The EOS driver isn't shipped in the OSS slice, and no OSS driver can
+        # be an AristaSwitch, so the guard below simply doesn't apply there --
+        # importing unconditionally would fail the step with
+        # ModuleNotFoundError before any flap method got a chance to run.
+        AristaSwitch = None
+        if not TAAC_OSS:
+            from taac.internal.driver.arista_switch import (
+                AristaSwitch,
+            )
 
         if (
-            isinstance(self.driver, AristaSwitch)
+            AristaSwitch is not None
+            and isinstance(self.driver, AristaSwitch)
             and interface_flap_method
             != taac_types.InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
         ):
@@ -10771,8 +10794,25 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
         all_check_results = []
         all_check_device_names = []
         all_check_ids = []
+        # --skip-health-checks (TAAC_SKIP_HEALTH_CHECKS): drop checks by name at
+        # every stage. For checks a config requests but that cannot run in this
+        # environment -- e.g. DRAIN_STATE_CHECK needs the Meta-only LocalDrainer
+        # client -- so the config's check list stays untouched. Skips are logged
+        # individually: a silently-dropped check reads as a pass in the summary.
+        _skip_names = {
+            n.strip().upper()
+            for n in os.environ.get("TAAC_SKIP_HEALTH_CHECKS", "").split(",")
+            if n.strip()
+        }
         priority_to_hcs = defaultdict(list)
         for check in input.point_in_time_checks:
+            if _skip_names and check.name.name in _skip_names:
+                self.logger.warning(
+                    f"Skipping health check {check.name.name} on "
+                    f"{self.device.name} -- requested via --skip-health-checks. "
+                    f"This check is NOT being evaluated."
+                )
+                continue
             check_impl = NAME_TO_POINT_IN_TIME_HEALTH_CHECK[check.name]
             check_priority = check.priority or check_impl.DEFAULT_PRIORITY
             priority_to_hcs[check_priority].append(check)

@@ -815,6 +815,14 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     uplink_flap_iterations=50,
     uplink_flap_interval_s=30,
     uplink_flap_settle_s=30,
+    # The TC-level precheck reads CUMULATIVE IXIA counters. Setup's trial
+    # traffic runs every traffic item at once before BGP/routes converge, so
+    # those counters already show 100% loss by the time the precheck samples
+    # them -- the precheck then fails before the playbook has run at all.
+    # Clearing first makes the precheck measure the converged steady state, and
+    # makes the POSTcheck measure exactly the playbook's own window. Defaults
+    # False to leave existing callers untouched.
+    precheck_packet_loss_clear_stats=False,
     include_bgp_longevity_playbooks=False,
     bgp_longevity_prefix_pool_regex=".*",
     bgp_longevity_local_pref_cycles=30,
@@ -924,6 +932,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     expect_packet_loss=False,
                 ),
             ],
+            clear_traffic_stats=precheck_packet_loss_clear_stats,
         ),
         create_prefix_limit_check(prefix_limit=prefix_limit),
         create_memory_utilization_check(

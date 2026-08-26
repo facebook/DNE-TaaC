@@ -96,6 +96,11 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.traffic_item_view_assistant = None
         self.ptp_drill_down_view_assistant = None
 
+        # Baseline of the cumulative Port Statistics fault counters, snapshotted
+        # by IxiaPortStatsHealthCheck so later runs compare deltas — faults
+        # accrued while links trained during setup must not fail postchecks.
+        self.port_fault_baseline: t.Optional[t.Dict[str, t.Dict[str, float]]] = None
+
         # Per-view StatViewAssistant cache. Created lazily by
         # get_or_create_stat_view(); reused across HC invocations so we pay the
         # ~10-15s subscription/ready-wait cost ONCE per view per test run instead
@@ -441,6 +446,70 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             return self._get_packet_loss_statistics_unlocked(
                 traffic_item_view_assistant
             )
+
+    def log_benchmark_rate_report(
+        self,
+        traffic_item_name: str,
+        frame_size_bytes: int,
+        directions: int = 2,
+    ) -> None:
+        """Log a normalized throughput report for one benchmark traffic item.
+
+        IXIA's Traffic Item Statistics ``Tx/Rx Rate (Mbps)`` count L2 frame
+        bits summed over every flow of the item — for the default
+        bidirectional snake item, both directions — so the raw numbers can
+        exceed the port's physical rate and never reach it at small frame
+        sizes. This normalizes to per-direction L2 Gbps and pps, and reports
+        forwarded %% as Rx/Tx (dimensionless, so it is immune to the L1/L2
+        overhead accounting). Report-only: raises nothing on zero traffic,
+        it just logs what it saw.
+
+        Args:
+            traffic_item_name: Traffic item to report (stats identifier).
+            frame_size_bytes: The item's fixed frame size (for pps).
+            directions: Flow directions summed in the item's stats (2 for the
+                default bidirectional item, 1 for unidirectional).
+        """
+        try:
+            if self.capturing:
+                stats = self.get_latest_stats_traffic()
+            else:
+                # Sampler disabled (TAAC_IXIA_SAMPLE_INTERVAL_S=0): the stats
+                # cache never fills and get_latest_stats_traffic would burn
+                # its timeout then raise. Take a direct snapshot instead; no
+                # lock needed since no background thread competes for it.
+                stats = self.get_traffic_rate_statistics(
+                    self.traffic_item_view_assistant
+                )
+        except Exception:
+            self.logger.warning(
+                f"[BENCHMARK] {traffic_item_name}: failed to read traffic "
+                "stats — no throughput report",
+                exc_info=True,
+            )
+            return
+        for stat in stats:
+            if stat.get("identifier") != traffic_item_name:
+                continue
+            tx_mbps = float(stat.get("Tx Rate") or 0.0)
+            rx_mbps = float(stat.get("Rx Rate") or 0.0)
+            directions = max(directions, 1)
+            tx_gbps_dir = tx_mbps / 1000.0 / directions
+            rx_gbps_dir = rx_mbps / 1000.0 / directions
+            rx_mpps_dir = rx_mbps * 1e6 / (frame_size_bytes * 8) / directions / 1e6
+            forwarded_pct = (rx_mbps / tx_mbps * 100.0) if tx_mbps > 0 else 0.0
+            self.logger.warning(
+                f"[BENCHMARK] {traffic_item_name}: forwarded "
+                f"{forwarded_pct:.1f}% of offered | per direction: "
+                f"offered {tx_gbps_dir:.1f} Gbps L2, forwarded "
+                f"{rx_gbps_dir:.1f} Gbps L2 (~{rx_mpps_dir:.0f} Mpps) "
+                f"at {frame_size_bytes}B frames"
+            )
+            return
+        self.logger.warning(
+            f"[BENCHMARK] {traffic_item_name}: no traffic stats row found — "
+            "no throughput report"
+        )
 
     def get_latest_stats_traffic(
         self,

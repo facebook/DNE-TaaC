@@ -841,6 +841,14 @@ else:
             """Return the path to the log file."""
             return self._log_file
 
+        def get_log_file(self) -> str:
+            """Return the log file path (parity with Meta ConsoleFileLogger)."""
+            return self._log_file
+
+        def set_console_log_level(self, level: int) -> None:
+            """Set console handler log level (parity with Meta ConsoleFileLogger)."""
+            self._console_handler.setLevel(level)
+
         def enable_console_debug_log(self) -> None:
             """Enable debug level logging to console."""
             self._console_handler.setLevel(logging.DEBUG)

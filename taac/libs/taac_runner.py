@@ -261,6 +261,10 @@ def _require_known_host(topology: TestTopology, hostname: str) -> None:
         )
 
 
+# Description of the validation stage that inject_validation_stages() adds for
+# playbook prechecks; run_test_case keys the early PRE-HEALTH table on it.
+_PRECHECK_STAGE_DESCRIPTION = "Prechecks"
+
 class TaacRunner:
     def __init__(
         self,
@@ -748,7 +752,7 @@ class TaacRunner:
             # create_steps_stage factory.
             precheck_stage = create_steps_stage(
                 stage_id="prechecks",
-                description="Prechecks",
+                description=_PRECHECK_STAGE_DESCRIPTION,
                 steps=[
                     taac_types.Step(
                         name=taac_types.StepName.VALIDATION_STEP,
@@ -1076,7 +1080,22 @@ class TaacRunner:
                                     for test_device in test_devices
                                 ]
                             )
+                            if stage.description == _PRECHECK_STAGE_DESCRIPTION:
+                                # Tabulate prechecks as soon as they finish
+                                # (not at end-of-case) so someone tailing a
+                                # live run sees them before the stages start.
+                                await self._log_stage_health_results(
+                                    test_case_results,
+                                    taac_types.ValidationStage.PRE_TEST,
+                                    "PRE-HEALTH CHECK RESULTS",
+                                )
                         except TestbedError:
+                            if stage.description == _PRECHECK_STAGE_DESCRIPTION:
+                                await self._log_stage_health_results(
+                                    test_case_results,
+                                    taac_types.ValidationStage.PRE_TEST,
+                                    "PRE-HEALTH CHECK RESULTS",
+                                )
                             if self.continue_on_precheck_failure:
                                 self.logger.warning(
                                     f"[--continue-on-precheck-failure] "
@@ -1151,8 +1170,18 @@ class TaacRunner:
                             await ondevice_sampler.reap_all(self.logger)
                         self.jq_vars["test_case_end_time"] = int(time.time())
 
-                    # Log POST_TEST health check results table
-                    await self._log_post_test_results(test_case_results)
+                    # Health-check results tables. PRE_TEST was tabulated
+                    # right after the precheck stage ran (see the stage loop);
+                    # historically only POST_TEST was tabulated at all, which
+                    # read as if prechecks were skipped on a green run.
+                    for _stage, _title in (
+                        (taac_types.ValidationStage.MID_TEST, "MID-TEST HEALTH CHECK RESULTS"),
+                        (taac_types.ValidationStage.POST_TEST, "POST-HEALTH CHECK RESULTS"),
+                        (taac_types.ValidationStage.SNAPSHOT, "SNAPSHOT CHECK RESULTS"),
+                    ):
+                        await self._log_stage_health_results(
+                            test_case_results, _stage, _title
+                        )
 
                     _teardown_exc = None
                     with suppress_console_logs(self.logger):
@@ -1467,29 +1496,34 @@ class TaacRunner:
             return stage.id
         return "Unnamed Stage"
 
-    async def _log_post_test_results(
-        self, test_case_results: t.List[TestResult]
+    async def _log_stage_health_results(
+        self,
+        test_case_results: t.List[TestResult],
+        stage: taac_types.ValidationStage,
+        title: str,
     ) -> None:
-        """Log a summary table of POST_TEST health check results.
+        """Log a summary table of health check results for one validation stage.
 
-        Filters test_case_results to only include POST_TEST checks and logs
-        them in a formatted table showing check name, status, and any failure message.
-        For failed checks, uploads the full failure details to Everpaste and
+        Filters test_case_results to checks whose ``check_stage`` equals
+        ``stage.name`` (``check_stage`` is always written as the enum name —
+        see ``taac.utils.common.create_test_result``) and logs them in a
+        formatted table. Rows are prefixed with the device name(s) so
+        multi-DUT stages don't render as N identical-looking rows. For
+        failed checks, uploads the full failure details to Everpaste and
         appends the URL to the message.
         """
-        # Filter for POST_TEST health check results
-        post_test_results = [
+        stage_results = [
             result
             for result in test_case_results
-            if result.check_stage and "POST_TEST" in str(result.check_stage)
+            if result.check_stage == stage.name
         ]
 
-        if not post_test_results:
+        if not stage_results:
             return
 
         # Format results for the table
         formatted_results = []
-        for result in post_test_results:
+        for result in stage_results:
             status = result.test_status or "UNKNOWN"
             # Normalize status display
             if status.upper() in ("PASS", "PASSED", "SUCCESS"):
@@ -1518,16 +1552,20 @@ class TaacRunner:
                 except Exception:
                     pass
 
+            # hostnames is newline-joined for multi-device results; keep the
+            # row on one line.
+            devices = (result.hostnames or "").replace("\n", ",")
+            check_name = result.check_name or "Unknown"
             formatted_results.append(
                 {
-                    "check_name": result.check_name or "Unknown",
+                    "check_name": f"{devices}: {check_name}" if devices else check_name,
                     "status": display_status,
                     "message": message,
                 }
             )
 
         log_results_table(
-            title="POST-HEALTH CHECK RESULTS",
+            title=title,
             results=formatted_results,
             logger=self.logger,
         )

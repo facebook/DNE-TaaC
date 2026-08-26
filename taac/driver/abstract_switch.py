@@ -1061,6 +1061,8 @@ class AbstractSwitch(ABC):
 
     async def async_create_cold_boot_file(self) -> None: ...
 
+    async def async_remove_cold_boot_file(self) -> None: ...
+
     async def async_get_aggregated_interfaces(
         self,
     ) -> Optional[Dict[str, List[str]]]:

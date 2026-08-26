@@ -119,6 +119,12 @@ from neteng.fboss.transceiver.thrift_types import ReadRequest, TransceiverIOPara
 # =============================================================================
 # TAAC / DNE (OSS-compatible)
 # =============================================================================
+from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
+    FBOSS_COLD_BOOT_ONCE_FILE,
+    FBOSS_COLD_BOOT_ONCE_GLOBS,
+    FBOSS_SPLIT_HW_COLD_BOOT_ONCE_FILE_FMT,
+    FBOSS_SPLIT_SW_COLD_BOOT_ONCE_FILE,
+)
 from taac.driver.abstract_switch import (
     AbstractSwitch,
     TestingException,
@@ -483,7 +489,7 @@ class FbossSwitch(AbstractSwitch):
                     f"Successfully reloaded the agent config on {self.hostname} "
                 )
         except Exception:
-            self.async_restart_service(FbossSystemctlServiceName.AGENT)
+            await self.async_restart_service(FbossSystemctlServiceName.AGENT)
         await self.async_wait_for_agent_state_configured()
 
     @async_retryable(retries=30, sleep_time=6, exceptions=(Exception,))
@@ -2016,8 +2022,42 @@ class FbossSwitch(AbstractSwitch):
         return interface_bgp_session_state_map
 
     async def async_create_cold_boot_file(self) -> None:
-        cmd: str = "touch /dev/shm/fboss/warm_boot/cold_boot_once_0 && "
-        await self.async_run_cmd_on_shell(cmd)
+        """Force the next agent start to cold boot (see the paired remove).
+
+        A split-agent DUT needs a flag per agent: no OSS agent reads the
+        monolithic ``cold_boot_once_<idx>``, so writing only that leaves the
+        "cold" boot warm. See FBOSS_COLD_BOOT_ONCE_FILE in taac/constants.py.
+        """
+        flag_files = await self._async_cold_boot_flag_files()
+        await self.async_run_cmd_on_shell(f"touch {' '.join(flag_files)}")
+
+    async def _async_cold_boot_flag_files(self) -> List[str]:
+        try:
+            # Try to get hw agent switch indices. Success means multi-switch.
+            # Enumerated rather than assumed to be index 0: a hw agent whose flag
+            # is missing warm boots while the rest of the box cold boots, which is
+            # a worse state to debug than either a clean cold or a clean warm boot.
+            switch_indices = await self.async_get_hw_agent_switch_indices()
+            return [FBOSS_SPLIT_SW_COLD_BOOT_ONCE_FILE] + [
+                FBOSS_SPLIT_HW_COLD_BOOT_ONCE_FILE_FMT.format(switch_index=switch_index)
+                for switch_index in switch_indices
+            ]
+        except Exception:
+            # Either monolithic DUT or agent is unreachable. Fall back to
+            # monolithic flag. Globbing on remove still works either way.
+            return [FBOSS_COLD_BOOT_ONCE_FILE]
+
+    async def async_remove_cold_boot_file(self) -> None:
+        """Clear the one-shot cold-boot flags, for every switch index.
+
+        The agents do not reliably delete their flag after honouring it, and
+        /dev/shm survives every restart until the box reboots.
+
+        Globbed rather than enumerated so this still works with the agent
+        down -- there is no thrift to ask for the NPU count then, and a clear
+        that needs a healthy agent is useless exactly when it is most needed.
+        """
+        await self.async_delete_file(" ".join(FBOSS_COLD_BOOT_ONCE_GLOBS))
 
     async def _async_get_port_id_from_interface_name(self, interface_name: str) -> int:
         """
@@ -3452,7 +3492,6 @@ class FbossSwitch(AbstractSwitch):
         )
 
     @is_dne_test_device
-    @async_retryable(retries=2, sleep_time=10, exceptions=(Exception,))
     async def async_restart_service(
         self,
         service: Service,
@@ -3461,9 +3500,39 @@ class FbossSwitch(AbstractSwitch):
         """
         Restart service and validate restart process by comparing service uptime
         before and after restart
+
+        OSS-compatible: on a multi-switch (split-agent) DUT the monolithic
+        ``wedge_agent`` unit does not exist, so a ``Service.AGENT`` restart is
+        fanned out to the split agents (``fboss_sw_agent`` + ``fboss_hw_agent@0``)
+        in warmboot-safe order -- mirroring the ``Service.AGENT`` handling in
+        ``async_crash_service`` (which maps the same concept to
+        ``pkill -9 -f fboss_``). A plain ``systemctl restart wedge_agent`` would
+        otherwise fail with "unit not found" on such DUTs.
+
         Args:
             service: service to restart
         """
+        try:
+            is_multi_switch = await self.async_is_multi_switch()
+        except NotImplementedError:
+            is_multi_switch = False
+
+        if (
+            is_multi_switch
+            and service.value == FbossSystemctlServiceName.AGENT.value
+        ):
+            # Deliberately not wrapped in @async_retryable: a warm boot that
+            # loses its state (async_assert_hw_agent_stable raising) must
+            # surface as a failure. Retrying would restart from an already
+            # cold-booted hw agent, which reliably "succeeds" and hides the
+            # very regression this orchestration exists to catch.
+            await self.async_restart_split_agents()
+            return
+
+        await self._async_restart_single_service(service)
+
+    @async_retryable(retries=2, sleep_time=10, exceptions=(Exception,))
+    async def _async_restart_single_service(self, service: Service) -> None:
         self.logger.debug(
             f"Checking the uptime of service {service.value} before restarting it"
         )
@@ -3485,10 +3554,269 @@ class FbossSwitch(AbstractSwitch):
         )
 
         # Verifying service restart based on service uptime
-        assert service_start_time_after_restart > service_start_time_before_restart
+        assert (
+            service_start_time_after_restart > service_start_time_before_restart
+        )
         self.logger.debug(
             f"Successfully restarted service {service.value} on {self.hostname} "
         )
+
+    async def async_wait_for_service_exit(
+        self,
+        service: Service,
+        timeout: int = 120,
+        interval: int = 2,
+    ) -> None:
+        """Block until ``service`` is no longer running.
+
+        ``systemctl stop`` can return while the unit is still
+        ``deactivating``, so poll ActiveState rather than trusting the
+        stop command to be a barrier.
+        """
+        end_time = time.time() + timeout
+        status = None
+        while time.time() < end_time:
+            status = await self.async_get_service_status(service)
+            if status in (
+                SystemctlServiceStatus.INACTIVE,
+                SystemctlServiceStatus.FAILED,
+            ):
+                if status == SystemctlServiceStatus.FAILED:
+                    self.logger.warning(
+                        f"Service {service.value} on {self.hostname} exited "
+                        "FAILED rather than INACTIVE -- it may not have shut "
+                        "down cleanly, so any warm boot state it owed is "
+                        "likely lost"
+                    )
+                else:
+                    self.logger.debug(
+                        f"Service {service.value} fully exited on {self.hostname} "
+                        f"(status {status.name})"
+                    )
+                return
+            await asyncio.sleep(interval)
+        raise Exception(
+            f"Service {service.value} did not fully exit within {timeout}s on "
+            f"{self.hostname} (last status "
+            f"{status.name if status else 'unknown'})"
+        )
+
+    # A hw agent answering thrift has already survived SDK init and the warm
+    # boot restore. CONFIGURED is deliberately not required: in split-agent
+    # FBOSS the sw agent is what programs the hw agent, so demanding
+    # CONFIGURED before the sw agent starts would never be satisfied.
+    HW_AGENT_READY_STATES: t.ClassVar[frozenset] = frozenset(
+        {
+            SwitchRunState.INITIALIZED,
+            SwitchRunState.CONFIGURED,
+            SwitchRunState.FIB_SYNCED,
+        }
+    )
+
+    async def async_get_service_main_pid(self, service: Service) -> int:
+        """PID of the unit's main process, 0 when it is not running.
+
+        Used instead of ``NRestarts`` to tell one instance from another:
+        systemd RESETS ``NRestarts`` on a manual ``systemctl start``, so a
+        baseline taken before the stop goes 1 -> 0 -> 1 across a
+        crash-restart and compares equal -- hiding the crash entirely.
+        """
+        return await self.async_get_single_systemd_service_counter_as_int(
+            service, "MainPID"
+        )
+
+    async def async_wait_for_hw_agent_ready(
+        self,
+        switch_index: int = 0,
+        timeout: int = 300,
+        interval: int = 5,
+    ) -> int:
+        """Block until the HW agent is up and serving thrift; return its PID.
+
+        The PID lets callers tell the instance they started apart from a
+        systemd-spawned replacement, which cold-boots rather than warm-boots.
+        """
+        hw_agent = self.HW_AGENT_SERVICE_BY_INDEX[switch_index]
+        end_time = time.time() + timeout
+        last_state = None
+        tracked_pid = 0
+        while time.time() < end_time:
+            pid = await self.async_get_service_main_pid(hw_agent)
+            if pid and not tracked_pid:
+                tracked_pid = pid
+            elif tracked_pid and pid != tracked_pid:
+                raise Exception(
+                    f"HW agent on {self.hostname} died while coming up "
+                    f"(pid {tracked_pid} -> {pid or 'gone'}); the warm boot "
+                    f"state it restored is gone"
+                )
+            if tracked_pid:
+                try:
+                    async with await self.get_hw_agent_client(
+                        switch_index=switch_index
+                    ) as client:
+                        last_state = await client.getHwSwitchRunState()
+                except RuntimeError:
+                    # Misconfiguration (e.g. no client_provider) -- will never
+                    # resolve by polling, so fail fast instead of spinning for
+                    # the full timeout.
+                    raise
+                except Exception:
+                    # Not listening yet -- keep polling until the deadline.
+                    last_state = None
+                if last_state in self.HW_AGENT_READY_STATES:
+                    self.logger.debug(
+                        f"HW agent on {self.hostname} ready (pid {tracked_pid}, "
+                        f"run state {last_state})"
+                    )
+                    return tracked_pid
+            await asyncio.sleep(interval)
+        raise Exception(
+            f"HW agent on {self.hostname} did not become ready within "
+            f"{timeout}s (last run state {last_state}, "
+            f"pid {tracked_pid or 'none'})"
+        )
+
+    async def async_assert_hw_agent_stable(
+        self,
+        tracked_pid: int,
+        switch_index: int = 0,
+        timeout: int = 120,
+        interval: int = 5,
+    ) -> None:
+        """Fail if the HW agent is replaced while the SW agent pushes state.
+
+        Where a warm boot state mismatch surfaces: the HW agent aborts in
+        ``SaiStore::checkUnexpectedUnclaimedWarmbootHandles`` once the SW
+        agent applies initial state. Without this the restart looks clean and
+        only the playbook's post-checks notice, as an unexplained all-ports-down.
+
+        Polls until the SW agent reports CONFIGURED (the point the risky
+        state push is known to be over) instead of a fixed sleep -- a fixed
+        window either wastes time on a fast box or ends before a slow one
+        finishes pushing state.
+        """
+        hw_agent = self.HW_AGENT_SERVICE_BY_INDEX[switch_index]
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            pid = await self.async_get_service_main_pid(hw_agent)
+            if pid != tracked_pid:
+                raise Exception(
+                    f"HW agent {switch_index} on {self.hostname} crashed after "
+                    f"the SW agent started (pid {tracked_pid} -> "
+                    f"{pid or 'gone'}); systemd restarted it into a COLD boot, "
+                    "so the warm boot did not hold"
+                )
+            if await self.async_is_agent_configured():
+                self.logger.debug(
+                    f"HW agent {switch_index} on {self.hostname} stable "
+                    f"(pid {tracked_pid}) through SW agent reaching CONFIGURED"
+                )
+                return
+            await asyncio.sleep(interval)
+        raise Exception(
+            f"SW agent on {self.hostname} did not reach CONFIGURED within "
+            f"{timeout}s after starting; cannot confirm the HW agent "
+            f"(pid {tracked_pid}) survived the warm boot state push"
+        )
+
+    HW_AGENT_SERVICE_BY_INDEX: t.ClassVar[Dict[int, Service]] = {
+        0: FbossSystemctlServiceName.FBOSS_HW_AGENT_0,
+        1: FbossSystemctlServiceName.FBOSS_HW_AGENT_1,
+    }
+
+    async def async_get_hw_agent_switch_indices(self) -> List[int]:
+        """NPU indices this DUT actually has, read off the running agent.
+
+        ``hwIndexToRunState`` is populated by the sw agent for every live
+        NPU (already used the same way in ``async_is_agent_configured``), so
+        this reflects real hardware instead of a hardcoded/env-configured
+        guess that silently drifts from the DUT it runs against.
+        """
+        multi_switch_state = await self.async_get_multi_switch_run_state()
+        indices = sorted(multi_switch_state.hwIndexToRunState.keys())
+        if not indices:
+            raise Exception(
+                f"{self.hostname} reports multi-switch enabled but "
+                "hwIndexToRunState is empty -- cannot determine NPU count"
+            )
+        return indices
+
+    async def async_restart_split_agents(
+        self,
+        exit_timeout: int = 120,
+        hw_ready_timeout: int = 300,
+        hw_settle_timeout: int = 120,
+    ) -> None:
+        """Restart the split agents in warmboot-safe order.
+
+        A warmboot needs the sw agent down before any hw agent goes down,
+        and every hw agent back up before the sw agent reconnects to them:
+
+            stop sw -> await exit -> stop all hw -> await exit
+            -> start all hw -> await all hw ready -> start sw
+
+        Two independent ``systemctl restart`` calls do not give that
+        ordering -- the sw agent is back up and reconnecting while a hw
+        agent is still being torn down, so the warm boot state handoff is
+        lost. On a multi-NPU DUT this has to cover every NPU: leaving one
+        hw agent running across the sw agent restart reintroduces the same
+        ordering bug for that NPU alone.
+        """
+        sw_agent = FbossSystemctlServiceName.FBOSS_SW_AGENT
+        switch_indices = await self.async_get_hw_agent_switch_indices()
+        hw_agents = [self.HW_AGENT_SERVICE_BY_INDEX[i] for i in switch_indices]
+        all_services = [sw_agent] + hw_agents
+
+        # Only the sw agent needs a before/after uptime check: each hw
+        # agent's pid is tracked continuously from its own start through
+        # async_assert_hw_agent_stable, which is a strictly stronger
+        # guarantee than "monotonic start time increased".
+        sw_agent_start_time_before_restart = (
+            await self.async_get_service_monotonic_start_time(sw_agent)
+        )
+
+        for svc in all_services:
+            self.logger.debug(f"Stopping {svc.value} on {self.hostname}...")
+            await self.async_run_cmd_on_shell(f"systemctl stop {svc.value}")
+            await self.async_wait_for_service_exit(svc, timeout=exit_timeout)
+
+        # Every hw agent has to be up and serving before the sw agent starts:
+        # all units are Type=simple, so `systemctl start` returns at
+        # fork/exec and gives no ordering of its own.
+        tracked_pids: Dict[int, int] = {}
+        for switch_index, hw_agent in zip(switch_indices, hw_agents):
+            self.logger.debug(f"Starting {hw_agent.value} on {self.hostname}...")
+            await self.async_run_cmd_on_shell(f"systemctl start {hw_agent.value}")
+            tracked_pids[switch_index] = await self.async_wait_for_hw_agent_ready(
+                switch_index=switch_index,
+                timeout=hw_ready_timeout,
+            )
+
+        self.logger.debug(f"Starting {sw_agent.value} on {self.hostname}...")
+        await self.async_run_cmd_on_shell(f"systemctl start {sw_agent.value}")
+        for switch_index in switch_indices:
+            await self.async_assert_hw_agent_stable(
+                tracked_pids[switch_index],
+                switch_index=switch_index,
+                timeout=hw_settle_timeout,
+            )
+
+        # Verifying sw agent restart based on service uptime
+        sw_agent_start_time_after_restart = (
+            await self.async_get_service_monotonic_start_time(sw_agent)
+        )
+        assert (
+            sw_agent_start_time_after_restart > sw_agent_start_time_before_restart
+        ), (
+            f"Service {sw_agent.value} did not restart on {self.hostname}: "
+            f"monotonic start time {sw_agent_start_time_after_restart} <= "
+            f"{sw_agent_start_time_before_restart}"
+        )
+        for svc in all_services:
+            self.logger.debug(
+                f"Successfully restarted service {svc.value} on {self.hostname} "
+            )
 
     @is_dne_test_device
     @async_retryable(retries=2, sleep_time=10, exceptions=(Exception,))

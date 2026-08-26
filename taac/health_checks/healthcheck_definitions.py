@@ -420,6 +420,7 @@ def create_ixia_packet_loss_check_traffic_split(
     expect_loss_traffic: t.List[str],
     no_loss_traffic: t.List[str],
     no_loss_threshold: str = "0.1",
+    clear_traffic_stats: bool = False,
 ) -> PointInTimeHealthCheck:
     """IXIA_PACKET_LOSS_CHECK — split-threshold variant.
 
@@ -427,6 +428,12 @@ def create_ixia_packet_loss_check_traffic_split(
     one set of traffic items and **not exceeded** beyond ``no_loss_threshold``
     for another set. Traffic-item names are formed as
     ``f"{device_name.upper()}_{traffic}"``.
+
+    ``clear_traffic_stats`` zeroes the IXIA counters before sampling. Set it on
+    a PREcheck: counters are cumulative for the whole session, and setup's trial
+    traffic runs every item at once before routes converge, so an unclear
+    precheck samples ~100% loss and fails before the playbook starts. Leave it
+    False on a POSTcheck, which should measure the playbook's own window.
     """
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
@@ -448,7 +455,8 @@ def create_ixia_packet_loss_check_traffic_split(
                         str_value=no_loss_threshold,
                         expect_packet_loss=False,
                     ),
-                ]
+                ],
+                clear_traffic_stats=clear_traffic_stats,
             )
         ),
     )
@@ -1464,26 +1472,38 @@ def create_fsdb_subscriber_timestamp_check(
 
 def create_ixia_port_stats_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
+    snapshot_baseline: bool = False,
 ) -> PointInTimeHealthCheck:
     """Create a point-in-time check of IXIA port-level statistics thresholds.
 
-    Polls IXIA port stats (link state, error counters, signal lock) and
-    asserts each value satisfies the supplied thresholds. Used as a precheck
-    in IXIA-driven tests to confirm chassis ports are healthy before traffic
-    starts.
+    Polls IXIA port fault counters (CRC errors, local/remote faults) plus the
+    current link / link-fault state, and fails on any increase since the
+    baseline, reporting which direction of the link lost RX.
+
+    The counters are cumulative since port ownership, so the check compares
+    against a baseline snapshotted on its first invocation in a test run —
+    faults from setup-time link training don't fail later invocations.
 
     Args:
-        json_params: Opaque dict carrying threshold expectations
-            (port-name → metric → threshold map). Bare check when omitted.
+        json_params: Extra check_params merged verbatim (e.g. retry knobs).
+            The fault-counter threshold itself is fixed at 0 new faults;
+            per-port threshold maps are NOT supported.
+        snapshot_baseline: Force this invocation to (re)take the baseline.
+            The point-in-time link/link-fault state is still asserted. Use on
+            the precheck of a pre/post pair when an earlier check may already
+            have taken one, or after deliberately flapping links during setup.
 
     Returns:
         A `PointInTimeHealthCheck` with `name=IXIA_PORT_STATS_CHECK`.
     """
-    if json_params is None:
+    params = dict(json_params or {})
+    if snapshot_baseline:
+        params["snapshot_baseline"] = True
+    if not params:
         return PointInTimeHealthCheck(name=hc_types.CheckName.IXIA_PORT_STATS_CHECK)
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IXIA_PORT_STATS_CHECK,
-        check_params=Params(json_params=json.dumps(json_params)),
+        check_params=Params(json_params=json.dumps(params)),
     )
 
 
