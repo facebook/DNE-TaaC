@@ -4419,6 +4419,8 @@ def create_characterization_bracket_stages(
                 session_key=rss_key,
                 interval_seconds=config.rss_interval_seconds,
                 baseline_settle_max_seconds=config.rss_baseline_settle_max_seconds,
+                on_device=config.rss_on_device,
+                keep_ondevice_log=config.keep_ondevice_log,
             )
         )
         stop_steps.append(
@@ -4440,6 +4442,9 @@ def create_characterization_bracket_stages(
                 device_name=device_name,
                 session_key=cpu_key,
                 interval_seconds=config.cpu_interval_seconds,
+                on_device=config.cpu_on_device,
+                compare_with_legacy=config.cpu_on_device_compare,
+                keep_ondevice_log=config.keep_ondevice_log,
             )
         )
         # CPU STOP goes before RSS STOP for the mirror-image reason: the RSS stop

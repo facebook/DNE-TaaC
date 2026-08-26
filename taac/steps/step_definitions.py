@@ -11570,6 +11570,8 @@ def create_rss_start_step(
     interval_seconds: float = 3.0,
     process_name: str = "bgpcpp",
     baseline_settle_max_seconds: float = 90.0,
+    on_device: bool = False,
+    keep_ondevice_log: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
     """START of an embeddable bgpcpp RSS delta bracket.
@@ -11584,10 +11586,20 @@ def create_rss_start_step(
     Args:
         device_name: DUT under test.
         session_key: unique id tying this START to its matching STOP.
-        interval_seconds: background sampling interval (default 3.0s).
+        interval_seconds: sampling interval (default 2.0s). Honored on both
+            paths: the DUT loop's sleep when ``on_device`` is set, the
+            background sampler's interval otherwise.
         process_name: BGP++ process name (default "bgpcpp").
         baseline_settle_max_seconds: cap on the plateau wait before baselining
             (default 90.0); the wait ends early once RSS stops climbing.
+        on_device: run the VmRSS sampler ON the DUT as a detached loop and
+            retrieve its log in one read at STOP, instead of one FCR round trip
+            per sample. The per-sample path measured 5.84s effective against a
+            3.0s nominal interval on bag011. Also yields VmHWM. Left out of the
+            serialized params when False so playbooks that have not opted in
+            stay golden byte-equivalent.
+        keep_ondevice_log: leave the DUT-side sampler log in place after STOP.
+            Same byte-equivalence treatment as ``on_device``.
         description: optional step description override.
     """
     params: t.Dict[str, t.Any] = {
@@ -11598,6 +11610,10 @@ def create_rss_start_step(
         "process_name": process_name,
         "baseline_settle_max_seconds": baseline_settle_max_seconds,
     }
+    if on_device:
+        params["on_device"] = on_device
+    if keep_ondevice_log:
+        params["keep_ondevice_log"] = keep_ondevice_log
     return Step(
         name=StepName.CUSTOM_STEP,
         step_params=Params(json_params=json.dumps(params)),
@@ -11646,6 +11662,9 @@ def create_cpu_percentile_start_step(
     session_key: str,
     interval_seconds: float = 2.0,
     process_name: str = "bgpcpp",
+    on_device: bool = False,
+    compare_with_legacy: bool = False,
+    keep_ondevice_log: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
     """START of an embeddable bgpcpp CPU percentile bracket.
@@ -11660,8 +11679,21 @@ def create_cpu_percentile_start_step(
     Args:
         device_name: DUT under test.
         session_key: unique id tying this START to its matching STOP.
-        interval_seconds: sampling interval (default 2.0s).
+        interval_seconds: sampling interval (default 2.0s). Honored on both
+            paths: the DUT loop's sleep when ``on_device`` is set, the
+            background sampler's interval otherwise.
         process_name: BGP++ process name (default "bgpcpp").
+        on_device: run the sampler ON the DUT as a detached loop and retrieve
+            its log in one read at STOP, instead of one FCR round-trip per
+            sample: two device queries per span rather than ~800, at a cadence
+            the loop actually honours. Left out of the serialized params when
+            False so the playbooks that have not opted in stay golden
+            byte-equivalent.
+        compare_with_legacy: also run the per-sample sampler over the same span
+            and log both p95 values. Validation only: it re-incurs the round
+            trips ``on_device`` exists to remove.
+        keep_ondevice_log: leave the DUT-side sampler log in place after STOP.
+            Same byte-equivalence treatment as ``on_device``.
         description: optional step description override.
     """
     params: t.Dict[str, t.Any] = {
@@ -11671,6 +11703,12 @@ def create_cpu_percentile_start_step(
         "interval_seconds": interval_seconds,
         "process_name": process_name,
     }
+    if on_device:
+        params["on_device"] = on_device
+    if compare_with_legacy:
+        params["compare_with_legacy"] = compare_with_legacy
+    if keep_ondevice_log:
+        params["keep_ondevice_log"] = keep_ondevice_log
     return Step(
         name=StepName.CUSTOM_STEP,
         step_params=Params(json_params=json.dumps(params)),

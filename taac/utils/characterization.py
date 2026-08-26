@@ -92,8 +92,34 @@ class CharacterizationConfig:
         enable_rss: Collect the bgpcpp RSS delta bracket.
         cpu_interval_seconds: CPU sampling interval. Denser sampling costs more
             device round trips; 2s over a multi-minute span is ample for p95.
-        rss_interval_seconds: Background VmRSS sampling interval, which sets the
-            resolution of the reported peak.
+            Ignored when cpu_on_device is set.
+        cpu_on_device: Run the CPU sampler ON the DUT as a detached loop and
+            read its log once at STOP, instead of one FCR round-trip per
+            sample. Two device queries per span rather than ~800, at a true
+            fixed 1s cadence instead of the ~4.7s effective period the
+            per-sample path actually achieves. This is the mechanism that makes
+            the bracket cheap enough for route-storm, whose periodic tasks were
+            removed for distorting transition timing.
+        cpu_on_device_compare: Run the legacy per-sample sampler ALONGSIDE the
+            on-device loop and log both p95 values for the identical span. For
+            validation runs only, since it re-incurs the ~800 round trips the
+            on-device path exists to remove. Its purpose is to make a single
+            run answer "do the two mechanisms agree" without a second run and
+            without a cross-run confound. Note that the two are NOT expected to
+            agree at high percentiles: the coarser grid averages bursts away.
+        rss_on_device: Run the RSS sampler on the DUT too, by the same
+            mechanism. The per-sample path measured 5.84s effective against a
+            3.0s nominal interval on bag011, so once CPU moved on-device the
+            RSS bracket became the expensive half of the span. Also yields
+            VmHWM, which the per-sample path never read.
+        keep_ondevice_log: Leave the DUT-side sampler log in place after STOP
+            instead of deleting it, so the raw per-sample records can be
+            inspected on the device. The devserver-side dump is written either
+            way; this is for when you want to look at the file in situ.
+        rss_interval_seconds: VmRSS sampling interval, which sets the
+            resolution of the reported peak. Honored on both paths: the DUT
+            loop's sleep when rss_on_device is set, the background sampler's
+            interval otherwise.
         rss_baseline_settle_max_seconds: Cap on how long START waits for RSS to
             plateau before taking the baseline. Raise it for spans whose entry
             point is still climbing; the bracket takes the baseline early rather
@@ -103,6 +129,10 @@ class CharacterizationConfig:
     enable_cpu: bool = True
     enable_rss: bool = True
     cpu_interval_seconds: float = 2.0
+    cpu_on_device: bool = False
+    cpu_on_device_compare: bool = False
+    rss_on_device: bool = False
+    keep_ondevice_log: bool = False
     rss_interval_seconds: float = 3.0
     rss_baseline_settle_max_seconds: float = 90.0
 
@@ -111,6 +141,30 @@ class CharacterizationConfig:
 # a playbook that has never carried one: it produces the data needed to choose a
 # threshold without being able to fail a run while that data does not exist.
 OBSERVE_ONLY: CharacterizationConfig = CharacterizationConfig()
+
+# As OBSERVE_ONLY, but BOTH samplers run on the DUT. Proven on bag011 over a
+# 3832s attribute-churn span: the CPU loop held 1.0066s against a 1s target for
+# an hour under load, at two device queries instead of ~800.
+#
+# ``keep_ondevice_log`` is deliberately left off. It does NOT decide whether the
+# raw per-sample records survive: ``dump_raw`` writes them devserver-side on the
+# STOP path and on the salvage path alike, before the DUT-side copy is removed.
+# All it buys is a duplicate under the DUT's /tmp, and because the log name
+# carries a per-run stamp nothing ever overwrites it, so those duplicates
+# accumulate one span at a time on a box that CI keeps reusing. Set it per call
+# site when you specifically want to read the file in situ.
+OBSERVE_ONLY_ON_DEVICE: CharacterizationConfig = CharacterizationConfig(
+    cpu_on_device=True,
+    rss_on_device=True,
+)
+
+# As OBSERVE_ONLY_ON_DEVICE, but ALSO runs the legacy per-sample CPU sampler
+# over the same span for a direct A/B. Costs the ~800 round trips the on-device
+# path exists to remove, so use it to validate a mechanism change, not to
+# collect numbers.
+OBSERVE_ONLY_ON_DEVICE_COMPARE: CharacterizationConfig = dataclasses.replace(
+    OBSERVE_ONLY_ON_DEVICE, cpu_on_device_compare=True
+)
 
 # Collect nothing. For spans where the measurement would be meaningless, e.g. a
 # span too short to plateau an RSS baseline.
