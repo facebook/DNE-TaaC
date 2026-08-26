@@ -675,9 +675,9 @@ def _get_bgp_ebb_full_scale_playbooks(
         )
     port_count = len(physical_inventory.ixia_ports)
     invalid_port_roles = {
-        role: resolved_port_map[role]
-        for role in ("uplink", "ibgp")
-        if not 0 <= resolved_port_map[role] < port_count
+        role: port_index
+        for role, port_index in resolved_port_map.items()
+        if not 0 <= port_index < port_count
     }
     if invalid_port_roles:
         raise ValueError(

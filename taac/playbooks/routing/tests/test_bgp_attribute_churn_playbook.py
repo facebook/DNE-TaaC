@@ -869,6 +869,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         for port_map, role, index in (
             ({"uplink": -1, "ibgp": 1}, "uplink", -1),
             ({"uplink": 0, "ibgp": 2}, "ibgp", 2),
+            ({"uplink": 0, "ibgp": 1, "bgpmon": 2}, "bgpmon", 2),
         ):
             with (
                 self.subTest(role=role, index=index),
