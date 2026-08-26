@@ -15,9 +15,9 @@ from taac.abstractions.compilation.legacy_ixia_identity import (
 )
 from taac.abstractions.compilation.model import (
     EndpointSetupMode,
-    IxiaNextHopMode,
     IxiaPlan,
     IxiaPortPlan,
+    IxiaRouteScaleMode,
     ResourceId,
     ResourceKind,
     TopologyCompilationPlan,
@@ -549,17 +549,13 @@ class TrafficGeneratorPortDeviceGroupRenderResult(t.Generic[TDeviceGroupConfig_c
             tuple(port.resource_id for port in active_ports),
             tuple(fragment.port_id for fragment in self.fragments),
         )
-        fragments_by_port_id = {
-            fragment.port_id: fragment for fragment in self.fragments
-        }
-        for port in active_ports:
-            fragment = fragments_by_port_id[port.resource_id]
+        for port, fragment in zip(active_ports, self.fragments, strict=True):
             group_ids = tuple(
                 group.resource_id
                 for group in plan.device_groups
                 if group.port_id == port.resource_id
             )
-            _validate_exact_resource_order(
+            _validate_exact_resource_coverage(
                 "traffic-generator port device-group fragment",
                 group_ids,
                 fragment.device_group_ids,
@@ -681,7 +677,7 @@ class TrafficGeneratorRenderResult:
             activation.emit_lifecycle for activation in request.endpoint_activations
         )
         requires_configuration = lifecycle_is_active and any(
-            advertisement.next_hop.mode is IxiaNextHopMode.FORMULAIC
+            advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
             for advertisement in request.plan.advertisements
         )
         expected_slots = (

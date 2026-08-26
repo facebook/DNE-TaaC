@@ -97,8 +97,10 @@ from taac.abstractions.topology import (
     PrefixMembership,
     PrefixSet,
     RouteAttributePool,
+    RouteScaleMode,
     RoutingDeviceConfig,
     StandardCommunity,
+    TaskCompatibilityProfile,
 )
 
 EBB_PARENT_NETWORKS: dict[str, str] = {
@@ -674,6 +676,7 @@ def _ebb_advertisement(
                 advertised_prefix_count if device_group.role == "uplink" else 750
             ),
             peer_distribution=distribution,
+            route_scale_mode=RouteScaleMode.FLAT,
         ),
         membership=PrefixMembership(
             start_index=0,
@@ -1241,9 +1244,13 @@ _EBB_FULL_SCALE_NO_BGPMON_BASE = LogicalTopology(
     ),
 )
 
-EBB_FULL_SCALE_NO_BGPMON = _with_ebb_route_intent(
-    _EBB_FULL_SCALE_NO_BGPMON_BASE,
-    openr_mode=OpenRMode.NONE,
+EBB_FULL_SCALE_NO_BGPMON = replace(
+    _with_ebb_route_intent(
+        _EBB_FULL_SCALE_NO_BGPMON_BASE,
+        openr_mode=OpenRMode.NONE,
+    ),
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON,
 )
 
 

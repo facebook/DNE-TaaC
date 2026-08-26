@@ -74,6 +74,11 @@ class IxiaPeerPrefixDistribution(str, Enum):
     DISJOINT = "disjoint"
 
 
+class IxiaRouteScaleMode(str, Enum):
+    WINDOWED = "windowed"
+    FLAT = "flat"
+
+
 class IxiaNextHopMode(str, Enum):
     SELF = "self"
     FORMULAIC = "formulaic"
@@ -202,6 +207,7 @@ class IxiaPrefixWindowPlan:
     prefixes_per_peer: int
     peer_distribution: IxiaPeerPrefixDistribution
     network_group_index: int
+    route_scale_mode: IxiaRouteScaleMode = IxiaRouteScaleMode.WINDOWED
 
     def __post_init__(self) -> None:
         if not self.source_start or not self.starting_prefix:
@@ -215,6 +221,8 @@ class IxiaPrefixWindowPlan:
         _require_non_negative(self.network_group_index, "network_group_index")
         if not isinstance(self.peer_distribution, IxiaPeerPrefixDistribution):
             raise TypeError("peer distribution must be an IxiaPeerPrefixDistribution")
+        if not isinstance(self.route_scale_mode, IxiaRouteScaleMode):
+            raise TypeError("route-scale mode must be an IxiaRouteScaleMode")
         if (
             self.membership_start_index + self.membership_prefix_count
             > self.source_count

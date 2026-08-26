@@ -12,6 +12,11 @@ class PeerPrefixDistribution(str, Enum):
     DISJOINT = "disjoint"
 
 
+class RouteScaleMode(str, Enum):
+    WINDOWED = "windowed"
+    FLAT = "flat"
+
+
 class NextHopMode(str, Enum):
     SELF = "self"
     FORMULAIC = "formulaic"
@@ -57,6 +62,7 @@ class PrefixAllocation:
     prefixes_per_peer: int
     peer_distribution: PeerPrefixDistribution
     network_group_index: int = 0
+    route_scale_mode: RouteScaleMode = RouteScaleMode.WINDOWED
 
     def distinct_prefix_count(self, peer_count: int) -> int:
         if self.peer_distribution == PeerPrefixDistribution.SHARED:

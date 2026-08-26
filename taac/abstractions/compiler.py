@@ -4689,11 +4689,11 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
-        return (
-            _preserve_bounded_ecmp_task_artifacts(bound, native_artifacts)
-            if _is_profile_free_bounded_ecmp(bound)
-            else native_artifacts
-        )
+        if _is_profile_free_bounded_ecmp(bound):
+            return _preserve_bounded_ecmp_task_artifacts(bound, native_artifacts)
+        if _is_profile_free_ebb_full_scale_no_bgpmon(bound):
+            return _preserve_ebb_full_scale_task_artifacts(bound, native_artifacts)
+        return native_artifacts
 
 
 class EosBgpCppCompiler(TopologyCompiler):
@@ -5138,6 +5138,40 @@ def _is_profile_free_bounded_ecmp(bound: BoundTopology) -> bool:
     )
 
 
+def _is_profile_free_ebb_full_scale_no_bgpmon(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON
+    )
+
+
+def _preserve_ebb_full_scale_task_artifacts(
+    bound: BoundTopology,
+    native_artifacts: CompiledTaacArtifacts,
+) -> CompiledTaacArtifacts:
+    task_bound = replace(
+        bound,
+        logical_topology=replace(
+            bound.logical_topology,
+            legacy_profile=_EBB_FULL_SCALE_PROFILE,
+            task_compatibility_profile=None,
+        ),
+    )
+    established = EosBgpCppCompiler()
+    return replace(
+        native_artifacts,
+        setup_tasks=established.build_setup_tasks(task_bound),
+        teardown_tasks=established.build_teardown_tasks(task_bound),
+    )
+
+
+def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
+    return _is_profile_free_bounded_ecmp(
+        bound
+    ) or _is_profile_free_ebb_full_scale_no_bgpmon(bound)
+
+
 # The legacy BOUNDED_ECMP task config places IPv4 iBGP at index 1 and its
 # three IPv4 eBGP sets at indices 3-5; IPv6 groups start at index 0.
 _BOUNDED_ECMP_LEGACY_V4_NON_EBGP_DEVICE_GROUP_INDEX = 1
@@ -5213,7 +5247,7 @@ def select_topology_compiler(bound: BoundTopology) -> TopologyCompiler:
     if key == CompilerKey(endpoint_os="eos", routing_driver="bgpcpp"):
         return (
             ProfileFreeEosBgpCppCompiler()
-            if _is_profile_free_bounded_ecmp(bound)
+            if _uses_profile_free_eos_compiler(bound)
             else EosBgpCppCompiler()
         )
     if key == CompilerKey(endpoint_os="fboss", routing_driver="fboss"):

@@ -30,6 +30,7 @@ from taac.abstractions.compilation.model import (
     IxiaPrefixWindowPlan,
     IxiaRouteAttributeDistribution,
     IxiaRouteAttributePoolPlan,
+    IxiaRouteScaleMode,
     IxiaSelfNextHopRealization,
     IxiaStandardCommunityPlan,
     ResourceId,
@@ -455,6 +456,7 @@ def _advertisement_plan(
                 allocation.peer_distribution.value
             ),
             network_group_index=allocation.network_group_index,
+            route_scale_mode=IxiaRouteScaleMode(allocation.route_scale_mode.value),
         ),
         next_hop=_next_hop_plan(spec.next_hop, device_group.afi),
         attributes=_scalar_attributes(spec.attributes),

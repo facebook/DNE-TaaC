@@ -64,17 +64,9 @@ def _compose_port(
     if base.l1_config is not None or base.device_group_configs is not None:
         raise ValueError(f"basic-port base {port.resource_id} overlaps owned fields")
 
-    groups_by_id = {
-        group.device_group_id: group for group in body_fragment.device_groups
-    }
-    ordered_groups = tuple(
-        groups_by_id[group.resource_id]
-        for group in request.plan.device_groups
-        if group.port_id == port.resource_id
-    )
     configs = []
     provenance = []
-    for group in ordered_groups:
+    for group in body_fragment.device_groups:
         config = group.device_group_config
         if not isinstance(config, taac_types.DeviceGroupConfig):
             raise TypeError(

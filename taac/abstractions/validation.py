@@ -30,6 +30,7 @@ from taac.abstractions.topology.prefix import (
     NextHopIntent,
     NextHopMode,
     PeerPrefixDistribution,
+    RouteScaleMode,
     SelfNextHopRealization,
 )
 
@@ -541,6 +542,14 @@ def _validate_prefix_advertisement_geometry(
                 f"{path}.allocation.network_group_index",
                 "invalid_network_group_index",
                 "network_group_index must be a non-negative integer",
+            )
+        )
+    if not isinstance(allocation.route_scale_mode, RouteScaleMode):
+        issues.append(
+            _issue(
+                f"{path}.allocation.route_scale_mode",
+                "invalid_route_scale_mode",
+                "route_scale_mode must be WINDOWED or FLAT",
             )
         )
     membership = advertisement.membership
@@ -1772,6 +1781,7 @@ def _partition_advertisement_geometry(dg: DeviceGroupSpec) -> tuple[t.Any, ...]:
             advertisement.prefix_set,
             advertisement.allocation.prefixes_per_peer,
             advertisement.allocation.peer_distribution,
+            advertisement.allocation.route_scale_mode,
         )
         for advertisement in dg.prefix_advertisements
     )

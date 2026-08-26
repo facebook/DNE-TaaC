@@ -61,6 +61,7 @@ from taac.abstractions.topology.prefix import (
     PrefixAllocation,
     PrefixMembership,
     PrefixSet,
+    RouteScaleMode,
     SelfNextHopRealization,
 )
 from taac.abstractions.topology.routes import (
@@ -127,6 +128,7 @@ __all__ = (
     "ResolvedPeer",
     "RouteAttributeDistribution",
     "RouteAttributePool",
+    "RouteScaleMode",
     "RouteSender",
     "RoutingDeviceConfig",
     "SelfNextHopRealization",
