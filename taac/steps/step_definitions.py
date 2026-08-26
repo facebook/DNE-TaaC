@@ -6748,6 +6748,7 @@ def create_performance_scaling_convergence_step(
     ibgp_peer_count: int = 0,
     ebgp_peer_count: int = 0,
     convergence_wait_seconds: int = 600,
+    advertisement_settle_seconds: t.Optional[int] = None,
     soak_seconds: int = 120,
     test_name: str = "BGP_PLUS_PLUS_PERFORMANCE_SCALING_CONVERGENCE",
     description: t.Optional[str] = None,
@@ -6777,6 +6778,8 @@ def create_performance_scaling_convergence_step(
         ibgp_peer_count: IBGP peer count for Scuba logging
         ebgp_peer_count: EBGP peer count for Scuba logging
         convergence_wait_seconds: Maximum wait for convergence per iteration (default: 600)
+        advertisement_settle_seconds: Burst observation window before the soak.
+            When omitted, the custom step uses its default.
         soak_seconds: Soak period after convergence per iteration (default: 120)
         test_name: Scuba logging label
         description: Custom description for the step
@@ -6805,6 +6808,8 @@ def create_performance_scaling_convergence_step(
     }
     if address_families is not None:
         step_params["address_families"] = address_families
+    if advertisement_settle_seconds is not None:
+        step_params["advertisement_settle_seconds"] = advertisement_settle_seconds
 
     return Step(
         name=StepName.CUSTOM_STEP,

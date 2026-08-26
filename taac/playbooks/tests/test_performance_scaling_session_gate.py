@@ -10,6 +10,7 @@ equals that Stage's ``total_peer_count`` (2*n IBGP v6+v4 + 2*ebgp_peer_count
 EBGP), placed right before the convergence (prefix-advertise + measure) step.
 """
 
+import json
 import unittest
 
 from taac.playbooks.playbook_definitions import (
@@ -59,3 +60,9 @@ class PerfScalingSessionGateTest(unittest.TestCase):
         stage = self._sweep_stages(self._sweep_playbook([100]))[0]
         self.assertGreaterEqual(len(stage.steps), 2)
         self.assertEqual(stage.steps[-2].name, StepName.VALIDATION_STEP)
+
+    def test_cpu_burst_observation_exceeds_two_minute_gate(self) -> None:
+        stage = self._sweep_stages(self._sweep_playbook([100]))[0]
+        params = json.loads(stage.steps[-1].step_params.json_params)
+
+        self.assertEqual(180, params["advertisement_settle_seconds"])

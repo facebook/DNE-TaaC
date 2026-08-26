@@ -105,8 +105,8 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # "constant computation" characteristic (compute once per update-group, not
     # per peer). Observe until calibrated.
     GATE_SC1_CPU_STABLE: GATE_MODE_BLOCKING,
-    # Transient (peak - stable) CPU flatness across the egress-peer sweep (the
-    # convergence-burst compute) -- observe.
+    # Convergence-burst CPU may remain above 50% for up to 24 samples, which is
+    # approximately two minutes at the configured five-second cadence.
     GATE_SC1_CPU_TRANSIENT: GATE_MODE_BLOCKING,
     # Anti-vacuousness: the DUT must advertise the ingress route set OUT to its
     # iBGP egress peers (per-peer postpolicy_sent_prefix_count) -- observe until

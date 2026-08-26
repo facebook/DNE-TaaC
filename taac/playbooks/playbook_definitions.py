@@ -2220,6 +2220,8 @@ def _ps_case1_build_per_iteration_peer_setup_steps(n: int) -> list[Step]:
 # never get there, so there is no point waiting a long budget).
 _PS_CASE1_SESSION_RETRY_COUNT: int = 8
 _PS_CASE1_SESSION_RETRY_DELAY_SECONDS: float = 10.0
+# Observe one minute beyond the two-minute CPU gate.
+_SC1_BURST_OBSERVATION_SECONDS: int = 180
 # Generous ceiling for the end-of-run BGP convergence gate (AGENT_CONFIGURED ->
 # INITIALIZED). Placeholder pending a real at-scale convergence run; tighten once
 # the true max-scale (1002-peer + 50K-route) convergence time is known.
@@ -2303,6 +2305,7 @@ def create_performance_scaling_egress_peer_sweep_playbook(
                 total_peer_count=total_peer_count,
                 ibgp_peer_count=ibgp_peer_count,
                 ebgp_peer_count=ebgp_total,
+                advertisement_settle_seconds=_SC1_BURST_OBSERVATION_SECONDS,
             )
         )
         stages.append(
