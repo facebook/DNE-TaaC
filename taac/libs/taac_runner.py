@@ -911,6 +911,51 @@ class TaacRunner:
                 matched.append(device)
         return matched
 
+    def playbook_applies_to_device(
+        self,
+        playbook: taac_types.Playbook,
+        test_device: TestDevice,
+    ) -> bool:
+        """Whether a playbook's device filters select this DUT.
+
+        `device_regexes` and `attribute_filters` are ANDed. Step-level and
+        stage-level filtering instead treat them as mutually exclusive.
+
+        Public because the netcastle front end (`taac_test_framework.py`) calls
+        it to skip a test case before it builds a `TestResult` for the DUT.
+        """
+        if playbook.device_regexes and not any(
+            re.match(regex, test_device.name) for regex in playbook.device_regexes
+        ):
+            return False
+        if (
+            playbook.attribute_filters
+            and not self._get_devices_matching_attribute_filters(
+                [test_device],
+                # pyre-fixme[6]: For 2nd argument expected `Dict[str, List[str]]`
+                #  but got `Mapping[str, Sequence[str]]`.
+                playbook.attribute_filters,
+            )
+        ):
+            return False
+        return True
+
+    def _playbooks_for_device(
+        self,
+        playbooks: t.Sequence[taac_types.Playbook],
+        test_device: TestDevice,
+    ) -> t.List[taac_types.Playbook]:
+        selected = []
+        for playbook in playbooks:
+            if self.playbook_applies_to_device(playbook, test_device):
+                selected.append(playbook)
+            else:
+                self.logger.info(
+                    f"\033[2m  Skipping playbook '{playbook.name}' on "
+                    f"{test_device.name}: device filters do not match\033[0m"
+                )
+        return selected
+
     async def run_test_case(
         self,
         playbook: taac_types.Playbook,
@@ -1766,12 +1811,17 @@ class TaacRunner:
         duts = none_throws(duts or self.duts)
         # pyre-fixme[16]: `Optional` has no attribute `__iter__`.
         enabled_playbooks = [p for p in playbooks if p.enabled]
-        total_playbooks = len(enabled_playbooks)
         failed_playbooks: t.List[t.Tuple[str, str, Exception]] = []
         for dut in duts:
             # pyrefly: ignore [missing-attribute]
             test_device = self.topology.get_device_by_name(dut)
-            for pb_idx, playbook in enumerate(enabled_playbooks, 1):
+            dut_playbooks = self._playbooks_for_device(
+                # pyrefly: ignore [bad-argument-type]
+                enabled_playbooks,
+                test_device,
+            )
+            total_playbooks = len(dut_playbooks)
+            for pb_idx, playbook in enumerate(dut_playbooks, 1):
                 self.logger.info("")
                 self.logger.info(f"\033[1m\033[36m{'=' * 70}\033[0m")
                 self.logger.info(
