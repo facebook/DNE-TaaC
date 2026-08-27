@@ -22,7 +22,25 @@ AGENT_LOGS_PATH = "/var/log/agents"
 ARCHIVED_AGENT_LOGS_PATH = "/mnt/flash/archive/current/var/log/agents"
 _ARCHIVED_LOG_ROTATION_EPOCH_RE = re.compile(r"_(\d{10})\.gz$")
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_SHELL_PROMPT_RE = re.compile(r"^(?:bash-[\d.]+|[\w.-]+)#(?:\s|$)")
+# Sentinels that bracket the real payload of a privileged-shell read.
+#
+# Recognising the shell's command echo by the shape of its prompt does not work,
+# and the prompt-matching predicate this replaced is deliberately gone rather
+# than merely unused, so nothing reaches for it again. The prompt varies by user
+# and device: the netcastle bot gets
+# `[root@bag011.ash6:/home/svc-netcastle_bot]$`, while that pattern required a
+# trailing `#` and so matched nothing here. When the echo
+# survives, every caller that searches the returned text can match the command
+# instead of the file, and a read whose command embeds a search literal then
+# finds its own literal. That is not hypothetical: it failed a bag011 route
+# oscillation run on 2026-08-26, reporting five bogus "Memory Limit Reached"
+# hits that were five echoed `grep -F -- 'Memory Limit Reached'` commands, one
+# per archive swept, while the string appeared nowhere on the device.
+#
+# Markers remove the guessing. Whatever the prompt looks like, only the lines
+# strictly between them are device output.
+_OUTPUT_BEGIN_MARKER = "__TAAC_SHELL_OUTPUT_BEGIN__"
+_OUTPUT_END_MARKER = "__TAAC_SHELL_OUTPUT_END__"
 _EOS_SHOW_LOGGING_ERRORS_COMMAND = "show logging errors"
 _EOS_LOG_MNEMONIC_RE = re.compile(r"%[A-Z0-9_]+-\d+-([A-Z0-9_]+):", re.IGNORECASE)
 _EOS_EXCLUDED_MNEMONIC_SUFFIXES = ("_NORMAL",)
@@ -194,7 +212,7 @@ async def get_archived_agent_logs(
             content = await driver.async_execute_show_or_configure_cmd_on_shell(
                 read_cmd
             )
-            content = _strip_privileged_shell_output(content)
+            content = _extract_marked_output(content, archived_file)
 
             if content:
                 combined_contents.append(content)
@@ -276,10 +294,10 @@ def _build_archived_log_read_cmd(
 ) -> str:
     quoted_file = shlex.quote(archived_file)
     if start_time is None or end_time is None:
-        command = f"bash sudo su\ngzip -cd -- {quoted_file} 2>/dev/null"
+        payload = f"gzip -cd -- {quoted_file} 2>/dev/null"
         if matching_literal is not None:
-            command += f" | grep -F -- {shlex.quote(matching_literal)} || true"
-        return f"{command}\nexit"
+            payload += f" | grep -F -- {shlex.quote(matching_literal)} || true"
+        return _wrap_in_privileged_shell(payload)
 
     start_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(start_time)))
     end_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(end_time)))
@@ -299,27 +317,78 @@ def _build_archived_log_read_cmd(
         ": (key >= start && key <= end) } "
         "if (keep) print }"
     )
-    command = (
-        "bash sudo su\n"
+    payload = (
         f"gzip -cd -- {quoted_file} 2>/dev/null | "
         f"awk -v start={start_key} -v end={end_key} {shlex.quote(awk_program)}"
     )
     if matching_literal is not None:
-        command += f" | grep -F -- {shlex.quote(matching_literal)} || true"
-    return f"{command}\nexit"
+        payload += f" | grep -F -- {shlex.quote(matching_literal)} || true"
+    return _wrap_in_privileged_shell(payload)
 
 
-def _strip_privileged_shell_output(content: str) -> str:
-    lines = []
-    for line in content.splitlines():
-        line_without_ansi = _ANSI_ESCAPE_RE.sub("", line)
-        shell_line = line_without_ansi.strip()
-        if not shell_line or shell_line in {"exit", "logout"}:
-            continue
-        if _SHELL_PROMPT_RE.match(shell_line):
-            continue
-        lines.append(line_without_ansi)
-    return "\n".join(lines)
+def _wrap_in_privileged_shell(payload: str) -> str:
+    """Bracket ``payload`` with sentinels so its output can be found exactly.
+
+    The markers are echoed on the SAME shell line as the payload, deliberately.
+    The shell echoes a line before executing it, so a separate ``echo BEGIN``
+    line would put the payload's own echo AFTER the begin marker and back inside
+    the extracted region, which is precisely the failure this exists to prevent.
+    Emitting all three as one compound command means the single echoed line
+    precedes the begin marker and lands outside.
+
+    Args:
+        payload: Shell command whose stdout is the content the caller wants.
+
+    Returns:
+        The full privileged-shell command, ready for
+        ``async_execute_show_or_configure_cmd_on_shell``.
+    """
+    return (
+        "bash sudo su\n"
+        f"echo {_OUTPUT_BEGIN_MARKER}; {payload}; echo {_OUTPUT_END_MARKER}\n"
+        "exit"
+    )
+
+
+def _extract_marked_output(content: str, source: str) -> str:
+    """Return only the lines strictly between the sentinels.
+
+    Matching is by exact line equality, not substring: the echoed command
+    CONTAINS both marker names, so a substring test would select the echo as the
+    begin marker and defeat the whole mechanism.
+
+    Args:
+        content: Raw text returned by the privileged shell.
+        source: Archived file the content came from, for the error message.
+
+    Returns:
+        The device output with the command echo, prompts and banners removed.
+
+    Raises:
+        ArchivedLogError: Either sentinel is missing or they arrive out of
+            order. Read output that cannot be delimited is not returned as-is,
+            because an undelimited read is how the command echo reached the
+            callers' matching in the first place; failing here is loud, whereas
+            passing it through is a wrong answer that looks like a real one.
+    """
+    lines = [_ANSI_ESCAPE_RE.sub("", line) for line in content.splitlines()]
+    begin_index: Optional[int] = None
+    end_index: Optional[int] = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if begin_index is None:
+            if stripped == _OUTPUT_BEGIN_MARKER:
+                begin_index = index
+        elif stripped == _OUTPUT_END_MARKER:
+            end_index = index
+            break
+    if begin_index is None or end_index is None:
+        raise ArchivedLogError(
+            f"[ARISTA_UTILS] Could not delimit shell output for {source}: "
+            f"begin marker {'found' if begin_index is not None else 'missing'}, "
+            f"end marker {'found' if end_index is not None else 'missing'}"
+        )
+    return "\n".join(lines[begin_index + 1 : end_index]).strip("\n")
 
 
 async def check_eos_system_logs(
