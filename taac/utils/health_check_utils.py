@@ -55,6 +55,18 @@ FBOSS_FB303_PORT: int = 5909
 FBOSS_MNPU_FB303_PORT: int = 5931
 
 
+def normalize_device_name(device_name: str) -> str:
+    normalized = device_name.rstrip(".").casefold()
+    for suffix in (".facebook.com", ".tfbnw.net"):
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def is_same_device(left: str, right: str) -> bool:
+    return normalize_device_name(left) == normalize_device_name(right)
+
+
 async def get_fb303_client(host: str):
     """Get fb303 client.
     In OSS mode, raises NotImplementedError since fb303 requires Meta-internal thrift.

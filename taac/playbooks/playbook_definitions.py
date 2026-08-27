@@ -158,6 +158,7 @@ from taac.steps.step_definitions import (
     create_unregister_patcher_step,
     create_validation_step,
     create_verify_port_operational_state_step,
+    create_wedge_agent_crash_step,
     duration_all_prefix_flaps_s,
     duration_all_session_flaps_s,
     duration_no_prefix_session_flaps_s,
@@ -5899,6 +5900,482 @@ def create_playbook_wd(
         postchecks=postchecks + hardening_postchecks,
         snapshot_checks=hardening_snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
+    )
+
+
+def create_pfc_repeated_watchdog_playbook(
+    *,
+    pause_traffic_item_name: str,
+    be_traffic_item_name: str,
+    receiving_interfaces: list[TrafficEndpoint],
+    device_name: str,
+    base_bandwidth_gbps: int = 200,
+    traffic_duration: int = 60,
+    pause_frame_rate_fps: int = 7500,
+    burst_packet_count: int = 2250,
+    inter_burst_gap_ms: float = 1500.0,
+    minimum_watchdog_cycles: int = 25,
+) -> Playbook:
+    """Exercise repeated native IXIA TC2 bursts while TC1 flows."""
+    if minimum_watchdog_cycles < 1:
+        raise ValueError("minimum_watchdog_cycles must be at least 1")
+    if pause_frame_rate_fps < 1:
+        raise ValueError("pause_frame_rate_fps must be at least 1")
+    if burst_packet_count < 1:
+        raise ValueError("burst_packet_count must be at least 1")
+    if inter_burst_gap_ms < 0:
+        raise ValueError("inter_burst_gap_ms must be non-negative")
+    burst_duration_ms = burst_packet_count / pause_frame_rate_fps * 1000
+    burst_interval_ms = burst_duration_ms + inter_burst_gap_ms
+    number_of_bursts = int(traffic_duration * 1000 // burst_interval_ms)
+    if number_of_bursts < minimum_watchdog_cycles:
+        raise ValueError(
+            f"traffic_duration permits only {number_of_bursts} bursts, below "
+            f"minimum_watchdog_cycles={minimum_watchdog_cycles}"
+        )
+    wd_thresholds = [
+        hc_types.PfcWdThreshold(
+            interfaces=[endpoint.name for endpoint in receiving_interfaces],
+            deadlock_threshold=minimum_watchdog_cycles - 1,
+            recovery_threshold=minimum_watchdog_cycles - 1,
+            comparison=hc_types.ComparisonType.GREATER_THAN,
+        )
+    ]
+    pfc_thresholds = [
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in receiving_interfaces],
+            in_pfc=50000,
+            comparison=hc_types.ComparisonType.GREATER_THAN,
+            priority=hc_types.Priority.PRIORITY_2,
+        )
+    ]
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(True)
+    )
+    return Playbook(
+        name="test_tc2_pfc_wd_repeated_detection_recovery",
+        description=(
+            "Run TC1 continuously while periodic TC2 pause bursts repeatedly "
+            "drive balanced watchdog detection and recovery cycles"
+        ),
+        device_regexes=[device_name],
+        traffic_items_to_configure={
+            pause_traffic_item_name: TrafficItemSettings(
+                transmission_control=ixia_types.TransmissionControl(
+                    type=ixia_types.TransmissionControlType.BURST_FIXED_DURATION,
+                    duration=traffic_duration,
+                    burst_packet_count=burst_packet_count,
+                    inter_burst_gap_ms=inter_burst_gap_ms,
+                )
+            )
+        },
+        traffic_items_to_start=[be_traffic_item_name],
+        prechecks=[
+            create_clear_counters_check()(priority=0),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="snapshot",
+                executor_device=device_name,
+                replace_snapshot=True,
+            )(priority=10),
+            _create_pfc_wd_check_central(
+                thresholds=wd_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="snapshot",
+                snapshot_retry_on_zero=True,
+                replace_snapshot=True,
+                executor_device=device_name,
+            )(priority=10),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_ixia_api_step(
+                        api_name="set_transmission_control",
+                        args_dict={
+                            "traffic_item_regex": pause_traffic_item_name,
+                            "transmission_type": "burstFixedDuration",
+                            "duration": traffic_duration,
+                            "burst_packet_count": burst_packet_count,
+                            "inter_burst_gap_ms": inter_burst_gap_ms,
+                            "repeat_burst_count": number_of_bursts,
+                            "transmit_mode": "sequential",
+                        },
+                        description=(
+                            f"Configure {number_of_bursts} native IXIA TC2 bursts"
+                        ),
+                    ),
+                    create_ixia_api_step(
+                        api_name="enable_traffic",
+                        args_dict={
+                            "regexes": [
+                                pause_traffic_item_name,
+                                be_traffic_item_name,
+                            ],
+                            "enable": True,
+                        },
+                        description="Enable TC1 data and periodic TC2 pause traffic",
+                    ),
+                    create_longevity_step(
+                        duration=traffic_duration,
+                        description=(
+                            f"Run native IXIA TC2 bursts for {traffic_duration}s "
+                            f"with {inter_burst_gap_ms:.0f}ms inter-burst gaps"
+                        ),
+                    ),
+                ]
+            )
+        ],
+        postchecks=[
+            create_ixia_packet_loss_check(
+                thresholds=[
+                    hc_types.PacketLossThreshold(
+                        names=[be_traffic_item_name],
+                        str_value="0",
+                        metric=hc_types.PacketLossMetric.DURATION,
+                    )
+                ],
+                sleep_time=60,
+                skip_traffic_items=[pause_traffic_item_name],
+            ),
+            create_ixia_traffic_rate_check(
+                thresholds=[
+                    hc_types.TrafficRateThreshold(
+                        names=[be_traffic_item_name],
+                        value=23,
+                        threshold_type=hc_types.ThresholdType.PERCENT,
+                        metric=hc_types.TrafficRateMetric.TX_RATE,
+                    )
+                ],
+                base_bandwidth_gbps=base_bandwidth_gbps,
+            ),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="check",
+                executor_device=device_name,
+            ),
+            _create_pfc_wd_check_central(
+                thresholds=wd_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="check",
+                max_detection_recovery_difference=1,
+                executor_device=device_name,
+            ),
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
+        cleanup_steps=[
+            create_ixia_api_step(
+                api_name="enable_traffic",
+                args_dict={"regexes": [pause_traffic_item_name], "enable": False},
+                description="Disable TC2 pause traffic before restoring its mode",
+            ),
+            create_ixia_api_step(
+                api_name="set_transmission_control",
+                args_dict={
+                    "traffic_item_regex": pause_traffic_item_name,
+                    "transmission_type": "continuous",
+                    "transmit_mode": "interleaved",
+                },
+                description="Restore TC2 pause traffic to continuous mode",
+            ),
+            create_ixia_api_step(
+                api_name="stop_traffic",
+                args_dict={},
+                description="Stop traffic after restoring transmission control",
+            ),
+        ],
+    )
+
+
+def create_pfc_wedge_agent_crash_playbook(
+    *,
+    rdma_traffic_item_names: list[str],
+    source_interfaces: list[TrafficEndpoint],
+    destination_interfaces: list[TrafficEndpoint],
+    egress_device_name: str,
+    base_bandwidth_gbps: int = 200,
+) -> Playbook:
+    """Crash only wedge_agent during PFC-protected RDMA congestion."""
+    pfc_thresholds = [
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in source_interfaces],
+            out_pfc=1000,
+            comparison=hc_types.ComparisonType.GREATER_THAN,
+            priority=hc_types.Priority.PRIORITY_2,
+        ),
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in destination_interfaces],
+            priority=hc_types.Priority.PRIORITY_2,
+        ),
+    ]
+    return Playbook(
+        name="test_pfc_functionality_wedge_agent_crash",
+        description=(
+            "Crash wedge_agent on the congested egress GTSW and verify strict "
+            "lossless RDMA recovery after agent and BGP convergence"
+        ),
+        device_regexes=[egress_device_name],
+        traffic_items_to_start=rdma_traffic_item_names,
+        prechecks=[
+            create_clear_counters_check()(priority=0),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="snapshot",
+                executor_device=egress_device_name,
+                replace_snapshot=True,
+            )(priority=10),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_longevity_step(
+                        duration=60,
+                        description="Establish congested RDMA baseline for 60 seconds",
+                    ),
+                    create_wedge_agent_crash_step(
+                        device_regexes=[egress_device_name]
+                    ),
+                    create_service_convergence_step(
+                        services=[taac_types.Service.AGENT, taac_types.Service.BGP],
+                        timeout=600,
+                        device_regexes=[egress_device_name],
+                        description=(
+                            "Wait within a combined 600-second bound for "
+                            "wedge_agent and BGP recovery"
+                        ),
+                    ),
+                    create_clear_traffic_stats_step(),
+                    create_validation_step(
+                        point_in_time_checks=[
+                            _create_dsf_pfc_check_central(
+                                thresholds=pfc_thresholds,
+                                check_scope=hc_types.Scope.DEFAULT,
+                                mode="snapshot",
+                                executor_device=egress_device_name,
+                                replace_snapshot=True,
+                                snapshot_retry_out_pfc_on_zero=True,
+                            )
+                        ],
+                        description="Snapshot PFC counters after convergence",
+                    ),
+                    create_longevity_step(
+                        duration=60,
+                        description="Measure recovered congested RDMA for 60 seconds",
+                    ),
+                ]
+            )
+        ],
+        postchecks=[
+            create_ixia_packet_loss_check(
+                thresholds=[
+                    hc_types.PacketLossThreshold(
+                        names=rdma_traffic_item_names,
+                        str_value="0",
+                        metric=hc_types.PacketLossMetric.DURATION,
+                    )
+                ],
+                sleep_time=60,
+            ),
+            create_ixia_traffic_rate_check(
+                thresholds=[
+                    hc_types.TrafficRateThreshold(
+                        names=rdma_traffic_item_names,
+                        value=32,
+                        threshold_type=hc_types.ThresholdType.PERCENT,
+                        metric=hc_types.TrafficRateMetric.TX_RATE,
+                    )
+                ],
+                base_bandwidth_gbps=base_bandwidth_gbps,
+            ),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="check",
+                executor_device=egress_device_name,
+            ),
+            create_port_counters_check(
+                thresholds=[
+                    hc_types.PortCountersThreshold(
+                        interfaces=[
+                            endpoint.name for endpoint in destination_interfaces
+                        ],
+                        out_discards=0,
+                        comparison=hc_types.ComparisonType.EQUAL_TO,
+                    )
+                ]
+            ),
+            create_port_state_check(),
+            create_wedge_agent_configured_check(),
+            create_systemctl_active_state_check(),
+            create_device_core_dumps_check()(priority=50),
+            create_unclean_exit_check(
+                exclude_services=WEDGE_AGENT_BINDS_TO_CASCADE
+            )(priority=50),
+            create_memory_utilization_check(
+                threshold=Gigabyte.GIG_10.value,
+                start_time_jq_var="test_case_start_time",
+            )(priority=50),
+            create_cpu_utilization_check(
+                threshold=400.0,
+                start_time_jq_var="test_case_start_time",
+            )(priority=50),
+            create_service_restart_check(
+                services=SERVICES_TO_MONITOR_DURING_AGENT_RESTART,
+                expected_restarted_services=WEDGE_AGENT_BINDS_TO_CASCADE,
+            )(priority=50),
+        ],
+        snapshot_checks=[
+            create_bgp_session_snapshot_check(
+                skip_flap_check=True,
+                skip_uptime_check=True,
+                assert_reconvergence=True,
+                max_convergence_sec=600,
+                convergence_service="wedge_agent",
+                reconvergence_hosts=[egress_device_name],
+            ),
+            create_core_dumps_snapshot_check(),
+        ],
+    )
+
+
+def create_pfc_pause_non_impact_playbook(
+    *,
+    rdma_traffic_item_name: str,
+    pause_traffic_item_name: str,
+    pause_receiving_interfaces: list[TrafficEndpoint],
+    rdma_source_interfaces: list[TrafficEndpoint],
+    rdma_destination_interfaces: list[TrafficEndpoint],
+    device_name: str,
+    pause_priority: hc_types.Priority,
+    base_bandwidth_gbps: int = 200,
+    rdma_expected_rate_percent: int = 90,
+    rdma_rate_tolerance_percent: int = 10,
+    assert_no_watchdog_events: bool = True,
+) -> Playbook:
+    """Verify priority-specific pause does not affect forward TC2 RDMA."""
+    pause_traffic_class = int(pause_priority)
+    pfc_thresholds = [
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in pause_receiving_interfaces],
+            in_pfc=400000,
+            comparison=hc_types.ComparisonType.GREATER_THAN,
+            priority=pause_priority,
+        ),
+        hc_types.DsfPfcThreshold(
+            interfaces=[endpoint.name for endpoint in rdma_source_interfaces],
+            out_pfc=0,
+            comparison=hc_types.ComparisonType.EQUAL_TO,
+            priority=hc_types.Priority.PRIORITY_2,
+        ),
+    ]
+    wd_thresholds = [
+        hc_types.PfcWdThreshold(
+            interfaces=[endpoint.name for endpoint in pause_receiving_interfaces],
+            deadlock_threshold=0,
+            recovery_threshold=0,
+            comparison=hc_types.ComparisonType.EQUAL_TO,
+        )
+    ]
+    wd_snapshot_checks = (
+        [
+            _create_pfc_wd_check_central(
+                thresholds=wd_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="snapshot",
+                replace_snapshot=True,
+                executor_device=device_name,
+            )(priority=10)
+        ]
+        if assert_no_watchdog_events
+        else []
+    )
+    wd_postchecks = (
+        [
+            _create_pfc_wd_check_central(
+                thresholds=wd_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="check",
+                executor_device=device_name,
+            )
+        ]
+        if assert_no_watchdog_events
+        else []
+    )
+    hardening_postchecks, hardening_snapshot_checks = (
+        _create_pfc_platform_hardening_checks(True)
+    )
+    return Playbook(
+        name=f"test_tc{pause_traffic_class}_pfc_pause_non_impact_rdma",
+        description=(
+            f"Inject reverse-direction TC{pause_traffic_class} pause frames and "
+            "prove TC2 RDMA "
+            "remains lossless at full non-congested throughput"
+        ),
+        device_regexes=[device_name],
+        traffic_items_to_start=[rdma_traffic_item_name, pause_traffic_item_name],
+        prechecks=[
+            create_clear_counters_check()(priority=0),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="snapshot",
+                executor_device=device_name,
+                replace_snapshot=True,
+            )(priority=10),
+        ]
+        + wd_snapshot_checks,
+        stages=[create_steps_stage(steps=[create_longevity_step(duration=60)])],
+        postchecks=[
+            create_ixia_packet_loss_check(
+                thresholds=[
+                    hc_types.PacketLossThreshold(
+                        names=[rdma_traffic_item_name],
+                        str_value="0",
+                        metric=hc_types.PacketLossMetric.DURATION,
+                    )
+                ],
+                sleep_time=60,
+                skip_traffic_items=[pause_traffic_item_name],
+            ),
+            create_ixia_traffic_rate_check(
+                thresholds=[
+                    hc_types.TrafficRateThreshold(
+                        names=[rdma_traffic_item_name],
+                        value=rdma_expected_rate_percent,
+                        threshold_type=hc_types.ThresholdType.PERCENT,
+                        metric=hc_types.TrafficRateMetric.TX_RATE,
+                    )
+                ],
+                base_bandwidth_gbps=base_bandwidth_gbps,
+                rate_tolerance_percent=rdma_rate_tolerance_percent,
+            ),
+            _create_dsf_pfc_check_central(
+                thresholds=pfc_thresholds,
+                check_scope=hc_types.Scope.DEFAULT,
+                mode="check",
+                executor_device=device_name,
+            ),
+        ]
+        + wd_postchecks
+        + [
+            create_port_counters_check(
+                thresholds=[
+                    hc_types.PortCountersThreshold(
+                        interfaces=[
+                            endpoint.name for endpoint in rdma_destination_interfaces
+                        ],
+                        out_discards=0,
+                        comparison=hc_types.ComparisonType.EQUAL_TO,
+                    )
+                ]
+            ),
+        ]
+        + hardening_postchecks,
+        snapshot_checks=hardening_snapshot_checks,
     )
 
 

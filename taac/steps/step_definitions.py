@@ -3860,6 +3860,7 @@ def create_run_ssh_command_step(
     cmd: str,
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
 ) -> Step:
     """Run an arbitrary shell command on the DUT via SSH.
 
@@ -3875,6 +3876,7 @@ def create_run_ssh_command_step(
             logs. If omitted, no description is rendered.
         step_id: Optional step id, used by downstream stages to reference
             this step's output via jq.
+        device_regexes: Optional device patterns restricting where the command runs.
 
     Returns:
         A `Step` with `step_name=StepName.RUN_SSH_COMMAND_STEP`.
@@ -3884,6 +3886,41 @@ def create_run_ssh_command_step(
         step_params=Params(json_params=json.dumps({"cmd": cmd})),
         description=description,
         id=step_id,
+        device_regexes=device_regexes,
+    )
+
+
+def create_wedge_agent_crash_step(
+    device_regexes: t.List[str],
+    description: t.Optional[str] = None,
+    step_id: t.Optional[str] = None,
+) -> Step:
+    """Crash and verify replacement of the ``wedge_agent.service`` main process."""
+    return create_run_ssh_command_step(
+        cmd=(
+            "old_pid=$(systemctl show --property=MainPID --value "
+            "wedge_agent.service) || exit 1; "
+            "case \"$old_pid\" in ''|0|*[!0-9]*) "
+            "echo 'wedge_agent has no valid running MainPID' >&2; exit 1;; esac; "
+            "systemctl kill --kill-who=main --signal=SIGKILL "
+            "wedge_agent.service || exit 1; "
+            'attempt=0; while [ "$attempt" -lt 50 ]; do '
+            "new_pid=$(systemctl show --property=MainPID --value "
+            "wedge_agent.service) || exit 1; "
+            'case "$new_pid" in '
+            '0) echo "Verified wedge_agent MainPID transition: $old_pid -> 0"; '
+            "exit 0;; "
+            "''|*[!0-9]*) ;; "
+            '*) if [ "$new_pid" -ne "$old_pid" ]; then '
+            'echo "Verified wedge_agent MainPID transition: '
+            '$old_pid -> $new_pid"; exit 0; fi;; esac; '
+            "attempt=$((attempt + 1)); sleep 0.1; done; "
+            'echo "wedge_agent MainPID did not change from $old_pid after SIGKILL" '
+            ">&2; exit 1"
+        ),
+        description=description or "Crash the wedge_agent main process with SIGKILL",
+        step_id=step_id,
+        device_regexes=device_regexes,
     )
 
 

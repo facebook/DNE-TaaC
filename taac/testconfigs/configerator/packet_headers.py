@@ -80,7 +80,8 @@ def create_generic_pfc_pause_packet_headers(priority_enable_vector, pfc_queue):
     """PFC pause headers with a specific queue paused (all 8 queues explicitly set).
 
     Args:
-        priority_enable_vector: Integer for which priorities are enabled for flow control
+        priority_enable_vector: IXIA hex-field value selecting priorities for flow control.
+            Prefer a hexadecimal string for values above 9.
         pfc_queue: Integer (0-7) specifying which queue to pause (set to "ffff"),
             all other queues are set to 0
     """
@@ -121,7 +122,8 @@ def create_generic_pfc_pause_packet_headers(priority_enable_vector, pfc_queue):
 
 
 TC2_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers(4, 2)
-TC6_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers(40, 6)
+TC0_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers("01", 0)
+TC6_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers("40", 6)
 
 
 LLDP_TRAFFIC_PACKET_HEADERS = [

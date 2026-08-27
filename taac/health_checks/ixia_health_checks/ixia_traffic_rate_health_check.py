@@ -35,7 +35,7 @@ class IxiaTrafficRateHealthCheck(
                 message="No traffic items found in the ixia setup.",
             )
         latest_stats = obj.get_latest_stats_traffic()
-        less_than_thresholds = []
+        rate_violations = []
         all_thresholds = list(input.thresholds)
 
         # Callers may override the PERCENT-mode reference bandwidth via
@@ -44,32 +44,44 @@ class IxiaTrafficRateHealthCheck(
         base_bandwidth_gbps = float(
             check_params.get("base_bandwidth_gbps", DEFAULT_BASE_BANDWIDTH_GBPS)
         )
+        try:
+            rate_tolerance_percent = self._validate_rate_tolerance_percent(
+                check_params.get("rate_tolerance_percent")
+            )
+        except ValueError as error:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=str(error),
+            )
 
         for threshold in all_thresholds:
-            less_than_thresholds.extend(
+            rate_violations.extend(
                 self.verify_traffic_rate_threshold(
-                    latest_stats, threshold, base_bandwidth_gbps
+                    latest_stats,
+                    threshold,
+                    base_bandwidth_gbps,
+                    rate_tolerance_percent,
                 )
             )
 
-        if less_than_thresholds:
+        if rate_violations:
             # Use the Everpaste URL directly; it is already a clickable internalfb.com
             # link, so the throttled fburl tier (createFBUrl) is unnecessary here.
             everpaste_url = await async_everpaste_str(
-                tabulate(less_than_thresholds, headers="keys", tablefmt="simple_grid")
+                tabulate(rate_violations, headers="keys", tablefmt="simple_grid")
             )
             inline_summary = [
                 f"{t['identifier']}: Tx={t['Tx Rate (Gbps)']}Gbps, Rx={t['Rx Rate (Gbps)']}Gbps"
-                for t in less_than_thresholds[:5]
+                for t in rate_violations[:5]
             ]
             suffix = (
-                f" (+{len(less_than_thresholds) - 5} more)"
-                if len(less_than_thresholds) > 5
+                f" (+{len(rate_violations) - 5} more)"
+                if len(rate_violations) > 5
                 else ""
             )
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
-                message=f"Traffic rate lower than the defined threshold(s): "
+                message=f"Traffic rate outside the defined threshold(s): "
                 f"{inline_summary}{suffix}. Full details: {everpaste_url}",
             )
         return hc_types.HealthCheckResult(status=hc_types.HealthCheckStatus.PASS)
@@ -79,6 +91,7 @@ class IxiaTrafficRateHealthCheck(
         latest_stats: t.List[t.Dict[str, t.Any]],
         threshold: hc_types.TrafficRateThreshold,
         base_bandwidth_gbps: float = DEFAULT_BASE_BANDWIDTH_GBPS,
+        rate_tolerance_percent: float | None = None,
     ) -> t.List[t.Dict[str, t.Any]]:
         """
         Verify if the port stats exceed the given threshold.
@@ -91,11 +104,18 @@ class IxiaTrafficRateHealthCheck(
                 back-compat with configs written against 400G ports; pass the
                 real port speed (e.g. 200 for 200G, 800 for 800G) via
                 ``check_params["base_bandwidth_gbps"]``.
+            rate_tolerance_percent: When set, treats the threshold as an expected
+                rate and requires both TX and RX to remain within this percentage
+                above or below it. When omitted, preserves the historical
+                lower-bound-only behavior.
 
         Returns:
             A list of dictionaries containing the ports that exceeded the threshold.
         """
-        less_than_thresholds = []
+        rate_tolerance_percent = self._validate_rate_tolerance_percent(
+            rate_tolerance_percent
+        )
+        rate_violations = []
 
         threshold_value = threshold.value
         value_type = threshold.threshold_type
@@ -129,17 +149,44 @@ class IxiaTrafficRateHealthCheck(
                 tx_rate_threshold_gbps = threshold_value
                 rx_rate_threshold_gbps = threshold_value
 
-            # Check if the TX or RX rates exceed the threshold
-            if (
-                tx_rate_gbps <= tx_rate_threshold_gbps
-                or rx_rate_gbps <= rx_rate_threshold_gbps
-            ):
-                less_than_thresholds.append(
-                    {
-                        "identifier": identifier,
-                        "Tx Rate (Gbps)": tx_rate_gbps,
-                        "Rx Rate (Gbps)": rx_rate_gbps,
-                    }
+            if rate_tolerance_percent is None:
+                rate_is_invalid = (
+                    tx_rate_gbps <= tx_rate_threshold_gbps
+                    or rx_rate_gbps <= rx_rate_threshold_gbps
+                )
+                minimum_rate_gbps = tx_rate_threshold_gbps
+                maximum_rate_gbps = None
+            else:
+                tolerance = rate_tolerance_percent / 100.0
+                minimum_rate_gbps = tx_rate_threshold_gbps * (1.0 - tolerance)
+                maximum_rate_gbps = tx_rate_threshold_gbps * (1.0 + tolerance)
+                rate_is_invalid = not (
+                    minimum_rate_gbps <= tx_rate_gbps <= maximum_rate_gbps
+                    and minimum_rate_gbps <= rx_rate_gbps <= maximum_rate_gbps
                 )
 
-        return less_than_thresholds
+            if rate_is_invalid:
+                violation = {
+                    "identifier": identifier,
+                    "Tx Rate (Gbps)": tx_rate_gbps,
+                    "Rx Rate (Gbps)": rx_rate_gbps,
+                    "Minimum Rate (Gbps)": minimum_rate_gbps,
+                }
+                if maximum_rate_gbps is not None:
+                    violation["Maximum Rate (Gbps)"] = maximum_rate_gbps
+                rate_violations.append(violation)
+
+        return rate_violations
+
+    @staticmethod
+    def _validate_rate_tolerance_percent(value: t.Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                "rate_tolerance_percent must be a number between 0 and 100"
+            )
+        tolerance = float(value)
+        if not 0 <= tolerance <= 100:
+            raise ValueError("rate_tolerance_percent must be between 0 and 100")
+        return tolerance

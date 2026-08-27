@@ -2585,6 +2585,7 @@ class Ixia:
     def _configure_transmission_control(
         config_element: "ConfigElement",
         transmission_control: ixia_types.TransmissionControl,
+        repeat_burst_count: t.Optional[int] = None,
     ) -> None:
         """Configures the transmission control for the config element
 
@@ -2598,7 +2599,7 @@ class Ixia:
         ]
         if transmission_control.type == ixia_types.TransmissionControlType.CONTINUOUS:
             config_element.TransmissionControl.update(
-                Type=transmission_control_type_raw
+                Type=transmission_control_type_raw,
             )
 
         elif (
@@ -2627,6 +2628,9 @@ class Ixia:
                 "Type": transmission_control_type_raw,
                 "Duration": transmission_control.duration,
                 "EnableInterBurstGap": True,
+                "RepeatBurst": (
+                    repeat_burst_count if repeat_burst_count is not None else 1
+                ),
             }
             if transmission_control.burst_packet_count is not None:
                 burst_params["BurstPacketCount"] = (
@@ -10257,6 +10261,8 @@ class Ixia:
         inter_burst_gap_ms: t.Optional[float] = None,
         burst_packet_count: t.Optional[int] = None,
         min_gap_bytes: t.Optional[int] = None,
+        repeat_burst_count: t.Optional[int] = None,
+        transmit_mode: t.Optional[str] = None,
     ) -> None:
         """Set transmission control mode on matching traffic items.
 
@@ -10271,6 +10277,65 @@ class Ixia:
         """
         import re
 
+        tc = self._build_runtime_transmission_control(
+            transmission_type=transmission_type,
+            duration=duration,
+            inter_burst_gap_ms=inter_burst_gap_ms,
+            burst_packet_count=burst_packet_count,
+            min_gap_bytes=min_gap_bytes,
+            repeat_burst_count=repeat_burst_count,
+            transmit_mode=transmit_mode,
+        )
+
+        # Stop traffic before modifying transmission control to avoid
+        # "stateless traffic item has been unapplied" errors from IXIA.
+        # The IXIA server rejects dynamic TransmissionControl updates on
+        # traffic items that are in unapplied state (e.g. after a
+        # stop/start cycle without regeneration).
+        was_running = self.is_traffic_running()
+        if was_running:
+            self.stop_traffic()
+
+        pattern = re.compile(traffic_item_regex)
+        matched = 0
+        for ti in self.ixnetwork.Traffic.TrafficItem.find():
+            if pattern.search(ti.Name):
+                matched += 1
+                if transmit_mode is not None:
+                    ti.update(TransmitMode=transmit_mode)
+                for ce in ti.ConfigElement.find():
+                    self._configure_transmission_control(
+                        ce, tc, repeat_burst_count=repeat_burst_count
+                    )
+                ti.Generate()
+                self.logger.info(
+                    f"Set transmission control to '{transmission_type}' "
+                    f"on traffic item '{ti.Name}'"
+                )
+
+        # A regex that matches nothing would otherwise leave every traffic item
+        # on its previous pattern and still report success.
+        if not matched:
+            raise ValueError(
+                f"No traffic item matched '{traffic_item_regex}'; transmission "
+                f"control was not changed."
+            )
+
+        if was_running:
+            self.apply_traffic()
+            self.start_traffic()
+
+    @staticmethod
+    def _build_runtime_transmission_control(
+        *,
+        transmission_type: str,
+        duration: int,
+        inter_burst_gap_ms: t.Optional[float],
+        burst_packet_count: t.Optional[int],
+        min_gap_bytes: t.Optional[int],
+        repeat_burst_count: t.Optional[int],
+        transmit_mode: t.Optional[str],
+    ) -> ixia_types.TransmissionControl:
         type_map = {v: k for k, v in ixia_types.TRANS_CONTROL_TYPE_MAP.items()}
         if transmission_type not in type_map:
             raise ValueError(
@@ -10282,6 +10347,7 @@ class Ixia:
             "inter_burst_gap_ms": inter_burst_gap_ms,
             "burst_packet_count": burst_packet_count,
             "min_gap_bytes": min_gap_bytes,
+            "repeat_burst_count": repeat_burst_count,
         }
         supplied_burst_args = sorted(k for k, v in burst_args.items() if v is not None)
         if (
@@ -10300,47 +10366,26 @@ class Ixia:
                 "burstFixedDuration needs an explicit burst_packet_count; "
                 "without it IXIA keeps whatever burst size was configured last."
             )
-        tc = ixia_types.TransmissionControl(
+        if repeat_burst_count is not None and repeat_burst_count < 1:
+            raise ValueError("repeat_burst_count must be at least 1")
+        valid_transmit_modes = set(ixia_types.TRANSMIT_MODE_MAP.values())
+        if transmit_mode is not None and transmit_mode not in valid_transmit_modes:
+            raise ValueError(
+                f"Unknown transmit mode {transmit_mode!r}. "
+                f"Valid: {sorted(valid_transmit_modes)}"
+            )
+        if repeat_burst_count is not None and transmit_mode != "sequential":
+            raise ValueError(
+                "repeat_burst_count requires transmit_mode='sequential'; "
+                "IXIA ignores RepeatBurst in interleaved mode."
+            )
+        return ixia_types.TransmissionControl(
             type=resolved_type,
             duration=duration,
             burst_packet_count=burst_packet_count,
             inter_burst_gap_ms=inter_burst_gap_ms,
             min_gap_bytes=min_gap_bytes,
         )
-
-        # Stop traffic before modifying transmission control to avoid
-        # "stateless traffic item has been unapplied" errors from IXIA.
-        # The IXIA server rejects dynamic TransmissionControl updates on
-        # traffic items that are in unapplied state (e.g. after a
-        # stop/start cycle without regeneration).
-        was_running = self.is_traffic_running()
-        if was_running:
-            self.stop_traffic()
-
-        pattern = re.compile(traffic_item_regex)
-        matched = 0
-        for ti in self.ixnetwork.Traffic.TrafficItem.find():
-            if pattern.search(ti.Name):
-                matched += 1
-                for ce in ti.ConfigElement.find():
-                    self._configure_transmission_control(ce, tc)
-                ti.Generate()
-                self.logger.info(
-                    f"Set transmission control to '{transmission_type}' "
-                    f"on traffic item '{ti.Name}'"
-                )
-
-        # A regex that matches nothing would otherwise leave every traffic item
-        # on its previous pattern and still report success.
-        if not matched:
-            raise ValueError(
-                f"No traffic item matched '{traffic_item_regex}'; transmission "
-                f"control was not changed."
-            )
-
-        if was_running:
-            self.apply_traffic()
-            self.start_traffic()
 
     @staticmethod
     def _validate_control_buffer_percent(control_buffer_percent: int) -> None:

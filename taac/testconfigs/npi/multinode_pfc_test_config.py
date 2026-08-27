@@ -21,7 +21,17 @@ https://docs.google.com/document/d/1XBnOhM67YkfaAJdvEIMehkY2PsGLsskZ-29ullzPlKA/
 
 import typing as t
 
-from taac.packet_headers import DSF_RDMA_IB_PACKET_HEADERS
+from taac.packet_headers import (
+    DSF_RDMA_IB_PACKET_HEADERS,
+    TC0_PFC_PAUSE_PACKET_HEADERS,
+    TC6_PFC_PAUSE_PACKET_HEADERS,
+)
+from taac.playbooks.playbook_definitions import (
+    create_pfc_pause_non_impact_playbook,
+    create_pfc_pause_traffic_config,
+    create_pfc_repeated_watchdog_playbook,
+    create_pfc_wedge_agent_crash_playbook,
+)
 from taac.testbed_params.testbed_params_gtsw_th6_ash6_c085 import (
     ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_END_POINTS,
     ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS,
@@ -167,6 +177,18 @@ _PFC8_ENDPOINTS = [
         ixia_ports=GTSW001_L1002_C085_IXIA_DST_PORTS,
     ),
 ]
+_PFC_EGRESS_DUT_ENDPOINTS = [
+    taac_types.Endpoint(
+        name=GTSW001_L1001_C085_ASH6,
+        dut=False,
+        ixia_ports=GTSW001_L1001_C085_IXIA19_PFC_SRC_PORTS,
+    ),
+    taac_types.Endpoint(
+        name=GTSW001_L1002_C085_ASH6,
+        dut=True,
+        ixia_ports=GTSW001_L1002_C085_IXIA_DST_PORTS,
+    ),
+]
 _FOCUSED_PFC_BASE = gen_pfc_functionality_test_generic_4port_configs(
     test_config_name="NPI_DVT_ICEPACK_GTSW__PFC8_TEST_CONFIG",
     endpoints=_PFC8_ENDPOINTS,
@@ -302,4 +324,135 @@ NPI_DVT_ICEPACK_GTSW__PFC017_TEST_CONFIG = _create_focused_pfc_test_config(
         "TEST_BE_24_TRAFFIC",
     },
     playbook_name="test_tc2_pfc_wd_functionality_non_impact_tc1",
+)
+
+_PFC013_RDMA_TRAFFIC_ITEMS = [
+    "TEST_RDMA_TRAFFIC_90PCT_P1_TO_P4",
+    "TEST_RDMA_TRAFFIC_90PCT_P2_TO_P4",
+    "TEST_RDMA_TRAFFIC_90PCT_P3_TO_P4",
+]
+NPI_DVT_ICEPACK_GTSW__PFC013_TEST_CONFIG = _FOCUSED_PFC_BASE(
+    name="NPI_DVT_ICEPACK_GTSW__PFC013_TEST_CONFIG",
+    endpoints=_PFC_EGRESS_DUT_ENDPOINTS,
+    basic_traffic_item_configs=_select_named_config_items(
+        config_name="NPI_DVT_ICEPACK_GTSW__PFC013_TEST_CONFIG",
+        items=_FOCUSED_PFC_BASE.basic_traffic_item_configs or [],
+        expected_names=set(_PFC013_RDMA_TRAFFIC_ITEMS),
+        item_type="traffic items",
+    ),
+    playbooks=[
+        create_pfc_wedge_agent_crash_playbook(
+            rdma_traffic_item_names=_PFC013_RDMA_TRAFFIC_ITEMS,
+            source_interfaces=_PFC8_SRC_ENDPOINTS[:3],
+            destination_interfaces=(
+                ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS
+            ),
+            egress_device_name=GTSW001_L1002_C085_ASH6,
+        )
+    ],
+)
+
+_PFC015_TRAFFIC_ITEMS = _select_named_config_items(
+    config_name="NPI_DVT_ICEPACK_GTSW__PFC015_TEST_CONFIG",
+    items=_FOCUSED_PFC_BASE.basic_traffic_item_configs or [],
+    expected_names={
+        "TRAFFIC_TC2_PFC_PAUSE_7500FPS",
+        "TEST_BE_24_TRAFFIC",
+    },
+    item_type="traffic items",
+)
+_PFC015_PAUSE_FRAME_RATE_FPS = int(
+    next(
+        item.line_rate
+        for item in _PFC015_TRAFFIC_ITEMS
+        if item.name == "TRAFFIC_TC2_PFC_PAUSE_7500FPS"
+    )
+)
+NPI_DVT_ICEPACK_GTSW__PFC015_TEST_CONFIG = _FOCUSED_PFC_BASE(
+    name="NPI_DVT_ICEPACK_GTSW__PFC015_TEST_CONFIG",
+    basic_traffic_item_configs=_PFC015_TRAFFIC_ITEMS,
+    playbooks=[
+        create_pfc_repeated_watchdog_playbook(
+            pause_traffic_item_name="TRAFFIC_TC2_PFC_PAUSE_7500FPS",
+            be_traffic_item_name="TEST_BE_24_TRAFFIC",
+            receiving_interfaces=_PFC8_SRC_ENDPOINTS[:1],
+            device_name=GTSW001_L1001_C085_ASH6,
+            pause_frame_rate_fps=_PFC015_PAUSE_FRAME_RATE_FPS,
+        )
+    ],
+)
+
+_PFC018_PAUSE_TRAFFIC_ITEM_NAME = "TRAFFIC_TC6_PFC_PAUSE_7500FPS_REVERSE"
+_PFC018_PAUSE_TRAFFIC_ITEM = create_pfc_pause_traffic_config(
+    src_endpoints=ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS,
+    dest_endpoints=_PFC8_SRC_ENDPOINTS[:1],
+    name=_PFC018_PAUSE_TRAFFIC_ITEM_NAME,
+    line_rate=7500,
+    packet_headers=TC6_PFC_PAUSE_PACKET_HEADERS,
+)
+NPI_DVT_ICEPACK_GTSW__PFC018_TEST_CONFIG = _FOCUSED_PFC_BASE(
+    name="NPI_DVT_ICEPACK_GTSW__PFC018_TEST_CONFIG",
+    endpoints=_PFC_EGRESS_DUT_ENDPOINTS,
+    basic_traffic_item_configs=(
+        _select_named_config_items(
+            config_name="NPI_DVT_ICEPACK_GTSW__PFC018_TEST_CONFIG",
+            items=_FOCUSED_PFC_BASE.basic_traffic_item_configs or [],
+            expected_names={"TEST_RDMA_TRAFFIC_90PCT_P1_TO_P4"},
+            item_type="traffic items",
+        )
+        + [_PFC018_PAUSE_TRAFFIC_ITEM]
+    ),
+    playbooks=[
+        create_pfc_pause_non_impact_playbook(
+            rdma_traffic_item_name="TEST_RDMA_TRAFFIC_90PCT_P1_TO_P4",
+            pause_traffic_item_name=_PFC018_PAUSE_TRAFFIC_ITEM_NAME,
+            pause_receiving_interfaces=(
+                ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS
+            ),
+            rdma_source_interfaces=_PFC8_SRC_ENDPOINTS[:1],
+            rdma_destination_interfaces=(
+                ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS
+            ),
+            device_name=GTSW001_L1002_C085_ASH6,
+            pause_priority=hc_types.Priority.PRIORITY_6,
+            assert_no_watchdog_events=False,
+        )
+    ],
+)
+
+_PFC019_PAUSE_TRAFFIC_ITEM_NAME = "TRAFFIC_TC0_PFC_PAUSE_7500FPS_REVERSE"
+_PFC019_PAUSE_TRAFFIC_ITEM = create_pfc_pause_traffic_config(
+    src_endpoints=ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS,
+    dest_endpoints=_PFC8_SRC_ENDPOINTS[:1],
+    name=_PFC019_PAUSE_TRAFFIC_ITEM_NAME,
+    line_rate=7500,
+    packet_headers=TC0_PFC_PAUSE_PACKET_HEADERS,
+)
+NPI_DVT_ICEPACK_GTSW__PFC019_TEST_CONFIG = _FOCUSED_PFC_BASE(
+    name="NPI_DVT_ICEPACK_GTSW__PFC019_TEST_CONFIG",
+    endpoints=_PFC_EGRESS_DUT_ENDPOINTS,
+    basic_traffic_item_configs=(
+        _select_named_config_items(
+            config_name="NPI_DVT_ICEPACK_GTSW__PFC019_TEST_CONFIG",
+            items=_FOCUSED_PFC_BASE.basic_traffic_item_configs or [],
+            expected_names={"TEST_RDMA_TRAFFIC_90PCT_P1_TO_P4"},
+            item_type="traffic items",
+        )
+        + [_PFC019_PAUSE_TRAFFIC_ITEM]
+    ),
+    playbooks=[
+        create_pfc_pause_non_impact_playbook(
+            rdma_traffic_item_name="TEST_RDMA_TRAFFIC_90PCT_P1_TO_P4",
+            pause_traffic_item_name=_PFC019_PAUSE_TRAFFIC_ITEM_NAME,
+            pause_receiving_interfaces=(
+                ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS
+            ),
+            rdma_source_interfaces=_PFC8_SRC_ENDPOINTS[:1],
+            rdma_destination_interfaces=(
+                ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_DST_ENDPOINTS
+            ),
+            device_name=GTSW001_L1002_C085_ASH6,
+            pause_priority=hc_types.Priority.PRIORITY_0,
+        )
+    ],
 )

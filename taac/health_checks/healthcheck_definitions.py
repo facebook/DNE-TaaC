@@ -32,6 +32,17 @@ from taac.test_as_a_config.types import (
 _PV = ParamValue
 
 
+def _is_same_device_name(left: str, right: str) -> bool:
+    def normalize(device_name: str) -> str:
+        normalized = device_name.rstrip(".").casefold()
+        for suffix in (".facebook.com", ".tfbnw.net"):
+            if normalized.endswith(suffix):
+                return normalized[: -len(suffix)]
+        return normalized
+
+    return normalize(left) == normalize(right)
+
+
 def create_bare_health_check(check_name: hc_types.CheckName) -> PointInTimeHealthCheck:
     """Wrap a CheckName as a bare PointInTimeHealthCheck (no params).
 
@@ -449,6 +460,7 @@ def create_ixia_packet_loss_check(
     priority: t.Optional[int] = None,
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
     sleep_time: int = 10,
+    skip_traffic_items: t.Optional[t.List[str]] = None,
 ) -> PointInTimeHealthCheck:
     """IXIA_PACKET_LOSS_CHECK — generic thrift-input variant.
 
@@ -465,6 +477,11 @@ def create_ixia_packet_loss_check(
     sampling stats (lets in-flight frames drain before measuring); default 10.
     """
     if json_params is not None:
+        if skip_traffic_items is not None:
+            json_params = {
+                **json_params,
+                "skip_traffic_items": skip_traffic_items,
+            }
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
             check_params=Params(json_params=json.dumps(json_params)),
@@ -480,6 +497,11 @@ def create_ixia_packet_loss_check(
             )
         ),
         priority=priority,
+        check_params=(
+            Params(json_params=json.dumps({"skip_traffic_items": skip_traffic_items}))
+            if skip_traffic_items is not None
+            else None
+        ),
     )
 
 
@@ -1311,6 +1333,9 @@ def create_dsf_pfc_check(
     thresholds: t.Optional[t.List["hc_types.DsfPfcThreshold"]] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
     mode: t.Optional[str] = None,
+    executor_device: t.Optional[str] = None,
+    replace_snapshot: bool = False,
+    snapshot_retry_out_pfc_on_zero: bool = False,
 ) -> PointInTimeHealthCheck:
     """DSF_PFC_CHECK — verifies DSF PFC counters.
 
@@ -1325,11 +1350,56 @@ def create_dsf_pfc_check(
     - "snapshot": read monotonic `.sum`, store as pretest baseline, always PASS.
     - "check": read monotonic `.sum`, compare (current - snapshot) against
       thresholds. Requires a matching mode="snapshot" precheck to have run first.
+
+    `executor_device` selects the single DUT context that performs any remote
+    endpoint reads. When omitted, each DUT reads only its own endpoints.
+    `replace_snapshot` discards an earlier baseline for an intentional new
+    measurement window. `snapshot_retry_out_pfc_on_zero` retries only the
+    out-PFC counter when that baseline is expected to be non-zero.
     """
     if json_params is not None and thresholds is not None:
         raise ValueError("json_params and thresholds are mutually exclusive")
+    if thresholds is None and (
+        executor_device is not None
+        or (json_params is not None and "executor_device" in json_params)
+    ):
+        raise ValueError(
+            "executor_device requires typed thresholds so the executor can be validated"
+        )
+    if executor_device is not None and thresholds is not None:
+        threshold_devices = [
+            endpoint.split(":", 1)[0]
+            for threshold in thresholds
+            for endpoint in threshold.interfaces
+            if ":" in endpoint
+        ]
+        if not any(
+            _is_same_device_name(executor_device, device)
+            for device in threshold_devices
+        ):
+            raise ValueError(
+                f"executor_device {executor_device!r} must match a configured "
+                "DSF PFC endpoint device"
+            )
+    static_params = {}
+    if mode:
+        static_params["mode"] = ParamValue(string_value=mode)
+    if executor_device:
+        static_params["executor_device"] = ParamValue(string_value=executor_device)
+    if replace_snapshot:
+        static_params["replace_snapshot"] = ParamValue(int_value=1)
+    if snapshot_retry_out_pfc_on_zero:
+        static_params["snapshot_retry_out_pfc_on_zero"] = ParamValue(int_value=1)
+    effective_mode = mode if mode is not None else (json_params or {}).get("mode")
+    jq_params = (
+        {"snapshot_id": ".test_case_start_time"}
+        if effective_mode in ("snapshot", "check")
+        else None
+    )
     check_params = (
-        Params(static_params={"mode": ParamValue(string_value=mode)}) if mode else None
+        Params(static_params=static_params or None, jq_params=jq_params)
+        if static_params or jq_params
+        else None
     )
     if thresholds is not None:
         return PointInTimeHealthCheck(
@@ -1346,18 +1416,13 @@ def create_dsf_pfc_check(
             check_scope=check_scope,
             check_params=check_params,
         )
-    if mode:
-        return PointInTimeHealthCheck(
-            name=hc_types.CheckName.DSF_PFC_CHECK,
-            check_params=Params(
-                json_params=json.dumps(json_params),
-                static_params={"mode": ParamValue(string_value=mode)},
-            ),
-            check_scope=check_scope,
-        )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.DSF_PFC_CHECK,
-        check_params=Params(json_params=json.dumps(json_params)),
+        check_params=Params(
+            json_params=json.dumps(json_params),
+            static_params=static_params or None,
+            jq_params=jq_params,
+        ),
         check_scope=check_scope,
     )
 
@@ -1426,6 +1491,7 @@ def create_ixia_traffic_rate_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
     thresholds: t.Optional[t.List["hc_types.TrafficRateThreshold"]] = None,
     base_bandwidth_gbps: t.Optional[int] = None,
+    rate_tolerance_percent: t.Optional[int] = None,
 ) -> PointInTimeHealthCheck:
     """IXIA_TRAFFIC_RATE_CHECK — verifies IXIA traffic-rate thresholds.
 
@@ -1439,16 +1505,23 @@ def create_ixia_traffic_rate_check(
     ``ThresholdType.PERCENT``. Defaults to the check's built-in 400 Gbps
     when omitted. Set this to the physical port speed (200, 400, 800)
     when the traffic items are running against non-400G ports.
+
+    When ``rate_tolerance_percent`` is set, each threshold becomes an expected
+    rate and both TX and RX must stay within that percentage above or below it.
+    Omitting it preserves the historical lower-bound-only behavior.
     """
     if json_params is not None and thresholds is not None:
         raise ValueError("json_params and thresholds are mutually exclusive")
-    check_params: t.Optional[Params] = None
+    if rate_tolerance_percent is not None and not 0 <= rate_tolerance_percent <= 100:
+        raise ValueError("rate_tolerance_percent must be between 0 and 100")
+    static_params = {}
     if base_bandwidth_gbps is not None:
-        check_params = Params(
-            static_params={
-                "base_bandwidth_gbps": _PV(int_value=int(base_bandwidth_gbps))
-            }
+        static_params["base_bandwidth_gbps"] = _PV(int_value=int(base_bandwidth_gbps))
+    if rate_tolerance_percent is not None:
+        static_params["rate_tolerance_percent"] = _PV(
+            int_value=int(rate_tolerance_percent)
         )
+    check_params = Params(static_params=static_params) if static_params else None
     if thresholds is not None:
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.IXIA_TRAFFIC_RATE_CHECK,
@@ -1481,6 +1554,11 @@ def create_pfc_wd_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
     thresholds: t.Optional[t.List["hc_types.PfcWdThreshold"]] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
+    mode: t.Optional[str] = None,
+    max_detection_recovery_difference: t.Optional[int] = None,
+    snapshot_retry_on_zero: bool = False,
+    replace_snapshot: bool = False,
+    executor_device: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """PFC_WD_CHECK — PFC watchdog verification.
 
@@ -1491,9 +1569,67 @@ def create_pfc_wd_check(
     - `json_params`: pass-through Params.json_params dict.
     - `thresholds`: typed thrift `PfcWdHealthCheckIn(thresholds=...)` via input_json.
     Mutually exclusive.
+
+    `mode="snapshot"` records monotonic detection/recovery counters and
+    `mode="check"` validates deltas from that baseline. Snapshot state is
+    isolated by `.test_case_start_time`; `max_detection_recovery_difference`
+    bounds the absolute detection/recovery delta imbalance. Set
+    `snapshot_retry_on_zero` when a monotonic baseline may race FB303 refresh.
+    Set `replace_snapshot` to overwrite a same-run baseline on a retried
+    snapshot step. `executor_device` selects the single DUT context that reads
+    all configured endpoints, including remote ones.
     """
     if json_params is not None and thresholds is not None:
         raise ValueError("json_params and thresholds are mutually exclusive")
+    if thresholds is None and (
+        executor_device is not None
+        or (json_params is not None and "executor_device" in json_params)
+    ):
+        raise ValueError(
+            "executor_device requires typed thresholds so the executor can be validated"
+        )
+    if executor_device is not None and thresholds is not None:
+        threshold_devices = [
+            endpoint.split(":", 1)[0]
+            for threshold in thresholds
+            for endpoint in threshold.interfaces
+            if ":" in endpoint
+        ]
+        if not any(
+            _is_same_device_name(executor_device, device)
+            for device in threshold_devices
+        ):
+            raise ValueError(
+                f"executor_device {executor_device!r} must match a configured "
+                "PFC watchdog endpoint device"
+            )
+    params_payload = dict(json_params or {})
+    if mode is not None:
+        params_payload["mode"] = mode
+    if max_detection_recovery_difference is not None:
+        params_payload["max_detection_recovery_difference"] = (
+            max_detection_recovery_difference
+        )
+    if snapshot_retry_on_zero:
+        params_payload["snapshot_retry_on_zero"] = True
+    if replace_snapshot:
+        params_payload["replace_snapshot"] = True
+    if executor_device is not None:
+        params_payload["executor_device"] = executor_device
+    effective_mode = params_payload.get("mode")
+    jq_params = (
+        {"snapshot_id": ".test_case_start_time"}
+        if effective_mode in ("snapshot", "check")
+        else None
+    )
+    check_params = (
+        Params(
+            json_params=json.dumps(params_payload),
+            jq_params=jq_params,
+        )
+        if params_payload or json_params is not None or jq_params
+        else None
+    )
     if thresholds is not None:
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.PFC_WD_CHCEK,
@@ -1501,14 +1637,17 @@ def create_pfc_wd_check(
                 hc_types.PfcWdHealthCheckIn(thresholds=thresholds)
             ),
             check_scope=check_scope,
+            check_params=check_params,
         )
     if json_params is None:
         return PointInTimeHealthCheck(
-            name=hc_types.CheckName.PFC_WD_CHCEK, check_scope=check_scope
+            name=hc_types.CheckName.PFC_WD_CHCEK,
+            check_scope=check_scope,
+            check_params=check_params,
         )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.PFC_WD_CHCEK,
-        check_params=Params(json_params=json.dumps(json_params)),
+        check_params=check_params,
         check_scope=check_scope,
     )
 

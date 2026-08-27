@@ -463,12 +463,14 @@ enum TransmissionControlType {
   CONTINUOUS = 0,
   FIXED_DURATION = 1,
   FIXED_FRAME_COUNT = 2,
+  BURST_FIXED_DURATION = 3,
 }
 
 const map<TransmissionControlType, string> TRANS_CONTROL_TYPE_MAP = {
   CONTINUOUS: "continuous",
   FIXED_DURATION: "fixedDuration",
   FIXED_FRAME_COUNT: "fixedFrameCount",
+  BURST_FIXED_DURATION: "burstFixedDuration",
 };
 
 struct TransmissionControl {
@@ -477,6 +479,9 @@ struct TransmissionControl {
   2: i32 frame_count = 10000;
   # Will be used for FIXED_DURATION mode. Unit in seconds
   3: i32 duration = 300; # in seconds
+  4: optional i32 burst_packet_count;
+  5: optional double inter_burst_gap_ms;
+  6: optional i32 min_gap_bytes;
 }
 
 enum FramePayloadPattern {

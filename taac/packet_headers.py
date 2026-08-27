@@ -55,15 +55,16 @@ from taac.test_as_a_config import types as taac_types
 
 
 def create_generic_pfc_pause_packet_headers(
-    priority_enable_vector_single_value: int,
+    priority_enable_vector_single_value: int | str,
     pfc_queue: int,
 ) -> t.List[taac_types.PacketHeader]:
     """
     Creates PFC pause packet headers with specific queue settings.
 
     Args:
-        priority_enable_vector_single_value: Integer value for the priority enable vector
-            that determines which priorities are enabled for flow control
+        priority_enable_vector_single_value: IXIA hex-field value for the priority
+            enable vector that determines which priorities are enabled for flow control.
+            Prefer a hexadecimal string for values above 9 to avoid decimal/hex ambiguity.
         pfc_queue: Integer (0-7) specifying which queue to pause (set to "ffff")
             while all other queues are set to 0
 
@@ -148,8 +149,13 @@ TC2_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers(
     pfc_queue=2,
 )
 
+TC0_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers(
+    priority_enable_vector_single_value="01",
+    pfc_queue=0,
+)
+
 TC6_PFC_PAUSE_PACKET_HEADERS = create_generic_pfc_pause_packet_headers(
-    priority_enable_vector_single_value=40,
+    priority_enable_vector_single_value="40",
     pfc_queue=6,
 )
 

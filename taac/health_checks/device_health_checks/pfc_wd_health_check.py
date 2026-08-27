@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import time
 import typing as t
 
 from taac.constants import TestDevice
@@ -8,12 +9,45 @@ from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
 from taac.utils.common import async_everpaste_str
-from taac.utils.health_check_utils import get_fb303_client
+from taac.utils.health_check_utils import (
+    get_fb303_client,
+    is_same_device,
+)
 from taac.health_check.health_check import types as hc_types
+
+
+def _parse_endpoint(endpoint: str) -> t.Tuple[str, str]:
+    parts = endpoint.split(":", 1)
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(
+            f"Invalid PFC watchdog endpoint {endpoint!r}; expected 'device:interface'"
+        )
+    return parts[0], parts[1]
 
 
 class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
     CHECK_NAME: hc_types.CheckName = hc_types.CheckName.PFC_WD_CHCEK
+
+    # Precheck and postcheck use separate health-check instances, so the baseline
+    # must be shared. The test-case start time isolates concurrent and subsequent
+    # runs. Failed checks retain their baseline for framework retries. Entries
+    # older than a full day are abandoned-run state and are pruned without
+    # evicting baselines from normal in-flight tests.
+    _snapshots: t.Dict[t.Tuple[str, str, str], t.Tuple[int, int]] = {}
+    _snapshot_created_at: t.Dict[t.Tuple[str, str, str], float] = {}
+    _SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
+
+    @classmethod
+    def _discard_snapshot(cls, key: t.Tuple[str, str, str]) -> None:
+        cls._snapshots.pop(key, None)
+        cls._snapshot_created_at.pop(key, None)
+
+    @classmethod
+    def _prune_expired_snapshots(cls) -> None:
+        cutoff = time.monotonic() - cls._SNAPSHOT_TTL_SECONDS
+        for key, created_at in list(cls._snapshot_created_at.items()):
+            if created_at < cutoff:
+                cls._discard_snapshot(key)
 
     async def _run(
         self,
@@ -21,7 +55,25 @@ class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
         input: hc_types.PfcWdHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
+        try:
+            for threshold in input.thresholds:
+                for endpoint in threshold.interfaces:
+                    _parse_endpoint(endpoint)
+        except ValueError as e:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=str(e),
+            )
         operating_system = obj.attributes.operating_system
+        mode = check_params.get("mode", "windowed_60")
+        if operating_system != "FBOSS" and mode != "windowed_60":
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=(
+                    f"PfcWdHealthCheck mode={mode!r} requires FBOSS; "
+                    f"got {operating_system!r}"
+                ),
+            )
         match operating_system:
             case "FBOSS":
                 return await self._run_fboss_pfc_wd_health_check(
@@ -41,9 +93,259 @@ class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
         input: hc_types.PfcWdHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
+        mode = check_params.get("mode", "windowed_60")
+        if mode == "windowed_60":
+            return await self._run_fboss_pfc_wd_windowed(input)
+        if mode not in ("snapshot", "check"):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=f"Unsupported PfcWdHealthCheck mode: {mode}",
+            )
+        max_difference = check_params.get("max_detection_recovery_difference")
+        if max_difference is not None and (
+            not isinstance(max_difference, int)
+            or isinstance(max_difference, bool)
+            or max_difference < 0
+        ):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=(
+                    "max_detection_recovery_difference must be a non-negative "
+                    f"integer; got {max_difference!r}"
+                ),
+            )
+        return await self._run_fboss_pfc_wd_monotonic(
+            obj, input, check_params, mode, max_difference
+        )
+
+    async def _run_fboss_pfc_wd_monotonic(
+        self,
+        obj: TestDevice,
+        input: hc_types.PfcWdHealthCheckIn,
+        check_params: t.Dict[str, t.Any],
+        mode: str,
+        max_difference: t.Optional[int],
+    ) -> hc_types.HealthCheckResult:
+        snapshot_id = str(check_params.get("snapshot_id", "legacy"))
+        executor_device = check_params.get("executor_device")
+        if executor_device is not None and not is_same_device(
+            str(executor_device), obj.name
+        ):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=(
+                    f"Skipping PFC watchdog check on non-executor DUT {obj.name!r}; "
+                    f"selected executor is {executor_device!r}."
+                ),
+            )
+        endpoints_to_check = [
+            (device, interface, endpoint, threshold)
+            for threshold in input.thresholds
+            for endpoint in threshold.interfaces
+            for device, interface in [_parse_endpoint(endpoint)]
+            if executor_device is not None or is_same_device(device, obj.name)
+        ]
+        if not endpoints_to_check:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=(
+                    f"Skipping PFC watchdog check on DUT {obj.name!r}; no "
+                    "threshold interface belongs to this DUT."
+                ),
+            )
+        snapshot_retry_on_zero = bool(check_params.get("snapshot_retry_on_zero", False))
+        replace_snapshot = bool(check_params.get("replace_snapshot", False))
+        consumed_keys = {
+            (snapshot_id, device, interface)
+            for device, interface, _endpoint, _threshold in endpoints_to_check
+        }
+        if mode == "snapshot" and replace_snapshot:
+            for key in consumed_keys:
+                self._discard_snapshot(key)
+        for device, interface, endpoint, threshold in endpoints_to_check:
+            failure = await self._check_fboss_monotonic_endpoint(
+                snapshot_id,
+                device,
+                interface,
+                endpoint,
+                threshold,
+                mode,
+                max_difference,
+                snapshot_retry_on_zero,
+            )
+            if failure is not None:
+                return failure
+
+        if mode == "check":
+            for key in consumed_keys:
+                self._discard_snapshot(key)
+        return hc_types.HealthCheckResult(status=hc_types.HealthCheckStatus.PASS)
+
+    async def _check_fboss_monotonic_endpoint(
+        self,
+        snapshot_id: str,
+        device: str,
+        interface: str,
+        endpoint: str,
+        threshold: hc_types.PfcWdThreshold,
+        mode: str,
+        max_difference: t.Optional[int],
+        snapshot_retry_on_zero: bool,
+    ) -> t.Optional[hc_types.HealthCheckResult]:
+        key = (snapshot_id, device, interface)
+        if mode == "check" and key not in self._snapshots:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    "PfcWdHealthCheck mode=check requires a prior snapshot "
+                    f"for {device} {interface}; wire a mode=snapshot precheck first."
+                ),
+            )
+        baseline = self._snapshots.get(key, (0, 0))
+        try:
+            (
+                deadlock_sum,
+                recovery_sum,
+            ) = await self._get_fboss_monotonic_pfc_wd_counters(
+                device=device,
+                interface=interface,
+                baseline=baseline,
+                retry_on_regression=mode == "check",
+                retry_on_zero=mode == "snapshot" and snapshot_retry_on_zero,
+            )
+        except Exception as e:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    "Failed to fetch monotonic PFC watchdog counters for "
+                    f"{device} {interface}: {str(e)}"
+                ),
+            )
+
+        if mode == "snapshot":
+            self._prune_expired_snapshots()
+            if key in self._snapshots:
+                prior_deadlock, prior_recovery = self._snapshots[key]
+                deadlock_sum = max(deadlock_sum, prior_deadlock)
+                recovery_sum = max(recovery_sum, prior_recovery)
+            self._snapshots[key] = (deadlock_sum, recovery_sum)
+            self._snapshot_created_at[key] = time.monotonic()
+            self.logger.info(
+                f"Snapshotted {endpoint} - pfc_deadlock_detection.sum: "
+                f"{deadlock_sum}, pfc_deadlock_recovery.sum: {recovery_sum}"
+            )
+            return None
+
+        baseline_deadlock, baseline_recovery = baseline
+        deadlock = max(0, deadlock_sum - baseline_deadlock)
+        recovery = max(0, recovery_sum - baseline_recovery)
+        self.logger.info(
+            f"At {endpoint} observed - pfc_deadlock_detection: {deadlock}, "
+            f"pfc_deadlock_recovery: {recovery} (delta from snapshot: "
+            f"detection_sum {baseline_deadlock}→{deadlock_sum}, "
+            f"recovery_sum {baseline_recovery}→{recovery_sum})"
+        )
+
+        is_violated, message = await self._check_threshold_condition_violated(
+            threshold.comparison,
+            deadlock,
+            recovery,
+            threshold.deadlock_threshold,
+            threshold.recovery_threshold,
+        )
+        if is_violated:
+            return await self.create_failure_result(
+                device, interface, deadlock, recovery, message
+            )
+
+        difference = abs(deadlock - recovery)
+        if max_difference is not None and difference > max_difference:
+            return await self.create_failure_result(
+                device,
+                interface,
+                deadlock,
+                recovery,
+                "Detection/recovery difference "
+                f"{difference} exceeds configured maximum {max_difference}",
+            )
+        return None
+
+    async def _get_fboss_monotonic_pfc_wd_counters(
+        self,
+        device: str,
+        interface: str,
+        baseline: t.Tuple[int, int],
+        retry_on_regression: bool,
+        retry_on_zero: bool,
+    ) -> t.Tuple[int, int]:
+        deadlock_key = f"{interface}.pfc_deadlock_detection.sum"
+        recovery_key = f"{interface}.pfc_deadlock_recovery.sum"
+        deadlock_sum = 0
+        recovery_sum = 0
+        expected_counter_keys = {deadlock_key, recovery_key}
+        max_attempts = 5
+        async with await get_fb303_client(device) as client:
+            for attempt in range(max_attempts):
+                # A retry is valid only when that attempt's sample window contains
+                # both counters; retaining keys from an earlier attempt can mask a
+                # disappearing FB303 counter during agent recovery.
+                observed_counter_keys: t.Set[str] = set()
+                for _ in range(3):
+                    counters = await client.getSelectedCounters(
+                        [deadlock_key, recovery_key]
+                    )
+                    if deadlock_key in counters:
+                        observed_counter_keys.add(deadlock_key)
+                        deadlock_sum = max(deadlock_sum, counters[deadlock_key])
+                    if recovery_key in counters:
+                        observed_counter_keys.add(recovery_key)
+                        recovery_sum = max(recovery_sum, counters[recovery_key])
+                missing_counter_keys = expected_counter_keys - observed_counter_keys
+                if missing_counter_keys:
+                    if attempt < max_attempts - 1:
+                        self.logger.warning(
+                            f"PFC watchdog counters missing at {device}:{interface} "
+                            f"(attempt {attempt + 1}/{max_attempts}): "
+                            f"{sorted(missing_counter_keys)}"
+                        )
+                        await asyncio.sleep(0.2)
+                        continue
+                    raise RuntimeError(
+                        f"PFC watchdog counters missing for {device}:{interface}: "
+                        f"{sorted(missing_counter_keys)}"
+                    )
+                retry_needed = (
+                    retry_on_regression
+                    and (deadlock_sum < baseline[0] or recovery_sum < baseline[1])
+                ) or (retry_on_zero and deadlock_sum == 0 and recovery_sum == 0)
+                if not retry_needed:
+                    break
+                self.logger.warning(
+                    f"Racy PFC watchdog counter sample suspected at "
+                    f"{device}:{interface} (attempt {attempt + 1}/{max_attempts}): "
+                    f"current detection_sum={deadlock_sum}, "
+                    f"recovery_sum={recovery_sum}; baseline={baseline}"
+                )
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(0.2)
+        if retry_on_regression and (
+            deadlock_sum < baseline[0] or recovery_sum < baseline[1]
+        ):
+            raise RuntimeError(
+                "PFC watchdog counters remained below the snapshot baseline "
+                f"after {max_attempts} attempts: current="
+                f"({deadlock_sum}, {recovery_sum}), "
+                f"baseline={baseline}"
+            )
+        return deadlock_sum, recovery_sum
+
+    async def _run_fboss_pfc_wd_windowed(
+        self,
+        input: hc_types.PfcWdHealthCheckIn,
+    ) -> hc_types.HealthCheckResult:
         for threshold in input.thresholds:
             for endpoint in threshold.interfaces:
-                device, interface = endpoint.split(":")
+                device, interface = _parse_endpoint(endpoint)
                 # Fetch counters for the interface from the selected device
                 try:
                     async with await get_fb303_client(device) as client:
@@ -120,7 +422,7 @@ class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
         # Check the counters for each interface
         for threshold in input.thresholds:
             for endpoint in threshold.interfaces:
-                device, interface = endpoint.split(":")
+                device, interface = _parse_endpoint(endpoint)
                 try:
                     self.logger.info("Stopping traffic to fetch PFC watchdog counters")
                     ixia.stop_traffic()
@@ -226,7 +528,16 @@ class PfcWdHealthCheck(AbstractDeviceHealthCheck[hc_types.PfcWdHealthCheckIn]):
         )
 
     async def skip_check(self, obj: TestDevice) -> t.Tuple[bool, str | None]:
-        supported_roles = ["RDSW", "FDSW", "EDSW", "DTSW", "RTSW", "SUSW", "BAG"]
+        supported_roles = [
+            "RDSW",
+            "FDSW",
+            "EDSW",
+            "DTSW",
+            "RTSW",
+            "SUSW",
+            "BAG",
+            "GTSW",
+        ]
         if obj.attributes.role not in supported_roles:
             return True, f"{obj.name}'s device role is not in {supported_roles}"
         return False, None
