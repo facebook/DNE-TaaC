@@ -124,12 +124,15 @@ class HardwareCapacityResult:
 
 def _parse_capacity_row(line: str) -> tuple[str, int, int, int] | None:
     columns = line.split()
-    if len(columns) < 8:
-        return None
     try:
-        return columns[0].lower(), int(columns[2]), int(columns[6]), int(columns[7])
+        if len(columns) == 7:
+            # Thames aggregate rows omit the chip column.
+            return columns[0].lower(), int(columns[1]), int(columns[5]), int(columns[6])
+        if len(columns) >= 8:
+            return columns[0].lower(), int(columns[2]), int(columns[6]), int(columns[7])
     except (ValueError, IndexError):
         return None
+    return None
 
 
 async def get_hardware_capacity_data(driver) -> HardwareCapacityData:
