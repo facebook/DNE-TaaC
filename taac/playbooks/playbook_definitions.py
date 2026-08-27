@@ -13105,6 +13105,74 @@ def gen_snake_benchmark_playbooks(
     return playbooks
 
 
+def gen_cross_device_half_interface_toggle_playbook(
+    hostname: str,
+    iteration: int,
+    disable_delay_s: int,
+    enable_delay_s: int,
+    prechecks: t.List[taac_types.PointInTimeHealthCheck],
+    postchecks: t.List[taac_types.PointInTimeHealthCheck],
+) -> taac_types.Playbook:
+    def _select_interfaces(slicing_expression: str) -> t.Dict[str, t.Any]:
+        return {
+            "interfaces": [
+                taac_types.TransformFunction(
+                    name="SELECT_INTERFACES_BY_SLICING",
+                    json_params=json.dumps(
+                        {"slicing_expression": slicing_expression}
+                    ),
+                )
+            ]
+        }
+
+    return taac_types.Playbook(
+        name="test_snake_half_interface_toggle_with_thrift_api",
+        iteration=iteration,
+        prechecks=prechecks,
+        postchecks=postchecks
+        + [create_ixia_packet_loss_check(clear_traffic_stats=True)]
+        + gen_ptp_health_checks(),
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_interface_flap_step(
+                        enable=False,
+                        interface_flap_method=1,
+                        delay=disable_delay_s,
+                        jq_params={"interfaces": f'."{hostname}".interfaces'},
+                        transform_params=_select_interfaces("::2"),
+                        description="Disable the first half of interfaces",
+                    ),
+                    create_interface_flap_step(
+                        enable=True,
+                        interface_flap_method=1,
+                        delay=enable_delay_s,
+                        jq_params={"interfaces": f'."{hostname}".interfaces'},
+                        transform_params=_select_interfaces("::2"),
+                        description="Re-enable the first half of interfaces",
+                    ),
+                    create_interface_flap_step(
+                        enable=False,
+                        interface_flap_method=1,
+                        delay=disable_delay_s,
+                        jq_params={"interfaces": f'."{hostname}".interfaces'},
+                        transform_params=_select_interfaces("1::2"),
+                        description="Disable the second half of interfaces",
+                    ),
+                    create_interface_flap_step(
+                        enable=True,
+                        interface_flap_method=1,
+                        delay=enable_delay_s,
+                        jq_params={"interfaces": f'."{hostname}".interfaces'},
+                        transform_params=_select_interfaces("1::2"),
+                        description="Re-enable the second half of interfaces",
+                    ),
+                ]
+            )
+        ],
+    )
+
+
 def gen_snake_playbooks(
     hostname: str,
     iteration: int,
@@ -13126,7 +13194,32 @@ def gen_snake_playbooks(
     benchmark_traffic_item_name_by_packet_size: t.Optional[t.Dict[int, str]] = None,
     benchmark_duration_s: int = SNAKE_BENCHMARK_DURATION_S,
     use_ipv6_ping: bool = True,
+    use_cross_device_half_interface_toggle: bool = False,
+    qsfp_service_restart_postchecks: t.Optional[
+        t.List[taac_types.PointInTimeHealthCheck]
+    ] = None,
+    rapid_a_end_flap_neighbor_hostnames: t.Optional[t.List[str]] = None,
+    flap_recovery_check_retry_count: t.Optional[int] = None,
+    flap_recovery_check_retry_delay_seconds: float = 10.0,
+    skip_lldp_check: bool = False,
 ) -> t.List[taac_types.Playbook]:
+    def _create_flap_recovery_checks() -> t.List[
+        taac_types.PointInTimeHealthCheck
+    ]:
+        port_state_check = (
+            create_port_state_check()
+            if flap_recovery_check_retry_count is None
+            else create_port_state_check(
+                retry_count=flap_recovery_check_retry_count,
+                retry_delay_seconds=flap_recovery_check_retry_delay_seconds,
+                retry_delay_multiplier=1.0,
+            )
+        )
+        checks = [port_state_check]
+        if not skip_lldp_check:
+            checks.append(create_lldp_check())
+        return checks
+
     _prechecks = common_prechecks or []
     _postchecks = common_postchecks or []
 
@@ -13484,7 +13577,11 @@ def gen_snake_playbooks(
                 name="test_snake_qsfp_service_restart",
                 iteration=iteration,
                 prechecks=_prechecks,
-                postchecks=_postchecks,
+                postchecks=(
+                    qsfp_service_restart_postchecks
+                    if qsfp_service_restart_postchecks is not None
+                    else _postchecks
+                ),
                 stages=[
                     create_steps_stage(
                         steps=[
@@ -13764,10 +13861,7 @@ def gen_snake_playbooks(
                     create_steps_stage(
                         steps=[
                             create_validation_step(
-                                point_in_time_checks=[
-                                    create_port_state_check(),
-                                    create_lldp_check(),
-                                ],
+                                point_in_time_checks=_create_flap_recovery_checks(),
                                 stage=taac_types.ValidationStage.MID_TEST,
                             ),
                         ]
@@ -13805,6 +13899,7 @@ def gen_snake_playbooks(
                             create_snake_rapid_a_end_flap_step(
                                 duration_sec=rapid_a_end_flap_duration_s,
                                 flap_interval_sec=rapid_a_end_flap_interval_s,
+                                neighbor_hostnames=rapid_a_end_flap_neighbor_hostnames,
                             )
                         ]
                     ),
@@ -13828,10 +13923,7 @@ def gen_snake_playbooks(
                     create_steps_stage(
                         steps=[
                             create_validation_step(
-                                point_in_time_checks=[
-                                    create_port_state_check(),
-                                    create_lldp_check(),
-                                ],
+                                point_in_time_checks=_create_flap_recovery_checks(),
                                 stage=taac_types.ValidationStage.MID_TEST,
                             ),
                         ]
@@ -13874,6 +13966,27 @@ def gen_snake_playbooks(
                 postchecks=_postchecks,
             )
         )
+
+    if use_cross_device_half_interface_toggle:
+        cross_device_half_interface_toggle = (
+            gen_cross_device_half_interface_toggle_playbook(
+                hostname=hostname,
+                iteration=iteration,
+                disable_delay_s=link_flap_longevity_disable_delay_s,
+                enable_delay_s=link_flap_longevity_enable_delay_s,
+                prechecks=_prechecks,
+                postchecks=_postchecks,
+            )
+        )
+        playbooks = [
+            (
+                cross_device_half_interface_toggle
+                if playbook.name
+                == "test_snake_half_interface_toggle_with_thrift_api"
+                else playbook
+            )
+            for playbook in playbooks
+        ]
 
     if playbooks_to_skip:
         return [

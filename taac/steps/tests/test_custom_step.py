@@ -1854,6 +1854,28 @@ class TestSnakeRapidAEndFlap(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await self.custom_step._resolve_snake_a_ends(), ["eth1/2/1"])
 
+    async def test_resolves_local_ends_for_cross_device_circuits(self) -> None:
+        peer = "fboss336024506.ash6"
+        self._set_topology(
+            lldp={
+                "eth1/2/1": self._lldp("eth1/2/1", peer, "eth1/2/5"),
+                "eth1/2/3": self._lldp("eth1/2/3", peer, "eth1/2/6"),
+                "eth1/1/1": self._lldp("eth1/1/1", "ixia27.netcastle.ash6", "1/49"),
+                "eth1/65/1": self._lldp("eth1/65/1", peer, "eth1/65/1"),
+            },
+            port_types={
+                "eth1/1/1": PortType.INTERFACE_PORT,
+                "eth1/2/1": PortType.INTERFACE_PORT,
+                "eth1/2/3": PortType.INTERFACE_PORT,
+                "eth1/65/1": PortType.MANAGEMENT_PORT,
+            },
+        )
+
+        self.assertEqual(
+            await self.custom_step._resolve_snake_a_ends([peer]),
+            ["eth1/2/1", "eth1/2/3"],
+        )
+
     async def test_raises_when_no_a_ends_resolved(self) -> None:
         self._set_topology(lldp={}, port_types={})
         with self.assertRaises(TestCaseFailure):

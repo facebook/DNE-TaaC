@@ -1686,6 +1686,9 @@ def create_port_state_check(
     disabled_interfaces_jq_var: t.Optional[str] = None,
     disabled_interfaces_jq: t.Optional[str] = None,
     disabled_interfaces_transforms: t.Optional[t.List[TransformFunction]] = None,
+    retry_count: t.Optional[int] = None,
+    retry_delay_seconds: t.Optional[float] = None,
+    retry_delay_multiplier: t.Optional[float] = None,
 ) -> PointInTimeHealthCheck:
     """PORT_STATE_CHECK — port operational-state verification.
 
@@ -1703,16 +1706,27 @@ def create_port_state_check(
             deterministically (no prior cache step needed).
         disabled_interfaces_transforms: transforms applied to the jq result to
             select the expected-down set (e.g. ``SELECT_SNAKE_CIRCUIT_A_ENDS``).
+        retry_count: Number of retries after an initial failed state check.
+        retry_delay_seconds: Delay before the first retry.
+        retry_delay_multiplier: Multiplier applied to each successive delay.
     """
+    payload: t.Dict[str, t.Any] = {}
+    if additional_interfaces is not None:
+        payload["additional_interfaces"] = additional_interfaces
+    if disabled_interfaces is not None:
+        payload["disabled_interfaces"] = disabled_interfaces
+    if retry_count is not None:
+        payload["retry_count"] = retry_count
+    if retry_delay_seconds is not None:
+        payload["retry_delay_seconds"] = retry_delay_seconds
+    if retry_delay_multiplier is not None:
+        payload["retry_delay_multiplier"] = retry_delay_multiplier
+
     if disabled_interfaces_jq is not None:
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.PORT_STATE_CHECK,
             check_params=Params(
-                json_params=(
-                    json.dumps({"additional_interfaces": additional_interfaces})
-                    if additional_interfaces is not None
-                    else None
-                ),
+                json_params=json.dumps(payload) if payload else None,
                 jq_params={"disabled_interfaces": disabled_interfaces_jq},
                 transform_params=(
                     {"disabled_interfaces": disabled_interfaces_transforms}
@@ -1725,13 +1739,11 @@ def create_port_state_check(
         additional_interfaces is None
         and disabled_interfaces is None
         and disabled_interfaces_jq_var is None
+        and retry_count is None
+        and retry_delay_seconds is None
+        and retry_delay_multiplier is None
     ):
         return PointInTimeHealthCheck(name=hc_types.CheckName.PORT_STATE_CHECK)
-    payload: t.Dict[str, t.Any] = {}
-    if additional_interfaces is not None:
-        payload["additional_interfaces"] = additional_interfaces
-    if disabled_interfaces is not None:
-        payload["disabled_interfaces"] = disabled_interfaces
     jq_params = (
         {"disabled_interfaces": f".{disabled_interfaces_jq_var}"}
         if disabled_interfaces_jq_var

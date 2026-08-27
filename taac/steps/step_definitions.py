@@ -3046,15 +3046,16 @@ def create_snake_rapid_a_end_flap_step(
     flap_interval_sec: int = 6,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    neighbor_hostnames: t.Optional[t.List[str]] = None,
 ) -> Step:
     """Rapidly flap the A-end of every snake circuit over a window.
 
     CUSTOM_STEP wrapping the driver's ``async_do_rapid_interface_flaps``
     (wedge_qsfp_util tx_disable/tx_enable). At run time the handler
-    (``snake_rapid_a_end_flap``) resolves this DUT's snake circuits from LLDP
-    (device-to-device self-loops between front-panel ``INTERFACE_PORT``s only --
-    IXIA taps and management ports excluded, so no IXIA-LLDP dependency),
-    selects each circuit's A-end, and flaps that set repeatedly until
+    (``snake_rapid_a_end_flap``) resolves this DUT's snake circuits from LLDP.
+    It supports same-device loopbacks and an explicit cross-device peer list;
+    IXIA taps and management ports are excluded. The handler selects one local
+    endpoint per circuit and flaps that set repeatedly until
     ``duration_sec`` of WALL TIME has elapsed, holding ``flap_interval_sec`` s
     between flaps. tx_disabling the A-end downs the whole circuit, so only one
     end per circuit is toggled (gearbox sibling-lane safe).
@@ -3073,21 +3074,24 @@ def create_snake_rapid_a_end_flap_step(
             (== interval_to_link_up, default 6). NOT the per-flap cost.
         device_regexes: Optional device-regex scope.
         description: Custom step description.
+        neighbor_hostnames: Optional explicit peer devices for cross-device
+            snakes. The local endpoint of every link facing these peers is
+            selected instead of requiring a same-device loopback.
     """
+    step_params: t.Dict[str, t.Any] = {
+        "custom_step_name": "snake_rapid_a_end_flap",
+        "duration_sec": duration_sec,
+        "flap_interval_sec": flap_interval_sec,
+    }
+    if neighbor_hostnames is not None:
+        step_params["neighbor_hostnames"] = neighbor_hostnames
+
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"Rapid-flap snake A-ends for {duration_sec}s "
         f"(interval={flap_interval_sec}s)",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "snake_rapid_a_end_flap",
-                    "duration_sec": duration_sec,
-                    "flap_interval_sec": flap_interval_sec,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(step_params)),
         device_regexes=device_regexes,
     )
 
