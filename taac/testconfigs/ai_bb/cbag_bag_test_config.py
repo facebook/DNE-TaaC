@@ -356,7 +356,7 @@ CBAG_BAG2_IP = [
     [f"2401:db20:11b:db{i:02x}::", f"2401:db20:11b:db{i:02x}::1"] for i in range(0, 20)
 ]
 
-CBAG_ASN = 65350
+CBAG_ASN = 4206398000
 BAG_ASN = 65340
 
 

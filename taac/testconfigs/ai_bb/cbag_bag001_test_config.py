@@ -39,12 +39,17 @@ from taac.testconfigs.ai_bb.cbag_bag_test_config import (
     _build_ixia_bgp_peers_config,
     BAG001_BASIC_PORT_CONFIGS,
     BAG001_PORT_CONFIG_DATA,
+    BAG001_TRAFFIC_ENDPOINTS,
+    BAG_ASN,
     BAG_IXIA_PEER_GROUP,
     CBAG001_BASIC_PORT_CONFIGS,
     CBAG001_PORT_CONFIG_DATA,
+    CBAG001_TRAFFIC_ENDPOINTS,
+    CBAG_ASN,
     CBAG_BAG1_INTERFACES,
     CBAG_BAG_ENDPOINTS,
     CBAG_IXIA_PEER_GROUP,
+    create_basic_port_config,
     FABRIC_AGENTS,
     FABRIC_MODULES,
     LINECARD_AGENTS,
@@ -61,12 +66,63 @@ from taac.test_as_a_config.types import (
 CBAG_IXIA_LOCAL_AS = 65062
 BAG_IXIA_LOCAL_AS = 65063
 
+CBAG_BAG_BENCHMARK_PEERGROUP = "PEERGROUP_CBAG_BAG_ACCEPT_EVERYTHING"
+
+# Only this cbag<->bag link carries BGP for the benchmark. It is index 0 of both
+# CBAG_BAG1_INTERFACES and BAG_CBAG_INTERFACES, so both sides resolve to the same
+# /127 pair (CBAG_BAG1_IP[0]).
+CBAG_BAG_BENCHMARK_INTERFACES = ["Ethernet3/1/1"]
+
+# IXIA ports carrying benchmark traffic. Both devices use the same port names.
+CBAG_BAG001_BENCHMARK_IXIA_PORTS = ["Ethernet4/32/1", "Ethernet4/32/5"]
+
 # Reuse cbag001 + bag001 endpoints, dropping bag002
 CBAG_BAG001_ENDPOINTS = [
     endpoint
     for endpoint in CBAG_BAG_ENDPOINTS
     if endpoint.name in ("cbag001.qzp1", "bag001.qzq1")
 ]
+
+# The traffic generator reads an IPv6 address off every port in Endpoint.ixia_ports,
+# so an endpoint must not advertise ports that the setup tasks never address.
+CBAG_BAG001_BENCHMARK_ENDPOINTS = [
+    endpoint(
+        ixia_ports=CBAG_BAG001_BENCHMARK_IXIA_PORTS,
+        direct_ixia_connections=[
+            connection
+            # pyrefly: ignore [not-iterable]
+            for connection in endpoint.direct_ixia_connections
+            if connection.interface in CBAG_BAG001_BENCHMARK_IXIA_PORTS
+        ],
+    )
+    for endpoint in CBAG_BAG001_ENDPOINTS
+]
+
+
+def _benchmark_port_config_data(
+    port_config_data: list[tuple[str, str, str, str]],
+) -> list[tuple[str, str, str, str]]:
+    """Select the benchmark IXIA ports by name, in CBAG_BAG001_BENCHMARK_IXIA_PORTS order."""
+    by_port = {entry[0]: entry for entry in port_config_data}
+    return [by_port[port] for port in CBAG_BAG001_BENCHMARK_IXIA_PORTS]
+
+
+def _benchmark_traffic_endpoints(
+    traffic_endpoints: list[TrafficEndpoint],
+) -> list[TrafficEndpoint]:
+    """Keep only the benchmark ports, preserving order so ONE_TO_ONE pairs line up."""
+    suffixes = tuple(f":{port}" for port in CBAG_BAG001_BENCHMARK_IXIA_PORTS)
+    return [
+        traffic_endpoint
+        for traffic_endpoint in traffic_endpoints
+        if traffic_endpoint.name.endswith(suffixes)
+    ]
+
+
+CBAG001_BENCHMARK_PORT_CONFIG_DATA = _benchmark_port_config_data(
+    CBAG001_PORT_CONFIG_DATA
+)
+BAG001_BENCHMARK_PORT_CONFIG_DATA = _benchmark_port_config_data(BAG001_PORT_CONFIG_DATA)
 
 # RDMA incast traffic: each bag001.qzq1 source port sends to a single cbag001.qzp1
 # destination port. Frame size / packet headers match the RDMA items in
@@ -142,6 +198,24 @@ def _build_cbag_bag001_inter_device_peers() -> dict:
     """
     all_peers = json.loads(_build_cbag_bgp_peer_config())
     return {port: all_peers[port] for port in CBAG_BAG1_INTERFACES}
+
+
+def _build_cbag_bag001_benchmark_inter_device_peers(port_config: str) -> dict:
+    """Inter-device BGP peers scoped to the single benchmark link.
+
+    Takes the JSON emitted by _build_cbag_bgp_peer_config / _build_bag_bgp_peer_config
+    (which cover every cbag<->bag interface) and keeps only CBAG_BAG_BENCHMARK_INTERFACES.
+    Those builders hardcode the production peer groups, so the peer group is
+    overridden here to the ACCEPT_EVERYTHING group that setup creates.
+    """
+    all_peers = json.loads(port_config)
+    return {
+        port: [
+            {**peer, "peer_group_name": CBAG_BAG_BENCHMARK_PEERGROUP}
+            for peer in all_peers[port]
+        ]
+        for port in CBAG_BAG_BENCHMARK_INTERFACES
+    }
 
 
 CBAG_BAG001_SETUP_TASKS = [
@@ -296,3 +370,183 @@ def create_cbag_bag001_test_config(
 
 # CBAG_BAG001 test config instance
 CBAG_BAG001_TEST_CONFIGS = [create_cbag_bag001_test_config()]
+
+CBAG001_BENCHMARK_BASIC_PORT_CONFIGS = [
+    create_basic_port_config(
+        endpoint=f"cbag001.qzp1:{port}",
+        starting_ip=ixia_ip,
+        gateway_ip=gateway_ip,
+        local_as=CBAG_IXIA_LOCAL_AS,
+        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+        starting_prefixes=starting_prefix,
+        bgp_communities=[],
+    )
+    for port, ixia_ip, gateway_ip, starting_prefix in CBAG001_BENCHMARK_PORT_CONFIG_DATA
+]
+
+BAG001_BENCHMARK_BASIC_PORT_CONFIGS = [
+    create_basic_port_config(
+        endpoint=f"bag001.qzq1:{port}",
+        starting_ip=ixia_ip,
+        gateway_ip=gateway_ip,
+        local_as=BAG_IXIA_LOCAL_AS,
+        bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+        starting_prefixes=starting_prefix,
+        bgp_communities=[],
+    )
+    for port, ixia_ip, gateway_ip, starting_prefix in BAG001_BENCHMARK_PORT_CONFIG_DATA
+]
+
+CBAG_BAG001_BENCHMARK_BASIC_PORT_CONFIGS = (
+    CBAG001_BENCHMARK_BASIC_PORT_CONFIGS + BAG001_BENCHMARK_BASIC_PORT_CONFIGS
+)
+
+CBAG_BAG1_BENCHMARK_TRAFFIC_ITEM_CONFIGS = [
+    BasicTrafficItemConfig(
+        name="RDMA_CBAG001_TO_BAG001",
+        bidirectional=False,
+        line_rate_type=ixia_types.RateType.PERCENT_LINE_RATE,
+        line_rate=99,
+        src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
+        src_endpoints=_benchmark_traffic_endpoints(BAG001_TRAFFIC_ENDPOINTS),
+        dest_endpoints=_benchmark_traffic_endpoints(CBAG001_TRAFFIC_ENDPOINTS),
+        skip_default_l4_protocol=True,
+        traffic_type=ixia_types.TrafficType.IPV6,
+        tracking_types=[
+            ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+            ixia_types.TrafficStatsTrackingType.FLOW_GROUP,
+        ],
+        packet_headers=DSF_RDMA_IB_PACKET_HEADERS,
+        frame_size_settings=ixia_types.FrameSize(
+            type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+            imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
+        ),
+    ),
+]
+
+
+CBAG_BAG001_BENCHMARK_SETUP_TASKS = [
+    # Backup EOS configs on both devices
+    create_backup_running_config_task(
+        hostname="cbag001.qzp1",
+        backup_file="cbag001_backup_config",
+    ),
+    create_backup_running_config_task(
+        hostname="bag001.qzq1",
+        backup_file="bag001_backup_config",
+    ),
+    # Create IXIA peer groups with PROPAGATE_EVERYTHING on both devices
+    create_eos_bgp_peer_group_task(
+        hostname="cbag001.qzp1",
+        peer_group_name=CBAG_IXIA_PEER_GROUP,
+        remote_as=CBAG_IXIA_LOCAL_AS,
+        activate=True,
+        ipv4_unicast=False,
+        ipv6_unicast=True,
+        route_map_in="PROPAGATE_EVERYTHING",
+        route_map_out="PROPAGATE_EVERYTHING",
+    ),
+    create_eos_bgp_peer_group_task(
+        hostname="bag001.qzq1",
+        peer_group_name=BAG_IXIA_PEER_GROUP,
+        remote_as=BAG_IXIA_LOCAL_AS,
+        activate=True,
+        ipv4_unicast=False,
+        ipv6_unicast=True,
+        route_map_in="PROPAGATE_EVERYTHING",
+        route_map_out="PROPAGATE_EVERYTHING",
+    ),
+    # Create CBAG_BAG peer group with PROPAGATE_EVERYTHING on both devices
+    create_eos_bgp_peer_group_task(
+        hostname="cbag001.qzp1",
+        peer_group_name=CBAG_BAG_BENCHMARK_PEERGROUP,
+        remote_as=BAG_ASN,
+        activate=True,
+        ipv4_unicast=False,
+        ipv6_unicast=True,
+        route_map_in="PROPAGATE_EVERYTHING",
+        route_map_out="PROPAGATE_EVERYTHING",
+    ),
+    create_eos_bgp_peer_group_task(
+        hostname="bag001.qzq1",
+        peer_group_name=CBAG_BAG_BENCHMARK_PEERGROUP,
+        remote_as=CBAG_ASN,
+        activate=True,
+        ipv4_unicast=False,
+        ipv6_unicast=True,
+        route_map_in="PROPAGATE_EVERYTHING",
+        route_map_out="PROPAGATE_EVERYTHING",
+    ),
+    create_configure_eos_parallel_bgp_peers_task(
+        hostname="cbag001.qzp1",
+        config_json=json.dumps(
+            {
+                **json.loads(
+                    _build_ixia_bgp_peers_config(
+                        CBAG001_BENCHMARK_PORT_CONFIG_DATA,
+                        CBAG_IXIA_PEER_GROUP,
+                        CBAG_IXIA_LOCAL_AS,
+                    )
+                ),
+                **_build_cbag_bag001_benchmark_inter_device_peers(
+                    _build_cbag_bgp_peer_config()
+                ),
+            }
+        ),
+    ),
+    create_configure_eos_parallel_bgp_peers_task(
+        hostname="bag001.qzq1",
+        config_json=json.dumps(
+            {
+                **json.loads(
+                    _build_ixia_bgp_peers_config(
+                        BAG001_BENCHMARK_PORT_CONFIG_DATA,
+                        BAG_IXIA_PEER_GROUP,
+                        BAG_IXIA_LOCAL_AS,
+                    )
+                ),
+                **_build_cbag_bag001_benchmark_inter_device_peers(
+                    _build_bag_bgp_peer_config(is_bag1=True)
+                ),
+            }
+        ),
+    ),
+]
+
+
+def create_cbag_bag001_benchmarking_test_config(
+    test_config_name: str = "CBAG_BAG001_BENCHMARK_TEST_CONFIG",
+    longevity_duration: int = 300,
+) -> TestConfig:
+    """
+    Create a CBAG <-> BAG001 RDMA test config for AI BB.
+    Used for benchmarking Millisecond loss during OLS Protection Switching
+
+    Args:
+        test_config_name: Name of the test configuration
+        longevity_duration: Duration in seconds for longevity test
+
+    Returns:
+        TestConfig: Complete test configuration
+
+    """
+
+    return TestConfig(
+        name=test_config_name,
+        ixia_protocol_verification_timeout=300,
+        endpoints=CBAG_BAG001_BENCHMARK_ENDPOINTS,
+        setup_tasks=CBAG_BAG001_BENCHMARK_SETUP_TASKS,
+        basic_port_configs=CBAG_BAG001_BENCHMARK_BASIC_PORT_CONFIGS,
+        basic_traffic_item_configs=CBAG_BAG1_BENCHMARK_TRAFFIC_ITEM_CONFIGS,
+        playbooks=[
+            create_longevity_playbook(
+                playbook_name="test_cbag_bag001_longevity",
+                longevity_duration=longevity_duration,
+                traffic_items_to_start=["RDMA_CBAG001_TO_BAG001"],
+            ),
+        ],
+    )
+
+
+# CBAG_BAG001_BENCHMARK test config instance
+CBAG_BAG001_TEST_CONFIGS.append(create_cbag_bag001_benchmarking_test_config())
