@@ -16,6 +16,11 @@ Smoke-tested via [facebook/fboss](https://github.com/facebook/fboss)'s public Do
 
 That single command builds the FBOSS CentOS base image if missing, compiles the full dep tree (folly, fizz, wangle, mvfst, fbthrift), builds TAAC, and produces `fboss-taac` — a self-contained image with all transitive deps baked in.
 
+The normal command reuses the revision-tagged FBOSS/Thrift base image and
+unchanged TAAC layers. Use `--rebuild-taac-image` to rebuild TAAC without its
+layer cache, `--rebuild-base-image` to refresh the compiler/runtime base, or
+`--no-cache` as the compatibility shortcut for rebuilding both.
+
 ### Validating a change
 
 To build *and* verify in one step — the entry point CI and contributors should use:

@@ -7,13 +7,14 @@
 # Usage:
 #   ./docker/build-taac-image.sh                       # default tag, default parallelism
 #   ./docker/build-taac-image.sh --tag my-taac:v1      # custom tag
-#   ./docker/build-taac-image.sh --no-cache            # rebuild everything, base included
+#   ./docker/build-taac-image.sh --rebuild-base-image  # rebuild the compiler/runtime base
+#   ./docker/build-taac-image.sh --rebuild-taac-image  # rebuild only TAAC without layer cache
+#   ./docker/build-taac-image.sh --no-cache            # legacy alias: rebuild both images
 #   ./docker/build-taac-image.sh --num-jobs 4          # cap getdeps parallelism
 #
-# --no-cache rebuilds the FBOSS base image too, not just the TAAC layers.
-# That adds ~5.5 min but is the only way to refresh the base's CentOS
-# packages, which ship as part of the runtime stage. CI gets this for free:
-# runners are ephemeral, so the base is absent and rebuilt every run.
+# The revision-tagged FBOSS base image is reused by default. If it is missing,
+# it is built automatically. --rebuild-base-image forces a clean rebuild to
+# refresh the compiler and CentOS packages that also ship in the runtime stage.
 #
 # Parallelism note: the fbthrift / cc1plus compile phase is the main
 # memory hog (~5 GiB per worker). On memory-constrained hosts (<~6 GiB
@@ -30,7 +31,8 @@
 set -euo pipefail
 
 TAG="fboss-taac"
-NO_CACHE=0
+REBUILD_BASE_IMAGE=0
+REBUILD_TAAC_IMAGE=0
 NUM_JOBS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,8 +44,17 @@ while [[ $# -gt 0 ]]; do
             TAG="$2"
             shift 2
             ;;
+        --rebuild-base-image)
+            REBUILD_BASE_IMAGE=1
+            shift
+            ;;
+        --rebuild-taac-image)
+            REBUILD_TAAC_IMAGE=1
+            shift
+            ;;
         --no-cache)
-            NO_CACHE=1
+            REBUILD_BASE_IMAGE=1
+            REBUILD_TAAC_IMAGE=1
             shift
             ;;
         --num-jobs)
@@ -60,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Error: unknown argument: $1" >&2
-            echo "Usage: $0 [--tag <name>] [--no-cache] [--num-jobs <N>]" >&2
+            echo "Usage: $0 [--tag <name>] [--rebuild-base-image] [--rebuild-taac-image] [--no-cache] [--num-jobs <N>]" >&2
             exit 1
             ;;
     esac
@@ -88,14 +99,14 @@ fi
 BASE_IMAGE="fboss-build-env:centos-${FBOSS_REV:0:12}"
 
 # Build the FBOSS base image when it is missing, or unconditionally under
-# --no-cache. The base is also stage 2 of Dockerfile.taac (the shipped
+# --rebuild-base-image. The base is also stage 2 of Dockerfile.taac (the shipped
 # runtime), so its system packages are part of what we ship: rebuilding
 # re-runs `FROM quay.io/centos/centos:stream9` and the base image's own dnf
 # installs against live repos, which is how those packages get refreshed.
 # Nothing else in this repo pins or refreshes them.
 BASE_REASON=""
-if [[ "$NO_CACHE" -eq 1 ]]; then
-    BASE_REASON="--no-cache requested"
+if [[ "$REBUILD_BASE_IMAGE" -eq 1 ]]; then
+    BASE_REASON="--rebuild-base-image requested"
 elif ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
     BASE_REASON="not present locally"
 fi
@@ -114,7 +125,7 @@ if [[ -n "$BASE_REASON" ]]; then
     # stray edit there should not wedge the build.
     git -C "$FBOSS_IMAGE_SRC" checkout -qf FETCH_HEAD
     BASE_BUILD_ARGS=()
-    if [[ "$NO_CACHE" -eq 1 ]]; then
+    if [[ "$REBUILD_BASE_IMAGE" -eq 1 ]]; then
         BASE_BUILD_ARGS+=(--no-cache)
     fi
     # USE_CLANG=false: on CentOS, this makes glog and friends link
@@ -126,10 +137,12 @@ if [[ -n "$BASE_REASON" ]]; then
         -f "$FBOSS_IMAGE_SRC/fboss/oss/docker/Dockerfile" \
         "$FBOSS_IMAGE_SRC"
     echo "Built $BASE_IMAGE"
+else
+    echo "Using cached base image $BASE_IMAGE"
 fi
 
 DOCKER_BUILD_ARGS=()
-if [[ "$NO_CACHE" -eq 1 ]]; then
+if [[ "$REBUILD_TAAC_IMAGE" -eq 1 ]]; then
     DOCKER_BUILD_ARGS+=(--no-cache)
 fi
 # Empty NUM_JOBS arg lets Dockerfile.taac fall through to getdeps'

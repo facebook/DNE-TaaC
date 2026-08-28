@@ -50,6 +50,22 @@ The full build takes ~22 min cold (folly + fizz + wangle + mvfst + fbthrift comp
 ./docker/build-taac-image.sh --tag my-taac:v1
 ```
 
+**Cache controls:**
+
+```bash
+# Default: reuse the revision-tagged FBOSS base and unchanged TAAC layers.
+./docker/build-taac-image.sh
+
+# Rebuild only the TAAC image without its layer cache.
+./docker/build-taac-image.sh --rebuild-taac-image
+
+# Rebuild the FBOSS/Thrift compiler and runtime base without cache.
+./docker/build-taac-image.sh --rebuild-base-image
+
+# Backward-compatible shortcut that rebuilds both images.
+./docker/build-taac-image.sh --no-cache
+```
+
 ## When to rebuild
 
 Docker's layer cache keeps the heavy dep compile cached when only TAAC source changes:
@@ -61,20 +77,25 @@ Docker's layer cache keeps the heavy dep compile cached when only TAAC source ch
 | `getdeps/manifests/*` or `scripts/setup_getdeps.sh` | Entire builder + runtime | ~22 min |
 | `docker/taac-entrypoint.sh` or `docker/taac-regen-thrift.sh` | Runtime `COPY . /taac` + `cp` layer | ~1 sec |
 | fboss pin in `getdeps/manifests/fboss-thrift-defs` | Base image tag changes → base + everything | ~28 min |
+| `--rebuild-taac-image` | TAAC builder + runtime without cached layers | ~22 min |
+| `--rebuild-base-image` | Base image + TAAC layers invalidated by the new base | ~28 min |
 | `--no-cache` | Base image + entire builder + runtime | ~28 min |
 
 ### Refreshing the base image
 
-`--no-cache` rebuilds the FBOSS base image as well as the TAAC layers. That
-is deliberate: the base is stage 2 of `Dockerfile.taac` (the shipped runtime),
-so its CentOS packages are part of what ships, and rebuilding is the only
-thing that refreshes them — `quay.io/centos/centos:stream9` and the base's
-`dnf install` lines are not pinned by anything here.
+The revision-tagged FBOSS base is reused by default and built automatically
+when it is absent. Use `--rebuild-base-image` when the compiler, runtime, or
+CentOS packages need a clean refresh. The base is stage 2 of
+`Dockerfile.taac` (the shipped runtime), so rebuilding it also refreshes the
+packages installed from `quay.io/centos/centos:stream9` and the base image's
+`dnf install` lines.
 
 CI gets that refresh for free. Runners are ephemeral, so the base image is
 never present and is rebuilt from live repos on every run (~5.5 min of the
-~17 min build). Long-lived local machines do not, which is what `--no-cache`
-is for: without it, a locally built base can sit unchanged for months.
+~17 min build). Long-lived local machines retain it until the FBOSS revision
+changes or `--rebuild-base-image` is passed. Use `--rebuild-taac-image` when
+only the TAAC build needs to ignore cached layers; `--no-cache` remains an
+alias for rebuilding both.
 
 Because the tag carries the fboss rev, each bump leaves the previous
 `fboss-build-env:centos-<oldrev>` (~4 GB) behind on long-lived machines and
