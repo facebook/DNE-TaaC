@@ -5825,6 +5825,7 @@ def create_playbook_pfc_congestion_non_pfc_traffic(
 
 def _create_pfc_platform_hardening_checks(
     enabled: bool,
+    allow_expected_bgp_flap: bool = False,
 ) -> tuple[list[PointInTimeHealthCheck], t.Optional[list[SnapshotHealthCheck]]]:
     if not enabled:
         return [], None
@@ -5846,7 +5847,14 @@ def _create_pfc_platform_hardening_checks(
             )(priority=50),
         ],
         [
-            create_bgp_session_snapshot_check(),
+            (
+                create_bgp_session_snapshot_check(
+                    skip_flap_check=True,
+                    skip_uptime_check=True,
+                )
+                if allow_expected_bgp_flap
+                else create_bgp_session_snapshot_check()
+            ),
             create_core_dumps_snapshot_check(),
         ],
     )
@@ -5927,10 +5935,12 @@ def create_pfc_repeated_watchdog_playbook(
         raise ValueError("inter_burst_gap_ms must be non-negative")
     burst_duration_ms = burst_packet_count / pause_frame_rate_fps * 1000
     burst_interval_ms = burst_duration_ms + inter_burst_gap_ms
-    number_of_bursts = int(traffic_duration * 1000 // burst_interval_ms)
-    if number_of_bursts < minimum_watchdog_cycles:
+    number_of_bursts = minimum_watchdog_cycles + 1
+    available_bursts = int(traffic_duration * 1000 // burst_interval_ms)
+    if available_bursts < number_of_bursts:
         raise ValueError(
-            f"traffic_duration permits only {number_of_bursts} bursts, below "
+            f"traffic_duration permits only {available_bursts} bursts, below "
+            f"the required {number_of_bursts} bursts for "
             f"minimum_watchdog_cycles={minimum_watchdog_cycles}"
         )
     wd_thresholds = [
@@ -5965,7 +5975,7 @@ def create_pfc_repeated_watchdog_playbook(
                     type=ixia_types.TransmissionControlType.BURST_FIXED_DURATION,
                     duration=traffic_duration,
                     burst_packet_count=burst_packet_count,
-                    inter_burst_gap_ms=inter_burst_gap_ms,
+                    inter_burst_gap_ms=0,
                 )
             )
         },
@@ -5992,21 +6002,6 @@ def create_pfc_repeated_watchdog_playbook(
             create_steps_stage(
                 steps=[
                     create_ixia_api_step(
-                        api_name="set_transmission_control",
-                        args_dict={
-                            "traffic_item_regex": pause_traffic_item_name,
-                            "transmission_type": "burstFixedDuration",
-                            "duration": traffic_duration,
-                            "burst_packet_count": burst_packet_count,
-                            "inter_burst_gap_ms": inter_burst_gap_ms,
-                            "repeat_burst_count": number_of_bursts,
-                            "transmit_mode": "sequential",
-                        },
-                        description=(
-                            f"Configure {number_of_bursts} native IXIA TC2 bursts"
-                        ),
-                    ),
-                    create_ixia_api_step(
                         api_name="enable_traffic",
                         args_dict={
                             "regexes": [
@@ -6017,11 +6012,16 @@ def create_pfc_repeated_watchdog_playbook(
                         },
                         description="Enable TC1 data and periodic TC2 pause traffic",
                     ),
-                    create_longevity_step(
-                        duration=traffic_duration,
+                    create_ixia_api_step(
+                        api_name="repeat_traffic_item_bursts",
+                        args_dict={
+                            "traffic_item_regex": pause_traffic_item_name,
+                            "number_of_bursts": number_of_bursts,
+                            "inter_burst_gap_ms": inter_burst_gap_ms,
+                        },
                         description=(
-                            f"Run native IXIA TC2 bursts for {traffic_duration}s "
-                            f"with {inter_burst_gap_ms:.0f}ms inter-burst gaps"
+                            f"Retrigger {number_of_bursts} one-shot TC2 pause bursts "
+                            f"with at least {inter_burst_gap_ms:.0f}ms between bursts"
                         ),
                     ),
                 ]
@@ -6070,21 +6070,12 @@ def create_pfc_repeated_watchdog_playbook(
             create_ixia_api_step(
                 api_name="enable_traffic",
                 args_dict={"regexes": [pause_traffic_item_name], "enable": False},
-                description="Disable TC2 pause traffic before restoring its mode",
-            ),
-            create_ixia_api_step(
-                api_name="set_transmission_control",
-                args_dict={
-                    "traffic_item_regex": pause_traffic_item_name,
-                    "transmission_type": "continuous",
-                    "transmit_mode": "interleaved",
-                },
-                description="Restore TC2 pause traffic to continuous mode",
+                description="Disable TC2 pause traffic after watchdog validation",
             ),
             create_ixia_api_step(
                 api_name="stop_traffic",
                 args_dict={},
-                description="Stop traffic after restoring transmission control",
+                description="Stop all traffic after watchdog validation",
             ),
         ],
     )
@@ -23090,6 +23081,11 @@ def create_pfc_functionality_port_flap_4port_playbook(
     packet_loss_duration_only: bool = False,
     enable_platform_hardening_checks: bool = False,
     verify_port_state_transitions: bool = False,
+    interface_flap_method: int = 4,
+    expect_packet_loss_during_flap: bool = True,
+    pre_flap_traffic_duration: int = 0,
+    max_packet_loss_duration_ms: str = "0",
+    allow_expected_bgp_flap: bool = False,
 ) -> Playbook:
     """Playbook factory for `test_pfc_functionality_port_flap` (4port variant).
 
@@ -23100,9 +23096,28 @@ def create_pfc_functionality_port_flap_4port_playbook(
     ``base_bandwidth_gbps`` is forwarded to `create_ixia_traffic_rate_check`
     so the PERCENT-mode 49%-threshold resolves against the real port speed
     (defaults to the check's built-in 400 Gbps when unset).
+
+    ``expect_packet_loss_during_flap`` preserves the legacy source-port-flap
+    expectation by default. Set it to false when flapping a redundant fabric
+    uplink, where both RDMA flows are expected to remain lossless.
+
+    ``pre_flap_traffic_duration`` provides an optional traffic warm-up window
+    before the first interface disruption.
+
+    ``max_packet_loss_duration_ms`` bounds the measured failover loss when
+    duration-only validation is enabled and loss is not otherwise expected.
+
+    ``allow_expected_bgp_flap`` keeps peer-set recovery validation while
+    ignoring flap-count and uptime changes caused by the selected fabric link.
+
+    ``interface_flap_method`` selects the centralized interface-flap backend.
+    FBOSS fabric uplinks should use the Thrift port-state method.
     """
     hardening_postchecks, hardening_snapshot_checks = (
-        _create_pfc_platform_hardening_checks(enable_platform_hardening_checks)
+        _create_pfc_platform_hardening_checks(
+            enable_platform_hardening_checks,
+            allow_expected_bgp_flap=allow_expected_bgp_flap,
+        )
     )
     packet_loss_thresholds = [
         hc_types.PacketLossThreshold(
@@ -23112,7 +23127,7 @@ def create_pfc_functionality_port_flap_4port_playbook(
         ),
         hc_types.PacketLossThreshold(
             names=rdma_90pct_traffic_items_names[1:2],
-            str_value="3",
+            str_value="3" if expect_packet_loss_during_flap else "0",
             metric=hc_types.PacketLossMetric.PERCENTAGE,
         ),
     ]
@@ -23120,13 +23135,21 @@ def create_pfc_functionality_port_flap_4port_playbook(
         packet_loss_thresholds = [
             hc_types.PacketLossThreshold(
                 names=rdma_90pct_traffic_items_names[:1],
-                str_value="0",
+                str_value=max_packet_loss_duration_ms,
                 metric=hc_types.PacketLossMetric.DURATION,
             ),
-            hc_types.PacketLossThreshold(
-                names=rdma_90pct_traffic_items_names[1:2],
-                metric=hc_types.PacketLossMetric.DURATION,
-                expect_packet_loss=True,
+            (
+                hc_types.PacketLossThreshold(
+                    names=rdma_90pct_traffic_items_names[1:2],
+                    metric=hc_types.PacketLossMetric.DURATION,
+                    expect_packet_loss=True,
+                )
+                if expect_packet_loss_during_flap
+                else hc_types.PacketLossThreshold(
+                    names=rdma_90pct_traffic_items_names[1:2],
+                    str_value=max_packet_loss_duration_ms,
+                    metric=hc_types.PacketLossMetric.DURATION,
+                )
             ),
         ]
     def create_targeted_port_state_verification(
@@ -23145,15 +23168,20 @@ def create_pfc_functionality_port_flap_4port_playbook(
 
     down_verification_steps = create_targeted_port_state_verification(
         operational_state=False,
-        description="Verify the flapped source port is down",
+        description="Verify the flapped fabric uplink is down",
     )
     remaining_down_verification_steps = create_targeted_port_state_verification(
         operational_state=False,
-        description="Verify the flapped source port remains down",
+        description="Verify the flapped fabric uplink remains down",
     )
     up_verification_steps = create_targeted_port_state_verification(
         operational_state=True,
-        description="Verify the flapped source port is up",
+        description="Verify the flapped fabric uplink is up",
+    )
+    pre_flap_steps = (
+        [create_longevity_step(duration=pre_flap_traffic_duration)]
+        if pre_flap_traffic_duration > 0
+        else []
     )
     return Playbook(
         name="test_pfc_functionality_port_flap",
@@ -23165,11 +23193,12 @@ def create_pfc_functionality_port_flap_4port_playbook(
         stages=[
             create_steps_stage(
                 steps=[
+                    *pre_flap_steps,
                     create_interface_flap_step(
                         enable=False,
                         interfaces=json.dumps([interface_to_flap]),
                         device_name=device_name_of_interface_flap,
-                        interface_flap_method=4,  # InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
+                        interface_flap_method=interface_flap_method,
                     ),
                     *down_verification_steps,
                     create_longevity_step(duration=120),
@@ -23177,7 +23206,7 @@ def create_pfc_functionality_port_flap_4port_playbook(
                         enable=False,
                         interfaces=json.dumps([interface_to_flap]),
                         device_name=device_name_of_interface_flap,
-                        interface_flap_method=4,  # InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
+                        interface_flap_method=interface_flap_method,
                     ),
                     *remaining_down_verification_steps,
                     create_longevity_step(duration=120),
@@ -23185,7 +23214,7 @@ def create_pfc_functionality_port_flap_4port_playbook(
                         enable=True,
                         interfaces=json.dumps([interface_to_flap]),
                         device_name=device_name_of_interface_flap,
-                        interface_flap_method=4,
+                        interface_flap_method=interface_flap_method,
                     ),
                     *up_verification_steps,
                     create_longevity_step(duration=600),

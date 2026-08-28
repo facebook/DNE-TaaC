@@ -38,6 +38,7 @@ from taac.testbed_params.testbed_params_gtsw_th6_ash6_c085 import (
     ASH6_C085_GTSW_TH6_MULTI_NODE_PFC_TRAFFIC_SRC_ENDPOINTS,
     GTSW001_L1001_C085_ASH6,
     GTSW001_L1001_C085_IXIA19_PFC_SRC_PORTS,
+    GTSW001_L1001_C085_STSW_PFC_FLAP_UPLINK,
     GTSW001_L1002_C085_ASH6,
     GTSW001_L1002_C085_IXIA_DST_PORTS,
 )
@@ -103,6 +104,12 @@ _NPI_DVT_ICEPACK_GTSW_MULTI_NODE_PFC_BASE = (
         enable_platform_hardening_checks=True,
         verify_port_state_transitions=True,
         skip_default_l4_protocol=True,
+        pfc_port_flap_uplink_endpoint=GTSW001_L1001_C085_STSW_PFC_FLAP_UPLINK,
+        pfc_port_flap_method=1,
+        expect_packet_loss_during_port_flap=False,
+        pfc_port_flap_pre_trigger_wait_seconds=60,
+        pfc_port_flap_max_loss_duration_ms="2",
+        pfc_port_flap_allow_expected_bgp_flap=True,
         # IcePack GTSW RoCE must be RoCEv2/InfiniBand: IP -> UDP(4791) -> IB BTH
         # with Resv7=64 (AR bit = 1). Override the RDMA slot with the shared
         # DSF_RDMA_IB_PACKET_HEADERS (TCP-stripped) so the DUT classifies the
@@ -205,6 +212,12 @@ _FOCUSED_PFC_BASE = gen_pfc_functionality_test_generic_4port_configs(
     enable_platform_hardening_checks=True,
     verify_port_state_transitions=True,
     skip_default_l4_protocol=True,
+    pfc_port_flap_uplink_endpoint=GTSW001_L1001_C085_STSW_PFC_FLAP_UPLINK,
+    pfc_port_flap_method=1,
+    expect_packet_loss_during_port_flap=False,
+    pfc_port_flap_pre_trigger_wait_seconds=60,
+    pfc_port_flap_max_loss_duration_ms="2",
+    pfc_port_flap_allow_expected_bgp_flap=True,
     traffic_item_headers_map={
         **TRAFFIC_ITEM_HEADERS_MAP,
         "RDMA": DSF_RDMA_IB_PACKET_HEADERS,

@@ -1,13 +1,52 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import call, MagicMock, patch
 
 from ixia.ixia import types as ixia_types
 from taac.ixia.ixia import Ixia
 
 
 class BurstTransmissionControlTest(unittest.TestCase):
+    @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
+    def test_repeat_bursts_preserves_other_traffic(self, sleep: MagicMock) -> None:
+        ixia = object.__new__(Ixia)
+        pause_item = MagicMock()
+        pause_item.Name = "pause"
+        data_item = MagicMock()
+        data_item.Name = "data"
+        ixia.ixnetwork = MagicMock()
+        ixia.ixnetwork.Traffic.TrafficItem.find.return_value = [
+            pause_item,
+            data_item,
+        ]
+        ixia.logger = MagicMock()
+
+        ixia.repeat_traffic_item_bursts(
+            traffic_item_regex="pause",
+            number_of_bursts=3,
+            inter_burst_gap_ms=1500,
+        )
+
+        self.assertEqual(pause_item.StopStatelessTrafficBlocking.call_count, 3)
+        self.assertEqual(pause_item.StartStatelessTrafficBlocking.call_count, 3)
+        data_item.StopStatelessTrafficBlocking.assert_not_called()
+        data_item.StartStatelessTrafficBlocking.assert_not_called()
+        self.assertEqual(sleep.call_args_list, [call(1.5), call(1.5)])
+
+    def test_repeat_bursts_rejects_missing_item(self) -> None:
+        ixia = object.__new__(Ixia)
+        ixia.ixnetwork = MagicMock()
+        ixia.ixnetwork.Traffic.TrafficItem.find.return_value = []
+        ixia.logger = MagicMock()
+
+        with self.assertRaisesRegex(ValueError, "no bursts ran"):
+            ixia.repeat_traffic_item_bursts(
+                traffic_item_regex="pause",
+                number_of_bursts=1,
+                inter_burst_gap_ms=1500,
+            )
+
     def test_continuous_mode_does_not_send_burst_only_property(self) -> None:
         config_element = MagicMock()
 

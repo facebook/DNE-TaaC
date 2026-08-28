@@ -42,6 +42,13 @@ GTSW001_L1001_C085_IXIA19_PFC_SRC_PORTS = [
     "eth1/1/5",
 ]
 
+# Dedicated PFC_012 disruption target. This must remain a GTSW-to-STSW
+# fabric uplink and must never be replaced with an IXIA-facing interface.
+# Live topology: eth1/44/5 -> stsw001.s006.l201.ash6.
+GTSW001_L1001_C085_STSW_PFC_FLAP_UPLINK = TrafficEndpoint(
+    name=f"{GTSW001_L1001_C085_ASH6}:eth1/44/5"
+)
+
 # 1× IXIA destination port on gtsw001.l1002.c085.ash6 (sibling pod).
 # Verified via ``fboss2 show lldp`` — l1002 has 2 IXIA-facing ports up
 # (``eth1/1/1``, ``eth1/1/3``) cabled to ixia20.netcastle.ash6. Only one

@@ -673,6 +673,12 @@ def gen_pfc_functionality_test_generic_4port_configs(
     enable_platform_hardening_checks: bool = False,
     verify_port_state_transitions: bool = False,
     skip_default_l4_protocol: bool = False,
+    pfc_port_flap_uplink_endpoint: t.Optional[TrafficEndpoint] = None,
+    pfc_port_flap_method: int = 4,
+    expect_packet_loss_during_port_flap: bool = True,
+    pfc_port_flap_pre_trigger_wait_seconds: int = 0,
+    pfc_port_flap_max_loss_duration_ms: str = "0",
+    pfc_port_flap_allow_expected_bgp_flap: bool = False,
 ) -> TestConfig:
     """
     Tests traffic rate and PFC packet dispersion in mixed-traffic congestion,
@@ -706,6 +712,21 @@ def gen_pfc_functionality_test_generic_4port_configs(
             drives the selected source port down and restores it up.
         skip_default_l4_protocol: Do not append IXIA's default TCP stack to
             generated IPv6 traffic items.
+        pfc_port_flap_uplink_endpoint: Optional GTSW-to-STSW fabric endpoint
+            to flap instead of the legacy second IXIA-facing source port. The
+            endpoint must not appear in the IXIA source or destination lists.
+        pfc_port_flap_method: Interface-flap method used for the selected port.
+            Use the FBOSS Thrift method for a GTSW-to-STSW fabric uplink.
+        expect_packet_loss_during_port_flap: Whether the second RDMA traffic
+            item must observe loss. Set to false for a redundant fabric-link
+            flap where traffic should reconverge without loss.
+        pfc_port_flap_pre_trigger_wait_seconds: Time to run traffic before
+            disrupting the selected interface.
+        pfc_port_flap_max_loss_duration_ms: Maximum loss duration permitted on
+            each RDMA item while a redundant fabric uplink reconverges.
+        pfc_port_flap_allow_expected_bgp_flap: Preserve BGP peer-set recovery
+            validation while ignoring the intentional flap-count and uptime
+            changes caused by the selected fabric uplink disruption.
     """
     headers_map = traffic_item_headers_map or TRAFFIC_ITEM_HEADERS_MAP
     traffic_items_configs = []
@@ -937,9 +958,36 @@ def gen_pfc_functionality_test_generic_4port_configs(
         ),
     ]
 
-    # Flap the second originating port
-    interface_to_flap = src_endpoints[1].name.split(":")[1]
-    device_name_of_interface_flap = src_endpoints[1].name.split(":")[0]
+    port_flap_endpoint = pfc_port_flap_uplink_endpoint or src_endpoints[1]
+    device_name_of_interface_flap, separator, interface_to_flap = (
+        port_flap_endpoint.name.partition(":")
+    )
+    if not separator or not device_name_of_interface_flap or not interface_to_flap:
+        raise ValueError(
+            "PFC port-flap endpoint must use the hostname:interface format"
+        )
+    if pfc_port_flap_pre_trigger_wait_seconds < 0:
+        raise ValueError("pfc_port_flap_pre_trigger_wait_seconds must be non-negative")
+    if float(pfc_port_flap_max_loss_duration_ms) < 0:
+        raise ValueError("pfc_port_flap_max_loss_duration_ms must be non-negative")
+    if pfc_port_flap_uplink_endpoint is not None:
+        ixia_facing_endpoints = {
+            endpoint.name for endpoint in [*src_endpoints, *dst_endpoints]
+        } | {
+            f"{endpoint.name}:{interface}"
+            for endpoint in endpoints
+            for interface in endpoint.ixia_ports or []
+        }
+        if port_flap_endpoint.name in ixia_facing_endpoints:
+            raise ValueError(
+                "pfc_port_flap_uplink_endpoint must identify a GTSW-to-STSW "
+                "uplink, not an IXIA-facing interface"
+            )
+        source_devices = {endpoint.name.partition(":")[0] for endpoint in src_endpoints}
+        if device_name_of_interface_flap not in source_devices:
+            raise ValueError(
+                "pfc_port_flap_uplink_endpoint must belong to the source GTSW"
+            )
     PLAYBOOK_PFC_PORT_FLAP = [
         create_pfc_functionality_port_flap_4port_playbook(
             rdma_90pct_traffic_items_names=rdma_90pct_traffic_items_names,
@@ -951,6 +999,11 @@ def gen_pfc_functionality_test_generic_4port_configs(
             packet_loss_duration_only=packet_loss_duration_only,
             enable_platform_hardening_checks=enable_platform_hardening_checks,
             verify_port_state_transitions=verify_port_state_transitions,
+            interface_flap_method=pfc_port_flap_method,
+            expect_packet_loss_during_flap=expect_packet_loss_during_port_flap,
+            pre_flap_traffic_duration=pfc_port_flap_pre_trigger_wait_seconds,
+            max_packet_loss_duration_ms=pfc_port_flap_max_loss_duration_ms,
+            allow_expected_bgp_flap=pfc_port_flap_allow_expected_bgp_flap,
         ),
     ]
 

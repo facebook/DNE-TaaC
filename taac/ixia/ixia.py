@@ -10387,6 +10387,42 @@ class Ixia:
             min_gap_bytes=min_gap_bytes,
         )
 
+    @external_api
+    def repeat_traffic_item_bursts(
+        self,
+        traffic_item_regex: str,
+        number_of_bursts: int,
+        inter_burst_gap_ms: float,
+    ) -> None:
+        """Retrigger one-shot burst items without interrupting other traffic."""
+        if number_of_bursts < 1:
+            raise ValueError("number_of_bursts must be at least 1")
+        if inter_burst_gap_ms < 0:
+            raise ValueError("inter_burst_gap_ms must be non-negative")
+
+        pattern = re.compile(traffic_item_regex)
+        traffic_items = [
+            item
+            for item in self.ixnetwork.Traffic.TrafficItem.find()
+            if pattern.search(item.Name)
+        ]
+        if not traffic_items:
+            raise ValueError(
+                f"No traffic item matched '{traffic_item_regex}'; no bursts ran."
+            )
+
+        gap_seconds = inter_burst_gap_ms / 1000
+        for iteration in range(number_of_bursts):
+            if iteration:
+                time.sleep(gap_seconds)
+            for traffic_item in traffic_items:
+                traffic_item.StopStatelessTrafficBlocking()
+                traffic_item.StartStatelessTrafficBlocking()
+            self.logger.info(
+                f"Started burst {iteration + 1}/{number_of_bursts} for "
+                f"traffic item(s) {[item.Name for item in traffic_items]}"
+            )
+
     @staticmethod
     def _validate_control_buffer_percent(control_buffer_percent: int) -> None:
         if (
