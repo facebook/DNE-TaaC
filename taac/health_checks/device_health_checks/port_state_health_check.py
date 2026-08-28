@@ -44,6 +44,34 @@ class PortStateHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
             for interface in obj.interfaces
             if interface.interface_name not in disabled_interface_names
         ]
+
+        # Nothing to assert -> SKIP, not PASS. `obj.interfaces` is only populated
+        # for links whose neighbor is ALSO a declared endpoint (see
+        # `async_are_interfaces_present_in_group` in the test bed chunker), so a
+        # single-endpoint TestConfig leaves it empty and every loop below becomes
+        # a no-op. Reporting PASS there is misleading: observed on bag001.snc1,
+        # which passed at PRE_TEST while it had 0 links up.
+        additional_interfaces = check_params.get("additional_interfaces", []) or []
+        has_additional_for_device = any(
+            entry.get("switch_name") == obj.name for entry in additional_interfaces
+        )
+        if (
+            not enabled_interface_names
+            and not disabled_interface_names
+            and not has_additional_for_device
+        ):
+            message = (
+                f"No in-topology interfaces to validate on {obj.name}, so this check "
+                "asserted nothing. Declare the neighbor device(s) as "
+                "`Endpoint(dut=False)`, or pass `additional_interfaces`, to make it "
+                "meaningful."
+            )
+            self.logger.warning(f"{self.__class__.CHECK_NAME}: {message}")
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=message,
+            )
+
         interfaces_oper_state = (
             # pyrefly: ignore [missing-attribute]
             await self.driver.async_get_all_interfaces_operational_status()
@@ -61,7 +89,6 @@ class PortStateHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
                 )
 
         # Check additional (non-topology) interfaces for AdminState/LinkState consistency
-        additional_interfaces = check_params.get("additional_interfaces", [])
         if additional_interfaces:
             additional_interface_names = [
                 entry["interface_name"]
