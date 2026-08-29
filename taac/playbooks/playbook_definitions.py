@@ -1910,6 +1910,255 @@ def create_device_provisioning_playbook(
     )
 
 
+def create_eos_os_upgrade_playbook(
+    device_name: str,
+    netcode_package: str,
+    task_params: dict[str, t.Any],
+    playbook_name: str = "eos_os_upgrade",
+    include_link_checks: bool = True,
+    bgp_min_established_pct: t.Optional[float] = None,
+    bgp_postcheck_retry_count: int = 12,
+    bgp_postcheck_retry_delay_seconds: float = 15.0,
+    bgp_postcheck_retry_delay_multiplier: float = 1.5,
+) -> taac_types.Playbook:
+    """Build the gated EOS image-upgrade Playbook.
+
+    One stage running the `eos_os_upgrade` task, which installs a
+    netcode-published SWI and reloads the device. The runner injects the
+    prechecks as stage 0 and the postchecks as the final stage, so the ordering
+    is: baseline health -> image swap + reload -> recovery health.
+
+    BGP regression is detected by the SNAPSHOT check, not by an absolute
+    establish check. `BGP_SESSION_CHECK` compares the pre-stage snapshot against
+    the post-stage one and asserts that every peer Established BEFORE the reload
+    came back afterwards. That is the only formulation that works on a real lab
+    DUT: bag001.snc1, for example, runs 4 Established out of 56 configured
+    sessions (most peers are `Idle(NoIf)` with no interface present), so an
+    all-or-nothing `BGP_SESSION_ESTABLISH_CHECK` would fail the precheck and
+    abort the playbook before the device is touched. `skip_flap_check` and
+    `skip_uptime_check` are set because a reload legitimately resets both.
+
+    The absolute establish check is therefore opt-in via
+    `bgp_min_established_pct`, where it acts as a coarse "BGP did not collapse
+    entirely" floor rather than a health gate.
+
+    Prechecks (LLDP neighbors, port state, plus the optional BGP floor) show the
+    device was healthy before the upgrade. A precheck failure aborts the
+    playbook before the device is touched, unless the run passes
+    `--continue-on-precheck-failure`.
+
+    Postchecks re-run the same checks plus a core-dump check. When the BGP floor
+    is enabled it retries with exponential backoff rather than sleeping a fixed
+    interval, so it passes as soon as sessions are actually back rather than
+    after a guessed convergence window. The core-dump check is windowed on
+    `.test_case_start_time`, so pre-existing cores on the box do not fail the
+    run — only crashes caused by the upgrade do.
+
+    Args:
+        device_name: DUT hostname, used in the step description.
+        netcode_package: netcode package being installed, used in the
+            description so the log line names the target image.
+        task_params: parameter dict passed through to the `eos_os_upgrade`
+            task, normally built by `create_eos_os_upgrade_task`'s caller.
+        playbook_name: test-case name, i.e. what `--regex` matches.
+        bgp_min_established_pct: when set, adds an absolute
+            `BGP_SESSION_ESTABLISH_CHECK` to pre and postchecks with this
+            established/total floor (0.0-1.0). None omits it entirely and
+            leaves the snapshot check as the sole BGP signal.
+        bgp_postcheck_retry_count: retries for the post-upgrade BGP floor check.
+            Each retry re-fetches live device data.
+        bgp_postcheck_retry_delay_seconds: base delay before the first retry.
+        bgp_postcheck_retry_delay_multiplier: exponential backoff multiplier.
+
+    Returns:
+        A `Playbook` with prechecks, one upgrade stage, postchecks, and a BGP
+        session snapshot check.
+    """
+    prechecks, postchecks, snapshot_checks = _eos_os_upgrade_checks(
+        bgp_min_established_pct=bgp_min_established_pct,
+        bgp_postcheck_retry_count=bgp_postcheck_retry_count,
+        bgp_postcheck_retry_delay_seconds=bgp_postcheck_retry_delay_seconds,
+        bgp_postcheck_retry_delay_multiplier=bgp_postcheck_retry_delay_multiplier,
+        include_link_checks=include_link_checks,
+    )
+
+    return taac_types.Playbook(
+        name=playbook_name,
+        description=(
+            f"Upgrade {device_name} to netcode package {netcode_package} and "
+            "verify BGP, LLDP, port state, and core dumps after the reload"
+        ),
+        prechecks=prechecks,
+        stages=[
+            _eos_os_upgrade_stage(device_name, netcode_package, task_params),
+        ],
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+def _eos_os_upgrade_stage(
+    device_name: str,
+    netcode_package: str,
+    task_params: dict[str, t.Any],
+) -> taac_types.Stage:
+    """The image-swap stage shared by both EOS upgrade playbooks."""
+    return create_steps_stage(
+        steps=[
+            create_run_task_step(
+                task_name="eos_os_upgrade",
+                params_dict=task_params,
+                description=(
+                    f"Install netcode package {netcode_package} on "
+                    f"{device_name} and reload"
+                ),
+            )
+        ],
+        description=f"EOS image upgrade on {device_name}",
+    )
+
+
+def _eos_os_upgrade_checks(
+    bgp_min_established_pct: t.Optional[float],
+    bgp_postcheck_retry_count: int,
+    bgp_postcheck_retry_delay_seconds: float,
+    bgp_postcheck_retry_delay_multiplier: float,
+    include_link_checks: bool,
+) -> tuple[
+    list[PointInTimeHealthCheck],
+    list[PointInTimeHealthCheck],
+    list[SnapshotHealthCheck],
+]:
+    """Build the (prechecks, postchecks, snapshot_checks) shared by both EOS
+    upgrade playbooks, so the upgrade-only and upgrade+config-replace variants
+    cannot drift apart. See `create_eos_os_upgrade_playbook` for why the BGP
+    snapshot check is the load-bearing signal and the absolute establish check
+    is opt-in.
+
+    `include_link_checks` gates LLDP_CHECK and PORT_STATE_CHECK. Both validate
+    `TestDevice.interfaces`, which the test bed chunker only populates for links
+    whose neighbor is ALSO a declared endpoint. Without neighbor endpoints that
+    list is empty and both checks assert nothing — they reported PASS on
+    bag001.snc1 while it had 0 links up and 0 LLDP neighbors. Omitting them
+    entirely is better than shipping checks that cannot fail.
+    """
+    prechecks = []
+    postchecks = [
+        create_device_core_dumps_check(),
+    ]
+    if include_link_checks:
+        prechecks.extend([create_lldp_check(), create_port_state_check()])
+        postchecks[:0] = [create_lldp_check(), create_port_state_check()]
+    if bgp_min_established_pct is not None:
+        prechecks.insert(
+            0,
+            create_bgp_session_establish_check(
+                min_established_pct=bgp_min_established_pct
+            ),
+        )
+        postchecks.insert(
+            0,
+            create_bgp_session_establish_check(
+                min_established_pct=bgp_min_established_pct,
+                retry_count=bgp_postcheck_retry_count,
+                retry_delay_seconds=bgp_postcheck_retry_delay_seconds,
+                retry_delay_multiplier=bgp_postcheck_retry_delay_multiplier,
+            ),
+        )
+    snapshot_checks = [
+        create_bgp_session_snapshot_check(
+            skip_flap_check=True,
+            skip_uptime_check=True,
+        ),
+    ]
+    return prechecks, postchecks, snapshot_checks
+
+
+def create_eos_os_upgrade_with_config_replace_playbook(
+    device_name: str,
+    netcode_package: str,
+    task_params: dict[str, t.Any],
+    config_replace_file: str,
+    playbook_name: str = "eos_os_upgrade_config_replace",
+    include_link_checks: bool = True,
+    bgp_min_established_pct: t.Optional[float] = None,
+    bgp_postcheck_retry_count: int = 12,
+    bgp_postcheck_retry_delay_seconds: float = 15.0,
+    bgp_postcheck_retry_delay_multiplier: float = 1.5,
+) -> taac_types.Playbook:
+    """Upgrade the EOS image and then re-apply config with `configure replace`.
+
+    Two stages so each half is reported separately:
+
+    1. `eos_os_upgrade` — image swap and reload (same stage as the
+       upgrade-only playbook).
+    2. `restore_running_config` — `configure replace <config_replace_file>`,
+       reusing the existing task in `tasks/eos.py`.
+
+    Why this variant exists: `eos_os_upgrade` performs an image swap ONLY. It
+    deliberately does not run the config, chef, optics-firmware, and audit
+    phases that a real `pwm provision` runs after `EOSUpgradePhase`. On
+    bag001.snc1 that gap was not theoretical — after an image change LACP would
+    not negotiate and BGP stayed down, and a manual `configure replace` fixed it
+    with no further image change. This playbook is the supported way to
+    re-apply a known-good config as part of the upgrade.
+
+    Args:
+        device_name: DUT hostname.
+        netcode_package: netcode package being installed, for the description.
+        task_params: parameter dict for the `eos_os_upgrade` task.
+        config_replace_file: on-device config to replace with, in `flash:<name>`
+            form, e.g. `flash:config_may4_2026`. Device-specific; no default.
+        playbook_name: test-case name, i.e. what `--regex` matches.
+        bgp_min_established_pct: see `create_eos_os_upgrade_playbook`.
+        bgp_postcheck_retry_count: retries for the post-upgrade BGP floor check.
+        bgp_postcheck_retry_delay_seconds: base delay before the first retry.
+        bgp_postcheck_retry_delay_multiplier: exponential backoff multiplier.
+
+    Returns:
+        A `Playbook` with prechecks, an upgrade stage, a config-replace stage,
+        postchecks, and a BGP session snapshot check.
+    """
+    prechecks, postchecks, snapshot_checks = _eos_os_upgrade_checks(
+        bgp_min_established_pct=bgp_min_established_pct,
+        bgp_postcheck_retry_count=bgp_postcheck_retry_count,
+        bgp_postcheck_retry_delay_seconds=bgp_postcheck_retry_delay_seconds,
+        bgp_postcheck_retry_delay_multiplier=bgp_postcheck_retry_delay_multiplier,
+        include_link_checks=include_link_checks,
+    )
+
+    return taac_types.Playbook(
+        name=playbook_name,
+        description=(
+            f"Upgrade {device_name} to netcode package {netcode_package}, then "
+            f"restore config from {config_replace_file}, and verify BGP, LLDP, "
+            "port state, and core dumps"
+        ),
+        prechecks=prechecks,
+        stages=[
+            _eos_os_upgrade_stage(device_name, netcode_package, task_params),
+            create_steps_stage(
+                steps=[
+                    create_run_task_step(
+                        task_name="restore_running_config",
+                        params_dict={
+                            "hostname": device_name,
+                            "backup_file": config_replace_file,
+                        },
+                        description=(
+                            f"configure replace {config_replace_file} on "
+                            f"{device_name}"
+                        ),
+                    )
+                ],
+                description=f"Config replace on {device_name}",
+            ),
+        ],
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
 def create_ctsw_rtsw_interface_flap_playbook() -> taac_types.Playbook:
     """Build the single Playbook for CTSW_RTSW_TEST.
 
