@@ -1167,6 +1167,96 @@ def create_device_provisioning_task(
     )
 
 
+def create_eos_os_upgrade_task(
+    device_name: str,
+    netcode_package: str,
+    image_file: t.Optional[str] = None,
+    expected_version: t.Optional[str] = None,
+    skip_if_current: bool = True,
+    clear_flash: bool = True,
+    stop_after_download: bool = False,
+    download_timeout_s: t.Optional[int] = None,
+    ssh_wait_s: t.Optional[int] = None,
+    warmup_timeout_s: t.Optional[int] = None,
+    post_reload_settle_s: t.Optional[int] = None,
+    drain: bool = False,
+    task_id: t.Optional[str] = None,
+) -> Task:
+    """Create the `eos_os_upgrade` task: install a netcode SWI on an EOS device.
+
+    Ports the image-swap half of PWM's EOSUpgradePhase. Downloads the named
+    netcode package to /mnt/flash, verifies its md5, points boot-config at it,
+    reloads, and asserts the device came back on the expected version. Does NOT
+    re-run config, chef, optics firmware, or vendor audits — see
+    `internal/tasks/eos_os_upgrade_task.py`.
+
+    Args:
+        device_name: DUT hostname, e.g. "cpr002.qzp1".
+        netcode_package: netcode package to install, e.g.
+            "arista_eos_4.36.2f-dpe-ctnr". The package supplies the file name,
+            download URL, md5, and version.
+        image_file: explicit .swi within the package; only needed when the
+            package publishes more than one.
+        expected_version: what `show version` should report afterwards.
+            Defaults to the netcode Package.version, which does not always
+            match the CLI string.
+        skip_if_current: when True (default), a device already on the target
+            version is a no-op instead of a failure.
+        clear_flash: when True (default), clear deletable files from
+            /mnt/flash before downloading. That glob includes the running
+            image, so pass False when the device has room for both and a
+            failed download should be harmless.
+        stop_after_download: download and md5-verify, then stop without
+            writing boot-config or reloading. Use to prove the download path
+            on hardware without changing what the device boots.
+        download_timeout_s: per-attempt wget timeout. Task default is 900.
+        ssh_wait_s: post-reload SSH wait. Task default is 1800, sized for a
+            chassis.
+        warmup_timeout_s: EOS `wait-for-warmup` timeout. Task default is 900.
+        post_reload_settle_s: bounded settle after `wait-for-warmup` returns,
+            before the task hands back to the postchecks. Task default is 180,
+            sized for a chassis: warmup reports "agents are up" before the
+            linecard ASICs finish initializing, so postchecks that run
+            immediately see a device with no links. Pass 0 on a fixed-config
+            device, where there is nothing to wait for.
+        drain: when True, NDS-drain before upgrading. Requires `task_id`.
+        task_id: task number recorded against the drain.
+
+    Returns:
+        Task object for the EOS OS upgrade.
+    """
+    params: t.Dict[str, t.Any] = {
+        "device_name": device_name,
+        "netcode_package": netcode_package,
+        "skip_if_current": skip_if_current,
+        "clear_flash": clear_flash,
+        "stop_after_download": stop_after_download,
+        "drain": drain,
+    }
+    if image_file is not None:
+        params["image_file"] = image_file
+    if expected_version is not None:
+        params["expected_version"] = expected_version
+    if download_timeout_s is not None:
+        params["download_timeout_s"] = download_timeout_s
+    if ssh_wait_s is not None:
+        params["ssh_wait_s"] = ssh_wait_s
+    if warmup_timeout_s is not None:
+        params["warmup_timeout_s"] = warmup_timeout_s
+    # `is not None` rather than a truthiness test: 0 is the meaningful value
+    # for a fixed-config device and must still reach the task.
+    if post_reload_settle_s is not None:
+        params["post_reload_settle_s"] = post_reload_settle_s
+    if task_id is not None:
+        params["task_id"] = task_id
+
+    return Task(
+        task_name="eos_os_upgrade",
+        hostname=device_name,
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
 def create_eos_compiler_lifecycle_task(
     hostname: str,
     action: str = "physical_apply",
