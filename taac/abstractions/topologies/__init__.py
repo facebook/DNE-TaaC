@@ -62,6 +62,7 @@ from taac.abstractions.topologies.ug_backpressure import (
     UG_BACKPRESSURE_STORM_ROUTE_ATTRIBUTES,
 )
 from taac.abstractions.topologies.ug_new_peer_join import (
+    UG_ADD_PEER_DYNAMIC,
     UG_NEW_PEER_JOIN,
 )
 
@@ -114,5 +115,6 @@ __all__ = (
     "UG_BACKPRESSURE_PEER_GROUPS",
     "UG_BACKPRESSURE_PORT_MAP",
     "UG_BACKPRESSURE_STORM_ROUTE_ATTRIBUTES",
+    "UG_ADD_PEER_DYNAMIC",
     "UG_NEW_PEER_JOIN",
 )
