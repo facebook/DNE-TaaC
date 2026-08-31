@@ -31,6 +31,7 @@ from taac.abstractions.topology import (
     PrefixSet,
     RouteSender,
     RoutingDeviceConfig,
+    TaskCompatibilityProfile,
 )
 
 
@@ -98,7 +99,8 @@ IPV6_UPDATE_PACKING_ADVERTISEMENT = PrefixAdvertisement(
 
 IPV6_UPDATE_PACKING = LogicalTopology(
     name="ipv6_update_packing",
-    legacy_profile="ipv6_update_packing",
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.IPV6_UPDATE_PACKING,
     endpoints=(
         EndpointSpec(name="dut0", role="dut", kind="dut", setup_mode="full"),
         EndpointSpec(name="ixia", role="trafficgen", kind="ixia", setup_mode="full"),

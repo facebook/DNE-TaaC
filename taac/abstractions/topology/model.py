@@ -293,6 +293,7 @@ class TaskCompatibilityProfile(str, Enum):
     EBB_FULL_SCALE_NO_BGPMON = "ebb_full_scale_no_bgpmon"
     EBB_FULL_SCALE_WITH_BGPMON = "ebb_full_scale_with_bgpmon"
     EGRESS_PEER_SCALE = "egress_peer_scale"
+    IPV6_UPDATE_PACKING = "ipv6_update_packing"
 
 
 class OpenRSetupSequence(str, Enum):
