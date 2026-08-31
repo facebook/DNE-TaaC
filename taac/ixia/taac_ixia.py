@@ -278,7 +278,11 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 f"Encountered error when capturing PTP drill down statistics: {e}"
             )
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry: this runs under `stat_view_snapshot`, so retrying here holds the
+    # chassis snapshot lock while the very error being retried
+    # ("...already in progress") is caused by snapshot contention — a retry
+    # storm that prolongs it. The sampler's next tick is the retry; the
+    # foreground caller (`get_latest_stats`) retries at its own level.
     def get_packet_loss_statistics(
         self,
         view: StatViewAssistant,
@@ -308,7 +312,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             stats.append(stat)
         return stats
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry — sampler-only; the next tick is the retry. See
+    # `get_packet_loss_statistics`.
     def get_traffic_rate_statistics(
         self,
         view: StatViewAssistant,
@@ -333,7 +338,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             stats.append(stat)
         return stats
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry — sampler-only; the next tick is the retry. See
+    # `get_packet_loss_statistics`.
     def get_ptp_drill_down_statistics(
         self, ptp_drill_down_view: StatViewAssistant
     ) -> t.Dict:
@@ -1413,6 +1419,29 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         if self.ixia_config is None:
             return []
         return list(self.ixia_config.traffic_items or [])
+
+    def apply_traffic(self) -> None:
+        """Serialize `Traffic.Apply()` against chassis CSV snapshots.
+
+        Apply tears down and rebuilds the stat views, and the chassis allows
+        exactly one CSV snapshot at a time. A snapshot taken while Apply is in
+        flight fails — and Apply always wins the collision, so nothing surfaces
+        at `start_traffic` time. The damage stays invisible (the sampler logs
+        capture failures at DEBUG and keeps its previous state) until a
+        foreground consumer needs stats, which is why it presented as a health
+        check failing minutes later.
+
+        Evidence (2026-08-12 run): all six "Args do not match signature" errors
+        fell inside an Apply window, and the three steps where `start_traffic`
+        early-returned without applying produced none.
+
+        Taking the session-wide `stat_view_snapshot` lock makes Apply and
+        snapshots mutually exclusive. Safe to nest: `_snapshot_lock` is an
+        `RLock`, so callers already holding it (e.g. via `prepare_traffic`)
+        re-enter rather than deadlock.
+        """
+        with self.stat_view_snapshot():
+            super().apply_traffic()
 
     def prepare_traffic(self) -> None:
         self.regenerate_traffic_items()

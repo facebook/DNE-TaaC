@@ -335,10 +335,6 @@ class TaacRunner:
         self.skip_teardown_tasks = skip_teardown_tasks
         self.skip_all_tasks = skip_all_tasks
         self.skip_periodic_tasks = skip_periodic_tasks
-        # Skip PTP setup on IXIA
-        if skip_ptp_setup:
-            # pyrefly: ignore [read-only]
-            self.test_config.ptp_configs = []
         # EOS image ID for Arista device image deployment
         self.eos_image_id = eos_image_id or ""
         # Whether to clear old EOS images from flash before deployment

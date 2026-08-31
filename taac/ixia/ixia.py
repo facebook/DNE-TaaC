@@ -2339,15 +2339,21 @@ class Ixia:
             UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
         )
 
-        protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
+        # `CheckCondition` polls `self.Rows` in a loop until the condition holds
+        # or `Timeout` expires, and every `.Rows` read is a chassis CSV snapshot.
+        # Two 300s conditions therefore make this the heaviest snapshot user in
+        # the class, so it has to hold the session snapshot lock like every other
+        # stat-view reader. Nesting is safe — `_snapshot_lock` is an `RLock`.
+        with self.stat_view_snapshot():
+            protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
 
-        protocols_summary.CheckCondition(
-            "Sessions Not Started", StatViewAssistant.EQUAL, 0, Timeout=300
-        )
+            protocols_summary.CheckCondition(
+                "Sessions Not Started", StatViewAssistant.EQUAL, 0, Timeout=300
+            )
 
-        protocols_summary.CheckCondition(
-            "Sessions Down", StatViewAssistant.EQUAL, 0, Timeout=300
-        )
+            protocols_summary.CheckCondition(
+                "Sessions Down", StatViewAssistant.EQUAL, 0, Timeout=300
+            )
 
         self.logger.info(
             "[GLOBAL] Successfully verified the operational status of all "
