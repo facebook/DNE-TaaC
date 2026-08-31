@@ -2,6 +2,15 @@
 
 # pyre-unsafe
 
+from taac.testconfigs.fpf.fpf_gar_class_a import (
+    TEST_CONFIG as FPF_GAR_CLASS_A,
+)
+from taac.testconfigs.fpf.fpf_gar_class_b_c import (
+    TEST_CONFIG as FPF_GAR_CLASS_B_C,
+)
+from taac.testconfigs.fpf.fpf_gar_class_d import (
+    TEST_CONFIG as FPF_GAR_CLASS_D,
+)
 from taac.testconfigs.fpf.fpf_shared_injection_suite import (
     TEST_CONFIG as FPF_SHARED_INJECTION_SUITE,
 )
@@ -136,6 +145,9 @@ from taac.testconfigs.fpf.fpf_tc55_gtsw_device_reboot import (
 )
 
 __all__ = [
+    "FPF_GAR_CLASS_A",
+    "FPF_GAR_CLASS_B_C",
+    "FPF_GAR_CLASS_D",
     "FPF_SHARED_INJECTION_SUITE",
     "FPF_STRESS_TEST_CONFIG",
     "FPF_TC04_WEDGE_AGENT_WARMBOOT",

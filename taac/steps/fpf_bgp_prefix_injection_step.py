@@ -50,6 +50,8 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
             community set. Overrides ``communities`` if both are provided.
         communities: Explicit list of "ASN:VALUE" community strings.
             Used only when ``community_list`` is not set.
+        batch_size: Maximum prefixes sent in each BGP RPC. When omitted, all
+            prefixes are sent in one request.
         withdraw_only: If True, only withdraw (delNetworks) the prefixes
             without injecting. Default False.
     """
@@ -60,6 +62,7 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
         super().__init__(*args, **kwargs)
         self._devices: t.List[str] = []
         self._withdraw_only: bool = False
+        self._batch_size: t.Optional[int] = None
         self._prefixes: t.List[t.Any] = []
         self._communities: t.List[t.Any] = []
 
@@ -77,6 +80,7 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
         increment_step: str = params.get("increment_step", "0:0:1::")
         community_list: t.Optional[str] = params.get("community_list")
         communities_raw: t.Optional[t.List[str]] = params.get("communities")
+        self._batch_size = params.get("batch_size")
         self._withdraw_only = params.get("withdraw_only", False)
 
         # --- Build prefix list ---
@@ -134,13 +138,22 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
     async def _inject_on_device(self, device: str) -> None:
         self.logger.info(f"Connecting to {device} for prefix injection ...")
         driver = FbossSwitchInternal(hostname=device, logger=self.logger)
-        await inject_prefixes(driver, self._prefixes, self._communities)
+        await inject_prefixes(
+            driver,
+            self._prefixes,
+            self._communities,
+            batch_size=self._batch_size,
+        )
         self.logger.info(f"Injection complete on {device}")
 
     async def _withdraw_on_device(self, device: str) -> None:
         self.logger.info(f"Connecting to {device} for prefix withdrawal ...")
         driver = FbossSwitchInternal(hostname=device, logger=self.logger)
-        await withdraw_prefixes(driver, self._prefixes)
+        await withdraw_prefixes(
+            driver,
+            self._prefixes,
+            batch_size=self._batch_size,
+        )
         self.logger.info(f"Withdrawal complete on {device}")
 
     async def cleanUp(

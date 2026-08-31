@@ -2250,6 +2250,9 @@ def create_rss_delta_observe_check(
 def create_systemctl_active_state_check(
     services: t.Optional[t.List["hc_types.Service"]] = None,
     services_json: t.Optional[t.List[str]] = None,
+    retry_count: t.Optional[int] = None,
+    retry_delay_seconds: t.Optional[float] = None,
+    retry_delay_multiplier: t.Optional[float] = None,
 ) -> PointInTimeHealthCheck:
     """SYSTEMCTL_ACTIVE_STATE_CHECK — systemctl active-state verification.
 
@@ -2263,9 +2266,19 @@ def create_systemctl_active_state_check(
         raise ValueError(
             "services and services_json are mutually exclusive — pass at most one."
         )
+    retry_params: t.Dict[str, t.Any] = {}
+    if retry_count is not None:
+        retry_params["retry_count"] = retry_count
+    if retry_delay_seconds is not None:
+        retry_params["retry_delay_seconds"] = retry_delay_seconds
+    if retry_delay_multiplier is not None:
+        retry_params["retry_delay_multiplier"] = retry_delay_multiplier
     if services is None and services_json is None:
         return PointInTimeHealthCheck(
-            name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK
+            name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
+            check_params=(
+                Params(json_params=json.dumps(retry_params)) if retry_params else None
+            ),
         )
     if services is not None:
         return PointInTimeHealthCheck(
@@ -2273,10 +2286,14 @@ def create_systemctl_active_state_check(
             input_json=thrift_to_json(
                 hc_types.SystemctlActiveStateHealthCheckIn(services=services)
             ),
+            check_params=(
+                Params(json_params=json.dumps(retry_params)) if retry_params else None
+            ),
         )
+    json_params = {"services": services_json, **retry_params}
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
-        check_params=Params(json_params=json.dumps({"services": services_json})),
+        check_params=Params(json_params=json.dumps(json_params)),
     )
 
 
@@ -3289,6 +3306,60 @@ def create_fpf_hrt_plane_status_check(
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_PLANE_STATUS_CHECK,
         check_params=Params(json_params=json.dumps(params)),
+        check_id=check_id,
+    )
+
+
+def create_fpf_gar_vf_capacity_check(
+    *,
+    pairs: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    prefixes: t.Optional[t.List[str]] = None,
+    timeout_sec: float = 120,
+    poll_interval_sec: float = 5,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Validate production VF prefixes and GAR capacity on both rack sides."""
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_GAR_VF_CAPACITY_CHECK,
+        check_params=Params(
+            json_params=json.dumps(
+                {
+                    "pairs": pairs or [],
+                    "prefixes": prefixes or [],
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
+        check_id=check_id,
+    )
+
+
+def create_fpf_gar_scale_capacity_check(
+    *,
+    pairs: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    prefix_base: str = "",
+    prefix_count: int = 0,
+    increment_step: str = "0:0:1::",
+    timeout_sec: float = 120,
+    poll_interval_sec: float = 5,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Validate every injected scale prefix and GAR capacity on both rack sides."""
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_GAR_SCALE_CAPACITY_CHECK,
+        check_params=Params(
+            json_params=json.dumps(
+                {
+                    "pairs": pairs or [],
+                    "prefix_base": prefix_base,
+                    "prefix_count": prefix_count,
+                    "increment_step": increment_step,
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
         check_id=check_id,
     )
 

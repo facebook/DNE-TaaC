@@ -3300,6 +3300,74 @@ def create_fpf_multi_device_drain_step(
     )
 
 
+def create_fpf_gar_set_links_step(
+    targets: t.List[t.Dict[str, t.Any]],
+    mode: str,
+    disrupt: bool,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Disrupt or restore explicit GTSW-STSW member links for GAR tests.
+
+    Each target contains a device hostname and the exact interface list. The
+    custom step handles multiple devices concurrently, supports held admin-down
+    and per-interface soft-drain, and verifies the resulting state by read-back.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"GAR {mode} {'disrupt' if disrupt else 'restore'} on {len(targets)} pair(s)",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_gar_set_links",
+                    "targets": targets,
+                    "mode": mode,
+                    "disrupt": disrupt,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_gar_validate_step(
+    pairs: t.List[t.Dict[str, t.Any]],
+    prefix_base: str,
+    prefix_count: int,
+    increment_step: str = "0:0:1::",
+    timeout_sec: int = 120,
+    poll_interval_sec: int = 5,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Validate GAR BGP and Agent/FIB signals for a scaled prefix set.
+
+    Each pair specifies source, spine, observer, and expected_capacity. For
+    nonzero capacity the validator checks every prefix at all three devices;
+    for zero capacity it requires the prefixes to be pruned from both spine and
+    observer while remaining locally originated on the source GTSW.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Validate scaled GAR BGP and Agent signals",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_gar_validate",
+                    "pairs": pairs,
+                    "prefix_base": prefix_base,
+                    "prefix_count": prefix_count,
+                    "increment_step": increment_step,
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
 def create_fpf_nic_mstreg_flap_step(
     host: str,
     dev: int,
@@ -11550,6 +11618,7 @@ def create_fpf_bgp_prefix_injection_step(
     increment_step: str = "0:0:1::",
     community_list: t.Optional[str] = None,
     communities: t.Optional[t.List[str]] = None,
+    batch_size: t.Optional[int] = None,
     withdraw_only: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -11564,6 +11633,8 @@ def create_fpf_bgp_prefix_injection_step(
         "increment_step": increment_step,
         "withdraw_only": withdraw_only,
     }
+    if batch_size is not None:
+        params["batch_size"] = batch_size
     if community_list is not None:
         params["community_list"] = community_list
     if communities is not None:

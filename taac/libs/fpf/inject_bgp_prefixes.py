@@ -424,40 +424,66 @@ async def inject_prefixes(
     prefixes: Sequence[TIpPrefix],
     communities: Sequence[TBgpCommunity],
     prefix_as_path: Optional[Dict[TIpPrefix, List[int]]] = None,
+    batch_size: Optional[int] = None,
 ) -> None:
-    """Bulk-inject prefixes via a single addNetworks() call.
+    """Bulk-inject prefixes, optionally splitting them across BGP++ RPCs.
 
     Communities are identical across every prefix. If `prefix_as_path` is
     provided, each prefix additionally carries a per-bucket AS_SEQUENCE
     AS_PATH (one segment, one ASN — length stays constant across buckets,
     only the origin ASN varies). When omitted, behavior is byte-identical
     to the pre-Pod-Mosaic implementation.
+
+    If a later batch fails, earlier successful batches remain advertised.
+    Callers must run the matching withdrawal cleanup before retrying.
     """
-    networks = build_inject_networks(prefixes, communities, prefix_as_path)
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("batch_size must be greater than zero")
+    effective_batch_size = batch_size or max(len(prefixes), 1)
     bgp = await driver.bgp()
     pod_mosaic_msg = " with per-pod AS_PATH" if prefix_as_path else ""
     logger.info(
         f"[{driver.hostname}] Injecting {len(prefixes)} prefix(es) with "
-        f"{len(communities)} communities{pod_mosaic_msg} via addNetworks(): "
+        f"{len(communities)} communities{pod_mosaic_msg} via addNetworks() "
+        f"in batches of {effective_batch_size}: "
         f"{', '.join(prefix_to_str(p) for p in prefixes[:5])}"
         f"{'...' if len(prefixes) > 5 else ''}"
     )
-    await bgp.async_add_networks(networks)
-    logger.info(f"[{driver.hostname}] addNetworks() returned OK")
+    for start in range(0, len(prefixes), effective_batch_size):
+        batch = prefixes[start : start + effective_batch_size]
+        networks = build_inject_networks(batch, communities, prefix_as_path)
+        await bgp.async_add_networks(networks)
+    logger.info(
+        f"[{driver.hostname}] addNetworks() returned OK for {len(prefixes)} prefix(es)"
+    )
 
 
 async def withdraw_prefixes(
-    driver: FbossSwitchInternal, prefixes: Sequence[TIpPrefix]
+    driver: FbossSwitchInternal,
+    prefixes: Sequence[TIpPrefix],
+    batch_size: Optional[int] = None,
 ) -> None:
-    """Bulk-withdraw prefixes via a single delNetworks() call."""
+    """Bulk-withdraw prefixes, optionally splitting them across BGP++ RPCs.
+
+    If a later batch fails, earlier successful batches remain withdrawn.
+    The operation is safe to retry with the complete prefix set.
+    """
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("batch_size must be greater than zero")
+    effective_batch_size = batch_size or max(len(prefixes), 1)
     bgp = await driver.bgp()
     logger.info(
-        f"[{driver.hostname}] Withdrawing {len(prefixes)} prefix(es) via delNetworks(): "
+        f"[{driver.hostname}] Withdrawing {len(prefixes)} prefix(es) via "
+        f"delNetworks() in batches of {effective_batch_size}: "
         f"{', '.join(prefix_to_str(p) for p in prefixes[:5])}"
         f"{'...' if len(prefixes) > 5 else ''}"
     )
-    await bgp.async_del_networks(list(prefixes))
-    logger.info(f"[{driver.hostname}] delNetworks() returned OK")
+    for start in range(0, len(prefixes), effective_batch_size):
+        batch = prefixes[start : start + effective_batch_size]
+        await bgp.async_del_networks(list(batch))
+    logger.info(
+        f"[{driver.hostname}] delNetworks() returned OK for {len(prefixes)} prefix(es)"
+    )
 
 
 def _entry_prefix_str(entry: TRibEntry) -> str:
@@ -864,6 +890,13 @@ def parse_args() -> argparse.Namespace:
         "Examples: '::1' = increment lowest hextet, "
         "'0:0:0:1::' = increment 4th hextet, "
         "'0:0:1:0:0:0:0:0' = same as '0:0:1::'.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Maximum prefixes per BGP addNetworks/delNetworks RPC. Useful "
+        "for large injections that may exceed the RPC receive timeout.",
     )
     parser.add_argument(
         "--community-list",
@@ -1719,7 +1752,11 @@ async def run_for_device(
     driver = FbossSwitchInternal(hostname=device, logger=logger)
 
     if args.withdraw:
-        await withdraw_prefixes(driver, list(prefixes))
+        await withdraw_prefixes(
+            driver,
+            list(prefixes),
+            batch_size=args.batch_size,
+        )
         print(
             f"\nWithdrew {len(prefixes)} prefix(es) from {device}: "
             f"{', '.join(display_strs)}\n",
@@ -1727,7 +1764,13 @@ async def run_for_device(
         )
         return True
 
-    await inject_prefixes(driver, list(prefixes), communities, prefix_as_path)
+    await inject_prefixes(
+        driver,
+        list(prefixes),
+        communities,
+        prefix_as_path,
+        batch_size=args.batch_size,
+    )
 
     if args.no_validate:
         logger.info("Validation skipped (--no-validate)")
@@ -1736,7 +1779,11 @@ async def run_for_device(
                 driver, display_strs, args.fsdb_only_injected, out=out
             )
         if args.cleanup:
-            await withdraw_prefixes(driver, list(prefixes))
+            await withdraw_prefixes(
+                driver,
+                list(prefixes),
+                batch_size=args.batch_size,
+            )
         return True
 
     results = await validate_injection_bulk(
@@ -1786,7 +1833,11 @@ async def run_for_device(
             )
 
     if args.cleanup:
-        await withdraw_prefixes(driver, list(prefixes))
+        await withdraw_prefixes(
+            driver,
+            list(prefixes),
+            batch_size=args.batch_size,
+        )
 
     return passed and hrt_passed
 

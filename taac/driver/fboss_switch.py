@@ -3696,6 +3696,24 @@ class FbossSwitch(AbstractSwitch):
             f"Softdrain of interface '{interface}' on {self.hostname} completed"
         )
 
+    async def async_softdrain_interfaces(
+        self, interfaces: List[str], task_id: int = 0
+    ) -> None:
+        """Soft-drain several interfaces in one local-drainer request.
+
+        The bulk API applies all interface policy changes before restarting
+        BGP, avoiding one BGP restart per interface.
+        """
+        self.logger.info(
+            f"Softdraining interfaces {interfaces} on {self.hostname} "
+            f"(task_id={task_id})"
+        )
+        async with self.get_async_local_drainer_client() as client:
+            await client.softdrain_interfaces(interfaces, task_id)
+        self.logger.info(
+            f"Softdrain of interfaces {interfaces} on {self.hostname} completed"
+        )
+
     async def async_undrain_interface(self, interface: str) -> None:
         """
         Undrain a single interface on this FBOSS switch via the on-box
@@ -3713,6 +3731,19 @@ class FbossSwitch(AbstractSwitch):
             await client.undrain_interface(interface)
         self.logger.info(
             f"Undrain of interface '{interface}' on {self.hostname} completed"
+        )
+
+    async def async_undrain_interfaces(self, interfaces: List[str]) -> None:
+        """Undrain several interfaces in one local-drainer request.
+
+        The bulk API applies all interface policy changes before restarting
+        BGP, avoiding one BGP restart per interface.
+        """
+        self.logger.info(f"Undraining interfaces {interfaces} on {self.hostname}")
+        async with self.get_async_local_drainer_client() as client:
+            await client.undrain_interfaces(interfaces)
+        self.logger.info(
+            f"Undrain of interfaces {interfaces} on {self.hostname} completed"
         )
 
     @memoize_on_app_overload()

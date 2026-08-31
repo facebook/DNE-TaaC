@@ -291,6 +291,41 @@ class BuildInjectNetworksTest(unittest.TestCase):
         self.assertIn((65529, 52792), comm_set)
 
 
+class PrefixRpcBatchingTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.prefixes = [_make_prefix(i) for i in range(5)]
+        self.communities = inj.build_communities(inj.GTSW_COMMUNITIES)
+        self.bgp = MagicMock()
+        self.bgp.async_add_networks = AsyncMock()
+        self.bgp.async_del_networks = AsyncMock()
+        self.driver = MagicMock()
+        self.driver.hostname = "test-host"
+        self.driver.bgp = AsyncMock(return_value=self.bgp)
+
+    async def test_inject_prefixes_batches_rpc_calls(self) -> None:
+        await inj.inject_prefixes(
+            self.driver,
+            self.prefixes,
+            self.communities,
+            batch_size=2,
+        )
+
+        self.assertEqual(self.bgp.async_add_networks.await_count, 3)
+        self.assertEqual(
+            [len(call.args[0]) for call in self.bgp.async_add_networks.await_args_list],
+            [2, 2, 1],
+        )
+
+    async def test_withdraw_prefixes_batches_rpc_calls(self) -> None:
+        await inj.withdraw_prefixes(self.driver, self.prefixes, batch_size=2)
+
+        self.assertEqual(self.bgp.async_del_networks.await_count, 3)
+        self.assertEqual(
+            [len(call.args[0]) for call in self.bgp.async_del_networks.await_args_list],
+            [2, 2, 1],
+        )
+
+
 class ValidateInjectionBulkAsPathTest(unittest.TestCase):
     """Drives validate_injection_bulk() against a mocked BGP client."""
 

@@ -26803,6 +26803,32 @@ def create_be_qos_playbook(
     )
 
 
+def create_fpf_gar_playbook(
+    *,
+    name: str,
+    description: str,
+    prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    stages: t.Optional[t.List[Stage]] = None,
+    cleanup_steps: t.Optional[t.List[Step]] = None,
+    override_duplicate_checks: bool = False,
+) -> Playbook:
+    """Assemble an FPF GAR validation or recovery playbook.
+
+    GAR testconfigs compute topology-specific checks and trigger steps, while
+    this canonical factory owns construction of the Playbook primitive.
+    """
+    return Playbook(
+        name=name,
+        description=description,
+        prechecks=prechecks or [],
+        postchecks=postchecks or [],
+        stages=stages or [],
+        cleanup_steps=cleanup_steps or [],
+        override_duplicate_checks=override_duplicate_checks,
+    )
+
+
 # ── SC9: bounded number of programmed ECMP sets (characteristic 9) ───────────
 #
 # 128 eBGP peers per AFI all advertise the SAME 5,000 prefixes, so each prefix

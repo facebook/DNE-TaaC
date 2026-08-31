@@ -17,6 +17,8 @@ from taac.internal.steps.custom_step import (
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.steps.step_definitions import (
+    create_fpf_gar_set_links_step,
+    create_fpf_gar_validate_step,
     create_fpf_lldp_batched_set_interface_admin_step,
     create_fpf_ndp_clear_loop_step,
     create_fpf_nic_mstreg_flap_step,
@@ -142,6 +144,177 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cs.driver.async_run_cmd_on_shell.await_count, 120)
         for call in cs.driver.async_run_cmd_on_shell.await_args_list:
             self.assertEqual(call.args[0], "fboss2 clear ndp")
+
+
+class TestGarSteps(unittest.IsolatedAsyncioTestCase):
+    def test_factories(self):
+        targets = [{"device": "gtsw001", "interfaces": ["eth1/2/1"]}]
+        link_step = create_fpf_gar_set_links_step(
+            targets=targets,
+            mode="admin",
+            disrupt=True,
+            device_regexes=["gtsw001"],
+        )
+        self.assertEqual(link_step.name, StepName.CUSTOM_STEP)
+        self.assertEqual(list(link_step.device_regexes), ["gtsw001"])
+        link_params = _params(link_step)
+        self.assertEqual(link_params["custom_step_name"], "fpf_gar_set_links")
+        self.assertEqual(link_params["targets"], targets)
+
+        validate_step = create_fpf_gar_validate_step(
+            pairs=[
+                {
+                    "name": "pair-A",
+                    "source": "gtsw001",
+                    "spine": "stsw001",
+                    "observer": "gtsw001.remote",
+                    "expected_capacity": 35,
+                }
+            ],
+            prefix_base="5000:ca::/64",
+            prefix_count=1000,
+        )
+        validate_params = _params(validate_step)
+        self.assertEqual(validate_params["custom_step_name"], "fpf_gar_validate")
+        self.assertEqual(validate_params["prefix_count"], 1000)
+
+    @patch(
+        "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver"
+    )
+    async def test_multi_device_admin_disruption(self, mock_get_driver):
+        cs = _make_custom_step()
+        driver_a = AsyncMock()
+        driver_a.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/2/1": False
+        }
+        driver_b = AsyncMock()
+        driver_b.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/2/5": False
+        }
+        mock_get_driver.side_effect = [driver_a, driver_b]
+
+        await cs.fpf_gar_set_links(
+            {
+                "mode": "admin",
+                "disrupt": True,
+                "targets": [
+                    {"device": "gtsw001", "interfaces": ["eth1/2/1"]},
+                    {"device": "gtsw004", "interfaces": ["eth1/2/5"]},
+                ],
+            }
+        )
+
+        driver_a.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=["eth1/2/1"], is_enable_port=False
+        )
+        driver_b.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=["eth1/2/5"], is_enable_port=False
+        )
+
+    @patch(
+        "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver"
+    )
+    async def test_admin_readback_rejects_missing_interface(self, mock_get_driver):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_admin_status.return_value = {}
+        mock_get_driver.return_value = driver
+
+        with self.assertRaisesRegex(RuntimeError, "read-back failed"):
+            await cs.fpf_gar_set_links(
+                {
+                    "mode": "admin",
+                    "disrupt": True,
+                    "targets": [{"device": "gtsw001", "interfaces": ["eth1/2/1"]}],
+                }
+            )
+
+    @patch(
+        "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_disruption_time"
+    )
+    @patch(
+        "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver"
+    )
+    async def test_admin_recovery_preserves_disruption_time(
+        self, mock_get_driver, mock_set_disruption_time
+    ):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_admin_status.return_value = {"eth1/2/1": True}
+        mock_get_driver.return_value = driver
+
+        await cs.fpf_gar_set_links(
+            {
+                "mode": "admin",
+                "disrupt": False,
+                "targets": [{"device": "gtsw001", "interfaces": ["eth1/2/1"]}],
+            }
+        )
+
+        mock_set_disruption_time.assert_not_called()
+
+    @patch(
+        "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver"
+    )
+    async def test_softdrain_uses_one_bulk_request_per_device(self, mock_get_driver):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.get_specific_interface_info.side_effect = [
+            type("InterfaceInfo", (), {"isDrained": True})(),
+            type("InterfaceInfo", (), {"isDrained": True})(),
+        ]
+        mock_get_driver.return_value = driver
+
+        interfaces = ["eth1/2/1", "eth1/2/5"]
+        await cs.fpf_gar_set_links(
+            {
+                "mode": "softdrain",
+                "disrupt": True,
+                "targets": [{"device": "gtsw001", "interfaces": interfaces}],
+            }
+        )
+
+        driver.async_softdrain_interfaces.assert_awaited_once_with(interfaces)
+        driver.async_softdrain_interface.assert_not_awaited()
+
+    @patch(
+        "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver"
+    )
+    async def test_undrain_uses_one_bulk_request_per_device(self, mock_get_driver):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.get_specific_interface_info.side_effect = [
+            type("InterfaceInfo", (), {"isDrained": False})(),
+            type("InterfaceInfo", (), {"isDrained": False})(),
+        ]
+        mock_get_driver.return_value = driver
+
+        interfaces = ["eth1/2/1", "eth1/2/5"]
+        await cs.fpf_gar_set_links(
+            {
+                "mode": "softdrain",
+                "disrupt": False,
+                "targets": [{"device": "gtsw001", "interfaces": interfaces}],
+            }
+        )
+
+        driver.async_undrain_interfaces.assert_awaited_once_with(interfaces)
+        driver.async_undrain_interface.assert_not_awaited()
+
+    @patch(
+        "neteng.test_infra.dne.taac.libs.fpf.fpf_gar.wait_for_gar_pairs",
+        new_callable=AsyncMock,
+    )
+    async def test_gar_validation_delegates_to_library(self, mock_wait):
+        mock_wait.return_value = ["pair-A: capacity=35"]
+        cs = _make_custom_step()
+        params = {
+            "pairs": [{"name": "pair-A"}],
+            "prefix_base": "5000:ca::/64",
+            "prefix_count": 1000,
+        }
+        await cs.fpf_gar_validate(params)
+        mock_wait.assert_awaited_once()
 
 
 class TestRapidFlapStep(unittest.IsolatedAsyncioTestCase):
