@@ -345,9 +345,8 @@ UG_NEW_PEER_JOIN = LogicalTopology(
 # it at runtime via the addPeers control-plane thrift RPC. eBGP peer indices 0-20
 # are taken (ctrl 0-3, held 4, disp 5-20); 21 is next. dg index 3 is next.
 #
-# It shares the compiler handler with UG_NEW_PEER_JOIN via
-# ``legacy_profile="ug_new_peer_join"`` (see ``_is_ug_new_peer_join``); the spare
-# is handled there as an OPTIONAL (0-or-1) eBGP group, so the spare-free
+# It reuses UG_NEW_PEER_JOIN's profile-free task-compatibility projection. The
+# spare is handled there as an optional (0-or-1) eBGP group, so the spare-free
 # UG_NEW_PEER_JOIN render is unchanged.
 _UG_EBGP_SPARE_DG = DeviceGroupSpec(
     name="dg_ug_ebgp_spare",
@@ -374,9 +373,10 @@ _UG_EBGP_SPARE_DG = DeviceGroupSpec(
 
 UG_ADD_PEER_DYNAMIC = LogicalTopology(
     name="ug_add_peer_dynamic",
-    # Shared handler: same legacy_profile => routes through the ug_new_peer_join
-    # compiler path (the spare is optional there).
-    legacy_profile="ug_new_peer_join",
+    # Its distinct profile-free compatibility path reuses the shared projection,
+    # which treats the spare as optional.
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.UG_ADD_PEER_DYNAMIC,
     endpoints=UG_NEW_PEER_JOIN.endpoints,
     device_groups=UG_NEW_PEER_JOIN.device_groups + (_UG_EBGP_SPARE_DG,),
     device_config=UG_NEW_PEER_JOIN.device_config,

@@ -542,8 +542,9 @@ def create_bgp_ug_add_peer_dynamic_test_config(
     (``bgpcpp_configerator_path``). The 2.4.4 playbook creates that neighbor at
     runtime via the addPeers RPC. Unlike 2.4.1/2.4.2/2.4.3 (bag012), this variant
     targets bag013 (the qual conveyor device), which relies on the device-default
-    BGP router-id. It shares the ug_new_peer_join compiler handler + binding
-    constants (port map / parent networks / peer groups / AS numbers).
+    BGP router-id. It shares UG_NEW_PEER_JOIN's profile-free task-compatibility
+    projection and binding constants (port map / parent networks / peer groups /
+    AS numbers).
     """
     if physical_inventory.dut_bgp_as is None:
         raise ValueError("PhysicalInventory must have dut_bgp_as set")

@@ -4700,6 +4700,8 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return _preserve_ipv6_update_packing_task_artifacts(bound)
         if _is_profile_free_ug_new_peer_join(bound):
             return _preserve_ug_new_peer_join_task_artifacts(bound)
+        if _is_profile_free_ug_add_peer_dynamic(bound):
+            return _preserve_ug_new_peer_join_task_artifacts(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5186,6 +5188,15 @@ def _is_profile_free_ug_new_peer_join(bound: BoundTopology) -> bool:
     )
 
 
+def _is_profile_free_ug_add_peer_dynamic(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.name == _UG_ADD_PEER_DYNAMIC_TOPOLOGY
+        and bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.UG_ADD_PEER_DYNAMIC
+    )
+
+
 def _compile_profile_free_artifacts_by_openr_mode(
     bound: BoundTopology,
     established_bound: BoundTopology,
@@ -5340,6 +5351,7 @@ def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
         or _is_profile_free_ebb_full_scale(bound)
         or _is_profile_free_egress_peer_scale(bound)
         or _is_profile_free_ipv6_update_packing(bound)
+        or _is_profile_free_ug_add_peer_dynamic(bound)
         or _is_profile_free_ug_new_peer_join(bound)
     )
 
