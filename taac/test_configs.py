@@ -1,8 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import difflib
+import hashlib
 import os
+from pathlib import Path
 
+from taac.utils.json_thrift_utils import json_to_thrift
 from taac.utils.oss_taac_lib_utils import memoize_forever
 from taac.test_as_a_config import types as taac_types
 
@@ -25,6 +28,9 @@ else:
     INTERNAL_TEST_CONFIGS = []
 
 TAAC_TEST_CONFIGS = INTERNAL_TEST_CONFIGS
+EPHEMERAL_TEST_CONFIG_PATH_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_PATH"
+EPHEMERAL_TEST_CONFIG_SHA256_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_SHA256"
+MAX_EPHEMERAL_TEST_CONFIG_BYTES = 8 * 1024 * 1024
 
 
 def _known_test_config_names() -> list[str]:
@@ -62,14 +68,56 @@ def _unknown_test_config_message(test_config: str) -> str:
     return "\n".join(lines)
 
 
+def _load_ephemeral_test_config(
+    requested_name: str,
+) -> taac_types.TestConfig | None:
+    path_value = os.environ.get(EPHEMERAL_TEST_CONFIG_PATH_ENV)
+    expected_digest = os.environ.get(EPHEMERAL_TEST_CONFIG_SHA256_ENV)
+    if path_value is None and expected_digest is None:
+        return None
+    if not path_value or not expected_digest:
+        raise ValueError(
+            "ephemeral TAAC config requires both path and SHA-256 environment values"
+        )
+    return _get_ephemeral_test_config(
+        requested_name,
+        path_value,
+        expected_digest.lower(),
+    )
+
+
 @memoize_forever
-def get_test_config(test_config: str) -> taac_types.TestConfig:
-    """
-    Load a test config by name.
-    First checks in-memory TAAC_TEST_CONFIGS, then OSS factory configs.
-    In internal mode, falls back to Configerator if not found.
-    In OSS mode, raises an error if not found (no Configerator fallback).
-    """
+def _get_ephemeral_test_config(
+    requested_name: str,
+    path_value: str,
+    expected_digest: str,
+) -> taac_types.TestConfig:
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise ValueError("ephemeral TAAC config path must be absolute")
+    try:
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size <= 0 or size > MAX_EPHEMERAL_TEST_CONFIG_BYTES:
+                raise ValueError("ephemeral TAAC config size is outside allowed bounds")
+            content = handle.read(MAX_EPHEMERAL_TEST_CONFIG_BYTES + 1)
+    except OSError as error:
+        raise ValueError("ephemeral TAAC config is unavailable") from error
+    if not content or len(content) > MAX_EPHEMERAL_TEST_CONFIG_BYTES:
+        raise ValueError("ephemeral TAAC config size is outside allowed bounds")
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise ValueError("ephemeral TAAC config digest verification failed")
+    try:
+        config = json_to_thrift(content, taac_types.TestConfig)
+    except Exception as error:
+        raise ValueError("ephemeral TAAC config could not be decoded") from error
+    if config.name != requested_name:
+        raise ValueError("ephemeral TAAC config name does not match --test-config")
+    return config
+
+
+@memoize_forever
+def _get_registered_test_config(test_config: str) -> taac_types.TestConfig:
     for test_config_obj in TAAC_TEST_CONFIGS:
         if test_config_obj.name == test_config:
             return test_config_obj
@@ -100,3 +148,11 @@ def get_test_config(test_config: str) -> taac_types.TestConfig:
         # either. The raw ConfigeratorMissingConfigException reads as an infra
         # failure (INFRA_ERROR); re-raise as a clear, actionable user error.
         raise ValueError(_unknown_test_config_message(test_config)) from None
+
+
+def get_test_config(test_config: str) -> taac_types.TestConfig:
+    """Load a registered or invocation-scoped ephemeral TestConfig by name."""
+    ephemeral = _load_ephemeral_test_config(test_config)
+    if ephemeral is not None:
+        return ephemeral
+    return _get_registered_test_config(test_config)
