@@ -202,6 +202,7 @@ def _traffic_generator_lifecycle_fragments(
     )
     requires_configuration = lifecycle_is_active and any(
         advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
+        or advertisement.requires_route_mutation
         for advertisement in request.plan.advertisements
     )
     if not requires_configuration:
@@ -523,16 +524,27 @@ def _validate_partitioned_dual_stack_capability(
         group.resource_id for group in request.plan.device_groups
     ):
         _unsupported("partitioned dual-stack sessions must follow group plan order")
+    mutation_group_ids = frozenset(
+        advertisement.device_group_id
+        for advertisement in request.plan.advertisements
+        if advertisement.requires_route_mutation
+    )
     groups_by_relationship = _partitioned_groups_by_relationship(
         request,
         sessions_by_group,
         include_monitor=include_monitor,
+        mutation_group_ids=mutation_group_ids,
     )
     for relationship, groups in groups_by_relationship.items():
         if relationship is PeerRelationship.MONITOR:
             _validate_partitioned_monitor_group(request, groups)
         else:
-            _validate_partitioned_peer_windows(groups, relationship)
+            _validate_partitioned_peer_windows(
+                groups,
+                sessions_by_group,
+                relationship,
+                mutation_group_ids,
+            )
     _validate_partitioned_advertisements(request, sessions_by_group)
     _validate_partitioned_presentation_uniqueness(request)
 
@@ -542,6 +554,7 @@ def _partitioned_groups_by_relationship(
     sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
     *,
     include_monitor: bool,
+    mutation_group_ids: frozenset[ResourceId],
 ) -> dict[PeerRelationship, tuple[IxiaDeviceGroupPlan, ...]]:
     groups_by_relationship: dict[
         PeerRelationship,
@@ -574,7 +587,12 @@ def _partitioned_groups_by_relationship(
         _validate_unique_partitioned_group_indices(request, port)
         for group in groups:
             session = sessions_by_group[group.resource_id]
-            _validate_partitioned_session(group, session, relationship)
+            _validate_partitioned_session(
+                group,
+                session,
+                relationship,
+                requires_route_mutation=group.resource_id in mutation_group_ids,
+            )
             _validate_partitioned_named_identity(
                 request,
                 group,
@@ -612,7 +630,9 @@ def _validate_partitioned_monitor_group(
 
 def _validate_partitioned_peer_windows(
     groups: tuple[IxiaDeviceGroupPlan, ...],
+    sessions_by_group: dict[ResourceId, IxiaBgpSessionPlan],
     relationship: PeerRelationship,
+    mutation_group_ids: frozenset[ResourceId],
 ) -> None:
     if {group.afi for group in groups} != {AddressFamily.IPV4, AddressFamily.IPV6}:
         _unsupported(f"partitioned {relationship.value} groups require IPv4 and IPv6")
@@ -621,10 +641,12 @@ def _validate_partitioned_peer_windows(
         for parent_network in parent_networks:
             windows = sorted(
                 (
-                    (
-                        group.peer_start_index,
-                        group.peer_start_index + group.peer_count,
-                        group.resource_id,
+                    _partitioned_peer_window(
+                        group,
+                        sessions_by_group[group.resource_id],
+                        requires_route_mutation=(
+                            group.resource_id in mutation_group_ids
+                        ),
                     )
                     for group in groups
                     if group.afi is afi and group.parent_network == parent_network
@@ -646,10 +668,42 @@ def _validate_partitioned_peer_windows(
                     )
 
 
+def _partitioned_peer_window(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+    *,
+    requires_route_mutation: bool,
+) -> tuple[int, int, ResourceId]:
+    # Zero is the default in each independent legacy source; a nonzero value
+    # identifies the partition origin supplied by that source.
+    declared_starts = frozenset(
+        start
+        for start in (group.peer_start_index, session.address_start_index)
+        if start != 0
+    )
+    if len(declared_starts) > 1:
+        _unsupported(
+            f"IXIA group {group.resource_id} has conflicting peer window starts"
+        )
+    if session.address_start_index != 0 and not requires_route_mutation:
+        _unsupported(
+            f"IXIA session {session.resource_id} is outside partitioned "
+            "dual-stack lowering"
+        )
+    start = next(iter(declared_starts), 0)
+    return (
+        start,
+        start + group.peer_count,
+        group.resource_id,
+    )
+
+
 def _validate_partitioned_session(
     group: IxiaDeviceGroupPlan,
     session: IxiaBgpSessionPlan,
     relationship: PeerRelationship,
+    *,
+    requires_route_mutation: bool,
 ) -> None:
     expected_capabilities = (
         _MONITOR_BGP_CAPABILITIES
@@ -670,7 +724,11 @@ def _validate_partitioned_session(
         or session.capabilities != expected_capabilities
         or session.address_prefix_length != expected_prefix_length
         or session.address_step != 2
-        or session.address_start_index != 0
+        or (
+            session.address_start_index != 0
+            and group.peer_start_index == 0
+            and not requires_route_mutation
+        )
         or not session.enable_four_byte_local_as
         or session.hold_timer_s != 30
         or session.keepalive_timer_s != 10
@@ -787,7 +845,10 @@ def _validate_partitioned_advertisements(
     for advertisement in request.plan.advertisements:
         relationship = sessions_by_group[advertisement.device_group_id].relationship
         allowed_relationships = {PeerRelationship.EXTERNAL}
-        if advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT:
+        if (
+            advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
+            or advertisement.requires_route_mutation
+        ):
             allowed_relationships.add(PeerRelationship.INTERNAL)
         if relationship not in allowed_relationships:
             _unsupported(
@@ -796,21 +857,24 @@ def _validate_partitioned_advertisements(
             )
         _validate_partitioned_advertisement(
             groups_by_id[advertisement.device_group_id],
+            sessions_by_group[advertisement.device_group_id],
             advertisement,
         )
 
 
 def _validate_partitioned_advertisement(
     group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
     advertisement: IxiaAdvertisementPlan,
 ) -> None:
-    _validate_partitioned_prefix_window(group, advertisement)
+    _validate_partitioned_prefix_window(group, session, advertisement)
     _validate_partitioned_next_hop(group, advertisement)
     _validate_partitioned_route_attributes(advertisement)
 
 
 def _validate_partitioned_prefix_window(
     group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
     advertisement: IxiaAdvertisementPlan,
 ) -> None:
     prefix_window = advertisement.prefix_window
@@ -869,19 +933,37 @@ def _validate_partitioned_prefix_window(
             "source geometry"
         )
     if prefix_window.route_scale_mode is IxiaRouteScaleMode.WINDOWED:
-        _validate_windowed_partitioned_prefix_window(advertisement)
+        if advertisement.requires_route_mutation:
+            _validate_mutation_windowed_partitioned_prefix_window(
+                group,
+                session,
+                advertisement,
+            )
+        else:
+            _validate_windowed_partitioned_prefix_window(advertisement)
 
 
-def _retained_candidate_index(
-    logical_index: int,
-    excluded_indices: tuple[int, ...],
-) -> int:
-    candidate_index = logical_index
-    for excluded_index in sorted(excluded_indices):
-        if excluded_index > candidate_index:
-            break
-        candidate_index += 1
-    return candidate_index
+def _validate_mutation_windowed_partitioned_prefix_window(
+    group: IxiaDeviceGroupPlan,
+    session: IxiaBgpSessionPlan,
+    advertisement: IxiaAdvertisementPlan,
+) -> None:
+    prefix_window = advertisement.prefix_window
+    peer_start_index, _peer_end_index, _resource_id = _partitioned_peer_window(
+        group,
+        session,
+        requires_route_mutation=True,
+    )
+    expected_membership_start = (
+        0
+        if prefix_window.peer_distribution is IxiaPeerPrefixDistribution.SHARED
+        else peer_start_index * prefix_window.prefixes_per_peer
+    )
+    if prefix_window.membership_start_index != expected_membership_start:
+        _unsupported(
+            f"IXIA advertisement {advertisement.resource_id} has unsupported "
+            "mutation windowed route geometry"
+        )
 
 
 def _validate_windowed_partitioned_prefix_window(
@@ -905,6 +987,18 @@ def _validate_windowed_partitioned_prefix_window(
         )
 
 
+def _retained_candidate_index(
+    logical_index: int,
+    excluded_indices: tuple[int, ...],
+) -> int:
+    candidate_index = logical_index
+    for excluded_index in sorted(excluded_indices):
+        if excluded_index > candidate_index:
+            break
+        candidate_index += 1
+    return candidate_index
+
+
 def _validate_partitioned_next_hop(
     group: IxiaDeviceGroupPlan,
     advertisement: IxiaAdvertisementPlan,
@@ -923,8 +1017,8 @@ def _validate_partitioned_next_hop(
         return
     if (
         advertisement.prefix_window.route_scale_mode is not IxiaRouteScaleMode.FLAT
-        or next_hop.distribution is None
-    ):
+        and not advertisement.requires_route_mutation
+    ) or next_hop.distribution is None:
         _unsupported(
             f"IXIA advertisement {advertisement.resource_id} has unsupported "
             "next-hop lowering"
@@ -995,14 +1089,29 @@ def _validate_partitioned_route_attributes(
 ) -> None:
     attributes = advertisement.route_attributes
     if advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.WINDOWED:
-        valid = (
-            attributes is not None
-            and len(attributes.community_rows) == 1
-            and bool(attributes.community_rows[0])
-            and not attributes.extended_community_rows
-            and not attributes.as_paths
-            and attributes.distribution is IxiaRouteAttributeDistribution.ROUND_ROBIN
-        )
+        if advertisement.requires_route_mutation:
+            valid = attributes is None or (
+                bool(attributes.community_rows or attributes.extended_community_rows)
+                and all(attributes.community_rows)
+                and all(attributes.extended_community_rows)
+                and len(frozenset(attributes.community_rows))
+                == len(attributes.community_rows)
+                and len(frozenset(attributes.extended_community_rows))
+                == len(attributes.extended_community_rows)
+                and not attributes.as_paths
+                and attributes.distribution
+                is IxiaRouteAttributeDistribution.ROUND_ROBIN
+            )
+        else:
+            valid = (
+                attributes is not None
+                and len(attributes.community_rows) == 1
+                and bool(attributes.community_rows[0])
+                and not attributes.extended_community_rows
+                and not attributes.as_paths
+                and attributes.distribution
+                is IxiaRouteAttributeDistribution.ROUND_ROBIN
+            )
     else:
         valid = attributes is None or (
             not attributes.extended_community_rows
@@ -1619,9 +1728,12 @@ def _partitioned_address_config(
         for candidate in request.plan.device_groups
         if candidate.port_id == group.port_id
     )
-    port_has_flat_route_plan = any(
+    port_requires_configuration = any(
         advertisement.device_group_id in port_group_ids
-        and advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
+        and (
+            advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
+            or advertisement.requires_route_mutation
+        )
         for advertisement in request.plan.advertisements
     )
     group_advertises = any(
@@ -1629,13 +1741,21 @@ def _partitioned_address_config(
         for advertisement in request.plan.advertisements
     )
     return taac_types.IpAddressesConfig(
-        starting_ip=session.local_addresses[0],
+        starting_ip=_partitioned_address_origin(
+            session.local_addresses[0],
+            session.address_step,
+            session.address_start_index,
+        ),
         increment_ip=(
             "0.0.0.2"
             if group.afi is AddressFamily.IPV4
             else _legacy_v6_address_step(session.address_step)
         ),
-        gateway_starting_ip=session.peer_addresses[0],
+        gateway_starting_ip=_partitioned_address_origin(
+            session.peer_addresses[0],
+            session.address_step,
+            session.address_start_index,
+        ),
         gateway_increment_ip=(
             "0.0.0.2"
             if group.afi is AddressFamily.IPV4
@@ -1647,13 +1767,25 @@ def _partitioned_address_config(
         start_index=(
             session.address_start_index
             if (
-                not port_has_flat_route_plan
+                not port_requires_configuration
                 or group_advertises
                 or session.relationship is PeerRelationship.MONITOR
             )
             else None
         ),
     )
+
+
+def _partitioned_address_origin(
+    address: str,
+    step: int,
+    start_index: int,
+) -> str:
+    parsed = ipaddress.ip_address(address)
+    origin = int(parsed) - step * start_index
+    if origin < 0:
+        _unsupported(f"IXIA address {address!r} underflows its start index")
+    return str(type(parsed)(origin))
 
 
 def _partitioned_bgp_config(
@@ -1720,10 +1852,10 @@ def _partitioned_dual_stack_route_scale(
         prefix_count=route_prefix_count,
         prefix_length=prefix_window.prefix_length,
         starting_prefixes=prefix_window.starting_prefix,
-        prefix_step=_partitioned_route_step(group, route_step),
+        prefix_step=_partitioned_route_step(group, advertisement, route_step),
         multiplier=route_multiplier,
         as_path_prepend_numbers=_partitioned_as_paths(advertisement),
-        bgp_communities=_partitioned_route_communities(advertisement),
+        bgp_communities=_partitioned_initial_route_communities(advertisement),
         ip_address_family=(
             ixia_types.IpAddressFamily.IPV4
             if group.afi is AddressFamily.IPV4
@@ -1745,10 +1877,13 @@ def _partitioned_dual_stack_route_scale(
 
 def _partitioned_route_step(
     group: IxiaDeviceGroupPlan,
+    advertisement: IxiaAdvertisementPlan,
     route_step: int,
 ) -> str:
     if route_step == 0:
-        return "0.0.0.0" if group.afi is AddressFamily.IPV4 else "0:0:0:0:0:0:0:0"
+        if group.afi is AddressFamily.IPV4:
+            return "0.0.0.0"
+        return "::" if advertisement.requires_route_mutation else "0:0:0:0:0:0:0:0"
     address_type = (
         ipaddress.IPv4Address
         if group.afi is AddressFamily.IPV4
@@ -1757,11 +1892,19 @@ def _partitioned_route_step(
     return str(address_type(route_step))
 
 
-def _partitioned_route_communities(
+def _partitioned_initial_route_communities(
     advertisement: IxiaAdvertisementPlan,
 ) -> list[str]:
+    """Return communities applied during initial IXIA route-scale creation.
+
+    Mutation advertisements start with a neutral route scale. Their validated
+    attribute rows are emitted by `_partitioned_route_attribute_mutation` into
+    the `configure_formulaic_bgp_routes` lifecycle task.
+    """
     if advertisement.policy_communities:
         return list(advertisement.policy_communities)
+    if advertisement.requires_route_mutation:
+        return []
     attributes = advertisement.route_attributes
     if attributes is None or not attributes.community_rows:
         return []

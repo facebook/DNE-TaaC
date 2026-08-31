@@ -27,8 +27,10 @@ from taac.abstractions.topology import (
     PrefixMembership,
     RouteAttributeDistribution,
     RouteAttributePool,
+    RouteScaleMode,
     RouteSender,
     StandardCommunity,
+    TaskCompatibilityProfile,
 )
 
 _PREFIXES_PER_PEER = 750
@@ -161,6 +163,10 @@ def _partitioned_leaf(
     partitioned_advertisement = replace(
         advertisement,
         name=f"{name}_routes",
+        allocation=replace(
+            advertisement.allocation,
+            route_scale_mode=RouteScaleMode.WINDOWED,
+        ),
         membership=membership,
         next_hop=_slice_next_hop(
             advertisement.next_hop,
@@ -169,6 +175,7 @@ def _partitioned_leaf(
         ),
         route_attributes=route_attributes,
         legacy_ixia_name=_legacy_prefix_name(legacy_device_group_name),
+        requires_route_mutation=True,
     )
     return replace(
         base,
@@ -303,6 +310,8 @@ _IBGP_LEAVES = tuple(
 UG_BACKPRESSURE = replace(
     _UG_BACKPRESSURE_BASE,
     name="ug_backpressure",
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.UG_BACKPRESSURE,
     device_groups=(*_UPLINK_LEAVES, *_IBGP_LEAVES),
     device_config=replace(
         _UG_BACKPRESSURE_BASE.device_config,

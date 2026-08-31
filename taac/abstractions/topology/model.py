@@ -266,6 +266,7 @@ class PrefixAdvertisement:
     attributes: tuple[tuple[str, t.Any], ...] = ()
     route_attributes: RouteAttributePool | None = None
     legacy_ixia_name: str | None = None
+    requires_route_mutation: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,7 @@ class TaskCompatibilityProfile(str, Enum):
     EGRESS_PEER_SCALE = "egress_peer_scale"
     IPV6_UPDATE_PACKING = "ipv6_update_packing"
     UG_ADD_PEER_DYNAMIC = "ug_add_peer_dynamic"
+    UG_BACKPRESSURE = "ug_backpressure"
     UG_NEW_PEER_JOIN = "ug_new_peer_join"
 
 

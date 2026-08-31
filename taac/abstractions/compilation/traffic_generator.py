@@ -678,6 +678,7 @@ class TrafficGeneratorRenderResult:
         )
         requires_configuration = lifecycle_is_active and any(
             advertisement.prefix_window.route_scale_mode is IxiaRouteScaleMode.FLAT
+            or advertisement.requires_route_mutation
             for advertisement in request.plan.advertisements
         )
         expected_slots = (

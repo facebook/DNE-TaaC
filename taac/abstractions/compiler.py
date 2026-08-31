@@ -117,6 +117,7 @@ _UG_NEW_PEER_JOIN_TOPOLOGY = "ug_new_peer_join"
 # Spec 2.4.4 reuses the established `ug_new_peer_join` compatibility handler
 # but is a distinct topology carrying one optional spare eBGP group.
 _UG_ADD_PEER_DYNAMIC_TOPOLOGY = "ug_add_peer_dynamic"
+_UG_BACKPRESSURE_TOPOLOGY = "ug_backpressure"
 _IPV6_UPDATE_PACKING_PROFILE = "ipv6_update_packing"
 _IPV6_UPDATE_PACKING_TOPOLOGY = "ipv6_update_packing"
 _EGRESS_PEER_SCALE_PROFILE = "egress_peer_scale"
@@ -4702,6 +4703,8 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return _preserve_ug_new_peer_join_task_artifacts(bound)
         if _is_profile_free_ug_add_peer_dynamic(bound):
             return _preserve_ug_new_peer_join_task_artifacts(bound)
+        if _is_profile_free_ug_backpressure(bound):
+            return _preserve_ug_backpressure_task_artifacts(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5197,6 +5200,15 @@ def _is_profile_free_ug_add_peer_dynamic(bound: BoundTopology) -> bool:
     )
 
 
+def _is_profile_free_ug_backpressure(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.name == _UG_BACKPRESSURE_TOPOLOGY
+        and bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.UG_BACKPRESSURE
+    )
+
+
 def _compile_profile_free_artifacts_by_openr_mode(
     bound: BoundTopology,
     established_bound: BoundTopology,
@@ -5345,6 +5357,23 @@ def _preserve_ug_new_peer_join_task_artifacts(
     )
 
 
+def _preserve_ug_backpressure_task_artifacts(
+    bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    task_bound = replace(
+        bound,
+        logical_topology=replace(
+            bound.logical_topology,
+            legacy_profile=_EBB_FULL_SCALE_PROFILE,
+            task_compatibility_profile=None,
+        ),
+    )
+    return _compile_profile_free_artifacts_by_openr_mode(
+        bound,
+        task_bound,
+    )
+
+
 def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
     return (
         _is_profile_free_bounded_ecmp(bound)
@@ -5352,6 +5381,7 @@ def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
         or _is_profile_free_egress_peer_scale(bound)
         or _is_profile_free_ipv6_update_packing(bound)
         or _is_profile_free_ug_add_peer_dynamic(bound)
+        or _is_profile_free_ug_backpressure(bound)
         or _is_profile_free_ug_new_peer_join(bound)
     )
 

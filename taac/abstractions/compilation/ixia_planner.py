@@ -464,6 +464,7 @@ def _advertisement_plan(
         policy_communities=(
             tuple(policy.communities) if isinstance(policy, BgpPolicy) else ()
         ),
+        requires_route_mutation=spec.requires_route_mutation,
     )
 
 

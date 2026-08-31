@@ -627,6 +627,7 @@ class IxiaAdvertisementPlan:
     attributes: tuple[tuple[str, IxiaAttributeValue], ...] = ()
     route_attributes: IxiaRouteAttributePoolPlan | None = None
     policy_communities: tuple[str, ...] = ()
+    requires_route_mutation: bool = False
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.IXIA_ADVERTISEMENT)
@@ -636,6 +637,8 @@ class IxiaAdvertisementPlan:
             raise ValueError("IXIA advertisement attribute names must be nonempty")
         if any(not community for community in self.policy_communities):
             raise ValueError("IXIA policy communities must be nonempty")
+        if not isinstance(self.requires_route_mutation, bool):
+            raise TypeError("IXIA route-mutation intent must be a bool")
 
     @property
     def prefixes_per_peer(self) -> int:
