@@ -42,6 +42,7 @@ from taac.abstractions.topology import (
     RoutingDeviceConfig,
     SelfNextHopRealization,
     StandardCommunity,
+    TaskCompatibilityProfile,
 )
 
 
@@ -207,7 +208,8 @@ def _ibgp_child(
 
 BOUNDED_ECMP = LogicalTopology(
     name="bounded_ecmp",
-    legacy_profile="bounded_ecmp",
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.BOUNDED_ECMP,
     endpoints=(
         EndpointSpec(name="dut0", role="dut", kind="dut", setup_mode="full"),
         EndpointSpec(name="ixia", role="trafficgen", kind="ixia", setup_mode="full"),

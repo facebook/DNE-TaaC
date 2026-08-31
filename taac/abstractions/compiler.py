@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import typing as t
 from dataclasses import dataclass, replace
 
@@ -33,7 +34,10 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (
     IBGP_REMOTE_AS,
 )
 from taac.abstractions.eos_bgpcpp_candidate_factory import (
+    compile_profile_free_eos,
+    compile_profile_free_eos_basic_ports,
     compile_profile_free_eos_if_supported,
+    PROFILE_FREE_EOS_UNSUPPORTED_ERRORS,
 )
 from taac.abstractions.eos_bgpcpp_component_runtime import (
     ComponentRuntime,
@@ -99,6 +103,8 @@ from taac.task_definitions import (
     create_validate_bgpcpp_update_group_state_task,
 )
 from taac.test_as_a_config import types as taac_types
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 _T = t.TypeVar("_T")
 _TRAFFIC_ENDPOINT_ROLES = frozenset({"ixia", "traffic", "trafficgen"})
@@ -4686,14 +4692,18 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
     """EOS BGP++ compiler that prefers native profile-free artifacts."""
 
     def compile(self, bound: BoundTopology) -> CompiledTaacArtifacts:
+        if _is_profile_free_bounded_ecmp(bound):
+            return _preserve_bounded_ecmp_task_artifacts(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
-        if _is_profile_free_bounded_ecmp(bound):
-            return _preserve_bounded_ecmp_task_artifacts(bound, native_artifacts)
         if _is_profile_free_ebb_full_scale(bound):
             return _preserve_ebb_full_scale_task_artifacts(bound, native_artifacts)
         return native_artifacts
+
+
+class ProfileFreeEosShadowParityError(RuntimeError):
+    """Native shadow output drifted from the established EOS artifact."""
 
 
 class EosBgpCppCompiler(TopologyCompiler):
@@ -5055,7 +5065,6 @@ def _remap_device_group_keys(
 
 def _preserve_bounded_ecmp_task_artifacts(
     bound: BoundTopology,
-    native_artifacts: CompiledTaacArtifacts,
 ) -> CompiledTaacArtifacts:
     projected_groups = tuple(
         _bounded_ecmp_task_compatibility_group(group) for group in bound.device_groups
@@ -5073,7 +5082,7 @@ def _preserve_bounded_ecmp_task_artifacts(
             strict=True,
         )
     }
-    task_bound = replace(
+    established_bound = replace(
         bound,
         logical_topology=replace(
             bound.logical_topology,
@@ -5122,11 +5131,9 @@ def _preserve_bounded_ecmp_task_artifacts(
         legacy_names=_remap_device_group_keys(bound.legacy_names, group_names),
         parent_networks=_remap_device_group_keys(bound.parent_networks, group_names),
     )
-    established = EosBgpCppCompiler()
-    return replace(
-        native_artifacts,
-        setup_tasks=established.build_setup_tasks(task_bound),
-        teardown_tasks=established.build_teardown_tasks(task_bound),
+    return _compile_profile_free_artifacts_by_openr_mode(
+        bound,
+        established_bound,
     )
 
 
@@ -5147,6 +5154,82 @@ def _is_profile_free_ebb_full_scale(bound: BoundTopology) -> bool:
             TaskCompatibilityProfile.EBB_FULL_SCALE_WITH_BGPMON,
         }
     )
+
+
+def _compile_profile_free_artifacts_by_openr_mode(
+    bound: BoundTopology,
+    established_bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    """Select artifact authority around the temporary OpenR migration boundary.
+
+    Without OpenR, native artifacts are authoritative and retain only the
+    established DUT tasks. With OpenR, established artifacts remain
+    authoritative while native compilation shadows only IXIA basic ports.
+    """
+    device_config = bound.device_config or bound.logical_topology.device_config
+    if device_config.openr_mode is OpenRMode.NONE:
+        return _compile_native_artifacts_with_established_tasks(
+            bound, established_bound
+        )
+    return _compile_established_artifacts_with_native_basic_port_shadow(
+        bound, established_bound
+    )
+
+
+def _compile_native_artifacts_with_established_tasks(
+    bound: BoundTopology,
+    established_bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    established = EosBgpCppCompiler()
+    native_artifacts = compile_profile_free_eos(bound)
+    return replace(
+        native_artifacts,
+        setup_tasks=established.build_setup_tasks(established_bound),
+        teardown_tasks=established.build_teardown_tasks(established_bound),
+    )
+
+
+def _compile_established_artifacts_with_native_basic_port_shadow(
+    bound: BoundTopology,
+    established_bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    """Validate only native IXIA basic ports against the legacy projection.
+
+    Endpoints, host OS, DUT tasks, teardown tasks, and traffic items remain
+    established-authoritative while OpenR support is incomplete. Declared
+    unsupported variants retain that established artifact. Unexpected rendering
+    errors and basic-port parity mismatches propagate so migration defects fail
+    closed instead of silently bypassing the shadow check.
+    """
+    established = EosBgpCppCompiler()
+    established_artifacts = established.compile(established_bound)
+    native_shadow_bound = replace(
+        established_bound,
+        logical_topology=replace(
+            established_bound.logical_topology,
+            legacy_profile=None,
+            task_compatibility_profile=(
+                bound.logical_topology.task_compatibility_profile
+            ),
+        ),
+    )
+    try:
+        native_basic_port_configs = compile_profile_free_eos_basic_ports(
+            native_shadow_bound
+        )
+    except PROFILE_FREE_EOS_UNSUPPORTED_ERRORS as error:
+        logger.warning(
+            "Skipping native profile-free OpenR IXIA parity for %s: %s",
+            bound.logical_topology.name,
+            error,
+        )
+        return established_artifacts
+    if native_basic_port_configs != established_artifacts.basic_port_configs:
+        raise ProfileFreeEosShadowParityError(
+            "profile-free OpenR IXIA parity failed for topology "
+            f"{bound.logical_topology.name}; native basic port configs drifted"
+        )
+    return established_artifacts
 
 
 def _preserve_ebb_full_scale_task_artifacts(
