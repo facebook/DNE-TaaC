@@ -664,7 +664,7 @@ def _validate_partitioned_session(
     )
     expected_prefix_length = 31 if group.afi is AddressFamily.IPV4 else 64
     if (
-        group.peer_count <= 1
+        group.peer_count <= 0
         or group.local_asn is None
         or session.relationship is not relationship
         or session.capabilities != expected_capabilities
@@ -1708,7 +1708,7 @@ def _partitioned_dual_stack_route_scale(
     route_prefix_count = 1 if flat else prefix_window.prefixes_per_peer
     route_step = (
         prefix_window.source_step
-        if flat
+        if flat or group.peer_count == 1
         else (
             0
             if prefix_window.peer_distribution is IxiaPeerPrefixDistribution.SHARED

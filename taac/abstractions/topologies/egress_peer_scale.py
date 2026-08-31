@@ -40,7 +40,9 @@ from taac.abstractions.topology import (
     RouteAttributePool,
     RouteSender,
     RoutingDeviceConfig,
+    SelfNextHopRealization,
     StandardCommunity,
+    TaskCompatibilityProfile,
 )
 
 
@@ -128,7 +130,10 @@ EGRESS_PEER_SCALE_EBGP_V6_ADVERTISEMENT = PrefixAdvertisement(
         start_index=0,
         prefix_count=EGRESS_PEER_SCALE_PREFIX_COUNT,
     ),
-    next_hop=NextHopIntent(mode=NextHopMode.SELF),
+    next_hop=NextHopIntent(
+        mode=NextHopMode.SELF,
+        self_realization=SelfNextHopRealization.ADVERTISING_SESSION_LOCAL_ADDRESS,
+    ),
     route_attributes=EGRESS_PEER_SCALE_ROUTE_ATTRIBUTES,
     legacy_ixia_name="PREFIX_POOL_IPV6_EBGP",
 )
@@ -144,7 +149,10 @@ EGRESS_PEER_SCALE_EBGP_V4_ADVERTISEMENT = PrefixAdvertisement(
         start_index=0,
         prefix_count=EGRESS_PEER_SCALE_PREFIX_COUNT,
     ),
-    next_hop=NextHopIntent(mode=NextHopMode.SELF),
+    next_hop=NextHopIntent(
+        mode=NextHopMode.SELF,
+        self_realization=SelfNextHopRealization.ADVERTISING_SESSION_LOCAL_ADDRESS,
+    ),
     route_attributes=EGRESS_PEER_SCALE_ROUTE_ATTRIBUTES,
     legacy_ixia_name="PREFIX_POOL_IPV4_EBGP",
 )
@@ -160,7 +168,8 @@ _IBGP_PORT_ASSIGNMENT = IxiaPortAssignment(
 
 EGRESS_PEER_SCALE = LogicalTopology(
     name="egress_peer_scale",
-    legacy_profile="egress_peer_scale",
+    legacy_profile=None,
+    task_compatibility_profile=TaskCompatibilityProfile.EGRESS_PEER_SCALE,
     endpoints=(
         EndpointSpec(name="dut0", role="dut", kind="dut", setup_mode="full"),
         EndpointSpec(name="ixia", role="trafficgen", kind="ixia", setup_mode="full"),

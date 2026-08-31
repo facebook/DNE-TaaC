@@ -4694,6 +4694,8 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
     def compile(self, bound: BoundTopology) -> CompiledTaacArtifacts:
         if _is_profile_free_bounded_ecmp(bound):
             return _preserve_bounded_ecmp_task_artifacts(bound)
+        if _is_profile_free_egress_peer_scale(bound):
+            return _preserve_egress_peer_scale_task_artifacts(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5156,6 +5158,14 @@ def _is_profile_free_ebb_full_scale(bound: BoundTopology) -> bool:
     )
 
 
+def _is_profile_free_egress_peer_scale(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.EGRESS_PEER_SCALE
+    )
+
+
 def _compile_profile_free_artifacts_by_openr_mode(
     bound: BoundTopology,
     established_bound: BoundTopology,
@@ -5252,9 +5262,28 @@ def _preserve_ebb_full_scale_task_artifacts(
     )
 
 
+def _preserve_egress_peer_scale_task_artifacts(
+    bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    task_bound = replace(
+        bound,
+        logical_topology=replace(
+            bound.logical_topology,
+            legacy_profile=_EGRESS_PEER_SCALE_PROFILE,
+            task_compatibility_profile=None,
+        ),
+    )
+    return _compile_profile_free_artifacts_by_openr_mode(
+        bound,
+        task_bound,
+    )
+
+
 def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
-    return _is_profile_free_bounded_ecmp(bound) or _is_profile_free_ebb_full_scale(
-        bound
+    return (
+        _is_profile_free_bounded_ecmp(bound)
+        or _is_profile_free_ebb_full_scale(bound)
+        or _is_profile_free_egress_peer_scale(bound)
     )
 
 
