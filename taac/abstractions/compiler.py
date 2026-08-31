@@ -114,8 +114,8 @@ _EBB_FULL_SCALE_TOPOLOGY_NAMES = frozenset(
 )
 _UG_NEW_PEER_JOIN_PROFILE = "ug_new_peer_join"
 _UG_NEW_PEER_JOIN_TOPOLOGY = "ug_new_peer_join"
-# Spec 2.4.4 shares the ug_new_peer_join compiler handler (same legacy_profile)
-# but is a DISTINCT topology name carrying one OPTIONAL spare eBGP group.
+# Spec 2.4.4 reuses the established `ug_new_peer_join` compatibility handler
+# but is a distinct topology carrying one optional spare eBGP group.
 _UG_ADD_PEER_DYNAMIC_TOPOLOGY = "ug_add_peer_dynamic"
 _IPV6_UPDATE_PACKING_PROFILE = "ipv6_update_packing"
 _IPV6_UPDATE_PACKING_TOPOLOGY = "ipv6_update_packing"
@@ -163,8 +163,8 @@ _UG_NEW_PEER_JOIN_OPTIONAL_ROLE_COUNTS = (("ebgp_ug_spare", 1),)
 
 
 def _is_ug_new_peer_join(bound: BoundTopology) -> bool:
-    # UG_NEW_PEER_JOIN and UG_ADD_PEER_DYNAMIC (spec 2.4.4) share this handler via
-    # the same legacy_profile; the latter adds one OPTIONAL spare eBGP group.
+    # Keep established dispatch name-scoped so an unrelated topology cannot opt
+    # into this shape-specific renderer through a profile string alone.
     return (
         bound.logical_topology.name
         in (_UG_NEW_PEER_JOIN_TOPOLOGY, _UG_ADD_PEER_DYNAMIC_TOPOLOGY)
@@ -4698,6 +4698,8 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return _preserve_egress_peer_scale_task_artifacts(bound)
         if _is_profile_free_ipv6_update_packing(bound):
             return _preserve_ipv6_update_packing_task_artifacts(bound)
+        if _is_profile_free_ug_new_peer_join(bound):
+            return _preserve_ug_new_peer_join_task_artifacts(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5176,6 +5178,14 @@ def _is_profile_free_ipv6_update_packing(bound: BoundTopology) -> bool:
     )
 
 
+def _is_profile_free_ug_new_peer_join(bound: BoundTopology) -> bool:
+    return (
+        bound.logical_topology.legacy_profile is None
+        and bound.logical_topology.task_compatibility_profile
+        is TaskCompatibilityProfile.UG_NEW_PEER_JOIN
+    )
+
+
 def _compile_profile_free_artifacts_by_openr_mode(
     bound: BoundTopology,
     established_bound: BoundTopology,
@@ -5306,12 +5316,31 @@ def _preserve_ipv6_update_packing_task_artifacts(
     )
 
 
+def _preserve_ug_new_peer_join_task_artifacts(
+    bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    task_bound = replace(
+        bound,
+        logical_topology=replace(
+            bound.logical_topology,
+            name=_UG_NEW_PEER_JOIN_TOPOLOGY,
+            legacy_profile=_UG_NEW_PEER_JOIN_PROFILE,
+            task_compatibility_profile=None,
+        ),
+    )
+    return _compile_profile_free_artifacts_by_openr_mode(
+        bound,
+        task_bound,
+    )
+
+
 def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
     return (
         _is_profile_free_bounded_ecmp(bound)
         or _is_profile_free_ebb_full_scale(bound)
         or _is_profile_free_egress_peer_scale(bound)
         or _is_profile_free_ipv6_update_packing(bound)
+        or _is_profile_free_ug_new_peer_join(bound)
     )
 
 
