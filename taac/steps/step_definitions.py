@@ -253,6 +253,14 @@ __all_hc_reexports__ = ["create_next_hop_count_check"]
 # =============================================================================
 
 
+def create_dummy_step(description: t.Optional[str] = None) -> Step:
+    """Create a no-op step for stable-state validation playbooks."""
+    return Step(
+        name=StepName.DUMMY_STEP,
+        description=description,
+    )
+
+
 def create_custom_step(
     params_dict: t.Dict[str, t.Any],
     description: t.Optional[str] = None,

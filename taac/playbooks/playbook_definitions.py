@@ -203,6 +203,28 @@ from taac.test_as_a_config.types import (
 )
 
 
+def create_stable_state_validation_playbook(
+    *,
+    name: str,
+    description: str,
+    device_regexes: t.List[str],
+    traffic_items_to_start: t.List[str],
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.List[PointInTimeHealthCheck],
+    stages: t.List[Stage],
+) -> Playbook:
+    """Create a non-disruptive playbook that validates a stable DUT state."""
+    return Playbook(
+        name=name,
+        description=description,
+        device_regexes=device_regexes,
+        traffic_items_to_start=traffic_items_to_start,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        stages=stages,
+    )
+
+
 def create_agent_restart_playbook(
     wedge_agent_restart_no_of_interations: int = 10,
 ) -> Playbook:

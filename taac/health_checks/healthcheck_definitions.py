@@ -461,6 +461,7 @@ def create_ixia_packet_loss_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
     sleep_time: int = 10,
     skip_traffic_items: t.Optional[t.List[str]] = None,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """IXIA_PACKET_LOSS_CHECK — generic thrift-input variant.
 
@@ -475,6 +476,8 @@ def create_ixia_packet_loss_check(
     (e.g. `{"expect_loss": True}`).
     `sleep_time` is the seconds the check waits between stopping traffic and
     sampling stats (lets in-flight frames drain before measuring); default 10.
+    `check_id` provides a stable identifier when the same check type is used
+    more than once in a playbook.
     """
     if json_params is not None:
         if skip_traffic_items is not None:
@@ -484,11 +487,13 @@ def create_ixia_packet_loss_check(
             }
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+            check_id=check_id,
             check_params=Params(json_params=json.dumps(json_params)),
             priority=priority,
         )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+        check_id=check_id,
         input_json=thrift_to_json(
             hc_types.IxiaPacketLossHealthCheckIn(
                 thresholds=thresholds or [],
@@ -2465,6 +2470,9 @@ def create_drain_state_check(
 def create_unclean_exit_check(
     start_time_jq_var: t.Optional[str] = "test_case_start_time",
     exclude_services: t.Optional[t.List[str]] = None,
+    services: t.Optional[t.List[str]] = None,
+    sleep_timer: t.Optional[int] = None,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """UNCLEAN_EXIT_CHECK — detects unclean process exits since the test started.
 
@@ -2472,17 +2480,29 @@ def create_unclean_exit_check(
         start_time_jq_var: jq variable name carrying the lookback start time.
             Defaults to ``"test_case_start_time"``; set to ``None`` to omit.
         exclude_services: Process names to ignore (e.g. ``["bgpd"]`` for crash tests).
+        services: When set, limit validation to these process names.
+        sleep_timer: Optional delay in seconds before collecting exit state.
+        check_id: Stable identifier for this check instance.
     """
+    if exclude_services is not None and services is not None:
+        raise ValueError("exclude_services and services are mutually exclusive")
     jq_params = {"start_time": f".{start_time_jq_var}"} if start_time_jq_var else None
-    json_params = (
-        json.dumps({"exclude_services": exclude_services})
-        if exclude_services is not None
-        else None
-    )
+    json_payload: t.Dict[str, t.Any] = {}
+    if exclude_services is not None:
+        json_payload["exclude_services"] = exclude_services
+    if services is not None:
+        json_payload["services"] = services
+    if sleep_timer is not None:
+        json_payload["sleep_timer"] = sleep_timer
+    json_params = json.dumps(json_payload) if json_payload else None
     if not jq_params and not json_params:
-        return PointInTimeHealthCheck(name=hc_types.CheckName.UNCLEAN_EXIT_CHECK)
+        return PointInTimeHealthCheck(
+            name=hc_types.CheckName.UNCLEAN_EXIT_CHECK,
+            check_id=check_id,
+        )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.UNCLEAN_EXIT_CHECK,
+        check_id=check_id,
         check_params=Params(jq_params=jq_params, json_params=json_params),
     )
 
