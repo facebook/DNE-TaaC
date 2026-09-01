@@ -1,0 +1,9 @@
+# Single-switch OTG topology: one FBOSS DUT + one OTG controller host.
+# Format: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system,hardware
+#
+# Replace switch01.example.com with your DUT hostname (matches --dut flag).
+# Replace otg01.example.com with the host running the OTG controller (must
+# match the neighbor_hostname entries in circuit_info.csv). The controller
+# URL itself is passed via --ixia-api-server (e.g. https://localhost:8443).
+switch01.example.com,,,,,FBOSS,
+otg01.example.com,,,,,,

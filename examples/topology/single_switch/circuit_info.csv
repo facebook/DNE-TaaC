@@ -1,0 +1,18 @@
+# Single-switch topology: DUT connected to Ixia on two ports
+# Format: hostname,local_interface,local_platform,local_parent_interface,
+#         neighbor_hostname,neighbor_interface,neighbor_platform,
+#         neighbor_parent_interface,status,role
+#
+# Two DUT-Ixia pairs (bidirectional rows each):
+#   Port A (eth1/1/1): used by bgp_session_test.py and traffic_forwarding_test.py
+#   Port B (eth1/2/1): used by traffic_forwarding_test.py only
+#
+# neighbor_platform=ixia causes the circuit loader to treat these as Ixia
+# connections -- DirectIxiaConnection entries are built from these rows.
+# status=3 means active.
+#
+# Replace hostnames and interface names with your actual wiring.
+switch01.example.com,eth1/1/1,FBOSS,,ixia01.example.com,1/1,ixia,,3,
+ixia01.example.com,1/1,ixia,,switch01.example.com,eth1/1/1,FBOSS,,3,
+switch01.example.com,eth1/2/1,FBOSS,,ixia01.example.com,1/2,ixia,,3,
+ixia01.example.com,1/2,ixia,,switch01.example.com,eth1/2/1,FBOSS,,3,

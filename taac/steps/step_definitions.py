@@ -4004,6 +4004,7 @@ def create_run_ssh_command_step(
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
+    log_output: bool = False,
 ) -> Step:
     """Run an arbitrary shell command on the DUT via SSH.
 
@@ -4020,13 +4021,19 @@ def create_run_ssh_command_step(
         step_id: Optional step id, used by downstream stages to reference
             this step's output via jq.
         device_regexes: Optional device patterns restricting where the command runs.
+        log_output: When True the step logs the command's stdout/stderr at
+            INFO level (useful for smoke/connectivity checks). Default False
+            keeps the output out of the log.
 
     Returns:
         A `Step` with `step_name=StepName.RUN_SSH_COMMAND_STEP`.
     """
+    params: t.Dict[str, t.Any] = {"cmd": cmd}
+    if log_output:
+        params["log_output"] = True
     return Step(
         name=StepName.RUN_SSH_COMMAND_STEP,
-        step_params=Params(json_params=json.dumps({"cmd": cmd})),
+        step_params=Params(json_params=json.dumps(params)),
         description=description,
         id=step_id,
         device_regexes=device_regexes,

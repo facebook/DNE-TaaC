@@ -2258,6 +2258,7 @@ def create_systemctl_active_state_check(
     retry_count: t.Optional[int] = None,
     retry_delay_seconds: t.Optional[float] = None,
     retry_delay_multiplier: t.Optional[float] = None,
+    expected_restarted_services: t.Optional[t.List[str]] = None,
 ) -> PointInTimeHealthCheck:
     """SYSTEMCTL_ACTIVE_STATE_CHECK — systemctl active-state verification.
 
@@ -2266,10 +2267,23 @@ def create_systemctl_active_state_check(
       (typed Service enum list).
     - `services_json`: check_params.json_params variant (string list).
     Mutually exclusive — pass at most one.
+
+    `expected_restarted_services` (OSS collector path): services allowed to go
+    inactive during the window — for them only end-of-window recovery is
+    verified, not full-window activity. Use for playbooks that intentionally
+    restart a service. check_params variant only (incompatible with
+    `services`). Passing it WITHOUT `services_json` is valid: the check's
+    consumer falls back to DEFAULT_SERVICE_NAMES when no `services` key is
+    present in check_params — the allowlist still applies to that set.
     """
     if services is not None and services_json is not None:
         raise ValueError(
             "services and services_json are mutually exclusive — pass at most one."
+        )
+    if services is not None and expected_restarted_services is not None:
+        raise ValueError(
+            "expected_restarted_services requires the check_params variant — "
+            "pass services_json (or neither), not services."
         )
     retry_params: t.Dict[str, t.Any] = {}
     if retry_count is not None:
@@ -2278,7 +2292,11 @@ def create_systemctl_active_state_check(
         retry_params["retry_delay_seconds"] = retry_delay_seconds
     if retry_delay_multiplier is not None:
         retry_params["retry_delay_multiplier"] = retry_delay_multiplier
-    if services is None and services_json is None:
+    if (
+        services is None
+        and services_json is None
+        and expected_restarted_services is None
+    ):
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
             check_params=(
@@ -2295,10 +2313,14 @@ def create_systemctl_active_state_check(
                 Params(json_params=json.dumps(retry_params)) if retry_params else None
             ),
         )
-    json_params = {"services": services_json, **retry_params}
+    params: t.Dict[str, t.Any] = dict(retry_params)
+    if services_json is not None:
+        params["services"] = services_json
+    if expected_restarted_services is not None:
+        params["expected_restarted_services"] = expected_restarted_services
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
-        check_params=Params(json_params=json.dumps(json_params)),
+        check_params=Params(json_params=json.dumps(params)),
     )
 
 
