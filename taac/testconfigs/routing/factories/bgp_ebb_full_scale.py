@@ -952,6 +952,9 @@ def create_bgp_ebb_full_scale_test_config(
     enable_runtime_update = not playbooks_selected or (
         "bgp_ebb_route_registry_runtime_update_playbook" in playbooks_selected
     )
+    enable_route_storm_shards = not playbooks_selected or (
+        "bgp_ebb_route_storm_playbook" in playbooks_selected
+    )
     runtime_prefix_sets, runtime_advertisements = _tc7_runtime_intents(
         selected_tc7_playbooks
     )
@@ -981,6 +984,7 @@ def create_bgp_ebb_full_scale_test_config(
         ),
         extra_prefix_sets=runtime_prefix_sets,
         extra_advertisements=runtime_advertisements,
+        route_storm_shards=enable_route_storm_shards,
     )
     bound = topology.bind_to_inventory(
         physical_inventory=physical_inventory,

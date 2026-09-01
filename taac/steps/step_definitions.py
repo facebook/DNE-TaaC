@@ -1125,7 +1125,7 @@ def create_bgp_route_storm_step(
     bounded_validation: bool = False,
     convergence_hard_timeout_seconds: int = 300,
     heavy_setup_hard_timeout_seconds: int = 1_800,
-    heavy_route_batch_rows: int = 7_500,
+    heavy_route_batch_rows: int = 15_750,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-11 route-storm workflow."""

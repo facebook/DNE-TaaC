@@ -621,10 +621,10 @@ def get_bgp_ebb_route_storm_playbook(
 
     Drives 10,500 dual-stack plane-1 route paths through 60 verified
     advertise/withdraw cycles with a deterministic supported heavy-attribute
-    shape. The workflow uses direct IXIA route operations in batches of ten
-    peer blocks. It does not restart the parent network group or apply route
-    state through the global topology update. It proves each transition on
-    IXIA and the DUT, and restores the exact captured baseline.
+    shape. The workflow uses three peer-aligned IXIA route shards. It does not
+    restart the parent network group or apply route state through the global
+    topology update. It proves each transition on IXIA and the DUT, and
+    restores the exact captured baseline.
 
     Args:
         device_name: DUT hostname (used for setup steps and periodic tasks).
@@ -691,7 +691,7 @@ def get_bgp_ebb_route_storm_playbook(
                     poll_interval_seconds=5,
                     convergence_hard_timeout_seconds=300,
                     heavy_setup_hard_timeout_seconds=1_800,
-                    heavy_route_batch_rows=7_500,
+                    heavy_route_batch_rows=15_750,
                     session_establish_timeout_seconds=300,
                     restore_timeout_seconds=300,
                     quiet_window_seconds=quiet_window_seconds,

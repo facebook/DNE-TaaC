@@ -29,14 +29,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
 
 _OPENR_STANDALONE = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
 
-# Keep the heavy iBGP role on inventory index 0, which maps to IXIA11 port 8/1.
-# Inventory index 1 maps to port 8/2, which repeatedly enters cpuNotReady.
-_BAG012_STAGE1_PORT_MAP = {
-    "uplink": 1,
-    "ibgp": 0,
-    "bgpmon": 2,
-}
-
 # Stage 1: retain only the reviewed Non-UG cases selected for daily execution.
 # Each config lists its playbooks inline so what a Conveyor node runs is
 # readable at the node, without resolving a shared constant. The promotion-
@@ -104,7 +96,6 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_conf
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
-    port_map=_BAG012_STAGE1_PORT_MAP,
 )
 
 BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
@@ -118,7 +109,6 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
-    port_map=_BAG012_STAGE1_PORT_MAP,
 )
 
 # CONVEYOR: dne_routing / bag013_stage1_node

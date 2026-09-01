@@ -85,6 +85,7 @@ from taac.abstractions.topology import (
     ExplicitNextHopSource,
     FormulaicNextHopSource,
     FormulaicPrefixSource,
+    IxiaDeviceGroupChild,
     IxiaPortAssignment,
     LogicalTopology,
     NextHopDistribution,
@@ -186,6 +187,11 @@ EBB_ATTRIBUTE_CHURN_BASELINE = (
     ("med", 200),
     ("local_pref", 100),
     ("origin", "egp"),
+)
+
+EBB_ROUTE_STORM_SHARD_PEER_COUNTS = (21, 21, 20)
+EBB_ROUTE_STORM_SHARD_ROUTE_COUNTS = tuple(
+    peer_count * 750 for peer_count in EBB_ROUTE_STORM_SHARD_PEER_COUNTS
 )
 
 EBGP_V6_PEER_GROUP = BgpPeerGroup(
@@ -720,6 +726,75 @@ def _ebb_advertisement(
     )
 
 
+def _ebb_route_storm_ixia_children(
+    device_group: DeviceGroupSpec,
+) -> tuple[IxiaDeviceGroupChild, ...]:
+    if device_group.name not in {"dg_ibgp_v4_dc_p1", "dg_ibgp_v6_dc_p1"}:
+        return ()
+    if len(device_group.prefix_advertisements) != 1:
+        raise ValueError(
+            f"{device_group.name!r} route sharding requires one advertisement"
+        )
+    device_group_name = device_group.legacy_ixia_device_group_name
+    bgp_peer_name = (
+        device_group.legacy_ixia_bgp_peer_name or device_group.legacy_ixia_tag_name
+    )
+    device_group_index = device_group.legacy_ixia_device_group_index
+    prefix_pool_name = device_group.prefix_advertisements[0].legacy_ixia_name
+    if (
+        device_group_name is None
+        or bgp_peer_name is None
+        or device_group_index is None
+        or prefix_pool_name is None
+    ):
+        raise ValueError(
+            f"{device_group.name!r} route sharding requires legacy IXIA identity"
+        )
+
+    children = []
+    start_index = 0
+    additional_shard_count = len(EBB_ROUTE_STORM_SHARD_PEER_COUNTS) - 1
+    extra_index_start = (
+        16 if device_group.name == "dg_ibgp_v6_dc_p1" else 16 + additional_shard_count
+    )
+    for ordinal, peer_count in enumerate(EBB_ROUTE_STORM_SHARD_PEER_COUNTS):
+        suffix = "" if ordinal == 0 else f"_SHARD_{ordinal + 1}"
+        children.append(
+            IxiaDeviceGroupChild(
+                name=f"{device_group.name}_route_shard_{ordinal + 1}",
+                ordinal=ordinal,
+                start_index=start_index,
+                peer_count=peer_count,
+                legacy_ixia_device_group_name=f"{device_group_name}{suffix}",
+                legacy_ixia_bgp_peer_name=f"{bgp_peer_name}{suffix}",
+                legacy_ixia_prefix_pool_name=f"{prefix_pool_name}{suffix}",
+                legacy_ixia_device_group_index=(
+                    device_group_index
+                    if ordinal == 0
+                    else extra_index_start + ordinal - 1
+                ),
+            )
+        )
+        start_index += peer_count
+    return tuple(children)
+
+
+def _with_ebb_route_storm_shards(
+    device_group: DeviceGroupSpec,
+) -> DeviceGroupSpec:
+    children = _ebb_route_storm_ixia_children(device_group)
+    if not children:
+        return device_group
+    return replace(
+        device_group,
+        legacy_ixia_tag_name=None,
+        legacy_ixia_bgp_peer_name=None,
+        legacy_ixia_device_group_name=None,
+        legacy_ixia_device_group_index=None,
+        ixia_children=children,
+    )
+
+
 # Variant A: with bgpmon - 3 physical interfaces, 19 DeviceGroups total.
 # Keep this first topology instance explicit so it can be reviewed against
 # Appendix 1 without following helper loops or generated DG lists.
@@ -1136,6 +1211,7 @@ def _with_ebb_route_intent(
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    route_storm_shards: bool = False,
 ) -> LogicalTopology:
     if ebgp_prefix_count < 750:
         raise ValueError("ebgp_prefix_count must be at least 750")
@@ -1189,15 +1265,17 @@ def _with_ebb_route_intent(
             else extra
             for extra in extra_advertisements.get(device_group.name, ())
         )
+        resolved_group = replace(
+            device_group,
+            peer_group=peer_group,
+            prefix_advertisements=(
+                ((advertisement,) if advertisement else ()) + additional_advertisements
+            ),
+        )
         device_groups.append(
-            replace(
-                device_group,
-                peer_group=peer_group,
-                prefix_advertisements=(
-                    ((advertisement,) if advertisement else ())
-                    + additional_advertisements
-                ),
-            )
+            _with_ebb_route_storm_shards(resolved_group)
+            if route_storm_shards
+            else resolved_group
         )
     # Only STANDALONE injects; leaving the other modes empty keeps the NONE-mode
     # module topologies byte-identical to what they were before this field.
@@ -1271,13 +1349,14 @@ def ebb_full_scale_topology(
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    route_storm_shards: bool = False,
 ) -> LogicalTopology:
     base = (
         _EBB_FULL_SCALE_WITH_BGPMON_BASE
         if include_bgpmon
         else _EBB_FULL_SCALE_NO_BGPMON_BASE
     )
-    return _with_ebb_route_intent(
+    topology = _with_ebb_route_intent(
         base,
         openr_mode,
         ebgp_graceful_restart=ebgp_graceful_restart,
@@ -1289,6 +1368,19 @@ def ebb_full_scale_topology(
         extra_prefix_sets=extra_prefix_sets,
         extra_advertisements=extra_advertisements,
         next_hops=next_hops,
+        route_storm_shards=route_storm_shards,
+    )
+    if not route_storm_shards:
+        return topology
+    return replace(
+        topology,
+        name=f"{topology.name}_route_sharded",
+        legacy_profile=None,
+        task_compatibility_profile=(
+            TaskCompatibilityProfile.EBB_FULL_SCALE_WITH_BGPMON
+            if include_bgpmon
+            else TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON
+        ),
     )
 
 
@@ -1314,6 +1406,8 @@ __all__ = (
     "EBB_PARENT_NETWORKS",
     "EBB_PEER_GROUPS",
     "EBB_PREFIX_SETS",
+    "EBB_ROUTE_STORM_SHARD_PEER_COUNTS",
+    "EBB_ROUTE_STORM_SHARD_ROUTE_COUNTS",
     "EBGP_V4_PEER_GROUP",
     "EBGP_V6_PEER_GROUP",
     "IBGP_V4_PEER_GROUP",

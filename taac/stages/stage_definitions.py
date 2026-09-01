@@ -2399,7 +2399,7 @@ def create_bgp_ebb_route_storm_stage(
     bounded_validation: bool = False,
     convergence_hard_timeout_seconds: int = 300,
     heavy_setup_hard_timeout_seconds: int = 1_800,
-    heavy_route_batch_rows: int = 7_500,
+    heavy_route_batch_rows: int = 15_750,
 ) -> Stage:
     """Create CICD-EBB-11 as one failure-safe, audited custom workflow."""
     return Stage(

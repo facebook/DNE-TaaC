@@ -979,11 +979,11 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "bgp_ebb_full_scale._get_bgp_ebb_full_scale_playbooks"
         )
 
-        for selected, expected_churn, expected_ebgp_prefix_count in (
-            (None, True, 850),
-            (["bgp_ebb_attribute_churn_playbook"], True, 750),
-            (["bgp_ebb_route_storm_playbook"], False, 750),
-            (["bgp_ebb_route_registry_runtime_update_playbook"], False, 850),
+        for selected, expected_churn, expected_ebgp_prefix_count, expected_shards in (
+            (None, True, 850, True),
+            (["bgp_ebb_attribute_churn_playbook"], True, 750, False),
+            (["bgp_ebb_route_storm_playbook"], False, 750, True),
+            (["bgp_ebb_route_registry_runtime_update_playbook"], False, 850, False),
         ):
             available_playbooks = []
             if selected:
@@ -1008,6 +1008,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             self.assertEqual(
                 expected_ebgp_prefix_count,
                 topology_factory.call_args.kwargs["ebgp_prefix_count"],
+            )
+            self.assertEqual(
+                expected_shards,
+                topology_factory.call_args.kwargs["route_storm_shards"],
             )
             self.assertIsNone(
                 topology_factory.call_args.kwargs["ebgp_static_prefix_count"]
@@ -1060,7 +1064,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     topology_factory.call_args.kwargs["include_bgpmon"],
                 )
 
-    def test_bag012_stage1_uses_port_8_1_for_heavy_ibgp_routes(self) -> None:
+    def test_bag012_stage1_uses_default_port_assignment(self) -> None:
         for config in (
             BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
             BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
@@ -1074,10 +1078,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 connections = endpoint.direct_ixia_connections
                 self.assertIsNotNone(connections)
                 assert connections is not None
-                self.assertEqual(
+                self.assertCountEqual(
                     [
-                        ("Ethernet3/36/2", "8/2"),
                         ("Ethernet3/36/1", "8/1"),
+                        ("Ethernet3/36/2", "8/2"),
                         ("Ethernet3/36/3", "8/3"),
                     ],
                     [
@@ -1101,7 +1105,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             )
             if payload.get("custom_step_name") == "bgp_route_storm"
         )
-        self.assertEqual("Ethernet3/36/1", payload["ixia_interface_mimic_ibgp"])
+        self.assertEqual("Ethernet3/36/2", payload["ixia_interface_mimic_ibgp"])
+        self.assertNotIn("ixia_interfaces_mimic_ibgp", payload)
 
     def test_full_scale_factory_rejects_invalid_playbook_selections(self) -> None:
         inventory = MagicMock()

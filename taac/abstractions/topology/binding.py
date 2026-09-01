@@ -359,17 +359,125 @@ def _slice_ixia_child_advertisements(
     return tuple(
         replace(
             advertisement,
-            spec=(
-                advertisement.spec
-                if child.legacy_ixia_prefix_pool_name is None
-                else replace(
-                    advertisement.spec,
-                    legacy_ixia_name=child.legacy_ixia_prefix_pool_name,
-                )
-            ),
+            spec=_slice_ixia_child_advertisement_spec(advertisement.spec, child),
             paths_by_peer=advertisement.paths_by_peer[start:end],
         )
         for advertisement in advertisements
+    )
+
+
+def _slice_ixia_child_advertisement_spec(
+    advertisement: PrefixAdvertisement,
+    child: IxiaDeviceGroupChild,
+) -> PrefixAdvertisement:
+    allocation = advertisement.allocation
+    prefix_offset = (
+        child.start_index * allocation.prefixes_per_peer
+        if allocation.peer_distribution is PeerPrefixDistribution.DISJOINT
+        else 0
+    )
+    membership = advertisement.membership
+    if allocation.peer_distribution is PeerPrefixDistribution.DISJOINT:
+        membership = replace(
+            membership,
+            start_index=membership.start_index + prefix_offset,
+            prefix_count=child.peer_count * allocation.prefixes_per_peer,
+        )
+    return replace(
+        advertisement,
+        membership=membership,
+        next_hop=_slice_ixia_child_next_hop(advertisement, child, prefix_offset),
+        route_attributes=_rotate_ixia_child_route_attributes(
+            advertisement.route_attributes,
+            prefix_offset,
+        ),
+        legacy_ixia_name=(
+            child.legacy_ixia_prefix_pool_name
+            if child.legacy_ixia_prefix_pool_name is not None
+            else advertisement.legacy_ixia_name
+        ),
+    )
+
+
+def _slice_ixia_child_next_hop(
+    advertisement: PrefixAdvertisement,
+    child: IxiaDeviceGroupChild,
+    prefix_offset: int,
+) -> t.Any:
+    intent = advertisement.next_hop
+    if intent.mode is NextHopMode.SELF:
+        return intent
+    offset, count = _ixia_child_next_hop_window(
+        intent.distribution,
+        advertisement.allocation.peer_distribution,
+        child,
+        advertisement.allocation.prefixes_per_peer,
+        prefix_offset,
+    )
+    if intent.mode is NextHopMode.EXPLICIT:
+        source = intent.explicit_source
+        if source is None:
+            raise ValueError("explicit IXIA child next hop has no source")
+        return replace(
+            intent,
+            explicit_source=replace(
+                source,
+                addresses=source.addresses[offset : offset + count],
+            ),
+        )
+    source = intent.formulaic_source
+    if source is None:
+        raise ValueError("formulaic IXIA child next hop has no source")
+    starts = FormulaicAddressSequence(source.start, source.step, offset + 1)
+    return replace(
+        intent,
+        formulaic_source=replace(source, start=starts[offset]),
+    )
+
+
+def _ixia_child_next_hop_window(
+    distribution: NextHopDistribution | None,
+    peer_distribution: PeerPrefixDistribution,
+    child: IxiaDeviceGroupChild,
+    prefixes_per_peer: int,
+    prefix_offset: int,
+) -> tuple[int, int]:
+    if distribution is NextHopDistribution.SHARED:
+        return 0, 1
+    if distribution is NextHopDistribution.PER_PEER:
+        return child.start_index, child.peer_count
+    if distribution is NextHopDistribution.PER_PREFIX:
+        return (
+            (prefix_offset, child.peer_count * prefixes_per_peer)
+            if peer_distribution is PeerPrefixDistribution.DISJOINT
+            else (0, prefixes_per_peer)
+        )
+    if distribution is NextHopDistribution.PER_PEER_PREFIX:
+        return (
+            child.start_index * prefixes_per_peer,
+            child.peer_count * prefixes_per_peer,
+        )
+    raise ValueError(f"unsupported IXIA child next-hop distribution {distribution!r}")
+
+
+def _rotate_ixia_child_route_attributes(
+    route_attributes: t.Any,
+    prefix_offset: int,
+) -> t.Any:
+    if route_attributes is None or prefix_offset == 0:
+        return route_attributes
+
+    def rotate(values: tuple[t.Any, ...]) -> tuple[t.Any, ...]:
+        if not values:
+            return values
+        offset = prefix_offset % len(values)
+        return values[offset:] + values[:offset]
+
+    return replace(
+        route_attributes,
+        community_rows=rotate(route_attributes.community_rows),
+        extended_community_rows=rotate(route_attributes.extended_community_rows),
+        as_paths=rotate(route_attributes.as_paths),
     )
 
 
