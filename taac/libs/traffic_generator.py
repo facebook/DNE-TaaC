@@ -1228,10 +1228,12 @@ class TrafficGenerator:
         reference_values = []
         for i in reference.indices:
             value = None
-            src_hostname = src_endpoints[i].name.split(":")[0]
-            dst_hostname = dest_endpoints[i].name.split(":")[0]
-            src_port_config = self.get_port_config_by_name(src_hostname)
-            dst_port_config = self.get_port_config_by_name(dst_hostname)
+            src_endpoint_name = src_endpoints[i].name
+            dst_endpoint_name = dest_endpoints[i].name
+            src_hostname = src_endpoint_name.split(":")[0]
+            dst_hostname = dst_endpoint_name.split(":")[0]
+            src_port_config = self.get_port_config_by_name(src_endpoint_name)
+            dst_port_config = self.get_port_config_by_name(dst_endpoint_name)
             match reference.type:
                 case taac_types.ReferenceType.SRC_MAC_ADDRESS:
                     value = self.name_to_endpoint[src_hostname].mac_address
@@ -1339,6 +1341,9 @@ class TrafficGenerator:
         return ixia_packet_headers
 
     def get_port_config_by_name(self, port_name: str) -> ixia_types.PortConfig:
+        for port_config in self._port_configs:
+            if port_config.port_name == port_name:
+                return port_config
         for port_config in self._port_configs:
             if port_config.port_name.split(":")[0] == port_name:
                 return port_config

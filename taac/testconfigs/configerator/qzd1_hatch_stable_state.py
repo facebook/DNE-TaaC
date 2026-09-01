@@ -156,7 +156,7 @@ def _tcp_syn_headers(destination_port, source_port):
                     ),
                 ),
                 taac_thrift.Field(
-                    query=ixia_thrift.Query(regex="TCP-(Synchronize|SYN)"),
+                    query=ixia_thrift.Query(regex="^SYN$"),
                     attrs_json=json.dumps(
                         {
                             "ValueType": "singleValue",
@@ -265,7 +265,7 @@ def _raw_tcp_syn_headers(destination_port, source_port):
                     ),
                 ),
                 taac_thrift.Field(
-                    query=ixia_thrift.Query(regex="TCP-(Synchronize|SYN)"),
+                    query=ixia_thrift.Query(regex="^SYN$"),
                     attrs_json=json.dumps(
                         {
                             "ValueType": "singleValue",
