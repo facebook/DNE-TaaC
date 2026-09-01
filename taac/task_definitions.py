@@ -3637,6 +3637,8 @@ def create_fpf_start_collectors_task(
     fsdb_session_poll_interval_sec: float = 3.0,
     fsdb_session_expected: int = 32,
     rf_vf_groups: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    hrt_device_ids: t.Optional[t.List[int]] = None,
+    hrt_plane_ids: t.Optional[t.List[int]] = None,
 ) -> Task:
     """Create a setup task that starts long-lived FPF collectors.
 
@@ -3645,9 +3647,18 @@ def create_fpf_start_collectors_task(
     returns INVALID_PATH on GTSWs not exposing it). Default "ribmap".
 
     Starts the injected-prefix collectors (FSDB ribMap, HRT bulk, BGP RIB,
-    HRT remote-failure) and waits for baseline data collection. Prefix
-    injection is NOT done here — it is a stage step in the playbook so
-    test_case_start_time aligns with injection.
+    HRT remote-failure) and waits for baseline data collection. FSDB expands
+    ``gtsws`` to all local plane switches plus explicitly supplied observers;
+    BGP polls only the supplied observer list because only those devices are
+    consumed by BGP health checks. Prefix injection is NOT done here — it is a
+    stage step in the playbook so test_case_start_time aligns with injection.
+
+    ``hrt_device_ids`` selects the independent HRT devices whose local planes
+    are recorded by the bulk and aggregate remote-failure collectors. It
+    defaults compatibly to dev0 when omitted. Per-VF collector entries may carry
+    their own ``device_ids`` mapping.
+    ``hrt_plane_ids`` selects the local plane IDs emitted for every requested
+    device. It defaults to legacy 0..7; new-SDK paired-device hosts pass 0..3.
 
     When ``prod_prefixes`` is supplied, a fifth collector
     (ProdHrtPrefixCollector) is also started to monitor steady-state
@@ -3686,6 +3697,10 @@ def create_fpf_start_collectors_task(
     }
     if rf_vf_groups:
         params["rf_vf_groups"] = rf_vf_groups
+    if hrt_device_ids and hrt_device_ids != [0]:
+        params["hrt_device_ids"] = hrt_device_ids
+    if hrt_plane_ids and hrt_plane_ids != list(range(8)):
+        params["hrt_plane_ids"] = hrt_plane_ids
     if fsdb_session_hosts:
         params["fsdb_session_hosts"] = fsdb_session_hosts
     elif fsdb_session_host is not None:

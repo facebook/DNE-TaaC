@@ -21,6 +21,7 @@ from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
+    create_fpf_record_restart_time_step,
     create_longevity_step,
     create_service_convergence_step,
     create_service_interruption_step,
@@ -82,6 +83,9 @@ def create_fpf_tc07_test_config() -> TestConfig:
             duration=90,
             description="Wait 90s (within 120s GR window)",
         ),
+        create_fpf_record_restart_time_step(
+            description="Record FSDB restart time for ribMap reconvergence SLA"
+        ),
         create_service_interruption_step(
             service=taac_types.Service.FSDB,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
@@ -121,15 +125,18 @@ def create_fpf_tc07_test_config() -> TestConfig:
         reconvergence_service="fsdb",
         reconvergence_sla_sec=60.0,
         reconvergence_hosts=[OBSERVER_GTSWS[0]],
+        # FSDB ribMap collection is unavailable while fsdb is intentionally
+        # stopped. Measure recovery from the dedicated pre-START timestamp and
+        # require the first healthy sample within the 20s FSDB SLA.
+        fsdb_rib_restart_reconverge=True,
         # fsdb/HRT are coupled: the HRT FSDB-session census dips while fsdb
         # re-subscribes after the GR — expected, not a fault. Skip the postcheck
         # (precheck still asserts the 32/32 baseline).
         skip_fsdb_session_postcheck=True,
-        # GR-within (graceful, within-window): a within-window graceful restart
-        # must NOT break forwarding. MODE B (skip_null_strict) tolerates null
-        # collection blips but fails on any non-null degradation signature and
-        # requires the last non-null sample to hold the golden value — applied to
-        # the convergence Signal-3, HRT remote-failure, and prod-prefix checks.
+        # GR-within (graceful, within-window): the affected FSDB ribMap uses the
+        # restart-aware contract above. MODE B applies to the unaffected BGP and
+        # HRT checks, tolerating null collection blips while rejecting any
+        # non-null degradation signature.
         convergence_blip_mode="skip_null_strict",
     )
 

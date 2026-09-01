@@ -33,18 +33,23 @@ from taac.task_definitions import (
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
+    HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     VF_COLLECTOR_SUBNET,
@@ -60,20 +65,31 @@ from taac.test_as_a_config.types import TestConfig
 # own VF group's count: PREFIX_COUNT = VF_GROUP_PREFIX_COUNT. Collector subnet is
 # 5000::/16 to count both groups.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
 INJECT_SETTLE_SEC = 120
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
 TRIGGER_STSWS = ALL_STSWS
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, 0)]
-HRT_MEMORY_HOSTS = ["rtptest1544.mwg2", "rtptest1575.mwg2"]
 DUT_GTSW = OBSERVER_GTSWS[0]
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 
 
 def create_fpf_tc25_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh,
+        skip_ib,
+        traffic_config=IB_TRAFFIC_CONFIG,
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
     playbook = create_fpf_service_restart_playbook(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
@@ -91,10 +107,12 @@ def create_fpf_tc25_test_config() -> TestConfig:
         stabilization_delay_sec=120,
         settle_after_restart_sec=120,
         skip_ssh_dependent_checks=skip_ssh,
-        spray_hosts=None if skip_ssh else SPRAY_HOSTS,
+        spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         # Prefixes injected once by the setup task (8-STSW split-per-VF).
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
         # Assert reconvergence after the wedge_agent restart (DUT-scoped, anchored
         # on wedge_agent's systemd unit).
         assert_bgp_reconvergence=True,
@@ -109,6 +127,8 @@ def create_fpf_tc25_test_config() -> TestConfig:
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=PROD_PREFIXES,
                 prod_prefix_host=PROD_PREFIX_HOST,

@@ -15,6 +15,8 @@ from taac.libs.fpf.fpf_collector_registry import (
     everpaste_details_suffix,
     get_collector,
     get_disruption_time,
+    get_restart_completion_time,
+    get_restart_time,
     get_test_case_start_time,
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import normalize_prefix
@@ -151,6 +153,7 @@ class _HostResult:
         self.s2_ok = True  # data integrity
         self.compliance_issues: t.List[str] = []
         self.null_issues: t.List[str] = []
+        self.notes: t.List[str] = []
         # impacted prefix -> dict(ts_str, lost, gained, baseline, post_rb)
         self.impacts: t.List[t.Dict[str, t.Any]] = []
 
@@ -277,6 +280,184 @@ def _evaluate_host(
         res.status = "FAIL"
     else:
         res.status = "PASS"
+    return res
+
+
+def _restart_rows_for_host(
+    host: str,
+    collector: t.Any,
+    window_start: float,
+    window_end: float,
+) -> t.List[t.Tuple[float, t.Any]]:
+    rows = [
+        (ts, row)
+        for row in collector.get_rows_in_window(window_start, window_end)
+        if getattr(row, "host", None) == host
+        if (ts := _row_ts(row)) is not None
+    ]
+    return sorted(rows, key=lambda item: item[0])
+
+
+def _restart_monitored_prefixes(
+    rows: t.List[t.Tuple[float, t.Any]], target_norms: t.Optional[t.Set[str]]
+) -> t.Set[str]:
+    if target_norms:
+        return set(target_norms)
+    return {
+        normalize_prefix(pfx)
+        for _ts, row in rows
+        for pfx in getattr(row, "prefixes", {})
+    }
+
+
+def _restart_baselines(
+    rows: t.List[t.Tuple[float, t.Any]],
+    monitored: t.Set[str],
+    restart_ts: float,
+) -> t.Tuple[t.Dict[str, t.Dict[str, t.List[int]]], t.Dict[str, str]]:
+    baselines: t.Dict[str, t.Dict[str, t.List[int]]] = {}
+    displays: t.Dict[str, str] = {}
+    for ts, row in rows:
+        if ts > restart_ts:
+            break
+        for raw, rb in row.prefixes.items():
+            norm = normalize_prefix(raw)
+            if norm in monitored and not _sample_null_fields(rb):
+                baselines[norm] = _baseline_of(rb)
+                displays[norm] = raw
+    return baselines, displays
+
+
+def _complete_post_restart_rows(
+    rows: t.List[t.Tuple[float, t.Any]],
+    monitored: t.Set[str],
+    restart_ts: float,
+) -> t.Tuple[t.List[t.Tuple[float, t.Dict[str, t.Any]]], int, t.Optional[float]]:
+    valid: t.List[t.Tuple[float, t.Dict[str, t.Any]]] = []
+    ignored = 0
+    last_incomplete_ts: t.Optional[float] = None
+    for ts, row in rows:
+        if ts <= restart_ts:
+            continue
+        by_norm = {normalize_prefix(raw): rb for raw, rb in row.prefixes.items()}
+        if any(
+            norm not in by_norm or _sample_null_fields(by_norm[norm])
+            for norm in monitored
+        ):
+            ignored += 1
+            last_incomplete_ts = ts
+        else:
+            valid.append((ts, by_norm))
+    return valid, ignored, last_incomplete_ts
+
+
+def _evaluate_host_restart_recovery(
+    host: str,
+    collector: t.Any,
+    window_start: float,
+    window_end: float,
+    target_norms: t.Optional[t.Set[str]],
+    restart_ts: float,
+    max_recovery_sec: float,
+    restart_completion_ts: t.Optional[float] = None,
+) -> _HostResult:
+    """Validate full production-prefix recovery after an HRT restart.
+
+    Each prefix's baseline is its last complete sample at or before restart.
+    Empty, partial, or invalid rows after restart are treated as expected outage
+    observations. Recovery eligibility begins after the restart command
+    completes or the last observed outage row, whichever is later. Recovery
+    latency begins at the first complete eligible row and ends at the first row
+    where every monitored prefix matches its baseline. The final complete row
+    must also remain healthy.
+    """
+    res = _HostResult(host)
+    rows = _restart_rows_for_host(host, collector, window_start, window_end)
+    monitored = _restart_monitored_prefixes(rows, target_norms)
+    res.n_prefixes = len(monitored)
+    if not monitored:
+        res.status = "FAIL"
+        res.s1_ok = False
+        res.s2_ok = False
+        res.compliance_issues.append("no monitored prefix data")
+        return res
+
+    baselines, displays = _restart_baselines(rows, monitored, restart_ts)
+    missing_baselines = sorted(monitored - set(baselines))
+    if missing_baselines:
+        res.status = "FAIL"
+        res.s1_ok = False
+        res.s2_ok = False
+        res.compliance_issues.append(
+            "no complete pre-restart baseline for " + ", ".join(missing_baselines)
+        )
+        return res
+
+    valid_post, ignored_rows, last_incomplete_ts = _complete_post_restart_rows(
+        rows, monitored, restart_ts
+    )
+    if ignored_rows:
+        res.notes.append(
+            f"ignored {ignored_rows} empty/incomplete outage row(s) after restart"
+        )
+    eligibility_ts = max(
+        restart_ts,
+        restart_completion_ts or restart_ts,
+        last_incomplete_ts or restart_ts,
+    )
+    valid_post = [(ts, by_norm) for ts, by_norm in valid_post if ts > eligibility_ts]
+    res.notes.append(f"post-outage recovery eligibility starts at {eligibility_ts:.3f}")
+    res.n_samples = len(valid_post) * len(monitored)
+    if not valid_post:
+        res.status = "FAIL"
+        res.s1_ok = False
+        res.s2_ok = False
+        res.compliance_issues.append("no complete valid post-restart sample")
+        return res
+
+    first_valid_ts = valid_post[0][0]
+    full_recovery_ts: t.Optional[float] = None
+    for ts, by_norm in valid_post:
+        if all(
+            _sample_matches_baseline(by_norm[norm], baselines[norm])
+            for norm in monitored
+        ):
+            full_recovery_ts = ts
+            break
+
+    if full_recovery_ts is None:
+        res.s1_ok = False
+        res.compliance_issues.append(
+            "no complete post-restart sample recovered all monitored prefixes"
+        )
+    else:
+        recovery_sec = round(full_recovery_ts - first_valid_ts, 3)
+        if recovery_sec > max_recovery_sec:
+            res.s1_ok = False
+            res.compliance_issues.append(
+                f"full prefix recovery took {recovery_sec:.3f}s > "
+                f"{max_recovery_sec:.1f}s SLA"
+            )
+        else:
+            res.notes.append(
+                f"all {len(monitored)} prefix(es) recovered in "
+                f"{recovery_sec:.3f}s from first valid post-restart sample"
+            )
+
+    final_by_norm = valid_post[-1][1]
+    final_regressions = sorted(
+        displays.get(norm, norm)
+        for norm in monitored
+        if not _sample_matches_baseline(final_by_norm[norm], baselines[norm])
+    )
+    if final_regressions:
+        res.s1_ok = False
+        res.compliance_issues.append(
+            "final valid sample regressed for " + ", ".join(final_regressions)
+        )
+
+    res.s2_ok = True
+    res.status = "PASS" if res.s1_ok else "FAIL"
     return res
 
 
@@ -711,6 +892,10 @@ def _format_report(host_results: t.List[_HostResult], agg: str) -> str:
             )
         if r.null_issues and not r.impacts:
             lines.append(f"    NULL: {'; '.join(r.null_issues[:5])}")
+        if r.compliance_issues and not r.impacts:
+            lines.append(f"    ISSUE: {'; '.join(r.compliance_issues[:5])}")
+        for note in r.notes:
+            lines.append(f"    NOTE: {note}")
     lines.append(f"AGGREGATE: {agg}")
     return "\n".join(lines)
 
@@ -735,6 +920,13 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         ``expected_*`` check_params (applied to all prefixes).
       Signal 2 — Data integrity: no null data points (poll timeout >2min,
         missing prefix, or a non-list plane field).
+
+    ``mode="restart_recovery"`` is the HRT-restart exception to that strict
+    stability rule. It reports but ignores empty/incomplete outage rows, uses
+    each prefix's last complete pre-restart sample as baseline, and bounds full
+    post-restart recovery from the first complete sample after restart completion
+    or the final outage row. This prevents a healthy pre-outage race sample from
+    anchoring recovery at zero seconds.
 
     The result message is a per-host report that names every IMPACTED prefix
     with the timestamp it regressed and the planes lost (before->after). When
@@ -831,6 +1023,26 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             recorded = get_disruption_time()
             disruption_ts = recorded if recorded > 0 else None
 
+        restart_ts: t.Optional[float] = None
+        restart_completion_ts: t.Optional[float] = None
+        max_recovery_sec = float(check_params.get("max_recovery_sec", 30.0))
+        if mode == "restart_recovery":
+            restart_ts = check_params.get("restart_ts")
+            if restart_ts is None:
+                recorded = get_restart_time()
+                restart_ts = recorded if recorded > 0 else None
+            if restart_ts is None:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message="No recorded HRT restart timestamp",
+                )
+            restart_completion_ts = check_params.get("restart_completion_ts")
+            if restart_completion_ts is None:
+                recorded_completion = get_restart_completion_time()
+                restart_completion_ts = (
+                    recorded_completion if recorded_completion > 0 else None
+                )
+
         host_results = self._evaluate_hosts(
             collectors,
             mode=mode,
@@ -845,6 +1057,9 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             max_drain_sec=max_drain_sec,
             max_transition_sec=max_transition_sec,
             disruption_ts=disruption_ts,
+            restart_ts=restart_ts,
+            restart_completion_ts=restart_completion_ts,
+            max_recovery_sec=max_recovery_sec,
         )
         return await self._aggregate_and_report(
             host_results, collectors, window_start, window_end
@@ -900,6 +1115,9 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         max_drain_sec: float,
         max_transition_sec: float,
         disruption_ts: t.Optional[float],
+        restart_ts: t.Optional[float],
+        restart_completion_ts: t.Optional[float],
+        max_recovery_sec: float,
     ) -> t.List[_HostResult]:
         """Dispatch each (host, collector) to the evaluator for ``mode`` and log a
         one-line verdict per host."""
@@ -907,7 +1125,20 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         host_results: t.List[_HostResult] = []
         for host, collector in collectors:
             impacted = {int(p) for p in impacted_by_host.get(host, [])}
-            if mode in ("local_drain", "local_undrain"):
+            if mode == "restart_recovery":
+                if restart_ts is None:
+                    raise ValueError("restart_recovery requires restart_ts")
+                res = _evaluate_host_restart_recovery(
+                    host,
+                    collector,
+                    window_start,
+                    window_end,
+                    target_norms,
+                    restart_ts,
+                    max_recovery_sec,
+                    restart_completion_ts,
+                )
+            elif mode in ("local_drain", "local_undrain"):
                 res = _evaluate_host_local_drain(
                     host,
                     collector,

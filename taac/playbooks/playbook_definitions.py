@@ -12,6 +12,7 @@ The runner-side abstract base class lives in `playbooks/playbook.py`.
 
 import json
 import math
+import re
 import typing as t
 import uuid
 from enum import Enum
@@ -24446,6 +24447,7 @@ def _build_fpf_generic_checks(
     reconvergence_hosts: list[str] | None = None,
     out_congestion_last_minute_max: bool = False,
     host_spray_transform_desc: str | None = None,
+    hrt_device_ids: list[int] | None = None,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -24526,6 +24528,12 @@ def _build_fpf_generic_checks(
                     create_fpf_hrt_fsdb_session_check(
                         hosts=hosts,
                         expected_session_count=fsdb_sessions_per_host,
+                        device_ids=(
+                            hrt_device_ids if hrt_device_ids != [0] else None
+                        ),
+                        planes_per_device=(
+                            4 if hrt_device_ids and hrt_device_ids != [0] else None
+                        ),
                         check_id="fpf_hrt_precheck",
                     )
                 ]
@@ -24704,6 +24712,12 @@ def _build_fpf_generic_checks(
                     create_fpf_hrt_fsdb_session_check(
                         hosts=hosts,
                         expected_session_count=fsdb_sessions_per_host,
+                        device_ids=(
+                            hrt_device_ids if hrt_device_ids != [0] else None
+                        ),
+                        planes_per_device=(
+                            4 if hrt_device_ids and hrt_device_ids != [0] else None
+                        ),
                         check_id="fpf_hrt_postcheck",
                     )
                 ]
@@ -24957,6 +24971,40 @@ def create_fpf_hardening_playbook(
     )
 
 
+def _fpf_rf_stable_scope(
+    group: dict,
+    eligible_lanes: t.Iterable[int],
+) -> tuple[list[int], dict[str, int]]:
+    """Return lanes and expected counts for a per-VF stable RF assertion."""
+    eligible = set(eligible_lanes)
+    lanes = sorted(int(lane) for lane in group["lanes"] if lane in eligible)
+    return lanes, {}
+
+
+def _fpf_global_lanes_to_hrt_tuples(
+    hosts: t.Iterable[str],
+    global_lanes: t.Iterable[int],
+    device_ids: t.Iterable[int],
+    gpu_ids: t.Iterable[int] | None = None,
+) -> dict[str, dict[str, list[int]]]:
+    """Map physical GPU/global lanes to new-SDK device/local-plane tuples."""
+    allowed_devices = {int(device_id) for device_id in device_ids}
+    per_host: dict[str, dict[str, list[int]]] = {}
+    for host in hosts:
+        for gpu_id in gpu_ids or range(4):
+            for global_lane in global_lanes:
+                device_id = 2 * int(gpu_id) + int(global_lane) // 4
+                if device_id not in allowed_devices:
+                    continue
+                local_plane = int(global_lane) % 4
+                planes = per_host.setdefault(host, {}).setdefault(
+                    str(device_id), []
+                )
+                if local_plane not in planes:
+                    planes.append(local_plane)
+    return per_host
+
+
 def create_fpf_hardening_playbook_v2(
     gtsws: list[str],
     hosts: list[str],
@@ -24996,10 +25044,13 @@ def create_fpf_hardening_playbook_v2(
     rf_vf_groups: list | None = None,
     restart_ib_traffic_server: str | None = None,
     restart_ib_traffic_clients: list[str] | None = None,
+    ib_traffic_config: t.Mapping[str, t.Any] | None = None,
     assert_bgp_reconvergence: bool = False,
     reconvergence_service: str = "bgpd",
     reconvergence_sla_sec: float = 60.0,
     reconvergence_hosts: list[str] | None = None,
+    bgp_rib_restart_reconverge: bool = False,
+    fsdb_rib_restart_reconverge: bool = False,
     remote_failure_last_sample: bool = False,
     convergence_blip_mode: str = "strict",
     ods_discard_informational: bool = False,
@@ -25007,6 +25058,9 @@ def create_fpf_hardening_playbook_v2(
     host_spray_transform_desc: str | None = None,
     remote_failure_last_n: bool = False,
     recovery_last_n: int | None = None,
+    prod_prefix_restart_recovery_sla_sec: float | None = None,
+    hrt_restart_tolerant_hosts: list[str] | None = None,
+    hrt_device_ids: list[int] | None = None,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25030,15 +25084,33 @@ def create_fpf_hardening_playbook_v2(
 
     ``rf_vf_groups`` (8-STSW split-per-VF injection): list of
     ``{"suffix", "subnet", "lanes"}``. When given, the single broad HRT
-    remote-failure "stable" check is replaced by one per VF group, each scoped to
-    that group's own lanes and reading its per-group collector
-    ("hrt_remote_failure_<suffix>").
+    remote-failure "stable" check is replaced by one per VF group, each reading
+    its per-group collector and explicit device IDs. Every selected tuple is
+    expected to remain at zero.
 
     ``skip_injection`` drops the in-playbook prefix-injection + stabilization
     stage steps. Use it when prefixes are injected once by a dedicated setup
     task (``fpf_inject_bgp_prefixes``, e.g. the 8-STSW split-per-VF injection) so
     the netcastle run injects exactly once from setup. ``prefix_count`` is then
     used only as the EXPECTED converged count for the per-GTSW/per-lane checks.
+
+    ``bgp_rib_restart_reconverge`` switches the BGP RIB checks to the
+    restart-aware contract: tolerate null/error samples while bgpd is stopped,
+    require recovery to ``prefix_count`` within ``reconvergence_sla_sec`` of the
+    recorded restart timestamp, and require the final valid sample to remain
+    healthy.
+
+    ``fsdb_rib_restart_reconverge`` applies the same contract to FSDB ribMap,
+    using the separately recorded restart timestamp so an earlier disruption
+    timestamp remains available to drain-window checks.
+
+    ``prod_prefix_restart_recovery_sla_sec`` replaces ordinary production-prefix
+    stability with HRT restart recovery: baseline immediately before restart,
+    tolerate outage rows, then require full-set recovery within this many seconds
+    from the first complete sample after restart completion/final outage and a
+    healthy final sample. ``hrt_restart_tolerant_hosts`` applies the matching
+    null-tolerant-but-exact policy to HRT bulk and remote-failure checks only for
+    the intentionally restarted host(s); other hosts remain strict.
 
     ``fsdb_expected_total`` overrides the expected HRT FSDB session count
     (default ``32`` — every one of the 4 GPUs subscribes to all 8 GTSWs, so a
@@ -25129,6 +25201,13 @@ def create_fpf_hardening_playbook_v2(
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
     resolved_lanes = lanes if lanes is not None else [0, 1]
+    resolved_hrt_device_ids = hrt_device_ids or sorted(
+        {
+            int(device_id)
+            for group in (rf_vf_groups or [])
+            for device_id in group.get("device_ids", [0])
+        }
+    ) or [0]
     # Default the expected HRT FSDB session count to 32 — the per-BE-node count
     # is FIXED at 32 (every one of the 4 GPUs subscribes to all 8 GTSWs:
     # 4 x 8 = 32) regardless of how many GTSWs we observe. The previous
@@ -25147,6 +25226,13 @@ def create_fpf_hardening_playbook_v2(
     # across plane-status / host-spray / convergence / remote-failure below. Empty
     # => every check is byte-identical to a non-drained caller.
     drained_lanes = sorted(set(impacted_lanes_drained or []))
+    drained_hrt_tuples = (
+        _fpf_global_lanes_to_hrt_tuples(
+            hosts, drained_lanes, resolved_hrt_device_ids
+        )
+        if drained_lanes and resolved_hrt_device_ids != [0]
+        else {}
+    )
     # host -> ["beth{lane}", ...] for the host-spray ~0 assertion on the impacted
     # NIC lanes (draining a fabric lane stops egress on that lane's beth on EVERY
     # spray host attached to the plane, not just the drained circuit's host).
@@ -25194,6 +25280,7 @@ def create_fpf_hardening_playbook_v2(
         reconvergence_hosts=reconvergence_hosts,
         out_congestion_last_minute_max=out_congestion_last_minute_max,
         host_spray_transform_desc=host_spray_transform_desc,
+        hrt_device_ids=resolved_hrt_device_ids,
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -25233,7 +25320,17 @@ def create_fpf_hardening_playbook_v2(
     if _ib_server is None and spray_hosts and len(spray_hosts) >= 2:
         _ib_server = spray_hosts[0]
         _ib_clients = list(spray_hosts[1:])
-    if _ib_server and _ib_clients:
+    if ib_traffic_config:
+        stage_steps.append(
+            create_fpf_ensure_traffic_step(
+                **ib_traffic_config,
+                description=(
+                    "Strict traffic readiness: validate the canonical process "
+                    "and egress contract; recover only after the prior verdict"
+                ),
+            )
+        )
+    elif _ib_server and _ib_clients:
         stage_steps.append(
             create_fpf_ensure_traffic_step(
                 server=_ib_server,
@@ -25268,6 +25365,13 @@ def create_fpf_hardening_playbook_v2(
                 lane_map=lane_map,
                 expected_matched=prefix_count,
                 use_live_collectors=True,
+                mode="restart" if fsdb_rib_restart_reconverge else None,
+                reconverge_sla_sec=(
+                    FPF_ACTIVE_THRESHOLDS.fsdb_restart_reconverge_sla_sec
+                    if fsdb_rib_restart_reconverge
+                    else None
+                ),
+                use_restart_time=fsdb_rib_restart_reconverge,
                 signal1_e2e_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec,
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
@@ -25281,6 +25385,12 @@ def create_fpf_hardening_playbook_v2(
                 lane_map=lane_map,
                 expected_matched=prefix_count,
                 use_live_collectors=True,
+                mode="restart" if bgp_rib_restart_reconverge else None,
+                reconverge_sla_sec=(
+                    reconvergence_sla_sec
+                    if bgp_rib_restart_reconverge
+                    else None
+                ),
                 signal1_e2e_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec,
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
@@ -25297,6 +25407,7 @@ def create_fpf_hardening_playbook_v2(
         convergence_postchecks.append(
             create_fpf_hrt_bulk_convergence_check(
                 lanes=[lane_id],
+                device_ids=resolved_hrt_device_ids,
                 expected_per_lane={str(lane_id): prefix_count},
                 use_live_collectors=True,
                 signal1_e2e_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec,
@@ -25306,6 +25417,7 @@ def create_fpf_hardening_playbook_v2(
                 # re-converge transient isn't flagged as post-convergence churn.
                 settle_sec=convergence_settle_sec or None,
                 stability_mode=convergence_blip_mode,
+                restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                 check_id=f"fpf_hrt_convergence_lane{lane_id}",
             )
         )
@@ -25329,20 +25441,26 @@ def create_fpf_hardening_playbook_v2(
         _rf_direction = "stable_last_sample"
     else:
         _rf_direction = "stable"
-    # Drain exemption: the impacted lane may surface negative routes while the
-    # plane is drained, so it is dropped from the "stable" (must-stay-0)
-    # assertion; every unimpacted lane keeps the stable/last-sample contract.
+    # Drain exemption: an impacted lane may change its remote-failure count, so
+    # it is dropped from the stable assertion. Every unimpacted lane retains its
+    # configured stable/last-sample contract.
     if rf_vf_groups:
         for _g in rf_vf_groups:
-            _glanes = [lane for lane in _g["lanes"] if lane not in drained_lanes]
+            _glanes, _gexpected = _fpf_rf_stable_scope(
+                _g,
+                (lane for lane in resolved_lanes if lane not in drained_lanes),
+            )
             if not _glanes:
                 continue
             convergence_postchecks.append(
                 create_fpf_hrt_remote_failure_convergence_check(
                     lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
                     direction=_rf_direction,
                     use_live_collectors=True,
                     collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
                 )
             )
@@ -25352,8 +25470,10 @@ def create_fpf_hardening_playbook_v2(
             convergence_postchecks.append(
                 create_fpf_hrt_remote_failure_convergence_check(
                     lanes=_stable_lanes,
+                    device_ids=resolved_hrt_device_ids,
                     direction=_rf_direction,
                     use_live_collectors=True,
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id="fpf_remote_failure_stable",
                 )
             )
@@ -25392,6 +25512,14 @@ def create_fpf_hardening_playbook_v2(
                 check_id="fpf_prod_hrt_prefix_recovery",
             )
         )
+    elif prod_prefixes and prod_prefix_restart_recovery_sla_sec is not None:
+        convergence_postchecks.append(
+            create_fpf_prod_hrt_prefix_stability_check(
+                mode="restart_recovery",
+                max_recovery_sec=prod_prefix_restart_recovery_sla_sec,
+                check_id="fpf_prod_hrt_prefix_restart_recovery",
+            )
+        )
     elif prod_prefixes:
         convergence_postchecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
@@ -25416,6 +25544,8 @@ def create_fpf_hardening_playbook_v2(
                 create_fpf_hrt_plane_status_check(
                     mode="drain",
                     impacted_planes=drained_lanes,
+                    device_ids=resolved_hrt_device_ids,
+                    impacted_tuples_by_host_device=drained_hrt_tuples or None,
                     check_id="fpf_hrt_plane_status_drain",
                 )
             )
@@ -25423,6 +25553,7 @@ def create_fpf_hardening_playbook_v2(
             convergence_postchecks.append(
                 create_fpf_hrt_plane_status_check(
                     mode="all_up",
+                    device_ids=resolved_hrt_device_ids,
                     settle_sec=convergence_settle_sec or None,
                     # Disruptive configs (convergence_blip_mode="last_sample") tolerate
                     # a mid-window plane UNKNOWN that recovers to UP (e.g. latched while
@@ -25503,6 +25634,8 @@ def create_fpf_link_event_disrupt_playbook(
     skip_injection: bool = False,
     rf_vf_groups: list | None = None,
     gtsw_convergence_settle_sec: int = 0,
+    hrt_device_ids: list[int] | None = None,
+    ib_traffic_config: t.Mapping[str, t.Any] | None = None,
     playbook_name: str = "fpf_link_event_disrupt",
 ) -> Playbook:
     """Disrupt-phase playbook for FPF link events (interface-disable / link-drain).
@@ -25643,7 +25776,17 @@ def create_fpf_link_event_disrupt_playbook(
     # STRICT traffic precheck at the stage HEAD: verify all 4 RDMA planes carry
     # traffic (restart ib_write_bw if collapsed; fail hard on a plane wedge).
     # No-op when skip_ssh (spray_hosts is None / < 2 hosts).
-    if spray_hosts and len(spray_hosts) >= 2:
+    if ib_traffic_config:
+        stage_steps.append(
+            create_fpf_ensure_traffic_step(
+                **ib_traffic_config,
+                description=(
+                    "Strict traffic readiness: validate the canonical process "
+                    "and egress contract; recover only after the prior verdict"
+                ),
+            )
+        )
+    elif spray_hosts and len(spray_hosts) >= 2:
         stage_steps.append(
             create_fpf_ensure_traffic_step(
                 server=spray_hosts[0],
@@ -25685,6 +25828,13 @@ def create_fpf_link_event_disrupt_playbook(
     sig1 = FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
     sig2 = FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
     sig3 = FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+    resolved_hrt_device_ids = hrt_device_ids or sorted(
+        {
+            int(device_id)
+            for group in (rf_vf_groups or [])
+            for device_id in group.get("device_ids", [0])
+        }
+    ) or [0]
 
     postchecks = []
 
@@ -25756,15 +25906,37 @@ def create_fpf_link_event_disrupt_playbook(
     # the prod-prefix transition + host-spray.
     impacted_hosts = sorted(impacted_lanes_by_host_gpu.keys())
     bulk_impacted = impacted_lanes if injected_prefixes_withdrawn else []
+    impacted_hrt_tuples: dict[str, dict[str, list[int]]] = {}
+    if resolved_hrt_device_ids != [0]:
+        for _host, _gpus in impacted_lanes_by_host_gpu.items():
+            for _gpu_id, _global_lanes in _gpus.items():
+                for _global_lane in _global_lanes:
+                    _device_id = 2 * int(_gpu_id) + int(_global_lane) // 4
+                    _local_lane = int(_global_lane) % 4
+                    if _device_id not in resolved_hrt_device_ids:
+                        continue
+                    _lanes = impacted_hrt_tuples.setdefault(_host, {}).setdefault(
+                        str(_device_id), []
+                    )
+                    if _local_lane not in _lanes:
+                        _lanes.append(_local_lane)
     # When the injected prefixes withdraw (disable) only the impacted host's lane
     # changes -> scope to it. When they don't (drain) the injected prefixes stay
     # converged on EVERY host -> evaluate all hosts.
-    bulk_only_hosts = impacted_hosts if injected_prefixes_withdrawn else None
+    bulk_only_hosts = (
+        impacted_hosts
+        if injected_prefixes_withdrawn and resolved_hrt_device_ids == [0]
+        else None
+    )
     postchecks.append(
         create_fpf_hrt_bulk_convergence_check(
             lanes=injected_lanes,
+            device_ids=resolved_hrt_device_ids,
             expected_per_lane={str(lane): prefix_count for lane in injected_lanes},
             impacted_lanes=bulk_impacted,
+            impacted_tuple_lanes_by_host_device=(
+                impacted_hrt_tuples if injected_prefixes_withdrawn else None
+            ),
             withdrawn_max_count=0,
             lane_labels=lane_labels,
             only_hosts=bulk_only_hosts,
@@ -25792,17 +25964,46 @@ def create_fpf_link_event_disrupt_playbook(
             # impacted lanes; split into two checks when the impacted set spans
             # both groups.
             for _g in rf_vf_groups:
-                _glanes = [lane for lane in _g["lanes"] if lane in impacted_lanes]
+                if resolved_hrt_device_ids == [0]:
+                    _glanes = [
+                        lane for lane in _g["lanes"] if lane in impacted_lanes
+                    ]
+                    _group_impacted = {}
+                else:
+                    _group_devices = {int(d) for d in _g.get("device_ids", [0])}
+                    _group_impacted = {
+                        host: {
+                            device_id: tuple_lanes
+                            for device_id, tuple_lanes in devices.items()
+                            if int(device_id) in _group_devices
+                        }
+                        for host, devices in impacted_hrt_tuples.items()
+                    }
+                    _group_impacted = {
+                        host: devices
+                        for host, devices in _group_impacted.items()
+                        if devices
+                    }
+                    _glanes = sorted(
+                        {
+                            lane
+                            for devices in _group_impacted.values()
+                            for tuple_lanes in devices.values()
+                            for lane in tuple_lanes
+                        }
+                    )
                 if not _glanes:
                     continue
                 postchecks.append(
                     create_fpf_hrt_remote_failure_convergence_check(
                         lanes=_glanes,
+                        device_ids=_g.get("device_ids", [0]),
                         expected_per_lane={str(lane): prefix_count for lane in _glanes},
                         direction="drain",
                         max_convergence_sec=remote_failure_sla_sec,
                         lane_labels=lane_labels,
                         only_hosts=impacted_hosts,
+                        tuple_lanes_by_host_device=_group_impacted,
                         use_live_collectors=True,
                         collector_name=f"hrt_remote_failure_{_g['suffix']}",
                         check_id=f"fpf_remote_failure_impacted_{_g['suffix']}",
@@ -25812,6 +26013,7 @@ def create_fpf_link_event_disrupt_playbook(
             postchecks.append(
                 create_fpf_hrt_remote_failure_convergence_check(
                     lanes=impacted_lanes,
+                    device_ids=resolved_hrt_device_ids,
                     expected_per_lane={
                         str(lane): prefix_count for lane in impacted_lanes
                     },
@@ -25823,24 +26025,32 @@ def create_fpf_link_event_disrupt_playbook(
                     check_id="fpf_remote_failure_impacted",
                 )
             )
-    stable_rf = [
-        lane
-        for lane in injected_lanes
-        if not (injected_prefixes_withdrawn and lane in impacted_lanes)
-    ]
+    stable_rf = (
+        injected_lanes
+        if resolved_hrt_device_ids != [0]
+        else [
+            lane
+            for lane in injected_lanes
+            if not (injected_prefixes_withdrawn and lane in impacted_lanes)
+        ]
+    )
     if stable_rf and rf_vf_groups:
-        # Per-VF-group: assert zero remote-failure on each group's OWN lanes
-        # (intersected with the stable set), reading the group's narrow-subnet
-        # collector so the other group's expected cross-plane failures are excluded.
+        # Per-VF-group: assert zero remote failures on every mapped device/local
+        # plane tuple, reading the group's narrow-subnet collector.
         for _g in rf_vf_groups:
-            _glanes = [lane for lane in _g["lanes"] if lane in stable_rf]
+            _glanes, _gexpected = _fpf_rf_stable_scope(_g, stable_rf)
             if not _glanes:
                 continue
             postchecks.append(
                 create_fpf_hrt_remote_failure_convergence_check(
                     lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
                     direction="stable",
                     only_hosts=impacted_hosts,
+                    excluded_tuple_lanes_by_host_device=(
+                        impacted_hrt_tuples if injected_prefixes_withdrawn else None
+                    ),
                     use_live_collectors=True,
                     collector_name=f"hrt_remote_failure_{_g['suffix']}",
                     check_id=f"fpf_remote_failure_unimpacted_stable_{_g['suffix']}",
@@ -25850,6 +26060,7 @@ def create_fpf_link_event_disrupt_playbook(
         postchecks.append(
             create_fpf_hrt_remote_failure_convergence_check(
                 lanes=stable_rf,
+                device_ids=resolved_hrt_device_ids,
                 direction="stable",
                 only_hosts=impacted_hosts,
                 use_live_collectors=True,
@@ -25873,12 +26084,15 @@ def create_fpf_link_event_disrupt_playbook(
     # plane(s) go DRAINED while every other plane stays UP. Only added when the
     # caller opts in via plane_status_mode="drain" (link/device drain) — a port
     # disable shows the plane DOWN, not DRAINED, so it is out of this contract.
-    # Plane == lane on the monitored GPU device, so impacted_planes=impacted_lanes.
+    # New-SDK MWG2 maps each GPU/global lane to one exact device/local plane;
+    # legacy dev0 callers retain the lane-only contract.
     if plane_status_mode == "drain" and prod_prefixes and impacted_lanes:
         postchecks.append(
             create_fpf_hrt_plane_status_check(
                 mode="drain",
                 impacted_planes=impacted_lanes,
+                device_ids=resolved_hrt_device_ids,
+                impacted_tuples_by_host_device=impacted_hrt_tuples or None,
                 check_id="fpf_hrt_plane_status_drain",
             )
         )
@@ -25910,8 +26124,24 @@ def create_fpf_link_event_disrupt_playbook(
             create_fpf_hrt_fsdb_session_check(
                 hosts=hosts,
                 expected_session_count=fsdb_expected_total,
-                impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu,
-                reconcile_device_id=0,
+                device_ids=(
+                    resolved_hrt_device_ids
+                    if resolved_hrt_device_ids != [0]
+                    else None
+                ),
+                planes_per_device=(
+                    4 if resolved_hrt_device_ids != [0] else None
+                ),
+                impacted_lanes_by_host_gpu=(
+                    impacted_lanes_by_host_gpu
+                    if resolved_hrt_device_ids == [0]
+                    else None
+                ),
+                impacted_tuples_by_host_device=(
+                    impacted_hrt_tuples
+                    if resolved_hrt_device_ids != [0]
+                    else None
+                ),
                 check_id="fpf_hrt_fsdb_session_disrupt",
             )
         )
@@ -25921,6 +26151,14 @@ def create_fpf_link_event_disrupt_playbook(
             create_fpf_hrt_fsdb_session_check(
                 hosts=hosts,
                 expected_session_count=fsdb_expected_total,
+                device_ids=(
+                    resolved_hrt_device_ids
+                    if resolved_hrt_device_ids != [0]
+                    else None
+                ),
+                planes_per_device=(
+                    4 if resolved_hrt_device_ids != [0] else None
+                ),
                 check_id="fpf_hrt_fsdb_session_stable",
             )
         )
@@ -26176,6 +26414,7 @@ def create_fpf_disrupt_window_playbook(
     postchecks: list,
     stage_id: str = "disruption",
     spray_hosts: list[str] | None = None,
+    ib_traffic_config: t.Mapping[str, t.Any] | None = None,
 ) -> Playbook:
     """FPF disruption playbook with disruption-window-scoped postchecks.
 
@@ -26214,6 +26453,17 @@ def create_fpf_disrupt_window_playbook(
     ensure_traffic = (
         [
             create_fpf_ensure_traffic_step(
+                **ib_traffic_config,
+                description=(
+                    "Strict traffic readiness: validate the canonical process "
+                    "and egress contract; recover only after the prior verdict"
+                ),
+            )
+        ]
+        if ib_traffic_config
+        else (
+        [
+            create_fpf_ensure_traffic_step(
                 server=spray_hosts[0],
                 clients=list(spray_hosts[1:]),
                 description=(
@@ -26224,6 +26474,7 @@ def create_fpf_disrupt_window_playbook(
         ]
         if spray_hosts and len(spray_hosts) >= 2
         else []
+        )
     )
     steps = ensure_traffic + list(disruption_steps)
     return Playbook(
@@ -26329,6 +26580,8 @@ def create_fpf_service_restart_playbook(
     reconvergence_sla_sec: float = 60.0,
     skip_fsdb_session_postcheck: bool = False,
     convergence_blip_mode: str = "strict",
+    hrt_device_ids: list[int] | None = None,
+    ib_traffic_config: t.Mapping[str, t.Any] | None = None,
 ) -> Playbook:
     """FPF service-restart / coldboot playbook (single playbook, self-recovering).
 
@@ -26342,11 +26595,9 @@ def create_fpf_service_restart_playbook(
 
     ``rf_vf_groups`` (8-STSW split-per-VF injection): a list of
     ``{"suffix", "subnet", "lanes"}`` dicts. When given, the single broad HRT
-    remote-failure "stable" check is replaced by one per VF group, each scoped to
-    that group's own lanes and reading its per-group collector
-    ("hrt_remote_failure_<suffix>") — so each group asserts ZERO remote-failure on
-    the lanes where it IS reachable, instead of tripping on the other group's
-    expected cross-plane failures.
+    remote-failure "stable" check is replaced by one per VF group, each reading
+    its narrow-subnet collector and explicit device IDs. Every selected tuple is
+    expected to remain at zero.
 
     ``skip_injection`` drops the in-playbook prefix-injection + stabilization
     stage steps (prefixes injected once by the ``fpf_inject_bgp_prefixes`` setup
@@ -26399,6 +26650,13 @@ def create_fpf_service_restart_playbook(
     )
 
     services = ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
+    resolved_hrt_device_ids = hrt_device_ids or sorted(
+        {
+            int(device_id)
+            for group in (rf_vf_groups or [])
+            for device_id in group.get("device_ids", [0])
+        }
+    ) or [0]
 
     # Generic (non-convergence) check set shared with the hardening playbooks:
     # generic prechecks (with the MANDATORY drain pre-check prepended as the
@@ -26427,6 +26685,7 @@ def create_fpf_service_restart_playbook(
         reconvergence_service=taac_types.SERVICE_NAME_MAP[service],
         reconvergence_sla_sec=reconvergence_sla_sec,
         reconvergence_hosts=restart_device_regexes,
+        hrt_device_ids=resolved_hrt_device_ids,
     )
 
     # MANDATORY FPF drain pre-check (matches v1): abort if any in-scope GTSW /
@@ -26465,7 +26724,17 @@ def create_fpf_service_restart_playbook(
     # STRICT traffic precheck at the stage HEAD: verify all 4 RDMA planes carry
     # traffic (restart ib_write_bw if collapsed; fail hard on a plane wedge).
     # No-op when skip_ssh (spray_hosts is None / < 2 hosts).
-    if spray_hosts and len(spray_hosts) >= 2:
+    if ib_traffic_config:
+        stage_steps.append(
+            create_fpf_ensure_traffic_step(
+                **ib_traffic_config,
+                description=(
+                    "Strict traffic readiness: validate the canonical process "
+                    "and egress contract; recover only after the prior verdict"
+                ),
+            )
+        )
+    elif spray_hosts and len(spray_hosts) >= 2:
         stage_steps.append(
             create_fpf_ensure_traffic_step(
                 server=spray_hosts[0],
@@ -26512,22 +26781,37 @@ def create_fpf_service_restart_playbook(
     )
 
     postchecks = []
-
     # --- Per-GTSW rib checks: affected rib reconverges (null-tolerant), the
     # other stays converged. ---
     for lane_id, gtsw in enumerate(gtsws):
         lane_map = {str(lane_id): gtsw}
+        is_restart_target = any(
+            re.search(device_pattern, gtsw)
+            for device_pattern in restart_device_regexes
+        )
         if affected_rib == "bgp":
-            postchecks.append(
-                create_fpf_bgp_rib_convergence_check(
-                    lane_map=lane_map,
-                    expected_matched=prefix_count,
-                    use_live_collectors=True,
-                    mode="restart",
-                    reconverge_sla_sec=bgp_sla,
-                    check_id=f"fpf_bgp_restart_reconverge_lane{lane_id}",
+            if is_restart_target:
+                postchecks.append(
+                    create_fpf_bgp_rib_convergence_check(
+                        lane_map=lane_map,
+                        expected_matched=prefix_count,
+                        use_live_collectors=True,
+                        mode="restart",
+                        reconverge_sla_sec=bgp_sla,
+                        check_id=f"fpf_bgp_restart_reconverge_lane{lane_id}",
+                    )
                 )
-            )
+            else:
+                postchecks.append(
+                    create_fpf_bgp_rib_convergence_check(
+                        lane_map=lane_map,
+                        expected_matched=prefix_count,
+                        use_live_collectors=True,
+                        settle_sec=settle,
+                        stability_mode=convergence_blip_mode,
+                        check_id=f"fpf_bgp_stable_lane{lane_id}",
+                    )
+                )
             postchecks.append(
                 create_fpf_fsdb_ribmap_convergence_check(
                     lane_map=lane_map,
@@ -26539,16 +26823,28 @@ def create_fpf_service_restart_playbook(
                 )
             )
         elif affected_rib == "fsdb":
-            postchecks.append(
-                create_fpf_fsdb_ribmap_convergence_check(
-                    lane_map=lane_map,
-                    expected_matched=prefix_count,
-                    use_live_collectors=True,
-                    mode="restart",
-                    reconverge_sla_sec=fsdb_sla,
-                    check_id=f"fpf_fsdb_restart_reconverge_lane{lane_id}",
+            if is_restart_target:
+                postchecks.append(
+                    create_fpf_fsdb_ribmap_convergence_check(
+                        lane_map=lane_map,
+                        expected_matched=prefix_count,
+                        use_live_collectors=True,
+                        mode="restart",
+                        reconverge_sla_sec=fsdb_sla,
+                        check_id=f"fpf_fsdb_restart_reconverge_lane{lane_id}",
+                    )
                 )
-            )
+            else:
+                postchecks.append(
+                    create_fpf_fsdb_ribmap_convergence_check(
+                        lane_map=lane_map,
+                        expected_matched=prefix_count,
+                        use_live_collectors=True,
+                        settle_sec=settle,
+                        stability_mode=convergence_blip_mode,
+                        check_id=f"fpf_fsdb_stable_lane{lane_id}",
+                    )
+                )
             postchecks.append(
                 create_fpf_bgp_rib_convergence_check(
                     lane_map=lane_map,
@@ -26588,6 +26884,7 @@ def create_fpf_service_restart_playbook(
     postchecks.append(
         create_fpf_hrt_bulk_convergence_check(
             lanes=injected_lanes,
+            device_ids=resolved_hrt_device_ids,
             expected_per_lane={str(lane): prefix_count for lane in injected_lanes},
             use_live_collectors=True,
             settle_sec=settle,
@@ -26596,13 +26893,16 @@ def create_fpf_service_restart_playbook(
         )
     )
     if rf_vf_groups:
-        # Per-VF-group: assert each group has zero remote-failure on its OWN
-        # lanes (reading the group's narrow-subnet collector), avoiding the other
-        # group's expected cross-plane failures.
+        # Per-VF-group: assert zero on every mapped device/local-plane tuple.
         for _g in rf_vf_groups:
+            _glanes, _gexpected = _fpf_rf_stable_scope(_g, injected_lanes)
+            if not _glanes:
+                continue
             postchecks.append(
                 create_fpf_hrt_remote_failure_convergence_check(
-                    lanes=_g["lanes"],
+                    lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
                     direction=_rf_direction,
                     use_live_collectors=True,
                     collector_name=f"hrt_remote_failure_{_g['suffix']}",
@@ -26613,6 +26913,7 @@ def create_fpf_service_restart_playbook(
         postchecks.append(
             create_fpf_hrt_remote_failure_convergence_check(
                 lanes=injected_lanes,
+                device_ids=resolved_hrt_device_ids,
                 direction=_rf_direction,
                 use_live_collectors=True,
                 check_id="fpf_hrt_remote_failure_stable",
@@ -26629,6 +26930,7 @@ def create_fpf_service_restart_playbook(
         postchecks.append(
             create_fpf_hrt_plane_status_check(
                 mode="all_up",
+                device_ids=resolved_hrt_device_ids,
                 # Scope to the injected/tested lanes so a lab plane that is
                 # already impaired at baseline (e.g. an unrelated drained GTSW)
                 # is not flagged as a restart regression. Mirrors the
@@ -26649,6 +26951,10 @@ def create_fpf_service_restart_playbook(
         create_fpf_hrt_fsdb_session_check(
             hosts=hosts,
             expected_session_count=fsdb_expected_total,
+            device_ids=(resolved_hrt_device_ids if len(resolved_hrt_device_ids) > 1 else None),
+            planes_per_device=(
+                len(injected_lanes) if len(resolved_hrt_device_ids) > 1 else None
+            ),
             check_id="fpf_hrt_fsdb_session_stable",
         )
     )

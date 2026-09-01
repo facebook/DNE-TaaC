@@ -49,6 +49,8 @@ from taac.steps.step_definitions import (
     create_fpf_drain_interface_step,
     create_fpf_ndp_clear_loop_step,
     create_fpf_record_disruption_time_step,
+    create_fpf_record_restart_completion_time_step,
+    create_fpf_record_restart_time_step,
     create_fpf_repeated_service_crash_step,
     create_fpf_restart_hrt_step,
     create_fpf_set_interface_admin_step,
@@ -66,7 +68,6 @@ from taac.task_definitions import (
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     Circuit,
@@ -74,15 +75,21 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     DEFAULT_COMMUNITY_LIST,
     disable_interfaces_by_device,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
+    FpfIbTrafficConfig,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     impacted_lanes_by_host_gpu,
     num_disrupted_circuits,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     TRIGGER_STSWS,
@@ -102,9 +109,32 @@ from taac.test_as_a_config.types import TestConfig
 # on s005-s008 = planes 4-7); injected ONCE by the setup task, withdrawn ONCE in
 # teardown, so every playbook passes skip_injection=True.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
+FSDB_GLOBAL_LANE0_TUPLES = (
+    {
+        host: {str(device_id): [0] for device_id in HRT_VF_DEVICE_IDS[0]}
+        for host in GPU_HOSTS
+    }
+    if HRT_DEVICE_IDS != [0]
+    else {}
+)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+
+
+def _ib_readiness_config(
+    spray: list[str] | None,
+) -> FpfIbTrafficConfig | None:
+    """Return the setup-identical traffic contract only when traffic is enabled."""
+    return IB_TRAFFIC_CONFIG if spray else None
+
+
 # Settle after the ONE shared STSW injection, before the first playbook's
 # prechecks. Observed convergence is <10s end-to-end (BGP RIB + FSDB ribMap reach
 # 1000 in ~7-8s on every GTSW; HRT sessions 32/32), so 30s is ~3x margin and is
@@ -116,6 +146,8 @@ INJECTED_LANES = ALL_LANES
 INJECT_SETTLE_SEC = int(os.environ.get("FPF_INJECT_SETTLE_SEC", "30"))
 
 PROD_PREFIX_HOST = GPU_HOSTS[0]
+# Production-prefix recovery remains a deliberately narrow dev0 canary. Bulk
+# injected-prefix and remote-failure checks cover every configured HRT device.
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 
@@ -184,6 +216,7 @@ def _tc41_baseline(*, spray) -> list:
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             hrt_driver_hosts=HRT_MEMORY_HOSTS,
             spray_hosts=spray,
+            ib_traffic_config=_ib_readiness_config(spray),
             skip_injection=True,
             rf_vf_groups=RF_VF_GROUPS,
             lanes=INJECTED_LANES,
@@ -207,10 +240,12 @@ def _gr_playbook(
 ) -> list:
     """tc05/06/07/08: BGP/FSDB graceful-restart within/beyond window.
 
-    ``convergence_blip_mode`` selects the two-mode blip-handling contract for the
-    convergence (Signal-3) / HRT remote-failure / prod-prefix checks: GR-within
-    (tc05/tc07) is graceful -> "skip_null_strict" (MODE B); GR-beyond
-    (tc06/tc08) purges routes past the window -> "last_sample" (MODE A).
+    The affected BGP/FSDB RIB uses its restart-aware recovery contract.
+    ``convergence_blip_mode`` selects the two-mode blip-handling contract for
+    the unaffected RIB, HRT bulk/remote-failure, and prod-prefix checks:
+    GR-within (tc05/tc07) is graceful -> "skip_null_strict" (MODE B);
+    GR-beyond (tc06/tc08) purges routes past the window -> "last_sample"
+    (MODE A).
     """
     skip_ssh = skip_ssh_dependencies()
     disruption_steps = list(extra_steps_pre or [])
@@ -221,6 +256,24 @@ def _gr_playbook(
             description=f"Stop {service.name} on DUT GTSW",
         ),
         create_longevity_step(duration=wait_sec, description=wait_desc),
+    ]
+    if service == taac_types.Service.BGP:
+        # This GR shape has no separate pre-stop disruption window, so its
+        # existing disruption timestamp can anchor BGP RIB recovery.
+        disruption_steps.append(
+            create_fpf_record_disruption_time_step(
+                description="Record BGP restart time for RIB reconvergence SLA"
+            )
+        )
+    elif service == taac_types.Service.FSDB:
+        # Keep tc08's pre-stop disruption timestamp intact for its drain-window
+        # check while anchoring FSDB ribMap recovery immediately before START.
+        disruption_steps.append(
+            create_fpf_record_restart_time_step(
+                description="Record FSDB restart time for ribMap reconvergence SLA"
+            )
+        )
+    disruption_steps += [
         create_service_interruption_step(
             service=service,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
@@ -269,6 +322,7 @@ def _gr_playbook(
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             hrt_driver_hosts=HRT_MEMORY_HOSTS,
             spray_hosts=spray,
+            ib_traffic_config=_ib_readiness_config(spray),
             skip_injection=True,
             rf_vf_groups=RF_VF_GROUPS,
             lanes=INJECTED_LANES,
@@ -276,6 +330,8 @@ def _gr_playbook(
             reconvergence_service=reconvergence_service,
             reconvergence_sla_sec=60.0,
             reconvergence_hosts=[OBSERVER_GTSWS[0]],
+            bgp_rib_restart_reconverge=(service == taac_types.Service.BGP),
+            fsdb_rib_restart_reconverge=(service == taac_types.Service.FSDB),
             skip_fsdb_session_postcheck=True,
             convergence_blip_mode=convergence_blip_mode,
             # GR-BEYOND ONLY: holding the service down past the GR window purges
@@ -415,6 +471,7 @@ def _service_restart_playbook(
             bgp_reconverge_sla_sec=bgp_reconverge_sla_sec,
             skip_ssh_dependent_checks=skip_ssh,
             spray_hosts=spray,
+            ib_traffic_config=_ib_readiness_config(spray),
             skip_injection=True,
             rf_vf_groups=RF_VF_GROUPS,
             assert_bgp_reconvergence=True,
@@ -538,6 +595,7 @@ def _kill_playbooks(
         playbook_name=disrupt_name,
         disruption_steps=disrupt_steps,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         postchecks=build_kill_disrupt_postchecks(
             killed_service=killed_service,
             observer_gtsws=OBSERVER_GTSWS,
@@ -566,6 +624,7 @@ def _kill_playbooks(
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         convergence_settle_sec=longevity_settle_sec,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
@@ -638,13 +697,14 @@ def _fsdb_kill_window_playbooks(
             mode="disruption",
             expected_connected=EXPECTED_FSDB_SESSION_COUNT,
             expected_connected_during=connected_during,
-            impacted_lanes=[0],
+            impacted_lanes=([0] if HRT_DEVICE_IDS == [0] else None),
+            impacted_tuples_by_host_device=(FSDB_GLOBAL_LANE0_TUPLES or None),
             recovery_min_sec=recovery_min_sec,
             lookback_sec=session_lookback_sec,
             check_id=f"{disrupt_name}_session_stat",
         ),
     ]
-    if add_kill_window_spray:
+    if add_kill_window_spray and spray:
         postchecks.append(
             create_fpf_host_spray_check(
                 hosts=GPU_HOSTS,
@@ -665,7 +725,8 @@ def _fsdb_kill_window_playbooks(
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         playbook_name=disrupt_name,
         disruption_steps=disrupt_steps,
-        spray_hosts=(GPU_HOSTS if add_kill_window_spray else spray),
+        spray_hosts=(GPU_HOSTS if add_kill_window_spray and spray else spray),
+        ib_traffic_config=_ib_readiness_config(spray),
         postchecks=postchecks,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
@@ -681,7 +742,8 @@ def _fsdb_kill_window_playbooks(
         skip_ssh_dependent_checks=skip_ssh,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
-        spray_hosts=(GPU_HOSTS if add_kill_window_spray else spray),
+        spray_hosts=(GPU_HOSTS if add_kill_window_spray and spray else spray),
+        ib_traffic_config=_ib_readiness_config(spray),
         host_spray_label=longevity_host_spray_label,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         skip_injection=True,
@@ -766,7 +828,7 @@ def _tc51(*, spray, skip_ssh) -> list:
 
 
 def _tc52(*, spray, skip_ssh) -> list:
-    """tc52: HRT restart (disrupt full-strength v2 + longevity v2)."""
+    """tc52: HRT restart recovery contract followed by stable longevity."""
     stabilization_delay_sec = 120
     post_restart_settle_sec = 120
     longevity_sec = 300
@@ -786,13 +848,24 @@ def _tc52(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         disruption_steps=[
+            create_fpf_record_restart_time_step(
+                description=(
+                    "Record HRT restart initiation for production-prefix recovery SLA"
+                )
+            ),
             create_fpf_restart_hrt_step(
                 hosts=hrt_restart_hosts,
                 description=(
                     f"Restart HostReachTracker on {hrt_restart_hosts} "
                     f"(systemctl restart metalos.wds.hostreachtracker)"
                 ),
+            ),
+            create_fpf_record_restart_completion_time_step(
+                description=(
+                    "Record HRT restart completion for post-outage recovery eligibility"
+                )
             ),
             create_longevity_step(
                 duration=post_restart_settle_sec,
@@ -806,6 +879,8 @@ def _tc52(*, spray, skip_ssh) -> list:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
+        prod_prefix_restart_recovery_sla_sec=30.0,
+        hrt_restart_tolerant_hosts=hrt_restart_hosts,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
@@ -822,6 +897,7 @@ def _tc52(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
@@ -953,6 +1029,7 @@ def _tc38(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         lanes=INJECTED_LANES,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
@@ -1016,6 +1093,7 @@ def _tc15(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         flip_fsdb_session=True,
         flip_discards=True,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
@@ -1056,6 +1134,7 @@ def _tc15(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         plane_status_check=True,
     )
     return [disrupt_playbook, restore_playbook]
@@ -1096,6 +1175,7 @@ def _tc16(*, spray, skip_ssh) -> list:
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             hrt_driver_hosts=HRT_MEMORY_HOSTS,
             spray_hosts=spray,
+            ib_traffic_config=_ib_readiness_config(spray),
             plane_status_check=True,
             lanes=INJECTED_LANES,
             skip_injection=True,
@@ -1158,6 +1238,7 @@ def _drain_playbooks(
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         flip_fsdb_session=False,
         flip_discards=False,
         injected_prefixes_withdrawn=False,
@@ -1202,6 +1283,7 @@ def _drain_playbooks(
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         plane_status_check=True,
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
@@ -1271,6 +1353,7 @@ def _tc55(*, spray, skip_ssh) -> list:
         playbook_name="fpf_tc55_gtsw_device_reboot_disrupt",
         disruption_steps=disrupt_steps,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         postchecks=build_kill_disrupt_postchecks(
             killed_service="wedge_agent",
             observer_gtsws=OBSERVER_GTSWS,
@@ -1298,6 +1381,7 @@ def _tc55(*, spray, skip_ssh) -> list:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=_ib_readiness_config(spray),
         convergence_settle_sec=longevity_settle_sec,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
@@ -1308,8 +1392,13 @@ def _tc55(*, spray, skip_ssh) -> list:
 
 def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh,
+        skip_ib,
+        traffic_config=IB_TRAFFIC_CONFIG,
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
     # Ordered least-destructive -> most-destructive. Each entry contributes one or
     # more playbooks; all share the single setup-time injection (skip_injection).
@@ -1323,7 +1412,6 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     # Service restarts.
     playbooks += _tc23(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc24(spray=spray, skip_ssh=skip_ssh)
-    playbooks += _tc25(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc04(spray=spray, skip_ssh=skip_ssh)
     # Kills (unclean exits).
     playbooks += _tc28(spray=spray, skip_ssh=skip_ssh)
@@ -1354,6 +1442,8 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=PROD_PREFIXES,
                 prod_prefix_host=PROD_PREFIX_HOST,

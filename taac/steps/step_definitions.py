@@ -2931,6 +2931,39 @@ def create_fpf_record_disruption_time_step(
     )
 
 
+def create_fpf_record_restart_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record an FPF recovery/restart timestamp without replacing disruption time.
+
+    Place immediately before starting a service after an intentional outage.
+    Restart-aware RIB checks can then measure their recovery SLA from this point
+    while disruption-window checks retain the original pre-outage timestamp.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF restart time",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "record_fpf_restart_time"})
+        ),
+    )
+
+
+def create_fpf_record_restart_completion_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record the timestamp immediately after a restart command completes."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF restart completion time",
+        step_params=Params(
+            json_params=json.dumps(
+                {"custom_step_name": "record_fpf_restart_completion_time"}
+            )
+        ),
+    )
+
+
 def create_fpf_repeated_service_crash_step(
     service: taac_types.Service,
     every_sec: int = 1,
@@ -3487,6 +3520,18 @@ def create_fpf_restart_ib_traffic_step(
 def create_fpf_ensure_traffic_step(
     server: str,
     clients: t.List[str],
+    device: t.Optional[str] = None,
+    gid_iface: t.Optional[str] = None,
+    gid_prefix: t.Optional[str] = None,
+    gid_index: t.Optional[int] = None,
+    port: t.Optional[int] = None,
+    msg_size: t.Optional[int] = None,
+    qp: t.Optional[int] = None,
+    tclass: t.Optional[int] = None,
+    iters: t.Optional[int] = None,
+    min_egress_gbps: t.Optional[float] = None,
+    settle_sec: t.Optional[int] = None,
+    ods_window_sec: t.Optional[int] = None,
     traffic_floor_gbps: t.Optional[float] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3494,16 +3539,21 @@ def create_fpf_ensure_traffic_step(
 
     Verifies all 4 RDMA traffic planes (beth0-3) carry traffic on server+clients
     by sampling ``/sys/class/net/bethN/statistics/tx_bytes`` directly (no ODS).
-    If any plane is below the floor it restarts ib_write_bw and re-checks; if a
-    plane STILL can't carry traffic it raises (fail fast) — converting a silent
-    plane wedge (e.g. the DUT not learning that plane's prefixes) into an early,
-    loud failure instead of a contaminated run. Place at the HEAD of each playbook
-    stage so every test case starts from verified-healthy traffic.
+    If all planes collapse or the exact configured process is absent/wrong, it
+    restarts ib_write_bw and re-checks process identity, ODS egress, and direct
+    lane rates. A partial dead-lane result fails without remediation so a fabric
+    verdict cannot be masked. Place at the HEAD of a subsequent playbook stage
+    so the preceding disruption verdict is recorded before any recovery.
 
     Args:
         server: server host (e.g. ``"rtptest1544.mwg2"``).
         clients: client host(s) (non-empty).
-        traffic_floor_gbps: per-plane egress floor in Gbps (default 50.0 in the
+        device / gid_iface / gid_prefix / gid_index / port / msg_size / qp /
+            tclass / iters: The exact setup-time ib_write_bw contract. Supplying
+            these prevents recovery from silently using different defaults.
+        min_egress_gbps / settle_sec / ods_window_sec: ODS recovery-validation
+            contract, shared with the setup task.
+        traffic_floor_gbps: per-plane egress floor in Gbps (default 5.0 in the
             handler — catches a dead/0 plane while tolerating normal variation).
         description: Custom step description.
     """
@@ -3512,6 +3562,23 @@ def create_fpf_ensure_traffic_step(
         "server": server,
         "clients": clients,
     }
+    optional_params = {
+        "device": device,
+        "gid_iface": gid_iface,
+        "gid_prefix": gid_prefix,
+        "gid_index": gid_index,
+        "port": port,
+        "msg_size": msg_size,
+        "qp": qp,
+        "tclass": tclass,
+        "iters": iters,
+        "min_egress_gbps": min_egress_gbps,
+        "settle_sec": settle_sec,
+        "ods_window_sec": ods_window_sec,
+    }
+    payload.update(
+        {key: value for key, value in optional_params.items() if value is not None}
+    )
     if traffic_floor_gbps is not None:
         payload["traffic_floor_gbps"] = traffic_floor_gbps
     return Step(

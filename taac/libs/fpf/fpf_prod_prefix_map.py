@@ -74,6 +74,12 @@ HOST_DEVICE_PREFIX: t.Dict[str, t.Dict[int, str]] = {
     "rtptest1599.mwg2": {
         0: "2401:db00:292a:a124::/64",
     },
+    "twshared1352.03.mwg2": {
+        0: "2401:db00:292a:a27c::/64",
+    },
+    "twshared1388.03.mwg2": {
+        0: "2401:db00:292a:a16c::/64",
+    },
 }
 # === GENERATED:END host-device-prefix ===
 

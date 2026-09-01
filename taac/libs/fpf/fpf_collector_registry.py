@@ -35,6 +35,8 @@ Two responsibilities:
    Health check defaults can be overridden per call via ``check_params``.
 """
 
+import asyncio
+import time
 import typing as t
 
 # The registry state + register/get/clear/test_case_start_time helpers were
@@ -83,6 +85,7 @@ _disruption_effective_detail: str = ""
 # config sets allow_baseline_failures, postcheck lane assertions exclude these
 # lanes (a failure there is PRE-EXISTING, not a test regression).
 _baseline_impaired_lanes: t.Dict[str, t.Set[int]] = {}
+_baseline_impaired_tuples: t.Dict[str, t.Set[t.Tuple[int, int]]] = {}
 _allow_baseline_failures: bool = False
 
 
@@ -116,6 +119,18 @@ def set_baseline_impaired_lanes(host_to_lanes: t.Dict[str, t.Set[int]]) -> None:
 
 def get_baseline_impaired_lanes() -> t.Dict[str, t.Set[int]]:
     return {h: set(v) for h, v in _baseline_impaired_lanes.items()}
+
+
+def set_baseline_impaired_tuples(
+    host_to_tuples: t.Dict[str, t.Set[t.Tuple[int, int]]],
+) -> None:
+    """Record exact ``(device_id, local_plane)`` baseline impairments."""
+    global _baseline_impaired_tuples
+    _baseline_impaired_tuples = {h: set(v) for h, v in host_to_tuples.items()}
+
+
+def get_baseline_impaired_tuples() -> t.Dict[str, t.Set[t.Tuple[int, int]]]:
+    return {h: set(v) for h, v in _baseline_impaired_tuples.items()}
 
 
 def baseline_impaired_lane_union() -> t.Set[int]:
@@ -183,6 +198,16 @@ def get_check_results() -> t.List[t.Tuple[str, str, str, str]]:
 # disruption-relative heuristic. Distinct from test_case_start_time, which is
 # set at the START of the playbook (before inject + stabilization).
 _disruption_time: float = 0.0
+
+# Wall-clock epoch of a recovery/restart action. This is intentionally separate
+# from ``_disruption_time``: GR-beyond tests use the latter to retain the full
+# service-down observation window while affected-rib recovery SLAs start here.
+_restart_time: float = 0.0
+
+# Wall-clock epoch immediately after a restart command completes. HRT restart
+# recovery uses this to exclude a healthy collector sample that races between
+# the pre-command marker and the actual service outage.
+_restart_completion_time: float = 0.0
 
 # Signal 1: end-to-end convergence ceiling. Includes any stimulus push
 # duration. 180s allows ~110s for 10k-prefix injection + ~70s propagation.
@@ -260,19 +285,109 @@ def get_disruption_time() -> float:
     return _disruption_time
 
 
+def set_restart_time(ts: float) -> None:
+    global _restart_time
+    _restart_time = ts
+
+
+def get_restart_time() -> float:
+    return _restart_time
+
+
+def set_restart_completion_time(ts: float) -> None:
+    global _restart_completion_time
+    _restart_completion_time = ts
+
+
+def get_restart_completion_time() -> float:
+    return _restart_completion_time
+
+
+def validate_restart_tolerant_tuple(
+    rows: t.Iterable[t.Any],
+    host: str,
+    device_id: int,
+    lane: int,
+    expected: int,
+    restart_ts: float,
+    restart_completion_ts: t.Optional[float] = None,
+) -> t.Tuple[bool, str]:
+    """Validate one HRT tuple after an intentional host restart.
+
+    Error/null rows are tolerated for the restarted host, but every valid row
+    must retain the exact expected count. At least one valid row must also be
+    published after the restart command completes or, if later, after the last
+    observed outage row. This prevents a healthy sample racing just after the
+    pre-command marker from being mistaken for recovery.
+    """
+    valid: t.List[t.Tuple[float, int]] = []
+    last_outage_ts: t.Optional[float] = None
+    for row in rows:
+        if getattr(row, "host", None) != host:
+            continue
+        if int(getattr(row, "device_id", 0)) != device_id:
+            continue
+        try:
+            row_ts = _parse_ts(row.timestamp).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        if row_ts <= restart_ts:
+            continue
+        counts = getattr(row, "lane_counts", [])
+        is_error = (
+            not getattr(row, "valid", True)
+            or str(getattr(row, "notes", "") or "").startswith("error:")
+            or lane >= len(counts)
+        )
+        if is_error:
+            last_outage_ts = row_ts
+            continue
+        valid.append((row_ts, int(counts[lane])))
+
+    dirty = [(ts, count) for ts, count in valid if count != expected]
+    if dirty:
+        ts, count = dirty[0]
+        return (
+            False,
+            f"valid sample {count} != {expected} at {ts:.3f} after restart",
+        )
+
+    eligibility_ts = max(
+        restart_ts,
+        restart_completion_ts or restart_ts,
+        last_outage_ts or restart_ts,
+    )
+    eligible_valid = [(ts, count) for ts, count in valid if ts > eligibility_ts]
+    if not eligible_valid:
+        return (
+            False,
+            "no valid recovery sample after restart/outage eligibility "
+            f"{eligibility_ts:.3f}",
+        )
+    return (
+        True,
+        f"recovered at {eligible_valid[0][0]:.3f} after eligibility "
+        f"{eligibility_ts:.3f}; final={eligible_valid[-1][1]}",
+    )
+
+
 def clear_all() -> None:
-    global _disruption_time
+    global _disruption_time, _restart_time, _restart_completion_time
     global _disruption_effective, _disruption_effective_detail
-    global _baseline_impaired_lanes, _allow_baseline_failures
+    global _baseline_impaired_lanes, _baseline_impaired_tuples
+    global _allow_baseline_failures
     # Shared registry state (collectors dict + test-case start time) lives in
     # taac.libs.collectors.registry — delegate its reset there.
     _clear_collectors()
     _artifacts.clear()
     _check_results.clear()
     _disruption_time = 0.0
+    _restart_time = 0.0
+    _restart_completion_time = 0.0
     _disruption_effective = None
     _disruption_effective_detail = ""
     _baseline_impaired_lanes = {}
+    _baseline_impaired_tuples = {}
     _allow_baseline_failures = False
 
 
@@ -295,6 +410,10 @@ def _row_matches_device(row: t.Any, device: str) -> bool:
 def _row_value(
     row: t.Any, lane_id: t.Optional[int], match_field: str
 ) -> t.Optional[int]:
+    if not getattr(row, "valid", True) or str(getattr(row, "notes", "")).startswith(
+        "error:"
+    ):
+        return None
     if lane_id is not None and hasattr(row, "lane_counts"):
         lc = row.lane_counts
         return lc[lane_id] if lane_id < len(lc) else None
@@ -308,10 +427,16 @@ def _collect_sorted_samples(
     device: str,
     lane_id: t.Optional[int],
     match_field: str,
+    host: t.Optional[str] = None,
+    device_id: t.Optional[int] = None,
 ) -> t.List[t.Tuple[float, int]]:
     """Filter rows for device, parse timestamps, sort chronologically."""
     samples: t.List[t.Tuple[float, int]] = []
     for row in rows:
+        if host is not None and getattr(row, "host", None) != host:
+            continue
+        if device_id is not None and getattr(row, "device_id", None) != device_id:
+            continue
         if not _row_matches_device(row, device):
             continue
         val = _row_value(row, lane_id, match_field)
@@ -485,6 +610,8 @@ def evaluate_three_signals(
     match_field: str = "matched",
     lane_id: t.Optional[int] = None,
     stability_mode: str = BLIP_MODE_STRICT,
+    host: t.Optional[str] = None,
+    device_id: t.Optional[int] = None,
 ) -> PerLaneResult:
     """Decorate ``result`` with three independent signal evaluations.
 
@@ -513,7 +640,14 @@ def evaluate_three_signals(
     ``detail`` rewritten as a human-readable 3-line summary.
     """
     rows = collector.get_rows_in_window(window_start, window_end)
-    samples = _collect_sorted_samples(rows, result.device, lane_id, match_field)
+    samples = _collect_sorted_samples(
+        rows,
+        result.device,
+        lane_id,
+        match_field,
+        host=host,
+        device_id=device_id,
+    )
     t1, t2 = _find_t1_t2(samples, expected)
     _eval_signal1_e2e(result, t2, window_start, expected, signal1_e2e_max_sec)
     _eval_signal2_local(result, t1, t2, window_start, expected, signal2_local_max_sec)
@@ -543,6 +677,112 @@ def evaluate_three_signals(
     return result
 
 
+_RestartObservation = t.Tuple[float, float, int, bool]
+
+
+def _collect_restart_observations(
+    rows: t.Iterable[t.Any], match_field: str, disruption_ts: float
+) -> t.Tuple[t.List[_RestartObservation], int, int]:
+    observations: t.List[_RestartObservation] = []
+    null_count = 0
+    legacy_count = 0
+    for row in rows:
+        try:
+            completion_ts = _parse_ts(row.timestamp).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        request_start = float(getattr(row, "request_start_epoch", 0.0) or 0.0)
+        request_end = float(getattr(row, "request_end_epoch", 0.0) or 0.0)
+        legacy = request_start <= 0 or request_end < request_start
+        if legacy:
+            request_start = completion_ts
+            request_end = completion_ts
+            legacy_count += 1
+        if request_start < disruption_ts:
+            continue
+        notes = getattr(row, "notes", "") or ""
+        matched = getattr(row, match_field, None)
+        if notes.startswith("error:") or matched is None:
+            null_count += 1
+            continue
+        observations.append((request_start, request_end, int(matched), legacy))
+    observations.sort(key=lambda observation: observation[1])
+    return observations, null_count, legacy_count
+
+
+def _evaluate_restart_observations(
+    observations: t.List[_RestartObservation],
+    expected: int,
+    disruption_ts: float,
+    reconverge_sla_sec: float,
+    null_count: int,
+    legacy_count: int,
+) -> t.Tuple[bool, t.Optional[float], str]:
+    if not observations:
+        return (
+            False,
+            None,
+            "INSUFFICIENT MEASUREMENT — no non-null samples after "
+            f"restart ({null_count} null tolerated)",
+        )
+
+    recovery = next(
+        (observation for observation in observations if observation[2] >= expected),
+        None,
+    )
+    last = observations[-1][2]
+    legacy_note = (
+        f"; {legacy_count} legacy row(s) used completion-time fallback"
+        if legacy_count
+        else ""
+    )
+    if recovery is None:
+        return (
+            False,
+            None,
+            f"never reached {expected} after restart "
+            f"(last={last}, {null_count} null tolerated{legacy_note})",
+        )
+
+    request_start, request_end, _matched, legacy = recovery
+    reconverge_sec = round(request_end - disruption_ts, 1)
+    deadline = disruption_ts + reconverge_sla_sec
+    if request_end <= deadline:
+        timing_ok = True
+        timing_detail = f"completed by SLA at +{request_end - disruption_ts:.1f}s"
+    elif request_start > deadline:
+        timing_ok = False
+        timing_detail = (
+            f"request started after SLA at +{request_start - disruption_ts:.1f}s"
+        )
+    else:
+        timing_ok = False
+        timing_detail = (
+            "MEASUREMENT INCONCLUSIVE — qualifying request crossed SLA "
+            f"boundary (+{request_start - disruption_ts:.1f}s to "
+            f"+{request_end - disruption_ts:.1f}s)"
+        )
+
+    fallback = " using legacy completion-time fallback" if legacy else ""
+    if not timing_ok:
+        detail = (
+            f"reached {expected}, but {timing_detail}{fallback} "
+            f"(last={last}, {null_count} null tolerated{legacy_note})"
+        )
+    elif last < expected:
+        detail = (
+            f"reconverged to {expected} in {reconverge_sec}s but final "
+            f"sample regressed to {last}{legacy_note}"
+        )
+    else:
+        detail = (
+            f"reconverged to {expected} in {reconverge_sec}s "
+            f"(SLA {reconverge_sla_sec:.0f}s; {timing_detail}{fallback}); "
+            f"{null_count} null sample(s) tolerated{legacy_note}"
+        )
+    return timing_ok and last >= expected, reconverge_sec, detail
+
+
 def evaluate_restart_reconverge(
     collector: t.Any,
     lane_map: t.Dict[int, str],
@@ -560,68 +800,130 @@ def evaluate_restart_reconverge(
     ``reconverge_sla_sec`` of ``disruption_ts`` (the recorded restart moment). A
     device whose count never dropped (only nulls) passes with reconverge ~0s.
 
+    Request-boundary telemetry makes the SLA verdict unambiguous: a qualifying
+    request must both start after the disruption and complete by the deadline.
+    A qualifying request spanning the deadline is a strict measurement failure,
+    while one starting after the deadline is a definite late recovery. Rows that
+    predate request telemetry retain the legacy completion-timestamp behavior.
+
     A poll is treated as null/unresponsive when its ``notes`` starts with
     "error:" or the match field is None. Returns a list of
     (lane, device, passed, reconverge_sec, null_count, detail).
     """
-    from taac.libs.fpf.fpf_stress_checks import _parse_ts
-
     rows = collector.get_rows_in_window(disruption_ts, window_end)
     results: t.List[t.Tuple[int, str, bool, t.Optional[float], int, str]] = []
     for lane_id, device in sorted(lane_map.items()):
         drows = [r for r in rows if getattr(r, "gtsw", None) == device]
-        good: t.List[t.Tuple[float, int]] = []
-        null_count = 0
-        for r in drows:
-            notes = getattr(r, "notes", "") or ""
-            matched = getattr(r, match_field, None)
-            if notes.startswith("error:") or matched is None:
-                null_count += 1
-                continue
-            try:
-                ts = _parse_ts(r.timestamp).timestamp()
-            except (ValueError, AttributeError):
-                continue
-            good.append((ts, int(matched)))
-        good.sort(key=lambda x: x[0])
-        if not good:
-            results.append(
-                (
-                    lane_id,
-                    device,
-                    False,
-                    None,
-                    null_count,
-                    f"no non-null samples after restart ({null_count} null tolerated)",
-                )
-            )
-            continue
-        reconverge_sec: t.Optional[float] = None
-        for ts, m in good:
-            if m >= expected:
-                reconverge_sec = round(ts - disruption_ts, 1)
-                break
-        last = good[-1][1]
-        passed = (
-            reconverge_sec is not None
-            and reconverge_sec <= reconverge_sla_sec
-            and last >= expected
+        observations, null_count, legacy_count = _collect_restart_observations(
+            drows, match_field, disruption_ts
         )
-        if reconverge_sec is None:
-            detail = (
-                f"never reached {expected} after restart "
-                f"(last={last}, {null_count} null tolerated)"
-            )
-        elif not passed:
-            detail = (
-                f"reconverged to {expected} in {reconverge_sec}s "
-                f"> {reconverge_sla_sec:.0f}s SLA (last={last})"
-            )
-        else:
-            detail = (
-                f"reconverged to {expected} in {reconverge_sec}s "
-                f"(SLA {reconverge_sla_sec:.0f}s); {null_count} null sample(s) "
-                f"tolerated"
-            )
+        passed, reconverge_sec, detail = _evaluate_restart_observations(
+            observations=observations,
+            expected=expected,
+            disruption_ts=disruption_ts,
+            reconverge_sla_sec=reconverge_sla_sec,
+            null_count=null_count,
+            legacy_count=legacy_count,
+        )
         results.append((lane_id, device, passed, reconverge_sec, null_count, detail))
     return results
+
+
+async def wait_for_restart_reconverge(
+    collector: t.Any,
+    lane_map: t.Dict[int, str],
+    expected: int,
+    disruption_ts: float,
+    reconverge_sla_sec: float,
+    match_field: str = "matched",
+    window_end: t.Optional[float] = None,
+    poll_interval_sec: float = 1.0,
+) -> t.Tuple[t.List[t.Tuple[int, str, bool, t.Optional[float], int, str]], float]:
+    """Re-read live restart samples until the recovery SLA has elapsed.
+
+    A caller-supplied ``window_end`` is an explicit historical/test boundary and
+    is evaluated immediately. Live callers omit it: the health check remains
+    bounded by ``disruption_ts + reconverge_sla_sec`` and re-evaluates while the
+    background collector publishes new rows. Waiting through the deadline also
+    makes the final valid sample part of the verdict, so an early recovery that
+    regresses before the SLA expires still fails.
+    """
+    deadline = disruption_ts + reconverge_sla_sec
+    if window_end is not None:
+        final_window_end = float(window_end)
+        return (
+            evaluate_restart_reconverge(
+                collector=collector,
+                lane_map=lane_map,
+                expected=expected,
+                disruption_ts=disruption_ts,
+                window_end=final_window_end,
+                reconverge_sla_sec=reconverge_sla_sec,
+                match_field=match_field,
+            ),
+            final_window_end,
+        )
+
+    targets = list(lane_map.values())
+    boundary_wait_deadline = (
+        deadline
+        + float(getattr(collector, "per_gtsw_timeout_sec", 0.0))
+        + poll_interval_sec
+    )
+    while True:
+        current_time = time.time()
+        results = evaluate_restart_reconverge(
+            collector=collector,
+            lane_map=lane_map,
+            expected=expected,
+            disruption_ts=disruption_ts,
+            window_end=current_time,
+            reconverge_sla_sec=reconverge_sla_sec,
+            match_field=match_field,
+        )
+        remaining = deadline - current_time
+        if remaining <= 0:
+            has_boundary_request = getattr(
+                collector, "has_inflight_request_started_by", None
+            )
+            if (
+                callable(has_boundary_request)
+                and has_boundary_request(targets, deadline)
+                and current_time < boundary_wait_deadline
+            ):
+                await asyncio.sleep(
+                    min(poll_interval_sec, boundary_wait_deadline - current_time)
+                )
+                continue
+            return results, current_time
+        await asyncio.sleep(min(poll_interval_sec, remaining))
+
+
+async def wait_for_target_rib_rows(
+    collector: t.Any,
+    target_devices: t.Iterable[str],
+    window_start: float,
+    deadline: float,
+    match_field: str = "matched",
+    poll_interval_sec: float = 1.0,
+) -> float:
+    """Wait until every target device has a valid RIB row, or the deadline.
+
+    Null/error rows and rows for non-target devices do not satisfy the wait.
+    The returned timestamp is the evaluation window end. This helper only
+    delays the read; the caller's normal convergence/stability policy remains
+    responsible for exact counts, latency, and final-state validation.
+    """
+    targets = set(target_devices)
+    while True:
+        current_time = time.time()
+        rows = collector.get_rows_in_window(window_start, current_time)
+        observed = {
+            str(getattr(row, "gtsw", ""))
+            for row in rows
+            if getattr(row, match_field, None) is not None
+            and not str(getattr(row, "notes", "") or "").startswith("error:")
+        }
+        if targets.issubset(observed) or current_time >= deadline:
+            return current_time
+        await asyncio.sleep(min(poll_interval_sec, deadline - current_time))

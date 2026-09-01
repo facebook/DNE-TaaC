@@ -19,8 +19,11 @@ CHECK_PARAMS = {"hosts": [GPU_HOST]}
 
 def _make_session(name: str, state: str) -> MagicMock:
     """Create a mock FSDB session with the given name and state."""
+    index = int(name.rsplit("_", 1)[-1])
     session = MagicMock()
     session.name = name
+    session.device_id = index // 8
+    session.plane_id = index % 8
     session.state = state
     return session
 
@@ -253,13 +256,69 @@ class TestFpfHrtFsdbSessionHealthCheck(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_non_rtptest_hosts_filtered_out(self):
-        """Non-rtptest hosts should be filtered with a warning."""
+        """Non-GPU hosts should be filtered with a warning."""
         input_data = hc_types.BaseHealthCheckIn()
         params = {"hosts": ["gtsw001.l1002.c087.mwg2"]}
         result = await self.health_check._run(self.device, input_data, params)
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.SKIP)
-        self.assertIn("No valid rtptest", result.message)
+        self.assertIn("No valid GPU hosts", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks"
+        ".fpf_hrt_fsdb_session_health_check.get_hrt_client"
+    )
+    async def test_twshared_gpu_host_is_checked(self, mock_get_hrt_client):
+        """twshared GPU hosts should be queried just like rtptest hosts."""
+        sessions = [_make_session(f"session_{i}", "CONNECTED") for i in range(32)]
+        mock_client = AsyncMock()
+        mock_client.getFsdbSessions.return_value = sessions
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_get_hrt_client.return_value = mock_client
+
+        params = {"hosts": ["twshared1352.03.mwg2"]}
+        result = await self.health_check._run(
+            self.device, hc_types.BaseHealthCheckIn(), params
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        mock_get_hrt_client.assert_called_once_with("twshared1352.03.mwg2")
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks"
+        ".fpf_hrt_fsdb_session_health_check.get_hrt_client"
+    )
+    async def test_twshared_exact_eight_by_four_topology(self, mock_get_hrt_client):
+        sessions = []
+        for device_id in range(8):
+            for local_plane in range(4):
+                session = MagicMock()
+                session.device_id = device_id
+                session.plane_id = local_plane
+                session.state = "CONNECTED"
+                sessions.append(session)
+        # One exact tuple is down; another tuple on the same local plane cannot
+        # satisfy it.
+        sessions[4].state = "DISCONNECTED"  # dev1/L0
+        mock_client = AsyncMock()
+        mock_client.getFsdbSessions.return_value = sessions
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_get_hrt_client.return_value = mock_client
+
+        params = {
+            "hosts": ["twshared1352.03.mwg2"],
+            "device_ids": list(range(8)),
+            "planes_per_device": 4,
+            "impacted_tuples_by_host_device": {"twshared1352.03.mwg2": {"1": [0]}},
+        }
+        result = await self.health_check._run(
+            self.device, hc_types.BaseHealthCheckIn(), params
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("dev1/L0", result.message)
 
     @patch(
         "neteng.test_infra.dne.taac.health_checks.device_health_checks"

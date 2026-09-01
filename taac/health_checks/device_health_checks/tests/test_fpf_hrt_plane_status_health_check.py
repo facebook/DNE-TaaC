@@ -124,7 +124,7 @@ class TestFpfHrtPlaneStatusHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self._run(collector, {"mode": "all_up"})
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn(HOST_B, result.message)
-        self.assertIn("Plane 2", result.message)
+        self.assertIn("dev0/L2", result.message)
 
     async def test_timeout_fail(self):
         """A poll timeout (null data) -> FAIL."""
@@ -155,6 +155,55 @@ class TestFpfHrtPlaneStatusHealthCheck(unittest.IsolatedAsyncioTestCase):
         collector = _make_collector({HOST_A: drained})
         result = await self._run(collector, {"mode": "drain", "impacted_planes": [0]})
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_drain_mode_passes_exact_device_local_plane_scope(self):
+        drained = [
+            PlaneStatusResult(
+                plane=0,
+                device_id=1,
+                passed=True,
+                expected_state="DRAINED",
+                observed_state="DRAINED",
+                samples=10,
+            )
+        ]
+        collector = _make_collector({HOST_A: drained})
+        collector.device_ids = [0, 1]
+
+        result = await self._run(
+            collector,
+            {
+                "mode": "drain",
+                "device_ids": [0, 1],
+                "expected_planes": [0],
+                "impacted_tuples_by_host_device": {HOST_A: {"1": [0]}},
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        kwargs = collector.evaluate_drain_window.call_args.kwargs
+        self.assertEqual(kwargs["device_ids"], [0, 1])
+        self.assertEqual(kwargs["impacted_tuples_by_device"], {"1": [0]})
+
+    async def test_drain_window_excludes_stale_prior_playbook_timestamp(self):
+        collector = _make_collector({HOST_A: _up_results()})
+        with patch(f"{HC_MODULE}.get_disruption_time", return_value=900.0):
+            await self._run(
+                collector,
+                {"mode": "drain", "window_end": 1200.0, "impacted_planes": [0]},
+            )
+
+        self.assertEqual(collector.hosts_in_window.call_args.args[0], 1000.0)
+
+    async def test_drain_window_retains_current_playbook_timestamp(self):
+        collector = _make_collector({HOST_A: _up_results()})
+        with patch(f"{HC_MODULE}.get_disruption_time", return_value=1020.0):
+            await self._run(
+                collector,
+                {"mode": "drain", "window_end": 1200.0, "impacted_planes": [0]},
+            )
+
+        self.assertEqual(collector.hosts_in_window.call_args.args[0], 1020.0)
 
     async def test_no_collector_skip(self):
         """No registered collector -> SKIP."""

@@ -116,6 +116,9 @@ class FpfHrtSessionStatHealthCheck(
         impacted_lanes: t.List[int] = [
             int(p) for p in (check_params.get("impacted_lanes") or [])
         ]
+        impacted_tuples_by_host_device: t.Dict[str, t.Dict[str, t.List[int]]] = (
+            check_params.get("impacted_tuples_by_host_device", {}) or {}
+        )
         recovery_min_sec = float(
             check_params.get("recovery_min_sec", DEFAULT_RECOVERY_MIN_SEC)
         )
@@ -191,6 +194,7 @@ class FpfHrtSessionStatHealthCheck(
                     expected_connected,
                     expected_during,
                     impacted_lanes,
+                    impacted_tuples_by_host_device.get(host, {}),
                     recovery_min_sec,
                 )
             host_results.append(hr)
@@ -290,6 +294,7 @@ class FpfHrtSessionStatHealthCheck(
         expected_connected: int,
         expected_during: int,
         impacted_lanes: t.List[int],
+        impacted_tuples_by_device: t.Dict[str, t.List[int]],
         recovery_min_sec: float,
     ) -> _HostSessionResult:
         hr = _HostSessionResult(host)
@@ -298,6 +303,7 @@ class FpfHrtSessionStatHealthCheck(
             window_end=window_end,
             expected_connected=expected_connected,
             impacted_lanes=impacted_lanes,
+            impacted_tuples_by_device=impacted_tuples_by_device,
             host=host,
         )
         if res.samples == 0:
@@ -312,15 +318,29 @@ class FpfHrtSessionStatHealthCheck(
         # Signal 1: census dropped to expected_during during the disruption, and
         # every requested impacted lane churned (connected dropped below total).
         drop_ok = res.min_connected is not None and res.min_connected <= expected_during
-        churn_ok = all(
-            res.impacted_lane_churn.get(lane, False) for lane in impacted_lanes
-        )
+        tuple_keys = [
+            f"dev{int(device_id)}/L{int(local_plane)}"
+            for device_id, local_planes in impacted_tuples_by_device.items()
+            for local_plane in local_planes
+        ]
+        if tuple_keys:
+            churn_ok = all(
+                res.impacted_tuple_churn.get(key, False) for key in tuple_keys
+            )
+            churn_label = "impacted-tuple churn"
+            churn_detail = _tuple_churn_str(res, tuple_keys)
+        else:
+            churn_ok = all(
+                res.impacted_lane_churn.get(lane, False) for lane in impacted_lanes
+            )
+            churn_label = "impacted-lane churn"
+            churn_detail = _churn_str(res, impacted_lanes)
         signal1_ok = drop_ok and churn_ok
         signal1_msg = (
             f"Signal1[drop]: min_connected={res.min_connected} "
             f"(<= {expected_during} expected during) "
-            f"{'OK' if drop_ok else 'FAIL'}; impacted-lane churn "
-            f"{'OK' if churn_ok else 'FAIL'} ({_churn_str(res, impacted_lanes)})"
+            f"{'OK' if drop_ok else 'FAIL'}; {churn_label} "
+            f"{'OK' if churn_ok else 'FAIL'} ({churn_detail})"
         )
 
         # Signal 2: census recovered to expected and held >= recovery_min_sec.
@@ -377,4 +397,13 @@ def _churn_str(res: t.Any, impacted_lanes: t.List[int]) -> str:
     return ", ".join(
         f"L{lane}={'yes' if res.impacted_lane_churn.get(lane, False) else 'no'}"
         for lane in impacted_lanes
+    )
+
+
+def _tuple_churn_str(res: t.Any, tuple_keys: t.List[str]) -> str:
+    if not tuple_keys:
+        return "no impacted tuples"
+    return ", ".join(
+        f"{key}={'yes' if res.impacted_tuple_churn.get(key, False) else 'no'}"
+        for key in sorted(tuple_keys)
     )
