@@ -74,6 +74,7 @@ from neteng.fboss.bgp.client.canonical_rib_py3 import (
     get_rib_entries,
     get_rib_subprefixes,
 )
+from facebook.network.Address.thrift_types import BinaryAddress
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService
@@ -89,10 +90,12 @@ from neteng.fboss.ctrl.clients import FbossCtrl
 from neteng.fboss.ctrl.types import (
     AggregatePortThrift,
     ArpEntryThrift,
+    ClientID,
     DsfSessionThrift,
     FabricEndpoint,
     HwObjectType,
     InterfaceDetail,
+    IpPrefix,
     L2EntryThrift,
     LinkNeighborThrift,
     MultiSwitchRunState,
@@ -236,6 +239,26 @@ class FBOSSConsoleError(Exception):
 
 class MnpuNotEnabled(Exception):
     pass
+
+
+def _build_ip_prefix(cidr: str) -> IpPrefix:
+    """'2001:db8::/64' -> IpPrefix. Host addresses get their full-width mask."""
+    network = ipaddress.ip_network(cidr, strict=False)
+    return IpPrefix(
+        ip=BinaryAddress(addr=network.network_address.packed),
+        prefixLength=network.prefixlen,
+    )
+
+
+def _build_binary_address(addr: str) -> BinaryAddress:
+    """'2001:db8::1' -> BinaryAddress."""
+    return BinaryAddress(addr=ipaddress.ip_address(addr).packed)
+
+
+# Prefixes programmed per (host, patcher). Module-level, not per instance:
+# async_get_device_driver builds a fresh driver for every step, so the step that
+# withdraws is never the one that added, and an attribute would always be empty.
+_STATIC_ROUTE_PREFIXES: Dict[Tuple[str, str], List[IpPrefix]] = {}
 
 
 class FbossSwitch(AbstractSwitch):
@@ -1053,6 +1076,154 @@ class FbossSwitch(AbstractSwitch):
         )
         return True
 
+    # ----------------------------------------------------------------------
+    # COOP python-patcher contract.
+    #
+    # Meta mode registers patchers with the COOP agent (FbossSwitchInternal
+    # overrides these). OSS has no COOP, so the same register/apply/unregister
+    # contract is served by editing the config files directly -- see
+    # taac/driver/oss_coop_patcher.py for the mechanism and its rationale.
+    # Without these, every patcher-based NPI config fails setup with
+    # "'FbossSwitch' object has no attribute 'async_register_python_patcher'".
+    # ----------------------------------------------------------------------
+
+    async def async_register_python_patcher(
+        self,
+        config_name: str,
+        patcher_name: str,
+        py_func_name: str,
+        patcher_args: Optional[Dict[str, Any]] = None,
+        patcher_desc: str = "",
+        **kwargs,
+    ) -> None:
+        from taac.driver import oss_coop_patcher as _ocp
+
+        _ocp.register(
+            self.hostname,
+            config_name,
+            _ocp.OssPatcher(
+                name=patcher_name,
+                config_name=config_name,
+                py_func_name=py_func_name,
+                args=dict(patcher_args or {}),
+                desc=patcher_desc,
+            ),
+        )
+        self.logger.info(
+            f"[oss-patcher] registered {patcher_name} ({py_func_name}) "
+            f"on {self.hostname}:{config_name}"
+        )
+
+    async def async_coop_list_patchers(self, config_name: str, **kwargs) -> List[Any]:
+        from taac.driver import oss_coop_patcher as _ocp
+
+        return _ocp.list_patchers(self.hostname, config_name)
+
+    async def async_coop_unregister_patchers(
+        self, patcher_name: str, config_name: Optional[str] = None, **kwargs
+    ) -> None:
+        """Unregister a config patcher, or withdraw a static-route patcher."""
+        prefixes = _STATIC_ROUTE_PREFIXES.pop((self.hostname, patcher_name), [])
+        if prefixes:
+            self.logger.info(
+                f"{self.hostname}: withdrawing {len(prefixes)} static route(s) "
+                f"for patcher {patcher_name}"
+            )
+            async with self.async_agent_client as client:
+                await client.deleteUnicastRoutes(
+                    int(ClientID.STATIC_ROUTE), prefixes
+                )
+            return
+
+        from taac.driver import oss_coop_patcher as _ocp
+
+        if config_name is None:
+            # Callers unregister defensively before adding, so an unknown name is
+            # usually just that. Scan the host's configs so a real config patcher
+            # called without a config_name is still cleaned up rather than
+            # silently skipped.
+            for candidate in _ocp.pending_configs(self.hostname):
+                if any(
+                    p.name == patcher_name
+                    for p in _ocp.list_patchers(self.hostname, candidate)
+                ):
+                    config_name = candidate
+                    break
+            else:
+                return
+
+        had_pending = bool(_ocp.pending_configs(self.hostname))
+        _ocp.unregister(self.hostname, config_name, patcher_name)
+        self.logger.info(
+            f"[oss-patcher] unregistered {patcher_name} on "
+            f"{self.hostname}:{config_name}"
+        )
+        # COOP reverts the DUT on unregister+restart; OSS must reinstall the
+        # baselines itself once the last patcher is gone, or the patched
+        # configs would outlive the test.
+        if had_pending and not _ocp.pending_configs(self.hostname):
+            await self.async_restore_patched_configs()
+
+    async def async_apply_patchers(self, **kwargs) -> None:
+        """Materialise every queued patcher, then activate and restart.
+
+        Mirrors COOP's apply step. Each config is rebased on its pristine
+        ``.baseline.conf`` snapshot, so applying twice in a session is
+        idempotent rather than cumulative.
+        """
+        from taac.driver import oss_coop_patcher as _ocp
+
+        for config_name in _ocp.pending_configs(self.hostname):
+            patchers = _ocp.list_patchers(self.hostname, config_name)
+            _, service = _ocp.CONFIG_FILES[config_name]
+            self.logger.info(
+                f"[oss-patcher] applying {len(patchers)} patcher(s) to "
+                f"{self.hostname}:{config_name} -> restarting {service}"
+            )
+            out = await self.async_run_cmd_on_shell(
+                _ocp.build_apply_command(config_name, patchers)
+            )
+            self.logger.info(f"[oss-patcher] {config_name}: {(out or '').strip()}")
+            # Shell exit status is not surfaced; gate on the script's "OK"
+            # line so a failed mutation can't activate a stale patched file.
+            if not any(l.startswith("OK ") for l in (out or "").splitlines()):
+                raise RuntimeError(
+                    f"[oss-patcher] apply failed on {self.hostname}:{config_name}: "
+                    f"{(out or '').strip()!r}"
+                )
+            # Activation is a separate step so a failed mutation can never
+            # leave a half-written config installed where the service reads it.
+            out = await self.async_run_cmd_on_shell(
+                _ocp.build_activate_command(config_name)
+            )
+            if "ACTIVATED" not in (out or ""):
+                raise RuntimeError(
+                    f"[oss-patcher] activate failed on {self.hostname}:"
+                    f"{config_name}: {(out or '').strip()!r}"
+                )
+            out = await self.async_run_cmd_on_shell(
+                f"systemctl restart {service} && echo RESTARTED"
+            )
+            if "RESTARTED" not in (out or ""):
+                raise RuntimeError(
+                    f"[oss-patcher] restart of {service} failed on "
+                    f"{self.hostname}: {(out or '').strip()!r}"
+                )
+        await self.async_wait_for_agent_state_configured()
+
+    async def async_restore_patched_configs(self) -> None:
+        """Reinstall the pristine configs captured at first apply (teardown)."""
+        from taac.driver import oss_coop_patcher as _ocp
+
+        for config_name in list(_ocp.CONFIG_FILES):
+            _, service = _ocp.CONFIG_FILES[config_name]
+            await self.async_run_cmd_on_shell(
+                _ocp.build_restore_command(config_name)
+            )
+            await self.async_run_cmd_on_shell(f"systemctl restart {service}")
+        _ocp.clear(self.hostname)
+        self.logger.info(f"[oss-patcher] restored baseline configs on {self.hostname}")
+
     async def async_register_patcher_to_shut_ports_persistently(
         self, patcher_name: str, interfaces: List[str], additional_desc=None
     ) -> None:
@@ -1076,18 +1247,48 @@ class FbossSwitch(AbstractSwitch):
         patcher_desc: str = "",
         is_patcher_name_uuid_needed: bool = True,
     ) -> str:
-        raise NotImplementedError(
-            "Static route patcher not available in OSS mode. "
-            "Use FbossSwitchInternal for COOP-based patcher operations."
-        )
+        """Program static routes over thrift, in place of a COOP patcher.
 
-    async def async_coop_unregister_patchers(
-        self, patcher_name: str, config_name: Optional[str] = None
-    ) -> None:
-        raise NotImplementedError(
-            "COOP patcher operations not available in OSS mode. "
-            "Use FbossSwitchInternal for COOP-based patcher operations."
+        ClientID.STATIC_ROUTE exists for exactly this, so no config rewrite or
+        daemon restart is needed. Unlike COOP these live only in the running
+        agent: ConfigApplier resets ClientID::STATIC_ROUTE on every config
+        apply (fboss/agent/rib/ConfigApplier.cpp), so an agent restart *or any
+        config reload* -- another step's `config session commit`, a
+        config_modifiers drain, a rollback -- drops them, and the later
+        unregister will delete prefixes that are already gone.
+        """
+        if is_patcher_name_uuid_needed:
+            # The internal driver uuid-suffixes the name; returning it verbatim
+            # would hand back a non-unique name and merge two patchers into one
+            # tracking bucket.
+            raise NotImplementedError(
+                "is_patcher_name_uuid_needed=True is not supported in OSS mode; "
+                "pass a unique patcher_name with is_patcher_name_uuid_needed=False"
+            )
+        routes = []
+        prefixes = []
+        for cidr, next_hops in prefix_to_next_hops_map.items():
+            prefix = _build_ip_prefix(cidr)
+            prefixes.append(prefix)
+            routes.append(
+                UnicastRoute(
+                    dest=prefix,
+                    nextHopAddrs=[_build_binary_address(nh) for nh in next_hops],
+                )
+            )
+
+        self.logger.info(
+            f"{self.hostname}: programming {len(routes)} static route(s) "
+            f"for patcher {patcher_name}"
         )
+        # Track before the RPC: a failure part-way still leaves routes the agent
+        # accepted, and untracked routes can never be withdrawn.
+        _STATIC_ROUTE_PREFIXES.setdefault(
+            (self.hostname, patcher_name), []
+        ).extend(prefixes)
+        async with self.async_agent_client as client:
+            await client.addUnicastRoutes(int(ClientID.STATIC_ROUTE), routes)
+        return patcher_name
 
     async def async_get_ip_route(
         self, ip: str, print_interfaces: bool = True

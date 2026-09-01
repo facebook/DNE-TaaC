@@ -375,15 +375,10 @@ class CoopUnregisterPatchersTask(BaseTask):
     NAME = "coop_unregister_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_unregister_patchers: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
-            return
         hostnames = params.get("hostnames") or [none_throws(params.get("hostname"))]
         regex = params.get("regex", r".*.")
-        owner = params.get("owner", DNE_TEST_REGRESSION_NAME)
+        # OSS patchers carry no owner; COOP stamps DNE_TEST_REGRESSION_NAME.
+        owner = params.get("owner", None if TAAC_OSS else DNE_TEST_REGRESSION_NAME)
         config_names = params.get("config_names")
         unregister_patchers_coroutines = []
         for hostname in hostnames:
@@ -420,7 +415,7 @@ class CoopUnregisterPatchersTask(BaseTask):
                 if re.search(regex, patcher.name) and patcher.owner == owner
             ]
             if not patchers_to_unregister:
-                break
+                continue
             self.logger.info(
                 f"Unregistering patchers {patchers_to_unregister} from {hostname}:{config_name}"
             )
@@ -448,12 +443,6 @@ class CoopRegisterPatcherTask(BaseTask):
     NAME = "coop_register_patcher"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_register_patcher: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
-            return
         hostname = params["hostname"]
         config_names = params.get("config_names") or [params["config_name"]]
         patcher_name = params["patcher_name"]
@@ -477,13 +466,22 @@ class CoopApplyPatchersTask(BaseTask):
     NAME = "coop_apply_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_apply_patchers: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
-            return
         hostnames = params["hostnames"]
+        if TAAC_OSS:
+            if params.get("do_warmboot") or params.get("do_coldboot"):
+                raise NotImplementedError(
+                    "coop_apply_patchers boot flags are not supported under "
+                    "TAAC_OSS=1; the OSS apply restarts the owning services only."
+                )
+            # No COOP agent: the OSS driver's async_apply_patchers does the
+            # whole apply (patch, activate, restart, wait) itself; config_names
+            # is ignored because every pending config is applied.
+            for hostname in hostnames:
+                driver = await async_get_device_driver(hostname)
+                # pyre-fixme[16]: `AbstractSwitch` has no attribute
+                #  `async_apply_patchers`.
+                await driver.async_apply_patchers()
+            return
         config_names = params.get(
             "config_names",
         )
