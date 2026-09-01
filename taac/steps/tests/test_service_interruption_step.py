@@ -59,7 +59,9 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
         )
         await self.si_step.run(input_data, {})
-        self.driver_mock.async_restart_service.assert_called_once()
+        self.driver_mock.async_restart_service.assert_called_once_with(
+            FbossSystemctlServiceName.AGENT, None
+        )
 
     async def test_run_systemctl_stop(self):
         """Test that SYSTEMCTL_STOP trigger calls async_stop_service."""
@@ -96,10 +98,29 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
             create_cold_boot_file=True,
         )
         await self.si_step.run(input_data, {})
-        self.driver_mock.async_run_cmd_on_shell.assert_called_once_with(
-            "touch /dev/shm/fboss/warm_boot/cold_boot_once_0"
+        self.driver_mock.async_create_cold_boot_file.assert_awaited_once()
+        self.driver_mock.async_restart_service.assert_called_once_with(
+            FbossSystemctlServiceName.AGENT, None
         )
-        self.driver_mock.async_restart_service.assert_called_once()
+
+    async def test_run_leaves_the_flag_alone_for_non_agent_services(self):
+        """qsfp_service owns a separate flag; only the agent reads this one."""
+        input_data = taac_types.ServiceInterruptionInput(
+            name=taac_types.Service.QSFP_SERVICE,
+            trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+        )
+        await self.si_step.run(input_data, {})
+        self.driver_mock.async_remove_cold_boot_file.assert_not_awaited()
+
+    async def test_run_clears_a_stale_cold_boot_flag(self):
+        """A restart that didn't ask to be cold must not inherit someone else's flag."""
+        input_data = taac_types.ServiceInterruptionInput(
+            name=taac_types.Service.AGENT,
+            trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+        )
+        await self.si_step.run(input_data, {})
+        self.driver_mock.async_remove_cold_boot_file.assert_awaited_once()
+        self.driver_mock.async_create_cold_boot_file.assert_not_awaited()
 
     async def test_run_with_agents(self):
         """Test that agents list is passed through to the driver."""

@@ -41,6 +41,7 @@ from taac.health_checks.constants import (
     FBOSS_CORE_DUMP_PATH,
     FBOSS_CRITICAL_CORE_DUMPS,
 )
+from taac.driver.driver_constants import DEFAULT_THRIFT_TIMEOUT
 from taac.libs.collectors.registry import get_test_case_start_time
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import (
@@ -67,24 +68,51 @@ def is_same_device(left: str, right: str) -> bool:
     return normalize_device_name(left) == normalize_device_name(right)
 
 
-async def get_fb303_client(host: str):
-    """Get fb303 client.
-    In OSS mode, raises NotImplementedError since fb303 requires Meta-internal thrift.
+# fb303 counter reads are bulk: an agent exports tens of thousands of counters
+# and getCounters() returns all of them. fbthrift's default client timeout is far
+# too short for that, so give the OSS client the same headroom every other TAAC
+# thrift client gets.
+FB303_READ_TIMEOUT_SECONDS: float = float(DEFAULT_THRIFT_TIMEOUT)
+
+
+async def _resolve_fb303_port(host: str) -> int:
+    """Pick the fb303 monitoring port for ``host``.
+
+    A monolithic box exports the swagent's counters on :5909; a multi-switch
+    (DNX) box exports them on :5931.
     """
+    driver = await async_get_device_driver(host)
+    # pyre-fixme[16]: `AbstractSwitch` has no attribute `async_is_multi_switch`.
+    is_multi_switch = await driver.async_is_multi_switch()
+    return FBOSS_MNPU_FB303_PORT if is_multi_switch else FBOSS_FB303_PORT
+
+
+async def get_fb303_client(host: str):
+    """Get an fb303 client as an async context manager.
+
+    OSS uses a direct fbthrift connection to the agent's fb303 monitoring port,
+    the same way OSSClientFactory reaches FbossCtrl/TBgpService. fb303 itself is
+    not Meta-internal -- ``common/fb303/if/fb303.thrift`` ships in
+    fboss-thrift-defs and generates ``fb303.thrift_clients.FacebookService`` --
+    only the Meta ``get_direct_client`` transport was, which is why this used to
+    raise NotImplementedError and take every per-queue / buffer / PFC / DSF
+    health check down with it.
+    """
+    port = await _resolve_fb303_port(host)
+
     if TAAC_OSS:
-        # TODO: Implement fb303 client with direct TCP thrift connection
-        # for OSS. Use host:5909 (or 5931 for MNPU) with standard thrift transport.
-        raise NotImplementedError(
-            "fb303 client requires Meta-internal get_direct_client. "
-            "Not yet available in OSS mode."
+        from fb303.thrift_clients import FacebookService
+        from thrift.python.client import get_client
+
+        return get_client(
+            FacebookService,
+            host=host,
+            port=port,
+            timeout=FB303_READ_TIMEOUT_SECONDS,
         )
 
     from taac.utils.fb303_counter_utils import make_fb303_client
 
-    driver = await async_get_device_driver(host)
-    # pyre-fixme[16]: `AbstractSwitch` has no attribute `async_is_multi_switch`.
-    is_multi_switch = await driver.async_is_multi_switch()
-    port = FBOSS_MNPU_FB303_PORT if is_multi_switch else FBOSS_FB303_PORT
     return make_fb303_client(host, port)
 
 

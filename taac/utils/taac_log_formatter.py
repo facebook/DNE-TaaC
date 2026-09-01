@@ -120,7 +120,12 @@ def log_results_table(
     _logger.info(border)
 
     # Table header
-    header = f"  {'Check Name':<35} {'Status':<10} {'Message'}"
+    # Fit the widest check name (rows may be "<device>: <check>") with a
+    # 35-char floor so short tables keep the historical layout.
+    name_w = max(
+        [35] + [len(str(r.get("check_name", "Unknown"))) for r in results]
+    )
+    header = f"  {'Check Name':<{name_w}} {'Status':<10} {'Message'}"
     _logger.info(header)
     _logger.info("  " + "-" * (width - 4))
 
@@ -130,7 +135,7 @@ def log_results_table(
         check_name = result.get("check_name", "Unknown")
         status = result.get("status", "UNKNOWN")
         message = result.get("message", "")
-        _logger.info(f"  {check_name:<35} {status:<10} {message}")
+        _logger.info(f"  {check_name:<{name_w}} {status:<10} {message}")
         if status.upper() in ("PASS", "PASSED", "SUCCESS"):
             passed += 1
         else:

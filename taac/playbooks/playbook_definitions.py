@@ -17,9 +17,11 @@ import uuid
 from enum import Enum
 
 from ixia.ixia import types as ixia_types
+from taac.utils.json_thrift_utils import json_to_thrift
 from taac.utils.qos_constants import ClassOfService
 from taac.constants import (
     ARP_SOFT_LIMIT,
+    FBOSS_COLD_BOOT_ONCE_GLOBS,
     Gigabyte,
     MAC_SOFT_LIMIT,
     NDP_SOFT_LIMIT,
@@ -13772,6 +13774,23 @@ SNAKE_BENCHMARK_PACKET_SIZES = [
     9124,
 ]
 SNAKE_BENCHMARK_DURATION_S = 12 * 60
+# Loss ceiling for benchmark items exempted from the zero-loss default. Worst
+# expected loss in the sweep is 64B at 100% offered on TH5: the ASIC forwards
+# ~28% of offered at best (line-rate minimum is ~295B), i.e. ~72% loss; a wedge800
+# measures ~58%. 80% passes that physics loss while a blackholed item or dead
+# link (100% loss) still fails.
+SNAKE_BENCHMARK_MAX_LOSS_PCT = 80
+
+# Settle window between agent convergence and the postchecks, for the warmboot
+# playbook -- the sibling restart/reboot playbooks use a 300s one for the same
+# reason ("the convergence step can sometimes complete too quickly").
+#
+# SwitchRunState.CONFIGURED means the agent applied its config, which is not
+# the same as LLDP neighbors being relearned: that's soft state learned from
+# the wire, wiped by the restart, and refilled only as neighbors re-advertise.
+# 120s here rather than the sibling 300s -- re-measure if LLDP_CHECK still
+# flakes on the warmboot playbook.
+SNAKE_AGENT_LLDP_SETTLE_S = 120
 
 
 def gen_snake_benchmark_playbooks(
@@ -13779,6 +13798,7 @@ def gen_snake_benchmark_playbooks(
     duration_s: int = SNAKE_BENCHMARK_DURATION_S,
     prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    allowed_loss_packet_sizes: t.Optional[t.Set[int]] = None,
 ) -> t.List[taac_types.Playbook]:
     """One throughput-benchmark playbook per packet size.
 
@@ -13797,10 +13817,75 @@ def gen_snake_benchmark_playbooks(
         duration_s: Soak per packet size (default 12 minutes).
         prechecks: Playbook prechecks, typically ``gen_common_hcs`` output.
         postchecks: Playbook postchecks; the loss + rate checks are appended.
+        allowed_loss_packet_sizes: Frame sizes whose playbook may lose its own
+            item's packets without failing (sizes below the ASIC's line-rate
+            minimum, where loss at 100%% offered rate is physics, e.g.
+            ``{64, 192}`` on TH5). The measured throughput is still recorded
+            by the benchmark report step; loss on any other traffic item, or
+            at any other size, still fails.
 
     Returns:
         One Playbook per entry, ordered by ascending packet size.
     """
+    def _benchmark_loss_exemption(
+        traffic_item_name: str,
+    ) -> hc_types.PacketLossThreshold:
+        # An explicit threshold excludes the named item from the loss check's
+        # catch-all zero-loss default; every other item stays guarded. Bounded
+        # at SNAKE_BENCHMARK_MAX_LOSS_PCT rather than unlimited, so expected
+        # PPS-ceiling loss passes but a blackholed item still fails.
+        return hc_types.PacketLossThreshold(
+            names=[traffic_item_name],
+            metric=hc_types.PacketLossMetric.PERCENTAGE,
+            comparison=hc_types.ComparisonType.LESS_THAN_EQUAL_TO,
+            str_value=str(SNAKE_BENCHMARK_MAX_LOSS_PCT),
+            expect_packet_loss=False,
+        )
+
+    def _prechecks_allowing_benchmark_loss(
+        traffic_item_name: str,
+    ) -> t.List[taac_types.PointInTimeHealthCheck]:
+        # The benchmark item's loss at PPS-bound frame sizes is expected, and
+        # a failing PRE_TEST loss check aborts the playbook before the soak —
+        # before the benchmark ever measures anything. Exempt this playbook's
+        # own item from the precheck loss gate for every size; whether the
+        # POST_TEST loss check also tolerates it is per-size, via
+        # ``allowed_loss_packet_sizes``.
+        adjusted: t.List[taac_types.PointInTimeHealthCheck] = []
+        for hc in prechecks or []:
+            if hc.name != hc_types.CheckName.IXIA_PACKET_LOSS_CHECK:
+                adjusted.append(hc)
+            elif hc.input_json:
+                loss_in = json_to_thrift(
+                    hc.input_json, hc_types.IxiaPacketLossHealthCheckIn
+                )
+                adjusted.append(
+                    create_ixia_packet_loss_check(
+                        thresholds=list(loss_in.thresholds)
+                        + [_benchmark_loss_exemption(traffic_item_name)],
+                        clear_traffic_stats=loss_in.clear_traffic_stats,
+                        sleep_time=loss_in.sleep_time,
+                        priority=hc.priority,
+                    )
+                )
+            elif hc.check_params is None:
+                # Bare variant (gen_common_hcs default): no input_json, so at
+                # runtime _default_input applies the nameless zero-loss
+                # threshold and the precheck would still abort the playbook.
+                # Synthesize the exemption-bearing check (builder defaults
+                # match the bare check's runtime defaults).
+                adjusted.append(
+                    create_ixia_packet_loss_check(
+                        thresholds=[_benchmark_loss_exemption(traffic_item_name)],
+                        priority=hc.priority,
+                    )
+                )
+            else:
+                # Legacy json_params variant: rewriting would drop its
+                # untyped params; leave untouched.
+                adjusted.append(hc)
+        return adjusted
+
     playbooks: t.List[taac_types.Playbook] = []
     for packet_size in sorted(traffic_item_name_by_packet_size):
         traffic_item_name = traffic_item_name_by_packet_size[packet_size]
@@ -13811,10 +13896,21 @@ def gen_snake_benchmark_playbooks(
                     f"Benchmark test: {packet_size} byte frames at 100% line rate "
                     f"for {duration_s // 60} mins."
                 ),
-                prechecks=prechecks or [],
+                prechecks=_prechecks_allowing_benchmark_loss(traffic_item_name),
                 postchecks=(postchecks or [])
                 + [
-                    create_ixia_packet_loss_check(clear_traffic_stats=False),
+                    # Sizes in allowed_loss_packet_sizes may lose their own
+                    # item's packets without failing (expected below the
+                    # ASIC's line-rate minimum frame size); all other items
+                    # remain under the catch-all zero-loss default.
+                    create_ixia_packet_loss_check(
+                        thresholds=(
+                            [_benchmark_loss_exemption(traffic_item_name)]
+                            if packet_size in (allowed_loss_packet_sizes or set())
+                            else None
+                        ),
+                        clear_traffic_stats=False,
+                    ),
                     create_ixia_traffic_rate_check(),
                 ],
                 traffic_items_to_start=[traffic_item_name],
@@ -13834,6 +13930,21 @@ def gen_snake_benchmark_playbooks(
                                 description=(
                                     f"Soak {packet_size}B frames for "
                                     f"{duration_s}s at line rate"
+                                ),
+                            ),
+                            # End-of-soak, traffic still running: record the
+                            # normalized max-forwarding-rate report. This is
+                            # the benchmark's deliverable and emits even when
+                            # the loss postcheck fails the playbook.
+                            create_ixia_api_step(
+                                api_name="log_benchmark_rate_report",
+                                args_dict={
+                                    "traffic_item_name": traffic_item_name,
+                                    "frame_size_bytes": packet_size,
+                                },
+                                description=(
+                                    f"Report measured throughput for "
+                                    f"{packet_size}B frames"
                                 ),
                             ),
                         ]
@@ -13932,6 +14043,7 @@ def gen_snake_playbooks(
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     benchmark_traffic_item_name_by_packet_size: t.Optional[t.Dict[int, str]] = None,
     benchmark_duration_s: int = SNAKE_BENCHMARK_DURATION_S,
+    benchmark_allowed_loss_packet_sizes: t.Optional[t.Set[int]] = None,
     use_ipv6_ping: bool = True,
     use_cross_device_half_interface_toggle: bool = False,
     qsfp_service_restart_postchecks: t.Optional[
@@ -14308,6 +14420,12 @@ def gen_snake_playbooks(
                                 services=[taac_types.Service.AGENT],
                                 description="Wait for wedge_agent to converge",
                             ),
+                            create_longevity_step(
+                                duration=SNAKE_AGENT_LLDP_SETTLE_S,
+                                description=(
+                                    "Let LLDP neighbors relearn before postchecks"
+                                ),
+                            ),
                         ]
                     )
                 ],
@@ -14377,6 +14495,18 @@ def gen_snake_playbooks(
                             # Wait some additional time since the convergence step can sometimes complete too quickly
                             create_longevity_step(duration=300),
                         ]
+                    )
+                ],
+                # Runs in the runner's `finally`, so the flag is cleared even
+                # when the stage aborts -- which is exactly when it is most
+                # likely to be left unconsumed. Not safe as a stage step: the
+                # agent reads the flag during init and systemctl returns before
+                # that, so clearing mid-stage could downgrade this cold boot to
+                # a warm one.
+                cleanup_steps=[
+                    create_run_ssh_command_step(
+                        cmd=f"rm -f {' '.join(FBOSS_COLD_BOOT_ONCE_GLOBS)}",
+                        description="Clear the one-shot cold-boot flags",
                     )
                 ],
                 postchecks=_postchecks
@@ -14701,6 +14831,7 @@ def gen_snake_playbooks(
             gen_snake_benchmark_playbooks(
                 traffic_item_name_by_packet_size=benchmark_traffic_item_name_by_packet_size,
                 duration_s=benchmark_duration_s,
+                allowed_loss_packet_sizes=benchmark_allowed_loss_packet_sizes,
                 prechecks=_prechecks,
                 postchecks=_postchecks,
             )
@@ -17161,7 +17292,10 @@ _TC_PRECHECKS = [
     # PointInTimeHealthCheck(
     #     name=hc_types.CheckName.DSF_TRAFFIC_REBALANCE_CHECK,
     # ),
-    create_ixia_port_stats_check(),
+    # Explicitly (re)take the fault-counter baseline on the precheck so the
+    # postcheck's deltas always span exactly this test, regardless of which
+    # invocation happened to run first. Link state is still asserted.
+    create_ixia_port_stats_check(snapshot_baseline=True),
 ]
 
 _TC_POSTCHECKS = [

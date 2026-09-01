@@ -43,9 +43,22 @@ class IxiaPacketLossHealthCheck(
 
         if input.clear_traffic_stats:
             obj.clear_traffic_stats()
+            # Counters now read zero, so the measurement window opens HERE, not
+            # at the last start_traffic(). Gating only on traffic_start_time
+            # exits immediately for traffic started back in setup, so we would
+            # clear and then stop_traffic() with nothing in between: a
+            # zero-length window in which every item looks 100% lost. Observed
+            # as 11181.2ms of "loss" on two traffic items that were clean.
+            window_start = time.time()
+        else:
+            window_start = obj.get_traffic_start_time()
 
-        # make sure the traffic is running for at least the specified sleep time
-        while time.time() - obj.get_traffic_start_time() < input.sleep_time:
+        # make sure traffic has been running for at least the sample time since
+        # the window opened -- whichever is later, the clear or the last start.
+        while (
+            time.time() - max(window_start, obj.get_traffic_start_time())
+            < input.sleep_time
+        ):
             time.sleep(0.1)
         since_time = time.time()
         # this is necessary to allow in-flight traffic to arrive at the destination

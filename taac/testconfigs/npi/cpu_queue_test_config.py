@@ -1985,6 +1985,10 @@ create_dctypef_npi_cpu_queue_test_config = create_npi_cpu_queue_test_config
 NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     test_config_name="NPI_51T_DVT_TEST_CONFIG_KO3_SSW_CPU_QUEUE",
     device_name="ssw003.s001.m001.qzr1",
+    # Explicit MORGAN800CC queues; avoids import-time netwhoami lookup.
+    low_queue=0,
+    mid_queue=2,
+    high_queue=7,
     local_mac_address="ce:6a:33:ed:b7:16",
     ixia_downlink_interface="eth1/63/1",
     ixia_uplink_interface="eth1/64/1",
@@ -2048,6 +2052,10 @@ NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     test_config_name="NPI_51T_DVT_TEST_CONFIG_MP3_XSW_CPU_QUEUE",
     device_name="xsw003.x001.qzr1",
+    # Explicit MINIPACK3BA queues; avoids import-time netwhoami lookup.
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
     local_mac_address="B6:DB:91:95:FE:2E",
     ixia_downlink_interface="eth1/63/1",
     ixia_uplink_interface="eth1/64/1",
@@ -2117,6 +2125,10 @@ NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 NPI_DVT_ICEPACK_GTSW__CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     test_config_name="NPI_DVT_ICEPACK_GTSW__CPU_QUEUE_TEST_CONFIG",
     device_name="gtsw001.l1001.c085.ash6",
+    # Explicit ICECUBE800BC queues; avoids import-time netwhoami lookup.
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
     local_mac_address="02:00:00:00:0f:0c",
     # IXIA ports: factory uses uplink as source of CPU-queue test traffic,
     # downlink as sink + BGP-flap target. Rogue is unused for CPU-queue

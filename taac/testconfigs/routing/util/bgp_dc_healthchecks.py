@@ -64,7 +64,9 @@ def get_ixia_healthcheck_ignore_cpu_and_v4_directional_traffic(device_name: str)
     )
 
 
-def get_ixia_healthcheck_stable_state(device_name: str):
+def get_ixia_healthcheck_stable_state(
+    device_name: str, clear_traffic_stats: bool = False
+):
     return create_ixia_packet_loss_check_traffic_split(
         device_name,
         expect_loss_traffic=["GOOD_BUT_LOSSY_NDP_TRAFFIC", "LOSSY_ROGUE_NDP_TRAFFIC"],
@@ -73,4 +75,5 @@ def get_ixia_healthcheck_stable_state(device_name: str):
             "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
             "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
         ],
+        clear_traffic_stats=clear_traffic_stats,
     )

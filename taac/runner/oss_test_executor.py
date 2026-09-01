@@ -100,7 +100,19 @@ class OSSTestExecutor:
             # smoke (uname against fboss101 + fboss102, 2/2 PASSED).
             await self._taac_runner.run_tests([playbook], [dut])
             self._logger.info(f"Playbook '{playbook.name}' PASSED on {dut}")
-        except Exception as e:
+        # BaseExceptionGroup, not just Exception: TaacRunner.run_test_case
+        # raises BaseExceptionGroup("test case execution and teardown both
+        # failed", ...), and Python only downgrades that to the
+        # Exception-derived ExceptionGroup when EVERY member is an Exception.
+        # A health check that raises inside the postcheck asyncio.gather
+        # cancels its siblings, so one member is asyncio.CancelledError -- a
+        # BaseException. The group therefore stayed a BaseExceptionGroup and
+        # sailed straight through `except Exception`, out of the
+        # `for playbook in playbooks` loop in oss_entry_point. Observed
+        # 2026-08-22: a 5-playbook batch recorded one result and silently
+        # dropped the other four. A bare CancelledError still propagates, so
+        # genuine task cancellation is unaffected.
+        except (Exception, BaseExceptionGroup) as e:
             status, is_transient = classify_exception(e)
             exception_type = type(e).__name__
             exception_message = str(e)

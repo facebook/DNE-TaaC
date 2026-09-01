@@ -27,6 +27,45 @@ DNE_LOG_DIR: str = "/var/facebook/dne"
 RSYSLOG_AGENT_FILE: str = "/etc/rsyslog.d/00-agent-log.conf"
 FBOSS_LOG_DIR: str = "/var/facebook/logs/fboss"
 
+# One-shot cold-boot flag honoured by the Meta-internal monolithic agent
+# wrapper. The glob deliberately matches only numeric switch indices:
+# qsfp_service owns a separate `cold_boot_once_qsfp_service` in the same
+# directory, and clearing the agent's flag must not touch it.
+#
+# On a split-agent (OSS) DUT nothing reads this path -- it is reachable only
+# via AgentDirectoryUtil::getColdBootOnceFile(), whose one non-test caller
+# (fboss2 FbossServiceUtil.cpp) gates it on the monolithic wedge_agent case.
+# Use FBOSS_SPLIT_COLD_BOOT_ONCE_* below there instead.
+FBOSS_COLD_BOOT_ONCE_FILE: str = "/dev/shm/fboss/warm_boot/cold_boot_once_0"
+FBOSS_COLD_BOOT_ONCE_GLOB: str = "/dev/shm/fboss/warm_boot/cold_boot_once_[0-9]*"
+
+# Split-agent equivalents: each agent reads and clears its own flag at startup,
+# so a cold boot needs one file per running agent. Per the FBOSS sources in the
+# image:
+#   * fboss_sw_agent       -> `sw_cold_boot_once`
+#     (AgentDirectoryUtil.cpp getSwColdBootOnceFile)
+#   * fboss_hw_agent@<idx> -> `hw_cold_boot_once_<switchIndex>`
+#     (hw/HwSwitchWarmBootHelper.cpp forceColdBootPrefix, keyed on
+#     getAsic()->getSwitchIndex() per platforms/sai/SaiPlatform.cpp)
+FBOSS_SPLIT_SW_COLD_BOOT_ONCE_FILE: str = "/dev/shm/fboss/warm_boot/sw_cold_boot_once"
+FBOSS_SPLIT_HW_COLD_BOOT_ONCE_FILE_FMT: str = (
+    "/dev/shm/fboss/warm_boot/hw_cold_boot_once_{switch_index}"
+)
+
+# Every cold-boot flag a clear must remove, monolithic and split alike, so the
+# same cleanup works regardless of which kind of DUT ran.
+#
+# The sw entry is a prefix glob on purpose: besides `sw_cold_boot_once` the sw
+# agent also honours a legacy `sw_cold_boot_once_0`
+# (FileBasedWarmbootUtils.cpp getForceColdBootOnceFlagLegacy), and unlike the
+# others it is probed with checkFileExists rather than removeFile -- so it is
+# never self-cleared and would cold boot every subsequent start if left behind.
+FBOSS_COLD_BOOT_ONCE_GLOBS: t.List[str] = [
+    FBOSS_COLD_BOOT_ONCE_GLOB,
+    "/dev/shm/fboss/warm_boot/sw_cold_boot_once*",
+    "/dev/shm/fboss/warm_boot/hw_cold_boot_once_[0-9]*",
+]
+
 # Single source of truth for the systemd `BindsTo` cascade that fires when
 # wedge_agent is restarted. In practice the observable effect is that
 # `bgpd` restarts alongside wedge_agent — bgpd's RIB state depends on
