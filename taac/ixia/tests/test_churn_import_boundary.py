@@ -12,6 +12,7 @@ import unittest
 
 from taac.ixia.churn import (
     attribute_operations,
+    attribute_runtime,
     attribute_state,
     attribute_targets,
 )
@@ -19,6 +20,7 @@ from taac.ixia.churn import (
 
 _MODULES: tuple[types.ModuleType, ...] = (
     attribute_operations,
+    attribute_runtime,
     attribute_state,
     attribute_targets,
 )

@@ -50,3 +50,12 @@ class RouteState:
 
 
 ConvergenceState = tuple[t.Mapping[str, Counters], int, t.Mapping[str, RouteState]]
+
+
+@dataclasses.dataclass(frozen=True)
+class BaselineObservation:
+    blocks: tuple[Block, ...]
+    sessions: t.Mapping[str, Counters]
+    rib_version: int
+    routes: t.Mapping[str, RouteState]
+    established_session_peers: frozenset[str]

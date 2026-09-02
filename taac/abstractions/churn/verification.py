@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .observations import Counters, RouteState
+from .observations import Block, Counters, RouteState
 
 
 def counter_snapshot(counters: Counters) -> t.Mapping[str, object]:
@@ -91,3 +91,70 @@ def quiet_update_violation(
         ):
             return peer
     return None
+
+
+def transition_best_peer(
+    *,
+    prefix: str,
+    before: RouteState,
+    after: RouteState,
+    expected_peers: t.AbstractSet[str],
+    should_advance: bool,
+) -> str:
+    if after.path_selection_pending:
+        raise ValueError(f"{prefix}: path selection is pending")
+    if should_advance and after.rib_version <= before.rib_version:
+        raise ValueError(f"{prefix}: per-prefix RIB version did not advance")
+    if not after.best_peers:
+        raise ValueError(f"{prefix}: no best path selected")
+    unexpected_best = set(after.best_peers) - expected_peers
+    if unexpected_best:
+        raise ValueError(
+            f"{prefix}: unexpected best-path peers {sorted(unexpected_best)}"
+        )
+    if len(after.best_peers) != 1:
+        raise ValueError(
+            f"{prefix}: expected exactly one deterministic best path, "
+            f"got {list(after.best_peers)}"
+        )
+    return after.best_peers[0]
+
+
+def verify_preferred_path(
+    *,
+    prefix: str,
+    best_peer: str,
+    plane1_peer: str,
+    reference_peers: t.AbstractSet[str],
+    family: str,
+    preferred: bool | None,
+) -> None:
+    if preferred is True and best_peer != plane1_peer:
+        raise ValueError(f"{prefix}: plane 1 did not become best for {family}")
+    if preferred is False and best_peer == plane1_peer:
+        raise ValueError(f"{prefix}: plane 1 remained best for {family}")
+    if preferred is False and best_peer not in reference_peers:
+        raise ValueError(f"{prefix}: no reference plane became best")
+
+
+def verify_route_attributes(
+    *,
+    blocks: t.Sequence[Block],
+    routes: t.Mapping[str, RouteState],
+    family: str,
+    expected: object,
+    planes: t.AbstractSet[int],
+) -> None:
+    for block in blocks:
+        if block.plane not in planes:
+            continue
+        for prefix in block.prefixes:
+            state = routes[prefix]
+            if state.path_selection_pending:
+                raise ValueError(f"{prefix}: path selection is pending")
+            actual = state.peer_attributes[block.rib_peer][family]
+            if actual != expected:
+                raise ValueError(
+                    f"{prefix}: {block.rib_peer} {family}={actual!r}, "
+                    f"expected {expected!r}"
+                )

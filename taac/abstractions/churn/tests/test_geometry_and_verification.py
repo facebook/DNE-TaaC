@@ -14,6 +14,7 @@ from taac.abstractions.churn.geometry import (
     topology_prefix_at,
 )
 from taac.abstractions.churn.observations import (
+    BaselineObservation,
     Block,
     Counters,
     RouteState,
@@ -23,6 +24,9 @@ from taac.abstractions.churn.verification import (
     quiet_update_violation,
     routes_match_baseline,
     session_baseline_violation,
+    transition_best_peer,
+    verify_preferred_path,
+    verify_route_attributes,
 )
 
 
@@ -92,3 +96,67 @@ class ChurnGeometryAndVerificationTest(unittest.TestCase):
         route = RouteState(1, False, ("peer",), {"peer": {"med": 100}})
         self.assertTrue(routes_match_baseline({"10/8": route}, {"10/8": route}))
         self.assertFalse(routes_match_baseline({"10/8": route}, {}))
+
+    def test_baseline_observation_contains_only_device_independent_state(self) -> None:
+        route = RouteState(1, False, ("peer",), {"peer": {"med": 100}})
+        baseline = BaselineObservation(
+            blocks=(Block("ipv4", 1, 0, "pool", "peer", ("10/8",)),),
+            sessions={"peer": _counters()},
+            rib_version=1,
+            routes={"10/8": route},
+            established_session_peers=frozenset({"peer"}),
+        )
+
+        self.assertEqual(("10/8",), baseline.blocks[0].prefixes)
+        self.assertEqual(frozenset({"peer"}), baseline.established_session_peers)
+
+    def test_transition_helpers_validate_best_path_and_attributes(self) -> None:
+        before = RouteState(1, False, ("peer2",), {"peer1": {"med": 200}})
+        after = RouteState(2, False, ("peer1",), {"peer1": {"med": 100}})
+        block = Block("ipv4", 1, 0, "pool", "peer1", ("10/8",))
+
+        best_peer = transition_best_peer(
+            prefix="10/8",
+            before=before,
+            after=after,
+            expected_peers={"peer1", "peer2"},
+            should_advance=True,
+        )
+        verify_preferred_path(
+            prefix="10/8",
+            best_peer=best_peer,
+            plane1_peer="peer1",
+            reference_peers={"peer2"},
+            family="med",
+            preferred=True,
+        )
+        verify_route_attributes(
+            blocks=(block,),
+            routes={"10/8": after},
+            family="med",
+            expected=100,
+            planes={1},
+        )
+
+    def test_transition_helpers_reject_stale_or_unexpected_paths(self) -> None:
+        before = RouteState(2, False, ("peer2",), {})
+        stale = RouteState(2, False, ("peer3",), {})
+
+        with self.assertRaisesRegex(ValueError, "RIB version did not advance"):
+            transition_best_peer(
+                prefix="10/8",
+                before=before,
+                after=stale,
+                expected_peers={"peer3"},
+                should_advance=True,
+            )
+
+        with self.assertRaisesRegex(ValueError, "plane 1 remained best"):
+            verify_preferred_path(
+                prefix="10/8",
+                best_peer="peer1",
+                plane1_peer="peer1",
+                reference_peers={"peer2"},
+                family="med",
+                preferred=False,
+            )

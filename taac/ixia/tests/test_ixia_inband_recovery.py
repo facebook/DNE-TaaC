@@ -9,11 +9,9 @@ Covers two seams:
   2. `Ixia.ensure_ixia_alive` — between-playbook health gate; only fires
      recovery when health classifies as `API_DOWN_502` or `API_DOWN_OTHER`.
 
-The recovery lib is lazy-imported inside the recovery methods, so we stub
-it via `sys.modules` rather than taking a Buck dep on it (depending on
-both `:ixia` and `:ixia_recovery_lib` pulls two incompatible variants of
-the bgp_config thrift python types into a single binary — same constraint
-as `test_ixia_layer2_recovery.py` in the original D108952271 design).
+The recovery module is lazy-imported inside the recovery methods, so most
+tests stub it through `sys.modules` to isolate the Ixia wiring from HTTP and
+telemetry behavior.
 """
 
 import sys
@@ -25,7 +23,7 @@ from unittest.mock import MagicMock, patch
 from neteng.test_infra.dne.taac.ixia.ixia import external_api, Ixia  # oss-rewrite-touch
 
 
-_LIB_PATH = "neteng.test_infra.dne.taac.internal.utils.ixia_recovery_lib"
+_LIB_PATH = "neteng.test_infra.dne.taac.ixia.recovery"
 
 
 class _HealthStatus:
@@ -38,7 +36,7 @@ class _HealthStatus:
 
 
 def _make_fake_lib() -> types.ModuleType:
-    """Stand-in ixia_recovery_lib with the symbols the recovery methods import."""
+    """Stand-in recovery module with the symbols the Ixia methods import."""
     mod = types.ModuleType(_LIB_PATH)
     attrs = {
         "HealthStatus": _HealthStatus,
@@ -308,21 +306,20 @@ class EnsureIxiaAliveTest(_RecoveryTestBase):
 
 class SourceConstantsTest(unittest.TestCase):
     """Pin the locally-mirrored Scuba `source` constants in `ixia.py`
-    equal to the canonical values in `ixia_recovery_lib`. Rename on either
+    equal to the canonical values in `recovery`. Rename on either
     side breaks the build instead of silently splitting the Scuba dataset.
     """
 
     def test_inband_source_constants_match_lib(self):
-        from taac.internal.utils import ixia_recovery_lib
-        from taac.ixia import ixia
+        from neteng.test_infra.dne.taac.ixia import ixia, recovery
 
         self.assertEqual(
             ixia._INBAND_SOURCE_API_CALL,
-            ixia_recovery_lib.SOURCE_INBAND_API_CALL,
+            recovery.SOURCE_INBAND_API_CALL,
         )
         self.assertEqual(
             ixia._INBAND_SOURCE_BETWEEN_PLAYBOOK_GATE,
-            ixia_recovery_lib.SOURCE_BETWEEN_PLAYBOOK_GATE,
+            recovery.SOURCE_BETWEEN_PLAYBOOK_GATE,
         )
 
 

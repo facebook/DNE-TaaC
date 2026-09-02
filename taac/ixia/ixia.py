@@ -736,7 +736,7 @@ def require_traffic_item(func: t.Callable) -> t.Callable:
 
 
 # `source` values emitted into `inband_502_observed` Scuba rows. Mirrored
-# from `ixia_recovery_lib.SOURCE_INBAND_API_CALL` /
+# from `recovery.SOURCE_INBAND_API_CALL` /
 # `SOURCE_BETWEEN_PLAYBOOK_GATE` so the per-RPC wrapper can use them without
 # a non-OSS import at module load. A unit test
 # (`test_ixia_inband_recovery.SourceConstantsTest`) pins these equal to the
@@ -772,7 +772,7 @@ def external_api(func: t.Callable) -> t.Callable:
 
     On a 502/503 from the wrapped call, the wrapper emits a Scuba
     `inband_502_observed` row, invokes the already-tested-e2e recovery CLI
-    (`ixia._attempt_inband_recovery` → `ixia_recovery_lib.restart_ixnetwork`),
+    (`ixia._attempt_inband_recovery` → `recovery.restart_ixnetwork`),
     and retries the RPC once if recovery succeeded. A 504 is emitted but
     propagated without an application-wide restart: it proves that one
     operation exceeded the gateway deadline, not that the global API is down.
@@ -1638,13 +1638,13 @@ class Ixia:
         return True
 
     def _attempt_inband_recovery(self) -> bool:
-        """Best-effort soft restart of `ixnetworkweb` via `ixia_recovery_lib`.
+        """Best-effort soft restart of `ixnetworkweb` via the recovery module.
 
         Returns True iff the lib reports success AND `/api/v1/sessions`
         returned 200 within the poll window. Any exception inside the lib
         is logged and treated as a recovery failure.
         """
-        # OSS guard: `ixia_recovery_lib` is internal-only (the surrounding
+        # OSS guard: recovery telemetry is internal-only (the surrounding
         # file is OSS-shared). Skip in OSS builds without even attempting
         # the import, matching the convention used by `fetch_ixia_credentials`
         # elsewhere in this module. See `.llms/skills/taac_oss_privacy_rules.md`.
@@ -1653,12 +1653,10 @@ class Ixia:
         # Lazy import: keeps the dep chain off the hot connect path and
         # prevents a circular import.
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
-                restart_ixnetwork,
-            )
+            from taac.ixia.recovery import restart_ixnetwork
         except ImportError as ie:
             self.logger.warning(
-                f"{_YELLOW}[IXIA]{_RESET} ixia_recovery_lib not importable "
+                f"{_YELLOW}[IXIA]{_RESET} IXIA recovery module not importable "
                 f"({ie!r}) — skipping in-band recovery"
             )
             return False
@@ -1713,9 +1711,7 @@ class Ixia:
         if TAAC_OSS:
             return
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
-                emit_inband_502_scuba,
-            )
+            from taac.ixia.recovery import emit_inband_502_scuba
         except ImportError:
             return
         try:
@@ -1772,7 +1768,7 @@ class Ixia:
         ):
             return
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
+            from taac.ixia.recovery import (
                 classify_health,
                 HealthStatus,
             )
@@ -5950,7 +5946,7 @@ class Ixia:
             _username, password = get_oss_ixia_password()
             return password
 
-        from taac.internal.internal_utils import (
+        from taac.ixia.internal_credentials import (
             fetch_ixia_password_internal,
         )
 

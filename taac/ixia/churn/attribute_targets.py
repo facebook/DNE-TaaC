@@ -10,6 +10,7 @@ import typing as t
 
 from taac.constants import TestCaseFailure
 from taac.ixia.churn.attribute_operations import normalize_boolean
+from taac.ixia.churn.attribute_state import IxiaAttributePoolState
 from taac.ixia.route_geometry import (
     IxiaOverlayVector,
     IxiaValueVector,
@@ -89,3 +90,92 @@ def capture_topology_vector(
             f"baseline {expected!r}"
         )
     return vector
+
+
+def is_flat_pool(pool: t.Any, peer_count: int, routes_per_peer: int) -> bool:
+    return (
+        int(pool.Count) == peer_count * routes_per_peer
+        and int(pool.NumberOfAddresses) == 1
+    )
+
+
+def capture_value_pool_state(
+    *,
+    pool: t.Any,
+    route: t.Any,
+    afi: str,
+    plane: int,
+    rows: tuple[int, ...],
+    peer_ranges: tuple[tuple[int, int, str], ...],
+    physical_row_count: int,
+) -> IxiaAttributePoolState:
+    return IxiaAttributePoolState(
+        afi=afi,
+        plane=plane,
+        name=str(getattr(pool, "Name", "")),
+        pool=pool,
+        route=route,
+        rows=rows,
+        peer_ranges=peer_ranges,
+        local_pref=capture_value_vector(
+            route.LocalPreference, physical_row_count, "LocalPreference"
+        ),
+        med_enabled=capture_value_vector(
+            route.EnableMultiExitDiscriminator,
+            physical_row_count,
+            "MED enable",
+        ),
+        med=capture_value_vector(
+            route.MultiExitDiscriminator, physical_row_count, "MED"
+        ),
+        origin=capture_value_vector(route.Origin, physical_row_count, "Origin"),
+    )
+
+
+def capture_topology_pool_state(
+    *,
+    pool: t.Any,
+    route: t.Any,
+    afi: str,
+    plane: int,
+    rows: tuple[int, ...],
+    peer_ranges: tuple[tuple[int, int, str], ...],
+    physical_row_count: int,
+    local_pref: t.Any,
+    med: t.Any,
+    origin: t.Any,
+) -> IxiaAttributePoolState:
+    return IxiaAttributePoolState(
+        afi=afi,
+        plane=plane,
+        name=str(getattr(pool, "Name", "")),
+        pool=pool,
+        route=route,
+        rows=rows,
+        peer_ranges=peer_ranges,
+        local_pref=capture_topology_vector(
+            route.LocalPreference,
+            physical_row_count,
+            "LocalPreference",
+            local_pref,
+        ),
+        med_enabled=capture_topology_vector(
+            route.EnableMultiExitDiscriminator,
+            physical_row_count,
+            "MED enable",
+            med is not None,
+            boolean=True,
+        ),
+        med=capture_topology_vector(
+            route.MultiExitDiscriminator,
+            physical_row_count,
+            "MED",
+            med,
+        ),
+        origin=capture_topology_vector(
+            route.Origin,
+            physical_row_count,
+            "Origin",
+            origin,
+        ),
+    )
