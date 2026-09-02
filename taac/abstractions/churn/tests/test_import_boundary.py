@@ -13,6 +13,7 @@ import unittest
 from taac.abstractions.churn import (
     action,
     context,
+    geometry,
     observations,
     policies,
     resolver,
@@ -20,12 +21,14 @@ from taac.abstractions.churn import (
     runner,
     selectors,
     specs,
+    verification,
 )
 
 
 _CORE_MODULES: tuple[types.ModuleType, ...] = (
     action,
     context,
+    geometry,
     observations,
     policies,
     resolver,
@@ -33,12 +36,15 @@ _CORE_MODULES: tuple[types.ModuleType, ...] = (
     runner,
     selectors,
     specs,
+    verification,
 )
 _STDLIB_ALLOWED = {
     "__future__",
     "asyncio",
+    "bisect",
     "dataclasses",
     "enum",
+    "ipaddress",
     "time",
     "typing",
 }
