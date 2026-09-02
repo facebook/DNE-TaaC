@@ -937,6 +937,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
     def test_stage_contains_only_the_audited_custom_step(self) -> None:
         stage = create_bgp_ebb_attribute_churn_stage(**_locked_step_kwargs())
 
+        self.assertEqual("BGP attribute churn (CICD-EBB-10)", stage.description)
         self.assertEqual(1, len(stage.steps))
         payload = _step_payload(stage.steps[0])
         self.assertEqual("bgp_attribute_churn", payload["custom_step_name"])

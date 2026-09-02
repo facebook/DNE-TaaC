@@ -2340,6 +2340,7 @@ def create_bgp_ebb_attribute_churn_stage(
 ) -> Stage:
     """Create CICD-EBB-10 as one failure-safe, audited custom workflow."""
     return Stage(
+        description="BGP attribute churn (CICD-EBB-10)",
         steps=[
             create_bgp_attribute_churn_step(
                 hostname=hostname,
@@ -2353,7 +2354,7 @@ def create_bgp_ebb_attribute_churn_stage(
                 openr_mode=openr_mode,
                 transient_observation_logging=transient_observation_logging,
             )
-        ]
+        ],
     )
 
 
