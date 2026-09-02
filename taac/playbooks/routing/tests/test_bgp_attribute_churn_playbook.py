@@ -69,6 +69,36 @@ EXPECTED_MATRIX = {
 }
 
 
+# The complete flat CustomStep payload the production Playbook serializes.
+#
+# The golden manifest stores only a hash and seven structural counts, and no
+# factory snapshot covers `get_bgp_ebb_*` factories, so without this literal a
+# reviewer cannot see which field of the payload a diff changed -- only that
+# some byte moved. Frozen against the Playbook factory rather than the Step
+# factory because the Playbook is where the production values are authored.
+_FROZEN_CHURN_PAYLOAD: dict = {
+    "custom_step_name": "bgp_attribute_churn",
+    "hostname": "dut.example.com",
+    "prefix_pool_names": EXPECTED_POOLS,
+    "attribute_matrix": EXPECTED_MATRIX,
+    "openr_mode": "standalone",
+    "peer_count_per_plane": 62,
+    "selected_block_count_per_afi": 7,
+    "samples_per_block": 2,
+    "routes_per_block": 750,
+    "duration_seconds": 3_600,
+    "max_iterations": 100_000,
+    "cadence_seconds": 60,
+    "poll_interval_seconds": 5,
+    "transition_timeout_seconds": 60,
+    "convergence_hard_timeout_seconds": 300,
+    "reference_setup_timeout_seconds": 120,
+    "restore_timeout_seconds": 120,
+    "quiet_window_seconds": 120,
+    "max_lookup_concurrency": 8,
+}
+
+
 def _locked_step_kwargs() -> dict:
     return {
         "hostname": "dut.example.com",
@@ -645,6 +675,32 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     verifiers += 1
                     self.assertTrue(payload["require_updates"])
                 self.assertEqual(4, verifiers)
+
+    def test_playbook_payload_matches_frozen_contract(self) -> None:
+        """Byte-level oracle for the serialized CustomStep payload.
+
+        A field-by-field diff on failure, which neither the hash-only golden
+        manifest nor the `create_*_playbook`-only factory snapshots provide for
+        this Playbook. Any intended payload change updates this literal in the
+        same diff, so the change is visible in review.
+        """
+        playbook = get_bgp_ebb_attribute_churn_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            total_session_count=1272,
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+        )
+
+        # characterization defaults to DISABLED, so no START/STOP bracket is
+        # added and the churn Stage is the only one. Production wraps it; that
+        # composition is asserted separately.
+        self.assertEqual(1, len(playbook.stages))
+        self.assertEqual(1, len(playbook.stages[0].steps))
+
+        self.assertEqual(
+            _FROZEN_CHURN_PAYLOAD, _step_payload(playbook.stages[0].steps[0])
+        )
 
     def test_step_factory_serializes_locked_contract(self) -> None:
         step = create_bgp_attribute_churn_step(**_locked_step_kwargs())
