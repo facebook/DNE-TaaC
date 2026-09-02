@@ -11,6 +11,33 @@ alphabetical export order.
 
 import typing as t
 
+from taac.churn.attribute import (
+    AttributeChurn,
+    AttributePoolIdentity,
+    AttributeTargetSelector,
+    BaselineExpectation,
+    BlockGeometryExpectation,
+    DEFAULT_ATTRIBUTE_CHURN_CANCELLATION_GRACE_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_CLEANUP_TIMEOUT_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_GEOMETRY_TIMEOUT_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_IXIA_RESTORE_TIMEOUT_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_RESTORE_TIMEOUT_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_SNAPSHOT_TIMEOUT_SECONDS,
+    DEFAULT_ATTRIBUTE_CHURN_WORK_RESERVE_SECONDS,
+)
+from taac.churn.policies import (
+    ExecutionPolicy,
+    PreparationPolicy,
+    RecoveryPolicy,
+)
+from taac.churn.selectors import UniformRowSelection
+from taac.churn.specs import (
+    AttributeFamily,
+    AttributePhase,
+    ChurnScenario,
+    ChurnWorkload,
+)
 from taac.constants import (
     BgpPlusPlusProfile,
     DEFAULT_OPENR_START_IPV4S,
@@ -467,6 +494,91 @@ def get_bgp_ebb_cold_start_playbook(
     )
 
 
+def _bgp_ebb_attribute_churn(duration_seconds: int) -> AttributeChurn:
+    return AttributeChurn(
+        scenario=ChurnScenario(
+            scenario_id="bgp_ebb_attribute_churn",
+            workload=ChurnWorkload(
+                families=(
+                    AttributeFamily(
+                        name="med",
+                        phases=(
+                            AttributePhase(name="plane_1_preferred", value=100),
+                            AttributePhase(name="reference", value=200),
+                            AttributePhase(name="plane_1_nonpreferred", value=300),
+                        ),
+                    ),
+                    AttributeFamily(
+                        name="origin",
+                        phases=(
+                            AttributePhase(name="plane_1_preferred", value="igp"),
+                            AttributePhase(name="reference", value="egp"),
+                            AttributePhase(
+                                name="plane_1_nonpreferred", value="incomplete"
+                            ),
+                        ),
+                    ),
+                    AttributeFamily(
+                        name="local_pref",
+                        phases=(
+                            AttributePhase(name="plane_1_preferred", value=200),
+                            AttributePhase(name="reference", value=100),
+                            AttributePhase(name="plane_1_nonpreferred", value=50),
+                        ),
+                    ),
+                )
+            ),
+            preparation=PreparationPolicy(
+                initial_resolution_timeout_seconds=(
+                    DEFAULT_ATTRIBUTE_CHURN_GEOMETRY_TIMEOUT_SECONDS
+                ),
+                baseline_capture_timeout_seconds=(
+                    DEFAULT_ATTRIBUTE_CHURN_SNAPSHOT_TIMEOUT_SECONDS
+                ),
+                total_timeout_seconds=(
+                    duration_seconds + DEFAULT_ATTRIBUTE_CHURN_WORK_RESERVE_SECONDS
+                ),
+            ),
+            execution=ExecutionPolicy(
+                duration_seconds=duration_seconds,
+                cadence_seconds=60.0,
+                max_iterations=100_000,
+            ),
+            recovery=RecoveryPolicy(
+                total_timeout_seconds=DEFAULT_ATTRIBUTE_CHURN_CLEANUP_TIMEOUT_SECONDS,
+                restore_observation_timeout_seconds=(
+                    DEFAULT_ATTRIBUTE_CHURN_RESTORE_TIMEOUT_SECONDS
+                ),
+                ixia_restore_timeout_seconds=(
+                    DEFAULT_ATTRIBUTE_CHURN_IXIA_RESTORE_TIMEOUT_SECONDS
+                ),
+                cancellation_grace_seconds=(
+                    DEFAULT_ATTRIBUTE_CHURN_CANCELLATION_GRACE_SECONDS
+                ),
+            ),
+        ),
+        selector=AttributeTargetSelector(
+            prefix_pools=tuple(
+                AttributePoolIdentity(
+                    afi=afi,
+                    plane=plane,
+                    name=f"PREFIX_POOL_IBGP_{afi.upper()}_PLANE_{plane}_REMOTE_EB",
+                )
+                for afi in ("ipv4", "ipv6")
+                for plane in range(1, 5)
+            ),
+            peer_count_per_pool=62,
+            row_selection=UniformRowSelection(rows_per_pool=7),
+        ),
+        baseline_expectation=BaselineExpectation(
+            block_geometry=BlockGeometryExpectation(
+                routes_per_block=750,
+                samples_per_block=2,
+            )
+        ),
+    )
+
+
 def get_bgp_ebb_attribute_churn_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
@@ -474,7 +586,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     total_session_count: int,
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
-    duration_seconds: int = 3_600,
+    duration_seconds: int = DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
     characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
@@ -542,31 +654,10 @@ def get_bgp_ebb_attribute_churn_playbook(
             [
                 create_bgp_ebb_attribute_churn_stage(
                     hostname=device_name,
-                    prefix_pool_names={
-                        "ipv4": {
-                            "1": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
-                            "2": "PREFIX_POOL_IBGP_IPV4_PLANE_2_REMOTE_EB",
-                            "3": "PREFIX_POOL_IBGP_IPV4_PLANE_3_REMOTE_EB",
-                            "4": "PREFIX_POOL_IBGP_IPV4_PLANE_4_REMOTE_EB",
-                        },
-                        "ipv6": {
-                            "1": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
-                            "2": "PREFIX_POOL_IBGP_IPV6_PLANE_2_REMOTE_EB",
-                            "3": "PREFIX_POOL_IBGP_IPV6_PLANE_3_REMOTE_EB",
-                            "4": "PREFIX_POOL_IBGP_IPV6_PLANE_4_REMOTE_EB",
-                        },
-                    },
-                    peer_count_per_plane=62,
-                    selected_block_count_per_afi=7,
-                    samples_per_block=2,
-                    routes_per_block=750,
-                    duration_seconds=duration_seconds,
-                    max_iterations=100_000,
-                    cadence_seconds=60,
+                    attribute_churn=_bgp_ebb_attribute_churn(duration_seconds),
                     poll_interval_seconds=5,
                     transition_timeout_seconds=60,
                     reference_setup_timeout_seconds=120,
-                    restore_timeout_seconds=120,
                     quiet_window_seconds=120,
                     max_lookup_concurrency=8,
                     openr_mode=(
@@ -574,23 +665,6 @@ def get_bgp_ebb_attribute_churn_playbook(
                         if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
                         else "none"
                     ),
-                    attribute_matrix={
-                        "local_pref": {
-                            "plane_1_preferred": 200,
-                            "reference": 100,
-                            "plane_1_nonpreferred": 50,
-                        },
-                        "med": {
-                            "plane_1_preferred": 100,
-                            "reference": 200,
-                            "plane_1_nonpreferred": 300,
-                        },
-                        "origin": {
-                            "plane_1_preferred": "igp",
-                            "reference": "egp",
-                            "plane_1_nonpreferred": "incomplete",
-                        },
-                    },
                 )
             ],
             playbook_name="bgp_ebb_attribute_churn_playbook",

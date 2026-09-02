@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+from taac.churn.attribute import AttributeChurn
 from taac.constants import (
     DEFAULT_LOCAL_LINK,
     DEFAULT_OTHER_LINK,
@@ -2327,22 +2328,13 @@ def _create_change_as_path_length_step(
 def create_bgp_ebb_attribute_churn_stage(
     *,
     hostname: str,
-    prefix_pool_names: dict[str, dict[str, str]],
-    peer_count_per_plane: int,
-    selected_block_count_per_afi: int,
-    samples_per_block: int,
-    routes_per_block: int,
-    duration_seconds: int,
-    max_iterations: int,
-    cadence_seconds: int,
+    attribute_churn: AttributeChurn,
     poll_interval_seconds: int,
     transition_timeout_seconds: int,
     reference_setup_timeout_seconds: int,
-    restore_timeout_seconds: int,
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     openr_mode: str,
-    attribute_matrix: dict[str, dict[str, Any]],
     convergence_hard_timeout_seconds: int = 300,
 ) -> Stage:
     """Create CICD-EBB-10 as one failure-safe, audited custom workflow."""
@@ -2350,23 +2342,14 @@ def create_bgp_ebb_attribute_churn_stage(
         steps=[
             create_bgp_attribute_churn_step(
                 hostname=hostname,
-                prefix_pool_names=prefix_pool_names,
-                peer_count_per_plane=peer_count_per_plane,
-                selected_block_count_per_afi=selected_block_count_per_afi,
-                samples_per_block=samples_per_block,
-                routes_per_block=routes_per_block,
-                duration_seconds=duration_seconds,
-                max_iterations=max_iterations,
-                cadence_seconds=cadence_seconds,
+                attribute_churn=attribute_churn,
                 poll_interval_seconds=poll_interval_seconds,
                 transition_timeout_seconds=transition_timeout_seconds,
                 convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
                 reference_setup_timeout_seconds=reference_setup_timeout_seconds,
-                restore_timeout_seconds=restore_timeout_seconds,
                 quiet_window_seconds=quiet_window_seconds,
                 max_lookup_concurrency=max_lookup_concurrency,
                 openr_mode=openr_mode,
-                attribute_matrix=attribute_matrix,
             )
         ]
     )

@@ -21,6 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import paramiko
+from taac.churn.attribute import AttributeChurn
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -1005,58 +1006,110 @@ def _validate_bgp_attribute_churn_geometry(
         )
 
 
+def _bgp_attribute_churn_integer(value: t.Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be an integer")
+    try:
+        normalized = int(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{field} must be an integer") from error
+    if normalized != value:
+        raise ValueError(f"{field} must be an integer")
+    return normalized
+
+
 def create_bgp_attribute_churn_step(
     *,
     hostname: str,
-    prefix_pool_names: t.Mapping[str, t.Mapping[str, str]],
-    peer_count_per_plane: int,
-    selected_block_count_per_afi: int,
-    samples_per_block: int,
-    routes_per_block: int,
-    duration_seconds: int,
-    max_iterations: int,
-    cadence_seconds: int,
+    attribute_churn: AttributeChurn,
     poll_interval_seconds: int,
     transition_timeout_seconds: int,
     reference_setup_timeout_seconds: int,
-    restore_timeout_seconds: int,
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     openr_mode: str,
-    attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
     convergence_hard_timeout_seconds: int = 300,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-10 dual-stack attribute-churn workflow."""
+    churn_params = attribute_churn.to_step_params()
     numeric_params = {
-        "peer_count_per_plane": peer_count_per_plane,
-        "selected_block_count_per_afi": selected_block_count_per_afi,
-        "samples_per_block": samples_per_block,
-        "routes_per_block": routes_per_block,
-        "duration_seconds": duration_seconds,
-        "max_iterations": max_iterations,
-        "cadence_seconds": cadence_seconds,
+        "peer_count_per_plane": _bgp_attribute_churn_integer(
+            churn_params["peer_count_per_plane"], "peer_count_per_plane"
+        ),
+        "selected_block_count_per_afi": _bgp_attribute_churn_integer(
+            churn_params["selected_block_count_per_afi"],
+            "selected_block_count_per_afi",
+        ),
+        "samples_per_block": _bgp_attribute_churn_integer(
+            churn_params["samples_per_block"], "samples_per_block"
+        ),
+        "routes_per_block": _bgp_attribute_churn_integer(
+            churn_params["routes_per_block"], "routes_per_block"
+        ),
+        "duration_seconds": _bgp_attribute_churn_integer(
+            churn_params["duration_seconds"], "duration_seconds"
+        ),
+        "max_iterations": _bgp_attribute_churn_integer(
+            churn_params["max_iterations"], "max_iterations"
+        ),
+        "cadence_seconds": _bgp_attribute_churn_integer(
+            churn_params["cadence_seconds"], "cadence_seconds"
+        ),
+        "geometry_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["geometry_timeout_seconds"], "geometry_timeout_seconds"
+        ),
+        "snapshot_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["snapshot_timeout_seconds"], "snapshot_timeout_seconds"
+        ),
+        "work_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["work_timeout_seconds"], "work_timeout_seconds"
+        ),
+        "cleanup_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["cleanup_timeout_seconds"], "cleanup_timeout_seconds"
+        ),
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
         "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
         "reference_setup_timeout_seconds": reference_setup_timeout_seconds,
-        "restore_timeout_seconds": restore_timeout_seconds,
+        "restore_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["restore_timeout_seconds"], "restore_timeout_seconds"
+        ),
+        "ixia_restore_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["ixia_restore_timeout_seconds"],
+            "ixia_restore_timeout_seconds",
+        ),
+        "cancellation_grace_seconds": _bgp_attribute_churn_integer(
+            churn_params["cancellation_grace_seconds"],
+            "cancellation_grace_seconds",
+        ),
         "quiet_window_seconds": quiet_window_seconds,
         "max_lookup_concurrency": max_lookup_concurrency,
     }
     if not hostname:
         raise ValueError("hostname must be non-empty")
+    scenario_id = churn_params["scenario_id"]
+    if not isinstance(scenario_id, str) or not scenario_id:
+        raise ValueError("scenario_id must be non-empty")
     if openr_mode not in {"none", "standalone"}:
         raise ValueError("openr_mode must be none or standalone")
     _validate_bgp_attribute_churn_geometry(numeric_params)
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "bgp_attribute_churn",
+        "scenario_id": scenario_id,
         "hostname": hostname,
         "prefix_pool_names": _normalize_bgp_attribute_churn_pool_names(
-            prefix_pool_names
+            t.cast(
+                t.Mapping[str, t.Mapping[str, str]], churn_params["prefix_pool_names"]
+            )
         ),
-        "attribute_matrix": _normalize_bgp_attribute_churn_matrix(attribute_matrix),
+        "attribute_matrix": _normalize_bgp_attribute_churn_matrix(
+            t.cast(
+                t.Mapping[str, t.Mapping[str, t.Any]],
+                churn_params["attribute_matrix"],
+            )
+        ),
         "openr_mode": openr_mode,
         **numeric_params,
     }
