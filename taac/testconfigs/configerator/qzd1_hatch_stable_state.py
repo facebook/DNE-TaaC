@@ -10,7 +10,6 @@ from taac.health_checks.healthcheck_definitions import (
     create_unclean_exit_check,
 )
 from taac.packet_headers import (
-    ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
     BGP_CP_V6_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS,
     DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
     NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
@@ -20,6 +19,9 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import create_dummy_step
+from taac.utils.test_config_utils import (
+    create_raw_arp_request_traffic_item,
+)
 from taac.health_check.health_check import types as hc_thrift
 from taac.test_as_a_config import types as taac_thrift
 
@@ -460,38 +462,6 @@ def _raw_cpu_traffic_item(name, source_port, destination_port, packet_headers, d
     )
 
 
-def _raw_arp_cpu_traffic_item(name, source_port, destination_port, dut=DUT):
-    return taac_thrift.BasicTrafficItemConfig(
-        src_endpoints=[
-            taac_thrift.TrafficEndpoint(
-                name=f"{dut}:{source_port}",
-                network_group_index=0,
-                device_group_index=0,
-            )
-        ],
-        dest_endpoints=[
-            taac_thrift.TrafficEndpoint(
-                name=f"{dut}:{destination_port}",
-                network_group_index=0,
-                device_group_index=0,
-            )
-        ],
-        name=name,
-        enabled=False,
-        line_rate_type=ixia_thrift.RateType.PERCENT_LINE_RATE,
-        line_rate=5,
-        traffic_type=ixia_thrift.TrafficType.RAW,
-        bidirectional=False,
-        packet_headers=ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
-        # Match the CPU queue test: Ethernet + ARP is padded to the 64-byte
-        # minimum so the switch parses it as ARP instead of an invalid frame.
-        frame_size_settings=ixia_thrift.FrameSize(
-            type=ixia_thrift.FrameSizeType.FIXED,
-            fixed_size=64,
-        ),
-    )
-
-
 def _port_config(port, starting_ip, gateway, mask, dut=DUT):
     return taac_thrift.BasicPortConfig(
         endpoint=f"{dut}:{port}",
@@ -562,6 +532,7 @@ def _build_test_config(
     traffic_items = _traffic_items(port_a, port_b, port_c)
     raw_tcp_syn_items = _raw_tcp_syn_traffic_items(port_a, port_b, port_c)
     udp_items = _udp_traffic_items(port_a, port_b, port_c)
+    arp_items = _disabled_arp_traffic_items(port_a, port_b, port_c)
     blocked = (
         BLOCKED_TCP_TRAFFIC_ITEMS
         + [item[0] for item in udp_items]
@@ -628,10 +599,15 @@ def _build_test_config(
             )
         ]
         + [
-            _raw_arp_cpu_traffic_item(item_name, source, destination, dut)
-            for item_name, source, destination in _disabled_arp_traffic_items(
-                port_a, port_b, port_c
+            create_raw_arp_request_traffic_item(
+                name=item_name,
+                source_endpoint=f"{dut}:{source}",
+                destination_endpoint=f"{dut}:{destination}",
+                line_rate_type=ixia_thrift.RateType.PERCENT_LINE_RATE,
+                line_rate=5,
+                enabled=False,
             )
+            for item_name, source, destination in arp_items
         ],
         playbooks=[
             create_stable_state_validation_playbook(
