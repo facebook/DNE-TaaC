@@ -78,6 +78,19 @@ The abstraction package describes what a churn scenario requires. Internal and
 vendor adapters decide how those requirements are executed against live test
 infrastructure.
 
+All churn families use the same TAAC playbook renderer. Family-specific
+builders supply typed DICE specifications and action-stage factories:
+
+```python
+create_dice_unified_churn_playbook(spec=attribute_churn_spec(...))
+create_dice_unified_churn_playbook(spec=session_churn_spec(...))
+create_dice_unified_churn_playbook(spec=route_churn_spec(...))
+```
+
+The unified renderer owns only common `Playbook` assembly. Attribute, session,
+and route implementations retain their own target selection, stage parameters,
+verification, and recovery behavior.
+
 ---
 
 ## 2. LogicalTopology Model

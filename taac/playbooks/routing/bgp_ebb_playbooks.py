@@ -26,6 +26,11 @@ from taac.abstractions.churn.attribute import (
     DEFAULT_ATTRIBUTE_CHURN_SNAPSHOT_TIMEOUT_SECONDS,
     DEFAULT_ATTRIBUTE_CHURN_WORK_RESERVE_SECONDS,
 )
+from taac.abstractions.churn.playbook import (
+    attribute_churn_spec,
+    route_churn_spec,
+    session_churn_spec,
+)
 from taac.abstractions.churn.policies import (
     ExecutionPolicy,
     PreparationPolicy,
@@ -47,6 +52,9 @@ from taac.constants import (
 )
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_snapshot_check,
+)
+from taac.playbooks.routing.dice_churn import (
+    create_dice_unified_churn_playbook,
 )
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
@@ -636,42 +644,44 @@ def get_bgp_ebb_attribute_churn_playbook(
             rss_delta=rss_delta,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_attribute_churn_playbook",
-        setup_steps=create_bgp_instability_setup_steps(
-            device_name=device_name,
-        ),
-        prechecks=instability_checks.prechecks,
-        postchecks=instability_checks.postchecks,
-        snapshot_checks=instability_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=Gigabyte.GIG_9.value,
-            cpu_util_terminate_on_error=False,
-            memory_terminate_on_error=False,
-        ),
-        stages=_characterized(
-            [
-                create_bgp_ebb_attribute_churn_stage(
-                    hostname=device_name,
-                    attribute_churn=_bgp_ebb_attribute_churn(duration_seconds),
-                    poll_interval_seconds=5,
-                    transition_timeout_seconds=60,
-                    reference_setup_timeout_seconds=120,
-                    quiet_window_seconds=120,
-                    max_lookup_concurrency=8,
-                    openr_mode=(
-                        "standalone"
-                        if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
-                        else "none"
-                    ),
-                )
-            ],
-            playbook_name="bgp_ebb_attribute_churn_playbook",
-            phase=PHASE_WORKLOAD,
-            device_name=device_name,
-            config=characterization,
-        ),
+    playbook_name = "bgp_ebb_attribute_churn_playbook"
+    return create_dice_unified_churn_playbook(
+        spec=attribute_churn_spec(
+            playbook_name=playbook_name,
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=instability_checks.prechecks,
+            postchecks=instability_checks.postchecks,
+            snapshot_checks=instability_checks.snapshot_checks,
+            periodic_tasks=create_standard_periodic_tasks(
+                device_name=device_name,
+                memory_threshold=Gigabyte.GIG_9.value,
+                cpu_util_terminate_on_error=False,
+                memory_terminate_on_error=False,
+            ),
+            action_factory=lambda: _characterized(
+                [
+                    create_bgp_ebb_attribute_churn_stage(
+                        hostname=device_name,
+                        attribute_churn=_bgp_ebb_attribute_churn(duration_seconds),
+                        poll_interval_seconds=5,
+                        transition_timeout_seconds=60,
+                        reference_setup_timeout_seconds=120,
+                        quiet_window_seconds=120,
+                        max_lookup_concurrency=8,
+                        openr_mode=(
+                            "standalone"
+                            if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
+                            else "none"
+                        ),
+                    )
+                ],
+                playbook_name=playbook_name,
+                phase=PHASE_WORKLOAD,
+                device_name=device_name,
+                config=characterization,
+            ),
+        )
     )
 
 
@@ -735,54 +745,56 @@ def get_bgp_ebb_route_storm_playbook(
             rss_delta=rss_delta,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_route_storm_playbook",
-        setup_steps=create_bgp_instability_setup_steps(
-            device_name=device_name,
-        ),
-        prechecks=instability_checks.prechecks,
-        postchecks=instability_checks.postchecks,
-        snapshot_checks=instability_checks.snapshot_checks,
-        periodic_tasks=[],
-        stages=_characterized(
-            [
-                create_bgp_ebb_route_storm_stage(
-                    hostname=device_name,
-                    ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-                    expected_established_sessions=total_session_count,
-                    observer_peer_parent_prefix=observer_peer_parent_prefix,
-                    prefix_pool_names={
-                        "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
-                        "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
-                    },
-                    peer_count_per_plane=62,
-                    selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
-                    routes_per_peer=750,
-                    samples_per_block=2,
-                    cycles=cycles,
-                    advertise_seconds=30,
-                    withdraw_seconds=30,
-                    poll_interval_seconds=5,
-                    convergence_hard_timeout_seconds=300,
-                    heavy_setup_hard_timeout_seconds=1_800,
-                    heavy_route_batch_rows=15_750,
-                    session_establish_timeout_seconds=300,
-                    restore_timeout_seconds=300,
-                    quiet_window_seconds=quiet_window_seconds,
-                    bounded_validation=bounded_validation,
-                    max_lookup_concurrency=1,
-                    as_path_pool_size=10,
-                    as_path_length=255,
-                    as_set_length=255,
-                    communities_per_route=32,
-                    extended_communities_per_route=16,
-                ),
-            ],
-            playbook_name="bgp_ebb_route_storm_playbook",
-            phase=PHASE_WORKLOAD,
-            device_name=device_name,
-            config=characterization,
-        ),
+    playbook_name = "bgp_ebb_route_storm_playbook"
+    return create_dice_unified_churn_playbook(
+        spec=route_churn_spec(
+            playbook_name=playbook_name,
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=instability_checks.prechecks,
+            postchecks=instability_checks.postchecks,
+            snapshot_checks=instability_checks.snapshot_checks,
+            periodic_tasks=(),
+            action_factory=lambda: _characterized(
+                [
+                    create_bgp_ebb_route_storm_stage(
+                        hostname=device_name,
+                        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                        expected_established_sessions=total_session_count,
+                        observer_peer_parent_prefix=observer_peer_parent_prefix,
+                        prefix_pool_names={
+                            "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+                            "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+                        },
+                        peer_count_per_plane=62,
+                        selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
+                        routes_per_peer=750,
+                        samples_per_block=2,
+                        cycles=cycles,
+                        advertise_seconds=30,
+                        withdraw_seconds=30,
+                        poll_interval_seconds=5,
+                        convergence_hard_timeout_seconds=300,
+                        heavy_setup_hard_timeout_seconds=1_800,
+                        heavy_route_batch_rows=15_750,
+                        session_establish_timeout_seconds=300,
+                        restore_timeout_seconds=300,
+                        quiet_window_seconds=quiet_window_seconds,
+                        bounded_validation=bounded_validation,
+                        max_lookup_concurrency=1,
+                        as_path_pool_size=10,
+                        as_path_length=255,
+                        as_set_length=255,
+                        communities_per_route=32,
+                        extended_communities_per_route=16,
+                    ),
+                ],
+                playbook_name=playbook_name,
+                phase=PHASE_WORKLOAD,
+                device_name=device_name,
+                config=characterization,
+            ),
+        )
     )
 
 
@@ -1562,34 +1574,38 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             rss_delta=rss_delta,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_ebgp_route_oscillation_playbook",
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
-        prechecks=osc_checks.prechecks,
-        postchecks=osc_checks.postchecks,
-        snapshot_checks=osc_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=memory_threshold,
-            cpu_util_terminate_on_error=cpu_util_terminate_on_error,
-            memory_terminate_on_error=memory_terminate_on_error,
-        ),
-        stages=_characterized(
-            [
-                create_validated_ebgp_route_oscillations_stage(
-                    device_name=device_name,
-                    expected_established_sessions=expected_established_sessions,
-                    prefix_pool_regex=prefix_pool_regex,
-                    prefix_start_index=prefix_start_index,
-                    prefix_end_index=prefix_end_index,
-                    parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
-                )
-            ],
-            playbook_name="bgp_ebb_ebgp_route_oscillation_playbook",
-            phase=PHASE_WORKLOAD,
-            device_name=device_name,
-            config=characterization,
-        ),
+    playbook_name = "bgp_ebb_ebgp_route_oscillation_playbook"
+    return create_dice_unified_churn_playbook(
+        spec=route_churn_spec(
+            playbook_name=playbook_name,
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=osc_checks.prechecks,
+            postchecks=osc_checks.postchecks,
+            snapshot_checks=osc_checks.snapshot_checks,
+            periodic_tasks=create_standard_periodic_tasks(
+                device_name=device_name,
+                memory_threshold=memory_threshold,
+                cpu_util_terminate_on_error=cpu_util_terminate_on_error,
+                memory_terminate_on_error=memory_terminate_on_error,
+            ),
+            action_factory=lambda: _characterized(
+                [
+                    create_validated_ebgp_route_oscillations_stage(
+                        device_name=device_name,
+                        expected_established_sessions=expected_established_sessions,
+                        prefix_pool_regex=prefix_pool_regex,
+                        prefix_start_index=prefix_start_index,
+                        prefix_end_index=prefix_end_index,
+                        parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                    )
+                ],
+                playbook_name=playbook_name,
+                phase=PHASE_WORKLOAD,
+                device_name=device_name,
+                config=characterization,
+            ),
+        )
     )
 
 
@@ -1659,35 +1675,39 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             rss_delta=rss_delta,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_ibgp_route_oscillation_playbook",
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
-        prechecks=osc_checks.prechecks,
-        postchecks=osc_checks.postchecks,
-        snapshot_checks=osc_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=memory_threshold,
-            cpu_util_terminate_on_error=cpu_util_terminate_on_error,
-            memory_terminate_on_error=memory_terminate_on_error,
-        ),
-        stages=_characterized(
-            [
-                create_validated_bgp_route_oscillations_stage(
-                    device_name=device_name,
-                    expected_established_sessions=expected_established_sessions,
-                    prefix_pool_regex=prefix_pool_regex,
-                    expected_prefix_pool_names=expected_prefix_pool_names,
-                    prefix_start_index=prefix_start_index,
-                    prefix_end_index=prefix_end_index,
-                    parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
-                )
-            ],
-            playbook_name="bgp_ebb_ibgp_route_oscillation_playbook",
-            phase=PHASE_WORKLOAD,
-            device_name=device_name,
-            config=characterization,
-        ),
+    playbook_name = "bgp_ebb_ibgp_route_oscillation_playbook"
+    return create_dice_unified_churn_playbook(
+        spec=route_churn_spec(
+            playbook_name=playbook_name,
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=osc_checks.prechecks,
+            postchecks=osc_checks.postchecks,
+            snapshot_checks=osc_checks.snapshot_checks,
+            periodic_tasks=create_standard_periodic_tasks(
+                device_name=device_name,
+                memory_threshold=memory_threshold,
+                cpu_util_terminate_on_error=cpu_util_terminate_on_error,
+                memory_terminate_on_error=memory_terminate_on_error,
+            ),
+            action_factory=lambda: _characterized(
+                [
+                    create_validated_bgp_route_oscillations_stage(
+                        device_name=device_name,
+                        expected_established_sessions=expected_established_sessions,
+                        prefix_pool_regex=prefix_pool_regex,
+                        expected_prefix_pool_names=expected_prefix_pool_names,
+                        prefix_start_index=prefix_start_index,
+                        prefix_end_index=prefix_end_index,
+                        parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                    )
+                ],
+                playbook_name=playbook_name,
+                phase=PHASE_WORKLOAD,
+                device_name=device_name,
+                config=characterization,
+            ),
+        )
     )
 
 
@@ -1878,33 +1898,36 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
             snapshot_skip_uptime=True,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_ebgp_session_oscillation_playbook",
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
-        prechecks=osc_checks.prechecks,
-        postchecks=osc_checks.postchecks,
-        snapshot_checks=osc_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=memory_threshold,
-            cpu_util_terminate_on_error=cpu_util_terminate_on_error,
-            memory_terminate_on_error=memory_terminate_on_error,
-        ),
-        stages=[
-            create_validated_ebgp_session_oscillation_stage(
+    return create_dice_unified_churn_playbook(
+        spec=session_churn_spec(
+            playbook_name="bgp_ebb_ebgp_session_oscillation_playbook",
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=osc_checks.prechecks,
+            postchecks=osc_checks.postchecks,
+            snapshot_checks=osc_checks.snapshot_checks,
+            periodic_tasks=create_standard_periodic_tasks(
                 device_name=device_name,
-                ipv4_peer_regex=ipv4_peer_regex,
-                ipv6_peer_regex=ipv6_peer_regex,
-                test_duration_seconds=test_duration_seconds,
-                uptime_seconds=uptime_seconds,
-                downtime_seconds=downtime_seconds,
-                sessions_per_cycle=sessions_per_cycle,
-                ipv4_session_count=ipv4_session_count,
-                ipv6_session_count=ipv6_session_count,
-                expected_established_sessions=expected_established_sessions,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                memory_threshold=memory_threshold,
+                cpu_util_terminate_on_error=cpu_util_terminate_on_error,
+                memory_terminate_on_error=memory_terminate_on_error,
             ),
-        ],
+            action_factory=lambda: [
+                create_validated_ebgp_session_oscillation_stage(
+                    device_name=device_name,
+                    ipv4_peer_regex=ipv4_peer_regex,
+                    ipv6_peer_regex=ipv6_peer_regex,
+                    test_duration_seconds=test_duration_seconds,
+                    uptime_seconds=uptime_seconds,
+                    downtime_seconds=downtime_seconds,
+                    sessions_per_cycle=sessions_per_cycle,
+                    ipv4_session_count=ipv4_session_count,
+                    ipv6_session_count=ipv6_session_count,
+                    expected_established_sessions=expected_established_sessions,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                ),
+            ],
+        )
     )
 
 
@@ -1967,35 +1990,38 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             snapshot_skip_uptime=True,
         ),
     )
-    return Playbook(
-        name="bgp_ebb_ibgp_plane_session_oscillation_playbook",
-        setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
-        prechecks=osc_checks.prechecks,
-        postchecks=osc_checks.postchecks,
-        snapshot_checks=osc_checks.snapshot_checks,
-        periodic_tasks=create_standard_periodic_tasks(
-            device_name=device_name,
-            memory_threshold=memory_threshold,
-            cpu_util_terminate_on_error=cpu_util_terminate_on_error,
-            memory_terminate_on_error=memory_terminate_on_error,
-        ),
-        stages=[
-            create_validated_plane_bgp_session_oscillation_stage(
+    return create_dice_unified_churn_playbook(
+        spec=session_churn_spec(
+            playbook_name="bgp_ebb_ibgp_plane_session_oscillation_playbook",
+            device=device_name,
+            setup_steps=create_bgp_instability_setup_steps(device_name=device_name),
+            prechecks=osc_checks.prechecks,
+            postchecks=osc_checks.postchecks,
+            snapshot_checks=osc_checks.snapshot_checks,
+            periodic_tasks=create_standard_periodic_tasks(
                 device_name=device_name,
-                ipv4_peer_regex=ipv4_peer_regex,
-                ipv6_peer_regex=ipv6_peer_regex,
-                test_duration_seconds=test_duration_seconds,
-                uptime_seconds=uptime_seconds,
-                downtime_seconds=downtime_seconds,
-                sessions_per_cycle=sessions_per_plane,
-                ipv4_sessions_per_plane=ipv4_sessions_per_plane,
-                ipv6_sessions_per_plane=ipv6_sessions_per_plane,
-                tornado_planes=tornado_planes,
-                session_type=session_type,
-                expected_established_sessions=expected_established_sessions,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                memory_threshold=memory_threshold,
+                cpu_util_terminate_on_error=cpu_util_terminate_on_error,
+                memory_terminate_on_error=memory_terminate_on_error,
             ),
-        ],
+            action_factory=lambda: [
+                create_validated_plane_bgp_session_oscillation_stage(
+                    device_name=device_name,
+                    ipv4_peer_regex=ipv4_peer_regex,
+                    ipv6_peer_regex=ipv6_peer_regex,
+                    test_duration_seconds=test_duration_seconds,
+                    uptime_seconds=uptime_seconds,
+                    downtime_seconds=downtime_seconds,
+                    sessions_per_cycle=sessions_per_plane,
+                    ipv4_sessions_per_plane=ipv4_sessions_per_plane,
+                    ipv6_sessions_per_plane=ipv6_sessions_per_plane,
+                    tornado_planes=tornado_planes,
+                    session_type=session_type,
+                    expected_established_sessions=expected_established_sessions,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+                ),
+            ],
+        )
     )
 
 
