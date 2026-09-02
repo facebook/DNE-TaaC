@@ -631,6 +631,21 @@ class IxiaSessionQuarantinedError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class IxiaScenarioQuarantineRecord:
+    generation: int
+    reason: str
+    baseline: object
+    mutation_journal: object
+    created_at_monotonic: float
+    expires_at_monotonic: float
+    session_identity: t.Optional[t.Tuple[str, int]]
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.expires_at_monotonic
+
+
 class NetworkGroupNotFoundError(Exception):
     pass
 
@@ -746,6 +761,9 @@ _PROTOCOLS_STOPPED_STATES: t.FrozenSet[str] = frozenset({"notStarted", "configur
 _PROTOCOL_STATE_SETTLE_TIMEOUT_SECONDS: int = 120
 # Each poll is one REST round-trip per device group, so keep it coarse.
 _PROTOCOL_STATE_POLL_SECONDS: int = 2
+# ApplyOnTheFly failures are commonly transient while a large topology settles.
+_APPLY_CHANGES_MAX_ATTEMPTS: int = 3
+_APPLY_CHANGES_RETRY_DELAY_SECONDS: float = 10.0
 
 
 def external_api(func: t.Callable) -> t.Callable:
@@ -1074,6 +1092,10 @@ class Ixia:
         self._deadline_request_wrapper: t.Optional[t.Any] = None
         self._session_quarantine_reason: t.Optional[str] = None
         self._quarantined_session_identity: t.Optional[t.Tuple[str, int]] = None
+        self._scenario_quarantine_generation = 0
+        self._scenario_quarantine_record: t.Optional[IxiaScenarioQuarantineRecord] = (
+            None
+        )
 
     @staticmethod
     def get_formatted_ip_address(ixia_server_ip: str) -> str:
@@ -1388,15 +1410,94 @@ class Ixia:
     @property
     def session_quarantined(self) -> bool:
         with self._bounded_apply_lock:
-            return self._session_quarantine_reason is not None
+            return (
+                self._session_quarantine_reason is not None
+                or self._scenario_quarantine_record is not None
+            )
+
+    @property
+    def scenario_quarantine_record(
+        self,
+    ) -> t.Optional[IxiaScenarioQuarantineRecord]:
+        with self._bounded_apply_lock:
+            return self._scenario_quarantine_record
 
     def assert_session_not_quarantined(self) -> None:
         with self._bounded_apply_lock:
             reason = self._session_quarantine_reason
+            record = self._scenario_quarantine_record
+        if record is not None:
+            expiry = (
+                "expired; explicit recovery is required" if record.expired else "active"
+            )
+            raise IxiaSessionQuarantinedError(
+                "IXIA session is quarantined after an unverified churn restore: "
+                f"{record.reason} (generation={record.generation}, {expiry})"
+            )
         if reason is not None:
             raise IxiaSessionQuarantinedError(
                 f"IXIA session is quarantined after an ambiguous operation: {reason}"
             )
+
+    def quarantine_scenario(
+        self,
+        reason: str,
+        baseline: object,
+        mutation_journal: object,
+        expires_at_monotonic: float,
+    ) -> IxiaScenarioQuarantineRecord:
+        created_at = time.monotonic()
+        if expires_at_monotonic <= created_at:
+            raise ValueError("scenario quarantine expiry must be in the future")
+        with self._bounded_apply_lock:
+            self._scenario_quarantine_generation += 1
+            record = IxiaScenarioQuarantineRecord(
+                generation=self._scenario_quarantine_generation,
+                reason=reason,
+                baseline=baseline,
+                mutation_journal=mutation_journal,
+                created_at_monotonic=created_at,
+                expires_at_monotonic=expires_at_monotonic,
+                session_identity=self._remote_session_identity(),
+            )
+            self._scenario_quarantine_record = record
+            return record
+
+    def reset_scenario_quarantine(
+        self,
+        generation: int,
+        *,
+        restoration_verified: bool = False,
+        session_reset: bool = False,
+    ) -> None:
+        with self._bounded_apply_lock:
+            record = self._scenario_quarantine_record
+            if record is None:
+                raise IxiaSessionQuarantinedError("no scenario quarantine to reset")
+            if record.generation != generation:
+                raise IxiaSessionQuarantinedError(
+                    f"scenario quarantine generation changed from {generation} "
+                    f"to {record.generation}"
+                )
+            current_identity = self._remote_session_identity()
+            verified_same_session = (
+                restoration_verified
+                and record.session_identity is not None
+                and current_identity is not None
+                and current_identity == record.session_identity
+            )
+            replaced_session = (
+                session_reset
+                and record.session_identity is not None
+                and current_identity is not None
+                and current_identity != record.session_identity
+            )
+            if not verified_same_session and not replaced_session:
+                raise IxiaSessionQuarantinedError(
+                    "scenario quarantine reset requires verified restoration on the "
+                    "captured session or an explicitly replaced remote session"
+                )
+            self._scenario_quarantine_record = None
 
     def _quarantine_session(self, reason: str) -> None:
         with self._bounded_apply_lock:
@@ -2360,13 +2461,32 @@ class Ixia:
             "the protocols in the IXIA setup!"
         )
 
+    def _apply_changes_with_retry(self) -> None:
+        for attempt in range(1, _APPLY_CHANGES_MAX_ATTEMPTS + 1):
+            try:
+                with self._bounded_apply_lock:
+                    self.assert_session_not_quarantined()
+                    self.ixnetwork.Globals.Topology.ApplyOnTheFly()
+                    self.logger.debug(
+                        "[GLOBAL] Successfully applied changes on the fly"
+                    )
+                return
+            except IxiaSessionQuarantinedError:
+                raise
+            except Exception as error:
+                if attempt == _APPLY_CHANGES_MAX_ATTEMPTS:
+                    raise
+                self.logger.warning(
+                    f"Attempt {attempt}/{_APPLY_CHANGES_MAX_ATTEMPTS} failed for "
+                    f"_apply_changes_with_retry: {error}. Retrying in "
+                    f"{_APPLY_CHANGES_RETRY_DELAY_SECONDS:.2f}s..."
+                )
+                time.sleep(_APPLY_CHANGES_RETRY_DELAY_SECONDS)
+
     @external_api
-    @retryable(num_tries=3, sleep_time=10, debug=True)
     def apply_changes(self, sleep_timer: int = 0) -> None:
         """API to apply the changes made on the fly to the topology"""
-
-        self.ixnetwork.Globals.Topology.ApplyOnTheFly()
-        self.logger.debug("[GLOBAL] Successfully applied changes on the fly")
+        self._apply_changes_with_retry()
 
         time.sleep(sleep_timer)
 
