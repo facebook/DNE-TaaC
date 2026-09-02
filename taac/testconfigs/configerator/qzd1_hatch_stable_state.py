@@ -12,6 +12,7 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.packet_headers import (
     BGP_CP_V6_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS,
     DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
+    LLDP_TRAFFIC_PACKET_HEADERS,
     NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
 )
 from taac.playbooks.playbook_definitions import (
@@ -123,6 +124,9 @@ def _disabled_cpu_traffic_items(port_a, port_b, port_c):
         ("RAW_NDP_R", port_a, port_b, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
         ("RAW_NDP_B", port_b, port_c, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
         ("RAW_NDP_U", port_c, port_a, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
+        ("RAW_LLDP_R", port_a, port_b, LLDP_TRAFFIC_PACKET_HEADERS),
+        ("RAW_LLDP_B", port_b, port_c, LLDP_TRAFFIC_PACKET_HEADERS),
+        ("RAW_LLDP_U", port_c, port_a, LLDP_TRAFFIC_PACKET_HEADERS),
     ]
 
 
