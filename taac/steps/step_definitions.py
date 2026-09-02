@@ -1029,6 +1029,7 @@ def create_bgp_attribute_churn_step(
     max_lookup_concurrency: int,
     openr_mode: str,
     convergence_hard_timeout_seconds: int = 300,
+    transient_observation_logging: str = "off",
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-10 dual-stack attribute-churn workflow."""
@@ -1093,6 +1094,8 @@ def create_bgp_attribute_churn_step(
         raise ValueError("scenario_id must be non-empty")
     if openr_mode not in {"none", "standalone"}:
         raise ValueError("openr_mode must be none or standalone")
+    if transient_observation_logging not in {"off", "extended"}:
+        raise ValueError("transient_observation_logging must be off or extended")
     _validate_bgp_attribute_churn_geometry(numeric_params)
 
     params: t.Dict[str, t.Any] = {
@@ -1113,6 +1116,8 @@ def create_bgp_attribute_churn_step(
         "openr_mode": openr_mode,
         **numeric_params,
     }
+    if transient_observation_logging == "extended":
+        params["transient_observation_logging"] = transient_observation_logging
     return create_custom_step(
         params_dict=params,
         description=description or "Run audited dual-stack BGP attribute churn",

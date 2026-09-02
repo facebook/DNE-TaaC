@@ -811,6 +811,26 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(3_600, payload["duration_seconds"])
         self.assertEqual(100_000, payload["max_iterations"])
         self.assertEqual(300, payload["convergence_hard_timeout_seconds"])
+        self.assertNotIn("transient_observation_logging", payload)
+
+    def test_step_factory_enables_extended_transient_observation_logging(
+        self,
+    ) -> None:
+        kwargs = _locked_step_kwargs()
+        kwargs["transient_observation_logging"] = "extended"
+
+        payload = _step_payload(create_bgp_attribute_churn_step(**kwargs))
+
+        self.assertEqual("extended", payload["transient_observation_logging"])
+
+    def test_step_factory_rejects_unknown_transient_observation_logging(
+        self,
+    ) -> None:
+        kwargs = _locked_step_kwargs()
+        kwargs["transient_observation_logging"] = "verbose"
+
+        with self.assertRaisesRegex(ValueError, "must be off or extended"):
+            create_bgp_attribute_churn_step(**kwargs)
 
     def test_attribute_churn_step_params_round_trip_without_redefaulting(self) -> None:
         attribute_churn = _locked_attribute_churn()

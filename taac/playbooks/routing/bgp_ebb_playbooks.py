@@ -595,6 +595,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     profile,  # BgpPlusPlusProfile
     exclude_bgp_mon: bool = True,
     duration_seconds: int = DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
+    transient_observation_logging: str = "off",
     characterization: CharacterizationConfig = DISABLED,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
@@ -619,6 +620,8 @@ def get_bgp_ebb_attribute_churn_playbook(
             precheck when the OpenR variant is selected.
         duration_seconds: Active monotonic churn window, divided evenly
             across MED, origin, and local-pref.
+        transient_observation_logging: `off` suppresses retryable convergence
+            warnings; `extended` logs each retry with its stack trace.
 
     Returns:
         A `Playbook` named `bgp_ebb_attribute_churn_playbook` with standard
@@ -669,6 +672,7 @@ def get_bgp_ebb_attribute_churn_playbook(
                         reference_setup_timeout_seconds=120,
                         quiet_window_seconds=120,
                         max_lookup_concurrency=8,
+                        transient_observation_logging=(transient_observation_logging),
                         openr_mode=(
                             "standalone"
                             if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R

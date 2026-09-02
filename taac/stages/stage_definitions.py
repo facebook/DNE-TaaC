@@ -2336,6 +2336,7 @@ def create_bgp_ebb_attribute_churn_stage(
     max_lookup_concurrency: int,
     openr_mode: str,
     convergence_hard_timeout_seconds: int = 300,
+    transient_observation_logging: str = "off",
 ) -> Stage:
     """Create CICD-EBB-10 as one failure-safe, audited custom workflow."""
     return Stage(
@@ -2350,6 +2351,7 @@ def create_bgp_ebb_attribute_churn_stage(
                 quiet_window_seconds=quiet_window_seconds,
                 max_lookup_concurrency=max_lookup_concurrency,
                 openr_mode=openr_mode,
+                transient_observation_logging=transient_observation_logging,
             )
         ]
     )
