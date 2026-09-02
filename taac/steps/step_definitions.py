@@ -21,7 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import paramiko
-from taac.churn.attribute import AttributeChurn
+from taac.abstractions.churn.attribute import AttributeChurn
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 

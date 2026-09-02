@@ -2,11 +2,14 @@
 
 **Scope**: `fbcode/neteng/test_infra/dne/taac/abstractions/`.
 
-**Applies to**: optional high-level authoring helpers that compile to the same
-flat TAAC `TestConfig` fields the runner already consumes.
+**Applies to**: optional high-level authoring helpers and device-independent
+behavior abstractions that compile or adapt to the same flat TAAC contracts the
+runner already consumes.
 
-**Purpose**: give factory authors a typed source of truth for topology intent
-without changing TAAC runtime behavior or making flat TAAC authoring obsolete.
+**Purpose**: give factory authors a typed source of truth for topology and test
+behavior intent without making flat TAAC authoring obsolete. Runtime-neutral
+contracts may coordinate that intent, while TAAC-specific execution remains in
+`taac/internal`.
 
 Design reference: `P2421897026`.
 
@@ -21,7 +24,7 @@ TAAC remains flat. A `TestConfig` is still a flat bundle of endpoints, setup
 tasks, teardown tasks, IXIA configs, playbooks, checks, and related thrift
 fields.
 
-DICE is a factory-side authoring layer:
+DICE is an abstraction layer with a factory-side authoring path:
 
 ```text
 LogicalTopology + PhysicalInventory
@@ -37,6 +40,43 @@ into the existing `TestConfig` shape.
 Existing flat factory authoring remains supported. Use an abstraction when it
 removes duplicated topology intent or gives useful validation; do not use it as
 a mandatory wrapper around simple flat configs.
+
+DICE may also define device-independent behavior contracts, such as churn
+specifications, policies, selectors, outcomes, and generic orchestration. These
+contracts must not depend on TAAC runtime handlers, concrete IXIA objects, DUT
+RPC clients, result stores, logging, or `TestCaseFailure`. The concrete adapters
+that satisfy those contracts remain under `taac/internal`; reusable IXIA
+mechanics remain under `taac/ixia`.
+
+The dependency direction is:
+
+```text
+taac/internal/steps
+    -> taac/internal
+        -> taac/abstractions
+        -> taac/ixia
+```
+
+Code under `taac/abstractions` must never import `taac/internal`.
+
+### Churn ownership
+
+Churn code follows the same abstraction-to-runtime boundary:
+
+- `taac/abstractions/churn` owns typed scenarios, policies, selectors,
+  observations, results, action protocols, generic bounded orchestration, and
+  lowering to flat step parameters.
+- `taac/internal/churn` owns TAAC handler adapters, DUT RPC integration,
+  coordination, result publication, recovery decisions, and test-framework
+  failure translation.
+- `taac/ixia` owns reusable vendor-specific operations such as session access,
+  mutations, bounded apply, readback, restoration, and quarantine mechanisms.
+- `taac/internal/steps` remains a thin bridge from `CustomStep` execution into
+  the churn runtime adapter.
+
+The abstraction package describes what a churn scenario requires. Internal and
+vendor adapters decide how those requirements are executed against live test
+infrastructure.
 
 ---
 

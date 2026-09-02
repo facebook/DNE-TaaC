@@ -11,7 +11,7 @@ alphabetical export order.
 
 import typing as t
 
-from taac.churn.attribute import (
+from taac.abstractions.churn.attribute import (
     AttributeChurn,
     AttributePoolIdentity,
     AttributeTargetSelector,
@@ -26,13 +26,13 @@ from taac.churn.attribute import (
     DEFAULT_ATTRIBUTE_CHURN_SNAPSHOT_TIMEOUT_SECONDS,
     DEFAULT_ATTRIBUTE_CHURN_WORK_RESERVE_SECONDS,
 )
-from taac.churn.policies import (
+from taac.abstractions.churn.policies import (
     ExecutionPolicy,
     PreparationPolicy,
     RecoveryPolicy,
 )
-from taac.churn.selectors import UniformRowSelection
-from taac.churn.specs import (
+from taac.abstractions.churn.selectors import UniformRowSelection
+from taac.abstractions.churn.specs import (
     AttributeFamily,
     AttributePhase,
     ChurnScenario,

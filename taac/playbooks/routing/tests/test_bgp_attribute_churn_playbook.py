@@ -9,20 +9,20 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from taac.churn.attribute import (
+from taac.abstractions.churn.attribute import (
     AttributeChurn,
     AttributePoolIdentity,
     AttributeTargetSelector,
     BaselineExpectation,
     BlockGeometryExpectation,
 )
-from taac.churn.policies import (
+from taac.abstractions.churn.policies import (
     ExecutionPolicy,
     PreparationPolicy,
     RecoveryPolicy,
 )
-from taac.churn.selectors import UniformRowSelection
-from taac.churn.specs import (
+from taac.abstractions.churn.selectors import UniformRowSelection
+from taac.abstractions.churn.specs import (
     AttributeFamily,
     AttributePhase,
     ChurnScenario,

@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
-from taac.churn.attribute import AttributeChurn
+from taac.abstractions.churn.attribute import AttributeChurn
 from taac.constants import (
     DEFAULT_LOCAL_LINK,
     DEFAULT_OTHER_LINK,
