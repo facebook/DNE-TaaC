@@ -7271,6 +7271,7 @@ class Ixia:
         interface: str,
         prefix_count: int,
         network_group_multiplier: t.Optional[int] = None,
+        protocols_already_stopped: bool = False,
     ) -> None:
         """
         Update the prefix counts and optionally the network group multiplier for the specified port.
@@ -7280,6 +7281,8 @@ class Ixia:
             interface: Interface name
             prefix_count: New prefix count value to set
             network_group_multiplier: Optional multiplier to set for network groups
+            protocols_already_stopped: Skip the internal stop/start cycle when
+                the caller owns a larger stopped-protocol configuration window.
         """
         device_groups = self.get_device_groups_by_port_and_interface(
             hostname, interface
@@ -7305,23 +7308,30 @@ class Ixia:
                     # protocols synchronously, apply the multiplier, then restart
                     # (StartAllProtocols honors Enabled, so disabled groups stay
                     # down).
+                    action = (
+                        "protocols already stopped by caller"
+                        if protocols_already_stopped
+                        else "stopping all protocols"
+                    )
                     self.logger.info(
                         f"Multiplier change {network_group.Multiplier} -> "
                         f"{network_group_multiplier} for {network_group.Name}; "
-                        "stopping all protocols"
+                        f"{action}"
                     )
                     # StopAllProtocols can return before the protocol state fully
                     # settles; wait so the network group has actually left the
                     # started state before the (non-on-the-fly) multiplier PATCH.
-                    self.stop_protocols_and_wait()
+                    if not protocols_already_stopped:
+                        self.stop_protocols_and_wait()
                     self.logger.info(
                         f"Setting multiplier to {network_group_multiplier} for network group {network_group.Name}"
                     )
                     network_group.Multiplier = network_group_multiplier
-                    self.logger.info(
-                        f"Multiplier set for {network_group.Name}; starting all protocols"
-                    )
-                    self.start_protocols()
+                    if not protocols_already_stopped:
+                        self.logger.info(
+                            f"Multiplier set for {network_group.Name}; starting all protocols"
+                        )
+                        self.start_protocols()
 
                 # Update IPv6 prefix pools
                 for ipv6_prefix_pool in network_group.Ipv6PrefixPools.find():

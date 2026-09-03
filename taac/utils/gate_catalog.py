@@ -79,8 +79,14 @@ GATE_SC4_CPU_TRANSIENT = "sc4_cpu_transient"
 GATE_SC4_MEMORY_GROWTH = "sc4_memory_growth"
 GATE_SC4_MEMORY_TRANSIENT = "sc4_memory_transient"
 # SC3 -- transient-memory route-scale sweep test:
+GATE_SC3_MEMORY_ADJRIB_OUT = "sc3_memory_adjrib_out"
 GATE_SC3_MEMORY_DEDUP = "sc3_memory_dedup"
 GATE_SC3_MEMORY_TRANSIENT = "sc3_memory_transient"
+SC3_GATE_NAMES: tuple[str, ...] = (
+    GATE_SC3_MEMORY_ADJRIB_OUT,
+    GATE_SC3_MEMORY_DEDUP,
+    GATE_SC3_MEMORY_TRANSIENT,
+)
 
 # The central control point: gate name -> default enforcement mode. Flip a gate
 # globally by editing its mode here; override for a single run via the call site.
@@ -141,10 +147,16 @@ GATE_DEFAULT_MODES: dict[str, str] = {
     # internal/steps/bgp_attribute_storage_varying_combinations_custom_step.py
     # for the re-derivation this needs from the first clean run.
     GATE_SC2_MEMORY_GROWTH: GATE_MODE_BLOCKING,
-    # Deduplicator-size constancy across the route sweep -- observe.
-    GATE_SC3_MEMORY_DEDUP: GATE_MODE_PERMISSIVE,
-    # Transient (peak - stable) memory flatness across the route sweep -- observe.
-    GATE_SC3_MEMORY_TRANSIENT: GATE_MODE_PERMISSIVE,
+    # Fixed attribute bundles and sub-attribute pools must stay bounded as the
+    # route count grows.
+    GATE_SC3_MEMORY_DEDUP: GATE_MODE_BLOCKING,
+    # Stable RSS growth must remain below the raw Adj-RIB-Out payload that a
+    # complete fallback to per-peer storage would require. This conservative
+    # lower-bound check does not attempt to detect partial loss of sharing.
+    GATE_SC3_MEMORY_ADJRIB_OUT: GATE_MODE_BLOCKING,
+    # The sampled convergence peak may exceed post-convergence stable RSS by no
+    # more than the configured absolute memory ceiling.
+    GATE_SC3_MEMORY_TRANSIENT: GATE_MODE_BLOCKING,
     # Transient (peak - stable) memory flatness across the ingress-sender sweep.
     # This IS the SC4 claim -- the convergence burst must not buffer per sender --
     # and is the first of these to calibrate and flip. Observe until then.

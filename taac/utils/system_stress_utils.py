@@ -109,6 +109,19 @@ def high_cpu_span_seconds(high_cpu_elapsed_times: t.Sequence[float]) -> float:
     return high_cpu_elapsed_times[-1] - high_cpu_elapsed_times[0]
 
 
+async def _wait_for_next_sample(
+    sleep_time: float,
+    stop_event: t.Optional[asyncio.Event],
+) -> None:
+    if stop_event is None:
+        await asyncio.sleep(sleep_time)
+        return
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=sleep_time)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def async_collect_peak_cpu_memory(
     hostname: str,
     process_name: str,
@@ -116,6 +129,7 @@ async def async_collect_peak_cpu_memory(
     interval_seconds: int = 30,
     steady_mem: bool = False,
     high_cpu_threshold_percent: float = 50.0,
+    stop_event: t.Optional[asyncio.Event] = None,
 ) -> t.Dict[str, float]:
     """
     Collect CPU and memory samples for a process and return peak values.
@@ -128,6 +142,9 @@ async def async_collect_peak_cpu_memory(
         process_name: Process name to monitor (e.g., "bgpd_main")
         duration_seconds: Duration to monitor in seconds
         interval_seconds: Sampling interval in seconds (default: 30s)
+        stop_event: Optional signal to finish after the current sample. This lets
+            adaptive workflows collect the complete trigger-to-settle window
+            without waiting out the worst-case duration after early convergence.
 
     Returns:
         Dict containing:
@@ -137,6 +154,8 @@ async def async_collect_peak_cpu_memory(
         - avg_memory_mb: Full-window mean memory (MB) across all samples --
           the robust steady/stable value (vs a single flaky snapshot)
         - process_pid: Most recently observed PID for the measured process
+        - sample_count: Number of valid process samples collected
+        - process_pid_changed: 1.0 if the observed process PID changed
 
     Example:
         >>> peak_stats = await async_collect_peak_cpu_memory(
@@ -153,6 +172,7 @@ async def async_collect_peak_cpu_memory(
     max_cpu = 0.0
     max_memory_mb = 0.0
     process_pid = 0.0
+    process_pid_changed = False
     sample_count = 0
     # Monotonic clock: all elapsed-duration math below (loop bound, sustained-CPU
     # timestamps, inter-sample sleep) must be immune to wall-clock/NTP steps.
@@ -171,7 +191,9 @@ async def async_collect_peak_cpu_memory(
         f"(duration={duration_seconds}s, interval={interval_seconds}s)"
     )
 
-    while (time.monotonic() - start_time) < duration_seconds:
+    while (time.monotonic() - start_time) < duration_seconds and not (
+        stop_event is not None and stop_event.is_set()
+    ):
         sample_count += 1
 
         try:
@@ -186,6 +208,8 @@ async def async_collect_peak_cpu_memory(
                     observed_pid = float(pid)
 
                     if process_pid and observed_pid != process_pid:
+                        process_pid_changed = True
+
                         LOGGER.warning(
                             f"{process_name} PID changed from {int(process_pid)} "
                             f"to {int(observed_pid)} during monitoring; "
@@ -226,9 +250,11 @@ async def async_collect_peak_cpu_memory(
 
         # Sleep until next sample
         elapsed = time.monotonic() - start_time
-        if elapsed < duration_seconds:
+        if elapsed < duration_seconds and not (
+            stop_event is not None and stop_event.is_set()
+        ):
             sleep_time = min(interval_seconds, duration_seconds - elapsed)
-            await asyncio.sleep(sleep_time)
+            await _wait_for_next_sample(sleep_time, stop_event)
 
     high_cpu_sample_count = len(high_cpu_elapsed_times)
     high_cpu_duration_seconds = high_cpu_span_seconds(high_cpu_elapsed_times)
@@ -270,6 +296,8 @@ async def async_collect_peak_cpu_memory(
         "high_cpu_sample_count": float(high_cpu_sample_count),
         "high_cpu_duration_seconds": high_cpu_duration_seconds,
         "process_pid": process_pid,
+        "sample_count": float(len(memory_record)),
+        "process_pid_changed": float(process_pid_changed),
     }
 
 
