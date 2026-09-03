@@ -57,6 +57,16 @@ RUN /taac/scripts/setup_getdeps.sh
 # Build the full dep tree (~20 min cold). The ${NUM_JOBS:+--num-jobs ${NUM_JOBS}}
 # expansion adds the flag only when NUM_JOBS is set, so an unset value
 # preserves getdeps' default (= nproc) without injecting an empty arg.
+#
+# The trailing cleanup drops getdeps' transient inputs and intermediates
+# (source checkouts, extracted tarballs, per-dep build trees, downloads)
+# in the SAME layer that created them, keeping only /scratch/installed.
+# Those transient trees are tens of GB; leaving them in the layer bloats
+# the committed diff so much that the container engine can exhaust its
+# blob-staging / runroot temp space at commit time (manifesting as
+# "storing layer ... to file: io: read/write on closed pipe"). The later
+# `taac` build runs with --no-deps against /scratch/installed, so nothing
+# downstream needs the removed trees.
 RUN python3 build/fbcode_builder/getdeps.py \
         --scratch-path /scratch \
         --extra-cmake-defines='{"enable_tests": "OFF"}' \
@@ -68,7 +78,8 @@ RUN python3 build/fbcode_builder/getdeps.py \
         --extra-cmake-defines='{"enable_tests": "OFF"}' \
         --allow-system-packages build --no-tests \
         ${NUM_JOBS:+--num-jobs ${NUM_JOBS}} \
-        fboss-thrift-defs
+        fboss-thrift-defs \
+    && rm -rf /scratch/build /scratch/repos /scratch/extracted /scratch/downloads
 
 # Install the fbthrift python wheel.
 RUN python3 -m pip install --break-system-packages --no-index \

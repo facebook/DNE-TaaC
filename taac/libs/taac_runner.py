@@ -187,6 +187,13 @@ if not TAAC_OSS:
         IxiaDiagnosticsCollectionTask,
     )
     from taac.internal.utils import ondevice_sampler
+else:
+    # OSS binding for the mock-device registration helper. ``_add_oss_mock_device_data``
+    # (called from ``async_test_setUp`` for any config that populates
+    # ``oss_mock_device_data``) invokes this unconditionally, so it must resolve
+    # under TAAC_OSS too — the OSS-safe implementation lives in taac.utils, not
+    # taac.internal. Without this the runner NameErrors before setup for such configs.
+    from taac.utils.netwhoami_utils import add_oss_mock_device_data
 
 DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID: str = "test_case_start"
 DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
