@@ -80,6 +80,18 @@ from neteng.fboss.bgp_thrift.types import (
     TGetUpdateGroupInfoResponse,
     TOriginatedRoute,
 )
+
+try:
+    from neteng.fboss.bgp_thrift.types import (
+        TGetUpdateGroupSummariesResponse,
+    )
+except ImportError:
+    # TGetUpdateGroupSummariesResponse is absent from the OSS fboss thrift-defs
+    # build (drift vs Meta-internal). It is only referenced as a local-variable
+    # annotation (not evaluated at runtime), so a placeholder keeps this module
+    # importable in OSS without changing behavior.
+    class TGetUpdateGroupSummariesResponse:  # noqa: F811
+        pass
 from neteng.fboss.ctrl.clients import FbossCtrl
 from neteng.fboss.ctrl.types import (
     AggregatePortThrift,

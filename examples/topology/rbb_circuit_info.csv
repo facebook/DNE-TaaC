@@ -1,0 +1,33 @@
+# RBB SRv6 qualification — circuit_info TEMPLATE (replace with your values).
+#
+# This file is the SINGLE source of physical wiring for the RBB SRv6 slice.
+# taac/testconfigs/routing/util/bgp_rbb_topology.py derives from it:
+#   * CORE port-channels + members — rows whose two endpoints are BOTH DUTs and
+#     whose local endpoint carries a parent port-channel (columns 4 & 8). Members
+#     are grouped per node under that parent (e.g. port-channel1 = eth1/1,eth1/2).
+#   * IXIA edges + IXIA-port map     — rows with role=IXIA (last column). The
+#     DUT-side local_interface maps to the IXIA-side neighbor_interface, which is
+#     expressed as "slot/port" (e.g. 1/3) so it drops straight into IxNetwork.
+#
+# Point the harness / loader at your copy with:  export TAAC_CIRCUIT_INFO_PATH=path/to/your_circuit_info.csv
+# Bind the RBB roles with TAAC_RBB_R1_HOST / TAAC_RBB_R2_HOST (must match hostnames below).
+#
+# Columns:
+#   hostname,local_interface,local_platform,local_parent_interface,\
+#   neighbor_hostname,neighbor_interface,neighbor_platform,neighbor_parent_interface,\
+#   status,role
+# status=3 => active. Lines starting with '#' are comments. All names below are
+# generic placeholders — replace with your real interfaces / IXIA card-port pairs.
+#
+# --- Core underlay: two port-channels between R1 and R2 (one row per direction) ---
+rbb-r1.lab.example,eth1/1,FBOSS,port-channel1,rbb-r2.lab.example,eth1/1,FBOSS,port-channel1,3,
+rbb-r1.lab.example,eth1/2,FBOSS,port-channel1,rbb-r2.lab.example,eth1/2,FBOSS,port-channel1,3,
+rbb-r1.lab.example,eth1/3,FBOSS,port-channel2,rbb-r2.lab.example,eth1/3,FBOSS,port-channel2,3,
+rbb-r1.lab.example,eth1/4,FBOSS,port-channel2,rbb-r2.lab.example,eth1/4,FBOSS,port-channel2,3,
+rbb-r2.lab.example,eth1/1,FBOSS,port-channel1,rbb-r1.lab.example,eth1/1,FBOSS,port-channel1,3,
+rbb-r2.lab.example,eth1/2,FBOSS,port-channel1,rbb-r1.lab.example,eth1/2,FBOSS,port-channel1,3,
+rbb-r2.lab.example,eth1/3,FBOSS,port-channel2,rbb-r1.lab.example,eth1/3,FBOSS,port-channel2,3,
+rbb-r2.lab.example,eth1/4,FBOSS,port-channel2,rbb-r1.lab.example,eth1/4,FBOSS,port-channel2,3,
+# --- IXIA edges: DUT edge interface <-> IXIA physical port (slot/port) ---
+rbb-r1.lab.example,eth1/5,FBOSS,,ixia,1/1,IXIA,,3,IXIA
+rbb-r2.lab.example,eth1/5,FBOSS,,ixia,1/2,IXIA,,3,IXIA

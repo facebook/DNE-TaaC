@@ -1,0 +1,16 @@
+# RBB SRv6 qualification — device_info TEMPLATE (replace with your values).
+#
+# Two FBOSS DUTs: R1 (head/mid) and R2 (tail). Copy this file, fill in your real
+# hostnames/addresses, and either:
+#   * point the harness at it:  --device-info-csv path/to/your_device_info.csv
+#     (this also sets TAAC_DEVICE_INFO_PATH), and
+#   * bind the RBB roles:       export TAAC_RBB_R1_HOST=<r1 hostname>
+#                               export TAAC_RBB_R2_HOST=<r2 hostname>
+#     (the values must match the hostname column below).
+#
+# Columns: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system,hardware
+# Only hostname + operating_system are required for driver selection (FBOSS).
+# Lines starting with '#' are comments. Values shown use documentation ranges
+# (RFC 3849 / RFC 5737) — they are placeholders, not a real lab.
+rbb-r1.lab.example,,,,RBB,FBOSS,CISCO_8501
+rbb-r2.lab.example,,,,RBB,FBOSS,CISCO_8501

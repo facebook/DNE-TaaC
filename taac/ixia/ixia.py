@@ -461,6 +461,17 @@ def _apply_and_verify_device_group_toggle(
         )
 
 
+# The hash-suffixed topology submodules (e.g. bgpipv6peer_<hash>) are emitted
+# only by Meta-internal restpy generation; the public ixnetwork-restpy /
+# uhd-restpy wheels expose these classes but NOT under the hashed module paths,
+# so a plain import ModuleNotFound-s in OSS builds and takes the whole task
+# layer down with it (base_task imports this file). Guard each block: when the
+# hashed modules exist (internal), behavior is unchanged; when absent (OSS),
+# fall back to lightweight placeholder classes so this module stays importable.
+# These names are only referenced by the t.Union type aliases below and by
+# isinstance() checks on live restpy objects — real IXIA traffic uses attribute
+# access on the session objects (e.g. ipv6.BgpIpv6Peer.find()), not these
+# imported symbols — so the placeholders don't change traffic behavior.
 try:
     from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
         BgpIpv6Peer as IxnBgpIpv6Peer,
@@ -477,46 +488,65 @@ except ModuleNotFoundError:
         for module in pkgutil.iter_modules(_ixn_topology_package.__path__)
         if module.name.startswith("bgpipv6peer_")
     )
-    if len(_ixn_bgp_ipv6_modules) != 1:
-        raise ImportError(
-            "Expected exactly one compatible bgpipv6peer module in "
-            f"ixnetwork_restpy, found {_ixn_bgp_ipv6_modules}"
-        )
-    _ixn_bgp_ipv6_module = _ixn_bgp_ipv6_modules[0]
-    IxnBgpIpv6Peer = importlib.import_module(
-        f"{_ixn_topology_package.__name__}.{_ixn_bgp_ipv6_module}"
-    ).BgpIpv6Peer
+    if len(_ixn_bgp_ipv6_modules) == 1:
+        _ixn_bgp_ipv6_module = _ixn_bgp_ipv6_modules[0]
+        IxnBgpIpv6Peer = importlib.import_module(
+            f"{_ixn_topology_package.__name__}.{_ixn_bgp_ipv6_module}"
+        ).BgpIpv6Peer
+    else:
+        class IxnBgpIpv6Peer:  # noqa: F811
+            pass
 if TAAC_OSS:
     UhdBgpIpv6Peer = IxnBgpIpv6Peer
 else:
-    from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
-        BgpIpv6Peer as UhdBgpIpv6Peer,
-    )
+    try:
+        from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
+            BgpIpv6Peer as UhdBgpIpv6Peer,
+        )
+    except ImportError:
+        class UhdBgpIpv6Peer:  # noqa: F811
+            pass
 
 BgpIpv6Peer = t.Union[IxnBgpIpv6Peer, UhdBgpIpv6Peer]
 
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
-    Ipv4PrefixPools as IxnIpv4PrefixPools,
-)
+try:
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
+        Ipv4PrefixPools as IxnIpv4PrefixPools,
+    )
+except ImportError:
+    class IxnIpv4PrefixPools:  # noqa: F811
+        pass
 
 if TAAC_OSS:
     UhdIpv4PrefixPools = IxnIpv4PrefixPools
 else:
-    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
-        Ipv4PrefixPools as UhdIpv4PrefixPools,
-    )
+    try:
+        from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
+            Ipv4PrefixPools as UhdIpv4PrefixPools,
+        )
+    except ImportError:
+        class UhdIpv4PrefixPools:  # noqa: F811
+            pass
 
 Ipv4PrefixPools = t.Union[IxnIpv4PrefixPools, UhdIpv4PrefixPools]
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
-    Ipv6PrefixPools as IxnIpv6PrefixPools,
-)
+try:
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
+        Ipv6PrefixPools as IxnIpv6PrefixPools,
+    )
+except ImportError:
+    class IxnIpv6PrefixPools:  # noqa: F811
+        pass
 
 if TAAC_OSS:
     UhdIpv6PrefixPools = IxnIpv6PrefixPools
 else:
-    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
-        Ipv6PrefixPools as UhdIpv6PrefixPools,
-    )
+    try:
+        from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
+            Ipv6PrefixPools as UhdIpv6PrefixPools,
+        )
+    except ImportError:
+        class UhdIpv6PrefixPools:  # noqa: F811
+            pass
 
 Ipv6PrefixPools = t.Union[IxnIpv6PrefixPools, UhdIpv6PrefixPools]
 
