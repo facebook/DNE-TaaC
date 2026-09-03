@@ -12,6 +12,7 @@ from taac.health_checks.healthcheck_definitions import (
 from taac.packet_headers import (
     BGP_CP_V6_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS,
     DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
+    LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS,
     LLDP_TRAFFIC_PACKET_HEADERS,
     NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
 )
@@ -115,18 +116,57 @@ def _bgp_syn_packet_headers():
 def _disabled_cpu_traffic_items(port_a, port_b, port_c):
     bgp_syn_headers = _bgp_syn_packet_headers()
     return [
-        ("RAW_BGP_R", port_a, port_b, bgp_syn_headers),
-        ("RAW_BGP_B", port_b, port_c, bgp_syn_headers),
-        ("RAW_BGP_U", port_c, port_a, bgp_syn_headers),
-        ("RAW_DHCPV6_R", port_a, port_b, DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS),
-        ("RAW_DHCPV6_B", port_b, port_c, DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS),
-        ("RAW_DHCPV6_U", port_c, port_a, DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS),
-        ("RAW_NDP_R", port_a, port_b, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
-        ("RAW_NDP_B", port_b, port_c, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
-        ("RAW_NDP_U", port_c, port_a, NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS),
-        ("RAW_LLDP_R", port_a, port_b, LLDP_TRAFFIC_PACKET_HEADERS),
-        ("RAW_LLDP_B", port_b, port_c, LLDP_TRAFFIC_PACKET_HEADERS),
-        ("RAW_LLDP_U", port_c, port_a, LLDP_TRAFFIC_PACKET_HEADERS),
+        ("RAW_BGP_R", port_a, port_b, bgp_syn_headers, False),
+        ("RAW_BGP_B", port_b, port_c, bgp_syn_headers, False),
+        ("RAW_BGP_U", port_c, port_a, bgp_syn_headers, False),
+        (
+            "RAW_DHCPV6_R",
+            port_a,
+            port_b,
+            DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        (
+            "RAW_DHCPV6_B",
+            port_b,
+            port_c,
+            DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        (
+            "RAW_DHCPV6_U",
+            port_c,
+            port_a,
+            DHCP_V6_LL_DSCP48_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        (
+            "RAW_NDP_R",
+            port_a,
+            port_b,
+            NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        (
+            "RAW_NDP_B",
+            port_b,
+            port_c,
+            NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        (
+            "RAW_NDP_U",
+            port_c,
+            port_a,
+            NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
+            False,
+        ),
+        ("RAW_LLDP_R", port_a, port_b, LLDP_TRAFFIC_PACKET_HEADERS, False),
+        ("RAW_LLDP_B", port_b, port_c, LLDP_TRAFFIC_PACKET_HEADERS, False),
+        ("RAW_LLDP_U", port_c, port_a, LLDP_TRAFFIC_PACKET_HEADERS, False),
+        ("RAW_LACP_R", port_a, port_b, LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS, True),
+        ("RAW_LACP_B", port_b, port_c, LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS, True),
+        ("RAW_LACP_U", port_c, port_a, LACP_SLOW_TIMER_TRAFFIC_PACKET_HEADERS, True),
     ]
 
 
@@ -439,7 +479,14 @@ def _raw_traffic_item(
     )
 
 
-def _raw_cpu_traffic_item(name, source_port, destination_port, packet_headers, dut=DUT):
+def _raw_cpu_traffic_item(
+    name,
+    source_port,
+    destination_port,
+    packet_headers,
+    allow_self_destined,
+    dut=DUT,
+):
     return taac_thrift.BasicTrafficItemConfig(
         src_endpoints=[
             taac_thrift.TrafficEndpoint(
@@ -460,6 +507,7 @@ def _raw_cpu_traffic_item(name, source_port, destination_port, packet_headers, d
         line_rate_type=ixia_thrift.RateType.PERCENT_LINE_RATE,
         line_rate=5,
         traffic_type=ixia_thrift.TrafficType.RAW,
+        allow_self_destined=allow_self_destined,
         bidirectional=False,
         skip_default_l4_protocol=True,
         packet_headers=packet_headers,
@@ -597,10 +645,21 @@ def _build_test_config(
             for item_name, source, destination, source_tcp_port in raw_tcp_syn_items
         ]
         + [
-            _raw_cpu_traffic_item(item_name, source, destination, headers, dut)
-            for item_name, source, destination, headers in _disabled_cpu_traffic_items(
-                port_a, port_b, port_c
+            _raw_cpu_traffic_item(
+                item_name,
+                source,
+                destination,
+                headers,
+                allow_self_destined,
+                dut,
             )
+            for (
+                item_name,
+                source,
+                destination,
+                headers,
+                allow_self_destined,
+            ) in _disabled_cpu_traffic_items(port_a, port_b, port_c)
         ]
         + [
             create_raw_arp_request_traffic_item(
