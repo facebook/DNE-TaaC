@@ -41,6 +41,11 @@ W400_PLAYBOOK_NAME = "test_w400_stable_state_acl_traffic_matrix"
 W400_DUT = "rsw002.p005.f01.qzd1"
 W400_DUT_MAC = "c2:18:50:b8:b8:c4"
 
+FBOSS10_IPV6_BY_DUT: dict[str, str] = {
+    DUT: "2401:db00:e501:f105::",
+    W400_DUT: "2401:db00:e501:f104:1::",
+}
+
 # QZD1 (rsw001) port roles: A restricted, B blocked, C unconstrained.
 PORT_A = "eth1/13/1"
 PORT_B = "eth1/15/1"
@@ -290,7 +295,12 @@ def _udp_headers(destination_port, source_port):
     ]
 
 
-def _raw_tcp_syn_headers(destination_port, source_port, dut_mac=DUT_MAC):
+def _raw_tcp_syn_headers(
+    destination_port,
+    source_port,
+    dut_mac=DUT_MAC,
+    destination_ipv6=None,
+):
     return [
         taac_thrift.PacketHeader(
             query=ixia_thrift.Query(
@@ -345,13 +355,24 @@ def _raw_tcp_syn_headers(destination_port, source_port, dut_mac=DUT_MAC):
                 ),
                 taac_thrift.Field(
                     query=ixia_thrift.Query(regex="Destination Address"),
-                    attrs_json=json.dumps({"ValueType": "valueList"}),
-                    references={
-                        "ValueList": taac_thrift.Reference(
-                            type=taac_thrift.ReferenceType.DST_IPV6_ADDRESS,
-                            data_type=taac_thrift.DataType.LIST,
-                        )
-                    },
+                    attrs_json=json.dumps(
+                        {
+                            "ValueType": "singleValue",
+                            "SingleValue": destination_ipv6,
+                        }
+                        if destination_ipv6 is not None
+                        else {"ValueType": "valueList"}
+                    ),
+                    references=(
+                        {}
+                        if destination_ipv6 is not None
+                        else {
+                            "ValueList": taac_thrift.Reference(
+                                type=taac_thrift.ReferenceType.DST_IPV6_ADDRESS,
+                                data_type=taac_thrift.DataType.LIST,
+                            )
+                        }
+                    ),
                 ),
             ],
         ),
@@ -391,6 +412,54 @@ def _raw_tcp_syn_headers(destination_port, source_port, dut_mac=DUT_MAC):
                         {
                             "ValueType": "singleValue",
                             "SingleValue": 1,
+                        }
+                    ),
+                ),
+            ],
+        ),
+    ]
+
+
+def _raw_udp_headers(
+    destination_port,
+    source_port,
+    dut_mac=DUT_MAC,
+    destination_ipv6=None,
+):
+    return [
+        *_raw_tcp_syn_headers(
+            destination_port=destination_port,
+            source_port=source_port,
+            dut_mac=dut_mac,
+            destination_ipv6=destination_ipv6,
+        )[:-1],
+        taac_thrift.PacketHeader(
+            query=ixia_thrift.Query(
+                regex="udp",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            append_to_query=ixia_thrift.Query(
+                regex="ipv6",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            fields=[
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="UDP-Source-Port"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": source_port,
+                        }
+                    ),
+                ),
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="UDP-Dest-Port"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": destination_port,
                         }
                     ),
                 ),
@@ -581,6 +650,7 @@ def _build_test_config(
         addressing: (starting_ip, gateway, mask) for each of `ports`, same order.
     """
     port_a, port_b, port_c = ports
+    fboss10_ipv6 = FBOSS10_IPV6_BY_DUT[dut]
     traffic_items = _traffic_items(port_a, port_b, port_c)
     raw_tcp_syn_items = _raw_tcp_syn_traffic_items(port_a, port_b, port_c)
     udp_items = _udp_traffic_items(port_a, port_b, port_c)
@@ -643,6 +713,50 @@ def _build_test_config(
                 dut,
             )
             for item_name, source, destination, source_tcp_port in raw_tcp_syn_items
+        ]
+        + [
+            _raw_traffic_item(
+                item_name,
+                source,
+                destination,
+                _raw_tcp_syn_headers(
+                    destination_port=5909,
+                    source_port=source_port,
+                    dut_mac=dut_mac,
+                    destination_ipv6=fboss10_ipv6,
+                ),
+                1,
+                False,
+                400,
+                dut,
+            )
+            for item_name, source, destination, source_port in (
+                ("TCP_SYN_5909_R", port_a, port_b, 40018),
+                ("TCP_SYN_5909_B", port_b, port_c, 40019),
+                ("TCP_SYN_5909_U", port_c, port_a, 40020),
+            )
+        ]
+        + [
+            _raw_traffic_item(
+                item_name,
+                source,
+                destination,
+                _raw_udp_headers(
+                    destination_port=5909,
+                    source_port=source_port,
+                    dut_mac=dut_mac,
+                    destination_ipv6=fboss10_ipv6,
+                ),
+                1,
+                False,
+                400,
+                dut,
+            )
+            for item_name, source, destination, source_port in (
+                ("UDP_5909_R", port_a, port_b, 40021),
+                ("UDP_5909_B", port_b, port_c, 40022),
+                ("UDP_5909_U", port_c, port_a, 40023),
+            )
         ]
         + [
             _raw_cpu_traffic_item(
