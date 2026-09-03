@@ -27,6 +27,8 @@
 # Env overrides:
 #   FBOSS_IMAGE_SRC   Where to clone/find facebook/fboss for the base image
 #                     build context (default: ~/.taac-fboss-image-src)
+#   TAAC_FBCODE_DIR   Internal fbcode checkout whose current FBOSS Docker files
+#                     should be validated instead of the pinned public copies
 
 set -euo pipefail
 
@@ -124,6 +126,16 @@ if [[ -n "$BASE_REASON" ]]; then
     # -f: this is a managed cache dir, not a working checkout; a
     # stray edit there should not wedge the build.
     git -C "$FBOSS_IMAGE_SRC" checkout -qf FETCH_HEAD
+    if [[ -n "${TAAC_FBCODE_DIR:-}" ]]; then
+        FBCODE_FBOSS_DOCKER_DIR="$TAAC_FBCODE_DIR/fboss/oss/docker"
+        if [[ ! -d "$FBCODE_FBOSS_DOCKER_DIR" ]]; then
+            echo "ERROR: missing FBOSS Docker source: $FBCODE_FBOSS_DOCKER_DIR" >&2
+            exit 1
+        fi
+        # The internal CI target watches these files, so its build must exercise
+        # their current contents rather than only the pinned public revision.
+        cp -a "$FBCODE_FBOSS_DOCKER_DIR/." "$FBOSS_IMAGE_SRC/fboss/oss/docker/"
+    fi
     BASE_BUILD_ARGS=()
     if [[ "$REBUILD_BASE_IMAGE" -eq 1 ]]; then
         BASE_BUILD_ARGS+=(--no-cache)

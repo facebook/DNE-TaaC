@@ -1205,7 +1205,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                         factory.call_args.kwargs,
                     )
 
-    def test_full_scale_factory_enables_churn_baseline_only_when_selected(
+    def test_full_scale_factory_keeps_attribute_churn_out_of_topology(
         self,
     ) -> None:
         inventory = MagicMock()
@@ -1226,11 +1226,11 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "bgp_ebb_full_scale._get_bgp_ebb_full_scale_playbooks"
         )
 
-        for selected, expected_churn, expected_ebgp_prefix_count, expected_shards in (
-            (None, True, 850, True),
-            (["bgp_ebb_attribute_churn_playbook"], True, 750, False),
-            (["bgp_ebb_route_storm_playbook"], False, 750, True),
-            (["bgp_ebb_route_registry_runtime_update_playbook"], False, 850, False),
+        for selected, expected_ebgp_prefix_count, expected_shards in (
+            (None, 850, True),
+            (["bgp_ebb_attribute_churn_playbook"], 750, False),
+            (["bgp_ebb_route_storm_playbook"], 750, True),
+            (["bgp_ebb_route_registry_runtime_update_playbook"], 850, False),
         ):
             available_playbooks = []
             if selected:
@@ -1248,9 +1248,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
                 )
 
-            self.assertEqual(
-                expected_churn,
-                topology_factory.call_args.kwargs["enable_attribute_churn"],
+            self.assertNotIn(
+                "enable_attribute_churn", topology_factory.call_args.kwargs
             )
             self.assertEqual(
                 expected_ebgp_prefix_count,

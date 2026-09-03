@@ -166,11 +166,21 @@ def capture_topology_pool_state(
             med is not None,
             boolean=True,
         ),
-        med=capture_topology_vector(
-            route.MultiExitDiscriminator,
-            physical_row_count,
-            "MED",
-            med,
+        # IXIA can retain any backing MED value while advertisement is disabled.
+        # Capture that value for exact restore without assigning it semantics.
+        med=(
+            capture_topology_vector(
+                route.MultiExitDiscriminator,
+                physical_row_count,
+                "MED",
+                med,
+            )
+            if med is not None
+            else IxiaOverlayVector.capture(
+                route.MultiExitDiscriminator,
+                physical_row_count,
+                "MED",
+            )
         ),
         origin=capture_topology_vector(
             route.Origin,

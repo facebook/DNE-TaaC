@@ -77,7 +77,6 @@ from taac.abstractions.topologies.ebb_prefix_inventory import (
 )
 from taac.abstractions.topology import (
     AddressPlan,
-    AsPathSequence,
     BgpPeerGroup,
     BgpPolicy,
     DeviceGroupSpec,
@@ -160,7 +159,6 @@ EBB_AS_NUMBERS: dict[str, int] = {
     "bgpmon": BGP_MON_REMOTE_AS,
 }
 
-EBB_ATTRIBUTE_CHURN_AS_PATH = (64512,) * 10
 _EBB_ACCEPTANCE_COMMUNITY = StandardCommunity(asn=65529, value=39744)
 _EBB_IBGP_ROUTE_ATTRIBUTES = RouteAttributePool(
     community_rows=tuple(
@@ -183,10 +181,12 @@ _EBB_IBGP_ROUTE_ATTRIBUTES = RouteAttributePool(
 EBB_LONGEVITY_COMMUNITY_BASELINE_COUNT = len(
     _EBB_IBGP_ROUTE_ATTRIBUTES.community_rows[0]
 )
-EBB_ATTRIBUTE_CHURN_BASELINE = (
-    ("med", 200),
+# Every Playbook in a shared EBB TestConfig starts from these route attributes.
+# Playbook-specific changes must use runtime mutation and restore this state.
+EBB_BASELINE_ATTRIBUTES = (
+    ("med", None),
     ("local_pref", 100),
-    ("origin", "egp"),
+    ("origin", "igp"),
 )
 
 EBB_ROUTE_STORM_SHARD_PEER_COUNTS = (21, 21, 20)
@@ -641,7 +641,6 @@ def _ebb_advertisement(
     prefix_sets_by_name: t.Mapping[str, PrefixSet],
     ebgp_static_prefix_count: int,
     next_hop_self: bool = False,
-    enable_attribute_churn: bool = False,
     include_legacy_community_rows: bool = False,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
 ) -> PrefixAdvertisement | None:
@@ -694,33 +693,12 @@ def _ebb_advertisement(
             else _ebb_next_hop(device_group, openr_mode, next_hops)
         ),
         policy=EBB_ACCEPT_POLICY if device_group.role == "uplink" else None,
-        attributes=(
-            EBB_ATTRIBUTE_CHURN_BASELINE
-            if enable_attribute_churn and device_group.role.startswith("ibgp_dc_p")
-            else (("med", None), ("local_pref", 100), ("origin", "igp"))
-        ),
+        attributes=EBB_BASELINE_ATTRIBUTES,
         route_attributes=(
-            replace(
-                _EBB_IBGP_ROUTE_ATTRIBUTES,
-                as_paths=(AsPathSequence(asns=EBB_ATTRIBUTE_CHURN_AS_PATH),),
-            )
-            if (
-                enable_attribute_churn
-                and include_legacy_community_rows
-                and device_group.role.startswith("ibgp_dc_p")
-            )
-            else (
-                RouteAttributePool(
-                    as_paths=(AsPathSequence(asns=EBB_ATTRIBUTE_CHURN_AS_PATH),),
-                )
-                if enable_attribute_churn and device_group.role.startswith("ibgp_dc_p")
-                else (
-                    _EBB_IBGP_ROUTE_ATTRIBUTES
-                    if include_legacy_community_rows
-                    and device_group.role.startswith("ibgp_dc_p")
-                    else None
-                )
-            )
+            _EBB_IBGP_ROUTE_ATTRIBUTES
+            if include_legacy_community_rows
+            and device_group.role.startswith("ibgp_dc_p")
+            else None
         ),
         legacy_ixia_name=legacy_name,
     )
@@ -1204,7 +1182,6 @@ def _with_ebb_route_intent(
     *,
     ebgp_graceful_restart: bool = True,
     next_hop_self: bool = False,
-    enable_attribute_churn: bool = False,
     include_legacy_community_rows: bool = True,
     ebgp_prefix_count: int = 750,
     ebgp_static_prefix_count: int | None = None,
@@ -1253,7 +1230,6 @@ def _with_ebb_route_intent(
             prefix_sets_by_name=prefix_sets_by_name,
             ebgp_static_prefix_count=static_prefix_count,
             next_hop_self=next_hop_self,
-            enable_attribute_churn=enable_attribute_churn,
             include_legacy_community_rows=include_legacy_community_rows,
             next_hops=next_hops,
         )
@@ -1342,7 +1318,6 @@ def ebb_full_scale_topology(
     include_bgpmon: bool = True,
     ebgp_graceful_restart: bool = True,
     next_hop_self: bool = False,
-    enable_attribute_churn: bool = False,
     include_legacy_community_rows: bool = True,
     ebgp_prefix_count: int = 750,
     ebgp_static_prefix_count: int | None = None,
@@ -1361,7 +1336,6 @@ def ebb_full_scale_topology(
         openr_mode,
         ebgp_graceful_restart=ebgp_graceful_restart,
         next_hop_self=next_hop_self,
-        enable_attribute_churn=enable_attribute_churn,
         include_legacy_community_rows=include_legacy_community_rows,
         ebgp_prefix_count=ebgp_prefix_count,
         ebgp_static_prefix_count=ebgp_static_prefix_count,
@@ -1387,8 +1361,7 @@ def ebb_full_scale_topology(
 __all__ = (
     "BGP_MON_PEER_GROUP",
     "EBB_AS_NUMBERS",
-    "EBB_ATTRIBUTE_CHURN_AS_PATH",
-    "EBB_ATTRIBUTE_CHURN_BASELINE",
+    "EBB_BASELINE_ATTRIBUTES",
     "EBB_DEVICE_CONFIG",
     "EBB_EBGP_V4_PREFIX_SET",
     "EBB_EBGP_V6_PREFIX_SET",
