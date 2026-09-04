@@ -197,9 +197,14 @@ if not TAAC_OSS:
         add_oss_mock_device_data,
     )
     from taac.internal.tasks.ixia_diagnostics_collection_task import (
+        DEFAULT_MANIFOLD_BUCKET,
+        ixia_artifact_manifold_key,
         IxiaDiagnosticsCollectionTask,
     )
     from taac.internal.utils import ondevice_sampler
+    from taac.internal.utils.manifold_utils import (
+        async_upload_file_to_manifold,
+    )
 
 DEFAULT_PRE_SNAPSHOT_CHECKPOINT_ID: str = "test_case_start"
 DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
@@ -360,6 +365,9 @@ class TaacRunner:
         # Pull the Keysight chassis diagnostics archive at Ixia teardown and
         # upload to Manifold. Best-effort — failures never break teardown.
         collect_ixia_diagnostics: bool = True,
+        # Record every IxNetwork REST call to a JSONL file and publish it in
+        # the test summary. Best-effort — failures never break teardown.
+        trace_ixia_api: bool = True,
         ixia_profile: str = "auto",
         setup_only: bool = False,
     ) -> None:
@@ -437,6 +445,7 @@ class TaacRunner:
             clear_old_eos_images=clear_old_eos_images,
             ixia_candidates=self.ixia_candidates,
             ixia_profile=ixia_profile,
+            trace_ixia_api=trace_ixia_api,
         )
         self.test_case_uuid = ""
         self.custom_test_handlers = []
@@ -3323,6 +3332,41 @@ class TaacRunner:
                 f"(swallowed to protect teardown): {exc!r}"
             )
 
+    async def _async_publish_ixia_api_trace(self, ixia: TaacIxia) -> None:
+        """Close the IxNetwork REST trace and link it from the test summary.
+
+        Mirrors `_async_collect_ixia_diagnostics_if_enabled`: runs while the
+        Ixia object is still live, best-effort, never turns a green test red.
+        Under TAAC_OSS the JSONL stays on local disk (no Manifold).
+        """
+        tracer = ixia.api_tracer
+        if tracer is None:
+            return
+        summary = tracer.close()
+        self.logger.info(
+            f"ixia api trace: {summary.record_count} REST calls recorded "
+            f"({summary.dropped_count} dropped) -> {summary.path}"
+        )
+        if TAAC_OSS or summary.record_count == 0:
+            return
+        key = ixia_artifact_manifold_key(
+            str(ixia.primary_chassis_ip),
+            self.test_config.name,
+            "_api_trace.jsonl",
+        )
+        try:
+            url = await async_upload_file_to_manifold(
+                DEFAULT_MANIFOLD_BUCKET, key, summary.path
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"ixia api trace: Manifold upload failed for {summary.path} "
+                f"-> {DEFAULT_MANIFOLD_BUCKET}/{key}: {exc!r}"
+            )
+            return
+        self.logger.info(f"ixia api trace: uploaded -> {url}")
+        self.test_summary.add_artifact_section("IXIA REST API TRACE", url)
+
     async def async_test_tearDown(self) -> None:
         log_section("TEST CONFIG TEARDOWN", logger=self.logger)
         teardown_start = time.time()
@@ -3339,6 +3383,9 @@ class TaacRunner:
                         ixia.capturing = False  # type: ignore[attr-defined]
                     if isinstance(ixia, TaacIxia):
                         await self._async_collect_ixia_diagnostics_if_enabled(ixia)
+                        # After diagnostics so the trace covers their REST
+                        # calls too.
+                        await self._async_publish_ixia_api_trace(ixia)
                 await self.run_tasks(
                     (
                         self.selected_ixia_candidate.teardown_tasks

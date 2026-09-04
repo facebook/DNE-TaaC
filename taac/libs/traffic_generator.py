@@ -120,6 +120,7 @@ class TrafficGenerator:
         ixia_recovery: t.Optional[taac_types.IxiaRecovery] = None,
         setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
         cache_candidate_name: t.Optional[str] = None,
+        trace_api_calls: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -154,6 +155,8 @@ class TrafficGenerator:
         self.ixia_config_cache = ixia_config_cache
         # Opt-in IXIA REST API soft recovery — see IxiaRecovery Thrift docstring
         self.ixia_recovery = ixia_recovery
+        # Record every IxNetwork REST call to a JSONL file — see ixia_tracer.py
+        self.trace_api_calls = trace_api_calls
         # TestConfig setup_tasks — used by the v3 IXIA topology-cache key so
         # the cache auto-invalidates when an engineer edits a setup task
         # during testconfig development. Hashed via
@@ -284,6 +287,7 @@ class TrafficGenerator:
                 skip_ixia_protocol_verification=self.skip_ixia_protocol_verification,
                 ixia_protocol_verification_timeout=self.ixia_protocol_verification_timeout,
                 ixia_recovery=self.ixia_recovery,
+                trace_api_calls=self.trace_api_calls,
             )
 
             # Topology cache — only when (a) cache is enabled in TestConfig AND

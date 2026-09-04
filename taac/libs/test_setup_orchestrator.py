@@ -96,6 +96,7 @@ class TestSetupOrchestrator:
         clear_old_eos_images: bool = False,
         ixia_candidates: t.Optional[t.Sequence[IxiaCandidate]] = None,
         ixia_profile: str = "auto",
+        trace_ixia_api: bool = False,
     ) -> None:
         self.test_config = test_config
         self.logger = logger
@@ -116,6 +117,7 @@ class TestSetupOrchestrator:
         self._skip_package_update = skip_package_update
         self._override_ixia_traffic_items = override_ixia_traffic_items
         self._cleanup_failed_setup = cleanup_failed_setup
+        self._trace_ixia_api = trace_ixia_api
         # EOS image ID for Arista device image deployment
         self._eos_image_id = eos_image_id or ""
         # Whether to clear old EOS images from flash before deployment
@@ -580,6 +582,7 @@ class TestSetupOrchestrator:
             ixia_protocol_verification_timeout=self.test_config.ixia_protocol_verification_timeout,
             ixia_config_cache=ixia_config_cache,
             ixia_recovery=ixia_recovery,
+            trace_api_calls=self._trace_ixia_api,
             # v3 IXIA topology-cache key folds in setup_tasks so cache
             # auto-invalidates when an engineer edits a setup task during
             # testconfig development. See
