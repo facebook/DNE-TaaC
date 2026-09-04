@@ -151,10 +151,9 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         )
 
     def test_openr_profile_enables_ibgp_pnh_check(self) -> None:
-        target = (
-            "neteng.test_infra.dne.taac.playbooks.routing."
-            "bgp_ebb_playbooks.get_profile_checks"
-        )
+        # Patch the module under the name this test imported it as, so the
+        # patch lands on the same module object the factory calls through.
+        target = "taac.playbooks.routing.bgp_ebb_playbooks.get_profile_checks"
         with patch(target) as get_checks:
             get_checks.return_value = SimpleNamespace(
                 prechecks=[],

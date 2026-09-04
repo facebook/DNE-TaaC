@@ -1028,7 +1028,9 @@ class TestTwoPhaseSetup(unittest.TestCase):
         }
         ti = MagicMock()
         ti.name = "flow1"
-        ti.traffic_flow_config = MagicMock(bidirectional=True)
+        ti.traffic_flow_config = MagicMock(
+            bidirectional=True, frame_size=None, transmission_control=None
+        )
         ti.traffic_rate_info = None
         src_ep = MagicMock(port_name="p1", device_group_index=0)
         dst_ep = MagicMock(port_name="p2", device_group_index=0)

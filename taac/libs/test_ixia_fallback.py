@@ -646,7 +646,9 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
         )
         logger = logging.getLogger("taac-fallback-selected-task-test")
         logger.setLevel(logging.INFO)
-        runner = TaacRunner(config, logger=logger)
+        # This test asserts run_tasks call order by index; skip the OSS
+        # setup-task stage so its extra run_tasks call does not shift them.
+        runner = TaacRunner(config, logger=logger, skip_oss_setup_tasks=True)
         runner.run_tasks = AsyncMock()
         runner._add_oss_mock_device_data = MagicMock()
         runner._add_host_to_device_os_type_data = MagicMock()
