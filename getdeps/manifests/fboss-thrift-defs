@@ -12,7 +12,7 @@ repo_url = https://github.com/facebook/fboss.git
 # we want to pick up new fboss schemas, and add corresponding
 # add_taac_thrift_python_library bindings in thrift/CMakeLists.txt
 # at the same time.
-rev = a61b92c23e6e8a97db2ff58006d34f0224434da6
+rev = 47a7a438fb261181cf8330bc7d2849312cdcded0
 
 [build]
 builder = nop
