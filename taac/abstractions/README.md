@@ -91,6 +91,56 @@ The unified renderer owns only common `Playbook` assembly. Attribute, session,
 and route implementations retain their own target selection, stage parameters,
 verification, and recovery behavior.
 
+### Baseline lifecycle and failure ownership
+
+DICE distinguishes two nested restoration boundaries:
+
+- The **topology baseline** is the shared state established by TestConfig
+  topology setup. The TAAC runner owns this boundary. For an opted-in Playbook,
+  it captures the baseline immediately before Playbook setup and restores it
+  before finalizing the Playbook result, including when setup or execution
+  fails.
+- The **Playbook baseline** is the workload-specific state established after
+  Playbook setup, such as selected paths, advertised prefixes, and route
+  attributes. The churn implementation owns this boundary and restores it
+  after its mutations. For attribute churn, this is an exact restoration of
+  the captured IXIA backing vectors rather than a second full-config import.
+
+The intended lifecycle is:
+
+```text
+topology setup
+  -> capture topology baseline
+  -> Playbook setup
+  -> capture Playbook baseline
+  -> apply and measure churn
+  -> restore and verify Playbook baseline
+  -> Playbook teardown
+  -> restore and verify topology baseline
+  -> next Playbook
+```
+
+Topology restoration uses the explicit `Playbook.restore_topology_baseline`
+opt-in, which defaults to `false`. It does not reuse
+`backup_and_restore_ixia_config`; that legacy flag retains its existing
+behavior for current consumers. CICD-EBB-10 is the first adopter, so landing
+the framework does not enable the topology boundary for every TAAC Playbook.
+
+The two boundaries also have different failure ownership:
+
+- A Playbook-baseline restore failure is a Playbook `FAIL` when the outer
+  topology restore succeeds. The workload failed its own restoration contract,
+  but the shared environment is safe for the next Playbook.
+- A topology-baseline restore timeout, import failure, or verification mismatch
+  is an `INFRA_ERROR`. The runner poisons the lifecycle and blocks subsequent
+  Playbooks because the shared environment can no longer be trusted.
+- If both boundaries fail, `INFRA_ERROR` takes precedence while the original
+  Playbook failure remains attached as diagnostic evidence.
+
+The topology IXIA participant verifies the restored configuration against a
+canonical JSON digest of the captured snapshot. A successful import without an
+exact verification match is therefore still an infrastructure failure.
+
 ---
 
 ## 2. LogicalTopology Model

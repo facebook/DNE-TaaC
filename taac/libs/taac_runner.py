@@ -72,6 +72,13 @@ from taac.ixia.taac_ixia import TaacIxia
 # modes. taac.libs.fpf.fpf_collector_registry only re-exports this same function
 # object, and importing it would drag neteng.netcastle / taac.internal in via
 # fpf_stress_checks, so there is nothing to guard here.
+from taac.libs.baseline_lifecycle import (
+    BaselineContext,
+    BaselineLifecycle,
+    BaselineParticipant,
+    BaselineScope,
+    BaselineTimeouts,
+)
 from taac.libs.collectors.registry import set_test_case_start_time
 from taac.libs.investigation_report import (
     InvestigationReport,
@@ -81,6 +88,10 @@ from taac.libs.investigation_report import (
 from taac.libs.ixia_candidate import (
     IxiaCandidate,
     normalize_ixia_candidates,
+)
+from taac.libs.ixia_config_baseline import (
+    IxiaConfigClient,
+    IxiaTopologyBaselineParticipant,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.libs.periodic_task_executor import PeriodicTaskExecutor
@@ -216,6 +227,16 @@ class InvestigationLink(t.NamedTuple):
     url: str
 
 
+def _topology_baseline_infra_error(
+    message: str, errors: t.Sequence[BaseException]
+) -> TestbedError:
+    details = "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+    infrastructure_error = TestbedError(f"{message}: {details}" if details else message)
+    if errors:
+        infrastructure_error.__cause__ = _group_exceptions(message, errors)
+    return infrastructure_error
+
+
 def _start_test_case_time_window(
     jq_vars: t.MutableMapping[str, t.Any], start_time: int
 ) -> None:
@@ -259,6 +280,19 @@ def _require_known_host(topology: TestTopology, hostname: str) -> None:
             f"host '{hostname}' is not one of this test's reserved devices. "
             f"Valid hosts: {sorted(topology.device_names)}"
         )
+
+
+def _group_exceptions(message: str, errors: t.Sequence[BaseException]) -> BaseException:
+    if all(isinstance(error, Exception) for error in errors):
+        return ExceptionGroup(message, t.cast(t.List[Exception], list(errors)))
+    return BaseExceptionGroup(message, list(errors))
+
+
+_BASELINE_CAPTURE_TIMEOUT_SECONDS = 120
+# A full-scale IXIA import includes protocol startup and can take several minutes.
+_BASELINE_RESTORE_TIMEOUT_SECONDS = 900
+_BASELINE_VERIFY_TIMEOUT_SECONDS = 120
+_BASELINE_RELEASE_TIMEOUT_SECONDS = 30
 
 
 class TaacRunner:
@@ -417,6 +451,15 @@ class TaacRunner:
         self.investigation_link: t.Optional[InvestigationLink] = None
         self._current_playbook_section: t.Optional[SectionResult] = None
         self._last_completed_playbook_section: t.Optional[SectionResult] = None
+        self._baseline_lifecycle = BaselineLifecycle(
+            BaselineTimeouts(
+                capture_seconds=_BASELINE_CAPTURE_TIMEOUT_SECONDS,
+                restore_seconds=_BASELINE_RESTORE_TIMEOUT_SECONDS,
+                verify_seconds=_BASELINE_VERIFY_TIMEOUT_SECONDS,
+                release_seconds=_BASELINE_RELEASE_TIMEOUT_SECONDS,
+            )
+        )
+        self._topology_baseline_context: BaselineContext | None = None
 
     def _validate_no_test_config_level_checks(self) -> None:
         """Validate that deprecated TestConfig-level checks are not used.
@@ -965,7 +1008,7 @@ class TaacRunner:
         # list of (status, error_type) where status is "passed"/"failed"/"error"
         npi_iteration_outcomes: t.List[t.Tuple[str, t.Optional[str]]] = []
         self._npi_iteration_outcomes = npi_iteration_outcomes
-        _run_exc: t.Optional[Exception] = None
+        _run_exc: BaseException | None = None
         _npi_iteration_count = 0
         test_case_results: t.List[TestResult] = []
         test_case_start_time = int(time.time())
@@ -980,6 +1023,7 @@ class TaacRunner:
                     f"Playbook: {playbook.name} | {test_device.name}"
                 )
                 _start_test_case_time_window(self.jq_vars, int(time.time()))
+                await self._capture_topology_baseline(playbook)
                 with suppress_console_logs(self.logger):
                     await self.async_test_case_setUp(playbook, test_device)
                 test_case_start_time = int(time.time())
@@ -1150,7 +1194,7 @@ class TaacRunner:
                     # Log POST_TEST health check results table
                     await self._log_post_test_results(test_case_results)
 
-                    _teardown_exc = None
+                    _teardown_exc: BaseException | None = None
                     with suppress_console_logs(self.logger):
                         try:
                             await self.async_test_case_tearDown(
@@ -1159,36 +1203,23 @@ class TaacRunner:
                                 test_case_results,
                                 test_case_start_time,
                             )
+                        except asyncio.CancelledError as e:
+                            _teardown_exc = e
                         except Exception as e:
                             _teardown_exc = e
 
-                    if _teardown_exc is not None:
-                        if _stage_exc is not None:
-                            message = "test case execution and teardown both failed"
-                            if isinstance(_stage_exc, Exception):
-                                raise ExceptionGroup(
-                                    message,
-                                    [_stage_exc, _teardown_exc],
-                                )
-                            raise BaseExceptionGroup(
-                                message,
-                                [_stage_exc, _teardown_exc],
-                            )
-                        raise _teardown_exc
+                    _cleanup_errors = (
+                        [_teardown_exc] if _teardown_exc is not None else []
+                    )
+                    self._raise_test_case_cleanup_errors(_stage_exc, _cleanup_errors)
         except Exception as e:
             _run_exc = e
-            if self.npi_name and test_case_name:
-                if len(npi_iteration_outcomes) < _npi_iteration_count:
-                    # No outcome was recorded for this iteration (e.g. setUp
-                    # failure, setup_steps error, or tearDown crashed early).
-                    npi_iteration_outcomes.append(("error", str(e)))
-                elif (
-                    npi_iteration_outcomes and npi_iteration_outcomes[-1][0] == "passed"
-                ):
-                    # tearDown recorded "passed" but the iteration actually
-                    # errored (e.g. stage crash that isn't reflected in health
-                    # check results). Correct it to "error".
-                    npi_iteration_outcomes[-1] = ("error", str(e))
+            self._record_npi_iteration_error(
+                test_case_name,
+                npi_iteration_outcomes,
+                _npi_iteration_count,
+                e,
+            )
         finally:
             _run_exc = await self._run_test_case_fallback_cleanup(
                 test_case_name,
@@ -1208,6 +1239,104 @@ class TaacRunner:
             if _run_exc is not None:
                 raise _run_exc
 
+    def _record_npi_iteration_error(
+        self,
+        test_case_name: str,
+        outcomes: list[tuple[str, str | None]],
+        iteration_count: int,
+        error: Exception,
+    ) -> None:
+        if not self.npi_name or not test_case_name:
+            return
+        if len(outcomes) < iteration_count:
+            # Setup failures have no teardown result to correct.
+            outcomes.append(("error", str(error)))
+            return
+        if outcomes and outcomes[-1][0] == "passed":
+            outcomes[-1] = ("error", str(error))
+
+    async def _capture_topology_baseline(self, playbook: taac_types.Playbook) -> None:
+        self._topology_baseline_context = None
+        participants = self._baseline_participants_for(playbook)
+        if not participants:
+            return
+
+        invocation_id = uuid.uuid4().hex
+        test_config_name = self.test_config.name or "<unnamed>"
+        self._topology_baseline_context = BaselineContext(
+            test_config_name=test_config_name,
+            invocation_id=invocation_id,
+        )
+        await self._baseline_lifecycle.capture(
+            BaselineScope.TOPOLOGY,
+            self._topology_baseline_context,
+            participants,
+        )
+        self.logger.info(f"Captured topology baseline for playbook '{playbook.name}'")
+
+    @staticmethod
+    def _raise_test_case_cleanup_errors(
+        stage_error: BaseException | None,
+        cleanup_errors: t.Sequence[BaseException],
+    ) -> None:
+        if not cleanup_errors:
+            return
+        infrastructure_error = next(
+            (error for error in cleanup_errors if isinstance(error, TestbedError)),
+            None,
+        )
+        if infrastructure_error is not None:
+            if stage_error is None and len(cleanup_errors) == 1:
+                raise infrastructure_error
+            errors = [
+                *((stage_error,) if stage_error is not None else ()),
+                *cleanup_errors,
+            ]
+            raise _topology_baseline_infra_error(
+                "Test execution left the shared topology unsafe",
+                errors,
+            )
+        if stage_error is not None:
+            raise _group_exceptions(
+                "test case execution and restoration failed",
+                [stage_error, *cleanup_errors],
+            )
+        raise _group_exceptions("test case restoration failed", cleanup_errors)
+
+    def _baseline_participants_for(
+        self, playbook: taac_types.Playbook
+    ) -> tuple[BaselineParticipant, ...]:
+        if not playbook.restore_topology_baseline:
+            return ()
+        ixia = self.ixia
+        if ixia is None:
+            raise TestCaseFailure(
+                "restore_topology_baseline requires an IXIA traffic generator"
+            )
+        if not hasattr(ixia, "export_json_config") or not hasattr(
+            ixia, "import_json_config"
+        ):
+            raise TestCaseFailure(
+                "restore_topology_baseline is not supported by the selected "
+                "traffic generator backend"
+            )
+        participant = IxiaTopologyBaselineParticipant(t.cast(IxiaConfigClient, ixia))
+        return (participant,)
+
+    async def _restore_topology_baseline(self) -> tuple[BaseException, ...]:
+        if BaselineScope.TOPOLOGY not in self._baseline_lifecycle.active_scopes:
+            return ()
+        context = self._topology_baseline_context
+        if context is None:
+            return ()
+        errors = await self._baseline_lifecycle.restore(BaselineScope.TOPOLOGY, context)
+        if not errors:
+            self.logger.info(
+                "Restored and verified topology baseline for "
+                f"invocation {context.invocation_id}"
+            )
+        return errors
+
     def _get_test_case_iteration_count(self, playbook: taac_types.Playbook) -> int:
         iteration_count = 1 if self.is_autotester_run else playbook.iteration
         if iteration_count <= 0:
@@ -1222,10 +1351,10 @@ class TaacRunner:
         test_case_results: t.List[TestResult],
         test_device: TestDevice,
         test_case_start_time: int,
-        run_error: t.Optional[Exception],
-        active_exception: t.Optional[BaseException],
-    ) -> t.Optional[Exception]:
-        fallback_errors: t.List[Exception] = []
+        run_error: BaseException | None,
+        active_exception: BaseException | None,
+    ) -> BaseException | None:
+        fallback_errors: list[BaseException] = []
         if self.test_case_periodic_task_executor is not None:
             orphaned_executor = self._detach_test_case_periodic_task_executor(
                 test_case_name
@@ -1243,28 +1372,47 @@ class TaacRunner:
             self._test_case_cleanup_pending = False
             fallback_errors.extend(await self._run_post_periodic_test_case_cleanup())
 
-        if not fallback_errors:
-            return run_error
-        if run_error is not None:
-            return ExceptionGroup(
-                "test case execution and periodic cleanup both failed",
-                [run_error, *fallback_errors],
-            )
-        if active_exception is None:
-            return ExceptionGroup(
-                "test case fallback cleanup failed",
-                fallback_errors,
+        active_baseline_scopes = self._baseline_lifecycle.active_scopes
+        baseline_restore_errors = await self._baseline_lifecycle.restore_all()
+        fallback_errors.extend(baseline_restore_errors)
+        if active_baseline_scopes and not self._baseline_lifecycle.restoration_failures:
+            self.logger.info(
+                "Restored and verified remaining baseline scopes during "
+                "fallback cleanup"
             )
 
-        self.logger.error(
-            "Test case cleanup also failed while propagating "
-            f"{active_exception!r}: {fallback_errors!r}"
-        )
-        active_exception.add_note(
-            "Test case cleanup also failed: "
-            + "; ".join(f"{type(error).__name__}: {error}" for error in fallback_errors)
-        )
-        return None
+        if not fallback_errors:
+            return run_error
+        if BaselineScope.TOPOLOGY in active_baseline_scopes and baseline_restore_errors:
+            primary_errors = [
+                error for error in (run_error, active_exception) if error is not None
+            ]
+            return _topology_baseline_infra_error(
+                "Fallback topology baseline restoration failed",
+                [*primary_errors, *fallback_errors],
+            )
+        if run_error is None and active_exception is not None:
+            self.logger.error(
+                "Test case fallback cleanup failed while propagating %s: %s",
+                type(active_exception).__name__,
+                "; ".join(
+                    f"{type(error).__name__}: {error}" for error in fallback_errors
+                ),
+            )
+            active_exception.add_note(
+                "Test case cleanup also failed: "
+                + "; ".join(
+                    f"{type(error).__name__}: {error}" for error in fallback_errors
+                )
+            )
+            return None
+        primary_error = run_error or active_exception
+        if primary_error is not None:
+            return _group_exceptions(
+                "test case execution and fallback cleanup failed",
+                [primary_error, *fallback_errors],
+            )
+        return _group_exceptions("test case fallback cleanup failed", fallback_errors)
 
     async def _publish_npi_result(
         self,
@@ -1856,6 +2004,7 @@ class TaacRunner:
                         f"\033[31m  Playbook '{playbook.name}' failed on "
                         f"{dut}: {e}\033[0m"
                     )
+                    self._ensure_baseline_safe_for_next_playbook(failed_playbooks)
                     self.logger.info(
                         f"\033[33m  Continuing to next playbook "
                         f"({pb_idx}/{total_playbooks} complete)...\033[0m"
@@ -1878,6 +2027,21 @@ class TaacRunner:
                 f"{len(failed_playbooks)} playbook(s) failed:\n"
                 + "\n".join(detail_lines)
             ) from failed_playbooks[-1][2]
+
+    def _ensure_baseline_safe_for_next_playbook(
+        self, failed_playbooks: t.Sequence[t.Tuple[str, str, Exception]]
+    ) -> None:
+        if self._baseline_lifecycle.is_healthy:
+            return
+        self.logger.error(
+            "Stopping this TestConfig because baseline restoration could not "
+            "be verified"
+        )
+        raise _topology_baseline_infra_error(
+            "The topology baseline could not be restored; remaining Playbooks "
+            "were not started",
+            [error for _name, _dut, error in failed_playbooks],
+        )
 
     async def run_steps(
         self,
@@ -2142,6 +2306,34 @@ class TaacRunner:
                 )
         return ixia_config_snapshot
 
+    def _end_ixia_test_case_safely(
+        self,
+        playbook: taac_types.Playbook,
+        test_case_results: t.List[TestResult],
+        periodic_workers_stopped: t.Optional[bool],
+    ) -> tuple[t.Optional[str], list[BaseException]]:
+        ixia_teardown_errors: list[BaseException] = []
+        ixia_config_snapshot = None
+        try:
+            ixia_config_snapshot = self._end_ixia_test_case(
+                playbook,
+                test_case_results,
+                periodic_workers_stopped,
+            )
+        except Exception as error:
+            ixia_teardown_errors.append(error)
+        return ixia_config_snapshot, ixia_teardown_errors
+
+    async def _restore_topology_baseline_safely(self) -> list[BaseException]:
+        topology_restore_errors: list[BaseException] = []
+        try:
+            topology_restore_errors.extend(await self._restore_topology_baseline())
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            topology_restore_errors.append(error)
+        return topology_restore_errors
+
     async def _run_post_periodic_test_case_cleanup(self) -> t.List[Exception]:
         errors: t.List[Exception] = []
         handlers = self._test_case_handlers_pending_cleanup
@@ -2158,6 +2350,77 @@ class TaacRunner:
             except Exception as error:
                 errors.append(error)
         return errors
+
+    def _finalize_playbook_section(
+        self,
+        exceptions: t.Sequence[BaseException],
+        topology_restore_errors: t.Sequence[BaseException],
+    ) -> None:
+        section = self._current_playbook_section
+        if section is None:
+            return
+        if exceptions:
+            status = (
+                SectionStatus.INFRA_ERROR
+                if topology_restore_errors
+                else SectionStatus.FAIL
+            )
+            self.test_summary.end_section(
+                section,
+                status,
+                "; ".join(str(error) for error in exceptions),
+            )
+        else:
+            self.test_summary.end_section(section, SectionStatus.PASS)
+        self._last_completed_playbook_section = section
+        self._current_playbook_section = None
+
+    def _record_npi_teardown_outcome(
+        self,
+        test_case_name: str,
+        test_case_results: t.Sequence[TestResult],
+        exceptions: t.Sequence[BaseException],
+        topology_restore_errors: t.Sequence[BaseException],
+    ) -> None:
+        if not self.npi_name or not test_case_name:
+            return
+        if not exceptions:
+            self._npi_iteration_outcomes.append(("passed", None))
+            return
+        if topology_restore_errors:
+            self._npi_iteration_outcomes.append(("error", "topology_baseline_restore"))
+            return
+        if self.check_failure(list(test_case_results)):
+            self._npi_iteration_outcomes.append(("failed", "health_check"))
+            return
+        self._npi_iteration_outcomes.append(("error", str(exceptions[0])))
+
+    @staticmethod
+    def _raise_test_case_teardown_errors(
+        test_case_name: str,
+        test_device: TestDevice,
+        exceptions: t.Sequence[BaseException],
+        topology_restore_errors: t.Sequence[BaseException],
+        test_case_raise: TestCaseFailure | None,
+    ) -> None:
+        if not exceptions:
+            return
+        if topology_restore_errors:
+            raise _topology_baseline_infra_error(
+                (
+                    f"Topology baseline restoration failed for "
+                    f"{test_case_name} on {test_device.name}"
+                ),
+                exceptions,
+            )
+        error_messages = [str(exc) for exc in exceptions]
+        failure_string = "Failure detected in test case teardown:\n"
+        combined_message = "\n".join([f"- {msg}" for msg in error_messages])
+        is_postcheck = getattr(test_case_raise, "is_postcheck_failure", False)
+        raise TestCaseFailure(
+            failure_string + combined_message,
+            is_postcheck_failure=is_postcheck,
+        )
 
     def _get_periodic_task_executor_error(
         self, executor: t.Optional[PeriodicTaskExecutor]
@@ -2288,10 +2551,9 @@ class TaacRunner:
                 self.test_case_periodic_task_executor
             )
         )
-        # Taken before the generator is torn down: `end_test_case` pauses and
-        # disables traffic and `import_saved_config` rolls the configuration
-        # back, so afterwards the live state no longer shows what the test drove.
-        ixia_config_snapshot = self._end_ixia_test_case(
+        # Preserve failure evidence before either the legacy restore or the
+        # topology boundary replaces the state that the Playbook exercised.
+        ixia_config_snapshot, ixia_teardown_errors = self._end_ixia_test_case_safely(
             playbook,
             test_case_results,
             periodic_workers_stopped,
@@ -2378,6 +2640,7 @@ class TaacRunner:
         post_periodic_teardown_errors = (
             await self._run_post_periodic_test_case_cleanup()
         )
+        topology_restore_errors = await self._restore_topology_baseline_safely()
         periodic_task_executor_raise = self._get_periodic_task_executor_error(
             self.periodic_task_executor
         )
@@ -2386,49 +2649,28 @@ class TaacRunner:
             exc
             for exc in [
                 test_case_raise,
+                *ixia_teardown_errors,
+                *topology_restore_errors,
                 *test_case_periodic_task_executor_errors,
                 *post_periodic_teardown_errors,
                 periodic_task_executor_raise,
             ]
             if exc is not None
         ]
-        # Finalize playbook section in test summary
-        if self._current_playbook_section is not None:
-            if exceptions:
-                self.test_summary.end_section(
-                    self._current_playbook_section,
-                    SectionStatus.FAIL,
-                    "; ".join(str(e) for e in exceptions),
-                )
-            else:
-                self.test_summary.end_section(
-                    self._current_playbook_section, SectionStatus.PASS
-                )
-            self._last_completed_playbook_section = self._current_playbook_section
-            self._current_playbook_section = None
-
-        # Record iteration outcome for NPI aggregation (published after all iterations)
-        if self.npi_name and test_case_name:
-            if exceptions:
-                # Distinguish health check failures from unhandled errors
-                has_hc_failure = self.check_failure(test_case_results)
-                if has_hc_failure:
-                    self._npi_iteration_outcomes.append(("failed", "health_check"))
-                else:
-                    self._npi_iteration_outcomes.append(("error", str(exceptions[0])))
-            else:
-                self._npi_iteration_outcomes.append(("passed", None))
-
-        if exceptions:
-            error_messages = [str(exc) for exc in exceptions]
-            failure_string = "Failure detected in test case teardown:\n"
-            combined_message = "\n".join([f"- {msg}" for msg in error_messages])
-            # Propagate is_postcheck_failure if the primary failure was a postcheck
-            is_postcheck = getattr(test_case_raise, "is_postcheck_failure", False)
-            raise TestCaseFailure(
-                failure_string + combined_message,
-                is_postcheck_failure=is_postcheck,
-            )
+        self._finalize_playbook_section(exceptions, topology_restore_errors)
+        self._record_npi_teardown_outcome(
+            test_case_name,
+            test_case_results,
+            exceptions,
+            topology_restore_errors,
+        )
+        self._raise_test_case_teardown_errors(
+            test_case_name,
+            test_device,
+            exceptions,
+            topology_restore_errors,
+            test_case_raise,
+        )
 
     async def async_create_fboss_ryslog_configuration(self) -> None:
         # pyrefly: ignore [missing-attribute]

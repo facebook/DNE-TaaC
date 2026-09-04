@@ -9,7 +9,11 @@ from taac.abstractions.churn.playbook import ChurnPlaybookSpec
 from taac.test_as_a_config.types import Playbook
 
 
-def create_dice_unified_churn_playbook(*, spec: ChurnPlaybookSpec) -> Playbook:
+def create_dice_unified_churn_playbook(
+    *,
+    spec: ChurnPlaybookSpec,
+    restore_topology_baseline: bool = False,
+) -> Playbook:
     if not spec.playbook_name:
         raise ValueError("a churn playbook requires a name")
     if not spec.device:
@@ -29,6 +33,7 @@ def create_dice_unified_churn_playbook(*, spec: ChurnPlaybookSpec) -> Playbook:
         "snapshot_checks": list(spec.snapshot_checks),
         "periodic_tasks": list(spec.periodic_tasks),
         "stages": stages,
+        "restore_topology_baseline": restore_topology_baseline,
     }
     if spec.cleanup_steps:
         fields["cleanup_steps"] = list(spec.cleanup_steps)
