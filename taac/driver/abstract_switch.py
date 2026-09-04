@@ -19,6 +19,7 @@ from taac.driver.driver_constants import (
     BgpPeerAction,
     BgpSessionState,
     CoreDumpFiles,
+    describe_interface_state,
     DeviceDrainState,
     DNE_TEST_REGRESSION_FBID,
     DRAIN_UNDRAIN_TEST_TASK,
@@ -31,6 +32,7 @@ from taac.driver.driver_constants import (
     INTERFACE_CHECKS_RETRYABLE_TIMOUT,
     InterfaceEventState,
     InterfaceFlapMethod,
+    InterfaceState,
     PING_COUNT,
     PING_TIMEOUT,
     PortCounters,
@@ -124,6 +126,20 @@ class AbstractSwitch(ABC):
         """
         ...
 
+    async def async_get_interfaces_state(
+        self, interface_names: List[str]
+    ) -> Dict[str, InterfaceState]:
+        """
+        Used to fetch both the admin and the operational state of the given
+        interfaces. Drivers that cannot observe the admin state leave it unset,
+        which renders as admin=unknown rather than as a guess.
+        """
+        interfaces_oper_status = await self.async_get_interfaces_status(interface_names)
+        return {
+            interface_name: InterfaceState(oper_up=oper_up)
+            for interface_name, oper_up in interfaces_oper_status.items()
+        }
+
     async def async_get_interfaces_speed_in_Gbps(
         self,
         interface_names: Optional[List[str]] = None,
@@ -143,22 +159,22 @@ class AbstractSwitch(ABC):
         status depending on the state variable.
 
         @state: InterfaceEventState.STABLE|InterfaceEventState.UNSTABLE
-        If the state is stable, interface_status is expected to be True
-        (UP/enabled), otherwise it is expected to be False.
+        If the state is stable, the interface is expected to be operationally
+        up, otherwise it is expected to be operationally down.
         """
-        intf_oper_status_result = await self.async_get_interfaces_status(
-            [interface_name]
-        )
-        intf_oper_status = intf_oper_status_result[interface_name]
+        interface_state = (await self.async_get_interfaces_state([interface_name]))[
+            interface_name
+        ]
+        described = describe_interface_state(interface_state)
         if state == InterfaceEventState.STABLE:
             self.test_case_obj.assertTrue(
-                intf_oper_status,
-                msg=f"{self.hostname}:{interface_name} is NOT UP/enabled. Please check!",
+                interface_state.oper_up,
+                msg=f"{self.hostname}:{interface_name} is not operationally up: {described}",
             )
         elif state == InterfaceEventState.UNSTABLE:
             self.test_case_obj.assertFalse(
-                intf_oper_status,
-                msg=f"{self.hostname}:{interface_name} is NOT DOWN/disabled. Please check!",
+                interface_state.oper_up,
+                msg=f"{self.hostname}:{interface_name} is not operationally down: {described}",
             )
 
     @async_retryable(retries=60, sleep_time=5, exceptions=(Exception,))
@@ -169,17 +185,23 @@ class AbstractSwitch(ABC):
         Used to validate the expected interface status with the observed
         status depending on the state variable.
 
-        If the state is stable, interface_status is expected to be True
-        (UP/enabled), otherwise it is expected to be False.
+        If state is True, every interface is expected to be operationally up,
+        otherwise every interface is expected to be operationally down.
         """
-        interfaces_oper_status = await self.async_get_interfaces_status(interface_names)
+        interfaces_state = await self.async_get_interfaces_state(interface_names)
         interface_state_mismatch_map = {}
         for interface_name in interface_names:
-            intf_oper_status = interfaces_oper_status[interface_name]
-            if state != intf_oper_status:
-                interface_state_mismatch_map[interface_name] = intf_oper_status
+            interface_state = interfaces_state[interface_name]
+            if state != interface_state.oper_up:
+                interface_state_mismatch_map[interface_name] = describe_interface_state(
+                    interface_state
+                )
         if interface_state_mismatch_map:
-            err_msg = f"Interface state mismatch: {interface_state_mismatch_map} on {self.hostname}: expected state: {state}"
+            expected_oper = "up" if state else "down"
+            err_msg = (
+                f"Interface state mismatch on {self.hostname}, expected "
+                f"oper={expected_oper}: {interface_state_mismatch_map}"
+            )
             self.logger.error(err_msg)
             raise Exception(err_msg)
 
