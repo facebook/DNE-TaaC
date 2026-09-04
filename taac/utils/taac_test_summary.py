@@ -167,22 +167,6 @@ class TaacTestSummary:
         self._log_handler.add_section(section.log_lines)
         return section
 
-    def add_artifact_section(self, name: str, url: str) -> SectionResult:
-        """Add an already-complete row whose only payload is an artifact link.
-
-        Unlike `start_section`, this captures no logs — the artifact was
-        produced elsewhere (an upload to Manifold, say) and the row exists so
-        the reader can find it in the summary table.
-        """
-        section = SectionResult(
-            name=name,
-            status=SectionStatus.PASS,
-            everpaste_url=url,
-            start_time=time.time(),
-        )
-        self.sections.append(section)
-        return section
-
     def end_section(
         self,
         section: SectionResult,

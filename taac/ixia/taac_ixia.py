@@ -23,6 +23,7 @@ from taac.ixia.ixia import (  # oss-rewrite (force ShipIt re-export to taac.* ro
     IxiaOperationTimeoutError,
     IxiaSetupError,
 )
+from taac.ixia.ixia_tracer import TEARDOWN_PHASE
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
     retryable,
@@ -1505,6 +1506,9 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
 
     def begin_test_case(self, test_case_uuid, traffic_regexes=None) -> None:
         self.test_case_uuid = test_case_uuid
+        # The REST trace is cut here so the calls this test case drives land
+        # in their own slice, separate from setup and from its neighbours.
+        self.rotate_api_trace_phase(self._current_playbook_name or test_case_uuid)
         self.enable_traffic(traffic_regexes)
         self.prepare_traffic()
         if not self.capturing:
@@ -1516,3 +1520,4 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.paused = True
         self.log_to_scuba_ixia_packet_loss(none_throws(self.test_case_uuid))
         self.enable_traffic(traffic_regexes, enable=False)
+        self.rotate_api_trace_phase(TEARDOWN_PHASE)

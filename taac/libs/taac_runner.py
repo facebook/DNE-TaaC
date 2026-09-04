@@ -11,6 +11,7 @@ import sys
 import time
 import typing as t
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 if t.TYPE_CHECKING:
@@ -65,6 +66,7 @@ from taac.ixia.config_render import (
     render_ixia_config,
     ResolvedCheck,
 )
+from neteng.test_infra.dne.taac.ixia.ixia_tracer import IxiaTraceSlice, slugify_phase
 from taac.ixia.taac_ixia import TaacIxia
 
 # taac.libs.collectors.registry is OSS-safe (no Meta-internal imports) and owns
@@ -244,6 +246,20 @@ def _topology_baseline_infra_error(
     return infrastructure_error
 
 
+@dataclass(frozen=True)
+class PublishedIxiaTraceSlice:
+    """One phase of the IxNetwork REST trace, uploaded and ready to link.
+
+    `location` is a Manifold read URL, or the on-disk path under TAAC_OSS
+    where there is no Manifold to upload to.
+    """
+
+    phase: str
+    record_count: int
+    failure_count: int
+    location: str
+
+
 def _start_test_case_time_window(
     jq_vars: t.MutableMapping[str, t.Any], start_time: int
 ) -> None:
@@ -417,6 +433,10 @@ class TaacRunner:
         self.is_autotester_run = is_autotester_run
 
         self.ixia: t.Optional[AbstractTrafficGenerator] = None
+        # How many closed REST-trace slices have already been offered for
+        # upload, so a second publish call does not re-upload them.
+        self._ixia_trace_slices_seen = 0
+        self._published_ixia_trace_slices: t.List[PublishedIxiaTraceSlice] = []
         self.ixia_candidates = normalize_ixia_candidates(
             self.test_config,
             primary_api_server_ip=ixia_api_server,
@@ -603,6 +623,18 @@ class TaacRunner:
             }
 
     async def async_test_setUp(self) -> None:
+        try:
+            await self._async_run_test_setup()
+        except BaseException:
+            # The setup slice is the only record of what the chassis was
+            # asked to do before it refused, and a setup that raises may
+            # never reach `async_test_tearDown`. Publish it here so the
+            # evidence survives; the seen-counter makes a later teardown
+            # publish a no-op rather than a duplicate upload.
+            await self._async_publish_ixia_api_trace(final=True)
+            raise
+
+    async def _async_run_test_setup(self) -> None:
         log_section("TEST CONFIG SETUP", logger=self.logger)
         setup_start = time.time()
         skip_setup_tasks = self.skip_all_tasks or self.skip_setup_tasks
@@ -2677,6 +2709,10 @@ class TaacRunner:
                     collected_logs = await self.async_fboss_collect_and_print_logs(
                         test_case_start_time
                     )
+                    # Right after the device logs, and before the raise below
+                    # skips the rest of this block, so a failing test case
+                    # reports its IXIA trace alongside its other evidence.
+                    await self._async_publish_ixia_api_trace()
                     investigation_url = await self._async_run_investigation_if_enabled(
                         playbook,
                         test_device,
@@ -2728,6 +2764,9 @@ class TaacRunner:
         except TestCaseFailure as e:
             test_case_raise = e
 
+        # No-op when the failure branch above already published this test
+        # case's slice; this is the passing path's publish.
+        await self._async_publish_ixia_api_trace()
         self._test_case_cleanup_pending = False
         post_periodic_teardown_errors = (
             await self._run_post_periodic_test_case_cleanup()
@@ -3332,40 +3371,116 @@ class TaacRunner:
                 f"(swallowed to protect teardown): {exc!r}"
             )
 
-    async def _async_publish_ixia_api_trace(self, ixia: TaacIxia) -> None:
-        """Close the IxNetwork REST trace and link it from the test summary.
+    def _ixia_with_api_trace(self) -> t.Optional[TaacIxia]:
+        """The Ixia that owns the REST trace, including after a failed setup.
+
+        `self.ixia` is assigned only once `TestSetupOrchestrator.async_setUp`
+        returns, so a setup that died at port assignment (the case this
+        trace exists for) leaves it None while the orchestrator still holds
+        the object, and its trace.
+        """
+        for candidate in (self.ixia, self.test_setup_orchestrator.ixia):
+            if isinstance(candidate, TaacIxia) and candidate.api_tracer is not None:
+                return candidate
+        return None
+
+    async def _async_publish_ixia_api_trace(self, final: bool = False) -> None:
+        """Upload every trace slice closed since the last call and log them.
 
         Mirrors `_async_collect_ixia_diagnostics_if_enabled`: runs while the
         Ixia object is still live, best-effort, never turns a green test red.
-        Under TAAC_OSS the JSONL stays on local disk (no Manifold).
+        Under TAAC_OSS the JSONL stays on local disk (no Manifold) and the
+        table carries the path instead of a URL.
         """
-        tracer = ixia.api_tracer
-        if tracer is None:
+        try:
+            await self._async_publish_ixia_trace_slices(final)
+        except Exception as exc:
+            self.logger.error(
+                f"ixia api trace: publishing failed (swallowed to protect the "
+                f"test): {exc!r}"
+            )
+
+    async def _async_publish_ixia_trace_slices(self, final: bool) -> None:
+        ixia = self._ixia_with_api_trace()
+        if ixia is None:
             return
-        summary = tracer.close()
+        tracer = none_throws(ixia.api_tracer)
+        if final:
+            tracer.close()
+        closed_slices = tracer.slices
+        pending = closed_slices[self._ixia_trace_slices_seen :]
+        self._ixia_trace_slices_seen = len(closed_slices)
+        published_now = [
+            published
+            for published in [
+                await self._async_publish_ixia_trace_slice(ixia, trace_slice)
+                for trace_slice in pending
+            ]
+            if published is not None
+        ]
+        if not published_now:
+            return
+        self._published_ixia_trace_slices.extend(published_now)
+        self._log_ixia_trace_table()
+
+    async def _async_publish_ixia_trace_slice(
+        self, ixia: TaacIxia, trace_slice: IxiaTraceSlice
+    ) -> t.Optional[PublishedIxiaTraceSlice]:
+        if trace_slice.record_count == 0:
+            return None
         self.logger.info(
-            f"ixia api trace: {summary.record_count} REST calls recorded "
-            f"({summary.dropped_count} dropped) -> {summary.path}"
+            f"ixia api trace: phase {trace_slice.phase!r}: "
+            f"{trace_slice.record_count} REST calls, "
+            f"{trace_slice.failure_count} failed, "
+            f"{trace_slice.dropped_count} dropped -> {trace_slice.path}"
         )
-        if TAAC_OSS or summary.record_count == 0:
-            return
+        if TAAC_OSS:
+            return PublishedIxiaTraceSlice(
+                phase=trace_slice.phase,
+                record_count=trace_slice.record_count,
+                failure_count=trace_slice.failure_count,
+                location=str(trace_slice.path),
+            )
+        # The phase suffix keeps slices of one run from colliding: the shared
+        # key builder only disambiguates down to the second.
         key = ixia_artifact_manifold_key(
             str(ixia.primary_chassis_ip),
             self.test_config.name,
-            "_api_trace.jsonl",
+            f"_api_trace_{trace_slice.index:02d}"
+            f"_{slugify_phase(trace_slice.phase)}.jsonl",
         )
         try:
             url = await async_upload_file_to_manifold(
-                DEFAULT_MANIFOLD_BUCKET, key, summary.path
+                DEFAULT_MANIFOLD_BUCKET, key, trace_slice.path
             )
         except Exception as exc:
             self.logger.error(
-                f"ixia api trace: Manifold upload failed for {summary.path} "
+                f"ixia api trace: Manifold upload failed for {trace_slice.path} "
                 f"-> {DEFAULT_MANIFOLD_BUCKET}/{key}: {exc!r}"
             )
-            return
-        self.logger.info(f"ixia api trace: uploaded -> {url}")
-        self.test_summary.add_artifact_section("IXIA REST API TRACE", url)
+            return None
+        return PublishedIxiaTraceSlice(
+            phase=trace_slice.phase,
+            record_count=trace_slice.record_count,
+            failure_count=trace_slice.failure_count,
+            location=url,
+        )
+
+    def _log_ixia_trace_table(self) -> None:
+        trace_table = tabulate(
+            [
+                (
+                    published.phase,
+                    published.record_count,
+                    published.failure_count,
+                    published.location,
+                )
+                for published in self._published_ixia_trace_slices
+            ],
+            headers=["Phase", "Calls", "Failures", "Trace URL"],
+            tablefmt="grid",
+        )
+        self.logger.info(f"IXIA REST trace:\n {trace_table}")
 
     async def async_test_tearDown(self) -> None:
         log_section("TEST CONFIG TEARDOWN", logger=self.logger)
@@ -3383,9 +3498,11 @@ class TaacRunner:
                         ixia.capturing = False  # type: ignore[attr-defined]
                     if isinstance(ixia, TaacIxia):
                         await self._async_collect_ixia_diagnostics_if_enabled(ixia)
-                        # After diagnostics so the trace covers their REST
-                        # calls too.
-                        await self._async_publish_ixia_api_trace(ixia)
+                # After diagnostics so the trace covers their REST calls too.
+                # Outside the `if ixia` above because a failed setup leaves
+                # `self.ixia` None while the orchestrator still holds a traced
+                # Ixia.
+                await self._async_publish_ixia_api_trace(final=True)
                 await self.run_tasks(
                     (
                         self.selected_ixia_candidate.teardown_tasks

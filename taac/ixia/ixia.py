@@ -4,6 +4,8 @@
 # pyre-unsafe
 
 import functools
+import importlib.metadata
+import inspect
 import ipaddress
 import itertools
 import json
@@ -57,8 +59,12 @@ from taac.ixia.ixia_tracer import (
     build_trace_path,
     extract_request_body,
     extract_request_method_and_url,
+    IxiaTracePortMapping,
     IxiaTracer,
+    IxiaTraceSessionPreamble,
+    IxiaTraceSlice,
     IxiaTraceSpan,
+    RECORD_TYPE_SESSION_PREAMBLE,
 )
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
@@ -731,6 +737,7 @@ class VportIndex:
 def require_traffic_item(func: t.Callable) -> t.Callable:
     """Decorator to skip the function execution if no traffic items are found"""
 
+    @functools.wraps(func)
     def wrapper(self, *args, **kwargs) -> t.Any:
         if not self.has_traffic_items():
             self.logger.debug(
@@ -776,6 +783,11 @@ _APPLY_CHANGES_RETRY_DELAY_SECONDS: float = 10.0
 # and read back by the installer as its idempotency guard.
 _TRACED_REQUEST_OWNER: str = "_taac_ixia_request_wrapper_owner"
 
+# The tracer's own appErrors GET runs inside the transport wrapper, on the
+# thread whose call just failed. It is capped tightly so a wedged API server
+# cannot turn diagnostic collection into a test-length stall.
+_APP_ERRORS_FETCH_TIMEOUT_SECONDS: int = 15
+
 
 def cap_timeout_at_deadline(existing_timeout: t.Any, remaining: float) -> t.Any:
     """Cap a `requests` timeout at the seconds left on the current deadline.
@@ -791,6 +803,31 @@ def cap_timeout_at_deadline(existing_timeout: t.Any, remaining: float) -> t.Any:
     if existing_timeout is None:
         return remaining
     return min(existing_timeout, remaining)
+
+
+def _restpy_version() -> t.Optional[str]:
+    """The `ixnetwork-restpy` version, which pins the wire format Keysight
+    has to replay a trace against. Absent from a stripped par, hence best
+    effort."""
+    try:
+        return importlib.metadata.version("ixnetwork-restpy")
+    except Exception:
+        return None
+
+
+def resolve_decorated_name(func: t.Callable) -> str:
+    """The name of the method under `func`, not of the decorator wrapping it.
+
+    `@external_api` sits above `@require_traffic_item` and `@retryable`, so
+    `func.__name__` names whichever wrapper is directly underneath. Both of
+    those use `functools.wraps`, which sets `__wrapped__`, so `inspect.unwrap`
+    walks down to the real method. A decorator that sets neither leaves its
+    own name, which is still better than crashing on a missing attribute.
+    """
+    unwrapped = inspect.unwrap(func)
+    return getattr(unwrapped, "__name__", None) or getattr(
+        func, "__name__", "<unknown>"
+    )
 
 
 def external_api(func: t.Callable) -> t.Callable:
@@ -823,6 +860,7 @@ def external_api(func: t.Callable) -> t.Callable:
     issued it. The name is restored on exit rather than cleared, so a nested
     `@external_api` call unwinds to its caller's name instead of to None.
     """
+    op_name = resolve_decorated_name(func)
 
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs) -> t.Any:
@@ -831,7 +869,7 @@ def external_api(func: t.Callable) -> t.Callable:
         state = self._request_deadline_state if self._tracer is not None else None
         previous_op = getattr(state, "op", None)
         if state is not None:
-            state.op = func.__name__
+            state.op = op_name
         try:
             try:
                 return func(self, *args, **kwargs)
@@ -847,22 +885,20 @@ def external_api(func: t.Callable) -> t.Callable:
                 # failure here would otherwise replace the real operational
                 # error (e.g. the propagated 504) in the traceback.
                 try:
-                    self._emit_inband_502(
-                        func.__name__, exc, source=_INBAND_SOURCE_API_CALL
-                    )
+                    self._emit_inband_502(op_name, exc, source=_INBAND_SOURCE_API_CALL)
                 except Exception:
                     self.logger.exception(
                         f"{_YELLOW}[IXIA]{_RESET} failed to emit inband_502 "
-                        f"telemetry for {func.__name__}"
+                        f"telemetry for {op_name}"
                     )
                 if self._extract_5xx_status(exc) == 504:
                     self.logger.warning(
-                        f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit an "
+                        f"{_YELLOW}[IXIA]{_RESET} {op_name} hit an "
                         "operation-scoped 504 — skipping application-wide recovery"
                     )
                     raise
                 self.logger.warning(
-                    f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit 5xx mid-test — "
+                    f"{_YELLOW}[IXIA]{_RESET} {op_name} hit 5xx mid-test — "
                     f"invoking in-band recovery"
                 )
                 if not self._attempt_inband_recovery():
@@ -945,9 +981,13 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
 class Ixia:
     OPERATION_TIMEOUT_ERROR = IxiaOperationTimeoutError
 
-    # Class-level default so the transport wrapper can read `self._tracer`
-    # unconditionally. `__init__` overrides it per instance.
+    # Class-level defaults so the transport wrapper and the trace phase
+    # boundaries can read these unconditionally, including on the 11 test
+    # fixtures that construct an `Ixia` with `__init__` patched out.
+    # `__init__` overrides all three per instance.
     _tracer: t.Optional[IxiaTracer] = None
+    _current_playbook_name: t.Optional[str] = None
+    _current_testconfig_name: t.Optional[str] = None
 
     def __init__(
         self,
@@ -1339,6 +1379,11 @@ class Ixia:
                 f"after reconnect: {replacement_identity}"
             )
 
+        # Emitted here rather than after port assignment so that a trace of a
+        # setup that died AT port assignment (the force-take-ownership
+        # collision this tracer exists for) still names its session.
+        self._publish_trace_session_preamble()
+
     def _remote_session_identity(
         self, session: t.Optional[t.Any] = None
     ) -> t.Optional[t.Tuple[str, int]]:
@@ -1357,6 +1402,92 @@ class Ixia:
         """The REST call tracer, or None when `trace_api_calls` was not set."""
         return self._tracer
 
+    def rotate_api_trace_phase(self, phase: str) -> t.Optional[IxiaTraceSlice]:
+        """Close the current trace slice and start recording into `phase`.
+
+        Returns the slice that was just closed so the caller can publish it,
+        or None when tracing is off or the trace is already closed.
+        """
+        tracer = self._tracer
+        if tracer is None:
+            return None
+        try:
+            return tracer.rotate(phase)
+        except Exception as exc:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: phase rotation to "
+                f"{phase!r} failed: {exc!r}"
+            )
+            return None
+
+    def _publish_trace_session_preamble(self) -> None:
+        """Record the chassis, session and port map the trace was taken against.
+
+        Without this a slice is a list of URLs against an anonymous session:
+        Keysight cannot replay it, and nobody reading it six weeks later can
+        tell which physical ports the calls drove.
+        """
+        tracer = self._tracer
+        if tracer is None:
+            return
+        try:
+            tracer.set_session_preamble(
+                IxiaTraceSessionPreamble(
+                    record_type=RECORD_TYPE_SESSION_PREAMBLE,
+                    seq=0,
+                    recorded_at=time.time(),
+                    chassis_ip=str(self.primary_chassis_ip),
+                    session_id=self.session_id,
+                    session_name=self.session_name,
+                    restpy_version=_restpy_version(),
+                    is_uhd_chassis=self.is_uhd_chassis,
+                    force_take_port_ownership=self.force_take_port_ownership,
+                    ports=self._trace_port_mappings(),
+                    traffic_items=self._trace_traffic_item_names(),
+                )
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: session preamble "
+                f"failed: {exc!r}"
+            )
+
+    def _trace_port_mappings(self) -> t.Tuple[IxiaTracePortMapping, ...]:
+        """Slot/port to vport to DUT interface, from the declarative config.
+
+        Read from `ixia_config` rather than `vport_indices` because a topology
+        cache hit skips `assign_ports` and leaves `vport_indices` empty while
+        the ports themselves are very much mapped. The vport name is the same
+        deterministic `DESIRED_VPORT_NAME` render `assign_ports` uses.
+        """
+        config = self.ixia_config
+        port_configs = getattr(config, "port_configs", None) if config else None
+        mappings = []
+        for port_config in port_configs or []:
+            phy = port_config.phy_port_config
+            port_identifier = self.get_port_identifier(port_config.port_name)
+            mappings.append(
+                IxiaTracePortMapping(
+                    dut_interface=port_config.port_name,
+                    chassis_ip=phy.chassis_ip,
+                    slot=phy.slot_number,
+                    port=phy.port_number,
+                    vport_name=DESIRED_VPORT_NAME.format(
+                        port_identifier=port_identifier
+                    ),
+                )
+            )
+        return tuple(mappings)
+
+    def _trace_traffic_item_names(self) -> t.Tuple[str, ...]:
+        """The names `create_traffic_items` gives the items on the chassis."""
+        config = self.ixia_config
+        traffic_items = getattr(config, "traffic_items", None) if config else None
+        return tuple(
+            item.name or Ixia.get_traffic_item_name(item)
+            for item in traffic_items or []
+        )
+
     def _install_request_deadline_wrapper(self) -> None:
         with self._request_deadline_wrapper_lock:
             self._install_request_deadline_wrapper_locked(self.session)
@@ -1373,7 +1504,8 @@ class Ixia:
         Re-entrant by design: `connect()` and every `request_deadline()`
         scope call this under lock, including after in-band 5xx recovery.
         """
-        transport = session.TestPlatform._connection._session
+        connection = session.TestPlatform._connection
+        transport = connection._session
         current_request = transport.request
         # The guard reads a mark on the wrapper rather than the single-slot
         # bookkeeping below, which only remembers the most recently wrapped
@@ -1392,6 +1524,37 @@ class Ixia:
         transport.request = traced_request_with_deadline
         self._deadline_wrapped_transport = transport
         self._deadline_request_wrapper = traced_request_with_deadline
+        if self._tracer is not None:
+            self._tracer.set_app_errors_fetch(
+                self._build_app_errors_fetch(connection, current_request)
+            )
+
+    def _build_app_errors_fetch(
+        self, connection: t.Any, send: t.Callable[..., t.Any]
+    ) -> t.Callable[[str], t.Any]:
+        """A GET of `/globals/appErrors/error` that cannot recurse.
+
+        `send` is the transport callable captured BEFORE the tracing wrapper
+        replaced it, so the fetch the tracer issues from inside that wrapper
+        does not re-enter it. The tracer's reentrancy flag is a second line of
+        defense, not the only one.
+
+        No deadline is applied either: the fetch runs after the call it
+        explains has already failed, and inheriting an expired deadline would
+        drop exactly the evidence being collected.
+        """
+
+        def fetch(url: str) -> t.Any:
+            return send(
+                "GET",
+                url,
+                headers=getattr(connection, "_headers", None),
+                verify=getattr(connection, "_verify_cert", False),
+                allow_redirects=False,
+                timeout=_APP_ERRORS_FETCH_TIMEOUT_SECONDS,
+            )
+
+        return fetch
 
     def _trace_and_send(
         self,
