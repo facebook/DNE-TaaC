@@ -30,7 +30,7 @@ class SectionStatus(enum.Enum):
     IN_PROGRESS = "IN_PROGRESS"
 
 
-_FAILED_SECTION_STATUSES = {
+FAILED_SECTION_STATUSES = {
     SectionStatus.FAIL,
     SectionStatus.INFRA_ERROR,
 }
@@ -254,7 +254,7 @@ class TaacTestSummary:
         # are covered by the full-log paste linked at the bottom of the summary.
         url = section.everpaste_url or "-"
         lines.append(f"  {display_name:<45} {status_str:<10} {duration_str:<15} {url}")
-        if section.status in _FAILED_SECTION_STATUSES and section.error_message:
+        if section.status in FAILED_SECTION_STATUSES and section.error_message:
             short_err = self._truncate_message(section.error_message, 80)
             lines.append(f"  {indent}  └─ REASON: {short_err}")
         return lines
@@ -302,7 +302,7 @@ class TaacTestSummary:
         # Passing rows show "-" in the Logs column and point at the full log.
         for section in self.sections:
             if (
-                section.status in _FAILED_SECTION_STATUSES
+                section.status in FAILED_SECTION_STATUSES
                 and section.log_lines
                 and not section.everpaste_url
             ):
@@ -322,7 +322,7 @@ class TaacTestSummary:
 
         all_pass = True
         for section in self.sections:
-            if section.status in _FAILED_SECTION_STATUSES:
+            if section.status in FAILED_SECTION_STATUSES:
                 all_pass = False
             # pyrefly: ignore [bad-argument-type]
             lines.extend(self._format_section_row(section))
@@ -333,7 +333,7 @@ class TaacTestSummary:
         lines.append(f"  Overall: {overall}")
         lines.append("")
 
-        failed = [s for s in self.sections if s.status in _FAILED_SECTION_STATUSES]
+        failed = [s for s in self.sections if s.status in FAILED_SECTION_STATUSES]
         if failed:
             # pyrefly: ignore [bad-argument-type]
             lines.extend(self._format_failure_details(failed))

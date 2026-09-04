@@ -161,6 +161,14 @@ class IxiaTopologyBaselineParticipant:
         path: str,
         differences: list[str],
     ) -> bool:
+        expected_is_number = isinstance(expected, (int, float)) and not isinstance(
+            expected, bool
+        )
+        observed_is_number = isinstance(observed, (int, float)) and not isinstance(
+            observed, bool
+        )
+        if expected_is_number and observed_is_number and expected == observed:
+            return False
         if type(expected) is not type(observed):
             return IxiaTopologyBaselineParticipant._append_difference(
                 path=path,

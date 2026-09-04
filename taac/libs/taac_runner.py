@@ -160,6 +160,7 @@ from taac.utils.taac_log_formatter import (
     suppress_console_logs,
 )
 from taac.utils.taac_test_summary import (
+    FAILED_SECTION_STATUSES,
     SectionResult,
     SectionStatus,
     TaacTestSummary,
@@ -1204,7 +1205,12 @@ class TaacRunner:
                                 test_case_start_time,
                             )
                         except asyncio.CancelledError as e:
-                            _teardown_exc = e
+                            if _stage_exc is not None:
+                                e.add_note(
+                                    "Test case execution also failed: "
+                                    f"{type(_stage_exc).__name__}: {_stage_exc}"
+                                )
+                            raise
                         except Exception as e:
                             _teardown_exc = e
 
@@ -1281,6 +1287,29 @@ class TaacRunner:
     ) -> None:
         if not cleanup_errors:
             return
+        cancellation = next(
+            (
+                error
+                for error in cleanup_errors
+                if isinstance(error, asyncio.CancelledError)
+            ),
+            None,
+        )
+        if cancellation is not None:
+            additional_errors = [
+                error
+                for error in [stage_error, *cleanup_errors]
+                if error is not None and error is not cancellation
+            ]
+            if additional_errors:
+                cancellation.add_note(
+                    "Test case execution or cleanup also failed: "
+                    + "; ".join(
+                        f"{type(error).__name__}: {error}"
+                        for error in additional_errors
+                    )
+                )
+            raise cancellation
         infrastructure_error = next(
             (error for error in cleanup_errors if isinstance(error, TestbedError)),
             None,
@@ -1301,6 +1330,8 @@ class TaacRunner:
                 "test case execution and restoration failed",
                 [stage_error, *cleanup_errors],
             )
+        if len(cleanup_errors) == 1:
+            raise cleanup_errors[0]
         raise _group_exceptions("test case restoration failed", cleanup_errors)
 
     def _baseline_participants_for(
@@ -1375,7 +1406,7 @@ class TaacRunner:
         active_baseline_scopes = self._baseline_lifecycle.active_scopes
         baseline_restore_errors = await self._baseline_lifecycle.restore_all()
         fallback_errors.extend(baseline_restore_errors)
-        if active_baseline_scopes and not self._baseline_lifecycle.restoration_failures:
+        if active_baseline_scopes and not baseline_restore_errors:
             self.logger.info(
                 "Restored and verified remaining baseline scopes during "
                 "fallback cleanup"
@@ -1383,14 +1414,6 @@ class TaacRunner:
 
         if not fallback_errors:
             return run_error
-        if BaselineScope.TOPOLOGY in active_baseline_scopes and baseline_restore_errors:
-            primary_errors = [
-                error for error in (run_error, active_exception) if error is not None
-            ]
-            return _topology_baseline_infra_error(
-                "Fallback topology baseline restoration failed",
-                [*primary_errors, *fallback_errors],
-            )
         if run_error is None and active_exception is not None:
             self.logger.error(
                 "Test case fallback cleanup failed while propagating %s: %s",
@@ -1406,6 +1429,14 @@ class TaacRunner:
                 )
             )
             return None
+        if BaselineScope.TOPOLOGY in active_baseline_scopes and baseline_restore_errors:
+            primary_errors = [
+                error for error in (run_error, active_exception) if error is not None
+            ]
+            return _topology_baseline_infra_error(
+                "Fallback topology baseline restoration failed",
+                [*primary_errors, *fallback_errors],
+            )
         primary_error = run_error or active_exception
         if primary_error is not None:
             return _group_exceptions(
@@ -2363,6 +2394,7 @@ class TaacRunner:
             status = (
                 SectionStatus.INFRA_ERROR
                 if topology_restore_errors
+                or any(isinstance(error, TestbedError) for error in exceptions)
                 else SectionStatus.FAIL
             )
             self.test_summary.end_section(
@@ -2409,6 +2441,20 @@ class TaacRunner:
             raise _topology_baseline_infra_error(
                 (
                     f"Topology baseline restoration failed for "
+                    f"{test_case_name} on {test_device.name}"
+                ),
+                exceptions,
+            )
+        infrastructure_error = next(
+            (error for error in exceptions if isinstance(error, TestbedError)),
+            None,
+        )
+        if infrastructure_error is not None:
+            if len(exceptions) == 1:
+                raise infrastructure_error
+            raise _topology_baseline_infra_error(
+                (
+                    f"Test case teardown encountered an infrastructure failure for "
                     f"{test_case_name} on {test_device.name}"
                 ),
                 exceptions,
@@ -2973,7 +3019,7 @@ class TaacRunner:
         return [
             section.name
             for section in self.test_summary.sections
-            if section.status == SectionStatus.FAIL
+            if section.status in FAILED_SECTION_STATUSES
         ]
 
     async def _everpaste_evidence(self, text: str) -> str:
@@ -3300,8 +3346,8 @@ class TaacRunner:
             except Exception as e:
                 self.logger.error(f"Failed to generate test summary: {e}")
             # Trigger triage minion if enabled and there were failures
-            has_failures = _teardown_error is not None or any(
-                s.status == SectionStatus.FAIL for s in self.test_summary.sections
+            has_failures = _teardown_error is not None or bool(
+                self._failed_section_names()
             )
             if self.call_triage_minion and has_failures:
                 await self._async_trigger_triage_minion()
