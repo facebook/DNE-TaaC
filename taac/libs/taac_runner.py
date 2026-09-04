@@ -437,6 +437,7 @@ class TaacRunner:
         # upload, so a second publish call does not re-upload them.
         self._ixia_trace_slices_seen = 0
         self._published_ixia_trace_slices: t.List[PublishedIxiaTraceSlice] = []
+        self._logged_missing_ixia_trace = False
         self.ixia_candidates = normalize_ixia_candidates(
             self.test_config,
             primary_api_server_ip=ixia_api_server,
@@ -3374,12 +3375,25 @@ class TaacRunner:
     def _ixia_with_api_trace(self) -> t.Optional[TaacIxia]:
         """The Ixia that owns the REST trace, including after a failed setup.
 
-        `self.ixia` is assigned only once `TestSetupOrchestrator.async_setUp`
-        returns, so a setup that died at port assignment (the case this
-        trace exists for) leaves it None while the orchestrator still holds
-        the object, and its trace.
+        Each reference settles later than the one before it, so they are tried
+        most-settled first. `self.ixia` is assigned only once
+        `TestSetupOrchestrator.async_setUp` returns, and the orchestrator's own
+        `ixia` only once `async_create_ixia_setup` returns. A setup that died at
+        port assignment (the case this trace exists for) reaches neither: the
+        session, and its trace, is then only reachable through the traffic
+        generator, which holds it from the moment it is constructed. A candidate
+        retry rebuilds the traffic generator, so it always names the attempt that
+        actually ran.
         """
-        for candidate in (self.ixia, self.test_setup_orchestrator.ixia):
+        traffic_generator = getattr(
+            self.test_setup_orchestrator, "traffic_generator", None
+        )
+        candidates = (
+            self.ixia,
+            self.test_setup_orchestrator.ixia,
+            getattr(traffic_generator, "ixia", None),
+        )
+        for candidate in candidates:
             if isinstance(candidate, TaacIxia) and candidate.api_tracer is not None:
                 return candidate
         return None
@@ -3403,6 +3417,15 @@ class TaacRunner:
     async def _async_publish_ixia_trace_slices(self, final: bool) -> None:
         ixia = self._ixia_with_api_trace()
         if ixia is None:
+            # Silence here made an empty run indistinguishable from a tracer
+            # that failed to publish. Only on the final call: the per-test-case
+            # rotation would otherwise repeat it once per playbook.
+            if final and not self._logged_missing_ixia_trace:
+                self._logged_missing_ixia_trace = True
+                self.logger.info(
+                    "ixia api trace: no traced Ixia session was established, so "
+                    "this run has no REST trace to publish"
+                )
             return
         tracer = none_throws(ixia.api_tracer)
         if final:
