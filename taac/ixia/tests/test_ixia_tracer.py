@@ -25,7 +25,12 @@ from taac.ixia.ixia_tracer import (
     extract_request_body,
     extract_request_method_and_url,
     IxiaTracer,
+    redact_credentials,
+    REDACTED_MARKER,
 )
+
+_AUTH_URL: str = "https://chassis/api/v1/auth/session"
+_TOPOLOGY_URL: str = "https://chassis/api/v1/sessions/1/ixnetwork/topology"
 
 
 def _response(status_code: int, content: bytes = b"") -> SimpleNamespace:
@@ -94,6 +99,81 @@ class ClipBodyTest(unittest.TestCase):
 
     def test_bytes_body_is_decoded_leniently(self) -> None:
         self.assertEqual(clip_body(b"\xff\xfeabc", 4096), "\ufffd\ufffdabc")
+
+
+class RedactCredentialsTest(unittest.TestCase):
+    def test_auth_payload_keeps_its_shape_without_its_secrets(self) -> None:
+        redacted = json.loads(
+            _text(
+                redact_credentials(
+                    json.dumps(
+                        {
+                            "username": "ixia_admin",
+                            "password": "hunter2",
+                            "ignorePolicy": True,
+                        }
+                    ),
+                    _AUTH_URL,
+                )
+            )
+        )
+        self.assertEqual(
+            {
+                "username": REDACTED_MARKER,
+                "password": REDACTED_MARKER,
+                "ignorePolicy": True,
+            },
+            redacted,
+        )
+
+    def test_auth_reply_api_key_is_redacted(self) -> None:
+        redacted = json.loads(
+            _text(redact_credentials(b'{"apiKey": "5f4dcc3b"}', _AUTH_URL))
+        )
+        self.assertEqual({"apiKey": REDACTED_MARKER}, redacted)
+
+    def test_unparseable_auth_body_is_dropped_whole(self) -> None:
+        self.assertEqual(
+            REDACTED_MARKER, redact_credentials(b"\x00binary blob", _AUTH_URL)
+        )
+
+    def test_credential_keys_are_redacted_off_the_auth_path(self) -> None:
+        redacted = json.loads(
+            _text(
+                redact_credentials(
+                    json.dumps(
+                        {
+                            "name": "dg1",
+                            "password": "hunter2",
+                            "api_key": "5f4dcc3b",
+                            "nested": [{"apiKey": "5f4dcc3b"}],
+                        }
+                    ),
+                    _TOPOLOGY_URL,
+                )
+            )
+        )
+        self.assertEqual(
+            {
+                "name": "dg1",
+                "password": REDACTED_MARKER,
+                "api_key": REDACTED_MARKER,
+                "nested": [{"apiKey": REDACTED_MARKER}],
+            },
+            redacted,
+        )
+
+    def test_body_without_a_credential_is_returned_untouched(self) -> None:
+        body = '{"name": "Topology 1", "count": 4}'
+        self.assertIs(body, redact_credentials(body, _TOPOLOGY_URL))
+
+    def test_non_json_body_off_the_auth_path_is_returned_untouched(self) -> None:
+        self.assertEqual(
+            b"\x00ixncfg", redact_credentials(b"\x00ixncfg", _TOPOLOGY_URL)
+        )
+
+    def test_none_body_stays_none(self) -> None:
+        self.assertIsNone(redact_credentials(None, _AUTH_URL))
 
 
 class IxiaTracerTest(unittest.TestCase):
@@ -272,6 +352,34 @@ class IxiaTracerTest(unittest.TestCase):
 
         self.assertEqual(summary.record_count, 0)
         self.assertEqual(summary.dropped_count, 1)
+
+    def test_auth_credentials_never_reach_the_file(self) -> None:
+        tracer = IxiaTracer(
+            path=self.trace_path, response_body_capture=BodyCapture.ALWAYS
+        )
+        tracer.finish(
+            tracer.begin(
+                method="POST",
+                url="https://chassis/api/v1/auth/session",
+                request_body='{"username": "ixia_admin", "password": "hunter2"}',
+            ),
+            _response(200, b'{"apiKey": "5f4dcc3b"}'),
+        )
+        tracer.close()
+
+        raw = self.trace_path.read_text(encoding="utf-8")
+        self.assertNotIn("hunter2", raw)
+        self.assertNotIn("ixia_admin", raw)
+        self.assertNotIn("5f4dcc3b", raw)
+        (record,) = self._records()
+        self.assertEqual(
+            {"username": REDACTED_MARKER, "password": REDACTED_MARKER},
+            json.loads(_text(record["request_body"])),
+        )
+        self.assertEqual(
+            {"apiKey": REDACTED_MARKER},
+            json.loads(_text(record["response_body"])),
+        )
 
     def test_build_trace_path_is_unique_per_directory(self) -> None:
         path = build_trace_path(Path(self._tmpdir.name))

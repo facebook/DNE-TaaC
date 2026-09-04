@@ -14,6 +14,10 @@ REST traffic without instrumenting a single call site.
 
 `started_at` is wall clock rather than a monotonic reading because that is
 what Keysight correlates a trace against in their own server-side logs.
+
+Every body is passed through `redact_credentials` on its way to the file.
+The trace is uploaded to Manifold, attached to the test report and handed to
+Keysight, so a credential written here is a disclosure to an external vendor.
 """
 
 from __future__ import annotations
@@ -45,6 +49,103 @@ DEFAULT_REQUEST_BODY_CAPTURE: BodyCapture = BodyCapture.ALWAYS
 DEFAULT_RESPONSE_BODY_CAPTURE: BodyCapture = BodyCapture.ON_ERROR
 
 _SUCCESS_STATUS_RANGE: range = range(200, 300)
+
+REDACTED_MARKER: str = "[REDACTED]"
+
+# `TestPlatform.Authenticate` POSTs `{"username", "password", "ignorePolicy"}`
+# here and reads `apiKey` back out of the reply
+# (`ixnetwork_restpy/testplatform/testplatform.py:125-130`);
+# `Connection._determine_test_platform` probes the same path with an
+# empty-credential body of the same shape (`connection.py:188-210`). Both go
+# through the transport callable this module traces.
+AUTH_URL_PATH: str = "/auth/session"
+
+# Normalized (`_` and `-` stripped, lowercased) JSON keys whose value is a
+# credential. `apikey` is what the auth reply carries; the rest are the
+# spellings restpy and the IxNetwork schema use for a secret elsewhere.
+_CREDENTIAL_KEYS: frozenset[str] = frozenset(
+    {"password", "passwd", "pwd", "apikey", "xapikey", "secret"}
+)
+
+# The auth exchange is a few hundred bytes and a config POST is kilobytes, so
+# this covers everything that can carry the API credential with room to
+# spare. A stat view is megabytes and parsing one on every failed call would
+# cost more than the trace is worth, so above this bound only the URL rule
+# applies.
+_MAX_CREDENTIAL_SCAN_BYTES: int = 262144
+
+
+def is_auth_url(url: str) -> bool:
+    return AUTH_URL_PATH in url.lower()
+
+
+def redact_credentials(body: object, url: str) -> object:
+    """Strip credentials out of a body before it can reach the trace file.
+
+    Two rules apply, because either one alone leaves a hole:
+
+    - By key, anywhere in the payload, so a credential on a path this module
+      does not know about is still caught.
+    - By URL, blanking every string on the auth path, so a payload restpy
+      reshapes later, or one too large or too malformed to parse, stays
+      covered without this module tracking the schema.
+
+    Values are replaced with `REDACTED_MARKER` rather than dropped, so the
+    trace still shows that an auth call happened and which fields it carried.
+    """
+    if body is None:
+        return None
+    on_auth_path = is_auth_url(url)
+    parsed = _parse_json_body(body)
+    if parsed is None:
+        return REDACTED_MARKER if on_auth_path else body
+    redacted, changed = _redact_values(parsed, redact_every_string=on_auth_path)
+    if not changed:
+        return body
+    return json.dumps(redacted, separators=(",", ":"), default=str)
+
+
+def _parse_json_body(body: object) -> object | None:
+    if not isinstance(body, (bytes, bytearray, str)):
+        return None
+    if len(body) > _MAX_CREDENTIAL_SCAN_BYTES:
+        return None
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        # Covers `json.JSONDecodeError` and the `UnicodeDecodeError` a
+        # non-UTF-8 body raises; both subclass `ValueError`.
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _redact_values(value: object, redact_every_string: bool) -> tuple[object, bool]:
+    if isinstance(value, dict):
+        redacted_items: dict[object, object] = {}
+        changed = False
+        for key, item in value.items():
+            if _is_credential_key(key) or (
+                redact_every_string and isinstance(item, str)
+            ):
+                redacted_items[key] = REDACTED_MARKER
+                changed = True
+                continue
+            redacted_items[key], item_changed = _redact_values(
+                item, redact_every_string
+            )
+            changed = changed or item_changed
+        return (redacted_items, changed)
+    if isinstance(value, list):
+        results = [_redact_values(item, redact_every_string) for item in value]
+        return ([item for item, _ in results], any(changed for _, changed in results))
+    return (value, False)
+
+
+def _is_credential_key(key: object) -> bool:
+    return (
+        isinstance(key, str)
+        and key.replace("_", "").replace("-", "").lower() in _CREDENTIAL_KEYS
+    )
 
 
 @dataclass(frozen=True)
@@ -277,6 +378,7 @@ class IxiaTracer:
                 self._request_body_capture,
                 self._request_body_limit_bytes,
                 is_error,
+                span.url,
             ),
             status=status,
             response_body=self._render_body(
@@ -284,6 +386,7 @@ class IxiaTracer:
                 self._response_body_capture,
                 self._response_body_limit_bytes,
                 is_error,
+                span.url,
             ),
             error=error,
             op=span.op,
@@ -298,12 +401,13 @@ class IxiaTracer:
         capture: BodyCapture,
         limit_bytes: int,
         is_error: bool,
+        url: str,
     ) -> str | None:
         if capture is BodyCapture.NEVER:
             return None
         if capture is BodyCapture.ON_ERROR and not is_error:
             return None
-        return clip_body(body, limit_bytes)
+        return clip_body(redact_credentials(body, url), limit_bytes)
 
     def _write(self, line: str) -> None:
         with self._lock:
