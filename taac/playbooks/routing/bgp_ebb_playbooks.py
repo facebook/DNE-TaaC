@@ -649,6 +649,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     )
     playbook_name = "bgp_ebb_attribute_churn_playbook"
     return create_dice_unified_churn_playbook(
+        restore_topology_baseline=True,
         spec=attribute_churn_spec(
             playbook_name=playbook_name,
             device=device_name,
@@ -685,7 +686,7 @@ def get_bgp_ebb_attribute_churn_playbook(
                 device_name=device_name,
                 config=characterization,
             ),
-        )
+        ),
     )
 
 

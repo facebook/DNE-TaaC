@@ -771,6 +771,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         # composition is asserted separately.
         self.assertEqual(1, len(playbook.stages))
         self.assertEqual(1, len(playbook.stages[0].steps))
+        self.assertTrue(playbook.restore_topology_baseline)
 
         self.assertEqual(
             _FROZEN_CHURN_PAYLOAD, _step_payload(playbook.stages[0].steps[0])
