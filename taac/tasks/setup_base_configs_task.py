@@ -58,12 +58,17 @@ class SetupBaseConfigsTask(BaseTask):
             )
 
         restart_bgp = params.get("restart_bgp", True)
+        # Scope the transform to matching peer groups; see generate_base_configs.
+        peer_group_regex = params.get("peer_group_regex")
 
         self.logger.info(
-            f"Generating base BGP configs on {hostname} (restart_bgp={restart_bgp})"
+            f"Generating base BGP configs on {hostname} (restart_bgp={restart_bgp}, "
+            f"peer_group_regex={peer_group_regex!r})"
         )
         driver = await async_get_device_driver(hostname)
-        await setup_base_configs(driver, restart_bgp=restart_bgp)
+        await setup_base_configs(
+            driver, restart_bgp=restart_bgp, peer_group_regex=peer_group_regex
+        )
         self.logger.info(
             f"{hostname}: live and soft-drain configs written; device left undrained"
         )

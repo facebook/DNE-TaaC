@@ -37,6 +37,7 @@ Call these from a TAAC step or task with the device's driver::
 
 import json
 import logging
+import re
 import typing as t
 
 # Both of these imports resolve in OSS as well as internally. The module path is
@@ -519,62 +520,93 @@ def _clear_policy(network: BgpNetwork) -> BgpNetwork:
     return network(policy_name=None)
 
 
-def _reset_policies(config: BgpConfig) -> BgpConfig:
-    """Replace the config's entire policy section with the three propagate policies.
+def _reset_policies(config: BgpConfig, keep_existing: bool = False) -> BgpConfig:
+    """Install the three propagate policies.
 
-    The whole ``BgpPolicies`` container goes, not just the statements: the
-    auxiliary lists (community lists, as-path lists, prefix lists) only existed
-    to serve the policies being removed, and our three define their communities
-    inline. ``obj_uuid`` is carried over because it identifies the container
-    itself rather than anything in it.
+    By default the whole ``BgpPolicies`` container is replaced, not just the
+    statements: the auxiliary lists (community lists, as-path lists, prefix
+    lists) only existed to serve the policies being removed, and our three
+    define their communities inline. ``obj_uuid`` is carried over because it
+    identifies the container itself rather than anything in it.
+
+    With ``keep_existing`` (the scoped mode) the propagate policies are
+    appended instead, so peer groups left un-retargeted keep resolving their
+    original policies.
     """
     existing = config.policies
-    removed = len(existing.bgp_policy_statements) if existing else 0
+    kept = list(existing.bgp_policy_statements) if (keep_existing and existing) else []
+    kept_names = {p.name for p in kept}
+    added = [p for p in PROPAGATE_POLICIES if p.name not in kept_names]
     logger.info(
-        f"Replacing {removed} policy statement(s) with "
-        f"{len(PROPAGATE_POLICIES)} propagate policies"
+        f"{'Keeping' if keep_existing else 'Replacing'} "
+        f"{len(existing.bgp_policy_statements) if existing else 0} policy "
+        f"statement(s); adding {len(added)} propagate policies"
     )
+    if keep_existing and existing:
+        return config(policies=existing(bgp_policy_statements=kept + added))
     return config(
         policies=BgpPolicies(
-            bgp_policy_statements=list(PROPAGATE_POLICIES),
+            bgp_policy_statements=kept + added,
             obj_uuid=existing.obj_uuid if existing else None,
         )
     )
 
 
-def _retarget_peer_groups(config: BgpConfig, egress_policy: str) -> BgpConfig:
-    """Point every peer group at the propagate policies.
+def _retarget_peer_groups(
+    config: BgpConfig, egress_policy: str, peer_group_regex: t.Optional[str] = None
+) -> BgpConfig:
+    """Point peer groups at the propagate policies.
 
-    Every one, with no role resolution: a soft-drain is a whole-device
-    operation, so a peer group left on its original policy would keep
-    advertising LIVE while the rest of the device drains.
+    By default every one, with no role resolution: a soft-drain is a
+    whole-device operation, so a peer group left on its original policy would
+    keep advertising LIVE while the rest of the device drains.
+
+    ``peer_group_regex`` scopes the retarget to matching group names, for a DUT
+    wired into a live fabric where retargeting the fabric-facing groups would
+    advertise everything into it (unscoped, that crash-looped fboss_sw_agent on
+    a 2-RSW-2-FSW pod). Scoped, the drain is only observable on the matched
+    groups.
     """
     peer_groups = config.peer_groups
     if not peer_groups:
         logger.warning("Config has no peer groups to retarget")
         return config
 
+    match = re.compile(peer_group_regex).search if peer_group_regex else None
+    picked = [g for g in peer_groups if match is None or match(g.name or "")]
     logger.info(
-        f"Retargeting {len(peer_groups)} peer group(s) to "
+        f"Retargeting {len(picked)}/{len(peer_groups)} peer group(s) to "
         f"({POLICY_PROPAGATE_IN}, {egress_policy})"
     )
     return config(
-        peer_groups=[_retarget(peer_group, egress_policy) for peer_group in peer_groups]
+        peer_groups=[
+            _retarget(g, egress_policy) if g in picked else g for g in peer_groups
+        ]
     )
 
 
-def _retarget_peers(config: BgpConfig, egress_policy: str) -> BgpConfig:
-    """Point every peer at the propagate policies.
+def _retarget_peers(
+    config: BgpConfig, egress_policy: str, peer_group_regex: t.Optional[str] = None
+) -> BgpConfig:
+    """Point peers at the propagate policies.
 
     Peer-level policy names override the peer group's, so a peer still naming a
-    policy we just deleted would both dangle and escape the drain.
+    policy we just deleted would both dangle and escape the drain. With
+    ``peer_group_regex``, only peers of matching groups are touched -- the
+    others keep their (still present) original policies.
     """
     peers = config.peers
     if not peers:
         return config
 
-    logger.info(f"Retargeting {len(peers)} peer(s) to egress {egress_policy}")
-    return config(peers=[_retarget(peer, egress_policy) for peer in peers])
+    match = re.compile(peer_group_regex).search if peer_group_regex else None
+    picked = [p for p in peers if match is None or match(p.peer_group_name or "")]
+    logger.info(
+        f"Retargeting {len(picked)}/{len(peers)} peer(s) to egress {egress_policy}"
+    )
+    return config(
+        peers=[_retarget(p, egress_policy) if p in picked else p for p in peers]
+    )
 
 
 def _clear_network_policies(config: BgpConfig) -> BgpConfig:
@@ -613,19 +645,24 @@ def _set_drain_state(config: BgpConfig, drain_state: DrainState) -> BgpConfig:
 
 
 def _generate_variant(
-    base: BgpConfig, egress_policy: str, drain_state: DrainState
+    base: BgpConfig,
+    egress_policy: str,
+    drain_state: DrainState,
+    peer_group_regex: t.Optional[str] = None,
 ) -> BgpConfig:
     """Build one of the two config variants from the shared base.
 
     Both variants go through this, so the live and drain copies cannot drift
     into differing by anything other than these two arguments.
     """
-    config = _retarget_peer_groups(base, egress_policy)
-    config = _retarget_peers(config, egress_policy)
+    config = _retarget_peer_groups(base, egress_policy, peer_group_regex)
+    config = _retarget_peers(config, egress_policy, peer_group_regex)
     return _set_drain_state(config, drain_state)
 
 
-def generate_base_configs(config: BgpConfig) -> tuple[BgpConfig, BgpConfig]:
+def generate_base_configs(
+    config: BgpConfig, peer_group_regex: t.Optional[str] = None
+) -> tuple[BgpConfig, BgpConfig]:
     """Derive the live and soft-drain configs from a device's current config.
 
     The two outputs are identical except for the egress policy every peer group
@@ -635,14 +672,28 @@ def generate_base_configs(config: BgpConfig) -> tuple[BgpConfig, BgpConfig]:
 
     Args:
         config: the device's current BGP config. Not modified.
+        peer_group_regex: scope the transform to peer groups (and their peers)
+            whose name matches. Original policies and network policy references
+            are then kept, so unmatched groups keep working. Default: every
+            group, with the policy section replaced wholesale.
 
     Returns:
         ``(live_config, soft_drain_config)``.
     """
-    base = _clear_network_policies(_reset_policies(config))
+    scoped = peer_group_regex is not None
+    base = _reset_policies(config, keep_existing=scoped)
+    if not scoped:
+        base = _clear_network_policies(base)
     return (
-        _generate_variant(base, POLICY_PROPAGATE_OUT, DrainState.UNDRAINED),
-        _generate_variant(base, POLICY_PROPAGATE_OUT_DRAIN, DrainState.SOFT_DRAINED),
+        _generate_variant(
+            base, POLICY_PROPAGATE_OUT, DrainState.UNDRAINED, peer_group_regex
+        ),
+        _generate_variant(
+            base,
+            POLICY_PROPAGATE_OUT_DRAIN,
+            DrainState.SOFT_DRAINED,
+            peer_group_regex,
+        ),
     )
 
 
@@ -691,7 +742,11 @@ async def _async_write_config(
     await switch.async_write_file_on_device(contents, remote_path)
 
 
-async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -> None:
+async def setup_base_configs(
+    switch: AbstractSwitch,
+    restart_bgp: bool = True,
+    peer_group_regex: t.Optional[str] = None,
+) -> None:
     """Generate both BGP configs on a device and leave it undrained.
 
     Reads the device's live config, rewrites its policies into the three
@@ -726,7 +781,7 @@ async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -
     raw_config = await switch.async_read_file(LIVE_CONFIG_PATH)
     config = _deserialize_config(raw_config, hostname)
 
-    live_config, drain_config = generate_base_configs(config)
+    live_config, drain_config = generate_base_configs(config, peer_group_regex)
 
     for target_config, path in (
         (live_config, LIVE_CONFIG_PATH),
