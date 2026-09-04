@@ -517,11 +517,29 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.capturing = True
         self.start_capturing(self.sample_time)
 
-    def export_json_config(self) -> str:
-        json_config = self.session.Ixnetwork.ResourceManager.ExportConfig(
-            ["/descendant-or-self::*"],
-            False,
-            "json",
+    def export_json_config(self, *, baseline_invocation_id: str | None = None) -> str:
+        log_context = (
+            f" (invocation_id={baseline_invocation_id})"
+            if baseline_invocation_id is not None
+            else ""
+        )
+        started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Export started{log_context}")
+        try:
+            json_config = self.session.Ixnetwork.ResourceManager.ExportConfig(
+                ["/descendant-or-self::*"],
+                False,
+                "json",
+            )
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Export failed after "
+                f"{time.monotonic() - started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Export completed in "
+            f"{time.monotonic() - started:.1f}s{log_context}"
         )
         return json_config
 
@@ -530,14 +548,51 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         json_config = self.export_json_config()
         self.saved_configs[self.test_case_uuid] = json_config
 
-    def import_json_config(self, json_config: str) -> None:
-        self.session.Ixnetwork.ResourceManager.ImportConfig(json_config, False)
-        self.start_and_verify_protocols()
-        self.enable_traffic()
-        self.start_traffic(regenerate_traffic_items=True)
-        time.sleep(5)
-        self.stop_traffic()
-        self.enable_traffic(enable=False)
+    def import_json_config(
+        self,
+        json_config: str,
+        *,
+        baseline_invocation_id: str | None = None,
+    ) -> None:
+        log_context = (
+            f" (invocation_id={baseline_invocation_id})"
+            if baseline_invocation_id is not None
+            else ""
+        )
+        import_started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Import started{log_context}")
+        try:
+            self.session.Ixnetwork.ResourceManager.ImportConfig(json_config, False)
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Import failed after "
+                f"{time.monotonic() - import_started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Import completed in "
+            f"{time.monotonic() - import_started:.1f}s{log_context}"
+        )
+
+        activation_started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Post-import activation started{log_context}")
+        try:
+            self.start_and_verify_protocols()
+            self.enable_traffic()
+            self.start_traffic(regenerate_traffic_items=True)
+            time.sleep(5)
+            self.stop_traffic()
+            self.enable_traffic(enable=False)
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Post-import activation failed after "
+                f"{time.monotonic() - activation_started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Post-import activation completed in "
+            f"{time.monotonic() - activation_started:.1f}s{log_context}"
+        )
 
     def import_saved_config(self) -> None:
         self.logger.info(f"Importing saved ixia config for {self.test_case_uuid}")

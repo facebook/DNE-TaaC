@@ -24,9 +24,16 @@ _MAX_DIFFERENCE_VALUE_CHARACTERS = 160
 
 
 class IxiaConfigClient(Protocol):
-    def export_json_config(self) -> str: ...
+    def export_json_config(
+        self, *, baseline_invocation_id: str | None = None
+    ) -> str: ...
 
-    def import_json_config(self, json_config: str) -> None: ...
+    def import_json_config(
+        self,
+        json_config: str,
+        *,
+        baseline_invocation_id: str | None = None,
+    ) -> None: ...
 
 
 @dataclasses.dataclass
@@ -43,8 +50,10 @@ class IxiaTopologyBaselineParticipant:
         self._ixia = ixia
 
     async def capture(self, context: BaselineContext) -> object:
-        del context
-        json_config = await asyncio.to_thread(self._ixia.export_json_config)
+        json_config = await asyncio.to_thread(
+            self._ixia.export_json_config,
+            baseline_invocation_id=context.invocation_id,
+        )
         semantic_projection = self._semantic_projection(json_config)
         return IxiaConfigSnapshot(
             json_config,
@@ -52,19 +61,22 @@ class IxiaTopologyBaselineParticipant:
         )
 
     async def restore(self, context: BaselineContext, snapshot: object) -> None:
-        del context
         ixia_snapshot = self._require_snapshot(snapshot)
         await asyncio.to_thread(
-            self._ixia.import_json_config, ixia_snapshot.json_config
+            self._ixia.import_json_config,
+            ixia_snapshot.json_config,
+            baseline_invocation_id=context.invocation_id,
         )
         ixia_snapshot.restore_completed = True
 
     async def verify(self, context: BaselineContext, snapshot: object) -> None:
-        del context
         ixia_snapshot = self._require_snapshot(snapshot)
         if not ixia_snapshot.restore_completed:
             raise RuntimeError("IXIA configuration restore did not complete")
-        restored_config = await asyncio.to_thread(self._ixia.export_json_config)
+        restored_config = await asyncio.to_thread(
+            self._ixia.export_json_config,
+            baseline_invocation_id=context.invocation_id,
+        )
         expected_projection = self._semantic_projection(ixia_snapshot.json_config)
         restored_projection = self._semantic_projection(restored_config)
         differences, truncated = self._bounded_structural_diff(

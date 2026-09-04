@@ -75,6 +75,7 @@ from taac.ixia.taac_ixia import TaacIxia
 from taac.libs.baseline_lifecycle import (
     BaselineContext,
     BaselineLifecycle,
+    BaselineOperationTimeoutError,
     BaselineParticipant,
     BaselineScope,
     BaselineTimeouts,
@@ -289,10 +290,21 @@ def _group_exceptions(message: str, errors: t.Sequence[BaseException]) -> BaseEx
     return BaseExceptionGroup(message, list(errors))
 
 
-_BASELINE_CAPTURE_TIMEOUT_SECONDS = 120
+def _contains_baseline_capture_timeout(error: BaseException) -> bool:
+    if isinstance(error, BaselineOperationTimeoutError):
+        return error.operation == "capture"
+    if isinstance(error, BaseExceptionGroup):
+        return any(
+            _contains_baseline_capture_timeout(child) for child in error.exceptions
+        )
+    return False
+
+
+# Full-scale IXIA exports have exceeded two minutes on loaded chassis.
+_BASELINE_CAPTURE_TIMEOUT_SECONDS = 300
 # A full-scale IXIA import includes protocol startup and can take several minutes.
 _BASELINE_RESTORE_TIMEOUT_SECONDS = 900
-_BASELINE_VERIFY_TIMEOUT_SECONDS = 120
+_BASELINE_VERIFY_TIMEOUT_SECONDS = 300
 _BASELINE_RELEASE_TIMEOUT_SECONDS = 30
 
 
@@ -461,6 +473,7 @@ class TaacRunner:
             )
         )
         self._topology_baseline_context: BaselineContext | None = None
+        self._topology_baseline_capture_failed = False
 
     def _validate_no_test_config_level_checks(self) -> None:
         """Validate that deprecated TestConfig-level checks are not used.
@@ -1263,21 +1276,35 @@ class TaacRunner:
 
     async def _capture_topology_baseline(self, playbook: taac_types.Playbook) -> None:
         self._topology_baseline_context = None
+        self._topology_baseline_capture_failed = False
         participants = self._baseline_participants_for(playbook)
         if not participants:
             return
 
         invocation_id = uuid.uuid4().hex
         test_config_name = self.test_config.name or "<unnamed>"
-        self._topology_baseline_context = BaselineContext(
+        baseline_context = BaselineContext(
             test_config_name=test_config_name,
             invocation_id=invocation_id,
         )
-        await self._baseline_lifecycle.capture(
-            BaselineScope.TOPOLOGY,
-            self._topology_baseline_context,
-            participants,
-        )
+        self._topology_baseline_context = baseline_context
+        try:
+            await self._baseline_lifecycle.capture(
+                BaselineScope.TOPOLOGY,
+                baseline_context,
+                participants,
+            )
+        except Exception as error:
+            if not _contains_baseline_capture_timeout(error):
+                raise
+            self._topology_baseline_context = None
+            self._topology_baseline_capture_failed = True
+            raise _topology_baseline_infra_error(
+                "IXIA topology baseline capture timed out after "
+                f"{_BASELINE_CAPTURE_TIMEOUT_SECONDS}s "
+                f"(invocation_id={baseline_context.invocation_id})",
+                [error],
+            )
         self.logger.info(f"Captured topology baseline for playbook '{playbook.name}'")
 
     @staticmethod
@@ -2035,6 +2062,16 @@ class TaacRunner:
                         f"\033[31m  Playbook '{playbook.name}' failed on "
                         f"{dut}: {e}\033[0m"
                     )
+                    if self._topology_baseline_capture_failed:
+                        self.logger.error(
+                            "Stopping this TestConfig because the IXIA topology "
+                            "baseline could not be captured"
+                        )
+                        raise _topology_baseline_infra_error(
+                            "The IXIA topology baseline could not be captured; "
+                            "remaining Playbooks were not started",
+                            [error for _name, _dut, error in failed_playbooks],
+                        )
                     self._ensure_baseline_safe_for_next_playbook(failed_playbooks)
                     self.logger.info(
                         f"\033[33m  Continuing to next playbook "

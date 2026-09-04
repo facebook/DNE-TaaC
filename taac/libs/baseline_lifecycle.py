@@ -17,6 +17,24 @@ class BaselineScope(enum.StrEnum):
     PLAYBOOK = "playbook"
 
 
+class BaselineOperationTimeoutError(TimeoutError):
+    def __init__(
+        self,
+        scope: BaselineScope,
+        participant: str,
+        operation: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.scope = scope
+        self.participant = participant
+        self.operation = operation
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"{scope.value} baseline {operation} for {participant} exceeded "
+            f"the {timeout_seconds:g}s deadline"
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class BaselineContext:
     test_config_name: str
@@ -293,9 +311,38 @@ class BaselineLifecycle:
         self._events.append(
             BaselineEvent(scope, participant.name, operation, "started")
         )
+        timeout = asyncio.timeout(timeout_seconds)
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with timeout:
                 result = await awaitable
+        except TimeoutError as error:
+            if timeout.expired():
+                deadline_error = BaselineOperationTimeoutError(
+                    scope,
+                    participant.name,
+                    operation,
+                    timeout_seconds,
+                )
+                self._events.append(
+                    BaselineEvent(
+                        scope,
+                        participant.name,
+                        operation,
+                        "failed",
+                        f"{type(deadline_error).__name__}: {deadline_error}",
+                    )
+                )
+                raise deadline_error from error
+            self._events.append(
+                BaselineEvent(
+                    scope,
+                    participant.name,
+                    operation,
+                    "failed",
+                    f"{type(error).__name__}: {error}",
+                )
+            )
+            raise
         except BaseException as error:
             self._events.append(
                 BaselineEvent(
