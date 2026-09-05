@@ -150,10 +150,12 @@ def _ib_readiness_config(
 INJECT_SETTLE_SEC = int(os.environ.get("FPF_INJECT_SETTLE_SEC", "30"))
 
 PROD_PREFIX_HOST = GPU_HOSTS[0]
-# Production-prefix recovery remains a deliberately narrow dev0 canary. Bulk
-# injected-prefix and remote-failure checks cover every configured HRT device.
+# Production-prefix recovery remains a deliberately narrow dev0 canary, queried
+# from every GPU host. Bulk and remote-failure checks cover every HRT device.
 PROD_PREFIX_DEVICE_ID = 0
-PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_TARGET_PREFIX = get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)
+PROD_PREFIXES = [PROD_TARGET_PREFIX]
+PROD_PREFIXES_BY_HOST = {PROD_PREFIX_HOST: PROD_PREFIXES}
 
 # The legacy DUT GTSW (gtsw001) owns lane 0 and remains the TC17 link target.
 # TC19 selects its whole-device drain target independently so a known ambient
@@ -221,6 +223,25 @@ def _impacted_planes_by_host(circuits: list[Circuit]) -> dict[str, list[int]]:
     return {h: sorted(v) for h, v in sorted(out.items())}
 
 
+def _conditional_route_impacted_planes_by_host(
+    circuits: list[Circuit], observers: list[str]
+) -> dict[str, list[int]]:
+    """Expected plane loss for one origin route as seen by every observer."""
+    source_host = observers[0] if observers else PROD_PREFIX_HOST
+    source_planes = _impacted_planes_by_host(circuits).get(source_host, [])
+    if not source_planes:
+        raise ValueError(
+            f"No impacted planes found for production-prefix origin {source_host}"
+        )
+    return {host: list(source_planes) for host in observers}
+
+
+def _conditional_route_prefixes_by_host(
+    observers: list[str],
+) -> dict[str, list[str]]:
+    return {host: [PROD_TARGET_PREFIX] for host in observers}
+
+
 # ===========================================================================
 # Per-source-config playbook builders. Each returns one (or two) Playbook(s),
 # faithfully reproducing the source config's disruption_steps + flags. All pass
@@ -242,6 +263,7 @@ def _tc41_baseline(*, spray) -> list:
             community_list=DEFAULT_COMMUNITY_LIST,
             playbook_name="fpf_tc41_longevity_pristine",
             prod_prefixes=PROD_PREFIXES,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             skip_ssh_dependent_checks=skip_ssh,
             fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -348,6 +370,7 @@ def _gr_playbook(
             additional_postchecks=additional_postchecks,
             playbook_name=name,
             prod_prefixes=PROD_PREFIXES,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             skip_ssh_dependent_checks=skip_ssh,
             fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -493,6 +516,7 @@ def _service_restart_playbook(
             community_list=DEFAULT_COMMUNITY_LIST,
             injected_lanes=INJECTED_LANES,
             prod_prefixes=PROD_PREFIXES,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             hrt_driver_hosts=HRT_MEMORY_HOSTS,
             fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
@@ -650,6 +674,7 @@ def _kill_playbooks(
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name=longevity_name,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -770,6 +795,7 @@ def _fsdb_kill_window_playbooks(
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name=longevity_name,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
@@ -874,6 +900,7 @@ def _tc52(*, spray, skip_ssh) -> list:
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -927,6 +954,7 @@ def _tc52(*, spray, skip_ssh) -> list:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc52_hrt_restart_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1059,6 +1087,7 @@ def _tc38(*, spray, skip_ssh) -> list:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc38_persistent_ndp_clear_stable",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1099,6 +1128,10 @@ def _disable_steps(
 def _tc15(*, circuits: list[Circuit], spray, skip_ssh) -> list:
     """tc15: GTSW<->GPU interface disable (disrupt + restore)."""
     impacted_lanes = sorted({c.lane for c in circuits})
+    conditional_route_impacted_planes_by_host = (
+        _conditional_route_impacted_planes_by_host(circuits, GPU_HOSTS)
+    )
+    conditional_route_prefixes_by_host = _conditional_route_prefixes_by_host(GPU_HOSTS)
     n = num_disrupted_circuits(circuits)
     stabilization_delay_sec = 300
     longevity_sec = 120
@@ -1131,8 +1164,12 @@ def _tc15(*, circuits: list[Circuit], spray, skip_ssh) -> list:
         impacted_lanes=impacted_lanes,
         impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu(circuits),
         impacted_beths_by_host=_impacted_beths_by_host(circuits),
-        impacted_planes_by_host=_impacted_planes_by_host(circuits),
+        # The same server-originated conditional route must disappear on the
+        # directly attached host and every remote observer. Keep the physical
+        # circuit/session/bulk/RF scopes above target-only.
+        impacted_planes_by_host=conditional_route_impacted_planes_by_host,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=conditional_route_prefixes_by_host,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
@@ -1165,13 +1202,14 @@ def _tc15(*, circuits: list[Circuit], spray, skip_ssh) -> list:
         rf_vf_groups=RF_VF_GROUPS,
         playbook_name="fpf_tc15_interface_disable_restore",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=conditional_route_prefixes_by_host,
         skip_ssh_dependent_checks=skip_ssh,
         use_bgp_snapshot=True,
         prod_prefix_settle_sec=120,
         convergence_settle_sec=120,
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
-        impacted_planes_by_host=_impacted_planes_by_host(circuits),
+        impacted_planes_by_host=conditional_route_impacted_planes_by_host,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         skip_fsdb_session_precheck=True,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1222,6 +1260,7 @@ def _tc16(*, circuits: list[Circuit], spray, skip_ssh) -> list:
             community_list=DEFAULT_COMMUNITY_LIST,
             playbook_name="fpf_tc16_interface_enable",
             prod_prefixes=PROD_PREFIXES,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             # tc16 hard-codes skip_ssh_dependent_checks=True regardless of env.
             skip_ssh_dependent_checks=True,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1315,6 +1354,7 @@ def _drain_playbooks(
         impacted_beths_by_host=_impacted_beths_by_host(circuits),
         impacted_planes_by_host=_impacted_planes_by_host(circuits),
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
@@ -1368,6 +1408,7 @@ def _drain_playbooks(
         rf_vf_groups=RF_VF_GROUPS,
         playbook_name=restore_name,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         use_bgp_snapshot=True,
         prod_prefix_settle_sec=120,
@@ -1486,6 +1527,7 @@ def _tc55(*, spray, skip_ssh) -> list:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc55_gtsw_device_reboot_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1511,6 +1553,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
     link_event_circuits = _link_drain_circuits()
     device_drain_circuits = _device_drain_circuits(DEVICE_DRAIN_GTSW)
+    conditional_route_prefixes_by_host = _conditional_route_prefixes_by_host(GPU_HOSTS)
 
     # Ordered least-destructive -> most-destructive. Each entry contributes one or
     # more playbooks; all share the single setup-time injection (skip_injection).
@@ -1573,8 +1616,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes_by_host=conditional_route_prefixes_by_host,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,

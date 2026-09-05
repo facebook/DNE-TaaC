@@ -20,6 +20,7 @@ from taac.testconfigs.fpf import (
     fpf_tc06_bgp_gr_beyond_window,
     fpf_tc07_fsdb_gr_within_window,
     fpf_tc08_fsdb_gr_beyond_window,
+    fpf_tc15_interface_disable,
     fpf_tc23_bgp_restart,
     fpf_tc25_wedge_agent_restart,
 )
@@ -1042,6 +1043,135 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                 ]
             },
         )
+
+        collector_task = next(
+            task
+            for task in config.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        collector_params = json.loads(collector_task.params.json_params)
+        expected_observations = {
+            host: [fpf_shared_injection_suite.PROD_TARGET_PREFIX] for host in hosts
+        }
+        self.assertEqual(
+            collector_params["prod_prefixes_by_host"], expected_observations
+        )
+        self.assertNotIn("prod_prefix_host", collector_params)
+        self.assertNotIn("prod_prefixes", collector_params)
+
+        # The dual-host collector is shared suite-wide, but only TC15 opts into
+        # dual-host assertions. Unrelated playbooks preserve the legacy origin-
+        # host scope instead of silently gaining a second verdict surface.
+        baseline = _playbook(config, "fpf_tc41_longevity_pristine")
+        baseline_prod_checks = [
+            check
+            for check in [*(baseline.prechecks or []), *(baseline.postchecks or [])]
+            if check.check_id
+            in {
+                "fpf_prod_hrt_prefix_stability_precheck",
+                "fpf_prod_hrt_prefix_stability",
+            }
+        ]
+        self.assertEqual(len(baseline_prod_checks), 2)
+        for check in baseline_prod_checks:
+            self.assertEqual(
+                _check_params(check)["prefixes_by_host"],
+                {
+                    fpf_shared_injection_suite.PROD_PREFIX_HOST: [
+                        fpf_shared_injection_suite.PROD_TARGET_PREFIX
+                    ]
+                },
+            )
+
+        expected_conditional_route_impacts = {host: [0] for host in hosts}
+        transition = next(
+            check
+            for check in tc15[0].postchecks or []
+            if check.check_id == "fpf_prod_hrt_prefix_transition"
+        )
+        recovery = next(
+            check
+            for check in tc15[1].postchecks or []
+            if check.check_id == "fpf_prod_hrt_prefix_recovery"
+        )
+        self.assertEqual(
+            _check_params(transition)["impacted_planes_by_host"],
+            expected_conditional_route_impacts,
+        )
+        self.assertEqual(
+            _check_params(transition)["prefixes_by_host"], expected_observations
+        )
+        self.assertEqual(
+            _check_params(recovery)["impacted_planes_by_host"],
+            expected_conditional_route_impacts,
+        )
+        self.assertEqual(
+            _check_params(recovery)["prefixes_by_host"], expected_observations
+        )
+        self.assertEqual(
+            _check_params(recovery)["affected_prefixes_by_host"],
+            expected_observations,
+        )
+        self.assertEqual(
+            fpf_shared_injection_suite._impacted_planes_by_host(circuits),
+            {hosts[0]: [0]},
+        )
+
+        unrelated = (
+            fpf_shared_injection_suite._conditional_route_impacted_planes_by_host(
+                [
+                    *circuits,
+                    fpf_shared_injection_suite.Circuit(
+                        a_end_device="gtsw002.l1002.c087.mwg2",
+                        a_end_interface="eth1/41/5",
+                        z_end_device=hosts[1],
+                        z_end_gpu_id=0,
+                    ),
+                ],
+                hosts,
+            )
+        )
+        self.assertEqual(unrelated, expected_conditional_route_impacts)
+
+    def test_standalone_tc15_observes_the_same_route_on_both_hosts(self):
+        config = fpf_tc15_interface_disable.create_fpf_tc15_test_config()
+        hosts = fpf_tc15_interface_disable.GPU_HOSTS
+        target = fpf_tc15_interface_disable.PROD_TARGET_PREFIX
+
+        collector_task = next(
+            task
+            for task in config.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        collector_params = json.loads(collector_task.params.json_params)
+        self.assertEqual(
+            collector_params["prod_prefixes_by_host"],
+            {host: [target] for host in hosts},
+        )
+
+        expected_impacts = {host: [0] for host in hosts}
+        for playbook_name, check_id in (
+            (
+                "fpf_tc15_interface_disable_disrupt",
+                "fpf_prod_hrt_prefix_transition",
+            ),
+            (
+                "fpf_tc15_interface_disable_restore",
+                "fpf_prod_hrt_prefix_recovery",
+            ),
+        ):
+            check = next(
+                candidate
+                for candidate in _playbook(config, playbook_name).postchecks or []
+                if candidate.check_id == check_id
+            )
+            self.assertEqual(
+                _check_params(check)["impacted_planes_by_host"], expected_impacts
+            )
+            self.assertEqual(
+                _check_params(check)["prefixes_by_host"],
+                {host: [target] for host in hosts},
+            )
 
 
 if __name__ == "__main__":

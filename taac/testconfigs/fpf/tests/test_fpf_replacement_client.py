@@ -144,14 +144,21 @@ class FpfReplacementClientTest(unittest.TestCase):
                     ],
                 )
 
-                for config in (shared, tc25):
-                    with self.subTest(config=config.name):
-                        params = _collector_params(config)
-                        self.assertEqual(params["hosts"], HOSTS)
-                        self.assertEqual(
-                            params["prod_prefixes"],
-                            ["2401:db00:292a:a27c::/64"],
-                        )
+                shared_params = _collector_params(shared)
+                self.assertEqual(shared_params["hosts"], HOSTS)
+                self.assertNotIn("prod_prefixes", shared_params)
+                self.assertEqual(
+                    shared_params["prod_prefixes_by_host"],
+                    {host: ["2401:db00:292a:a27c::/64"] for host in HOSTS},
+                )
+
+                tc25_params = _collector_params(tc25)
+                self.assertEqual(tc25_params["hosts"], HOSTS)
+                self.assertEqual(
+                    tc25_params["prod_prefixes"],
+                    ["2401:db00:292a:a27c::/64"],
+                )
+                self.assertNotIn("prod_prefixes_by_host", tc25_params)
                 self.assertEqual(
                     _collector_params(tc21)["prod_prefixes"],
                     [

@@ -76,6 +76,7 @@ ODS_MODULE = (
 )
 
 GPU_HOST = "rtptest1555.mwg2"
+REMOTE_GPU_HOST = "rtptest1575.mwg2"
 PROD_PREFIX = "2401:db00:eef0:1100::/56"
 
 
@@ -556,7 +557,13 @@ class Tc36Tc37BulkWithdrawnSimulationTest(_LinkEventBase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
 
 
-def _prefix_row(epoch: float, reachable, drained, unreachable) -> ProdHrtPrefixRow:
+def _prefix_row(
+    epoch: float,
+    reachable,
+    drained,
+    unreachable,
+    host: str = GPU_HOST,
+) -> ProdHrtPrefixRow:
     rb = PrefixReachability(
         reachable_planes=list(reachable),
         drained_planes=list(drained),
@@ -566,7 +573,7 @@ def _prefix_row(epoch: float, reachable, drained, unreachable) -> ProdHrtPrefixR
         device_ids=[0],
     )
     return ProdHrtPrefixRow(
-        timestamp=_ts_str(epoch), host=GPU_HOST, prefixes={PROD_PREFIX: rb}
+        timestamp=_ts_str(epoch), host=host, prefixes={PROD_PREFIX: rb}
     )
 
 
@@ -639,6 +646,167 @@ class Tc36Tc37ProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTestCas
         ]
         result = await self._run(self._make_collector(rows), self._params())
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+
+
+class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTestCase):
+    """TC15 observes one server-originated conditional route from both hosts."""
+
+    def setUp(self):
+        self.health_check = FpfProdHrtPrefixStabilityHealthCheck(logger=MagicMock())
+        self.device = MagicMock(spec=TestDevice)
+        self.device.name = "gtsw001.l1002.c087.mwg2"
+        for target, kw in (
+            (
+                f"{PROD_MODULE}.everpaste_details_suffix",
+                {"new": AsyncMock(return_value="")},
+            ),
+            (f"{PROD_MODULE}.disruption_inconclusive_skip", {"return_value": None}),
+            (f"{PROD_MODULE}.get_test_case_start_time", {"return_value": WINDOW_START}),
+            (f"{PROD_MODULE}.get_disruption_time", {"return_value": 0.0}),
+        ):
+            p = patch(target, **kw)
+            self.addCleanup(p.stop)
+            p.start()
+
+    async def _run(self, rows, *, mode: str = "transition"):
+        collector = MagicMock()
+        collector.hosts = [GPU_HOST, REMOTE_GPU_HOST]
+        collector.get_rows_in_window.return_value = rows
+        collector.timeout_count_in_window.return_value = 0
+        collector.format_window_table.return_value = "(table)"
+        with patch(
+            f"{PROD_MODULE}.discover_prod_collectors",
+            return_value=[
+                (GPU_HOST, collector),
+                (REMOTE_GPU_HOST, collector),
+            ],
+        ):
+            return await self.health_check._run(
+                self.device,
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "mode": mode,
+                    "window_start": WINDOW_START,
+                    "window_end": WINDOW_END,
+                    "prefixes_by_host": {
+                        GPU_HOST: [PROD_PREFIX],
+                        REMOTE_GPU_HOST: [PROD_PREFIX],
+                    },
+                    "affected_prefixes_by_host": {
+                        GPU_HOST: [PROD_PREFIX],
+                        REMOTE_GPU_HOST: [PROD_PREFIX],
+                    },
+                    "impacted_planes_by_host": {
+                        GPU_HOST: [0],
+                        REMOTE_GPU_HOST: [0],
+                    },
+                    "max_transition_sec": 30.0,
+                    "max_drain_sec": 30.0,
+                    "disruption_ts": WINDOW_START + 10.0,
+                    "recovery_ts": WINDOW_START + 10.0,
+                    "recovery_completion_ts": WINDOW_START + 15.0,
+                },
+            )
+
+    @staticmethod
+    def _host_rows(host: str, transition: bool):
+        final_reachable = [1, 2, 3] if transition else [0, 1, 2, 3]
+        final_unreachable = [0, 4, 5, 6, 7] if transition else [4, 5, 6, 7]
+        return [
+            _prefix_row(
+                WINDOW_START + 5.0,
+                [0, 1, 2, 3],
+                [],
+                [4, 5, 6, 7],
+                host=host,
+            ),
+            _prefix_row(
+                WINDOW_START + 20.0,
+                final_reachable,
+                [],
+                final_unreachable,
+                host=host,
+            ),
+            _prefix_row(
+                WINDOW_START + 200.0,
+                final_reachable,
+                [],
+                final_unreachable,
+                host=host,
+            ),
+        ]
+
+    async def test_both_hosts_transition_pass(self):
+        rows = [
+            *self._host_rows(GPU_HOST, transition=True),
+            *self._host_rows(REMOTE_GPU_HOST, transition=True),
+        ]
+        result = await self._run(rows)
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_missing_remote_host_transition_fails(self):
+        rows = [
+            *self._host_rows(GPU_HOST, transition=True),
+            *self._host_rows(REMOTE_GPU_HOST, transition=False),
+        ]
+        result = await self._run(rows)
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn(REMOTE_GPU_HOST, result.message)
+        self.assertIn("never left reachable", result.message)
+
+    @staticmethod
+    def _host_recovery_rows(host: str, recover: bool):
+        final_reachable = [0, 1, 2, 3] if recover else [1, 2, 3]
+        final_drained = [] if recover else [0]
+        final_unreachable = [4, 5, 6, 7] if recover else [0, 4, 5, 6, 7]
+        return [
+            _prefix_row(
+                WINDOW_START + 5.0,
+                [1, 2, 3],
+                [0],
+                [0, 4, 5, 6, 7],
+                host=host,
+            ),
+            _prefix_row(
+                WINDOW_START + 20.0,
+                final_reachable,
+                final_drained,
+                final_unreachable,
+                host=host,
+            ),
+            _prefix_row(
+                WINDOW_START + 200.0,
+                final_reachable,
+                final_drained,
+                final_unreachable,
+                host=host,
+            ),
+        ]
+
+    async def test_both_hosts_recover_pass(self):
+        rows = [
+            *self._host_recovery_rows(GPU_HOST, recover=True),
+            *self._host_recovery_rows(REMOTE_GPU_HOST, recover=True),
+        ]
+        result = await self._run(rows, mode="local_undrain")
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_missing_remote_host_recovery_fails(self):
+        rows = [
+            *self._host_recovery_rows(GPU_HOST, recover=True),
+            *self._host_recovery_rows(REMOTE_GPU_HOST, recover=False),
+        ]
+        result = await self._run(rows, mode="local_undrain")
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn(REMOTE_GPU_HOST, result.message)
+        self.assertIn("never became reachable", result.message)
+
+    async def test_missing_remote_host_samples_fail(self):
+        result = await self._run(
+            self._host_rows(GPU_HOST, transition=True), mode="transition"
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("required host", result.message)
 
 
 class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTestCase):

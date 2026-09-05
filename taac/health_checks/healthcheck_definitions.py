@@ -3265,10 +3265,12 @@ def create_fpf_prod_hrt_prefix_stability_check(
     expected_unreachable: t.Optional[t.List[int]] = None,
     expected_plane_up: t.Optional[t.List[int]] = None,
     prefixes: t.Optional[t.List[str]] = None,
+    prefixes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
     mode: t.Optional[str] = None,
     impacted_planes_by_host: t.Optional[t.Dict[str, t.List[int]]] = None,
     max_transition_sec: t.Optional[float] = None,
     local_prefixes: t.Optional[t.List[str]] = None,
+    affected_prefixes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
     max_drain_sec: t.Optional[float] = None,
     disruption_ts: t.Optional[float] = None,
     lookback_sec: int = 900,
@@ -3303,6 +3305,11 @@ def create_fpf_prod_hrt_prefix_stability_check(
     full recovery within ``max_recovery_sec`` of the first complete sample after
     restart completion or the final observed outage row. The final complete
     sample must remain at baseline.
+
+    ``prefixes_by_host`` scopes each host to its configured prefix set and makes
+    every listed host required. ``affected_prefixes_by_host`` identifies which
+    of those routes must transition in local_drain/local_undrain mode; legacy
+    callers may continue using the global ``prefixes``/``local_prefixes`` lists.
     """
     params: t.Dict[str, t.Any] = {"lookback_sec": lookback_sec}
     if mode is not None:
@@ -3315,6 +3322,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["max_transition_sec"] = max_transition_sec
     if local_prefixes is not None:
         params["local_prefixes"] = local_prefixes
+    if affected_prefixes_by_host is not None:
+        params["affected_prefixes_by_host"] = affected_prefixes_by_host
     if max_drain_sec is not None:
         params["max_drain_sec"] = max_drain_sec
     if disruption_ts is not None:
@@ -3329,6 +3338,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["expected_plane_up"] = expected_plane_up
     if prefixes is not None:
         params["prefixes"] = prefixes
+    if prefixes_by_host is not None:
+        params["prefixes_by_host"] = prefixes_by_host
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:

@@ -3701,10 +3701,11 @@ def create_fpf_start_collectors_task(
     holding ALL monitored hosts (one file with a host column). ``fsdb_session_hosts``
     ([host, ...]) selects which hosts the session collector monitors (default: all
     GPU hosts). ``prod_prefixes_by_host`` ({host: [prefixes]}) gives each host its
-    OWN prod prefixes for the prod-prefix + plane-status collectors; the legacy
-    ``prod_prefixes`` + ``prod_prefix_host`` folds into a one-host map. The matching
-    health checks read the single collector and iterate its hosts internally,
-    asserting every host independently. ``fsdb_session_host`` (singular) is
+    configured query prefixes for the prod-prefix collector; multiple hosts may
+    observe the same conditional route. The legacy ``prod_prefixes`` +
+    ``prod_prefix_host`` folds into a one-host map. The matching health checks read
+    the single collector and iterate its hosts internally, asserting every host
+    independently. ``fsdb_session_host`` (singular) is
     accepted for back-compat and, when the plural form is not given, folded into
     a one-entry ``fsdb_session_hosts`` list to preserve single-host intent.
     """

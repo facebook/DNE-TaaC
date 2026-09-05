@@ -24448,6 +24448,7 @@ def _build_fpf_generic_checks(
     out_congestion_last_minute_max: bool = False,
     host_spray_transform_desc: str | None = None,
     hrt_device_ids: list[int] | None = None,
+    prod_prefixes_by_host: dict[str, list[str]] | None = None,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -24544,6 +24545,7 @@ def _build_fpf_generic_checks(
     if prod_prefixes:
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
         )
@@ -25034,6 +25036,7 @@ def create_fpf_hardening_playbook_v2(
     plane_status_check: bool = False,
     prod_prefix_recovery: bool = False,
     local_prod_prefixes: list[str] | None = None,
+    prod_prefixes_by_host: dict[str, list[str]] | None = None,
     impacted_planes_by_host: dict | None = None,
     impacted_lanes_drained: list[int] | None = None,
     impacted_spray_max_gbps: float = 10.0,
@@ -25213,6 +25216,7 @@ def create_fpf_hardening_playbook_v2(
             for device_id in group.get("device_ids", [0])
         }
     ) or [0]
+    resolved_prod_prefixes_by_host = prod_prefixes_by_host
     # Default the expected HRT FSDB session count to 32 — the per-BE-node count
     # is FIXED at 32 (every one of the 4 GPUs subscribes to all 8 GTSWs:
     # 4 x 8 = 32) regardless of how many GTSWs we observe. The previous
@@ -25260,6 +25264,7 @@ def create_fpf_hardening_playbook_v2(
         skip_ssh_dependent_checks=skip_ssh_dependent_checks,
         fsdb_sessions_per_host=fsdb_sessions_per_host,
         prod_prefixes=prod_prefixes,
+        prod_prefixes_by_host=resolved_prod_prefixes_by_host,
         hrt_memory_hosts=hrt_memory_hosts,
         hrt_driver_hosts=hrt_driver_hosts,
         spray_hosts=spray_hosts,
@@ -25508,6 +25513,7 @@ def create_fpf_hardening_playbook_v2(
             create_fpf_prod_hrt_prefix_stability_check(
                 settle_sec=prod_prefix_settle_sec or None,
                 stability_mode=convergence_blip_mode,
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability",
             )
         )
@@ -25523,6 +25529,8 @@ def create_fpf_hardening_playbook_v2(
             create_fpf_prod_hrt_prefix_stability_check(
                 mode="local_undrain",
                 local_prefixes=local_prod_prefixes,
+                prefixes_by_host=resolved_prod_prefixes_by_host,
+                affected_prefixes_by_host=resolved_prod_prefixes_by_host,
                 impacted_planes_by_host=impacted_planes_by_host or {},
                 max_drain_sec=FPF_ACTIVE_THRESHOLDS.prod_prefix_recovery_sla_sec,
                 check_id="fpf_prod_hrt_prefix_recovery",
@@ -25533,6 +25541,7 @@ def create_fpf_hardening_playbook_v2(
             create_fpf_prod_hrt_prefix_stability_check(
                 mode="restart_recovery",
                 max_recovery_sec=prod_prefix_restart_recovery_sla_sec,
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_restart_recovery",
             )
         )
@@ -25545,6 +25554,7 @@ def create_fpf_hardening_playbook_v2(
                 settle_sec=prod_prefix_settle_sec or None,
                 stability_mode=convergence_blip_mode,
                 recovery_last_n=recovery_last_n,
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability",
             )
         )
@@ -25702,6 +25712,7 @@ def create_fpf_link_event_disrupt_playbook(
     impacted_beths_by_host: dict,
     impacted_planes_by_host: dict,
     prod_prefixes: list[str] | None = None,
+    prod_prefixes_by_host: dict[str, list[str]] | None = None,
     hrt_memory_hosts: list[str] | None = None,
     hrt_driver_hosts: list[str] | None = None,
     spray_hosts: list[str] | None = None,
@@ -25817,6 +25828,7 @@ def create_fpf_link_event_disrupt_playbook(
         if resolved_hrt_device_ids == [0]
         else list(resolved_hrt_device_ids)
     )
+    resolved_prod_prefixes_by_host = prod_prefixes_by_host
 
     # ---- Prechecks: assert healthy/stable BEFORE the disruption ----
     prechecks = [
@@ -25831,6 +25843,7 @@ def create_fpf_link_event_disrupt_playbook(
     if prod_prefixes:
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
         )
@@ -26168,6 +26181,7 @@ def create_fpf_link_event_disrupt_playbook(
         postchecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
                 mode="transition",
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 impacted_planes_by_host=impacted_planes_by_host,
                 max_transition_sec=float(transition_sla_sec),
                 check_id="fpf_prod_hrt_prefix_transition",
@@ -26659,6 +26673,7 @@ def create_fpf_service_restart_playbook(
     community_list: str,
     injected_lanes: list[int],
     prod_prefixes: list[str] | None = None,
+    prod_prefixes_by_host: dict[str, list[str]] | None = None,
     hrt_memory_hosts: list[str] | None = None,
     hrt_driver_hosts: list[str] | None = None,
     spray_hosts: list[str] | None = None,
@@ -26755,6 +26770,7 @@ def create_fpf_service_restart_playbook(
             for device_id in group.get("device_ids", [0])
         }
     ) or [0]
+    resolved_prod_prefixes_by_host = prod_prefixes_by_host
 
     # Generic (non-convergence) check set shared with the hardening playbooks:
     # generic prechecks (with the MANDATORY drain pre-check prepended as the
@@ -26767,6 +26783,7 @@ def create_fpf_service_restart_playbook(
         skip_ssh_dependent_checks=skip_ssh_dependent_checks,
         fsdb_sessions_per_host=fsdb_expected_total,
         prod_prefixes=prod_prefixes,
+        prod_prefixes_by_host=resolved_prod_prefixes_by_host,
         hrt_memory_hosts=hrt_memory_hosts,
         hrt_driver_hosts=hrt_driver_hosts,
         spray_hosts=spray_hosts,
@@ -27022,6 +27039,7 @@ def create_fpf_service_restart_playbook(
             create_fpf_prod_hrt_prefix_stability_check(
                 settle_sec=settle,
                 stability_mode=convergence_blip_mode,
+                prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stable",
             )
         )

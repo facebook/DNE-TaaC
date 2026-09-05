@@ -91,6 +91,12 @@ def discover_prod_collectors(
     c = get_collector(name)
     if c is None:
         return []
+    prefixes_by_host = check_params.get("prefixes_by_host") or {}
+    if prefixes_by_host:
+        # An explicit host/prefix map is a required observation contract, not a
+        # best-effort filter over whichever hosts happened to emit rows. Return
+        # every requested host so a missing host is surfaced by the evaluator.
+        return [(str(host), c) for host in prefixes_by_host]
     hosts: t.List[str] = []
     hiw = getattr(c, "hosts_in_window", None)
     if callable(hiw):
@@ -692,7 +698,7 @@ def _evaluate_host_local_drain(
     collector: t.Any,
     window_start: float,
     window_end: float,
-    local_norms: t.Set[str],
+    affected_norms: t.Set[str],
     impacted_planes: t.Set[int],
     max_drain_sec: float,
     action_ts: t.Optional[float],
@@ -701,9 +707,10 @@ def _evaluate_host_local_drain(
 ) -> _HostResult:
     """Local-vs-remote drain/undrain contract for one host.
 
-    Splits monitored prefixes into LOCAL (this host's own, ``local_norms``) and
-    REMOTE (everything else). Three signals on the LOCAL prefixes' impacted
-    plane(s); a no-churn assertion on the REMOTE prefixes:
+    Splits monitored prefixes into AFFECTED (the origin route expected to react
+    on this observer, ``affected_norms``) and UNAFFECTED (everything else).
+    Three signals apply to affected prefixes' impacted plane(s); unaffected
+    prefixes retain a no-churn assertion:
 
       ``to_drained=True`` (DRAIN): each impacted plane that was reachable at the
         baseline must move into ``drained_planes`` (Signal 1), must NOT land in
@@ -758,7 +765,7 @@ def _evaluate_host_local_drain(
         display = info["display"]
         samples = info["samples"]
         res.n_samples += len(samples)
-        is_local = norm in local_norms
+        is_affected = norm in affected_norms
         base_rb, post_samples = _split(samples)
 
         if (
@@ -772,21 +779,21 @@ def _evaluate_host_local_drain(
             )
             continue
 
-        if not is_local:
-            # REMOTE prefix: reachable set must not change through the disruption.
+        if not is_affected:
+            # Unaffected prefix: reachable set must not change through disruption.
             baseline_reachable = set(base_rb.reachable_planes)
             for _ts, ts_str, rb in post_samples:
                 if set(rb.reachable_planes) != baseline_reachable:
                     res.compliance_issues.append(
-                        f"REMOTE {display} churned at {ts_str}: reachable "
+                        f"UNAFFECTED {display} churned at {ts_str}: reachable "
                         f"{_fmt(sorted(baseline_reachable))}->"
                         f"{_fmt(sorted(rb.reachable_planes))} "
-                        f"(expected no change on a local-host drain)"
+                        "(expected no change for this route)"
                     )
                     break
             continue
 
-        # LOCAL prefix: assert the drain/undrain transition on impacted planes.
+        # AFFECTED prefix: assert the drain/undrain transition on impacted planes.
         baseline_reachable = set(base_rb.reachable_planes)
         baseline_drained = set(base_rb.drained_planes)
         # On DRAIN the relevant planes are those reachable just before the drain;
@@ -821,7 +828,7 @@ def _evaluate_host_local_drain(
             # Signal 1: the impacted plane reached the expected state.
             if transition_ts is None:
                 res.compliance_issues.append(
-                    f"LOCAL {display} plane {plane} never became {want} "
+                    f"AFFECTED {display} plane {plane} never became {want} "
                     f"({'drain' if to_drained else 'undrain'} did not take)"
                 )
                 continue
@@ -833,7 +840,7 @@ def _evaluate_host_local_drain(
             # here for undrain.
             if not to_drained and plane in set(final_rb.unreachable_planes):
                 res.compliance_issues.append(
-                    f"LOCAL {display} plane {plane} left UNREACHABLE after undrain "
+                    f"AFFECTED {display} plane {plane} left UNREACHABLE after undrain "
                     f"(expected reachable)"
                 )
             # Signal 3: within SLA, measured from the drain/recovery action.
@@ -841,7 +848,7 @@ def _evaluate_host_local_drain(
             latency = round(transition_ts - ref, 1)
             if latency > max_drain_sec:
                 res.compliance_issues.append(
-                    f"LOCAL {display} plane {plane} became {want} in {latency}s "
+                    f"AFFECTED {display} plane {plane} became {want} in {latency}s "
                     f"> {max_drain_sec:.0f}s SLA"
                 )
             else:
@@ -867,7 +874,7 @@ def _evaluate_host_local_drain(
             unexplained = new_unreach - set(final_rb.drained_planes)
             if unexplained:
                 res.compliance_issues.append(
-                    f"LOCAL {display} plane(s) {sorted(unexplained)} went "
+                    f"AFFECTED {display} plane(s) {sorted(unexplained)} went "
                     f"UNAVAILABLE (unreachable without being drained)"
                 )
 
@@ -922,7 +929,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
 
     Consumes the single live ``prod_hrt_prefix`` collector registered in the FPF
     collector registry. That ONE collector holds ALL monitored hosts (each row
-    carries its ``host``, and each host monitors its own prefixes); this check
+    carries its ``host``, and each host monitors its configured prefixes); this check
     iterates the hosts present in its rows and evaluates each host independently.
     For every monitored prefix on a host, over the test window:
 
@@ -1003,6 +1010,13 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         target_norms = (
             {normalize_prefix(p) for p in prefix_filter} if prefix_filter else None
         )
+        raw_prefixes_by_host: t.Dict[str, t.List[str]] = (
+            check_params.get("prefixes_by_host", {}) or {}
+        )
+        target_norms_by_host = {
+            str(host): {normalize_prefix(prefix) for prefix in prefixes}
+            for host, prefixes in raw_prefixes_by_host.items()
+        }
 
         fixed_expected = self._build_fixed_expected(check_params)
 
@@ -1022,10 +1036,18 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             check_params.get("impacted_planes_by_host", {}) or {}
         )
         max_transition_sec = float(check_params.get("max_transition_sec", 30.0))
-        # LOCAL prefix set (this host's own advertised prefixes). Everything else
-        # monitored is treated as REMOTE for the local_drain/local_undrain modes.
+        # Legacy global affected-prefix set. ``affected_prefixes_by_host`` is the
+        # precise form for a route observed from multiple hosts; it prevents an
+        # observer's copy from being mislabeled based only on a global set.
         local_norms: t.Set[str] = {
             normalize_prefix(p) for p in (check_params.get("local_prefixes") or [])
+        }
+        raw_affected_by_host: t.Dict[str, t.List[str]] = (
+            check_params.get("affected_prefixes_by_host", {}) or {}
+        )
+        affected_norms_by_host = {
+            str(host): {normalize_prefix(prefix) for prefix in prefixes}
+            for host, prefixes in raw_affected_by_host.items()
         }
         max_drain_sec = float(check_params.get("max_drain_sec", 30.0))
         # Reference for the transition SLA: explicit check_param wins; else the
@@ -1090,10 +1112,12 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             window_start=window_start,
             window_end=window_end,
             target_norms=target_norms,
+            target_norms_by_host=target_norms_by_host,
             fixed_expected=fixed_expected,
             stability_mode=stability_mode,
             recovery_last_n=recovery_last_n,
             local_norms=local_norms,
+            affected_norms_by_host=affected_norms_by_host,
             impacted_by_host=impacted_by_host,
             max_drain_sec=max_drain_sec,
             max_transition_sec=max_transition_sec,
@@ -1150,10 +1174,12 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         window_start: float,
         window_end: float,
         target_norms: t.Optional[t.Set[str]],
+        target_norms_by_host: t.Dict[str, t.Set[str]],
         fixed_expected: t.Optional[t.Dict[str, t.List[int]]],
         stability_mode: str,
         recovery_last_n: t.Optional[int],
         local_norms: t.Set[str],
+        affected_norms_by_host: t.Dict[str, t.Set[str]],
         impacted_by_host: t.Dict[str, t.List[int]],
         max_drain_sec: float,
         max_transition_sec: float,
@@ -1171,6 +1197,8 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         host_results: t.List[_HostResult] = []
         for host, collector in collectors:
             impacted = {int(p) for p in impacted_by_host.get(host, [])}
+            host_target_norms = target_norms_by_host.get(host, target_norms)
+            host_affected_norms = affected_norms_by_host.get(host, local_norms)
             if mode == "restart_recovery":
                 if restart_ts is None:
                     raise ValueError("restart_recovery requires restart_ts")
@@ -1179,7 +1207,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     collector,
                     window_start,
                     window_end,
-                    target_norms,
+                    host_target_norms,
                     restart_ts,
                     max_recovery_sec,
                     restart_completion_ts,
@@ -1190,7 +1218,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     collector,
                     window_start,
                     window_end,
-                    local_norms,
+                    host_affected_norms,
                     impacted,
                     max_drain_sec,
                     dts if mode == "local_drain" else rts,
@@ -1203,7 +1231,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     collector,
                     window_start,
                     window_end,
-                    target_norms,
+                    host_target_norms,
                     impacted,
                     max_transition_sec,
                     dts,
@@ -1214,10 +1242,17 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     collector,
                     window_start,
                     window_end,
-                    target_norms,
+                    host_target_norms,
                     fixed_expected,
                     stability_mode=stability_mode,
                     recovery_last_n=recovery_last_n,
+                )
+            if host in target_norms_by_host and res.status == "SKIP":
+                res.status = "FAIL"
+                res.s1_ok = False
+                res.compliance_issues.append(
+                    f"required host {host} produced no in-window samples for "
+                    "its configured prefixes"
                 )
             host_results.append(res)
             self.logger.info(

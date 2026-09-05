@@ -1676,9 +1676,10 @@ class ProdHrtPrefixCollector(BaseCollector):
     GPUs (matching the standalone binary's contract).
 
     ONE collector instance holds ALL monitored hosts (``hosts``); each host
-    monitors its OWN prefixes via ``prefixes_by_host`` ({host: [prefixes]}). Each
-    poll loops the hosts and queries each with ITS prefixes; every row carries
-    its ``host``; a single file with a host column.
+    monitors its configured query prefixes via ``prefixes_by_host``
+    ({host: [prefixes]}). Multiple hosts may observe the same conditional route.
+    Each poll loops the hosts and queries each with its configured prefixes;
+    every row carries its ``host``; a single file has a host column.
     """
 
     def __init__(

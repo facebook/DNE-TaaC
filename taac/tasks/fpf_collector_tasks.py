@@ -241,10 +241,10 @@ class FpfStartCollectorsTask(BaseTask):
 
         # Production-prefix reachability collector. This remains an explicitly
         # selected single-device canary, not whole-host device coverage. Each
-        # host monitors its OWN prefixes via
-        # ``prefixes_by_host``. Wiring inputs:
+        # host monitors its configured query prefixes via ``prefixes_by_host``;
+        # multiple hosts may observe the same route. Wiring inputs:
         #
-        #   ``prod_prefixes_by_host`` ({host: [prefixes]}): the per-host prefix
+        #   ``prod_prefixes_by_host`` ({host: [prefixes]}): the per-host query
         #     map, preferred. Every host in the map is monitored.
         #   Legacy (``prod_prefixes`` + ``prod_prefix_host``): a single host's
         #     prefixes, folded into a one-entry prefixes_by_host map.
