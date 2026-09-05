@@ -895,6 +895,72 @@ class TestRapidFlapStepLldp(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(raised.exception.__cause__, RuntimeError)
         self.assertEqual(str(raised.exception.__cause__), "flap failed")
 
+
+class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
+    def test_factory_serializes_fail_closed_scope(self):
+        interfaces = [f"eth1/41/{channel}" for channel in range(5, 9)]
+        recovery = {
+            "gtsw001": {
+                interface: {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": gpu,
+                    "lane": 0,
+                }
+                for gpu, interface in enumerate(interfaces)
+            }
+        }
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=900,
+            fail_closed=True,
+            expected_interfaces=interfaces,
+            require_exact_neighbor_hosts=True,
+            nic_recovery_by_gtsw_interface=recovery,
+        )
+        params = _params(step)
+        self.assertTrue(params["fail_closed"])
+        self.assertEqual(params["expected_interfaces"], interfaces)
+        self.assertEqual(params["nic_recovery_by_gtsw_interface"], recovery)
+
+    async def test_fail_closed_propagates_gtsw_failure_after_cleanup(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = {
+            "eth1/41/5": SwitchLldpData(
+                remote_device_name="twshared1352.03.mwg2",
+                remote_intf_name="beth0",
+            )
+        }
+        driver.async_do_rapid_interface_flaps.side_effect = RuntimeError("boom")
+        driver.async_get_all_interfaces_admin_status.return_value = {"eth1/41/5": True}
+        driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/41/5": True
+        }
+        with (
+            self.assertRaisesRegex(Exception, "one or more GTSWs failed.*boom"),
+            patch("time.time", return_value=0.0),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001"],
+                    "neighbor_hosts": ["twshared1352.03.mwg2"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "require_exact_neighbor_hosts": True,
+                    "final_up_timeout_sec": 0,
+                }
+            )
+        driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=("eth1/41/5",), is_enable_port=True
+        )
+
     async def test_fail_closed_uses_scoped_paos_for_admin_up_oper_down(self):
         cs = _make_custom_step()
         cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
@@ -906,8 +972,9 @@ class TestRapidFlapStepLldp(unittest.IsolatedAsyncioTestCase):
             {"eth1/4/1": False},
             {"eth1/4/1": True},
         ]
+        ticks = iter([0.0, 100.0])
         with (
-            patch("time.time", side_effect=[0.0, 100.0]),
+            patch("time.time", side_effect=lambda: next(ticks, 100.0)),
             patch(
                 "neteng.test_infra.dne.taac.internal.steps.custom_step."
                 "_fpf_async_ssh_run",

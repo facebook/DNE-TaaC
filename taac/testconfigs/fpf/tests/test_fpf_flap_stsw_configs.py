@@ -18,6 +18,7 @@ from unittest.mock import patch
 from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_tc32_downlink_flaps,
+    fpf_tc40_cont_interface_flaps,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import GPU_HOSTS
 from taac.testconfigs.fpf.fpf_tc32_downlink_flaps import (
@@ -273,9 +274,44 @@ class TestRapidFlapConfigs(unittest.TestCase):
                     "fpf_start_ib_traffic",
                     {task.task_name for task in config.setup_tasks},
                 )
+
+                tc40_module = importlib.reload(fpf_tc40_cont_interface_flaps)
+                tc40 = tc40_module.create_fpf_tc40_test_config()
+                tc40_flap = _params(_steps(tc40.playbooks[0])[0])
+                self.assertTrue(tc40_flap["fail_closed"])
+                self.assertEqual(tc40_flap["neighbor_hosts"], [hosts[0]])
+                self.assertEqual(
+                    tc40_flap["expected_interfaces"],
+                    ["eth1/41/5", "eth1/41/6", "eth1/41/7", "eth1/41/8"],
+                )
+                recovery = tc40_flap["nic_recovery_by_gtsw_interface"]
+                self.assertEqual(set(recovery), set(tc40_module.ALL_GTSWS))
+                self.assertEqual(
+                    recovery[tc40_module.ALL_GTSWS[0]]["eth1/41/8"],
+                    {"host": hosts[0], "dev": 3, "lane": 0},
+                )
+                self.assertEqual(
+                    recovery[tc40_module.ALL_GTSWS[-1]]["eth1/41/5"],
+                    {"host": hosts[0], "dev": 0, "lane": 7},
+                )
         finally:
             importlib.reload(fpf_hardening_common)
             importlib.reload(fpf_tc32_downlink_flaps)
+            importlib.reload(fpf_tc40_cont_interface_flaps)
+
+    def test_tc40_opts_into_fail_closed_multi_gtsw_safety(self):
+        config = fpf_tc40_cont_interface_flaps.TEST_CONFIG
+        flap = _params(_steps(config.playbooks[0])[0])
+        self.assertTrue(flap["fail_closed"])
+        self.assertTrue(flap["require_exact_neighbor_hosts"])
+        self.assertEqual(
+            flap["expected_interfaces"],
+            fpf_tc40_cont_interface_flaps.FLAP_INTERFACES,
+        )
+        self.assertEqual(
+            set(flap["nic_recovery_by_gtsw_interface"]),
+            set(fpf_tc40_cont_interface_flaps.ALL_GTSWS),
+        )
 
     def test_tc32_derives_interface_scope_when_factory_is_called(self):
         interfaces = [f"eth1/41/{channel}" for channel in range(1, 5)]
