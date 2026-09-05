@@ -62,6 +62,7 @@ from taac.steps.step_definitions import (
     create_system_reboot_step,
 )
 from taac.task_definitions import (
+    create_fpf_ensure_interfaces_enabled_task,
     create_fpf_inject_vf_groups_task,
     create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
@@ -1071,13 +1072,21 @@ def _tc38(*, spray, skip_ssh) -> list:
     return [disrupt_playbook, stable_playbook]
 
 
-def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
+def _disable_steps(
+    circuits: list[Circuit],
+    enable: bool,
+    *,
+    best_effort: bool = False,
+    record_event_time: bool = True,
+) -> list:
     steps = []
     for dev, intfs in disable_interfaces_by_device(circuits).items():
         steps.append(
             create_fpf_set_interface_admin_step(
                 interfaces=intfs,
                 enable=enable,
+                best_effort=best_effort,
+                record_event_time=record_event_time,
                 description=(
                     f"{'Enable' if enable else 'Disable'} {intfs} on {dev} "
                     f"(thrift admin state)"
@@ -1169,7 +1178,16 @@ def _tc15(*, circuits: list[Circuit], spray, skip_ssh) -> list:
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
         ib_traffic_config=_ib_readiness_config(spray),
+        ensure_traffic_after_disruption=True,
         plane_status_check=True,
+        # Idempotent safety retry only: never overwrite the recovery window
+        # recorded by the ordered restore step, and never block later cleanup.
+        cleanup_steps=_disable_steps(
+            circuits,
+            enable=True,
+            best_effort=True,
+            record_event_time=False,
+        ),
     )
     return [disrupt_playbook, restore_playbook]
 
@@ -1574,6 +1592,9 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
             ),
         ],
         teardown_tasks=[
+            create_fpf_ensure_interfaces_enabled_task(
+                disable_interfaces_by_device(link_event_circuits)
+            ),
             create_fpf_withdraw_vf_groups_task(groups=INJECTION_GROUPS),
             create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(

@@ -18,6 +18,8 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_recovery_start_time,
     mark_drain_mutation,
     set_disruption_time,
+    set_recovery_completion_time,
+    set_recovery_start_time,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.test_as_a_config.types import Step, TestConfig
@@ -68,8 +70,8 @@ class TestFpfRecoveryTimestamps(unittest.IsolatedAsyncioTestCase):
             side_effect=[100.0, 110.0],
         ):
             await custom_step.fpf_conditional_undrain(params)
-            # Normal restore path: disrupt cleanup cleared the marker. This no-op
-            # must retain cleanup's recovery boundary for the restore postcheck.
+            # A completed owned restore cleared the marker. A repeated no-op
+            # must retain the original recovery boundary for the postcheck.
             await custom_step.fpf_conditional_undrain(params)
 
         self.assertEqual(get_recovery_start_time(), 100.0)
@@ -77,6 +79,73 @@ class TestFpfRecoveryTimestamps(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_disruption_time(), 50.0)
         self.assertIsNone(get_drain_mutation("tc17"))
         self.assertEqual(driver.async_undrain_interface.await_count, 1)
+
+    async def test_interface_cleanup_does_not_reanchor_recovery(self) -> None:
+        custom_step = _make_custom_step()
+        driver = t.cast(AsyncMock, custom_step.driver)
+        driver.async_get_all_interfaces_admin_status.return_value = {"eth1/41/5": True}
+        set_recovery_start_time(100.0)
+        set_recovery_completion_time(110.0)
+
+        await custom_step.fpf_set_interface_admin(
+            {
+                "interfaces": ["eth1/41/5"],
+                "is_enable": True,
+                "best_effort": True,
+                "record_event_time": False,
+            }
+        )
+
+        self.assertEqual(get_recovery_start_time(), 100.0)
+        self.assertEqual(get_recovery_completion_time(), 110.0)
+        driver.async_thrift_disable_enable_interfaces.assert_awaited_once()
+
+    async def test_interface_cleanup_failure_is_best_effort(self) -> None:
+        custom_step = _make_custom_step()
+        driver = t.cast(AsyncMock, custom_step.driver)
+        driver.async_thrift_disable_enable_interfaces.side_effect = RuntimeError(
+            "enable failed"
+        )
+
+        await custom_step.fpf_set_interface_admin(
+            {
+                "interfaces": ["eth1/41/5"],
+                "is_enable": True,
+                "best_effort": True,
+                "record_event_time": False,
+            }
+        )
+
+        t.cast(MagicMock, custom_step.logger.error).assert_called_once()
+        self.assertIn(
+            "continuing cleanup",
+            t.cast(MagicMock, custom_step.logger.error).call_args.args[0],
+        )
+
+    async def test_best_effort_cleanup_cannot_record_unmatched_recovery(self) -> None:
+        custom_step = _make_custom_step()
+        driver = t.cast(AsyncMock, custom_step.driver)
+        driver.async_thrift_disable_enable_interfaces.side_effect = RuntimeError(
+            "enable failed"
+        )
+
+        await custom_step.fpf_set_interface_admin(
+            {
+                "interfaces": ["eth1/41/5"],
+                "is_enable": True,
+                "best_effort": True,
+                "record_event_time": True,
+            }
+        )
+
+        self.assertEqual(get_recovery_start_time(), 0.0)
+        self.assertEqual(get_recovery_completion_time(), 0.0)
+        self.assertTrue(
+            any(
+                "disabling event-time recording" in str(call)
+                for call in t.cast(MagicMock, custom_step.logger.warning).call_args_list
+            )
+        )
 
 
 if __name__ == "__main__":

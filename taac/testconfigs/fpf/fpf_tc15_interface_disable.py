@@ -45,6 +45,7 @@ from taac.steps.step_definitions import (
     create_longevity_step,
 )
 from taac.task_definitions import (
+    create_fpf_ensure_interfaces_enabled_task,
     create_fpf_inject_vf_groups_task,
     create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
@@ -127,7 +128,13 @@ def _impacted_planes_by_host(circuits: list[Circuit]) -> dict[str, list[int]]:
     return {h: sorted(v) for h, v in sorted(out.items())}
 
 
-def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
+def _disable_steps(
+    circuits: list[Circuit],
+    enable: bool,
+    *,
+    best_effort: bool = False,
+    record_event_time: bool = True,
+) -> list:
     """Thrift-based held disable/enable of the A-end interface(s) on the DUT.
 
     Uses the live-agent setPortState path (immediate + held) rather than the
@@ -140,6 +147,8 @@ def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
             create_fpf_set_interface_admin_step(
                 interfaces=intfs,
                 enable=enable,
+                best_effort=best_effort,
+                record_event_time=record_event_time,
                 description=(
                     f"{'Enable' if enable else 'Disable'} {intfs} on {dev} "
                     f"(thrift admin state)"
@@ -255,6 +264,7 @@ def create_fpf_tc15_test_config() -> TestConfig:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ensure_traffic_after_disruption=True,
         # After re-enable, every plane must be UP on the GPU's hrtctl plane-status.
         # (The disrupt half is a port DISABLE — the plane goes DOWN, not DRAINED —
         # so no plane-status postcheck is added there.)
@@ -265,10 +275,21 @@ def create_fpf_tc15_test_config() -> TestConfig:
         # LAST in-window sample reached the golden/UP state — the recovery
         # transient is tolerated (mid-window blips ignored).
         convergence_blip_mode="last_sample",
+        # Cleanup is an idempotent safety retry, not a second recovery event.
+        cleanup_steps=_disable_steps(
+            CIRCUITS,
+            enable=True,
+            best_effort=True,
+            record_event_time=False,
+        ),
     )
 
     setup_tasks = []
-    teardown_tasks = []
+    teardown_tasks = [
+        create_fpf_ensure_interfaces_enabled_task(
+            disable_interfaces_by_device(CIRCUITS)
+        )
+    ]
     if not skip_ssh:
         setup_tasks.append(
             create_fpf_start_ib_traffic_task(

@@ -25060,6 +25060,7 @@ def create_fpf_hardening_playbook_v2(
     hrt_restart_tolerant_hosts: list[str] | None = None,
     hrt_device_ids: list[int] | None = None,
     cleanup_steps: list | None = None,
+    ensure_traffic_after_disruption: bool = False,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25147,6 +25148,11 @@ def create_fpf_hardening_playbook_v2(
     drained in the steady state under test (e.g. an STSW-plane drain that takes
     the lane-0 spine down), so only the surviving lanes are held to the floor.
     None means no exclusion — no change for existing callers.
+
+    ``ensure_traffic_after_disruption`` moves the strict traffic-readiness step
+    behind ``disruption_steps``. This is a narrow restore-path opt-in for callers
+    whose disruption steps first repair a link and wait for convergence; the
+    default remains the existing fail-fast check at the head of the stage.
 
     ``impacted_lanes_drained`` (default None) marks the given fabric lanes as
     DRAINED/impacted for a drain-longevity config where the drain STAYS in effect
@@ -25306,40 +25312,49 @@ def create_fpf_hardening_playbook_v2(
                 ),
             ]
         )
-    # STRICT traffic precheck at the head of every playbook: verify all 4 RDMA
-    # planes (beth0-3) carry traffic; if overall traffic has collapsed to ~0 (all
-    # 4 lanes dead — e.g. a prior playbook's disruption killed ib_write_bw)
-    # restart it and re-verify; FAIL HARD if a plane still can't carry traffic
-    # (a real fabric/plane wedge a restart can't fix — fail fast rather than run a
-    # contaminated test). A single dead lane is logged but NOT auto-restarted.
-    # Hosts default to spray_hosts (server = spray_hosts[0], clients = the rest);
-    # no-op when skip_ssh (spray_hosts is None). Runs before the disruption/soak.
+    # STRICT traffic readiness verifies all 4 RDMA planes carry traffic. It runs
+    # before the disruption/soak by default; restore playbooks may opt into
+    # running it after their repair and settle steps. If overall traffic has
+    # collapsed to ~0 (all 4 lanes dead — e.g. a prior disruption killed
+    # ib_write_bw), restart it and re-verify. FAIL HARD if a plane still cannot
+    # carry traffic (a real fabric/plane wedge a restart cannot fix). A single
+    # dead lane is logged but NOT auto-restarted. Hosts default to spray_hosts
+    # (server = spray_hosts[0], clients = the rest); no-op when skip_ssh.
     _ib_server = restart_ib_traffic_server
     _ib_clients = restart_ib_traffic_clients
     if _ib_server is None and spray_hosts and len(spray_hosts) >= 2:
         _ib_server = spray_hosts[0]
         _ib_clients = list(spray_hosts[1:])
+    traffic_readiness_step = None
     if ib_traffic_config:
-        stage_steps.append(
-            create_fpf_ensure_traffic_step(
-                **ib_traffic_config,
-                description=(
+        traffic_readiness_step = create_fpf_ensure_traffic_step(
+            **ib_traffic_config,
+            description=(
+                "Strict post-restore traffic readiness: validate the canonical "
+                "process and egress contract after repair and convergence"
+                if ensure_traffic_after_disruption
+                else (
                     "Strict traffic readiness: validate the canonical process "
                     "and egress contract; recover only after the prior verdict"
-                ),
-            )
+                )
+            ),
         )
     elif _ib_server and _ib_clients:
-        stage_steps.append(
-            create_fpf_ensure_traffic_step(
-                server=_ib_server,
-                clients=_ib_clients,
-                description=(
+        traffic_readiness_step = create_fpf_ensure_traffic_step(
+            server=_ib_server,
+            clients=_ib_clients,
+            description=(
+                "Strict post-restore traffic readiness: ensure all 4 planes carry "
+                "traffic after repair and convergence"
+                if ensure_traffic_after_disruption
+                else (
                     "Strict traffic precheck: ensure all 4 planes carry traffic "
                     "(restart ib_write_bw if collapsed; fail hard on a plane wedge)"
-                ),
-            )
+                )
+            ),
         )
+    if traffic_readiness_step is not None and not ensure_traffic_after_disruption:
+        stage_steps.append(traffic_readiness_step)
     if disruption_steps:
         stage_steps.extend(disruption_steps)
     elif soak_duration_sec > 0:
@@ -25349,6 +25364,8 @@ def create_fpf_hardening_playbook_v2(
                 description="Stable-state soak — no disruption",
             ),
         )
+    if traffic_readiness_step is not None and ensure_traffic_after_disruption:
+        stage_steps.append(traffic_readiness_step)
 
     convergence_postchecks = []
     for lane_id, gtsw in enumerate(gtsws):

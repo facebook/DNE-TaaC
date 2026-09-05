@@ -2859,6 +2859,8 @@ def create_record_jq_timestamp_step(
 def create_fpf_set_interface_admin_step(
     interfaces: t.List[str],
     enable: bool,
+    best_effort: bool = False,
+    record_event_time: bool = True,
     description: t.Optional[str] = None,
 ) -> Step:
     """Disable/enable interface(s) on the live agent via thrift (held).
@@ -2870,19 +2872,20 @@ def create_fpf_set_interface_admin_step(
     tests that must have the port actually down during the assertion window; pair
     a disable (enable=False) with an enable (enable=True) to restore.
     """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_set_interface_admin",
+        "interfaces": interfaces,
+        "is_enable": enable,
+    }
+    if best_effort:
+        params["best_effort"] = True
+    if not record_event_time:
+        params["record_event_time"] = False
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"{'Enable' if enable else 'Disable'} {interfaces} (thrift admin state)",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_set_interface_admin",
-                    "interfaces": interfaces,
-                    "is_enable": enable,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 

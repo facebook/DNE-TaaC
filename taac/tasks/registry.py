@@ -93,6 +93,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.tasks.fpf_inject_bgp_prefixes_task import (
         FpfInjectBgpPrefixesTask,
     )
+    from taac.tasks.fpf_interface_admin_task import (
+        FpfEnsureInterfacesEnabledTask,
+    )
     from taac.tasks.fpf_restart_service_task import (
         FpfRestartServiceTask,
     )
@@ -254,6 +257,7 @@ if not TAAC_OSS:
             IxiaPreflightTask,
             FpfStartIbTrafficTask,
             FpfStopIbTrafficTask,
+            FpfEnsureInterfacesEnabledTask,
         ]
     )
 

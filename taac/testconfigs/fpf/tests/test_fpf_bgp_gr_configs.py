@@ -945,14 +945,15 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             circuits = fpf_shared_injection_suite._link_drain_circuits()
             tc15 = fpf_shared_injection_suite._tc15(
                 circuits=circuits,
-                spray=None,
-                skip_ssh=True,
+                spray=hosts,
+                skip_ssh=False,
             )
             tc16 = fpf_shared_injection_suite._tc16(
                 circuits=circuits,
                 spray=None,
                 skip_ssh=True,
             )
+            config = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
 
         self.assertEqual(circuits[0].a_end_device, "gtsw001.l1002.c087.mwg2")
         self.assertEqual(circuits[0].a_end_interface, "eth1/41/5")
@@ -985,6 +986,61 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                 for action in compatibility_enable
             ],
             [(["eth1/41/5"], True)],
+        )
+
+        restore_steps = tc15[1].stages[0].steps
+        self.assertEqual(len(restore_steps), 3)
+        self.assertEqual(
+            _step_params(restore_steps[0]),
+            {
+                "custom_step_name": "fpf_set_interface_admin",
+                "interfaces": ["eth1/41/5"],
+                "is_enable": True,
+            },
+        )
+        self.assertEqual(_step_params(restore_steps[1])["duration"], 180)
+        self.assertEqual(
+            _step_params(restore_steps[2])["custom_step_name"],
+            "fpf_ensure_traffic",
+        )
+
+        # The disrupted state must remain held through the first playbook's
+        # postchecks. Recovery is initiated only by the restore playbook; its
+        # cleanup and the TestConfig teardown remain idempotent safety guards.
+        # The cleanup retry is best-effort and must not re-anchor recovery time.
+        self.assertEqual(list(tc15[0].cleanup_steps or []), [])
+        restore_cleanup = tc15[1].cleanup_steps or []
+        self.assertEqual(len(restore_cleanup), 1)
+        self.assertEqual(
+            _step_params(restore_cleanup[0]),
+            {
+                "custom_step_name": "fpf_set_interface_admin",
+                "interfaces": ["eth1/41/5"],
+                "is_enable": True,
+                "best_effort": True,
+                "record_event_time": False,
+            },
+        )
+        self.assertIn(
+            "post-restore traffic readiness",
+            restore_steps[2].description.lower(),
+        )
+
+        teardown_guard = config.teardown_tasks[0]
+        self.assertEqual(
+            teardown_guard.task_name,
+            "fpf_ensure_interfaces_enabled",
+        )
+        self.assertEqual(
+            json.loads(teardown_guard.params.json_params),
+            {
+                "targets": [
+                    {
+                        "device": "gtsw001.l1002.c087.mwg2",
+                        "interfaces": ["eth1/41/5"],
+                    }
+                ]
+            },
         )
 
 

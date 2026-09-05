@@ -29,6 +29,31 @@ from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Params, PeriodicTask, Task
 
 
+def create_fpf_ensure_interfaces_enabled_task(
+    interfaces_by_device: t.Mapping[str, t.Sequence[str]],
+) -> Task:
+    """Create an idempotent TestConfig-teardown guard for held-down ports."""
+    empty_devices = sorted(
+        device for device, interfaces in interfaces_by_device.items() if not interfaces
+    )
+    if empty_devices:
+        raise ValueError(
+            "Every interface-enable target must contain at least one interface; "
+            f"empty targets: {empty_devices}"
+        )
+    targets = [
+        {"device": device, "interfaces": sorted(set(interfaces))}
+        for device, interfaces in sorted(interfaces_by_device.items())
+    ]
+    if not targets:
+        raise ValueError("At least one device/interface target is required")
+    return Task(
+        task_name="fpf_ensure_interfaces_enabled",
+        description="Best-effort restore of FPF interface admin state",
+        params=Params(json_params=json.dumps({"targets": targets})),
+    )
+
+
 # =============================================================================
 # EOS IMAGE DEPLOYMENT TASK FACTORY
 # =============================================================================
