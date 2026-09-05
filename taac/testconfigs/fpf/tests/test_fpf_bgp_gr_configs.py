@@ -10,6 +10,9 @@ import os
 import unittest
 from unittest.mock import patch
 
+from taac.playbooks.playbook_definitions import (
+    _resolve_fpf_hrt_precheck_topology,
+)
 from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_shared_injection_suite,
@@ -136,6 +139,87 @@ def _assert_ods_policy(test, playbook, transient_discard_allowed: bool) -> None:
 
 
 class TestFpfGracefulRestartConfigs(unittest.TestCase):
+    def test_hrt_precheck_topology_preserves_explicit_device_order(self) -> None:
+        self.assertEqual(
+            _resolve_fpf_hrt_precheck_topology(
+                hrt_device_ids=[3, 1],
+                rf_vf_groups=None,
+                injected_lanes=list(range(8)),
+                expected_session_count=8,
+            ),
+            ([3, 1], 4),
+        )
+
+    def test_hrt_precheck_topology_rejects_ambiguous_models(self) -> None:
+        cases: tuple[tuple[list[int], list[int], int], ...] = (
+            ([0, 1, 2, 3, 4], [0, 1, 2, 3], 32),
+            ([0, 0], [0], 2),
+            ([0, 1], list(range(9)), 8),
+        )
+        for device_ids, injected_lanes, expected_session_count in cases:
+            with self.subTest(
+                device_ids=device_ids,
+                injected_lanes=injected_lanes,
+                expected_session_count=expected_session_count,
+            ):
+                with self.assertRaises(ValueError):
+                    _resolve_fpf_hrt_precheck_topology(
+                        hrt_device_ids=device_ids,
+                        rf_vf_groups=None,
+                        injected_lanes=injected_lanes,
+                        expected_session_count=expected_session_count,
+                    )
+
+    def test_hrt_precheck_topology_accepts_global_lanes(self) -> None:
+        resolved, planes_per_device = _resolve_fpf_hrt_precheck_topology(
+            hrt_device_ids=list(range(8)),
+            rf_vf_groups=None,
+            injected_lanes=list(range(8)),
+            expected_session_count=32,
+        )
+
+        self.assertEqual(resolved, list(range(8)))
+        self.assertEqual(planes_per_device, 4)
+
+    def test_empty_device_ids_preserve_deduplicated_group_fallback(self) -> None:
+        self.assertEqual(
+            _resolve_fpf_hrt_precheck_topology(
+                hrt_device_ids=[],
+                rf_vf_groups=[
+                    {"device_ids": [2, 0, 2]},
+                    {},
+                ],
+                injected_lanes=list(range(8)),
+                expected_session_count=8,
+            ),
+            ([0, 2], 4),
+        )
+
+    def test_empty_group_device_ids_contribute_nothing(self) -> None:
+        self.assertEqual(
+            _resolve_fpf_hrt_precheck_topology(
+                hrt_device_ids=[],
+                rf_vf_groups=[
+                    {"device_ids": []},
+                    {"device_ids": [3, 1, 3]},
+                ],
+                injected_lanes=list(range(8)),
+                expected_session_count=8,
+            ),
+            ([1, 3], 4),
+        )
+
+    def test_hrt_precheck_legacy_groups_do_not_duplicate_device_zero(self) -> None:
+        self.assertEqual(
+            _resolve_fpf_hrt_precheck_topology(
+                hrt_device_ids=None,
+                rf_vf_groups=[{"suffix": "vf1"}, {"suffix": "vf2"}],
+                injected_lanes=list(range(8)),
+                expected_session_count=32,
+            ),
+            ([0], None),
+        )
+
     def test_partial_plane_remote_failure_groups_use_explicit_devices(self):
         groups = fpf_rf_vf_groups(
             active_lanes=[0, 1, 2, 3],
@@ -793,6 +877,18 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             by_id["fpf_hrt_fsdb_session_disrupt"]["impacted_tuples_by_host_device"],
             expected_impacted,
         )
+
+        for drain_name in (
+            "fpf_tc17_link_drain_disrupt",
+            "fpf_tc19_device_drain_disrupt",
+        ):
+            drain_precheck = next(
+                check
+                for check in _playbook(config, drain_name).prechecks or []
+                if check.check_id == "fpf_hrt_fsdb_session_precheck"
+            )
+            self.assertEqual(_check_params(drain_precheck)["device_ids"], device_ids)
+            self.assertEqual(_check_params(drain_precheck)["planes_per_device"], 4)
 
         drain = _playbook(config, "fpf_tc17_link_drain_disrupt")
         drain_by_id = {

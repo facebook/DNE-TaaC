@@ -25604,6 +25604,72 @@ def create_fpf_hardening_playbook_v2(
     return Playbook(**playbook_kwargs)
 
 
+_FPF_HRT_LOCAL_PLANES_PER_DEVICE = 4
+
+
+def _resolve_fpf_hrt_precheck_topology(
+    *,
+    hrt_device_ids: list[int] | None,
+    rf_vf_groups: list | None,
+    injected_lanes: list[int],
+    expected_session_count: int,
+) -> tuple[list[int], int | None]:
+    """Resolve and validate the HRT device/local-plane session model.
+
+    ``[0]`` is the legacy sentinel and therefore leaves the health check's
+    historical four-GPU/eight-plane defaults untouched. Multi-device callers
+    supply the device set, and its product with the canonical four local planes
+    must equal the expected session count. ``injected_lanes`` uses the global
+    two-VF lane domain (0..7), not the per-device local-plane domain (0..3).
+    """
+    if expected_session_count <= 0:
+        raise ValueError("expected_session_count must be positive")
+
+    if hrt_device_ids:
+        resolved_device_ids = [int(device_id) for device_id in hrt_device_ids]
+        if len(resolved_device_ids) != len(set(resolved_device_ids)):
+            raise ValueError(f"HRT device IDs must be unique: {resolved_device_ids}")
+    else:
+        derived_device_ids = {
+            int(device_id)
+            for group in (rf_vf_groups or [])
+            for device_id in group.get("device_ids", [0])
+        }
+        resolved_device_ids = sorted(derived_device_ids) or [0]
+
+    if any(device_id < 0 for device_id in resolved_device_ids):
+        raise ValueError(
+            f"HRT device IDs must be non-negative: {resolved_device_ids}"
+        )
+
+    if resolved_device_ids == [0]:
+        return resolved_device_ids, None
+    planes_per_device = _FPF_HRT_LOCAL_PLANES_PER_DEVICE
+    derived_session_count = len(resolved_device_ids) * planes_per_device
+    if derived_session_count != expected_session_count:
+        raise ValueError(
+            "Invalid HRT FSDB-session topology: expected_session_count "
+            f"{expected_session_count} does not equal {len(resolved_device_ids)} "
+            f"device IDs * {planes_per_device} local planes/device "
+            f"({derived_session_count})"
+        )
+    global_lane_count = 2 * planes_per_device
+    invalid_lanes = sorted(
+        {
+            int(lane)
+            for lane in injected_lanes
+            if int(lane) < 0 or int(lane) >= global_lane_count
+        }
+    )
+    if invalid_lanes:
+        raise ValueError(
+            f"Injected global lanes {invalid_lanes} are outside 0.."
+            f"{global_lane_count - 1} for a {planes_per_device}-local-plane "
+            "two-VF topology"
+        )
+    return resolved_device_ids, planes_per_device
+
+
 def create_fpf_link_event_disrupt_playbook(
     *,
     gtsws: list[str],
@@ -25721,11 +25787,27 @@ def create_fpf_link_event_disrupt_playbook(
         create_longevity_step,
     )
 
+    resolved_hrt_device_ids, precheck_planes_per_device = (
+        _resolve_fpf_hrt_precheck_topology(
+            hrt_device_ids=hrt_device_ids,
+            rf_vf_groups=rf_vf_groups,
+            injected_lanes=injected_lanes,
+            expected_session_count=fsdb_expected_total,
+        )
+    )
+    precheck_device_ids = (
+        None
+        if resolved_hrt_device_ids == [0]
+        else list(resolved_hrt_device_ids)
+    )
+
     # ---- Prechecks: assert healthy/stable BEFORE the disruption ----
     prechecks = [
         create_fpf_hrt_fsdb_session_check(
             hosts=hosts,
             expected_session_count=fsdb_expected_total,
+            device_ids=precheck_device_ids,
+            planes_per_device=precheck_planes_per_device,
             check_id="fpf_hrt_fsdb_session_precheck",
         ),
     ]
@@ -25831,14 +25913,6 @@ def create_fpf_link_event_disrupt_playbook(
     sig1 = FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
     sig2 = FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
     sig3 = FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
-    resolved_hrt_device_ids = hrt_device_ids or sorted(
-        {
-            int(device_id)
-            for group in (rf_vf_groups or [])
-            for device_id in group.get("device_ids", [0])
-        }
-    ) or [0]
-
     postchecks = []
 
     # GTSW-side convergence (UNCHANGED — the GTSW<->GPU link being down does not
