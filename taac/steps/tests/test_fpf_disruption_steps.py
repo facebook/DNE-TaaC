@@ -3,6 +3,7 @@
 # pyre-unsafe
 import json
 import time
+import typing as t
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,7 +31,7 @@ from taac.steps.step_definitions import (
 from taac.test_as_a_config.thrift_types import Service, Step, StepName, TestConfig
 
 
-def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6"):
+def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6") -> CustomStep:
     """Build a CustomStep wired with a mocked driver (no real DUT)."""
     device = MagicMock(spec=TestDevice)
     device.name = hostname
@@ -57,6 +58,11 @@ def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6"):
     cs.driver = AsyncMock()
     cs.logger = MagicMock()
     return cs
+
+
+def _driver_mock(custom_step: CustomStep) -> AsyncMock:
+    """Expose the concrete test double behind CustomStep's driver interface."""
+    return t.cast(AsyncMock, custom_step.driver)
 
 
 def _params(step: Step) -> dict:
