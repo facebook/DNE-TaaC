@@ -974,6 +974,10 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
         ]
         ticks = iter([0.0, 100.0])
         with (
+            self.assertRaisesRegex(
+                Exception,
+                r"natural interface recovery exceeded 0s.*restored \['eth1/4/1'\]",
+            ),
             patch("time.time", side_effect=lambda: next(ticks, 100.0)),
             patch(
                 "neteng.test_infra.dne.taac.internal.steps.custom_step."
@@ -998,11 +1002,108 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             )
-        ssh.assert_awaited_once()
-        host, command = ssh.await_args.args
-        self.assertEqual(host, "rtptest1555")
-        self.assertIn("mstreg -d 0000:03:00.0 --reg_name PAOS", command)
-        self.assertIn("admin_status=1", command)
+        self.assertEqual(ssh.await_count, 2)
+        down, up = [call.args for call in ssh.await_args_list]
+        self.assertEqual(down[0], "rtptest1555")
+        self.assertEqual(up[0], "rtptest1555")
+        self.assertIn("mstreg --yes -d 0000:03:00.0 --reg_name PAOS", down[1])
+        self.assertIn("admin_status=2", down[1])
+        self.assertIn("mstreg --yes -d 0000:03:00.0 --reg_name PAOS", up[1])
+        self.assertIn("admin_status=1", up[1])
+
+    async def test_scoped_paos_down_command_timeout_is_strict_failure(self):
+        cs = _make_custom_step()
+        interface = "eth1/41/5"
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {interface: True}
+        cs.driver.async_get_all_interfaces_operational_status.return_value = {
+            interface: False
+        }
+        with (
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"scoped NIC PAOS-DOWN failed.*rc=124.*timed out",
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_fpf_async_ssh_run",
+                new=AsyncMock(
+                    side_effect=[
+                        (124, "", "timed out"),
+                        (0, "PAOS up", ""),
+                    ]
+                ),
+            ) as ssh,
+        ):
+            await cs._restore_rapid_flap_interfaces(
+                driver=cs.driver,
+                device="gtsw001.l1002.c087.mwg2",
+                interface_hosts={interface: "twshared1352"},
+                final_up_timeout_sec=0,
+                final_up_poll_interval_sec=0,
+                nic_recovery_by_interface={
+                    interface: {
+                        "host": "twshared1352.03.mwg2",
+                        "dev": 0,
+                        "lane": 0,
+                    }
+                },
+            )
+        self.assertEqual(ssh.await_count, 2)
+        _, command = ssh.await_args_list[0].args
+        self.assertEqual(
+            command,
+            "mstreg --yes -d 0000:03:00.0 --reg_name PAOS "
+            '--set "admin_status=2,ase=1,fd=1" -i "local_port=1"',
+        )
+        self.assertIn("mstreg --yes", ssh.await_args_list[1].args[1])
+        self.assertIn("admin_status=1", ssh.await_args_list[1].args[1])
+
+    async def test_scoped_paos_up_failure_retries_up_and_remains_failure(self):
+        cs = _make_custom_step()
+        interface = "eth1/41/5"
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {interface: True}
+        cs.driver.async_get_all_interfaces_operational_status.side_effect = [
+            {interface: False},
+            {interface: True},
+        ]
+        with (
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"PAOS-UP failed.*rc=124.*final switch-state readback: all "
+                r"touched interfaces UP",
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_fpf_async_ssh_run",
+                new=AsyncMock(
+                    side_effect=[
+                        (0, "PAOS down", ""),
+                        (124, "", "timed out"),
+                        (0, "PAOS up", ""),
+                    ]
+                ),
+            ) as ssh,
+        ):
+            await cs._restore_rapid_flap_interfaces(
+                driver=cs.driver,
+                device="gtsw001.l1002.c087.mwg2",
+                interface_hosts={interface: "twshared1352"},
+                final_up_timeout_sec=0,
+                final_up_poll_interval_sec=0,
+                nic_recovery_by_interface={
+                    interface: {
+                        "host": "twshared1352.03.mwg2",
+                        "dev": 0,
+                        "lane": 0,
+                    }
+                },
+            )
+        self.assertEqual(ssh.await_count, 3)
+        commands = [call.args[1] for call in ssh.await_args_list]
+        self.assertIn("admin_status=2", commands[0])
+        self.assertIn("admin_status=1", commands[1])
+        self.assertIn("admin_status=1", commands[2])
+        self.assertTrue(all("mstreg --yes" in command for command in commands))
 
     async def test_scoped_paos_recovers_every_latched_interface_on_same_host(self):
         cs = _make_custom_step()
@@ -1024,10 +1125,17 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
             }
             for gpu, interface in enumerate(interfaces)
         }
-        with patch(
-            "neteng.test_infra.dne.taac.internal.steps.custom_step._fpf_async_ssh_run",
-            new=AsyncMock(return_value=(0, "PAOS enabled", "")),
-        ) as ssh:
+        with (
+            self.assertRaisesRegex(
+                Exception,
+                r"natural interface recovery exceeded 0s.*eth1/41/5.*eth1/41/8",
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_fpf_async_ssh_run",
+                new=AsyncMock(return_value=(0, "PAOS enabled", "")),
+            ) as ssh,
+        ):
             await cs._restore_rapid_flap_interfaces(
                 driver=cs.driver,
                 device="gtsw001.l1002.c087.mwg2",
@@ -1036,7 +1144,7 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
                 final_up_poll_interval_sec=0,
                 nic_recovery_by_interface=recovery,
             )
-        self.assertEqual(ssh.await_count, 4)
+        self.assertEqual(ssh.await_count, 8)
         commands = [call.args[1] for call in ssh.await_args_list]
         for bdf in (
             "0000:03:00.0",
@@ -1044,7 +1152,12 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
             "0010:03:00.0",
             "0012:03:00.0",
         ):
-            self.assertTrue(any(f"mstreg -d {bdf}" in command for command in commands))
+            self.assertTrue(
+                any(f"mstreg --yes -d {bdf}" in command for command in commands)
+            )
+        for down, up in zip(commands[::2], commands[1::2]):
+            self.assertIn("admin_status=2", down)
+            self.assertIn("admin_status=1", up)
 
     async def test_fail_closed_cleanup_survives_cancellation(self):
         cs = _make_custom_step()
