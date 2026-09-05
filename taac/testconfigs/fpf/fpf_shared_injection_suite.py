@@ -167,27 +167,13 @@ COLLECTOR_GTSWS = list(dict.fromkeys([*OBSERVER_GTSWS, DEVICE_DRAIN_GTSW]))
 # Restart / link-event source configs advertise on (and clear from) all 8 STSWs.
 ALL_STSW_TRIGGERS = ALL_STSWS
 
-# ---------------------------------------------------------------------------
-# Circuit list (the GTSW<->GPU link the link-event playbooks drive) — identical
-# to tc15/tc16/tc17/tc19. gtsw001 -> lane 0, rtptest1555 GPU0 beth0.
-# (rtptest1555 hangs off eth1/45/x on each GTSW; the retired rtptest1544 used eth1/41/x.)
-# ---------------------------------------------------------------------------
-CIRCUITS = [
-    Circuit(
-        a_end_device=OBSERVER_GTSWS[0],
-        a_end_interface="eth1/45/5",
-        z_end_device=GPU_HOSTS[0],
-        z_end_gpu_id=0,
-    ),
-]
-
 
 def _link_drain_circuits() -> list[Circuit]:
-    """Resolve the TC17 target independently from the legacy TC15/TC16 link."""
+    """Resolve the validated single-link target for TC15, TC16, and TC17."""
     return [
         Circuit(
             a_end_device=DUT_GTSW,
-            a_end_interface=fpf_link_drain_interface(),
+            a_end_interface=fpf_link_drain_interface(GPU_HOSTS),
             z_end_device=GPU_HOSTS[0],
             z_end_gpu_id=0,
         )
@@ -1101,18 +1087,18 @@ def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
     return steps
 
 
-def _tc15(*, spray, skip_ssh) -> list:
+def _tc15(*, circuits: list[Circuit], spray, skip_ssh) -> list:
     """tc15: GTSW<->GPU interface disable (disrupt + restore)."""
-    impacted_lanes = sorted({c.lane for c in CIRCUITS})
-    n = num_disrupted_circuits(CIRCUITS)
+    impacted_lanes = sorted({c.lane for c in circuits})
+    n = num_disrupted_circuits(circuits)
     stabilization_delay_sec = 300
     longevity_sec = 120
 
     disrupt_interfaces = sorted(
-        {i for intfs in disable_interfaces_by_device(CIRCUITS).values() for i in intfs}
+        {i for intfs in disable_interfaces_by_device(circuits).values() for i in intfs}
     )
     disrupt_steps = [
-        *_disable_steps(CIRCUITS, enable=False),
+        *_disable_steps(circuits, enable=False),
         create_longevity_step(
             duration=longevity_sec,
             description=(
@@ -1134,9 +1120,9 @@ def _tc15(*, spray, skip_ssh) -> list:
         stabilization_delay_sec=stabilization_delay_sec,
         injected_lanes=INJECTED_LANES,
         impacted_lanes=impacted_lanes,
-        impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu(CIRCUITS),
-        impacted_beths_by_host=_impacted_beths_by_host(CIRCUITS),
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu(circuits),
+        impacted_beths_by_host=_impacted_beths_by_host(circuits),
+        impacted_planes_by_host=_impacted_planes_by_host(circuits),
         prod_prefixes=PROD_PREFIXES,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
@@ -1155,7 +1141,7 @@ def _tc15(*, spray, skip_ssh) -> list:
         hosts=GPU_HOSTS,
         trigger_stsws=TRIGGER_STSWS,
         disruption_steps=[
-            *_disable_steps(CIRCUITS, enable=True),
+            *_disable_steps(circuits, enable=True),
             create_longevity_step(
                 duration=180,
                 description="Settle after re-enable; expect full recovery",
@@ -1176,7 +1162,7 @@ def _tc15(*, spray, skip_ssh) -> list:
         convergence_settle_sec=120,
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_planes_by_host=_impacted_planes_by_host(circuits),
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         skip_fsdb_session_precheck=True,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -1188,11 +1174,11 @@ def _tc15(*, spray, skip_ssh) -> list:
     return [disrupt_playbook, restore_playbook]
 
 
-def _tc16(*, spray, skip_ssh) -> list:
+def _tc16(*, circuits: list[Circuit], spray, skip_ssh) -> list:
     """tc16: GTSW<->GPU interface enable (single v2 playbook)."""
     stabilization_delay_sec = 300
     steps = []
-    for dev, intfs in disable_interfaces_by_device(CIRCUITS).items():
+    for dev, intfs in disable_interfaces_by_device(circuits).items():
         steps.append(
             create_fpf_set_interface_admin_step(
                 interfaces=intfs,
@@ -1505,7 +1491,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
         traffic_config=IB_TRAFFIC_CONFIG,
     )
     spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
-    link_drain_circuits = _link_drain_circuits()
+    link_event_circuits = _link_drain_circuits()
     device_drain_circuits = _device_drain_circuits(DEVICE_DRAIN_GTSW)
 
     # Ordered least-destructive -> most-destructive. Each entry contributes one or
@@ -1532,11 +1518,19 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     # NDP clear.
     playbooks += _tc38(spray=spray, skip_ssh=skip_ssh)
     # Interface admin events.
-    playbooks += _tc15(spray=spray, skip_ssh=skip_ssh)
-    playbooks += _tc16(spray=spray, skip_ssh=skip_ssh)
+    playbooks += _tc15(
+        circuits=link_event_circuits,
+        spray=spray,
+        skip_ssh=skip_ssh,
+    )
+    playbooks += _tc16(
+        circuits=link_event_circuits,
+        spray=spray,
+        skip_ssh=skip_ssh,
+    )
     # GTSW drains.
     playbooks += _tc17(
-        circuits=link_drain_circuits,
+        circuits=link_event_circuits,
         spray=spray,
         skip_ssh=skip_ssh,
     )

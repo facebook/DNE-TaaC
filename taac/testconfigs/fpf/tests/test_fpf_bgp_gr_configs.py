@@ -933,6 +933,60 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             self.assertEqual(session_params["device_ids"], device_ids)
             self.assertEqual(session_params["planes_per_device"], 4)
 
+    def test_tc15_and_tc16_use_validated_twshared_interface(self):
+        hosts = ["twshared1352.03.mwg2", "twshared1375.03.mwg2"]
+        with (
+            patch.object(fpf_shared_injection_suite, "GPU_HOSTS", hosts),
+            patch.dict(
+                os.environ,
+                {"TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5"},
+            ),
+        ):
+            circuits = fpf_shared_injection_suite._link_drain_circuits()
+            tc15 = fpf_shared_injection_suite._tc15(
+                circuits=circuits,
+                spray=None,
+                skip_ssh=True,
+            )
+            tc16 = fpf_shared_injection_suite._tc16(
+                circuits=circuits,
+                spray=None,
+                skip_ssh=True,
+            )
+
+        self.assertEqual(circuits[0].a_end_device, "gtsw001.l1002.c087.mwg2")
+        self.assertEqual(circuits[0].a_end_interface, "eth1/41/5")
+        self.assertEqual(circuits[0].z_end_device, hosts[0])
+
+        def admin_actions(playbook):
+            return [
+                _step_params(step)
+                for stage in playbook.stages
+                for step in stage.steps
+                if step.step_params is not None
+                and _step_params(step).get("custom_step_name")
+                == "fpf_set_interface_admin"
+            ]
+
+        disable = admin_actions(tc15[0])
+        restore = admin_actions(tc15[1])
+        compatibility_enable = admin_actions(tc16[0])
+        self.assertEqual(
+            [(action["interfaces"], action["is_enable"]) for action in disable],
+            [(["eth1/41/5"], False)],
+        )
+        self.assertEqual(
+            [(action["interfaces"], action["is_enable"]) for action in restore],
+            [(["eth1/41/5"], True)],
+        )
+        self.assertEqual(
+            [
+                (action["interfaces"], action["is_enable"])
+                for action in compatibility_enable
+            ],
+            [(["eth1/41/5"], True)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
