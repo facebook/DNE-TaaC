@@ -30,6 +30,7 @@ from taac.steps.step_definitions import (
     create_fpf_gar_set_links_step,
     create_fpf_gar_validate_step,
     create_fpf_lldp_batched_set_interface_admin_step,
+    create_fpf_multi_gtsw_rapid_flap_step,
     create_fpf_ndp_clear_loop_step,
     create_fpf_nic_mstreg_flap_step,
     create_fpf_rapid_flap_step,
@@ -664,9 +665,57 @@ class TestRapidFlapStepLldp(unittest.IsolatedAsyncioTestCase):
         )
         p = _params(step)
         self.assertEqual(p["neighbor_hosts"], ["rtptest1555", "rtptest1575"])
-        # The glob is still carried as a fallback.
-        self.assertEqual(p["neighbor_pattern"], "rtptest*")
+        # Exact hosts are authoritative; do not retain a broader fallback glob.
+        self.assertIsNone(p["neighbor_pattern"])
         self.assertEqual(p["down_time_sec"], 6.0)
+
+    def test_factory_serializes_opt_in_fail_closed_contract(self):
+        step = create_fpf_rapid_flap_step_lldp(
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=900,
+            fail_closed=True,
+            expected_interfaces=["eth1/41/5"],
+            require_exact_neighbor_hosts=True,
+            final_up_timeout_sec=60,
+            final_up_poll_interval_sec=5,
+            nic_recovery_by_interface={
+                "eth1/41/5": {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                },
+            },
+        )
+        p = _params(step)
+        self.assertTrue(p["fail_closed"])
+        self.assertEqual(p["expected_interfaces"], ["eth1/41/5"])
+        self.assertTrue(p["require_exact_neighbor_hosts"])
+        self.assertEqual(
+            p["nic_recovery_by_interface"],
+            {
+                "eth1/41/5": {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                }
+            },
+        )
+
+    def test_fail_closed_factories_require_exact_interface_scope(self):
+        with self.assertRaisesRegex(ValueError, "expected_interfaces"):
+            create_fpf_rapid_flap_step_lldp(
+                neighbor_hosts=["twshared1352.03.mwg2"],
+                duration_sec=900,
+                fail_closed=True,
+            )
+        with self.assertRaisesRegex(ValueError, "expected_interfaces"):
+            create_fpf_multi_gtsw_rapid_flap_step(
+                gtsws=["gtsw001.l1002.c087.mwg2"],
+                neighbor_hosts=["twshared1352.03.mwg2"],
+                duration_sec=900,
+                fail_closed=True,
+                expected_interfaces=[],
+            )
 
     async def test_flaps_lldp_resolved_tuple_wall_clock_bounded(self):
         """The handler loops single flaps until duration_sec elapses.
@@ -735,6 +784,227 @@ class TestRapidFlapStepLldp(unittest.IsolatedAsyncioTestCase):
             }
         )
         cs.driver.async_do_rapid_interface_flaps.assert_not_awaited()
+
+    async def test_fail_closed_rejects_inexact_lldp_before_flap(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        with self.assertRaisesRegex(Exception, "LLDP interface scope mismatch"):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        cs.driver.async_do_rapid_interface_flaps.assert_not_awaited()
+
+    async def test_fail_closed_handler_requires_exact_interface_scope(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        with self.assertRaisesRegex(Exception, "exact expected_interfaces scope"):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        cs.driver.async_do_rapid_interface_flaps.assert_not_awaited()
+
+    async def test_multi_gtsw_rejected_scope_does_not_run_cleanup(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cleanup = AsyncMock()
+        with (
+            self.assertRaisesRegex(Exception, "one or more GTSWs failed"),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=cleanup),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001.l1002.c087.mwg2"],
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        driver.async_do_rapid_interface_flaps.assert_not_awaited()
+        cleanup.assert_not_awaited()
+
+    async def test_fail_closed_restores_and_verifies_after_flap_failure(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_do_rapid_interface_flaps.side_effect = RuntimeError("boom")
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/4/1": True
+        }
+        cs.driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/4/1": True
+        }
+        with (
+            self.assertRaisesRegex(RuntimeError, "boom"),
+            patch("time.time", return_value=0.0),
+        ):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/4/1"],
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        cs.driver.async_run_cmd_on_shell.assert_awaited_once_with(
+            "wedge_qsfp_util -tx_enable eth1/4/1"
+        )
+        cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=("eth1/4/1",), is_enable_port=True
+        )
+
+    async def test_restore_failure_chains_original_flap_failure(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_do_rapid_interface_flaps.side_effect = RuntimeError(
+            "flap failed"
+        )
+        cleanup = AsyncMock(side_effect=ValueError("restore failed"))
+        with (
+            self.assertRaisesRegex(ValueError, "restore failed") as raised,
+            patch("time.time", return_value=0.0),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=cleanup),
+        ):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/4/1"],
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), "flap failed")
+
+    async def test_fail_closed_uses_scoped_paos_for_admin_up_oper_down(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_get_all_interfaces_admin_status.side_effect = [
+            {"eth1/4/1": True},
+            {"eth1/4/1": True},
+        ]
+        cs.driver.async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/4/1": False},
+            {"eth1/4/1": True},
+        ]
+        with (
+            patch("time.time", side_effect=[0.0, 100.0]),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_fpf_async_ssh_run",
+                new=AsyncMock(return_value=(0, "PAOS enabled", "")),
+            ) as ssh,
+        ):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/4/1"],
+                    "require_exact_neighbor_hosts": True,
+                    "final_up_timeout_sec": 0,
+                    "nic_recovery_by_interface": {
+                        "eth1/4/1": {
+                            "host": "rtptest1555",
+                            "dev": 0,
+                            "lane": 0,
+                        }
+                    },
+                }
+            )
+        ssh.assert_awaited_once()
+        host, command = ssh.await_args.args
+        self.assertEqual(host, "rtptest1555")
+        self.assertIn("mstreg -d 0000:03:00.0 --reg_name PAOS", command)
+        self.assertIn("admin_status=1", command)
+
+    async def test_scoped_paos_recovers_every_latched_interface_on_same_host(self):
+        cs = _make_custom_step()
+        interfaces = [f"eth1/41/{channel}" for channel in range(5, 9)]
+        interface_hosts = dict.fromkeys(interfaces, "twshared1352")
+        cs.driver.async_get_all_interfaces_admin_status.side_effect = [
+            dict.fromkeys(interfaces, True),
+            dict.fromkeys(interfaces, True),
+        ]
+        cs.driver.async_get_all_interfaces_operational_status.side_effect = [
+            dict.fromkeys(interfaces, False),
+            dict.fromkeys(interfaces, True),
+        ]
+        recovery = {
+            interface: {
+                "host": "twshared1352.03.mwg2",
+                "dev": gpu,
+                "lane": 0,
+            }
+            for gpu, interface in enumerate(interfaces)
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step._fpf_async_ssh_run",
+            new=AsyncMock(return_value=(0, "PAOS enabled", "")),
+        ) as ssh:
+            await cs._restore_rapid_flap_interfaces(
+                driver=cs.driver,
+                device="gtsw001.l1002.c087.mwg2",
+                interface_hosts=interface_hosts,
+                final_up_timeout_sec=0,
+                final_up_poll_interval_sec=0,
+                nic_recovery_by_interface=recovery,
+            )
+        self.assertEqual(ssh.await_count, 4)
+        commands = [call.args[1] for call in ssh.await_args_list]
+        for bdf in (
+            "0000:03:00.0",
+            "0002:03:00.0",
+            "0010:03:00.0",
+            "0012:03:00.0",
+        ):
+            self.assertTrue(any(f"mstreg -d {bdf}" in command for command in commands))
+
+    async def test_fail_closed_cleanup_survives_cancellation(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_do_rapid_interface_flaps.side_effect = asyncio.CancelledError
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/4/1": True
+        }
+        cs.driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/4/1": True
+        }
+        with (
+            self.assertRaises(asyncio.CancelledError),
+            patch("time.time", return_value=0.0),
+        ):
+            await cs.fpf_rapid_flap_lldp(
+                {
+                    "neighbor_hosts": ["rtptest1555"],
+                    "duration_sec": 30,
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/4/1"],
+                    "require_exact_neighbor_hosts": True,
+                }
+            )
+        cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=("eth1/4/1",), is_enable_port=True
+        )
 
 
 class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):

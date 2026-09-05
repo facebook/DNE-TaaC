@@ -624,6 +624,74 @@ def gtsw_to_lane(gtsw: str) -> int:
     return int(m.group(1)) - 1
 
 
+def fpf_gpu_downlink_interfaces(
+    gpu_hosts: list[str] | None = None,
+) -> list[str]:
+    """Return the exact four GPU-facing breakouts anchored by the known circuit.
+
+    ``fpf_link_drain_interface`` validates the environment-selected GPU0
+    circuit. The other three GPU ports are the adjacent breakout channels on
+    MWG2 (for example eth1/41/5..8 for twshared1352).
+    """
+    first = fpf_link_drain_interface(gpu_hosts)
+    match = re.fullmatch(r"(eth\d+/\d+/)(\d+)", first)
+    if match is None:
+        raise ValueError(f"Cannot derive GPU downlink bundle from {first!r}")
+    start = int(match.group(2))
+    if start not in (1, 5):
+        raise ValueError(
+            "GPU downlink bundle must start at breakout channel 1 or 5 so its "
+            f"four channels stay within one 1..4/5..8 group; got {first!r}"
+        )
+    return [f"{match.group(1)}{start + gpu}" for gpu in range(GPUS_PER_BE_NODE)]
+
+
+def fpf_nic_recovery_by_interface(
+    *,
+    gtsw: str,
+    host: str,
+    interfaces: list[str],
+) -> dict[str, dict[str, str | int]]:
+    """Map each GPU-facing GTSW interface to its exact PAOS recovery target.
+
+    A GTSW plane maps to the same physical NIC lane on each of the four GPUs.
+    ``dev`` is the physical GPU index consumed by ``_nic_mstreg_bdf``. Under
+    the 8-device HRT SDK representation, that physical GPU maps separately to
+    logical device IDs ``2*N``/``2*N+1``; those logical IDs are not PAOS
+    addresses. ``lane`` remains the global NIC lane (0..7).
+    """
+    if len(interfaces) != GPUS_PER_BE_NODE or len(set(interfaces)) != len(interfaces):
+        raise ValueError(
+            f"Expected {GPUS_PER_BE_NODE} unique GPU downlinks, got {interfaces}"
+        )
+    parsed: list[tuple[str, str, int]] = []
+    for interface in interfaces:
+        match = re.fullmatch(r"(eth\d+/\d+/)(\d+)", interface)
+        if match is None:
+            raise ValueError(f"Cannot derive GPU identity from {interface!r}")
+        parsed.append((interface, match.group(1), int(match.group(2))))
+    port_stems = {stem for _interface, stem, _channel in parsed}
+    if len(port_stems) != 1:
+        raise ValueError(f"GPU downlinks must share one parent port: {interfaces}")
+    channels = {channel for _interface, _stem, channel in parsed}
+    bundle_start = min(channels)
+    expected_channels = set(range(bundle_start, bundle_start + GPUS_PER_BE_NODE))
+    if bundle_start not in (1, 5) or channels != expected_channels:
+        raise ValueError(
+            "GPU downlinks must be one exact 1..4 or 5..8 breakout bundle; "
+            f"got {interfaces}"
+        )
+    lane = gtsw_to_lane(gtsw)
+    return {
+        interface: {
+            "host": host,
+            "dev": channel - bundle_start,
+            "lane": lane,
+        }
+        for interface, _stem, channel in parsed
+    }
+
+
 @dataclass(frozen=True)
 class Circuit:
     """One GTSW<->GPU link, described end to end.

@@ -4,8 +4,9 @@
 
 """TC32: All Downlink Flaps on GTSW (scaled "1hr" rapid-flap stability test).
 
-Rapidly flaps ALL of the GTSW->GPU DOWNLINK interfaces on the DUT GTSW for a
-sustained window, then validates that the steady state recovers cleanly. The
+Rapidly flaps the exact four GTSW->GPU downlinks from the DUT GTSW to the
+configured traffic-server host for a sustained window, then validates that the
+steady state recovers cleanly. The
 original test plan calls for a 1-hour flap soak; this config runs a SCALED
 version (15 min rapid flaps + 5 min longevity) so it fits a normal test slot
 while still exercising the same churn path (continuous FSDB ribMap updates and
@@ -24,11 +25,9 @@ Two-playbook "longevity-anchored health check" pattern:
 Downlink interface selection (runtime LLDP):
   Uses ``create_fpf_rapid_flap_step_lldp`` so the GTSW->GPU downlink set is
   resolved at step run time by enumerating LLDP neighbors on the DUT GTSW and
-  matching the remote system name against the GPU-host pattern
-  (``DOWNLINK_NEIGHBOR_PATTERN``, fnmatch glob — defaults to ``"rtptest*"`` to
-  match the MWG2 GPU hosts ``rtptest1544.mwg2`` / ``rtptest1575.mwg2``). No
-  hardcoded eth1/37/* breakouts here — the testbed wiring can change without
-  touching this config.
+  matching the remote system name against the exact configured GPU host. TC32
+  requires the exact four-interface bundle anchored by the environment-aware
+  GPU0 circuit and fails before disruption if LLDP returns a different scope.
 
 Usage:
   buck2 run neteng/netcastle:netcastle_taac -- \\
@@ -47,27 +46,51 @@ from taac.steps.step_definitions import (
     create_longevity_step,
 )
 from taac.task_definitions import (
+    create_fpf_inject_vf_groups_task,
+    create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
     create_fpf_stop_collectors_task,
+    create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
+    ALL_GTSWS,
+    ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
-    DEFAULT_SUBNET_PREFIX,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_gpu_downlink_interfaces,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
+    fpf_nic_recovery_by_interface,
+    fpf_rf_vf_groups,
+    fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
-    TRIGGER_STSWS,
+    VF_COLLECTOR_SUBNET,
+    VF_GROUP_PREFIX_COUNT,
 )
 from taac.test_as_a_config.types import TestConfig
 
-PREFIX_COUNT = 1000
+INJECTION_GROUPS = fpf_vf_injection_groups()
+PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
+INJECT_SETTLE_SEC = 120
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 # Scaled flap window (15 min) — the "1hr" plan compressed to a normal slot.
 FLAP_DURATION_SEC = 900
 FLAP_INTERVAL_SEC = 1
@@ -75,12 +98,7 @@ FLAP_INTERVAL_SEC = 1
 LONGEVITY_SEC = 300
 
 DUT_GTSW = OBSERVER_GTSWS[0]
-
-# GTSW->GPU downlink neighbor pattern (fnmatch glob over LLDP remote system
-# name). The rapid-flap step resolves the actual eth1/* breakout list at run
-# time by reading LLDP on DUT_GTSW and picking interfaces whose neighbor
-# matches this glob. ``rtptest*`` covers the MWG2 GPU hosts.
-DOWNLINK_NEIGHBOR_PATTERN = "rtptest*"
+FLAP_HOST = GPU_HOSTS[0]
 
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
@@ -88,32 +106,48 @@ PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 
 
 def create_fpf_tc32_test_config() -> TestConfig:
+    # Resolve environment-dependent topology inside the factory so repeated
+    # construction cannot reuse a stale import-time interface/recovery map.
+    flap_interfaces = fpf_gpu_downlink_interfaces()
+    nic_recovery_by_interface = fpf_nic_recovery_by_interface(
+        gtsw=DUT_GTSW,
+        host=FLAP_HOST,
+        interfaces=flap_interfaces,
+    )
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh,
+        skip_ib,
+        traffic_config=IB_TRAFFIC_CONFIG,
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
     disrupt_playbook = create_fpf_disruption_only_playbook(
-        gtsws=OBSERVER_GTSWS,
+        gtsws=ALL_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         disruption_steps=[
             create_fpf_rapid_flap_step_lldp(
                 # Scope precisely to the configured GPU hosts (exact match);
-                # the glob is kept only as a fallback when neighbor_hosts is
-                # empty. This prevents flapping ALL 132 downlinks (the tc32
+                # exact host selector prevents flapping ALL 132 downlinks (the tc32
                 # 36h-hang root cause) — only rtptest1544/rtptest1575 are
                 # flapped.
-                neighbor_hosts=GPU_HOSTS,
-                neighbor_pattern=DOWNLINK_NEIGHBOR_PATTERN,
+                neighbor_hosts=[FLAP_HOST],
                 duration_sec=FLAP_DURATION_SEC,
                 flap_interval_sec=FLAP_INTERVAL_SEC,
                 # Symmetric cycle: enable -> 6s up -> disable -> 6s down.
                 flap_down_time_sec=6,
                 flap_up_time_sec=6,
+                fail_closed=True,
+                expected_interfaces=flap_interfaces,
+                require_exact_neighbor_hosts=True,
+                nic_recovery_by_interface=nic_recovery_by_interface,
                 device_regexes=[DUT_GTSW],
                 description=(
-                    f"Rapid-flap LLDP-resolved downlinks to {GPU_HOSTS} on "
-                    f"{DUT_GTSW} for {FLAP_DURATION_SEC}s (wall-clock bound)"
+                    f"Rapid-flap exact LLDP circuits {DUT_GTSW} "
+                    f"{flap_interfaces} -> {FLAP_HOST} for "
+                    f"{FLAP_DURATION_SEC}s (wall-clock bound)"
                 ),
             ),
             create_longevity_step(
@@ -127,9 +161,9 @@ def create_fpf_tc32_test_config() -> TestConfig:
     # Stable-state longevity playbook: same expectations as the stress config.
     # All HCs anchor at this playbook's (longevity) start time.
     longevity_playbook = create_fpf_hardening_playbook_v2(
-        gtsws=OBSERVER_GTSWS,
+        gtsws=ALL_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         soak_duration_sec=LONGEVITY_SEC,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
@@ -141,29 +175,43 @@ def create_fpf_tc32_test_config() -> TestConfig:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
+        skip_injection=True,
+        rf_vf_groups=RF_VF_GROUPS,
+        lanes=INJECTED_LANES,
+        hrt_device_ids=HRT_DEVICE_IDS,
     )
 
     return TestConfig(
         name="fpf_tc32_downlink_flaps",
-        endpoints=create_fpf_endpoints(),
+        endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
             create_fpf_start_collectors_task(
-                gtsws=OBSERVER_GTSWS,
+                gtsws=ALL_GTSWS,
                 hosts=GPU_HOSTS,
-                subnet_prefix=DEFAULT_SUBNET_PREFIX,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
+                subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=PROD_PREFIXES,
                 prod_prefix_host=PROD_PREFIX_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
+                rf_vf_groups=RF_VF_GROUPS,
+            ),
+            create_fpf_inject_vf_groups_task(
+                groups=INJECTION_GROUPS,
+                settle_sec=INJECT_SETTLE_SEC,
             ),
         ],
         teardown_tasks=[
+            create_fpf_withdraw_vf_groups_task(groups=INJECTION_GROUPS),
+            create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(
-                trigger_stsws=TRIGGER_STSWS,
-                prefix_count=PREFIX_COUNT,
+                trigger_stsws=ALL_STSWS,
                 community_list=DEFAULT_COMMUNITY_LIST,
+                withdraw=False,
             ),
             *ib_teardown,
         ],

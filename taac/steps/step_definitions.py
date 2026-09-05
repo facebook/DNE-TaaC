@@ -3262,6 +3262,14 @@ def create_fpf_rapid_flap_step_lldp(
     neighbor_hosts: t.Optional[t.List[str]] = None,
     flap_down_time_sec: float = 6.0,
     flap_up_time_sec: float = 6.0,
+    fail_closed: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
+    require_exact_neighbor_hosts: bool = False,
+    final_up_timeout_sec: int = 60,
+    final_up_poll_interval_sec: int = 5,
+    nic_recovery_by_interface: t.Optional[
+        t.Dict[str, t.Dict[str, t.Union[str, int]]]
+    ] = None,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3301,9 +3309,44 @@ def create_fpf_rapid_flap_step_lldp(
             ``tx_enable -> sleep up -> tx_disable -> sleep down`` — and the
             handler leaves the link UP at the end. ``flap_interval_sec`` is
             unused with the symmetric cycle.
+        fail_closed: Opt into fatal discovery/execution/restore errors and
+            positive final-UP verification. False preserves legacy callers.
+        expected_interfaces: Exact LLDP-resolved interface set required when
+            fail_closed is enabled.
+        require_exact_neighbor_hosts: Require exact explicit-host LLDP coverage.
+        final_up_timeout_sec: Maximum wait for final admin+oper UP state.
+        final_up_poll_interval_sec: Final-state polling interval.
+        nic_recovery_by_interface: Optional exact interface -> {host, dev, lane}
+            PAOS-UP fallback for an admin-UP/oper-DOWN latch.
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
+    if fail_closed and not expected_interfaces:
+        raise ValueError(
+            "fail_closed rapid flap requires a non-empty exact "
+            "expected_interfaces scope"
+        )
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_rapid_flap_lldp",
+        "neighbor_pattern": None if neighbor_hosts else neighbor_pattern,
+        "neighbor_hosts": neighbor_hosts,
+        "duration_sec": duration_sec,
+        "flap_interval_sec": flap_interval_sec,
+        "down_time_sec": flap_down_time_sec,
+        "up_time_sec": flap_up_time_sec,
+    }
+    if fail_closed:
+        params.update(
+            {
+                "fail_closed": True,
+                "expected_interfaces": expected_interfaces,
+                "require_exact_neighbor_hosts": require_exact_neighbor_hosts,
+                "final_up_timeout_sec": final_up_timeout_sec,
+                "final_up_poll_interval_sec": final_up_poll_interval_sec,
+                "nic_recovery_by_interface": nic_recovery_by_interface,
+            }
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
@@ -3312,19 +3355,7 @@ def create_fpf_rapid_flap_step_lldp(
             f"(neighbors~={neighbor_hosts or neighbor_pattern!r}) "
             f"for {duration_sec}s"
         ),
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_rapid_flap_lldp",
-                    "neighbor_pattern": neighbor_pattern,
-                    "neighbor_hosts": neighbor_hosts,
-                    "duration_sec": duration_sec,
-                    "flap_interval_sec": flap_interval_sec,
-                    "down_time_sec": flap_down_time_sec,
-                    "up_time_sec": flap_up_time_sec,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
         device_regexes=device_regexes,
     )
 
@@ -3342,6 +3373,14 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     churn_every_sec: int = 120,
     churn_devices: t.Optional[t.List[str]] = None,
     uniform_interface_discovery: bool = False,
+    final_up_timeout_sec: int = 60,
+    final_up_poll_interval_sec: int = 5,
+    fail_closed: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
+    require_exact_neighbor_hosts: bool = False,
+    nic_recovery_by_gtsw_interface: t.Optional[
+        t.Dict[str, t.Dict[str, t.Dict[str, t.Union[str, int]]]]
+    ] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Flap the links facing a GPU host across MANY GTSWs CONCURRENTLY.
@@ -3371,13 +3410,28 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         churn_action: "restart" (default) or "crash".
         churn_every_sec: seconds between churn rounds (default 120 = 2 min).
         churn_devices: devices to churn (defaults to ``gtsws``).
+        final_up_timeout_sec: maximum wait for every touched interface to be
+            admin-enabled and operationally UP after cleanup (default 60).
+        final_up_poll_interval_sec: final-state polling interval (default 5).
+        fail_closed: Opt into fatal discovery/execution/restore errors and
+            positive final-UP verification. False preserves legacy callers.
+        expected_interfaces: Exact interface set required on each GTSW.
+        require_exact_neighbor_hosts: Require exact explicit-host LLDP coverage.
+        nic_recovery_by_gtsw_interface: Optional GTSW -> interface ->
+            {host, dev, lane} PAOS-UP fallback for an admin-UP/oper-DOWN latch.
         description: Custom step description.
     """
+    if fail_closed and not expected_interfaces:
+        raise ValueError(
+            "fail_closed multi-GTSW rapid flap requires a non-empty exact "
+            "expected_interfaces scope"
+        )
+
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "fpf_multi_gtsw_rapid_flap",
         "gtsws": gtsws,
         "neighbor_hosts": neighbor_hosts,
-        "neighbor_pattern": neighbor_pattern,
+        "neighbor_pattern": None if neighbor_hosts else neighbor_pattern,
         "duration_sec": duration_sec,
         "down_time_sec": flap_down_time_sec,
         "up_time_sec": flap_up_time_sec,
@@ -3387,6 +3441,17 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         "churn_devices": churn_devices,
         "uniform_interface_discovery": uniform_interface_discovery,
     }
+    if fail_closed:
+        params.update(
+            {
+                "fail_closed": True,
+                "expected_interfaces": expected_interfaces,
+                "require_exact_neighbor_hosts": require_exact_neighbor_hosts,
+                "final_up_timeout_sec": final_up_timeout_sec,
+                "final_up_poll_interval_sec": final_up_poll_interval_sec,
+                "nic_recovery_by_gtsw_interface": (nic_recovery_by_gtsw_interface),
+            }
+        )
     if churn_service is not None:
         params["churn_service"] = int(churn_service.value)
     return Step(
