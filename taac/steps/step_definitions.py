@@ -2889,6 +2889,8 @@ def create_fpf_set_interface_admin_step(
 def create_fpf_drain_interface_step(
     interfaces: t.Optional[t.List[str]],
     drain: bool,
+    target_device: t.Optional[str] = None,
+    mutation_token: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Soft-drain / undrain via the on-box LOCAL_DRAINER, calling the driver
@@ -2911,18 +2913,49 @@ def create_fpf_drain_interface_step(
         default_desc = f"{'Soft-drain' if drain else 'Undrain'} {intfs} (local drainer)"
     else:
         default_desc = f"{'Soft-drain' if drain else 'Undrain'} DEVICE (local drainer)"
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_drain_interface",
+        "interfaces": intfs,
+        "is_drain": drain,
+    }
+    if target_device:
+        params["target_device"] = target_device
+    if mutation_token:
+        params["mutation_token"] = mutation_token
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or default_desc,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_drain_interface",
-                    "interfaces": intfs,
-                    "is_drain": drain,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_fpf_conditional_undrain_step(
+    interfaces: t.Optional[t.List[str]],
+    mutation_token: str,
+    target_device: t.Optional[str] = None,
+    best_effort: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Restore only a drain owned by this playbook's mutation token.
+
+    With no matching marker the step is an explicit no-op. This makes it safe
+    to put in ``Playbook.cleanup_steps``: cancellation after the drain is
+    restored, while a precondition failure cannot clear ambient drain state.
+    """
+    intfs = interfaces or []
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_conditional_undrain",
+        "interfaces": intfs,
+        "mutation_token": mutation_token,
+        "best_effort": best_effort,
+    }
+    if target_device:
+        params["target_device"] = target_device
+    scope = f"interface(s) {intfs}" if intfs else "whole device"
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Restore owned drain on {scope}",
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -2933,6 +2966,7 @@ def create_fpf_verify_disruption_step(
     mode: str = "admin_oper",
     expect_drained: bool = True,
     fail_if_ineffective: bool = False,
+    target_device: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Disruption-effectiveness gate: verify the disrupted interface(s) actually
@@ -2947,26 +2981,28 @@ def create_fpf_verify_disruption_step(
     ``expect_drained`` — the correct signal for a link DRAIN, where the port
     stays admin=ENABLED / oper=UP by design (control up, data depreferenced).
 
+    mode="device_clean": read-only precondition that requires both the
+    device-level drain flag and every per-port drain flag to be clear.
+
     fail_if_ineffective=True RAISES (fails the step / aborts the playbook) when
     the disruption did not take, instead of only recording it for downstream
     SKIP. Use for a disable, where a no-op makes the whole test meaningless.
     """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_verify_disruption",
+        "interfaces": interfaces,
+        "mode": mode,
+        "expect_admin_enabled": expect_admin_enabled,
+        "expect_oper_up": expect_oper_up,
+        "expect_drained": expect_drained,
+        "fail_if_ineffective": fail_if_ineffective,
+    }
+    if target_device:
+        params["target_device"] = target_device
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or f"Verify disruption effective on {interfaces}",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_verify_disruption",
-                    "interfaces": interfaces,
-                    "mode": mode,
-                    "expect_admin_enabled": expect_admin_enabled,
-                    "expect_oper_up": expect_oper_up,
-                    "expect_drained": expect_drained,
-                    "fail_if_ineffective": fail_if_ineffective,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -3541,6 +3577,7 @@ def create_fpf_nic_mstreg_flap_step(
 def create_fpf_restart_ib_traffic_step(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Kill + restart the long-lived ``ib_write_bw`` flow on server + clients.
@@ -3557,27 +3594,28 @@ def create_fpf_restart_ib_traffic_step(
     Args:
         server: server host (e.g. ``"rtptest1544.mwg2"``).
         clients: client host(s) (non-empty).
+        binary_path: Absolute ib_write_bw path. Defaults to /usr/bin/ib_write_bw.
         description: Custom step description.
     """
+    payload: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_restart_ib_traffic",
+        "server": server,
+        "clients": clients,
+    }
+    if binary_path is not None:
+        payload["binary_path"] = binary_path
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"Restart ib_write_bw: server={server} clients={clients}",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_restart_ib_traffic",
-                    "server": server,
-                    "clients": clients,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(payload)),
     )
 
 
 def create_fpf_ensure_traffic_step(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
     device: t.Optional[str] = None,
     gid_iface: t.Optional[str] = None,
     gid_prefix: t.Optional[str] = None,
@@ -3606,9 +3644,10 @@ def create_fpf_ensure_traffic_step(
     Args:
         server: server host (e.g. ``"rtptest1544.mwg2"``).
         clients: client host(s) (non-empty).
-        device / gid_iface / gid_prefix / gid_index / port / msg_size / qp /
-            tclass / iters: The exact setup-time ib_write_bw contract. Supplying
-            these prevents recovery from silently using different defaults.
+        binary_path / device / gid_iface / gid_prefix / gid_index / port /
+            msg_size / qp / tclass / iters: The exact setup-time ib_write_bw
+            contract. Supplying these prevents recovery from silently using
+            different defaults.
         min_egress_gbps / settle_sec / ods_window_sec: ODS recovery-validation
             contract, shared with the setup task.
         traffic_floor_gbps: per-plane egress floor in Gbps (default 5.0 in the
@@ -3621,6 +3660,7 @@ def create_fpf_ensure_traffic_step(
         "clients": clients,
     }
     optional_params = {
+        "binary_path": binary_path,
         "device": device,
         "gid_iface": gid_iface,
         "gid_prefix": gid_prefix,

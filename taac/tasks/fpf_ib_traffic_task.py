@@ -28,6 +28,7 @@ Usage in TestConfig:
 """
 
 import asyncio
+import posixpath
 import re
 import shlex
 import time
@@ -83,6 +84,8 @@ DEFAULT_PROCESS_VALIDATION_INTERVAL_SEC = 1.0
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _DEVICE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_:.-]+$")
+_ABSOLUTE_BINARY_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
+_WORLD_WRITABLE_STAGING_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,96 @@ class IbWriteBwProcess:
     cgroup: str
 
 
-def build_ib_process_snapshot_cmd() -> str:
+def _validate_binary_path(binary_path: str) -> str:
+    if not isinstance(binary_path, str) or not _ABSOLUTE_BINARY_RE.fullmatch(
+        binary_path
+    ):
+        raise ValueError(
+            "Invalid ib_write_bw binary path: expected an absolute path without "
+            f"whitespace, got {binary_path!r}"
+        )
+    if posixpath.normpath(binary_path) != binary_path:
+        raise ValueError(
+            "Invalid ib_write_bw binary path: path must be canonical without "
+            f"'.', '..', or duplicate separators, got {binary_path!r}"
+        )
+    if any(
+        binary_path == root or binary_path.startswith(f"{root}/")
+        for root in _WORLD_WRITABLE_STAGING_ROOTS
+    ):
+        raise ValueError(
+            "Invalid ib_write_bw binary path: world-writable staging roots "
+            f"{_WORLD_WRITABLE_STAGING_ROOTS} are not trusted; got {binary_path!r}"
+        )
+    return binary_path
+
+
+def _build_ib_mode_validation_cmd() -> str:
+    """Return the shell fragment that rejects group/world-writable modes."""
+    return (
+        'case "$mode" in ""|*[!0-7]*) '
+        'echo "INVALID_MODE:$candidate:$mode"; exit 5;; esac; '
+        'if [ "$((0$mode & 022))" -ne 0 ]; then '
+        'echo "GROUP_OR_WORLD_WRITABLE:$candidate:$mode"; exit 7; fi; '
+    )
+
+
+def build_ib_binary_probe_cmd(binary_path: str = IB_WRITE_BW_BIN) -> str:
+    """Return a fail-closed executable and root-owned path-chain check."""
+    path = shlex.quote(_validate_binary_path(binary_path))
+    return (
+        f"if [ ! -e {path} ]; then echo MISSING; exit 2; fi; "
+        f"if [ ! -f {path} ]; then echo NOT_REGULAR; exit 3; fi; "
+        f"if [ ! -x {path} ]; then echo NOT_EXECUTABLE; exit 4; fi; "
+        f"candidate={path}; "
+        "while :; do "
+        "metadata=$(stat -Lc '%u %a' -- \"$candidate\" 2>/dev/null) || "
+        '{ echo "STAT_FAILED:$candidate"; exit 5; }; '
+        "owner=${metadata%% *}; mode=${metadata#* }; "
+        'if [ "$owner" != 0 ]; then echo "NOT_ROOT_OWNED:$candidate:$owner"; '
+        "exit 6; fi; "
+        f"{_build_ib_mode_validation_cmd()}"
+        '[ "$candidate" = / ] && break; '
+        'candidate=${candidate%/*}; [ -n "$candidate" ] || candidate=/; '
+        "done; "
+        'printf "OK\\n"'
+    )
+
+
+async def validate_remote_ib_binary(
+    *,
+    host: str,
+    binary_path: str,
+    ssh_run: t.Callable[..., t.Awaitable[t.Tuple[int, str, str]]],
+) -> None:
+    """Require a root-owned executable under a non-writable path on ``host``."""
+    path = _validate_binary_path(binary_path)
+    rc, out, err = await ssh_run(host, build_ib_binary_probe_cmd(path))
+    if rc != 0 or out.strip() != "OK":
+        detail = err.strip() or out.strip() or "no output"
+        raise RuntimeError(
+            f"{host}: ib_write_bw binary validation failed for {path!r} "
+            f"(rc={rc}): {detail}"
+        )
+
+
+async def launch_validated_ib_process(
+    *,
+    host: str,
+    binary_path: str,
+    launch_cmd: str,
+    ssh_run: t.Callable[..., t.Awaitable[t.Tuple[int, str, str]]],
+) -> t.Tuple[int, str, str]:
+    """Revalidate the binary immediately before issuing its launch command."""
+    await validate_remote_ib_binary(
+        host=host,
+        binary_path=binary_path,
+        ssh_run=ssh_run,
+    )
+    return await ssh_run(host, launch_cmd)
+
+
+def build_ib_process_snapshot_cmd(binary_path: str = IB_WRITE_BW_BIN) -> str:
     """Return a fail-closed process inventory command without duplicate zeros.
 
     A shell ``pgrep -c ... || echo 0`` prints two zero lines because ``pgrep``
@@ -104,12 +196,17 @@ def build_ib_process_snapshot_cmd() -> str:
     exact executable match, including the evidence needed to diagnose cgroup
     ownership after an HRT restart.
     """
+    path = shlex.quote(_validate_binary_path(binary_path))
     return (
-        "for pid in $(pgrep -x ib_write_bw 2>/dev/null); do "
+        "for proc in /proc/[0-9]*; do "
+        '[ -r "$proc/cmdline" ] || continue; '
+        "first=$(tr '\\0' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
+        f'[ "$first" = {path} ] || continue; '
+        'pid="${proc##*/}"; '
         'printf "PID=%s\\tCMD=" "$pid"; '
-        "tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null; "
+        "tr '\\0' ' ' < \"$proc/cmdline\" 2>/dev/null; "
         'printf "\\tCGROUP="; '
-        "tr '\\n' ';' < /proc/$pid/cgroup 2>/dev/null; "
+        "tr '\\n' ';' < \"$proc/cgroup\" 2>/dev/null; "
         'printf "\\n"; '
         "done"
     )
@@ -188,7 +285,10 @@ async def validate_remote_ib_process(
     if attempts < 1:
         raise ValueError("process validation attempts must be at least 1")
     snapshots: list[IbWriteBwProcess] = []
-    command = build_ib_process_snapshot_cmd()
+    expected_argv = shlex.split(expected_cmd)
+    if not expected_argv:
+        raise ValueError("expected ib_write_bw command must not be empty")
+    command = build_ib_process_snapshot_cmd(expected_argv[0])
     for attempt in range(attempts):
         rc, out, err = await ssh_run(host, command)
         if rc != 0:
@@ -338,11 +438,12 @@ def build_ib_write_bw_cmd(
     tclass: int = DEFAULT_TCLASS,
     iters: int = DEFAULT_ITERS,
     server: t.Optional[str] = None,
+    binary_path: str = IB_WRITE_BW_BIN,
 ) -> str:
     """Build the ib_write_bw command. If ``server`` is set, it's a client cmd."""
     _validate_device(device)
     cmd = (
-        f"{IB_WRITE_BW_BIN} -S 0 --report_gbits"
+        f"{_validate_binary_path(binary_path)} -S 0 --report_gbits"
         f" -d {device} -m {int(msg_size)} -x {int(gid_index)} --qp {int(qp)}"
         f" -a -F --tclass {int(tclass)} -p {int(port)} --ipv6-addr -n {int(iters)}"
         f" -b --run_infinitely"
@@ -458,6 +559,7 @@ class FpfStartIbTrafficTask(BaseTask):
         clients = [_validate_hostname(c) for c in params["clients"]]
         if not clients:
             raise ValueError("fpf_start_ib_traffic requires at least one client host")
+        binary_path = _validate_binary_path(params.get("binary_path", IB_WRITE_BW_BIN))
         device = _validate_device(params.get("device", DEFAULT_DEVICE))
         # GID index is discovered per host from show_gids unless explicitly set.
         gid_override = params.get("gid_index")
@@ -498,7 +600,7 @@ class FpfStartIbTrafficTask(BaseTask):
         )
         logger.info(
             f"[FpfStartIbTraffic] server={server} clients={clients} "
-            f"device={device} {gid_note} port={port}; "
+            f"binary={binary_path} device={device} {gid_note} port={port}; "
             f"settle={settle_sec}s, threshold={min_egress_gbps:.1f} Gbps/host"
         )
 
@@ -506,6 +608,16 @@ class FpfStartIbTrafficTask(BaseTask):
             if gid_override is not None:
                 return int(gid_override)
             return await self._resolve_gid_index(host, gid_iface, gid_prefix)
+
+        # Validate every endpoint before killing an existing flow. A missing or
+        # non-executable staged binary must fail setup without destroying the
+        # only traffic process that may still be running.
+        for host in all_hosts:
+            await validate_remote_ib_binary(
+                host=host,
+                binary_path=binary_path,
+                ssh_run=self._ssh_run,
+            )
 
         # Clean any stale ib_write_bw on every host first (best-effort).
         for host in all_hosts:
@@ -518,11 +630,23 @@ class FpfStartIbTrafficTask(BaseTask):
         server_log = f"/tmp/ib_write_bw_server_{attempt_id}.log"
         server_gid = await _gid_for(server)
         server_cmd = build_ib_write_bw_cmd(
-            device, server_gid, port, msg_size, qp, tclass, iters
+            device,
+            server_gid,
+            port,
+            msg_size,
+            qp,
+            tclass,
+            iters,
+            binary_path=binary_path,
         )
         server_full = f"setsid nohup {server_cmd} > {server_log} 2>&1 & echo $!"
         logger.info(f"[FpfStartIbTraffic] {server} SERVER cmd: {server_full}")
-        rc, out, err = await self._ssh_run(server, server_full)
+        rc, out, err = await launch_validated_ib_process(
+            host=server,
+            binary_path=binary_path,
+            launch_cmd=server_full,
+            ssh_run=self._ssh_run,
+        )
         if rc != 0:
             raise Exception(
                 f"[FpfStartIbTraffic] failed to start server on {server} "
@@ -542,12 +666,25 @@ class FpfStartIbTrafficTask(BaseTask):
         for host in clients:
             client_gid = await _gid_for(host)
             client_cmd = build_ib_write_bw_cmd(
-                device, client_gid, port, msg_size, qp, tclass, iters, server=server
+                device,
+                client_gid,
+                port,
+                msg_size,
+                qp,
+                tclass,
+                iters,
+                server=server,
+                binary_path=binary_path,
             )
             client_log = f"/tmp/ib_write_bw_client_{attempt_id}.log"
             client_full = f"setsid nohup {client_cmd} > {client_log} 2>&1 & echo $!"
             logger.info(f"[FpfStartIbTraffic] {host} CLIENT cmd: {client_full}")
-            rc, out, err = await self._ssh_run(host, client_full)
+            rc, out, err = await launch_validated_ib_process(
+                host=host,
+                binary_path=binary_path,
+                launch_cmd=client_full,
+                ssh_run=self._ssh_run,
+            )
             if rc != 0:
                 raise Exception(
                     f"[FpfStartIbTraffic] failed to start client on {host} "

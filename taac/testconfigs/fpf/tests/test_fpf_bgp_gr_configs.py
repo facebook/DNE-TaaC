@@ -119,6 +119,22 @@ def _assert_fsdb_restart_contract(test, playbook, has_drain_window: bool) -> Non
         test.assertEqual(disruption_descriptions, [])
 
 
+def _assert_ods_policy(test, playbook, transient_discard_allowed: bool) -> None:
+    by_id = {
+        check.check_id: check for check in playbook.postchecks or [] if check.check_id
+    }
+    for check_id in ("ods_in_dst_null_discard", "ods_in_discard"):
+        params = _check_params(by_id[check_id])
+        test.assertEqual(params["baseline_excess_max"], 10000)
+        test.assertIs(
+            params["transient_excess_informational"], transient_discard_allowed
+        )
+    for check_id in ("ods_in_congestion", "ods_out_congestion"):
+        params = _check_params(by_id[check_id])
+        test.assertNotIn("baseline_excess_max", params)
+        test.assertFalse(params.get("informational", False))
+
+
 class TestFpfGracefulRestartConfigs(unittest.TestCase):
     def test_partial_plane_remote_failure_groups_use_explicit_devices(self):
         groups = fpf_rf_vf_groups(
@@ -193,6 +209,30 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                     self, _playbook(config, name), has_drain_window
                 )
 
+    def test_gr_discard_policy_is_hard_within_and_transient_only_beyond(self):
+        standalone = (
+            (fpf_tc05_bgp_gr_within_window.create_fpf_tc05_test_config(), False),
+            (fpf_tc06_bgp_gr_beyond_window.create_fpf_tc06_test_config(), True),
+            (fpf_tc07_fsdb_gr_within_window.create_fpf_tc07_test_config(), False),
+            (fpf_tc08_fsdb_gr_beyond_window.create_fpf_tc08_test_config(), True),
+        )
+        for config, transient_allowed in standalone:
+            with self.subTest(config=config.name):
+                _assert_ods_policy(self, config.playbooks[0], transient_allowed)
+
+        shared = (
+            fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
+        )
+        for name, transient_allowed in (
+            ("fpf_tc05_bgp_gr_within_window", False),
+            ("fpf_tc06_bgp_gr_beyond_window", True),
+            ("fpf_tc07_fsdb_gr_within_window", False),
+            ("fpf_tc08_fsdb_gr_beyond_window", True),
+            ("fpf_tc41_longevity_pristine", False),
+        ):
+            with self.subTest(playbook=name):
+                _assert_ods_policy(self, _playbook(shared, name), transient_allowed)
+
     def test_shared_suite_uses_tc04_as_the_single_wedge_warm_restart(self):
         config = (
             fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
@@ -246,6 +286,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                     "FPF_HRT_VF1_DEVICE_IDS": "0,2,4,6",
                     "FPF_HRT_VF2_DEVICE_IDS": "1,3,5,7",
                     "TAAC_FPF_IB_DEVICE": "mlx5_bveth0",
+                    "TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5",
                 },
             ):
                 os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)

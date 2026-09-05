@@ -182,9 +182,9 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         self.assertNotIn("fpf_hrt_fsdb_session_disrupt", ids)
         # flip_discards=False -> NO failing in_discard loss assertion.
         self.assertNotIn("ods_in_discard_loss_expected", ids)
-        # ods_discard_informational=True -> the two DISCARD checks are added
-        # with informational=True (breach -> [INFORMATIONAL] PASS), and the
-        # two CONGESTION checks are added without informational (hard).
+        # ods_discard_informational=True -> transient baseline excess is
+        # informational for the two DISCARD checks, but final recovery and both
+        # CONGESTION checks remain hard.
         self.assertIn("ods_in_dst_null_discard", ids)
         self.assertIn("ods_in_discard", ids)
         self.assertIn("ods_in_congestion", ids)
@@ -198,8 +198,12 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         out_congestion = json.loads(
             by_id["ods_out_congestion"].check_params.json_params
         )
-        self.assertIs(in_dst_null.get("informational"), True)
-        self.assertIs(in_discard.get("informational"), True)
+        self.assertEqual(in_dst_null.get("baseline_excess_max"), 10000)
+        self.assertEqual(in_discard.get("baseline_excess_max"), 10000)
+        self.assertIs(in_dst_null.get("transient_excess_informational"), True)
+        self.assertIs(in_discard.get("transient_excess_informational"), True)
+        self.assertFalse(in_dst_null.get("informational", False))
+        self.assertFalse(in_discard.get("informational", False))
         # Congestion checks stay hard: informational is False (or absent).
         self.assertFalse(in_congestion.get("informational", False))
         self.assertFalse(out_congestion.get("informational", False))

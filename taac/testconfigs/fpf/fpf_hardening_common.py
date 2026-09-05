@@ -44,6 +44,7 @@ def skip_ib_traffic() -> bool:
 
 
 DEFAULT_IB_DEVICE: str = "mlx5_34"
+DEFAULT_IB_BINARY: str = "/usr/bin/ib_write_bw"
 DEFAULT_IB_GID_IFACE: str = "bveth0"
 DEFAULT_IB_GID_PREFIX: str = "2401"
 DEFAULT_IB_PORT: int = 15000
@@ -54,11 +55,17 @@ DEFAULT_IB_ITERS: int = 1000
 DEFAULT_IB_MIN_EGRESS_GBPS: float = 10.0
 DEFAULT_IB_SETTLE_SEC: int = 120
 DEFAULT_IB_ODS_WINDOW_SEC: int = 120
+DEFAULT_LINK_DRAIN_INTERFACE: str = "eth1/45/5"
+DEFAULT_GPU_HOSTS: list[str] = ["rtptest1555.mwg2", "rtptest1599.mwg2"]
+_KNOWN_LINK_DRAIN_INTERFACES: dict[str, str] = {
+    "twshared1352.03.mwg2": "eth1/41/5",
+}
 
 
 class FpfIbTrafficConfig(t.TypedDict):
     server: str
     clients: list[str]
+    binary_path: str
     device: str
     gid_iface: str
     gid_prefix: str
@@ -82,6 +89,64 @@ def fpf_ib_device() -> str:
         os.environ.get("TAAC_FPF_IB_DEVICE", DEFAULT_IB_DEVICE).strip()
         or DEFAULT_IB_DEVICE
     )
+
+
+def fpf_ib_binary() -> str:
+    """Return the absolute ib_write_bw path for setup and recovery.
+
+    The default production path is preserved. Testbeds with host-provisioning
+    drift may point at a verified, temporarily staged binary, but relative or
+    whitespace-containing paths are rejected before config generation so the
+    command cannot be interpreted differently by the remote shell.
+    """
+    binary_path = (
+        os.environ.get("TAAC_FPF_IB_BINARY", DEFAULT_IB_BINARY).strip()
+        or DEFAULT_IB_BINARY
+    )
+    if not os.path.isabs(binary_path):
+        raise ValueError(
+            f"TAAC_FPF_IB_BINARY must be an absolute path; got {binary_path!r}"
+        )
+    if re.search(r"\s", binary_path):
+        raise ValueError(
+            f"TAAC_FPF_IB_BINARY must not contain whitespace; got {binary_path!r}"
+        )
+    return binary_path
+
+
+def fpf_link_drain_interface(
+    gpu_hosts: list[str] | None = None,
+) -> str:
+    """Return the GTSW interface used by shared-suite link-drain tests.
+
+    The legacy RTP topology keeps its historical ``eth1/45/5`` default. A
+    non-default GPU host pair must explicitly supply
+    ``TAAC_FPF_LINK_DRAIN_INTERFACE`` so a copied config cannot silently drain
+    the previous host's circuit. MWG2 twshared1352 uses ``eth1/41/5`` on
+    ``gtsw001.l1002.c087.mwg2`` for device 0 / local plane 0 / beth0.
+    """
+    hosts = list(GPU_HOSTS if gpu_hosts is None else gpu_hosts)
+    configured = os.environ.get("TAAC_FPF_LINK_DRAIN_INTERFACE", "").strip()
+    if not configured:
+        if hosts != DEFAULT_GPU_HOSTS:
+            raise ValueError(
+                "TAAC_FPF_LINK_DRAIN_INTERFACE is required when FPF_GPU_HOSTS "
+                f"differs from the legacy RTP hosts {DEFAULT_GPU_HOSTS}; got {hosts}"
+            )
+        return DEFAULT_LINK_DRAIN_INTERFACE
+    if re.fullmatch(r"eth\d+/\d+/\d+", configured) is None:
+        raise ValueError(
+            "TAAC_FPF_LINK_DRAIN_INTERFACE must be an exact FBOSS interface "
+            f"name such as eth1/41/5; got {configured!r}"
+        )
+    server = hosts[0].removesuffix(".facebook.com") if hosts else ""
+    known = _KNOWN_LINK_DRAIN_INTERFACES.get(server)
+    if known is not None and configured != known:
+        raise ValueError(
+            f"TAAC_FPF_LINK_DRAIN_INTERFACE={configured!r} does not match the "
+            f"validated {server} device0/local-plane0 circuit {known!r}"
+        )
+    return configured
 
 
 TRIGGER_STSWS = [
@@ -337,11 +402,29 @@ OBSERVER_GTSWS = [
 # (async_get_device_driver), so these do NOT all need to be in endpoints.
 ALL_GTSWS = [f"gtsw00{i}.l1002.c087.mwg2" for i in range(1, 9)]
 
+
+def fpf_device_drain_gtsw() -> str:
+    """Return the TC19 whole-device drain target.
+
+    The legacy target remains gtsw001. Alternate testbeds can select another
+    local-pod GTSW explicitly, but a typo or remote-pod target is rejected
+    before config generation. MWG2 twshared testing uses gtsw002 so an ambient
+    drain on gtsw001 is never cleared or otherwise mutated by TC19.
+    """
+    target = os.environ.get("TAAC_FPF_DEVICE_DRAIN_GTSW", "").strip()
+    if not target:
+        return ALL_GTSWS[0]
+    if target not in ALL_GTSWS:
+        raise ValueError(
+            "TAAC_FPF_DEVICE_DRAIN_GTSW must be one of the local-pod "
+            f"FPF GTSWs {ALL_GTSWS}; got {target!r}"
+        )
+    return target
+
+
 GPU_HOSTS = [
     host.strip()
-    for host in os.environ.get(
-        "FPF_GPU_HOSTS", "rtptest1555.mwg2,rtptest1599.mwg2"
-    ).split(",")
+    for host in os.environ.get("FPF_GPU_HOSTS", ",".join(DEFAULT_GPU_HOSTS)).split(",")
     if host.strip()
 ]
 if len(GPU_HOSTS) < 2:
@@ -371,6 +454,7 @@ def fpf_ib_traffic_config(*, ib_device: str | None = None) -> FpfIbTrafficConfig
     return {
         "server": IB_TRAFFIC_SERVER,
         "clients": list(IB_TRAFFIC_CLIENTS),
+        "binary_path": fpf_ib_binary(),
         "device": ib_device if ib_device is not None else fpf_ib_device(),
         "gid_iface": DEFAULT_IB_GID_IFACE,
         "gid_prefix": DEFAULT_IB_GID_PREFIX,
@@ -438,6 +522,7 @@ def fpf_ib_traffic_tasks(
             create_fpf_start_ib_traffic_task(
                 server=config["server"],
                 clients=config["clients"],
+                binary_path=config["binary_path"],
                 device=config["device"],
                 gid_iface=config["gid_iface"],
                 gid_prefix=config["gid_prefix"],

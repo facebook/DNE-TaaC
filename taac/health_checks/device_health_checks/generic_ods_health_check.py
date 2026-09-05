@@ -37,6 +37,117 @@ def dict(ods_data) -> JSON:
     return dict_data
 
 
+def _sum_entity_time_series(
+    entity_data: t.Mapping[str, t.Mapping[t.Any, t.Any]],
+) -> t.Dict[int, float]:
+    """Collapse reduced ODS keys into one per-entity timestamp series."""
+    values: t.Dict[int, float] = {}
+    for time_series in entity_data.values():
+        for timestamp, value in time_series.items():
+            ts = int(timestamp)
+            values[ts] = values.get(ts, 0.0) + float(value)
+    return values
+
+
+def _normalize_ods_entity_name(entity: str) -> str:
+    """Normalize ODS response keys to the requested host identity."""
+    name = entity.strip()
+    if "::" in name:
+        name = name.split("::", 1)[1]
+    name = name.split(":", 1)[0]
+    return name.split(".", 1)[0].lower()
+
+
+def _find_ods_entity_data(
+    ods_data: t.Mapping[str, t.Mapping[str, t.Mapping[t.Any, t.Any]]],
+    expected_entity: str,
+) -> t.Optional[t.Mapping[str, t.Mapping[t.Any, t.Any]]]:
+    """Find one entity despite ODS reducer prefixes/suffixes and FQDNs."""
+    expected = _normalize_ods_entity_name(expected_entity)
+    matches = [
+        entity_data
+        for returned_entity, entity_data in ods_data.items()
+        if _normalize_ods_entity_name(returned_entity) == expected
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _evaluate_baseline_excess(
+    values: t.Mapping[int, float],
+    *,
+    test_start: float,
+    query_end: float,
+    bucket_width_sec: int,
+    min_baseline_buckets: int,
+    final_bucket_count: int,
+    allowed_excess: float,
+) -> t.Dict[str, t.Any]:
+    """Evaluate trailing-window counters against their pre-test ceiling.
+
+    A ``.sum.60`` point at T describes the trailing interval ``(T-60, T]``.
+    Therefore points ending at/before the test start are complete baseline
+    buckets, points ending during the first bucket after the start straddle the
+    boundary and are excluded, and later points are complete test buckets.
+    """
+    baseline = sorted((ts, value) for ts, value in values.items() if ts <= test_start)
+    test_values = sorted(
+        (ts, value)
+        for ts, value in values.items()
+        if test_start + bucket_width_sec <= ts <= query_end
+    )
+    straddling_count = sum(
+        1 for ts in values if test_start < ts < test_start + bucket_width_sec
+    )
+    if len(baseline) < min_baseline_buckets:
+        return {
+            "conclusive": False,
+            "reason": (
+                f"only {len(baseline)} complete pre-test buckets; "
+                f"need {min_baseline_buckets}"
+            ),
+            "straddling_count": straddling_count,
+        }
+    if not test_values:
+        return {
+            "conclusive": False,
+            "reason": "no complete post-start buckets",
+            "straddling_count": straddling_count,
+        }
+    if len(test_values) < final_bucket_count:
+        return {
+            "conclusive": False,
+            "reason": (
+                f"only {len(test_values)} complete post-start buckets; need "
+                f"{final_bucket_count} for the final-state policy"
+            ),
+            "straddling_count": straddling_count,
+        }
+
+    baseline_ceiling = max(value for _, value in baseline)
+    allowed_total = baseline_ceiling + allowed_excess
+    peak_ts, peak_value = max(test_values, key=lambda item: item[1])
+    final_values = test_values[-max(1, final_bucket_count) :]
+    final_violations = [
+        (ts, value) for ts, value in final_values if value > allowed_total
+    ]
+    return {
+        "conclusive": True,
+        "baseline_count": len(baseline),
+        "baseline_ceiling": baseline_ceiling,
+        "allowed_total": allowed_total,
+        "peak_ts": peak_ts,
+        "peak_value": peak_value,
+        "peak_excess": max(0.0, peak_value - baseline_ceiling),
+        "transient_violation": peak_value > allowed_total,
+        "final_count": len(final_values),
+        "final_max": max(value for _, value in final_values),
+        "final_violations": final_violations,
+        "straddling_count": straddling_count,
+    }
+
+
 class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
     CHECK_NAME = hc_types.CheckName.GENERIC_ODS_CHECK
     LOG_TO_SCUBA = True
@@ -51,8 +162,23 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         entity_desc = check_params.get("entity_desc", obj.name)
         min_ods_query_duration = int(check_params.get("min_ods_query_duration", 120))
         use_tc_start = check_params.get("use_test_case_start_time", False)
-        if use_tc_start:
-            tc_start = get_test_case_start_time()
+        tc_start = get_test_case_start_time() if use_tc_start else None
+        baseline_excess_max = check_params.get("baseline_excess_max")
+        baseline_test_start: t.Optional[float] = None
+        if baseline_excess_max is not None and tc_start is None:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "[INCONCLUSIVE] Baseline-aware ODS evaluation requires "
+                    "a recorded test-case start time"
+                ),
+            )
+        if baseline_excess_max is not None:
+            assert tc_start is not None
+            baseline_test_start = float(tc_start)
+            baseline_lookback_sec = int(check_params.get("baseline_lookback_sec", 420))
+            start_time = int(baseline_test_start) - baseline_lookback_sec
+        elif use_tc_start:
             start_time = int(tc_start) if tc_start else int(time.time())
         else:
             start_time = int(check_params.get("start_time", time.time()))
@@ -88,7 +214,12 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             # A SKIP (no data) is not a failure and does not need a short link;
             # keep the raw ODS URL inline and skip the throttled fburl tier.
             ods_query_url = ods_query_url_raw
-            msg = f"ODS query returned no data: {ods_query_url}"
+            msg = (
+                f"[INCONCLUSIVE] Baseline-aware ODS query returned no data: "
+                f"{ods_query_url}"
+                if baseline_excess_max is not None
+                else f"ODS query returned no data: {ods_query_url}"
+            )
             self.logger.debug(msg)
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.SKIP,
@@ -115,6 +246,129 @@ class GenericOdsHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         # rather than failing the test — used for expected transient discards
         # during a disruptive restart/coldboot.
         informational = bool(check_params.get("informational", False))
+
+        if baseline_excess_max is not None:
+            assert baseline_test_start is not None
+            bucket_width_sec = int(check_params.get("bucket_width_sec", 60))
+            min_baseline_buckets = int(check_params.get("min_baseline_buckets", 5))
+            final_bucket_count = int(check_params.get("final_bucket_count", 2))
+            transient_informational = bool(
+                check_params.get("transient_excess_informational", False)
+            )
+            expected_entities = [
+                entity.strip() for entity in entity_desc.split(",") if entity.strip()
+            ]
+            evaluations: t.Dict[str, t.Dict[str, t.Any]] = {}
+            inconclusive: t.List[str] = []
+            for entity in expected_entities:
+                entity_data = _find_ods_entity_data(ods_data, entity)
+                if not entity_data:
+                    inconclusive.append(f"{entity}: no returned series")
+                    continue
+                evaluation = _evaluate_baseline_excess(
+                    _sum_entity_time_series(entity_data),
+                    test_start=baseline_test_start,
+                    query_end=float(end_time),
+                    bucket_width_sec=bucket_width_sec,
+                    min_baseline_buckets=min_baseline_buckets,
+                    final_bucket_count=final_bucket_count,
+                    allowed_excess=float(baseline_excess_max),
+                )
+                evaluations[entity] = evaluation
+                if not evaluation["conclusive"]:
+                    inconclusive.append(f"{entity}: {evaluation['reason']}")
+
+            summaries = []
+            final_failures = []
+            transient_failures = []
+            for entity, evaluation in sorted(evaluations.items()):
+                if not evaluation["conclusive"]:
+                    continue
+                summaries.append(
+                    f"{entity}: baseline={evaluation['baseline_ceiling']:.0f}, "
+                    f"peak={evaluation['peak_value']:.0f} "
+                    f"(excess={evaluation['peak_excess']:.0f}), "
+                    f"limit={evaluation['allowed_total']:.0f}, "
+                    f"final_max={evaluation['final_max']:.0f} "
+                    f"over {evaluation['final_count']} bucket(s)"
+                )
+                if evaluation["final_violations"]:
+                    final_failures.append(entity)
+                elif evaluation["transient_violation"]:
+                    transient_failures.append(entity)
+            summary = "; ".join(summaries)
+
+            ods_url_raw = await async_generate_ods_url(
+                entity_desc=entity_desc,
+                key_desc=key_desc,
+                reduce_desc=reduce_desc,
+                transform_desc=transform_desc,
+                start_time=int(start_time),
+                end_time=int(end_time),
+            )
+            hard_violation = bool(final_failures) or bool(
+                transient_failures and not transient_informational
+            )
+            display_url = ods_url_raw
+            if shorten_pass_url or hard_violation:
+                try:
+                    display_url = await async_get_fburl_retry(ods_url_raw)
+                except Exception:
+                    display_url = ods_url_raw
+            if shorten_pass_url:
+                from taac.libs.fpf.fpf_collector_registry import (
+                    register_artifact,
+                )
+
+                register_artifact("ods", str(counter_name), display_url)
+
+            self.logger.info(
+                f"  [{counter_name}] baseline-aware discard evaluation: {summary}; "
+                f"excluded_straddling={sum(e['straddling_count'] for e in evaluations.values())}"
+            )
+            if final_failures:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"{counter_name} final complete bucket(s) did not recover "
+                        f"for {', '.join(final_failures)} — {summary} | ODS: {display_url}"
+                    ),
+                )
+            if transient_failures and not transient_informational:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"{counter_name} transient excess above the "
+                        f"pre-test ceiling for {', '.join(transient_failures)} — "
+                        f"{summary} | ODS: {display_url}"
+                    ),
+                )
+            if inconclusive:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.SKIP,
+                    message=(
+                        f"[INCONCLUSIVE] {counter_name} baseline unavailable: "
+                        f"{'; '.join(inconclusive)} | ODS: {display_url}"
+                    ),
+                )
+            if transient_failures:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.PASS,
+                    message=(
+                        f"[INFORMATIONAL] {counter_name} transient excess above "
+                        f"the pre-test ceiling for {', '.join(transient_failures)} "
+                        f"— {summary} | ODS: {display_url}"
+                    ),
+                )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=(
+                    f"{counter_name} stayed within baseline + "
+                    f"{float(baseline_excess_max):.0f} events/min and recovered "
+                    f"— {summary} | ODS: {display_url}"
+                ),
+            )
+
         violations = []
         entity_max_map: t.Dict[str, t.Tuple[float, str]] = {}
 

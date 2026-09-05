@@ -3725,6 +3725,7 @@ def create_fpf_start_collectors_task(
 def create_fpf_start_ib_traffic_task(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
     device: str = "mlx5_34",
     gid_iface: str = "bveth0",
     gid_prefix: str = "2401",
@@ -3743,7 +3744,8 @@ def create_fpf_start_ib_traffic_task(
 ) -> Task:
     """Create a setup task that starts ib_write_bw RDMA traffic and validates egress.
 
-    SSHes to ``server`` and each host in ``clients``, starts long-lived
+    SSHes to ``server`` and each host in ``clients``, validates the configured
+    ``binary_path`` (default /usr/bin/ib_write_bw), starts long-lived
     ``ib_write_bw`` (server then clients) on RDMA ``device`` (default mlx5_34 /
     VF1), confirms the processes are up, waits ``settle_sec`` (default 120s),
     then queries ODS to confirm each host is egressing more than
@@ -3771,6 +3773,8 @@ def create_fpf_start_ib_traffic_task(
         "settle_sec": settle_sec,
         "ods_window_sec": ods_window_sec,
     }
+    if binary_path is not None:
+        params["binary_path"] = binary_path
     if gid_index is not None:
         params["gid_index"] = gid_index
     if msg_size is not None:

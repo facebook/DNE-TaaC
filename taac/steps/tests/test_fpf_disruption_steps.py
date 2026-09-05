@@ -1,10 +1,12 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
 # pyre-unsafe
+import asyncio
 import json
 import time
 import typing as t
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
@@ -16,8 +18,15 @@ from taac.internal.steps.custom_step import (
     _nic_mstreg_bdf,
     CustomStep,
 )
+from taac.libs.fpf.fpf_collector_registry import (
+    clear_drain_mutations,
+    get_drain_mutation,
+    mark_drain_mutation,
+)
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.steps.step_definitions import (
+    create_fpf_conditional_undrain_step,
+    create_fpf_drain_interface_step,
     create_fpf_gar_set_links_step,
     create_fpf_gar_validate_step,
     create_fpf_lldp_batched_set_interface_admin_step,
@@ -28,7 +37,7 @@ from taac.steps.step_definitions import (
     create_fpf_repeated_service_crash_step,
     create_fpf_stsw_drain_and_reinject_steps,
 )
-from taac.test_as_a_config.thrift_types import Service, Step, StepName, TestConfig
+from taac.test_as_a_config.types import Service, Step, StepName, TestConfig
 
 
 def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6") -> CustomStep:
@@ -150,6 +159,184 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cs.driver.async_run_cmd_on_shell.await_count, 120)
         for call in cs.driver.async_run_cmd_on_shell.await_args_list:
             self.assertEqual(call.args[0], "fboss2 clear ndp")
+
+
+class TestOwnedDrainCleanup(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        clear_drain_mutations()
+
+    def tearDown(self) -> None:
+        clear_drain_mutations()
+
+    def test_factories_retain_exact_target_and_scope(self) -> None:
+        drain = create_fpf_drain_interface_step(
+            interfaces=["eth1/41/5"],
+            drain=True,
+            target_device="gtsw001.l1002.c087.mwg2",
+            mutation_token="tc17",
+        )
+        self.assertEqual(
+            _params(drain),
+            {
+                "custom_step_name": "fpf_drain_interface",
+                "interfaces": ["eth1/41/5"],
+                "is_drain": True,
+                "target_device": "gtsw001.l1002.c087.mwg2",
+                "mutation_token": "tc17",
+            },
+        )
+        cleanup = create_fpf_conditional_undrain_step(
+            interfaces=[],
+            target_device="gtsw002.l1002.c087.mwg2",
+            mutation_token="tc19",
+            best_effort=True,
+        )
+        self.assertEqual(_params(cleanup)["interfaces"], [])
+        self.assertEqual(_params(cleanup)["target_device"], "gtsw002.l1002.c087.mwg2")
+        self.assertIs(_params(cleanup)["best_effort"], True)
+
+    async def test_no_marker_cleanup_is_noop(self) -> None:
+        cs = _make_custom_step()
+        driver = _driver_mock(cs)
+        await cs.fpf_conditional_undrain(
+            {
+                "interfaces": ["eth1/41/5"],
+                "mutation_token": "tc17",
+            }
+        )
+        driver.async_undrain_interface.assert_not_awaited()
+        driver.async_onbox_undrain_device.assert_not_awaited()
+        self.assertTrue(
+            any(
+                "SKIPPED: no mutation marker" in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
+
+    async def test_marker_restores_only_exact_interface(self) -> None:
+        cs = _make_custom_step()
+        driver = _driver_mock(cs)
+        mark_drain_mutation("tc17", cs.hostname, ["eth1/41/5"])
+        driver.get_specific_interface_info.return_value = SimpleNamespace(
+            isDrained=False
+        )
+
+        await cs.fpf_conditional_undrain(
+            {
+                "interfaces": ["eth1/41/5"],
+                "mutation_token": "tc17",
+            }
+        )
+
+        driver.async_undrain_interface.assert_awaited_once_with("eth1/41/5")
+        driver.async_onbox_undrain_device.assert_not_awaited()
+        self.assertIsNone(get_drain_mutation("tc17"))
+
+    async def test_device_clean_rejects_preexisting_port_drain(self) -> None:
+        cs = _make_custom_step()
+        driver = _driver_mock(cs)
+        driver.async_is_device_drained.return_value = False
+        driver.async_get_all_interfaces_info.return_value = {
+            "eth1/1/4": SimpleNamespace(isDrained=True),
+            "eth1/41/5": SimpleNamespace(isDrained=False),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "eth1/1/4"):
+            await cs.fpf_verify_disruption(
+                {
+                    "interfaces": [],
+                    "mode": "device_clean",
+                    "fail_if_ineffective": True,
+                }
+            )
+
+        driver.async_onbox_undrain_device.assert_not_awaited()
+        driver.async_undrain_interface.assert_not_awaited()
+
+    async def test_cancelled_drain_leaves_marker_for_cleanup(self) -> None:
+        cs = _make_custom_step()
+        driver = _driver_mock(cs)
+        driver.async_softdrain_interface.side_effect = asyncio.CancelledError()
+        params = {
+            "interfaces": ["eth1/41/5"],
+            "is_drain": True,
+            "mutation_token": "tc17",
+        }
+
+        with self.assertRaises(asyncio.CancelledError):
+            await cs.fpf_drain_interface(params)
+
+        self.assertEqual(
+            get_drain_mutation("tc17"),
+            (cs.hostname, ("eth1/41/5",)),
+        )
+        driver.async_softdrain_interface.side_effect = None
+        driver.get_specific_interface_info.return_value = SimpleNamespace(
+            isDrained=False
+        )
+        await cs.fpf_conditional_undrain(
+            {
+                "interfaces": ["eth1/41/5"],
+                "mutation_token": "tc17",
+            }
+        )
+        self.assertIsNone(get_drain_mutation("tc17"))
+
+    async def test_marker_restores_whole_target_device(self) -> None:
+        cs = _make_custom_step()
+        target = "gtsw002.l1002.c087.mwg2"
+        target_driver = AsyncMock()
+        target_driver.async_is_device_drained.return_value = False
+        mark_drain_mutation("tc19", target, [])
+
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            new=AsyncMock(return_value=target_driver),
+        ) as get_driver:
+            await cs.fpf_conditional_undrain(
+                {
+                    "interfaces": [],
+                    "target_device": target,
+                    "mutation_token": "tc19",
+                }
+            )
+
+        t.cast(AsyncMock, get_driver).assert_awaited_once_with(target, cs.logger)
+        target_driver.async_onbox_undrain_device.assert_awaited_once()
+        self.assertIsNone(get_drain_mutation("tc19"))
+
+    async def test_drain_and_readback_use_explicit_target_device(self) -> None:
+        cs = _make_custom_step()
+        target = "gtsw002.l1002.c087.mwg2"
+        target_driver = AsyncMock()
+        target_driver.async_is_device_drained.return_value = True
+
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            new=AsyncMock(return_value=target_driver),
+        ) as get_driver:
+            await cs.fpf_drain_interface(
+                {
+                    "interfaces": [],
+                    "is_drain": True,
+                    "target_device": target,
+                    "mutation_token": "tc19",
+                }
+            )
+            await cs.fpf_verify_disruption(
+                {
+                    "interfaces": [],
+                    "mode": "device_drain",
+                    "expect_drained": True,
+                    "fail_if_ineffective": True,
+                    "target_device": target,
+                }
+            )
+
+        self.assertEqual(t.cast(AsyncMock, get_driver).await_count, 2)
+        target_driver.async_onbox_softdrain_device.assert_awaited_once()
+        target_driver.async_is_device_drained.assert_awaited_once()
+        _driver_mock(cs).async_onbox_softdrain_device.assert_not_awaited()
 
 
 class TestGarSteps(unittest.IsolatedAsyncioTestCase):

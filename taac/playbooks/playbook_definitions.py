@@ -24565,13 +24565,11 @@ def _build_fpf_generic_checks(
 
     # --- ODS discard/congestion counter postchecks (SSH-independent but
     # dropped in minimal mode alongside the generic SSH checks). ---
-    # All FOUR discard/congestion counters (in_dst_null_discard, in_discard,
-    # in_congestion, out_congestion) can be marked informational
-    # (``ods_discard_informational``) so a disruptive restart/coldboot/reboot —
-    # where transient in-flight packet loss AND congestion are expected with live
-    # traffic to purged/blackholed lane-0 dests — reports the breach (values + ODS
-    # link) without failing the test (per the user's bucket-#1 decision). Default
-    # False keeps GR-within / non-disruptive callers hard + byte-identical.
+    # The two non-congestion discard counters use a per-entity pre-test
+    # ``.sum.60`` ceiling. The configured 10k threshold is additional events per
+    # minute, not an absolute total. ``ods_discard_informational`` permits only a
+    # transient excess during disruptive tests; final recovery remains hard.
+    # Congestion counters always retain their absolute-zero hard contract.
     # ODS discard/congestion checks scoped to the observer GTSWs only — STSWs are
     # deliberately not monitored (matches create_fpf_endpoints excluding STSWs from
     # per-device checks). Callers can still pass explicit ods_entities to override.
@@ -24585,7 +24583,8 @@ def _build_fpf_generic_checks(
             reduce_desc=ods_reduce,
             counter_name="in_dst_null_discard",
             shorten_pass_url=True,
-            informational=ods_discard_informational,
+            baseline_excess_max=FPF_ACTIVE_THRESHOLDS.ods_in_dst_null_discard_max,
+            transient_excess_informational=ods_discard_informational,
             check_id="ods_in_dst_null_discard",
         ),
         create_fpf_ods_counter_check(
@@ -24595,7 +24594,8 @@ def _build_fpf_generic_checks(
             reduce_desc=ods_reduce,
             counter_name="in_discard",
             shorten_pass_url=True,
-            informational=ods_discard_informational,
+            baseline_excess_max=FPF_ACTIVE_THRESHOLDS.ods_in_discard_max,
+            transient_excess_informational=ods_discard_informational,
             check_id="ods_in_discard",
         ),
         create_fpf_ods_counter_check(
@@ -24605,7 +24605,6 @@ def _build_fpf_generic_checks(
             reduce_desc=ods_reduce,
             counter_name="in_congestion",
             shorten_pass_url=True,
-            informational=ods_discard_informational,
             check_id="ods_in_congestion",
         ),
         create_fpf_ods_counter_check(
@@ -24615,7 +24614,6 @@ def _build_fpf_generic_checks(
             reduce_desc=ods_reduce,
             counter_name="out_congestion",
             shorten_pass_url=True,
-            informational=ods_discard_informational,
             aggregate="max" if out_congestion_last_minute_max else None,
             require="all" if out_congestion_last_minute_max else "all",
             use_test_case_start_time=not out_congestion_last_minute_max,
@@ -25061,6 +25059,7 @@ def create_fpf_hardening_playbook_v2(
     prod_prefix_restart_recovery_sla_sec: float | None = None,
     hrt_restart_tolerant_hosts: list[str] | None = None,
     hrt_device_ids: list[int] | None = None,
+    cleanup_steps: list | None = None,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25593,13 +25592,16 @@ def create_fpf_hardening_playbook_v2(
         *(additional_postchecks or []),
     ]
 
-    return Playbook(
-        name=playbook_name,
-        prechecks=prechecks,
-        postchecks=postchecks,
-        snapshot_checks=snapshot_checks,
-        stages=[create_steps_stage(stage_id="disruption", steps=stage_steps)],
-    )
+    playbook_kwargs: dict[str, t.Any] = {
+        "name": playbook_name,
+        "prechecks": prechecks,
+        "postchecks": postchecks,
+        "snapshot_checks": snapshot_checks,
+        "stages": [create_steps_stage(stage_id="disruption", steps=stage_steps)],
+    }
+    if cleanup_steps is not None:
+        playbook_kwargs["cleanup_steps"] = cleanup_steps
+    return Playbook(**playbook_kwargs)
 
 
 def create_fpf_link_event_disrupt_playbook(
@@ -25636,6 +25638,7 @@ def create_fpf_link_event_disrupt_playbook(
     gtsw_convergence_settle_sec: int = 0,
     hrt_device_ids: list[int] | None = None,
     ib_traffic_config: t.Mapping[str, t.Any] | None = None,
+    cleanup_steps: list | None = None,
     playbook_name: str = "fpf_link_event_disrupt",
 ) -> Playbook:
     """Disrupt-phase playbook for FPF link events (interface-disable / link-drain).
@@ -26167,10 +26170,9 @@ def create_fpf_link_event_disrupt_playbook(
     # expectation to assert real packet loss; drain keeps the clean bound.
     # When ods_discard_informational is True (e.g. tc36: shutting an entire
     # STSW->GTSW bundle), expected transient loss on the impacted plane is
-    # RECORDED but never fails the test — the two DISCARD <= checks carry
-    # informational=True (breach -> PASS with [INFORMATIONAL]). The two
-    # CONGESTION checks are always hard (a link event must not cause
-    # congestion). This mirrors the same knob on the service-restart playbook.
+    # recorded against the pre-test baseline without failing the test. Final
+    # discard recovery and both CONGESTION checks remain hard. This mirrors the
+    # same knob on the service-restart playbook.
     # ODS discard/congestion checks scoped to the observer GTSWs only — STSWs are
     # deliberately not monitored (matches create_fpf_endpoints excluding STSWs from
     # per-device checks). Callers can still pass explicit ods_entities to override.
@@ -26188,7 +26190,8 @@ def create_fpf_link_event_disrupt_playbook(
                     reduce_desc=ods_reduce,
                     counter_name="in_dst_null_discard",
                     shorten_pass_url=True,
-                    informational=True,
+                    baseline_excess_max=FPF_ACTIVE_THRESHOLDS.ods_in_dst_null_discard_max,
+                    transient_excess_informational=True,
                     check_id="ods_in_dst_null_discard",
                 ),
                 create_fpf_ods_counter_check(
@@ -26198,7 +26201,8 @@ def create_fpf_link_event_disrupt_playbook(
                     reduce_desc=ods_reduce,
                     counter_name="in_discard",
                     shorten_pass_url=True,
-                    informational=True,
+                    baseline_excess_max=FPF_ACTIVE_THRESHOLDS.ods_in_discard_max,
+                    transient_excess_informational=True,
                     check_id="ods_in_discard",
                 ),
                 create_fpf_ods_counter_check(
@@ -26285,13 +26289,16 @@ def create_fpf_link_event_disrupt_playbook(
             )
         )
 
-    return Playbook(
-        name=playbook_name,
-        prechecks=prechecks,
-        postchecks=postchecks,
-        snapshot_checks=snapshot_checks,
-        stages=[create_steps_stage(stage_id="disruption", steps=stage_steps)],
-    )
+    playbook_kwargs: dict[str, t.Any] = {
+        "name": playbook_name,
+        "prechecks": prechecks,
+        "postchecks": postchecks,
+        "snapshot_checks": snapshot_checks,
+        "stages": [create_steps_stage(stage_id="disruption", steps=stage_steps)],
+    }
+    if cleanup_steps is not None:
+        playbook_kwargs["cleanup_steps"] = cleanup_steps
+    return Playbook(**playbook_kwargs)
 
 
 def create_fpf_disruption_only_playbook(

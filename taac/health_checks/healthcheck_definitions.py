@@ -3696,6 +3696,11 @@ def create_fpf_ods_counter_check(
     aggregate: t.Optional[str] = None,
     require: str = "all",
     informational: bool = False,
+    baseline_excess_max: t.Optional[float] = None,
+    transient_excess_informational: bool = False,
+    baseline_lookback_sec: int = 420,
+    min_baseline_buckets: int = 5,
+    final_bucket_count: int = 2,
     check_id: t.Optional[str] = None,
     use_test_case_start_time: bool = True,
     min_ods_query_duration: int = 0,
@@ -3714,6 +3719,13 @@ def create_fpf_ods_counter_check(
     require="any"`` for "assert a transient event happened on the impacted path"
     checks — e.g. in_discard loss during a disable/drain, where the counter is 0
     at most samples and only spikes on the impacted device.
+
+    ``baseline_excess_max`` enables FPF's ``.sum.60`` discard policy: compare
+    each entity's complete test buckets with its complete pre-test bucket
+    ceiling, excluding the boundary-straddling bucket. The value is the allowed
+    additional events/minute. ``transient_excess_informational`` permits an
+    in-window spike but never permits the final complete bucket(s) to remain
+    above the baseline-adjusted limit.
     """
     params: t.Dict[str, t.Any] = {
         "entity_desc": entity_desc,
@@ -3731,11 +3743,22 @@ def create_fpf_ods_counter_check(
         # transient discards during a disruptive restart/coldboot.
         "informational": informational,
     }
+    if baseline_excess_max is not None:
+        params.update(
+            {
+                "baseline_excess_max": baseline_excess_max,
+                "transient_excess_informational": transient_excess_informational,
+                "baseline_lookback_sec": baseline_lookback_sec,
+                "min_baseline_buckets": min_baseline_buckets,
+                "final_bucket_count": final_bucket_count,
+            }
+        )
     if aggregate is not None:
         params["aggregate"] = aggregate
         params["require"] = require
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.GENERIC_ODS_CHECK,
+        check_scope=hc_types.Scope.DEFAULT,
         check_params=Params(json_params=json.dumps(params)),
         check_id=check_id,
     )

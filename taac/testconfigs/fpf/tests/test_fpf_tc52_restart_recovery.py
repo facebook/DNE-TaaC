@@ -76,6 +76,29 @@ def _assert_tc52_contract(test, disrupt_playbook, longevity_playbook) -> None:
     test.assertIn("fpf_prod_hrt_prefix_stability", longevity_ids)
     test.assertNotIn("fpf_prod_hrt_prefix_restart_recovery", longevity_ids)
 
+    disrupt_by_id = {
+        check.check_id: check for check in disrupt_playbook.postchecks or []
+    }
+    longevity_by_id = {
+        check.check_id: check for check in longevity_playbook.postchecks or []
+    }
+    for check_id in ("ods_in_dst_null_discard", "ods_in_discard"):
+        disrupt_params = _params(disrupt_by_id[check_id].check_params)
+        longevity_params = _params(longevity_by_id[check_id].check_params)
+        test.assertEqual(disrupt_params["baseline_excess_max"], 10000)
+        test.assertIs(disrupt_params["transient_excess_informational"], True)
+        test.assertEqual(longevity_params["baseline_excess_max"], 10000)
+        test.assertIs(longevity_params["transient_excess_informational"], False)
+    for check_id in ("ods_in_congestion", "ods_out_congestion"):
+        test.assertFalse(
+            _params(disrupt_by_id[check_id].check_params).get("informational", False)
+        )
+    for checks_by_id in (disrupt_by_id, longevity_by_id):
+        test.assertIn("fpf_host_spray", checks_by_id)
+        test.assertNotIn(
+            "informational", _params(checks_by_id["fpf_host_spray"].check_params)
+        )
+
 
 class TestFpfTc52RestartRecovery(unittest.TestCase):
     def test_standalone_tc52_uses_restart_recovery_only_on_disrupt(self):

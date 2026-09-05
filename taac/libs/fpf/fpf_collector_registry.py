@@ -88,6 +88,12 @@ _baseline_impaired_lanes: t.Dict[str, t.Set[int]] = {}
 _baseline_impaired_tuples: t.Dict[str, t.Set[t.Tuple[int, int]]] = {}
 _allow_baseline_failures: bool = False
 
+# Drain cleanup ownership. A token is armed only immediately before this test
+# invokes the local drainer, after its read-only clean-state precondition has
+# passed. Cleanup must present the same token, target device, and interface
+# scope so it cannot clear unrelated ambient drain state.
+_drain_mutations: t.Dict[str, t.Tuple[str, t.Tuple[str, ...]]] = {}
+
 
 def set_disruption_effective(effective: bool, detail: str = "") -> None:
     global _disruption_effective, _disruption_effective_detail
@@ -148,6 +154,28 @@ def set_allow_baseline_failures(allow: bool) -> None:
 
 def get_allow_baseline_failures() -> bool:
     return _allow_baseline_failures
+
+
+def mark_drain_mutation(
+    token: str,
+    device: str,
+    interfaces: t.Iterable[str],
+) -> None:
+    _drain_mutations[token] = (device, tuple(sorted(interfaces)))
+
+
+def get_drain_mutation(
+    token: str,
+) -> t.Optional[t.Tuple[str, t.Tuple[str, ...]]]:
+    return _drain_mutations.get(token)
+
+
+def clear_drain_mutation(token: str) -> None:
+    _drain_mutations.pop(token, None)
+
+
+def clear_drain_mutations() -> None:
+    _drain_mutations.clear()
 
 
 def register_artifact(category: str, label: str, url: str) -> None:
@@ -389,6 +417,7 @@ def clear_all() -> None:
     _baseline_impaired_lanes = {}
     _baseline_impaired_tuples = {}
     _allow_baseline_failures = False
+    clear_drain_mutations()
 
 
 def _row_matches_device(row: t.Any, device: str) -> bool:
