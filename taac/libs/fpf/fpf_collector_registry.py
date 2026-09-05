@@ -237,6 +237,14 @@ _restart_time: float = 0.0
 # the pre-command marker and the actual service outage.
 _restart_completion_time: float = 0.0
 
+# Wall-clock epochs bracketing a link/device recovery action. These are kept
+# separate from ``_disruption_time`` because a disrupt playbook's finally
+# cleanup may perform the real undrain before the following restore playbook
+# starts. The restore health check must measure from that cleanup action rather
+# than from the earlier drain.
+_recovery_start_time: float = 0.0
+_recovery_completion_time: float = 0.0
+
 # Signal 1: end-to-end convergence ceiling. Includes any stimulus push
 # duration. 180s allows ~110s for 10k-prefix injection + ~70s propagation.
 DEFAULT_SIGNAL1_E2E_MAX_SEC: float = 180.0
@@ -331,6 +339,26 @@ def get_restart_completion_time() -> float:
     return _restart_completion_time
 
 
+def set_recovery_start_time(ts: float) -> None:
+    global _recovery_start_time, _recovery_completion_time
+    _recovery_start_time = ts
+    # A new recovery attempt invalidates completion from any earlier attempt.
+    _recovery_completion_time = 0.0
+
+
+def get_recovery_start_time() -> float:
+    return _recovery_start_time
+
+
+def set_recovery_completion_time(ts: float) -> None:
+    global _recovery_completion_time
+    _recovery_completion_time = ts
+
+
+def get_recovery_completion_time() -> float:
+    return _recovery_completion_time
+
+
 def validate_restart_tolerant_tuple(
     rows: t.Iterable[t.Any],
     host: str,
@@ -401,6 +429,7 @@ def validate_restart_tolerant_tuple(
 
 def clear_all() -> None:
     global _disruption_time, _restart_time, _restart_completion_time
+    global _recovery_start_time, _recovery_completion_time
     global _disruption_effective, _disruption_effective_detail
     global _baseline_impaired_lanes, _baseline_impaired_tuples
     global _allow_baseline_failures
@@ -412,6 +441,8 @@ def clear_all() -> None:
     _disruption_time = 0.0
     _restart_time = 0.0
     _restart_completion_time = 0.0
+    _recovery_start_time = 0.0
+    _recovery_completion_time = 0.0
     _disruption_effective = None
     _disruption_effective_detail = ""
     _baseline_impaired_lanes = {}

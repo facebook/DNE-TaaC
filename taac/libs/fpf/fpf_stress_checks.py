@@ -2190,7 +2190,7 @@ class HrtPlaneStatusCollector(BaseCollector):
                     for device_id in sorted(selected_devices):
                         local_impacted = (
                             impacted_tuples_by_device.get(str(device_id), [])
-                            if impacted_tuples_by_device
+                            if impacted_tuples_by_device is not None
                             else impacted_planes
                         )
                         self.rows = [

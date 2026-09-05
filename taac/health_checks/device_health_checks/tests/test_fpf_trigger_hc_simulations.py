@@ -641,6 +641,97 @@ class Tc36Tc37ProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTestCas
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
 
 
+class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTestCase):
+    """TC17 cleanup may undrain before the restore playbook starts."""
+
+    def setUp(self):
+        self.health_check = FpfProdHrtPrefixStabilityHealthCheck(logger=MagicMock())
+        self.device = MagicMock(spec=TestDevice)
+        self.device.name = "gtsw001.l1002.c087.mwg2"
+        for target, kw in (
+            (
+                f"{PROD_MODULE}.everpaste_details_suffix",
+                {"new": AsyncMock(return_value="")},
+            ),
+            (
+                f"{PROD_MODULE}.get_test_case_start_time",
+                {"return_value": WINDOW_START + 200.0},
+            ),
+            (f"{PROD_MODULE}.get_disruption_time", {"return_value": WINDOW_START}),
+            (
+                f"{PROD_MODULE}.get_recovery_start_time",
+                {"return_value": WINDOW_START + 100.0},
+            ),
+            (
+                f"{PROD_MODULE}.get_recovery_completion_time",
+                {"return_value": WINDOW_START + 110.0},
+            ),
+        ):
+            p = patch(target, **kw)
+            self.addCleanup(p.stop)
+            p.start()
+
+    async def test_cleanup_recovery_is_measured_across_playbook_boundary(self):
+        timed_rows = [
+            (
+                WINDOW_START + 101.0,
+                _prefix_row(
+                    WINDOW_START + 101.0,
+                    [1, 2, 3],
+                    [0],
+                    [0, 4, 5, 6, 7],
+                ),
+            ),
+            (
+                WINDOW_START + 108.0,
+                _prefix_row(
+                    WINDOW_START + 108.0,
+                    [0, 1, 2, 3],
+                    [],
+                    [4, 5, 6, 7],
+                ),
+            ),
+            (
+                WINDOW_START + 112.0,
+                _prefix_row(
+                    WINDOW_START + 112.0,
+                    [0, 1, 2, 3],
+                    [],
+                    [4, 5, 6, 7],
+                ),
+            ),
+        ]
+        collector = MagicMock()
+        collector.host = GPU_HOST
+        collector.get_rows_in_window.side_effect = lambda start, end: [
+            row for ts, row in timed_rows if start <= ts <= end
+        ]
+        collector.timeout_count_in_window.return_value = 0
+        collector.format_window_table.return_value = "(table)"
+
+        with patch(
+            f"{PROD_MODULE}.discover_prod_collectors",
+            return_value=[(GPU_HOST, collector)],
+        ):
+            result = await self.health_check._run(
+                self.device,
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "mode": "local_undrain",
+                    "window_end": WINDOW_END,
+                    "local_prefixes": [PROD_PREFIX],
+                    "impacted_planes_by_host": {GPU_HOST: [0]},
+                    "max_drain_sec": 60.0,
+                },
+            )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertEqual(
+            collector.get_rows_in_window.call_args.args[0], WINDOW_START + 100.0
+        )
+        self.assertNotIn("287", result.message or "")
+
+
 class Tc36DiscardsCongestionSimulationTest(unittest.IsolatedAsyncioTestCase):
     """tc36 ODS contract: a DISCARD breach is INFORMATIONAL (PASS with
     [INFORMATIONAL]), but a CONGESTION breach (informational=False) still FAILs.

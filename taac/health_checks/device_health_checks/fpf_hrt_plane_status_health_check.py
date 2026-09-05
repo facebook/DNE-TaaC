@@ -92,9 +92,9 @@ class FpfHrtPlaneStatusHealthCheck(
         impacted_planes: t.List[int] = [
             int(p) for p in (check_params.get("impacted_planes") or [])
         ]
-        impacted_tuples_by_host_device: t.Dict[str, t.Dict[str, t.List[int]]] = (
-            check_params.get("impacted_tuples_by_host_device", {}) or {}
-        )
+        impacted_tuples_by_host_device: t.Optional[
+            t.Dict[str, t.Dict[str, t.List[int]]]
+        ] = check_params.get("impacted_tuples_by_host_device")
 
         if mode == "drain":
             _skip = disruption_inconclusive_skip()
@@ -136,7 +136,11 @@ class FpfHrtPlaneStatusHealthCheck(
                 expected_planes,
                 impacted_planes,
                 device_ids,
-                impacted_tuples_by_host_device.get(host, {}),
+                (
+                    impacted_tuples_by_host_device.get(host, {})
+                    if impacted_tuples_by_host_device is not None
+                    else None
+                ),
                 window_start,
                 window_end,
             )
@@ -183,7 +187,7 @@ class FpfHrtPlaneStatusHealthCheck(
         expected_planes: t.Optional[t.List[int]],
         impacted_planes: t.List[int],
         device_ids: t.Optional[t.List[int]],
-        impacted_tuples_by_device: t.Dict[str, t.List[int]],
+        impacted_tuples_by_device: t.Optional[t.Dict[str, t.List[int]]],
         window_start: float,
         window_end: float,
     ) -> _HostPlaneResult:

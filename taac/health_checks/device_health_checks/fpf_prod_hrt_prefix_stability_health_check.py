@@ -15,6 +15,8 @@ from taac.libs.fpf.fpf_collector_registry import (
     everpaste_details_suffix,
     get_collector,
     get_disruption_time,
+    get_recovery_completion_time,
+    get_recovery_start_time,
     get_restart_completion_time,
     get_restart_time,
     get_test_case_start_time,
@@ -693,7 +695,8 @@ def _evaluate_host_local_drain(
     local_norms: t.Set[str],
     impacted_planes: t.Set[int],
     max_drain_sec: float,
-    disruption_ts: t.Optional[float],
+    action_ts: t.Optional[float],
+    recovery_completion_ts: t.Optional[float],
     to_drained: bool,
 ) -> _HostResult:
     """Local-vs-remote drain/undrain contract for one host.
@@ -705,11 +708,12 @@ def _evaluate_host_local_drain(
       ``to_drained=True`` (DRAIN): each impacted plane that was reachable at the
         baseline must move into ``drained_planes`` (Signal 1), must NOT land in
         ``unreachable_planes`` — drained, not unavailable (Signal 2), and must do
-        so within ``max_drain_sec`` of ``disruption_ts`` (Signal 3).
+        so within ``max_drain_sec`` of the recorded drain start (Signal 3).
       ``to_drained=False`` (UNDRAIN): each impacted plane must LEAVE
         ``drained_planes`` and return to ``reachable_planes`` within
-        ``max_drain_sec`` (Signals 1+3); it must not be left unreachable
-        (Signal 2).
+        ``max_drain_sec`` of the separately recorded recovery start
+        (Signals 1+3); it must not be left unreachable (Signal 2), and at
+        least one sample must follow recovery completion.
 
     REMOTE prefixes must show NO churn: their reachable plane set is unchanged
     across the whole window (a drain of THIS host's local advert must not move a
@@ -734,18 +738,18 @@ def _evaluate_host_local_drain(
     def _split(
         samples: t.List[t.Any],
     ) -> t.Tuple[t.Any, t.List[t.Any]]:
-        """(pre-disruption baseline sample, post-disruption samples).
+        """Return the pre-action baseline and post-action samples.
 
         Anchoring the baseline at the sample JUST BEFORE the recorded disruption
         time makes the check robust to a dirty starting state (e.g. a plane left
-        drained by a prior aborted run): we judge the transition the disruption
-        actually caused, measured from the disruption moment, not from whatever
-        the window happened to open on.
+        drained by a prior aborted run): we judge the transition the action
+        actually caused, measured from its recorded start, not from whatever the
+        window happened to open on.
         """
-        if disruption_ts is None:
+        if action_ts is None:
             return samples[0][2], samples
-        pre = [s for s in samples if s[0] <= disruption_ts]
-        post = [s for s in samples if s[0] > disruption_ts]
+        pre = [s for s in samples if s[0] <= action_ts]
+        post = [s for s in samples if s[0] > action_ts]
         base = pre[-1][2] if pre else samples[0][2]
         return base, (post if post else samples)
 
@@ -756,6 +760,17 @@ def _evaluate_host_local_drain(
         res.n_samples += len(samples)
         is_local = norm in local_norms
         base_rb, post_samples = _split(samples)
+
+        if (
+            not to_drained
+            and recovery_completion_ts is not None
+            and not any(ts >= recovery_completion_ts for ts, _ts_str, _rb in samples)
+        ):
+            res.compliance_issues.append(
+                f"{display} has no collector sample after recovery completed at "
+                f"{recovery_completion_ts:.3f}"
+            )
+            continue
 
         if not is_local:
             # REMOTE prefix: reachable set must not change through the disruption.
@@ -821,8 +836,8 @@ def _evaluate_host_local_drain(
                     f"LOCAL {display} plane {plane} left UNREACHABLE after undrain "
                     f"(expected reachable)"
                 )
-            # Signal 3: within SLA, measured from the disruption moment.
-            ref = disruption_ts if disruption_ts is not None else post_samples[0][0]
+            # Signal 3: within SLA, measured from the drain/recovery action.
+            ref = action_ts if action_ts is not None else post_samples[0][0]
             latency = round(transition_ts - ref, 1)
             if latency > max_drain_sec:
                 res.compliance_issues.append(
@@ -1023,6 +1038,32 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             recorded = get_disruption_time()
             disruption_ts = recorded if recorded > 0 else None
 
+        recovery_ts: t.Optional[float] = None
+        recovery_completion_ts: t.Optional[float] = None
+        if mode == "local_undrain":
+            recovery_ts = check_params.get("recovery_ts")
+            if recovery_ts is None:
+                recorded_recovery = get_recovery_start_time()
+                recovery_ts = recorded_recovery if recorded_recovery > 0 else None
+            recovery_completion_ts = check_params.get("recovery_completion_ts")
+            if recovery_completion_ts is None:
+                recorded_completion = get_recovery_completion_time()
+                recovery_completion_ts = (
+                    recorded_completion if recorded_completion > 0 else None
+                )
+            if recovery_ts is None or recovery_completion_ts is None:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        "No complete recorded recovery boundary for local_undrain "
+                        f"(start={recovery_ts}, completion={recovery_completion_ts})"
+                    ),
+                )
+            # Cleanup of the disrupt playbook may perform the undrain before the
+            # restore playbook starts. Retain those cross-playbook samples.
+            if "window_start" not in check_params:
+                window_start = min(window_start, recovery_ts)
+
         restart_ts: t.Optional[float] = None
         restart_completion_ts: t.Optional[float] = None
         max_recovery_sec = float(check_params.get("max_recovery_sec", 30.0))
@@ -1057,6 +1098,8 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             max_drain_sec=max_drain_sec,
             max_transition_sec=max_transition_sec,
             disruption_ts=disruption_ts,
+            recovery_ts=recovery_ts,
+            recovery_completion_ts=recovery_completion_ts,
             restart_ts=restart_ts,
             restart_completion_ts=restart_completion_ts,
             max_recovery_sec=max_recovery_sec,
@@ -1115,6 +1158,8 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         max_drain_sec: float,
         max_transition_sec: float,
         disruption_ts: t.Optional[float],
+        recovery_ts: t.Optional[float],
+        recovery_completion_ts: t.Optional[float],
         restart_ts: t.Optional[float],
         restart_completion_ts: t.Optional[float],
         max_recovery_sec: float,
@@ -1122,6 +1167,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
         """Dispatch each (host, collector) to the evaluator for ``mode`` and log a
         one-line verdict per host."""
         dts = float(disruption_ts) if disruption_ts is not None else None
+        rts = float(recovery_ts) if recovery_ts is not None else None
         host_results: t.List[_HostResult] = []
         for host, collector in collectors:
             impacted = {int(p) for p in impacted_by_host.get(host, [])}
@@ -1147,7 +1193,8 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                     local_norms,
                     impacted,
                     max_drain_sec,
-                    dts,
+                    dts if mode == "local_drain" else rts,
+                    recovery_completion_ts,
                     to_drained=(mode == "local_drain"),
                 )
             elif mode == "transition":

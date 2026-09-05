@@ -234,6 +234,57 @@ class TestFpfHrtDeviceTopology(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(by_device[0].passed)
         self.assertFalse(by_device[1].passed)
 
+    def test_plane_status_exact_empty_host_scope_does_not_fallback(self) -> None:
+        collector = HrtPlaneStatusCollector(
+            hosts=["host-a", "host-b"], device_ids=[0], num_planes=1
+        )
+        collector.rows = [
+            HrtPlaneStatusRow(
+                timestamp="2026-08-30 22:00:00+0000",
+                host="host-a",
+                device_id=0,
+                plane_states={0: "DRAINED"},
+            ),
+            HrtPlaneStatusRow(
+                timestamp="2026-08-30 22:00:00+0000",
+                host="host-b",
+                device_id=0,
+                plane_states={0: "UP"},
+            ),
+        ]
+
+        affected = collector.evaluate_drain_window(
+            window_start=0,
+            window_end=2_000_000_000,
+            impacted_planes=[0],
+            expected_planes=[0],
+            host="host-a",
+            impacted_tuples_by_device={"0": [0]},
+        )
+        unaffected = collector.evaluate_drain_window(
+            window_start=0,
+            window_end=2_000_000_000,
+            impacted_planes=[0],
+            expected_planes=[0],
+            host="host-b",
+            impacted_tuples_by_device={},
+        )
+        legacy = collector.evaluate_drain_window(
+            window_start=0,
+            window_end=2_000_000_000,
+            impacted_planes=[0],
+            expected_planes=[0],
+            host="host-b",
+            impacted_tuples_by_device=None,
+        )
+
+        self.assertTrue(affected[0].passed)
+        self.assertEqual(affected[0].expected_state, "DRAINED")
+        self.assertTrue(unaffected[0].passed)
+        self.assertEqual(unaffected[0].expected_state, "UP")
+        self.assertFalse(legacy[0].passed)
+        self.assertEqual(legacy[0].expected_state, "DRAINED")
+
     def test_fsdb_session_stat_preserves_exact_tuple_churn(self) -> None:
         collector = HrtFsdbSessionCollector(hosts=["host-a"])
         collector.rows = [

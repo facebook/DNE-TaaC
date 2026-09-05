@@ -185,6 +185,31 @@ class TestFpfHrtPlaneStatusHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["device_ids"], [0, 1])
         self.assertEqual(kwargs["impacted_tuples_by_device"], {"1": [0]})
 
+    async def test_drain_mode_preserves_explicit_empty_scope_for_other_host(self):
+        collector = _make_collector({HOST_A: _up_results(1), HOST_B: _up_results(1)})
+
+        result = await self._run(
+            collector,
+            {
+                "mode": "drain",
+                "device_ids": [0],
+                "expected_planes": [0],
+                "impacted_planes": [0],
+                "impacted_tuples_by_host_device": {
+                    HOST_A: {"0": [0]},
+                    HOST_B: {},
+                },
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        calls_by_host = {
+            call.kwargs["host"]: call.kwargs
+            for call in collector.evaluate_drain_window.call_args_list
+        }
+        self.assertEqual(calls_by_host[HOST_A]["impacted_tuples_by_device"], {"0": [0]})
+        self.assertEqual(calls_by_host[HOST_B]["impacted_tuples_by_device"], {})
+
     async def test_drain_window_excludes_stale_prior_playbook_timestamp(self):
         collector = _make_collector({HOST_A: _up_results()})
         with patch(f"{HC_MODULE}.get_disruption_time", return_value=900.0):
