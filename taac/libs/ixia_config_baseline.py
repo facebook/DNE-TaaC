@@ -21,6 +21,7 @@ JsonValue: TypeAlias = (
 
 _MAX_STRUCTURAL_DIFFERENCES = 12
 _MAX_DIFFERENCE_VALUE_CHARACTERS = 160
+_VOLATILE_SEMANTIC_PATHS = frozenset({("globals", "dotnetDebug")})
 
 
 class IxiaConfigClient(Protocol):
@@ -106,21 +107,37 @@ class IxiaTopologyBaselineParticipant:
     @staticmethod
     def _semantic_projection(json_config: str) -> JsonValue:
         parsed_config = cast(JsonValue, json.loads(json_config))
-        return IxiaTopologyBaselineParticipant._normalize_semantic_value(parsed_config)
+        return IxiaTopologyBaselineParticipant._normalize_semantic_value(
+            parsed_config,
+            path=(),
+        )
 
     @staticmethod
-    def _normalize_semantic_value(value: JsonValue) -> JsonValue:
+    def _normalize_semantic_value(
+        value: JsonValue,
+        *,
+        path: tuple[str, ...],
+    ) -> JsonValue:
         if isinstance(value, dict):
             return {
-                key: IxiaTopologyBaselineParticipant._normalize_semantic_value(child)
+                key: IxiaTopologyBaselineParticipant._normalize_semantic_value(
+                    child,
+                    path=(*path, key),
+                )
                 for key, child in sorted(value.items())
+                # IxNetwork regenerates and reindexes these debugger process
+                # descriptors independently of the imported topology.
+                if (*path, key) not in _VOLATILE_SEMANTIC_PATHS
             }
         if not isinstance(value, list):
             return value
 
         normalized = [
-            IxiaTopologyBaselineParticipant._normalize_semantic_value(child)
-            for child in value
+            IxiaTopologyBaselineParticipant._normalize_semantic_value(
+                child,
+                path=(*path, str(index)),
+            )
+            for index, child in enumerate(value)
         ]
         xpaths = [
             child.get("xpath") if isinstance(child, dict) else None
