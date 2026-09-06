@@ -67,7 +67,7 @@ from taac.ixia.config_render import (
     render_ixia_config,
     ResolvedCheck,
 )
-from neteng.test_infra.dne.taac.ixia.ixia_tracer import IxiaTraceSlice, slugify_phase
+from taac.ixia.ixia_tracer import IxiaTraceSlice, slugify_phase
 from taac.ixia.taac_ixia import TaacIxia
 
 # taac.libs.collectors.registry is OSS-safe (no Meta-internal imports) and owns
@@ -84,11 +84,22 @@ from taac.libs.baseline_lifecycle import (
     BaselineTimeouts,
 )
 from taac.libs.collectors.registry import set_test_case_start_time
-from taac.libs.investigation_report import (
-    InvestigationReport,
-    render_headline,
-    render_report_lines,
-)
+if not TAAC_OSS:
+    from taac.libs.investigation_report import (
+        InvestigationReport,
+        render_headline,
+        render_report_lines,
+    )
+else:
+    # The investigation agent is unavailable in OSS. Keep its optional type
+    # annotations import-free so OSS does not need the agent's pydantic stack.
+    InvestigationReport = t.Any
+
+    def render_headline(_report: t.Any) -> str:
+        return ""
+
+    def render_report_lines(_report: t.Any) -> t.List[str]:
+        return []
 from taac.libs.ixia_candidate import (
     IxiaCandidate,
     normalize_ixia_candidates,
@@ -953,6 +964,33 @@ class TaacRunner:
                 errors,
             )
 
+    async def _run_teardown_tasks_best_effort(
+        self, tasks: t.Sequence[taac_types.Task]
+    ) -> None:
+        """Run every teardown task even when an earlier cleanup fails.
+
+        Setup tasks intentionally fail fast, but teardown owns restoration of
+        independent DUTs and nested config snapshots.  Stopping at the first
+        error can strand later devices in the test configuration.  Keep the
+        existing per-task retry behavior by invoking ``run_tasks`` with one
+        task at a time, then surface all failures after every cleanup was
+        attempted.
+        """
+        errors: t.List[Exception] = []
+        for task in tasks:
+            try:
+                await self.run_tasks((task,))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                self.logger.error(
+                    "Teardown task failed; continuing remaining cleanup: "
+                    f"{self._get_task_description(task)}: {exc}"
+                )
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Multiple TAAC teardown tasks failed", errors)
+
     async def _async_run_oss_setup_tasks(self) -> None:
         """Run the OSS setup-task stage.
 
@@ -1285,6 +1323,10 @@ class TaacRunner:
             topology=self.topology,
             step=step,
         )
+        # Set after construction so third-party Step subclasses with explicit
+        # constructor signatures do not have to accept a new keyword merely to
+        # benefit from runner-owned registered-task state.
+        step_obj.shared_data = self.shared_task_data
         step_obj._input = (
             json_to_thrift(step.input_json, STEP_NAME_TO_INPUT[step.name])
             if step.input_json

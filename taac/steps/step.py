@@ -88,6 +88,9 @@ class Step(t.Generic[StepInput], ABC):
         self.hostname: str = self.device.name
         self.logger = logger or get_root_logger()
         self.parameter_evaluator = parameter_evaluator
+        # One runner-owned store lets registered tasks in separate RUN_TASK
+        # steps exchange keyed state without process-global caches.
+        self.shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None
         # pyrefly: ignore [bad-assignment]
         self.driver: AbstractSwitch = ...
         self.failures = []
