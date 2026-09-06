@@ -110,10 +110,10 @@ BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (
 #
 # Testbed-driven route-scale sweep WITH egress. Both peer counts are pinned
 # (eBGP=2 ingress, iBGP=500 egress; nexthops RESOLVABLE and advertised) and the
-# ingress ROUTE count is swept. PRIMARY signal is the TRANSIENT memory (peak
-# high-watermark − stable steady-state); it must stay ~flat as routes scale
-# because bgpd bounds the burst via update-queue backpressure. A deduplicator-
-# size check rides along as a bonus.
+# ingress ROUTE count is swept. The transient memory (peak high-watermark −
+# stable steady-state) must remain below an absolute ceiling because bgpd bounds
+# the burst via update-queue backpressure. Separate gates verify attribute
+# deduplication and rule out a complete fallback to per-peer Adj-RIB-Out state.
 #
 #   IXIA eBGP ×2 ══▶ bag010 (DUT) ══▶ iBGP egress ×500  (resolvable, advertised)
 #     routes swept     full ingress → egress path
@@ -123,8 +123,8 @@ BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (
 #   │ iBGP egress  = 500       │    10K → 50K                    │
 #   │ nexthop      = resolved  │                                 │
 #   └──────────────────────────┴─────────────────────────────────┘
-#   SIGNAL: transient memory (peak − stable) ~flat as routes scale
-#   GATES : transient-memory + dedup-size, both mode-flagged (default permissive)
+#   SIGNAL: transient memory (peak − stable), shared Adj-RIB-Out, dedup size
+#   GATES : transient-memory + Adj-RIB-Out + dedup-size, all blocking by default
 #   name  : BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP
 BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(

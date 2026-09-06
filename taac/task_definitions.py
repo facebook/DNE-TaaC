@@ -29,6 +29,31 @@ from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Params, PeriodicTask, Task
 
 
+def create_fpf_ensure_interfaces_enabled_task(
+    interfaces_by_device: t.Mapping[str, t.Sequence[str]],
+) -> Task:
+    """Create an idempotent TestConfig-teardown guard for held-down ports."""
+    empty_devices = sorted(
+        device for device, interfaces in interfaces_by_device.items() if not interfaces
+    )
+    if empty_devices:
+        raise ValueError(
+            "Every interface-enable target must contain at least one interface; "
+            f"empty targets: {empty_devices}"
+        )
+    targets = [
+        {"device": device, "interfaces": sorted(set(interfaces))}
+        for device, interfaces in sorted(interfaces_by_device.items())
+    ]
+    if not targets:
+        raise ValueError("At least one device/interface target is required")
+    return Task(
+        task_name="fpf_ensure_interfaces_enabled",
+        description="Best-effort restore of FPF interface admin state",
+        params=Params(json_params=json.dumps({"targets": targets})),
+    )
+
+
 # =============================================================================
 # EOS IMAGE DEPLOYMENT TASK FACTORY
 # =============================================================================
@@ -3637,6 +3662,8 @@ def create_fpf_start_collectors_task(
     fsdb_session_poll_interval_sec: float = 3.0,
     fsdb_session_expected: int = 32,
     rf_vf_groups: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    hrt_device_ids: t.Optional[t.List[int]] = None,
+    hrt_plane_ids: t.Optional[t.List[int]] = None,
 ) -> Task:
     """Create a setup task that starts long-lived FPF collectors.
 
@@ -3645,9 +3672,18 @@ def create_fpf_start_collectors_task(
     returns INVALID_PATH on GTSWs not exposing it). Default "ribmap".
 
     Starts the injected-prefix collectors (FSDB ribMap, HRT bulk, BGP RIB,
-    HRT remote-failure) and waits for baseline data collection. Prefix
-    injection is NOT done here — it is a stage step in the playbook so
-    test_case_start_time aligns with injection.
+    HRT remote-failure) and waits for baseline data collection. FSDB expands
+    ``gtsws`` to all local plane switches plus explicitly supplied observers;
+    BGP polls only the supplied observer list because only those devices are
+    consumed by BGP health checks. Prefix injection is NOT done here — it is a
+    stage step in the playbook so test_case_start_time aligns with injection.
+
+    ``hrt_device_ids`` selects the independent HRT devices whose local planes
+    are recorded by the bulk and aggregate remote-failure collectors. It
+    defaults compatibly to dev0 when omitted. Per-VF collector entries may carry
+    their own ``device_ids`` mapping.
+    ``hrt_plane_ids`` selects the local plane IDs emitted for every requested
+    device. It defaults to legacy 0..7; new-SDK paired-device hosts pass 0..3.
 
     When ``prod_prefixes`` is supplied, a fifth collector
     (ProdHrtPrefixCollector) is also started to monitor steady-state
@@ -3665,10 +3701,11 @@ def create_fpf_start_collectors_task(
     holding ALL monitored hosts (one file with a host column). ``fsdb_session_hosts``
     ([host, ...]) selects which hosts the session collector monitors (default: all
     GPU hosts). ``prod_prefixes_by_host`` ({host: [prefixes]}) gives each host its
-    OWN prod prefixes for the prod-prefix + plane-status collectors; the legacy
-    ``prod_prefixes`` + ``prod_prefix_host`` folds into a one-host map. The matching
-    health checks read the single collector and iterate its hosts internally,
-    asserting every host independently. ``fsdb_session_host`` (singular) is
+    configured query prefixes for the prod-prefix collector; multiple hosts may
+    observe the same conditional route. The legacy ``prod_prefixes`` +
+    ``prod_prefix_host`` folds into a one-host map. The matching health checks read
+    the single collector and iterate its hosts internally, asserting every host
+    independently. ``fsdb_session_host`` (singular) is
     accepted for back-compat and, when the plural form is not given, folded into
     a one-entry ``fsdb_session_hosts`` list to preserve single-host intent.
     """
@@ -3686,6 +3723,10 @@ def create_fpf_start_collectors_task(
     }
     if rf_vf_groups:
         params["rf_vf_groups"] = rf_vf_groups
+    if hrt_device_ids and hrt_device_ids != [0]:
+        params["hrt_device_ids"] = hrt_device_ids
+    if hrt_plane_ids and hrt_plane_ids != list(range(8)):
+        params["hrt_plane_ids"] = hrt_plane_ids
     if fsdb_session_hosts:
         params["fsdb_session_hosts"] = fsdb_session_hosts
     elif fsdb_session_host is not None:
@@ -3710,6 +3751,7 @@ def create_fpf_start_collectors_task(
 def create_fpf_start_ib_traffic_task(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
     device: str = "mlx5_34",
     gid_iface: str = "bveth0",
     gid_prefix: str = "2401",
@@ -3728,7 +3770,8 @@ def create_fpf_start_ib_traffic_task(
 ) -> Task:
     """Create a setup task that starts ib_write_bw RDMA traffic and validates egress.
 
-    SSHes to ``server`` and each host in ``clients``, starts long-lived
+    SSHes to ``server`` and each host in ``clients``, validates the configured
+    ``binary_path`` (default /usr/bin/ib_write_bw), starts long-lived
     ``ib_write_bw`` (server then clients) on RDMA ``device`` (default mlx5_34 /
     VF1), confirms the processes are up, waits ``settle_sec`` (default 120s),
     then queries ODS to confirm each host is egressing more than
@@ -3756,6 +3799,8 @@ def create_fpf_start_ib_traffic_task(
         "settle_sec": settle_sec,
         "ods_window_sec": ods_window_sec,
     }
+    if binary_path is not None:
+        params["binary_path"] = binary_path
     if gid_index is not None:
         params["gid_index"] = gid_index
     if msg_size is not None:

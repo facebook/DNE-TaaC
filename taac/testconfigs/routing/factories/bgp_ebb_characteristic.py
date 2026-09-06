@@ -394,6 +394,10 @@ _CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES: list[str] = ["65529:39744"]
 # the 65529:39744 acceptance tag -- so EB-FA-IN rejects every route (Accepted=0).
 # Matches SC2 / the legacy single-axis config.
 _CONSTANT_ATTR_MAX_COMMUNITIES_PER_ROUTE: int = 5
+_SC3_CONVERGENCE_TIMEOUT_SECONDS: int = 600
+_SC3_CONVERGENCE_POLL_SECONDS: int = 5
+_SC3_CONVERGENCE_QUIESCENCE_SECONDS: int = 30
+_SC3_TRANSIENT_MEMORY_CEILING_MB: float = 50.0
 
 # ─── SC2 (char-2 Constant Storage, INGRESS-ONLY) ───────────────────────────
 # eBGP ingress peer count (IPv6-only), FIXED. No iBGP egress at all.
@@ -406,7 +410,7 @@ _INGRESS_ATTR_TOTAL_PATHS: int = 800_000
 _INGRESS_ATTR_COMBINATION_SWEEP: list[int] = [100_000, 200_000, 400_000, 800_000]
 
 
-def test_config_constant_attribute_storage_route_sweep_on_eos(
+def test_config_sc3_transient_memory_route_scale_on_eos(
     test_config_name: str,
     device_name: str,
     ixia_interface_mimic_ebgp: str,
@@ -436,26 +440,29 @@ def test_config_constant_attribute_storage_route_sweep_on_eos(
     test_route_withdrawal: bool = False,
     withdrawal_wait_minutes: int = 3,
     dump_attribute_assignments: bool = True,
-    soak_time_minutes: int = 10,
     direct_ixia_connections: list | None = None,
     log_collection_timeout: int | None = None,
     oss_mock_device_data=None,
     host_os_type_map=None,
     host_driver_args=None,
-    transient_ratio_tolerance: float = 2.0,
-    dedup_gate_mode: str = "permissive",
-    transient_gate_mode: str = "permissive",
+    dedup_gate_mode: str | None = None,
+    adjrib_out_memory_gate_mode: str | None = None,
+    transient_gate_mode: str | None = None,
+    transient_memory_ceiling_mb: float = _SC3_TRANSIENT_MEMORY_CEILING_MB,
+    convergence_timeout_seconds: int = _SC3_CONVERGENCE_TIMEOUT_SECONDS,
+    convergence_poll_seconds: int = _SC3_CONVERGENCE_POLL_SECONDS,
+    convergence_quiescence_seconds: int = _SC3_CONVERGENCE_QUIESCENCE_SECONDS,
 ) -> taac_types.TestConfig:
-    """BGP++ constant-attribute-storage route-scale sweep on Arista EOS.
+    """BGP++ SC3 transient-memory route-scale sweep on Arista EOS.
 
     Fixed topology -- ``ebgp_peer_count`` eBGP (ingress source) + ``ibgp_peer_count``
     iBGP (egress fan-out) -- with the ingress route count as the only swept axis
     (``route_sweep``). Every route draws an attribute-set from a fixed bounded
     pool, so as routes scale the DEDUPLICATOR SIZE (unique attribute count) must
     stay ~constant iff attributes are shared (stored once) rather than re-created
-    per route; RSS is observational (it grows with prefix/path count). Under
-    update-group, holding egress *paths* constant would NOT hold memory constant
-    (adj-rib-out is per-group ~= prefixes), so the deduplicator is the signal.
+    per route. Stable RSS may grow with prefix/path count, but must remain below
+    the raw lower bound for a complete fallback to per-peer Adj-RIB-Out storage.
+    The peak-minus-stable convergence transient has a separate absolute ceiling.
 
     The device is provisioned with the SC1-mirrored setup layer: the test's own
     eBGP+iBGP bgpcpp peer list is written and the interface secondary IPs laid
@@ -643,7 +650,7 @@ def test_config_constant_attribute_storage_route_sweep_on_eos(
                     DeviceGroupConfig(
                         device_group_name="DEVICE_GROUP_IPV6_IBGP",
                         device_group_index=0,
-                        multiplier=1,
+                        multiplier=ibgp_peer_count_per_afi,
                         v6_addresses_config=IpAddressesConfig(
                             starting_ip=f"{ixia_ibgp_ic_parent_network_v6}::11",
                             increment_ip="0:0:0:0::2",
@@ -661,7 +668,7 @@ def test_config_constant_attribute_storage_route_sweep_on_eos(
                     DeviceGroupConfig(
                         device_group_name="DEVICE_GROUP_IPV4_IBGP",
                         device_group_index=1,
-                        multiplier=1,
+                        multiplier=ibgp_peer_count_per_afi,
                         v4_addresses_config=IpAddressesConfig(
                             starting_ip=f"{ixia_ibgp_ic_parent_network_v4}.11",
                             increment_ip="0.0.0.2",
@@ -682,25 +689,31 @@ def test_config_constant_attribute_storage_route_sweep_on_eos(
         ],
         playbooks=[
             build_case2_playbook(
-                name="bgp_plus_plus_constant_attribute_storage_test",
-                description="Test BGP++ constant attribute storage with varying EBGP peers and prefix counts",
+                name="bgp_plus_plus_sc3_transient_memory_route_scale_test",
+                description=(
+                    "Test BGP++ SC3 transient memory while ingress routes scale"
+                ),
                 stages=[
                     create_steps_stage(
                         steps=[
                             create_custom_step(
                                 params_dict={
-                                    "custom_step_name": "test_constant_attribute_storage_eos_bgp_plus_plus",
+                                    "custom_step_name": "test_sc3_transient_memory_route_scale_eos_bgp_plus_plus",
                                     "test_config_name": test_config_name,
                                     "hostname": device_name,
                                     "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
                                     "ebgp_peer_count": ebgp_peer_count,
                                     "ibgp_peer_count": ibgp_peer_count,
+                                    "ibgp_remote_as": ibgp_local_as,
                                     "route_sweep": route_sweep,
-                                    "transient_ratio_tolerance": transient_ratio_tolerance,
                                     "dedup_gate_mode": dedup_gate_mode,
+                                    "adjrib_out_memory_gate_mode": adjrib_out_memory_gate_mode,
                                     "transient_gate_mode": transient_gate_mode,
+                                    "transient_memory_ceiling_mb": transient_memory_ceiling_mb,
+                                    "convergence_timeout_seconds": convergence_timeout_seconds,
+                                    "convergence_poll_seconds": convergence_poll_seconds,
+                                    "convergence_quiescence_seconds": convergence_quiescence_seconds,
                                     "constant_total_paths": constant_total_paths,
-                                    "soak_time_minutes": soak_time_minutes,
                                     "attribute_pool_as_paths": as_path_pool,
                                     "attribute_pool_communities": community_pool,
                                     "attribute_pool_extended_communities": extended_community_pool,
@@ -731,13 +744,12 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     The SC3 "scale & characteristics" test = the (former SC2) route-scale sweep
     WITH egress. Fixed topology (eBGP=2 ingress source, iBGP=500 egress fan-out,
     RESOLVABLE nexthops, routes advertised) and sweeps the INGRESS ROUTE count
-    (``_CONSTANT_ATTR_ROUTE_SWEEP``, 10K->50K). PRIMARY signal = TRANSIENT memory
-    = peak (high-watermark during the convergence burst) - stable (steady-state
-    after soak); it must stay ~flat as routes scale, because bgpd bounds the
-    transient working set via bounded update queues (backpressure). The
-    DEDUPLICATOR-SIZE check rides along as a bonus (the char-2 signal). Both
-    gates expose a blocking|permissive mode flag (default permissive until
-    calibrated on a real run, then flip to blocking).
+    (``_CONSTANT_ATTR_ROUTE_SWEEP``, 10K->50K). PRIMARY signal = transient memory
+    = peak sampled RSS during convergence - stable post-convergence RSS; it must
+    remain within the absolute 50 MB ceiling because bgpd bounds the transient
+    working set via update-queue backpressure. Separate blocking gates rule out
+    a complete fallback to per-peer Adj-RIB-Out storage and verify that the
+    fixed attribute pools stay deduplicated.
 
     Mirrors the SC1 perf-scaling factory: the DUT is provisioned via
     ``get_update_packing_setup_tasks`` and the name derives from
@@ -763,12 +775,12 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     if enable_update_group:
         name += "_UPDATE_GROUP"
 
-    return test_config_constant_attribute_storage_route_sweep_on_eos(
+    return test_config_sc3_transient_memory_route_scale_on_eos(
         test_config_name=name,
         device_name=testbed.device_name,
         # Bind the DUT to the BGP++-aware AristaFbossSwitch driver (thrift), so
-        # health checks (BGP_SESSION_ESTABLISH_CHECK / BGP_RIB_FIB_CONSISTENCY_CHECK)
-        # query BGP++ instead of falling back to native ar-bgp CLI. Mirrors SC2.
+        # the BGP session health check queries BGP++ instead of falling back to
+        # native ar-bgp CLI. Mirrors SC2.
         host_os_type_map={testbed.device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         ixia_interface_mimic_ebgp=testbed.ixia_ports[0][0],
         ixia_interface_mimic_ibgp=testbed.ixia_ports[1][0],
@@ -781,8 +793,10 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
         # Fixed topology: eBGP=2 ingress source, iBGP=500 egress fan-out.
         ebgp_peer_count=_CONSTANT_ATTR_EBGP_PEER_COUNT,
         ibgp_peer_count=_CONSTANT_ATTR_IBGP_PEER_COUNT,
-        # The only swept axis: ingress route count. iBGP + attribute pool are
-        # held constant so the deduplicator size is the signal, not egress paths.
+        # The only swept axis is ingress route count. The fixed iBGP fan-out lets
+        # endpoint RSS growth rule out a complete fallback to per-peer
+        # Adj-RIB-Out state, while the fixed attribute pools make their
+        # deduplicator sizes independently testable.
         route_sweep=_CONSTANT_ATTR_ROUTE_SWEEP,
         dut_bgp_as=testbed.dut_bgp_as,
         bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,

@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, patch
 from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.driver_constants import (
     BgpSessionState,
+    describe_interface_state,
+    InterfaceEventState,
+    InterfaceState,
     SystemAvailability,
 )
 
@@ -194,3 +197,195 @@ class TestIsCriticalCoreDumps(unittest.IsolatedAsyncioTestCase):
             "some_random.core.12345", ["wedge_agent"]
         )
         self.assertFalse(result)
+
+
+class TestDescribeInterfaceState(unittest.TestCase):
+    def test_admin_enabled_and_oper_down_blames_the_far_end(self):
+        """A port the device enabled but that never linked is not the device's fault."""
+        described = describe_interface_state(
+            InterfaceState(
+                oper_up=False,
+                admin_enabled=True,
+                speed_mbps=400000,
+                profile_id="PROFILE_400G_8_PAM4_RS544X2N_OPTICAL",
+                has_transceiver=True,
+            )
+        )
+        self.assertIn("admin=enabled oper=down", described)
+        self.assertIn("speed=400000Mbps", described)
+        self.assertIn("profile=PROFILE_400G_8_PAM4_RS544X2N_OPTICAL", described)
+        self.assertIn("transceiver=present", described)
+        self.assertIn("check the far end, the cable and the optics", described)
+
+    def test_admin_disabled_and_oper_down_blames_the_device(self):
+        """A port the device never enabled cannot be a far end problem."""
+        described = describe_interface_state(
+            InterfaceState(oper_up=False, admin_enabled=False, has_transceiver=True)
+        )
+        self.assertIn("admin=disabled oper=down", described)
+        self.assertIn("The device never enabled the port", described)
+        self.assertIn("COOP config that failed to activate", described)
+        self.assertNotIn("check the far end", described)
+
+    def test_missing_transceiver_is_called_out_separately(self):
+        described = describe_interface_state(
+            InterfaceState(oper_up=False, admin_enabled=True, has_transceiver=False)
+        )
+        self.assertIn("transceiver=absent", described)
+        self.assertIn("reports no transceiver", described)
+
+    def test_unknown_admin_state_is_reported_as_unknown(self):
+        """An aggregated interface has no admin state, so none is invented."""
+        described = describe_interface_state(InterfaceState(oper_up=False))
+        self.assertIn("admin=unknown oper=down", described)
+        self.assertIn("check its member ports", described)
+        self.assertNotIn("admin=disabled", described)
+        self.assertNotIn("admin=enabled", described)
+
+    def test_up_interface_carries_no_cause_hint(self):
+        described = describe_interface_state(
+            InterfaceState(oper_up=True, admin_enabled=True, speed_mbps=400000)
+        )
+        self.assertEqual("admin=enabled oper=up speed=400000Mbps", described)
+
+    def test_absent_optional_fields_are_omitted(self):
+        described = describe_interface_state(
+            InterfaceState(oper_up=True, admin_enabled=True)
+        )
+        self.assertEqual("admin=enabled oper=up", described)
+
+
+@patch("asyncio.sleep", new_callable=AsyncMock)
+class TestCheckInterfaceStatusMessage(unittest.IsolatedAsyncioTestCase):
+    """The assertion message is the deliverable, so it is what gets asserted on."""
+
+    def setUp(self):
+        self.switch = _TestSwitch(
+            "rsw001.p001.f01.snc1", logger=logging.getLogger("test")
+        )
+
+    def _observe(self, state: InterfaceState) -> None:
+        self.switch.async_get_interfaces_state = AsyncMock(
+            return_value={"eth1/1/1": state}
+        )
+
+    async def _expect_up_failure(self, state: InterfaceState) -> str:
+        self._observe(state)
+        with self.assertRaises(AssertionError) as raised:
+            await self.switch.async_check_interface_status(
+                "eth1/1/1", InterfaceEventState.STABLE
+            )
+        return str(raised.exception)
+
+    async def test_admin_enabled_oper_down_names_the_far_end(self, _mock_sleep):
+        message = await self._expect_up_failure(
+            InterfaceState(
+                oper_up=False,
+                admin_enabled=True,
+                speed_mbps=400000,
+                profile_id="PROFILE_400G_8_PAM4_RS544X2N_OPTICAL",
+                has_transceiver=True,
+            )
+        )
+        self.assertIn(
+            "rsw001.p001.f01.snc1:eth1/1/1 is not operationally up: "
+            "admin=enabled oper=down speed=400000Mbps "
+            "profile=PROFILE_400G_8_PAM4_RS544X2N_OPTICAL transceiver=present. "
+            "The device has the port enabled, so the device side is configured; "
+            "check the far end, the cable and the optics.",
+            message,
+        )
+
+    async def test_admin_disabled_oper_down_names_the_device(self, _mock_sleep):
+        message = await self._expect_up_failure(
+            InterfaceState(oper_up=False, admin_enabled=False, has_transceiver=True)
+        )
+        self.assertIn(
+            "rsw001.p001.f01.snc1:eth1/1/1 is not operationally up: "
+            "admin=disabled oper=down transceiver=present. "
+            "The device never enabled the port, so it cannot link up whatever "
+            "the far end does; check the device configuration, for example a "
+            "COOP config that failed to activate.",
+            message,
+        )
+
+    async def test_aggregated_interface_reports_unknown_admin(self, _mock_sleep):
+        message = await self._expect_up_failure(InterfaceState(oper_up=False))
+        self.assertIn(
+            "rsw001.p001.f01.snc1:eth1/1/1 is not operationally up: "
+            "admin=unknown oper=down. "
+            "Admin state is not reported for this kind of interface, so the "
+            "cause cannot be attributed to a side; check its member ports.",
+            message,
+        )
+
+    async def test_up_interface_passes_the_stable_check(self, _mock_sleep):
+        self._observe(InterfaceState(oper_up=True, admin_enabled=True))
+        await self.switch.async_check_interface_status(
+            "eth1/1/1", InterfaceEventState.STABLE
+        )
+
+    async def test_unstable_check_reports_both_states(self, _mock_sleep):
+        self._observe(InterfaceState(oper_up=True, admin_enabled=True))
+        with self.assertRaises(AssertionError) as raised:
+            await self.switch.async_check_interface_status(
+                "eth1/1/1", InterfaceEventState.UNSTABLE
+            )
+        self.assertIn(
+            "rsw001.p001.f01.snc1:eth1/1/1 is not operationally down: "
+            "admin=enabled oper=up",
+            str(raised.exception),
+        )
+
+
+@patch("asyncio.sleep", new_callable=AsyncMock)
+class TestCheckInterfacesStatusMessage(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.switch = _TestSwitch(
+            "rsw001.p001.f01.snc1", logger=logging.getLogger("test")
+        )
+
+    async def test_mismatch_lists_admin_and_oper_per_interface(self, _mock_sleep):
+        self.switch.async_get_interfaces_state = AsyncMock(
+            return_value={
+                "eth1/1/1": InterfaceState(oper_up=False, admin_enabled=False),
+                "eth1/1/2": InterfaceState(oper_up=False, admin_enabled=True),
+                "eth1/1/3": InterfaceState(oper_up=True, admin_enabled=True),
+            }
+        )
+        with self.assertRaises(Exception) as raised:
+            await self.switch.async_check_interfaces_status(
+                ["eth1/1/1", "eth1/1/2", "eth1/1/3"], True
+            )
+        message = str(raised.exception)
+        self.assertIn(
+            "Interface state mismatch on rsw001.p001.f01.snc1, expected oper=up",
+            message,
+        )
+        self.assertIn("'eth1/1/1': 'admin=disabled oper=down.", message)
+        self.assertIn("'eth1/1/2': 'admin=enabled oper=down.", message)
+        self.assertNotIn("eth1/1/3", message)
+
+    async def test_all_up_passes(self, _mock_sleep):
+        self.switch.async_get_interfaces_state = AsyncMock(
+            return_value={"eth1/1/1": InterfaceState(oper_up=True, admin_enabled=True)}
+        )
+        await self.switch.async_check_interfaces_status(["eth1/1/1"], True)
+
+
+class TestAbstractSwitchInterfaceStateFallback(unittest.IsolatedAsyncioTestCase):
+    async def test_driver_without_admin_state_reports_unknown(self):
+        """Drivers that only expose oper state must not imply an admin state."""
+        switch = _TestSwitch("rsw001.p001.f01.snc1", logger=logging.getLogger("test"))
+        switch.async_get_interfaces_status = AsyncMock(
+            return_value={"eth1/1/1": False, "eth1/1/2": True}
+        )
+        states = await switch.async_get_interfaces_state(["eth1/1/1", "eth1/1/2"])
+        self.assertEqual(
+            {
+                "eth1/1/1": InterfaceState(oper_up=False),
+                "eth1/1/2": InterfaceState(oper_up=True),
+            },
+            states,
+        )
+        self.assertIsNone(states["eth1/1/1"].admin_enabled)

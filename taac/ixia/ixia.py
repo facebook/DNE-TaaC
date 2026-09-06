@@ -4,6 +4,8 @@
 # pyre-unsafe
 
 import functools
+import importlib.metadata
+import inspect
 import ipaddress
 import itertools
 import json
@@ -53,6 +55,17 @@ from ixnetwork_restpy.assistants.statistics.statviewassistant import (
 )
 from ixnetwork_restpy.errors import IxNetworkError as IxnIxNetworkError
 from ixnetwork_restpy.files import Files
+from taac.ixia.ixia_tracer import (
+    build_trace_path,
+    extract_request_body,
+    extract_request_method_and_url,
+    IxiaTracePortMapping,
+    IxiaTracer,
+    IxiaTraceSessionPreamble,
+    IxiaTraceSlice,
+    IxiaTraceSpan,
+    RECORD_TYPE_SESSION_PREAMBLE,
+)
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
 )
@@ -670,6 +683,21 @@ class IxiaSessionQuarantinedError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class IxiaScenarioQuarantineRecord:
+    generation: int
+    reason: str
+    baseline: object
+    mutation_journal: object
+    created_at_monotonic: float
+    expires_at_monotonic: float
+    session_identity: t.Optional[t.Tuple[str, int]]
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.expires_at_monotonic
+
+
 class NetworkGroupNotFoundError(Exception):
     pass
 
@@ -748,6 +776,7 @@ class VportIndex:
 def require_traffic_item(func: t.Callable) -> t.Callable:
     """Decorator to skip the function execution if no traffic items are found"""
 
+    @functools.wraps(func)
     def wrapper(self, *args, **kwargs) -> t.Any:
         if not self.has_traffic_items():
             self.logger.debug(
@@ -760,7 +789,7 @@ def require_traffic_item(func: t.Callable) -> t.Callable:
 
 
 # `source` values emitted into `inband_502_observed` Scuba rows. Mirrored
-# from `ixia_recovery_lib.SOURCE_INBAND_API_CALL` /
+# from `recovery.SOURCE_INBAND_API_CALL` /
 # `SOURCE_BETWEEN_PLAYBOOK_GATE` so the per-RPC wrapper can use them without
 # a non-OSS import at module load. A unit test
 # (`test_ixia_inband_recovery.SourceConstantsTest`) pins these equal to the
@@ -785,6 +814,59 @@ _PROTOCOLS_STOPPED_STATES: t.FrozenSet[str] = frozenset({"notStarted", "configur
 _PROTOCOL_STATE_SETTLE_TIMEOUT_SECONDS: int = 120
 # Each poll is one REST round-trip per device group, so keep it coarse.
 _PROTOCOL_STATE_POLL_SECONDS: int = 2
+# ApplyOnTheFly failures are commonly transient while a large topology settles.
+_APPLY_CHANGES_MAX_ATTEMPTS: int = 3
+_APPLY_CHANGES_RETRY_DELAY_SECONDS: float = 10.0
+
+# Stamped on the installed transport wrapper, holding the `Ixia` that owns it,
+# and read back by the installer as its idempotency guard.
+_TRACED_REQUEST_OWNER: str = "_taac_ixia_request_wrapper_owner"
+
+# The tracer's own appErrors GET runs inside the transport wrapper, on the
+# thread whose call just failed. It is capped tightly so a wedged API server
+# cannot turn diagnostic collection into a test-length stall.
+_APP_ERRORS_FETCH_TIMEOUT_SECONDS: int = 15
+
+
+def cap_timeout_at_deadline(existing_timeout: t.Any, remaining: float) -> t.Any:
+    """Cap a `requests` timeout at the seconds left on the current deadline.
+
+    A tuple is `requests`' independent connect/read pair, so each element is
+    capped on its own rather than collapsed into a single value.
+    """
+    if isinstance(existing_timeout, tuple):
+        return tuple(
+            remaining if value is None else min(value, remaining)
+            for value in existing_timeout
+        )
+    if existing_timeout is None:
+        return remaining
+    return min(existing_timeout, remaining)
+
+
+def _restpy_version() -> t.Optional[str]:
+    """The `ixnetwork-restpy` version, which pins the wire format Keysight
+    has to replay a trace against. Absent from a stripped par, hence best
+    effort."""
+    try:
+        return importlib.metadata.version("ixnetwork-restpy")
+    except Exception:
+        return None
+
+
+def resolve_decorated_name(func: t.Callable) -> str:
+    """The name of the method under `func`, not of the decorator wrapping it.
+
+    `@external_api` sits above `@require_traffic_item` and `@retryable`, so
+    `func.__name__` names whichever wrapper is directly underneath. Both of
+    those use `functools.wraps`, which sets `__wrapped__`, so `inspect.unwrap`
+    walks down to the real method. A decorator that sets neither leaves its
+    own name, which is still better than crashing on a missing attribute.
+    """
+    unwrapped = inspect.unwrap(func)
+    return getattr(unwrapped, "__name__", None) or getattr(
+        func, "__name__", "<unknown>"
+    )
 
 
 def external_api(func: t.Callable) -> t.Callable:
@@ -793,7 +875,7 @@ def external_api(func: t.Callable) -> t.Callable:
 
     On a 502/503 from the wrapped call, the wrapper emits a Scuba
     `inband_502_observed` row, invokes the already-tested-e2e recovery CLI
-    (`ixia._attempt_inband_recovery` → `ixia_recovery_lib.restart_ixnetwork`),
+    (`ixia._attempt_inband_recovery` → `recovery.restart_ixnetwork`),
     and retries the RPC once if recovery succeeded. A 504 is emitted but
     propagated without an application-wide restart: it proves that one
     operation exceeded the gateway deadline, not that the global API is down.
@@ -811,47 +893,62 @@ def external_api(func: t.Callable) -> t.Callable:
     The OSS guard lives inside `_attempt_inband_recovery`, which returns
     False under `TAAC_OSS`; this wrapper therefore degrades to its previous
     no-op behavior in OSS builds.
+
+    Also publishes the operation name on `_request_deadline_state` so the
+    REST tracer can attribute each recorded call to the TAAC operation that
+    issued it. The name is restored on exit rather than cleared, so a nested
+    `@external_api` call unwinds to its caller's name instead of to None.
     """
+    op_name = resolve_decorated_name(func)
 
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs) -> t.Any:
+        # The label exists only so the REST tracer can attribute a recorded
+        # call, so skip the bookkeeping when nothing is recording.
+        state = self._request_deadline_state if self._tracer is not None else None
+        previous_op = getattr(state, "op", None)
+        if state is not None:
+            state.op = op_name
         try:
-            return func(self, *args, **kwargs)
-        except Exception as exc:
-            # Use the budget-free eligibility check: the per-connect
-            # `_ixia_recovery_attempts_remaining` counter must NOT gate the
-            # per-RPC wrapper (a single connect-time recovery would exhaust
-            # it and silently block every mid-test recovery for the rest of
-            # the run — see Devmate review of D109398929 V1).
-            if not self._is_recovery_eligible_5xx(exc):
-                raise
-            # Telemetry must never mask the original 5xx: a Scuba write
-            # failure here would otherwise replace the real operational
-            # error (e.g. the propagated 504) in the traceback.
             try:
-                self._emit_inband_502(
-                    func.__name__, exc, source=_INBAND_SOURCE_API_CALL
-                )
-            except Exception:
-                self.logger.exception(
-                    f"{_YELLOW}[IXIA]{_RESET} failed to emit inband_502 "
-                    f"telemetry for {func.__name__}"
-                )
-            if self._extract_5xx_status(exc) == 504:
+                return func(self, *args, **kwargs)
+            except Exception as exc:
+                # Use the budget-free eligibility check: the per-connect
+                # `_ixia_recovery_attempts_remaining` counter must NOT gate the
+                # per-RPC wrapper (a single connect-time recovery would exhaust
+                # it and silently block every mid-test recovery for the rest of
+                # the run — see Devmate review of D109398929 V1).
+                if not self._is_recovery_eligible_5xx(exc):
+                    raise
+                # Telemetry must never mask the original 5xx: a Scuba write
+                # failure here would otherwise replace the real operational
+                # error (e.g. the propagated 504) in the traceback.
+                try:
+                    self._emit_inband_502(op_name, exc, source=_INBAND_SOURCE_API_CALL)
+                except Exception:
+                    self.logger.exception(
+                        f"{_YELLOW}[IXIA]{_RESET} failed to emit inband_502 "
+                        f"telemetry for {op_name}"
+                    )
+                if self._extract_5xx_status(exc) == 504:
+                    self.logger.warning(
+                        f"{_YELLOW}[IXIA]{_RESET} {op_name} hit an "
+                        "operation-scoped 504 — skipping application-wide recovery"
+                    )
+                    raise
                 self.logger.warning(
-                    f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit an "
-                    "operation-scoped 504 — skipping application-wide recovery"
+                    f"{_YELLOW}[IXIA]{_RESET} {op_name} hit 5xx mid-test — "
+                    f"invoking in-band recovery"
                 )
-                raise
-            self.logger.warning(
-                f"{_YELLOW}[IXIA]{_RESET} {func.__name__} hit 5xx mid-test — "
-                f"invoking in-band recovery"
-            )
-            if not self._attempt_inband_recovery():
-                # cooldown / auth / no_password / refusal / failure — keep the
-                # original 5xx in the traceback so triage sees the real cause.
-                raise
-            return func(self, *args, **kwargs)
+                if not self._attempt_inband_recovery():
+                    # cooldown / auth / no_password / refusal / failure — keep
+                    # the original 5xx in the traceback so triage sees the real
+                    # cause.
+                    raise
+                return func(self, *args, **kwargs)
+        finally:
+            if state is not None:
+                state.op = previous_op
 
     return wrapper
 
@@ -923,6 +1020,14 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
 class Ixia:
     OPERATION_TIMEOUT_ERROR = IxiaOperationTimeoutError
 
+    # Class-level defaults so the transport wrapper and the trace phase
+    # boundaries can read these unconditionally, including on the 11 test
+    # fixtures that construct an `Ixia` with `__init__` patched out.
+    # `__init__` overrides all three per instance.
+    _tracer: t.Optional[IxiaTracer] = None
+    _current_playbook_name: t.Optional[str] = None
+    _current_testconfig_name: t.Optional[str] = None
+
     def __init__(
         self,
         ixia_config: t.Optional[ixia_types.IxiaConfig] = None,
@@ -942,6 +1047,7 @@ class Ixia:
         password: t.Optional[str] = API_SERVER_PASSWORD,
         username: t.Optional[str] = API_SERVER_USERNAME,
         ixia_recovery: t.Optional[t.Any] = None,
+        trace_api_calls: bool = False,
     ) -> None:
         """Instantiates the object of class Ixia
 
@@ -1015,6 +1121,11 @@ class Ixia:
                 the default password will be used for logging in.
             username: Provide a username to log in to Ixia chassis. When not provided,
                 the default username will be used for logging in.
+
+            trace_api_calls: Record every IxNetwork REST call to a JSONL file
+                (see `ixia_tracer.py`). The file path is logged at construction
+                and exposed via the `api_tracer` property so the caller can
+                publish it once the run is over.
         """
 
         self.logger = logger if logger else get_logger()
@@ -1113,6 +1224,19 @@ class Ixia:
         self._deadline_request_wrapper: t.Optional[t.Any] = None
         self._session_quarantine_reason: t.Optional[str] = None
         self._quarantined_session_identity: t.Optional[t.Tuple[str, int]] = None
+        self._scenario_quarantine_generation = 0
+        self._scenario_quarantine_record: t.Optional[IxiaScenarioQuarantineRecord] = (
+            None
+        )
+        self._tracer: t.Optional[IxiaTracer] = (
+            IxiaTracer(path=build_trace_path(), logger=self.logger)
+            if trace_api_calls
+            else None
+        )
+        if self._tracer is not None:
+            self.logger.info(
+                f"{_CYAN}[IXIA]{_RESET} REST API tracing enabled -> {self._tracer.path}"
+            )
 
     @staticmethod
     def get_formatted_ip_address(ixia_server_ip: str) -> str:
@@ -1294,6 +1418,11 @@ class Ixia:
                 f"after reconnect: {replacement_identity}"
             )
 
+        # Emitted here rather than after port assignment so that a trace of a
+        # setup that died AT port assignment (the force-take-ownership
+        # collision this tracer exists for) still names its session.
+        self._publish_trace_session_preamble()
+
     def _remote_session_identity(
         self, session: t.Optional[t.Any] = None
     ) -> t.Optional[t.Tuple[str, int]]:
@@ -1307,58 +1436,270 @@ class Ixia:
         except (AttributeError, TypeError, ValueError):
             return None
 
+    @property
+    def api_tracer(self) -> t.Optional[IxiaTracer]:
+        """The REST call tracer, or None when `trace_api_calls` was not set."""
+        return self._tracer
+
+    def rotate_api_trace_phase(self, phase: str) -> t.Optional[IxiaTraceSlice]:
+        """Close the current trace slice and start recording into `phase`.
+
+        Returns the slice that was just closed so the caller can publish it,
+        or None when tracing is off or the trace is already closed.
+        """
+        tracer = self._tracer
+        if tracer is None:
+            return None
+        try:
+            return tracer.rotate(phase)
+        except Exception as exc:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: phase rotation to "
+                f"{phase!r} failed: {exc!r}"
+            )
+            return None
+
+    def _publish_trace_session_preamble(self) -> None:
+        """Record the chassis, session and port map the trace was taken against.
+
+        Without this a slice is a list of URLs against an anonymous session:
+        Keysight cannot replay it, and nobody reading it six weeks later can
+        tell which physical ports the calls drove.
+        """
+        tracer = self._tracer
+        if tracer is None:
+            return
+        try:
+            tracer.set_session_preamble(
+                IxiaTraceSessionPreamble(
+                    record_type=RECORD_TYPE_SESSION_PREAMBLE,
+                    seq=0,
+                    recorded_at=time.time(),
+                    chassis_ip=str(self.primary_chassis_ip),
+                    session_id=self.session_id,
+                    session_name=self.session_name,
+                    restpy_version=_restpy_version(),
+                    is_uhd_chassis=self.is_uhd_chassis,
+                    force_take_port_ownership=self.force_take_port_ownership,
+                    ports=self._trace_port_mappings(),
+                    traffic_items=self._trace_traffic_item_names(),
+                )
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: session preamble "
+                f"failed: {exc!r}"
+            )
+
+    def _trace_port_mappings(self) -> t.Tuple[IxiaTracePortMapping, ...]:
+        """Slot/port to vport to DUT interface, from the declarative config.
+
+        Read from `ixia_config` rather than `vport_indices` because a topology
+        cache hit skips `assign_ports` and leaves `vport_indices` empty while
+        the ports themselves are very much mapped. The vport name is the same
+        deterministic `DESIRED_VPORT_NAME` render `assign_ports` uses.
+        """
+        config = self.ixia_config
+        port_configs = getattr(config, "port_configs", None) if config else None
+        mappings = []
+        for port_config in port_configs or []:
+            phy = port_config.phy_port_config
+            port_identifier = self.get_port_identifier(port_config.port_name)
+            mappings.append(
+                IxiaTracePortMapping(
+                    dut_interface=port_config.port_name,
+                    chassis_ip=phy.chassis_ip,
+                    slot=phy.slot_number,
+                    port=phy.port_number,
+                    vport_name=DESIRED_VPORT_NAME.format(
+                        port_identifier=port_identifier
+                    ),
+                )
+            )
+        return tuple(mappings)
+
+    def _trace_traffic_item_names(self) -> t.Tuple[str, ...]:
+        """The names `create_traffic_items` gives the items on the chassis."""
+        config = self.ixia_config
+        traffic_items = getattr(config, "traffic_items", None) if config else None
+        return tuple(
+            item.name or Ixia.get_traffic_item_name(item)
+            for item in traffic_items or []
+        )
+
     def _install_request_deadline_wrapper(self) -> None:
         with self._request_deadline_wrapper_lock:
             self._install_request_deadline_wrapper_locked(self.session)
 
     def _install_request_deadline_wrapper_locked(self, session: t.Any) -> None:
-        transport = session.TestPlatform._connection._session
+        """Replace the restpy transport callable with the deadline + trace wrapper.
+
+        Every IxNetwork REST call funnels through this one `requests.Session`
+        method, so tracing wraps the whole call rather than living inside the
+        deadline branch: calls made outside a `request_deadline()` scope take
+        the no-deadline early return in `_send_with_deadline` and would
+        otherwise never be recorded.
+
+        Re-entrant by design: `connect()` and every `request_deadline()`
+        scope call this under lock, including after in-band 5xx recovery.
+        """
+        connection = session.TestPlatform._connection
+        transport = connection._session
         current_request = transport.request
-        if getattr(
-            self, "_deadline_wrapped_transport", None
-        ) is transport and current_request is getattr(
-            self, "_deadline_request_wrapper", None
-        ):
+        # The guard reads a mark on the wrapper rather than the single-slot
+        # bookkeeping below, which only remembers the most recently wrapped
+        # transport: reinstalling against an earlier one would otherwise nest
+        # a second wrapper and double both the deadline layer and the trace.
+        if getattr(current_request, _TRACED_REQUEST_OWNER, None) is self:
+            self._deadline_wrapped_transport = transport
+            self._deadline_request_wrapper = current_request
             return
-        deadline_state = self._request_deadline_state
 
         @functools.wraps(current_request)
-        def request_with_deadline(*args: t.Any, **kwargs: t.Any) -> t.Any:
-            deadline = getattr(deadline_state, "deadline", None)
-            if deadline is None:
-                return current_request(*args, **kwargs)
-            remaining = deadline - time.monotonic()
-            phase = getattr(deadline_state, "phase", "IXIA operation")
-            if remaining <= 0:
-                raise IxiaOperationTimeoutError(
-                    f"{phase} request deadline expired",
-                    deadline_expired=True,
-                )
-            existing_timeout = kwargs.get("timeout")
-            if isinstance(existing_timeout, tuple):
-                # Requests interprets this tuple as independent connect/read
-                # caps, so preserve each caller value while capping both.
-                kwargs["timeout"] = tuple(
-                    remaining if value is None else min(value, remaining)
-                    for value in existing_timeout
-                )
-            elif existing_timeout is None:
-                kwargs["timeout"] = remaining
-            else:
-                kwargs["timeout"] = min(existing_timeout, remaining)
-            try:
-                return current_request(*args, **kwargs)
-            except IxiaOperationTimeoutError:
-                raise
-            except (TimeoutError, RequestsTimeout) as error:
-                raise IxiaOperationTimeoutError(
-                    f"{phase} transport request timed out",
-                    deadline_expired=time.monotonic() >= deadline,
-                ) from error
+        def traced_request_with_deadline(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            return self._trace_and_send(current_request, args, kwargs)
 
-        transport.request = request_with_deadline
+        setattr(traced_request_with_deadline, _TRACED_REQUEST_OWNER, self)
+        transport.request = traced_request_with_deadline
         self._deadline_wrapped_transport = transport
-        self._deadline_request_wrapper = request_with_deadline
+        self._deadline_request_wrapper = traced_request_with_deadline
+        if self._tracer is not None:
+            self._tracer.set_app_errors_fetch(
+                self._build_app_errors_fetch(connection, current_request)
+            )
+
+    def _build_app_errors_fetch(
+        self, connection: t.Any, send: t.Callable[..., t.Any]
+    ) -> t.Callable[[str], t.Any]:
+        """A GET of `/globals/appErrors/error` that cannot recurse.
+
+        `send` is the transport callable captured BEFORE the tracing wrapper
+        replaced it, so the fetch the tracer issues from inside that wrapper
+        does not re-enter it. The tracer's reentrancy flag is a second line of
+        defense, not the only one.
+
+        No deadline is applied either: the fetch runs after the call it
+        explains has already failed, and inheriting an expired deadline would
+        drop exactly the evidence being collected.
+        """
+
+        def fetch(url: str) -> t.Any:
+            return send(
+                "GET",
+                url,
+                headers=getattr(connection, "_headers", None),
+                verify=getattr(connection, "_verify_cert", False),
+                allow_redirects=False,
+                timeout=_APP_ERRORS_FETCH_TIMEOUT_SECONDS,
+            )
+
+        return fetch
+
+    def _trace_and_send(
+        self,
+        send: t.Callable[..., t.Any],
+        args: t.Tuple[t.Any, ...],
+        kwargs: t.Dict[str, t.Any],
+    ) -> t.Any:
+        tracer = self._tracer
+        if tracer is None:
+            return self._send_with_deadline(send, args, kwargs)
+        span = self._begin_trace_span(tracer, args, kwargs)
+        if span is None:
+            return self._send_with_deadline(send, args, kwargs)
+        try:
+            response = self._send_with_deadline(send, args, kwargs)
+        except BaseException as error:
+            self._record_trace_outcome(tracer.fail, span, error)
+            raise
+        self._record_trace_outcome(tracer.finish, span, response)
+        return response
+
+    def _send_with_deadline(
+        self,
+        send: t.Callable[..., t.Any],
+        args: t.Tuple[t.Any, ...],
+        kwargs: t.Dict[str, t.Any],
+    ) -> t.Any:
+        state = self._request_deadline_state
+        deadline = getattr(state, "deadline", None)
+        if deadline is None:
+            return send(*args, **kwargs)
+        remaining = deadline - time.monotonic()
+        phase = getattr(state, "phase", "IXIA operation")
+        if remaining <= 0:
+            raise IxiaOperationTimeoutError(
+                f"{phase} request deadline expired",
+                deadline_expired=True,
+            )
+        kwargs["timeout"] = cap_timeout_at_deadline(kwargs.get("timeout"), remaining)
+        try:
+            return send(*args, **kwargs)
+        except IxiaOperationTimeoutError:
+            raise
+        except (TimeoutError, RequestsTimeout) as error:
+            raise IxiaOperationTimeoutError(
+                f"{phase} transport request timed out",
+                deadline_expired=time.monotonic() >= deadline,
+            ) from error
+
+    def _begin_trace_span(
+        self,
+        tracer: IxiaTracer,
+        args: t.Tuple[t.Any, ...],
+        kwargs: t.Dict[str, t.Any],
+    ) -> t.Optional[IxiaTraceSpan]:
+        """Open a trace span, or None when the call cannot be described.
+
+        restpy drives the transport two ways. `Connection._request` forwards
+        everything as keywords; the file-transfer, 409-retry and async-poll
+        helpers pass `("GET", url, ...)` positionally. A call shape the
+        extractors do not understand is therefore a real possibility, and
+        returning None sends the request untraced rather than failing a REST
+        call that tracing was only ever meant to observe.
+        """
+        try:
+            state = self._request_deadline_state
+            method, url = extract_request_method_and_url(args, kwargs)
+            return tracer.begin(
+                method=method,
+                url=url,
+                request_body=extract_request_body(kwargs),
+                # The stats sampler thread never enters an `@external_api`
+                # scope, so its rows carry op=None. The URL still names them.
+                op=getattr(state, "op", None),
+                phase=getattr(state, "phase", None),
+                playbook=self._current_playbook_name,
+                testconfig=self._current_testconfig_name,
+            )
+        except Exception:
+            self.logger.exception(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: span setup failed, "
+                "issuing the request untraced"
+            )
+            return None
+
+    def _record_trace_outcome(
+        self,
+        write: t.Callable[[IxiaTraceSpan, t.Any], None],
+        span: IxiaTraceSpan,
+        outcome: t.Any,
+    ) -> None:
+        """Write one trace record, swallowing any tracer failure.
+
+        A tracer fault must never replace the REST result the caller is
+        waiting on: on the success path it would turn a good call into a
+        failed one, and on the failure path it would hide the real exception
+        behind the tracer's. Same discipline `_emit_inband_502` applies to
+        its Scuba write.
+        """
+        try:
+            write(span, outcome)
+        except Exception:
+            self.logger.exception(
+                f"{_YELLOW}[IXIA]{_RESET} ixia api trace: failed to record "
+                f"{span.method} {span.url}"
+            )
 
     def request_deadline(
         self, timeout_seconds: float, phase: str
@@ -1427,15 +1768,94 @@ class Ixia:
     @property
     def session_quarantined(self) -> bool:
         with self._bounded_apply_lock:
-            return self._session_quarantine_reason is not None
+            return (
+                self._session_quarantine_reason is not None
+                or self._scenario_quarantine_record is not None
+            )
+
+    @property
+    def scenario_quarantine_record(
+        self,
+    ) -> t.Optional[IxiaScenarioQuarantineRecord]:
+        with self._bounded_apply_lock:
+            return self._scenario_quarantine_record
 
     def assert_session_not_quarantined(self) -> None:
         with self._bounded_apply_lock:
             reason = self._session_quarantine_reason
+            record = self._scenario_quarantine_record
+        if record is not None:
+            expiry = (
+                "expired; explicit recovery is required" if record.expired else "active"
+            )
+            raise IxiaSessionQuarantinedError(
+                "IXIA session is quarantined after an unverified churn restore: "
+                f"{record.reason} (generation={record.generation}, {expiry})"
+            )
         if reason is not None:
             raise IxiaSessionQuarantinedError(
                 f"IXIA session is quarantined after an ambiguous operation: {reason}"
             )
+
+    def quarantine_scenario(
+        self,
+        reason: str,
+        baseline: object,
+        mutation_journal: object,
+        expires_at_monotonic: float,
+    ) -> IxiaScenarioQuarantineRecord:
+        created_at = time.monotonic()
+        if expires_at_monotonic <= created_at:
+            raise ValueError("scenario quarantine expiry must be in the future")
+        with self._bounded_apply_lock:
+            self._scenario_quarantine_generation += 1
+            record = IxiaScenarioQuarantineRecord(
+                generation=self._scenario_quarantine_generation,
+                reason=reason,
+                baseline=baseline,
+                mutation_journal=mutation_journal,
+                created_at_monotonic=created_at,
+                expires_at_monotonic=expires_at_monotonic,
+                session_identity=self._remote_session_identity(),
+            )
+            self._scenario_quarantine_record = record
+            return record
+
+    def reset_scenario_quarantine(
+        self,
+        generation: int,
+        *,
+        restoration_verified: bool = False,
+        session_reset: bool = False,
+    ) -> None:
+        with self._bounded_apply_lock:
+            record = self._scenario_quarantine_record
+            if record is None:
+                raise IxiaSessionQuarantinedError("no scenario quarantine to reset")
+            if record.generation != generation:
+                raise IxiaSessionQuarantinedError(
+                    f"scenario quarantine generation changed from {generation} "
+                    f"to {record.generation}"
+                )
+            current_identity = self._remote_session_identity()
+            verified_same_session = (
+                restoration_verified
+                and record.session_identity is not None
+                and current_identity is not None
+                and current_identity == record.session_identity
+            )
+            replaced_session = (
+                session_reset
+                and record.session_identity is not None
+                and current_identity is not None
+                and current_identity != record.session_identity
+            )
+            if not verified_same_session and not replaced_session:
+                raise IxiaSessionQuarantinedError(
+                    "scenario quarantine reset requires verified restoration on the "
+                    "captured session or an explicitly replaced remote session"
+                )
+            self._scenario_quarantine_record = None
 
     def _quarantine_session(self, reason: str) -> None:
         with self._bounded_apply_lock:
@@ -1576,13 +1996,13 @@ class Ixia:
         return True
 
     def _attempt_inband_recovery(self) -> bool:
-        """Best-effort soft restart of `ixnetworkweb` via `ixia_recovery_lib`.
+        """Best-effort soft restart of `ixnetworkweb` via the recovery module.
 
         Returns True iff the lib reports success AND `/api/v1/sessions`
         returned 200 within the poll window. Any exception inside the lib
         is logged and treated as a recovery failure.
         """
-        # OSS guard: `ixia_recovery_lib` is internal-only (the surrounding
+        # OSS guard: recovery telemetry is internal-only (the surrounding
         # file is OSS-shared). Skip in OSS builds without even attempting
         # the import, matching the convention used by `fetch_ixia_credentials`
         # elsewhere in this module. See `.llms/skills/taac_oss_privacy_rules.md`.
@@ -1591,12 +2011,10 @@ class Ixia:
         # Lazy import: keeps the dep chain off the hot connect path and
         # prevents a circular import.
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
-                restart_ixnetwork,
-            )
+            from taac.ixia.recovery import restart_ixnetwork
         except ImportError as ie:
             self.logger.warning(
-                f"{_YELLOW}[IXIA]{_RESET} ixia_recovery_lib not importable "
+                f"{_YELLOW}[IXIA]{_RESET} IXIA recovery module not importable "
                 f"({ie!r}) — skipping in-band recovery"
             )
             return False
@@ -1651,9 +2069,7 @@ class Ixia:
         if TAAC_OSS:
             return
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
-                emit_inband_502_scuba,
-            )
+            from taac.ixia.recovery import emit_inband_502_scuba
         except ImportError:
             return
         try:
@@ -1710,7 +2126,7 @@ class Ixia:
         ):
             return
         try:
-            from taac.internal.utils.ixia_recovery_lib import (
+            from taac.ixia.recovery import (
                 classify_health,
                 HealthStatus,
             )
@@ -2378,28 +2794,53 @@ class Ixia:
             UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
         )
 
-        protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
+        # `CheckCondition` polls `self.Rows` in a loop until the condition holds
+        # or `Timeout` expires, and every `.Rows` read is a chassis CSV snapshot.
+        # Two 300s conditions therefore make this the heaviest snapshot user in
+        # the class, so it has to hold the session snapshot lock like every other
+        # stat-view reader. Nesting is safe — `_snapshot_lock` is an `RLock`.
+        with self.stat_view_snapshot():
+            protocols_summary = StatViewAssistant(self.ixnetwork, "Protocols Summary")
 
-        protocols_summary.CheckCondition(
-            "Sessions Not Started", StatViewAssistant.EQUAL, 0, Timeout=300
-        )
+            protocols_summary.CheckCondition(
+                "Sessions Not Started", StatViewAssistant.EQUAL, 0, Timeout=300
+            )
 
-        protocols_summary.CheckCondition(
-            "Sessions Down", StatViewAssistant.EQUAL, 0, Timeout=300
-        )
+            protocols_summary.CheckCondition(
+                "Sessions Down", StatViewAssistant.EQUAL, 0, Timeout=300
+            )
 
         self.logger.info(
             "[GLOBAL] Successfully verified the operational status of all "
             "the protocols in the IXIA setup!"
         )
 
+    def _apply_changes_with_retry(self) -> None:
+        for attempt in range(1, _APPLY_CHANGES_MAX_ATTEMPTS + 1):
+            try:
+                with self._bounded_apply_lock:
+                    self.assert_session_not_quarantined()
+                    self.ixnetwork.Globals.Topology.ApplyOnTheFly()
+                    self.logger.debug(
+                        "[GLOBAL] Successfully applied changes on the fly"
+                    )
+                return
+            except IxiaSessionQuarantinedError:
+                raise
+            except Exception as error:
+                if attempt == _APPLY_CHANGES_MAX_ATTEMPTS:
+                    raise
+                self.logger.warning(
+                    f"Attempt {attempt}/{_APPLY_CHANGES_MAX_ATTEMPTS} failed for "
+                    f"_apply_changes_with_retry: {error}. Retrying in "
+                    f"{_APPLY_CHANGES_RETRY_DELAY_SECONDS:.2f}s..."
+                )
+                time.sleep(_APPLY_CHANGES_RETRY_DELAY_SECONDS)
+
     @external_api
-    @retryable(num_tries=3, sleep_time=10, debug=True)
     def apply_changes(self, sleep_timer: int = 0) -> None:
         """API to apply the changes made on the fly to the topology"""
-
-        self.ixnetwork.Globals.Topology.ApplyOnTheFly()
-        self.logger.debug("[GLOBAL] Successfully applied changes on the fly")
+        self._apply_changes_with_retry()
 
         time.sleep(sleep_timer)
 
@@ -5863,7 +6304,7 @@ class Ixia:
             _username, password = get_oss_ixia_password()
             return password
 
-        from taac.internal.internal_utils import (
+        from taac.ixia.internal_credentials import (
             fetch_ixia_password_internal,
         )
 
@@ -7188,6 +7629,7 @@ class Ixia:
         interface: str,
         prefix_count: int,
         network_group_multiplier: t.Optional[int] = None,
+        protocols_already_stopped: bool = False,
     ) -> None:
         """
         Update the prefix counts and optionally the network group multiplier for the specified port.
@@ -7197,6 +7639,8 @@ class Ixia:
             interface: Interface name
             prefix_count: New prefix count value to set
             network_group_multiplier: Optional multiplier to set for network groups
+            protocols_already_stopped: Skip the internal stop/start cycle when
+                the caller owns a larger stopped-protocol configuration window.
         """
         device_groups = self.get_device_groups_by_port_and_interface(
             hostname, interface
@@ -7222,23 +7666,30 @@ class Ixia:
                     # protocols synchronously, apply the multiplier, then restart
                     # (StartAllProtocols honors Enabled, so disabled groups stay
                     # down).
+                    action = (
+                        "protocols already stopped by caller"
+                        if protocols_already_stopped
+                        else "stopping all protocols"
+                    )
                     self.logger.info(
                         f"Multiplier change {network_group.Multiplier} -> "
                         f"{network_group_multiplier} for {network_group.Name}; "
-                        "stopping all protocols"
+                        f"{action}"
                     )
                     # StopAllProtocols can return before the protocol state fully
                     # settles; wait so the network group has actually left the
                     # started state before the (non-on-the-fly) multiplier PATCH.
-                    self.stop_protocols_and_wait()
+                    if not protocols_already_stopped:
+                        self.stop_protocols_and_wait()
                     self.logger.info(
                         f"Setting multiplier to {network_group_multiplier} for network group {network_group.Name}"
                     )
                     network_group.Multiplier = network_group_multiplier
-                    self.logger.info(
-                        f"Multiplier set for {network_group.Name}; starting all protocols"
-                    )
-                    self.start_protocols()
+                    if not protocols_already_stopped:
+                        self.logger.info(
+                            f"Multiplier set for {network_group.Name}; starting all protocols"
+                        )
+                        self.start_protocols()
 
                 # Update IPv6 prefix pools
                 for ipv6_prefix_pool in network_group.Ipv6PrefixPools.find():

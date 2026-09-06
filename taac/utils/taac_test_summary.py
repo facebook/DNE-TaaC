@@ -25,8 +25,15 @@ from taac.utils.taac_log_formatter import (
 class SectionStatus(enum.Enum):
     PASS = "PASS"
     FAIL = "FAIL"
+    INFRA_ERROR = "INFRA_ERROR"
     SKIPPED = "SKIPPED"
     IN_PROGRESS = "IN_PROGRESS"
+
+
+FAILED_SECTION_STATUSES = {
+    SectionStatus.FAIL,
+    SectionStatus.INFRA_ERROR,
+}
 
 
 @dataclass
@@ -222,6 +229,7 @@ class TaacTestSummary:
         """Convert a SectionStatus to its display string."""
         status_map = {
             SectionStatus.FAIL: "FAIL",
+            SectionStatus.INFRA_ERROR: "INFRA_ERROR",
             SectionStatus.PASS: "PASS",
             SectionStatus.SKIPPED: "SKIP",
         }
@@ -246,7 +254,7 @@ class TaacTestSummary:
         # are covered by the full-log paste linked at the bottom of the summary.
         url = section.everpaste_url or "-"
         lines.append(f"  {display_name:<45} {status_str:<10} {duration_str:<15} {url}")
-        if section.status == SectionStatus.FAIL and section.error_message:
+        if section.status in FAILED_SECTION_STATUSES and section.error_message:
             short_err = self._truncate_message(section.error_message, 80)
             lines.append(f"  {indent}  └─ REASON: {short_err}")
         return lines
@@ -294,7 +302,7 @@ class TaacTestSummary:
         # Passing rows show "-" in the Logs column and point at the full log.
         for section in self.sections:
             if (
-                section.status == SectionStatus.FAIL
+                section.status in FAILED_SECTION_STATUSES
                 and section.log_lines
                 and not section.everpaste_url
             ):
@@ -314,7 +322,7 @@ class TaacTestSummary:
 
         all_pass = True
         for section in self.sections:
-            if section.status == SectionStatus.FAIL:
+            if section.status in FAILED_SECTION_STATUSES:
                 all_pass = False
             # pyrefly: ignore [bad-argument-type]
             lines.extend(self._format_section_row(section))
@@ -325,7 +333,7 @@ class TaacTestSummary:
         lines.append(f"  Overall: {overall}")
         lines.append("")
 
-        failed = [s for s in self.sections if s.status == SectionStatus.FAIL]
+        failed = [s for s in self.sections if s.status in FAILED_SECTION_STATUSES]
         if failed:
             # pyrefly: ignore [bad-argument-type]
             lines.extend(self._format_failure_details(failed))

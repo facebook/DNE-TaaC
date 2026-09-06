@@ -120,6 +120,7 @@ class TrafficGenerator:
         ixia_recovery: t.Optional[taac_types.IxiaRecovery] = None,
         setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
         cache_candidate_name: t.Optional[str] = None,
+        trace_api_calls: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -154,6 +155,8 @@ class TrafficGenerator:
         self.ixia_config_cache = ixia_config_cache
         # Opt-in IXIA REST API soft recovery — see IxiaRecovery Thrift docstring
         self.ixia_recovery = ixia_recovery
+        # Record every IxNetwork REST call to a JSONL file — see ixia_tracer.py
+        self.trace_api_calls = trace_api_calls
         # TestConfig setup_tasks — used by the v3 IXIA topology-cache key so
         # the cache auto-invalidates when an engineer edits a setup task
         # during testconfig development. Hashed via
@@ -284,6 +287,7 @@ class TrafficGenerator:
                 skip_ixia_protocol_verification=self.skip_ixia_protocol_verification,
                 ixia_protocol_verification_timeout=self.ixia_protocol_verification_timeout,
                 ixia_recovery=self.ixia_recovery,
+                trace_api_calls=self.trace_api_calls,
             )
 
             # Topology cache — only when (a) cache is enabled in TestConfig AND
@@ -1228,10 +1232,12 @@ class TrafficGenerator:
         reference_values = []
         for i in reference.indices:
             value = None
-            src_hostname = src_endpoints[i].name.split(":")[0]
-            dst_hostname = dest_endpoints[i].name.split(":")[0]
-            src_port_config = self.get_port_config_by_name(src_hostname)
-            dst_port_config = self.get_port_config_by_name(dst_hostname)
+            src_endpoint_name = src_endpoints[i].name
+            dst_endpoint_name = dest_endpoints[i].name
+            src_hostname = src_endpoint_name.split(":")[0]
+            dst_hostname = dst_endpoint_name.split(":")[0]
+            src_port_config = self.get_port_config_by_name(src_endpoint_name)
+            dst_port_config = self.get_port_config_by_name(dst_endpoint_name)
             match reference.type:
                 case taac_types.ReferenceType.SRC_MAC_ADDRESS:
                     value = self.name_to_endpoint[src_hostname].mac_address
@@ -1339,6 +1345,9 @@ class TrafficGenerator:
         return ixia_packet_headers
 
     def get_port_config_by_name(self, port_name: str) -> ixia_types.PortConfig:
+        for port_config in self._port_configs:
+            if port_config.port_name == port_name:
+                return port_config
         for port_config in self._port_configs:
             if port_config.port_name.split(":")[0] == port_name:
                 return port_config

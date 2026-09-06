@@ -201,6 +201,37 @@ class TestGeneratedRouteNextHop(unittest.TestCase):
         route_property.NextHopType.Single.assert_called_once_with("sameaslocalip")
 
 
+class TestOfflinePrefixResize(unittest.TestCase):
+    def test_caller_owned_stop_window_does_not_restart_protocols(self) -> None:
+        ixia = _create_ixia_instance()
+        ipv4_pool = MagicMock()
+        ipv6_pool = MagicMock()
+        network_group = MagicMock()
+        network_group.Name = "PREFIX_POOL_EBGP"
+        network_group.Multiplier = 1
+        network_group.Ipv4PrefixPools.find.return_value = [ipv4_pool]
+        network_group.Ipv6PrefixPools.find.return_value = [ipv6_pool]
+        device_group = _make_device_group("DEVICE_GROUP_EBGP", [network_group])
+        ixia.get_device_groups_by_port_and_interface = MagicMock(
+            return_value=[device_group]
+        )
+
+        ixia.update_prefix_counts_by_port(
+            hostname="bag010.ash6",
+            interface="Ethernet3/36/1",
+            prefix_count=1,
+            network_group_multiplier=50_000,
+            protocols_already_stopped=True,
+        )
+
+        self.assertEqual(network_group.Multiplier, 50_000)
+        self.assertEqual(ipv4_pool.NumberOfAddresses, 1)
+        self.assertEqual(ipv6_pool.NumberOfAddresses, 1)
+        ixia.stop_protocols_and_wait.assert_not_called()
+        ixia.start_protocols.assert_not_called()
+        ixia.apply_changes.assert_called_once()
+
+
 class TestExtendedCommunityPool(unittest.TestCase):
     def setUp(self):
         self.ixia = _create_ixia_instance()

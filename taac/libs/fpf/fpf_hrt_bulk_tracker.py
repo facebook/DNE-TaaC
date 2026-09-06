@@ -74,13 +74,17 @@ def count_per_lane(
     prefix_table,
     device_id: int,
     supernet: ipaddress.IPv6Network,
+    plane_ids: Optional[List[int]] = None,
 ) -> Tuple[List[int], int]:
-    """For each lane 0..NUM_LANES-1, count unique subnet-matching prefixes
+    """For each requested local plane, count unique subnet-matching prefixes
     visible on that lane for the given device_id.
 
+    ``plane_ids`` defaults to legacy planes 0..7. New-SDK paired-device hosts
+    pass 0..3 so each returned row contains exactly four local-plane values.
     Returns (counts_per_lane, total_unique_matches).
     """
-    per_lane_seen: Dict[int, set] = {i: set() for i in range(NUM_LANES)}
+    selected_planes = plane_ids if plane_ids is not None else list(range(NUM_LANES))
+    per_lane_seen: Dict[int, set] = {i: set() for i in selected_planes}
     all_seen: set = set()
     for entry in prefix_table:
         if entry.device_id != device_id:
@@ -94,9 +98,9 @@ def count_per_lane(
         all_seen.add(norm)
         for plane_info in entry.planes or []:
             pid = plane_info.plane_id
-            if 0 <= pid < NUM_LANES:
+            if pid in per_lane_seen:
                 per_lane_seen[pid].add(norm)
-    counts = [len(per_lane_seen[i]) for i in range(NUM_LANES)]
+    counts = [len(per_lane_seen[i]) for i in selected_planes]
     return counts, len(all_seen)
 
 
@@ -104,8 +108,9 @@ def count_failed_per_lane(
     remote_failures,
     device_id: int,
     supernet: ipaddress.IPv6Network,
+    plane_ids: Optional[List[int]] = None,
 ) -> Tuple[List[int], int]:
-    """For each lane 0..NUM_LANES-1, count unique subnet-matching prefixes that
+    """For each requested local plane, count unique subnet-matching prefixes that
     are currently in a remote-failure (negative-route) state on that lane for
     the given device_id.
 
@@ -117,7 +122,8 @@ def count_failed_per_lane(
 
     Returns (counts_per_lane, total_unique_failed_matches).
     """
-    per_lane_seen: Dict[int, set] = {i: set() for i in range(NUM_LANES)}
+    selected_planes = plane_ids if plane_ids is not None else list(range(NUM_LANES))
+    per_lane_seen: Dict[int, set] = {i: set() for i in selected_planes}
     all_seen: set = set()
     for entry in remote_failures:
         if entry.device_id != device_id:
@@ -130,9 +136,9 @@ def count_failed_per_lane(
             continue
         all_seen.add(norm)
         for pid in entry.failed_planes or []:
-            if 0 <= pid < NUM_LANES:
+            if pid in per_lane_seen:
                 per_lane_seen[pid].add(norm)
-    counts = [len(per_lane_seen[i]) for i in range(NUM_LANES)]
+    counts = [len(per_lane_seen[i]) for i in selected_planes]
     return counts, len(all_seen)
 
 

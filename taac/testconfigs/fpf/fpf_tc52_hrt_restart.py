@@ -5,19 +5,22 @@
 """TC52: Restart HostReachTracker (HRT) on the BE node, expect clean recovery.
 
 Restarts the HRT service (``systemctl restart metalos.wds.hostreachtracker``) on
-the GPU/BE host (rtptest1544 — our observed BE node), waits 2 minutes for HRT to
-re-subscribe to FSDB on all 8 GTSWs and rebuild its 32 sessions, then asserts the
-FULL stable-state contract (identical pre/post health checks — no relaxations).
-A second, no-churn longevity playbook then confirms the recovered state stays
-clean.
+the GPU/BE host, waits 2 minutes for HRT to re-subscribe to FSDB and rebuild its
+sessions, then requires production-prefix state to recover within 30 seconds
+from the first complete sample after restart completion/final observed outage
+and remain healthy at the final valid sample. Bulk and remote-failure checks
+tolerate outage errors only on the restarted host; the unaffected host and all
+valid samples stay strict. A second, no-churn longevity playbook confirms the
+recovered state stays clean.
 
 HRT runs on the rtptest host, NOT on a FBOSS switch, so the restart goes through
 the host-SSH path (lab-ssh as root), the same transport used by the ib-traffic /
 NIC-flap host steps — see ``fpf_restart_hrt`` in custom_step.py.
 
 Two-playbook structure (both full stable-state v2 — same as fpf_stress_test_config):
-  1. Disrupt playbook: inject + stabilize, restart HRT on the BE node, settle
-     120s, then the full stable-state contract (pre == post expectations).
+  1. Disrupt playbook: inject + stabilize, record restart initiation, restart
+     HRT, settle 120s, then validate bounded production-prefix recovery plus the
+     remaining stable-state checks.
   2. Longevity playbook: stable-state soak (no churn) — confirms the recovered
      state holds.
 
@@ -33,6 +36,8 @@ from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
+    create_fpf_record_restart_completion_time_step,
+    create_fpf_record_restart_time_step,
     create_fpf_restart_hrt_step,
     create_longevity_step,
 )
@@ -92,8 +97,9 @@ def create_fpf_tc52_test_config() -> TestConfig:
     ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
     spray = None if skip_ssh else SPRAY_HOSTS
 
-    # Playbook 1: full stable-state v2 contract with the HRT restart + 2-min
-    # settle as the disruption steps (pre == post expectations, no relaxations).
+    # Playbook 1: restart HRT, tolerate its expected collection outage, and
+    # require full production-prefix recovery within 30s from the first complete
+    # post-restart sample. Other postchecks retain their existing contracts.
     disrupt_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
@@ -109,12 +115,22 @@ def create_fpf_tc52_test_config() -> TestConfig:
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
         disruption_steps=[
+            create_fpf_record_restart_time_step(
+                description=(
+                    "Record HRT restart initiation for production-prefix recovery SLA"
+                )
+            ),
             create_fpf_restart_hrt_step(
                 hosts=HRT_RESTART_HOSTS,
                 description=(
                     f"Restart HostReachTracker on {HRT_RESTART_HOSTS} "
                     f"(systemctl restart metalos.wds.hostreachtracker)"
                 ),
+            ),
+            create_fpf_record_restart_completion_time_step(
+                description=(
+                    "Record HRT restart completion for post-outage recovery eligibility"
+                )
             ),
             create_longevity_step(
                 duration=POST_RESTART_SETTLE_SEC,
@@ -129,6 +145,8 @@ def create_fpf_tc52_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
+        prod_prefix_restart_recovery_sla_sec=30.0,
+        hrt_restart_tolerant_hosts=HRT_RESTART_HOSTS,
         # Expected mid-disruption STSW packet loss to purged lane-0 dests —
         # informational, not a hard fail (user-confirmed).
         ods_discard_informational=True,

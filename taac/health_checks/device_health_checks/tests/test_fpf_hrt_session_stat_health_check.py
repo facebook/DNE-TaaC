@@ -113,6 +113,35 @@ class TestFpfHrtSessionStatHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self._run(collector, params)
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    async def test_disruption_uses_exact_device_local_plane_churn(self):
+        """A healthy dev0/L0 cannot satisfy the impacted dev1/L0 tuple."""
+        res = FsdbSessionWindowResult(
+            host=GPU_HOST,
+            samples=40,
+            error_samples=0,
+            min_connected=31,
+            max_connected=32,
+            last_connected=32,
+            reached_expected=True,
+            impacted_tuple_churn={"dev1/L0": True},
+            detail="dev1/L0 churned",
+        )
+        collector = _make_collector(res)
+        params = {
+            "mode": "disruption",
+            "expected_connected": 32,
+            "expected_connected_during": 31,
+            "impacted_tuples_by_host_device": {GPU_HOST: {"1": [0]}},
+            "recovery_min_sec": 60,
+        }
+
+        result = await self._run(collector, params)
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        kwargs = collector.evaluate_window.call_args.kwargs
+        self.assertEqual(kwargs["impacted_tuples_by_device"], {"1": [0]})
+        self.assertIn("dev1/L0=yes", result.message)
+
     async def test_disruption_never_recovers_fail(self):
         """Dropped to 28 with churn but never recovered to 32 -> FAIL."""
         res = FsdbSessionWindowResult(

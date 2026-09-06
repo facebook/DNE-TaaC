@@ -89,6 +89,15 @@ async def get_bgp_rib(hostname: str) -> List[TRibEntry]:
     return await bgp.async_get_bgp_rib_entries()
 
 
+async def get_bgp_rib_subprefixes(
+    hostname: str, subnet: ipaddress.IPv6Network
+) -> List[TRibEntry]:
+    """Fetch only entries within ``subnet`` using BGP's server-side filter."""
+    driver = FbossSwitchInternal(hostname, logger)
+    bgp = await driver.bgp()
+    return await bgp.async_get_bgp_rib_subprefixes(str(subnet))
+
+
 def _rib_entry_to_network(entry: TRibEntry) -> Optional[ipaddress.IPv6Network]:
     """Turn a TRibEntry into a parsed IPv6Network. None on parse failure / v4."""
     try:

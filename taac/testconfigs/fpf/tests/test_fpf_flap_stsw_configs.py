@@ -9,12 +9,19 @@ longevity) shape, the rapid-flap window (900s), longevity settle (300s), the
 STSW drain/undrain step ordering + reinject community, and the ``["fpf"]`` tag.
 """
 
+import importlib
 import json
+import os
 import unittest
+from unittest.mock import patch
 
+from taac.testconfigs.fpf import (
+    fpf_hardening_common,
+    fpf_tc32_downlink_flaps,
+    fpf_tc40_cont_interface_flaps,
+)
 from taac.testconfigs.fpf.fpf_hardening_common import GPU_HOSTS
 from taac.testconfigs.fpf.fpf_tc32_downlink_flaps import (
-    DOWNLINK_NEIGHBOR_PATTERN,
     FLAP_DURATION_SEC as TC32_FLAP_SEC,
     LONGEVITY_SEC as TC32_LONGEVITY_SEC,
     TEST_CONFIG as TC32,
@@ -105,14 +112,23 @@ def _longevity_carries_v2_stable_check_set(tc, test, vf_grouped=False):
 class TestRapidFlapConfigs(unittest.TestCase):
     """TC32 (downlinks) and TC33 (uplinks) share the same flap shape."""
 
-    def _assert_flap_config(self, tc, name, flap_sec, longevity_sec, neighbor_pattern):
+    def _assert_flap_config(
+        self,
+        tc,
+        name,
+        flap_sec,
+        longevity_sec,
+        neighbor_pattern,
+        *,
+        vf_grouped=False,
+    ):
         self.assertEqual(tc.name, name)
         self.assertIn("fpf", tc.tags or [])
         # Two-playbook structure.
         self.assertEqual(len(tc.playbooks), 2)
         _disrupt_playbook_has_no_checks(tc, self)
         _longevity_playbook_has_checks(tc, self)
-        _longevity_carries_v2_stable_check_set(tc, self)
+        _longevity_carries_v2_stable_check_set(tc, self, vf_grouped=vf_grouped)
 
         # Scaled window: 15 min flaps, 5 min longevity.
         self.assertEqual(flap_sec, 900)
@@ -145,12 +161,191 @@ class TestRapidFlapConfigs(unittest.TestCase):
             "fpf_tc32_downlink_flaps",
             TC32_FLAP_SEC,
             TC32_LONGEVITY_SEC,
-            DOWNLINK_NEIGHBOR_PATTERN,
+            None,
+            vf_grouped=True,
         )
-        # tc32 scopes the flap to the exact configured GPU hosts (the glob is a
-        # fallback) to avoid flapping ALL downlinks (the 36h-hang root cause).
+        # TC32 is the single-plane staging gate for the wider TC40 campaign. It
+        # must touch exactly the environment-selected server circuit and fail
+        # closed if LLDP resolves anything else.
         flap_params = _params(_steps(TC32.playbooks[0])[0])
-        self.assertEqual(flap_params["neighbor_hosts"], list(GPU_HOSTS))
+        self.assertEqual(flap_params["neighbor_hosts"], [GPU_HOSTS[0]])
+        self.assertIsNone(flap_params["neighbor_pattern"])
+        self.assertTrue(flap_params["fail_closed"])
+        self.assertTrue(flap_params["require_exact_neighbor_hosts"])
+        self.assertEqual(len(flap_params["expected_interfaces"]), 4)
+        self.assertEqual(
+            flap_params["nic_recovery_by_interface"],
+            {
+                interface: {"host": GPU_HOSTS[0], "dev": gpu, "lane": 0}
+                for gpu, interface in enumerate(flap_params["expected_interfaces"])
+            },
+        )
+
+    def test_nic_recovery_map_is_derived_from_breakout_channel(self):
+        shuffled = ["eth1/41/8", "eth1/41/5", "eth1/41/7", "eth1/41/6"]
+        recovery = fpf_hardening_common.fpf_nic_recovery_by_interface(
+            gtsw="gtsw001.l1002.c087.mwg2",
+            host="twshared1352.03.mwg2",
+            interfaces=shuffled,
+        )
+        self.assertEqual(
+            {interface: target["dev"] for interface, target in recovery.items()},
+            {
+                "eth1/41/5": 0,
+                "eth1/41/6": 1,
+                "eth1/41/7": 2,
+                "eth1/41/8": 3,
+            },
+        )
+        self.assertTrue(all(target["lane"] == 0 for target in recovery.values()))
+
+    def test_nic_recovery_map_rejects_non_bundle_interfaces(self):
+        with self.assertRaisesRegex(ValueError, "exact 1..4 or 5..8 breakout"):
+            fpf_hardening_common.fpf_nic_recovery_by_interface(
+                gtsw="gtsw001.l1002.c087.mwg2",
+                host="twshared1352.03.mwg2",
+                interfaces=[
+                    "eth1/41/5",
+                    "eth1/41/6",
+                    "eth1/41/7",
+                    "eth1/41/9",
+                ],
+            )
+
+    def test_tc32_twshared_uses_exact_circuit_and_eight_by_four_model(self):
+        hosts = ["twshared1352.03.mwg2", "twshared1375.03.mwg2"]
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    "FPF_GPU_HOSTS": ",".join(hosts),
+                    "FPF_HRT_DEVICE_IDS": "0,1,2,3,4,5,6,7",
+                    "FPF_HRT_LANES": "0,1,2,3",
+                    "FPF_HRT_VF1_DEVICE_IDS": "0,2,4,6",
+                    "FPF_HRT_VF2_DEVICE_IDS": "1,3,5,7",
+                    "FPF_VF_GROUP_PODS": "16",
+                    "FPF_VF_PREFIXES_PER_POD": "252",
+                    "TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5",
+                },
+            ):
+                os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)
+                os.environ.pop("TAAC_FPF_SKIP_IB_TRAFFIC", None)
+                importlib.reload(fpf_hardening_common)
+                module = importlib.reload(fpf_tc32_downlink_flaps)
+                config = module.create_fpf_tc32_test_config()
+
+                flap = _params(_steps(config.playbooks[0])[0])
+                self.assertEqual(flap["neighbor_hosts"], [hosts[0]])
+                self.assertEqual(
+                    flap["expected_interfaces"],
+                    ["eth1/41/5", "eth1/41/6", "eth1/41/7", "eth1/41/8"],
+                )
+                self.assertEqual(
+                    flap["nic_recovery_by_interface"],
+                    {
+                        f"eth1/41/{5 + gpu}": {
+                            "host": hosts[0],
+                            "dev": gpu,
+                            "lane": 0,
+                        }
+                        for gpu in range(4)
+                    },
+                )
+
+                collector = next(
+                    task
+                    for task in config.setup_tasks
+                    if task.task_name == "fpf_start_collectors"
+                )
+                collector_params = json.loads(collector.params.json_params)
+                self.assertEqual(collector_params["hrt_device_ids"], list(range(8)))
+                self.assertEqual(collector_params["hrt_plane_ids"], [0, 1, 2, 3])
+
+                inject = next(
+                    task
+                    for task in config.setup_tasks
+                    if task.task_name == "fpf_inject_bgp_prefixes"
+                    and not json.loads(task.params.json_params)["withdraw"]
+                )
+                inject_params = json.loads(inject.params.json_params)
+                self.assertEqual(inject_params["groups"][0]["count"], 4032)
+                self.assertEqual(inject_params["groups"][1]["count"], 4032)
+                self.assertIn(
+                    "fpf_start_ib_traffic",
+                    {task.task_name for task in config.setup_tasks},
+                )
+
+                tc40_module = importlib.reload(fpf_tc40_cont_interface_flaps)
+                tc40 = tc40_module.create_fpf_tc40_test_config()
+                tc40_flap = _params(_steps(tc40.playbooks[0])[0])
+                self.assertTrue(tc40_flap["fail_closed"])
+                self.assertEqual(tc40_flap["neighbor_hosts"], [hosts[0]])
+                self.assertEqual(
+                    tc40_flap["expected_interfaces"],
+                    ["eth1/41/5", "eth1/41/6", "eth1/41/7", "eth1/41/8"],
+                )
+                recovery = tc40_flap["nic_recovery_by_gtsw_interface"]
+                self.assertEqual(set(recovery), set(tc40_module.ALL_GTSWS))
+                self.assertEqual(
+                    recovery[tc40_module.ALL_GTSWS[0]]["eth1/41/8"],
+                    {"host": hosts[0], "dev": 3, "lane": 0},
+                )
+                self.assertEqual(
+                    recovery[tc40_module.ALL_GTSWS[-1]]["eth1/41/5"],
+                    {"host": hosts[0], "dev": 0, "lane": 7},
+                )
+        finally:
+            importlib.reload(fpf_hardening_common)
+            importlib.reload(fpf_tc32_downlink_flaps)
+            importlib.reload(fpf_tc40_cont_interface_flaps)
+
+    def test_tc40_opts_into_fail_closed_multi_gtsw_safety(self):
+        config = fpf_tc40_cont_interface_flaps.TEST_CONFIG
+        flap = _params(_steps(config.playbooks[0])[0])
+        self.assertTrue(flap["fail_closed"])
+        self.assertTrue(flap["require_exact_neighbor_hosts"])
+        self.assertEqual(
+            flap["expected_interfaces"],
+            fpf_tc40_cont_interface_flaps.FLAP_INTERFACES,
+        )
+        self.assertEqual(
+            set(flap["nic_recovery_by_gtsw_interface"]),
+            set(fpf_tc40_cont_interface_flaps.ALL_GTSWS),
+        )
+
+    def test_tc32_derives_interface_scope_when_factory_is_called(self):
+        interfaces = [f"eth1/41/{channel}" for channel in range(1, 5)]
+        with (
+            patch.object(
+                fpf_tc32_downlink_flaps,
+                "fpf_gpu_downlink_interfaces",
+                return_value=interfaces,
+            ) as derive_interfaces,
+            patch.object(
+                fpf_tc32_downlink_flaps,
+                "fpf_nic_recovery_by_interface",
+                return_value={interface: {} for interface in interfaces},
+            ) as derive_recovery,
+        ):
+            config = fpf_tc32_downlink_flaps.create_fpf_tc32_test_config()
+
+        flap_params = _params(_steps(config.playbooks[0])[0])
+        self.assertEqual(flap_params["expected_interfaces"], interfaces)
+        derive_interfaces.assert_called_once_with()
+        derive_recovery.assert_called_once_with(
+            gtsw=fpf_tc32_downlink_flaps.DUT_GTSW,
+            host=fpf_tc32_downlink_flaps.FLAP_HOST,
+            interfaces=interfaces,
+        )
+
+    def test_downlink_bundle_rejects_cross_breakout_start(self):
+        with patch.object(
+            fpf_hardening_common,
+            "fpf_link_drain_interface",
+            return_value="eth1/41/6",
+        ):
+            with self.assertRaisesRegex(ValueError, "breakout channel 1 or 5"):
+                fpf_hardening_common.fpf_gpu_downlink_interfaces()
 
     def test_tc33_uplink_flaps(self):
         self._assert_flap_config(
@@ -166,8 +361,13 @@ class TestRapidFlapConfigs(unittest.TestCase):
         self.assertIsNone(flap_params["neighbor_hosts"])
 
     def test_tc32_and_tc33_target_different_neighbor_classes(self):
-        """Downlinks (rtptest* GPUs) and uplinks (stsw* spine) are distinct."""
-        self.assertNotEqual(DOWNLINK_NEIGHBOR_PATTERN, UPLINK_NEIGHBOR_PATTERN)
+        """Downlinks use an exact GPU host; uplinks use the STSW glob."""
+        tc32_params = _params(_steps(TC32.playbooks[0])[0])
+        tc33_params = _params(_steps(TC33.playbooks[0])[0])
+        self.assertEqual(tc32_params["neighbor_hosts"], [GPU_HOSTS[0]])
+        self.assertIsNone(tc32_params["neighbor_pattern"])
+        self.assertIsNone(tc33_params["neighbor_hosts"])
+        self.assertEqual(tc33_params["neighbor_pattern"], UPLINK_NEIGHBOR_PATTERN)
 
 
 class TestStswDrainReinjectConfigs(unittest.TestCase):

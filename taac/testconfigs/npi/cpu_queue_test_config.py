@@ -16,7 +16,6 @@ from taac.libs.custom_payload_registry import (
     register_custom_frame_payload,
 )
 from taac.packet_headers import (
-    ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
     ARP_RESPONSE_BCAST_TRAFFIC_PACKET_HEADERS,
     ARP_RESPONSE_TRAFFIC_PACKET_HEADERS,
     BGP_CP_TRAFFIC_PACKET_HEADERS,
@@ -80,16 +79,16 @@ from taac.task_definitions import (
     create_wait_for_agent_convergence_task,
 )
 from taac.utils.netwhoami_utils import fetch_whoami
+from taac.utils.test_config_utils import (
+    create_raw_arp_request_traffic_item,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
 
-# Valid 28-byte ARP body bytes (RFC 826 over Ethernet/IPv4) injected into the
-# 3 ARP traffic items via the custom-payload registry. With only an Ethernet
-# header in the explicit packet_headers stack and the IxNetwork incrementByte
-# default fill, the silicon rejects every frame at ingress validation
-# (eth1/13/3.in_discards grows at the full IXIA Tx rate). Supplying a real
-# ARP body lets the silicon classify the frame instead of dropping it.
+# Valid 28-byte ARP response body bytes (RFC 826 over Ethernet/IPv4) injected
+# into the two response traffic items via the custom-payload registry. The ARP
+# request item and its payload are built by create_raw_arp_request_traffic_item.
 #
 # Body layout (28 bytes):
 #   htype=0001 ptype=0800 hlen=06 plen=04 oper=<01 req | 02 reply>
@@ -105,7 +104,6 @@ from taac.test_as_a_config.types import TestConfig
 # accepts these (Pavan/Midhun's request) depends on whether the SPA/TPA must
 # match a DUT-known subnet — if so, we'd need to template the IPs to match
 # the actual `eth1/13/3` address.
-_ARP_REQUEST_BODY_HEX = "00010800060400010011010000010a00fe010000000000000a00fefe"
 _ARP_RESPONSE_BODY_HEX = "00010800060400020011010000010a00fe010011010000020a00fefe"
 _ARP_RESPONSE_BCAST_BODY_HEX = _ARP_RESPONSE_BODY_HEX
 
@@ -117,7 +115,6 @@ def _register_arp_custom_payloads() -> None:
     bound to test config construction rather than executing as a module-import
     side effect.
     """
-    register_custom_frame_payload("TEST_RAW_ARP_REQUEST_TRAFFIC", _ARP_REQUEST_BODY_HEX)
     register_custom_frame_payload(
         "TEST_RAW_ARP_RESPONSE_TRAFFIC", _ARP_RESPONSE_BODY_HEX
     )
@@ -1042,33 +1039,10 @@ def create_npi_cpu_queue_test_config(
                 bidirectional=False,
                 packet_headers=DHCP_V4_DISCOVER_TO_SERVER_TRAFFIC_PACKET_HEADERS,
             ),
-            taac_types.BasicTrafficItemConfig(
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_uplink_interface}",
-                        device_group_index=0,
-                    ),
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                        device_group_index=0,
-                    ),
-                ],
+            create_raw_arp_request_traffic_item(
                 name="TEST_RAW_ARP_REQUEST_TRAFFIC",
-                line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
-                line_rate=2000,
-                traffic_type=ixia_types.TrafficType.RAW,
-                bidirectional=False,
-                packet_headers=ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
-                # ARP-on-Ethernet is exactly 14 (eth) + 28 (arp) = 42 B;
-                # pad to the 64 B Ethernet minimum so the silicon parses it
-                # as a real ARP rather than rejecting it as malformed at
-                # ingress (in_discards). Without this we inherit IXIA's
-                # 400 B RAW default, which the silicon drops as invalid.
-                frame_size_settings=ixia_types.FrameSize(
-                    type=ixia_types.FrameSizeType.FIXED, fixed_size=64
-                ),
+                source_endpoint=f"{device_name}:{ixia_uplink_interface}",
+                destination_endpoint=f"{device_name}:{ixia_downlink_interface}",
             ),
             taac_types.BasicTrafficItemConfig(
                 src_endpoints=[

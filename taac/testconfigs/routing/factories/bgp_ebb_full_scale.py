@@ -946,11 +946,11 @@ def create_bgp_ebb_full_scale_test_config(
         if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
         else OpenRMode.NONE
     )
-    enable_attribute_churn = not playbooks_selected or (
-        "bgp_ebb_attribute_churn_playbook" in playbooks_selected
-    )
     enable_runtime_update = not playbooks_selected or (
         "bgp_ebb_route_registry_runtime_update_playbook" in playbooks_selected
+    )
+    enable_route_storm_shards = not playbooks_selected or (
+        "bgp_ebb_route_storm_playbook" in playbooks_selected
     )
     runtime_prefix_sets, runtime_advertisements = _tc7_runtime_intents(
         selected_tc7_playbooks
@@ -974,13 +974,13 @@ def create_bgp_ebb_full_scale_test_config(
         openr_mode=openr_mode,
         include_bgpmon=include_auxiliary_observers,
         ebgp_graceful_restart=not selected_tc7_playbooks,
-        enable_attribute_churn=enable_attribute_churn,
         ebgp_prefix_count=ebgp_prefix_count,
         ebgp_static_prefix_count=(
             _TC7_STATIC_EBGP_PREFIX_COUNT if selected_tc7_playbooks else None
         ),
         extra_prefix_sets=runtime_prefix_sets,
         extra_advertisements=runtime_advertisements,
+        route_storm_shards=enable_route_storm_shards,
     )
     bound = topology.bind_to_inventory(
         physical_inventory=physical_inventory,

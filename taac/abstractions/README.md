@@ -2,11 +2,14 @@
 
 **Scope**: `fbcode/neteng/test_infra/dne/taac/abstractions/`.
 
-**Applies to**: optional high-level authoring helpers that compile to the same
-flat TAAC `TestConfig` fields the runner already consumes.
+**Applies to**: optional high-level authoring helpers and device-independent
+behavior abstractions that compile or adapt to the same flat TAAC contracts the
+runner already consumes.
 
-**Purpose**: give factory authors a typed source of truth for topology intent
-without changing TAAC runtime behavior or making flat TAAC authoring obsolete.
+**Purpose**: give factory authors a typed source of truth for topology and test
+behavior intent without making flat TAAC authoring obsolete. Runtime-neutral
+contracts may coordinate that intent, while TAAC-specific execution remains in
+`taac/internal`.
 
 Design reference: `P2421897026`.
 
@@ -21,7 +24,7 @@ TAAC remains flat. A `TestConfig` is still a flat bundle of endpoints, setup
 tasks, teardown tasks, IXIA configs, playbooks, checks, and related thrift
 fields.
 
-DICE is a factory-side authoring layer:
+DICE is an abstraction layer with a factory-side authoring path:
 
 ```text
 LogicalTopology + PhysicalInventory
@@ -37,6 +40,106 @@ into the existing `TestConfig` shape.
 Existing flat factory authoring remains supported. Use an abstraction when it
 removes duplicated topology intent or gives useful validation; do not use it as
 a mandatory wrapper around simple flat configs.
+
+DICE may also define device-independent behavior contracts, such as churn
+specifications, policies, selectors, outcomes, and generic orchestration. These
+contracts must not depend on TAAC runtime handlers, concrete IXIA objects, DUT
+RPC clients, result stores, logging, or `TestCaseFailure`. The concrete adapters
+that satisfy those contracts remain under `taac/internal`; reusable IXIA
+mechanics remain under `taac/ixia`.
+
+The dependency direction is:
+
+```text
+taac/internal/steps
+    -> taac/internal
+        -> taac/abstractions
+        -> taac/ixia
+```
+
+Code under `taac/abstractions` must never import `taac/internal`.
+
+### Churn ownership
+
+Churn code follows the same abstraction-to-runtime boundary:
+
+- `taac/abstractions/churn` owns typed scenarios, policies, selectors,
+  observations, results, action protocols, generic bounded orchestration, and
+  lowering to flat step parameters.
+- `taac/internal/churn` owns TAAC handler adapters, DUT RPC integration,
+  coordination, result publication, recovery decisions, and test-framework
+  failure translation.
+- `taac/ixia` owns reusable vendor-specific operations such as session access,
+  mutations, bounded apply, readback, restoration, and quarantine mechanisms.
+- `taac/internal/steps` remains a thin bridge from `CustomStep` execution into
+  the churn runtime adapter.
+
+The abstraction package describes what a churn scenario requires. Internal and
+vendor adapters decide how those requirements are executed against live test
+infrastructure.
+
+All churn families use the same TAAC playbook renderer. Family-specific
+builders supply typed DICE specifications and action-stage factories:
+
+```python
+create_dice_unified_churn_playbook(spec=attribute_churn_spec(...))
+create_dice_unified_churn_playbook(spec=session_churn_spec(...))
+create_dice_unified_churn_playbook(spec=route_churn_spec(...))
+```
+
+The unified renderer owns only common `Playbook` assembly. Attribute, session,
+and route implementations retain their own target selection, stage parameters,
+verification, and recovery behavior.
+
+### Baseline lifecycle and failure ownership
+
+DICE distinguishes two nested restoration boundaries:
+
+- The **topology baseline** is the shared state established by TestConfig
+  topology setup. The TAAC runner owns this boundary. For an opted-in Playbook,
+  it captures the baseline immediately before Playbook setup and restores it
+  before finalizing the Playbook result, including when setup or execution
+  fails.
+- The **Playbook baseline** is the workload-specific state established after
+  Playbook setup, such as selected paths, advertised prefixes, and route
+  attributes. The churn implementation owns this boundary and restores it
+  after its mutations. For attribute churn, this is an exact restoration of
+  the captured IXIA backing vectors rather than a second full-config import.
+
+The intended lifecycle is:
+
+```text
+topology setup
+  -> capture topology baseline
+  -> Playbook setup
+  -> capture Playbook baseline
+  -> apply and measure churn
+  -> restore and verify Playbook baseline
+  -> Playbook teardown
+  -> restore and verify topology baseline
+  -> next Playbook
+```
+
+Topology restoration uses the explicit `Playbook.restore_topology_baseline`
+opt-in, which defaults to `false`. It does not reuse
+`backup_and_restore_ixia_config`; that legacy flag retains its existing
+behavior for current consumers. CICD-EBB-10 is the first adopter, so landing
+the framework does not enable the topology boundary for every TAAC Playbook.
+
+The two boundaries also have different failure ownership:
+
+- A Playbook-baseline restore failure is a Playbook `FAIL` when the outer
+  topology restore succeeds. The workload failed its own restoration contract,
+  but the shared environment is safe for the next Playbook.
+- A topology-baseline restore timeout, import failure, or verification mismatch
+  is an `INFRA_ERROR`. The runner poisons the lifecycle and blocks subsequent
+  Playbooks because the shared environment can no longer be trusted.
+- If both boundaries fail, `INFRA_ERROR` takes precedence while the original
+  Playbook failure remains attached as diagnostic evidence.
+
+The topology IXIA participant verifies the restored configuration against a
+canonical JSON digest of the captured snapshot. A successful import without an
+exact verification match is therefore still an infrastructure failure.
 
 ---
 

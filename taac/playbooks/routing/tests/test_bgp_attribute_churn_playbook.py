@@ -1,12 +1,33 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+import dataclasses
 import functools
 import json
+import typing as t
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from taac.abstractions.churn.attribute import (
+    AttributeChurn,
+    AttributePoolIdentity,
+    AttributeTargetSelector,
+    BaselineExpectation,
+    BlockGeometryExpectation,
+)
+from taac.abstractions.churn.policies import (
+    ExecutionPolicy,
+    PreparationPolicy,
+    RecoveryPolicy,
+)
+from taac.abstractions.churn.selectors import UniformRowSelection
+from taac.abstractions.churn.specs import (
+    AttributeFamily,
+    AttributePhase,
+    ChurnScenario,
+    ChurnWorkload,
+)
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     _ebb_drained_prefix_descriptors,
@@ -69,26 +90,109 @@ EXPECTED_MATRIX = {
 }
 
 
+# The complete flat CustomStep payload the production Playbook serializes.
+#
+# The golden manifest stores only a hash and seven structural counts, and no
+# factory snapshot covers `get_bgp_ebb_*` factories, so without this literal a
+# reviewer cannot see which field of the payload a diff changed -- only that
+# some byte moved. Frozen against the Playbook factory rather than the Step
+# factory because the Playbook is where the production values are authored.
+_FROZEN_CHURN_PAYLOAD: dict = {
+    "custom_step_name": "bgp_attribute_churn",
+    "scenario_id": "bgp_ebb_attribute_churn",
+    "hostname": "dut.example.com",
+    "prefix_pool_names": EXPECTED_POOLS,
+    "attribute_matrix": EXPECTED_MATRIX,
+    "openr_mode": "standalone",
+    "peer_count_per_plane": 62,
+    "selected_block_count_per_afi": 7,
+    "samples_per_block": 2,
+    "routes_per_block": 750,
+    "duration_seconds": 3_600,
+    "max_iterations": 100_000,
+    "cadence_seconds": 60,
+    "geometry_timeout_seconds": 480,
+    "snapshot_timeout_seconds": 480,
+    "work_timeout_seconds": 5_100,
+    "cleanup_timeout_seconds": 720,
+    "poll_interval_seconds": 5,
+    "transition_timeout_seconds": 60,
+    "convergence_hard_timeout_seconds": 300,
+    "reference_setup_timeout_seconds": 120,
+    "restore_timeout_seconds": 400,
+    "ixia_restore_timeout_seconds": 120,
+    "cancellation_grace_seconds": 10,
+    "quiet_window_seconds": 120,
+    "max_lookup_concurrency": 8,
+}
+
+
+def _locked_attribute_churn() -> AttributeChurn:
+    return AttributeChurn(
+        scenario=ChurnScenario(
+            scenario_id="bgp_ebb_attribute_churn",
+            workload=ChurnWorkload(
+                families=tuple(
+                    AttributeFamily(
+                        name=family,
+                        phases=tuple(
+                            AttributePhase(name=phase, value=value)
+                            for phase, value in EXPECTED_MATRIX[family].items()
+                        ),
+                    )
+                    for family in ("med", "origin", "local_pref")
+                )
+            ),
+            preparation=PreparationPolicy(
+                initial_resolution_timeout_seconds=480.0,
+                baseline_capture_timeout_seconds=480.0,
+                total_timeout_seconds=5_100.0,
+            ),
+            execution=ExecutionPolicy(
+                duration_seconds=3_600.0,
+                cadence_seconds=60.0,
+                max_iterations=100_000,
+            ),
+            recovery=RecoveryPolicy(
+                total_timeout_seconds=720.0,
+                restore_observation_timeout_seconds=400.0,
+                ixia_restore_timeout_seconds=120.0,
+                cancellation_grace_seconds=10.0,
+            ),
+        ),
+        selector=AttributeTargetSelector(
+            prefix_pools=tuple(
+                AttributePoolIdentity(
+                    afi=afi,
+                    plane=plane,
+                    name=EXPECTED_POOLS[afi][str(plane)],
+                )
+                for afi in ("ipv4", "ipv6")
+                for plane in range(1, 5)
+            ),
+            peer_count_per_pool=62,
+            row_selection=UniformRowSelection(rows_per_pool=7),
+        ),
+        baseline_expectation=BaselineExpectation(
+            block_geometry=BlockGeometryExpectation(
+                routes_per_block=750,
+                samples_per_block=2,
+            )
+        ),
+    )
+
+
 def _locked_step_kwargs() -> dict:
     return {
         "hostname": "dut.example.com",
-        "prefix_pool_names": EXPECTED_POOLS,
-        "peer_count_per_plane": 62,
-        "selected_block_count_per_afi": 7,
-        "samples_per_block": 2,
-        "routes_per_block": 750,
-        "duration_seconds": 3_600,
-        "max_iterations": 100_000,
-        "cadence_seconds": 60,
+        "attribute_churn": _locked_attribute_churn(),
         "poll_interval_seconds": 5,
         "transition_timeout_seconds": 60,
         "convergence_hard_timeout_seconds": 300,
         "reference_setup_timeout_seconds": 120,
-        "restore_timeout_seconds": 120,
         "quiet_window_seconds": 120,
         "max_lookup_concurrency": 8,
         "openr_mode": "standalone",
-        "attribute_matrix": EXPECTED_MATRIX,
     }
 
 
@@ -646,6 +750,56 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     self.assertTrue(payload["require_updates"])
                 self.assertEqual(4, verifiers)
 
+    def test_playbook_payload_matches_frozen_contract(self) -> None:
+        """Byte-level oracle for the serialized CustomStep payload.
+
+        A field-by-field diff on failure, which neither the hash-only golden
+        manifest nor the `create_*_playbook`-only factory snapshots provide for
+        this Playbook. Any intended payload change updates this literal in the
+        same diff, so the change is visible in review.
+        """
+        playbook = get_bgp_ebb_attribute_churn_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            total_session_count=1272,
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+        )
+
+        # characterization defaults to DISABLED, so no START/STOP bracket is
+        # added and the churn Stage is the only one. Production wraps it; that
+        # composition is asserted separately.
+        self.assertEqual(1, len(playbook.stages))
+        self.assertEqual(1, len(playbook.stages[0].steps))
+        self.assertTrue(playbook.restore_topology_baseline)
+
+        self.assertEqual(
+            _FROZEN_CHURN_PAYLOAD, _step_payload(playbook.stages[0].steps[0])
+        )
+
+    def test_playbook_passes_typed_attribute_churn_to_stage(self) -> None:
+        target = (
+            "neteng.test_infra.dne.taac.playbooks.routing."
+            "bgp_ebb_playbooks.create_bgp_ebb_attribute_churn_stage"
+        )
+        with patch(target) as create_stage:
+            create_stage.return_value = taac_types.Stage(steps=[])
+            get_bgp_ebb_attribute_churn_playbook(
+                device_name="dut.example.com",
+                peergroup_ibgp_v6="IBGP_V6",
+                peergroup_ibgp_v4="IBGP_V4",
+                total_session_count=1272,
+                profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            )
+
+        attribute_churn = create_stage.call_args.kwargs["attribute_churn"]
+        self.assertIsInstance(attribute_churn, AttributeChurn)
+        self.assertEqual(
+            ("med", "origin", "local_pref"),
+            tuple(family.name for family in attribute_churn.scenario.workload.families),
+        )
+        self.assertEqual(3_600, attribute_churn.scenario.execution.duration_seconds)
+
     def test_step_factory_serializes_locked_contract(self) -> None:
         step = create_bgp_attribute_churn_step(**_locked_step_kwargs())
 
@@ -658,13 +812,48 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(3_600, payload["duration_seconds"])
         self.assertEqual(100_000, payload["max_iterations"])
         self.assertEqual(300, payload["convergence_hard_timeout_seconds"])
+        self.assertNotIn("transient_observation_logging", payload)
+
+    def test_step_factory_enables_extended_transient_observation_logging(
+        self,
+    ) -> None:
+        kwargs = _locked_step_kwargs()
+        kwargs["transient_observation_logging"] = "extended"
+
+        payload = _step_payload(create_bgp_attribute_churn_step(**kwargs))
+
+        self.assertEqual("extended", payload["transient_observation_logging"])
+
+    def test_step_factory_rejects_unknown_transient_observation_logging(
+        self,
+    ) -> None:
+        kwargs = _locked_step_kwargs()
+        kwargs["transient_observation_logging"] = "verbose"
+
+        with self.assertRaisesRegex(ValueError, "must be off or extended"):
+            create_bgp_attribute_churn_step(**kwargs)
+
+    def test_attribute_churn_step_params_round_trip_without_redefaulting(self) -> None:
+        attribute_churn = _locked_attribute_churn()
+
+        decoded = AttributeChurn.from_step_params(attribute_churn.to_step_params())
+
+        self.assertEqual(attribute_churn, decoded)
 
     def test_step_factory_rejects_incomplete_pool_geometry(self) -> None:
         kwargs = _locked_step_kwargs()
-        kwargs["prefix_pool_names"] = {
-            "ipv4": EXPECTED_POOLS["ipv4"],
-            "ipv6": {"1": EXPECTED_POOLS["ipv6"]["1"]},
-        }
+        attribute_churn = t.cast(AttributeChurn, kwargs["attribute_churn"])
+        kwargs["attribute_churn"] = dataclasses.replace(
+            attribute_churn,
+            selector=dataclasses.replace(
+                attribute_churn.selector,
+                prefix_pools=tuple(
+                    pool
+                    for pool in attribute_churn.selector.prefix_pools
+                    if pool.afi == "ipv4" or pool.plane == 1
+                ),
+            ),
+        )
 
         with self.assertRaises(ValueError):
             create_bgp_attribute_churn_step(**kwargs)
@@ -686,7 +875,14 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
     def test_step_factory_requires_two_selected_blocks_per_afi(self) -> None:
         kwargs = _locked_step_kwargs()
-        kwargs["selected_block_count_per_afi"] = 1
+        attribute_churn = t.cast(AttributeChurn, kwargs["attribute_churn"])
+        kwargs["attribute_churn"] = dataclasses.replace(
+            attribute_churn,
+            selector=dataclasses.replace(
+                attribute_churn.selector,
+                row_selection=UniformRowSelection(1),
+            ),
+        )
 
         with self.assertRaisesRegex(
             ValueError,
@@ -701,9 +897,48 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must exceed"):
             create_bgp_attribute_churn_step(**kwargs)
 
+    def test_step_factory_rejects_fractional_typed_cadence(self) -> None:
+        kwargs = _locked_step_kwargs()
+        attribute_churn = t.cast(AttributeChurn, kwargs["attribute_churn"])
+        kwargs["attribute_churn"] = dataclasses.replace(
+            attribute_churn,
+            scenario=dataclasses.replace(
+                attribute_churn.scenario,
+                execution=dataclasses.replace(
+                    attribute_churn.scenario.execution,
+                    cadence_seconds=60.5,
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "cadence_seconds must be an integer"):
+            create_bgp_attribute_churn_step(**kwargs)
+
+    def test_step_factory_rejects_non_finite_typed_cadence(self) -> None:
+        for cadence_seconds in (float("inf"), float("nan")):
+            with self.subTest(cadence_seconds=cadence_seconds):
+                kwargs = _locked_step_kwargs()
+                attribute_churn = t.cast(AttributeChurn, kwargs["attribute_churn"])
+                kwargs["attribute_churn"] = dataclasses.replace(
+                    attribute_churn,
+                    scenario=dataclasses.replace(
+                        attribute_churn.scenario,
+                        execution=dataclasses.replace(
+                            attribute_churn.scenario.execution,
+                            cadence_seconds=cadence_seconds,
+                        ),
+                    ),
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "cadence_seconds must be an integer"
+                ):
+                    create_bgp_attribute_churn_step(**kwargs)
+
     def test_stage_contains_only_the_audited_custom_step(self) -> None:
         stage = create_bgp_ebb_attribute_churn_stage(**_locked_step_kwargs())
 
+        self.assertEqual("BGP attribute churn (CICD-EBB-10)", stage.description)
         self.assertEqual(1, len(stage.steps))
         payload = _step_payload(stage.steps[0])
         self.assertEqual("bgp_attribute_churn", payload["custom_step_name"])
@@ -716,7 +951,6 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             total_session_count=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         )
-
         self.assertEqual(1, len(playbook.stages))
         self.assertEqual(1, len(playbook.stages[0].steps))
         payload = _step_payload(playbook.stages[0].steps[0])
@@ -724,6 +958,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(EXPECTED_MATRIX, payload["attribute_matrix"])
         self.assertEqual(
             {
+                "scenario_id": "bgp_ebb_attribute_churn",
                 "peer_count_per_plane": 62,
                 "selected_block_count_per_afi": 7,
                 "samples_per_block": 2,
@@ -731,11 +966,17 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 "duration_seconds": 3_600,
                 "max_iterations": 100_000,
                 "cadence_seconds": 60,
+                "geometry_timeout_seconds": 480,
+                "snapshot_timeout_seconds": 480,
+                "work_timeout_seconds": 5_100,
+                "cleanup_timeout_seconds": 720,
                 "poll_interval_seconds": 5,
                 "transition_timeout_seconds": 60,
                 "convergence_hard_timeout_seconds": 300,
                 "reference_setup_timeout_seconds": 120,
-                "restore_timeout_seconds": 120,
+                "restore_timeout_seconds": 400,
+                "ixia_restore_timeout_seconds": 120,
+                "cancellation_grace_seconds": 10,
                 "quiet_window_seconds": 120,
                 "max_lookup_concurrency": 8,
                 "openr_mode": "standalone",
@@ -743,6 +984,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             {
                 key: payload[key]
                 for key in (
+                    "scenario_id",
                     "peer_count_per_plane",
                     "selected_block_count_per_afi",
                     "samples_per_block",
@@ -750,11 +992,17 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     "duration_seconds",
                     "max_iterations",
                     "cadence_seconds",
+                    "geometry_timeout_seconds",
+                    "snapshot_timeout_seconds",
+                    "work_timeout_seconds",
+                    "cleanup_timeout_seconds",
                     "poll_interval_seconds",
                     "transition_timeout_seconds",
                     "convergence_hard_timeout_seconds",
                     "reference_setup_timeout_seconds",
                     "restore_timeout_seconds",
+                    "ixia_restore_timeout_seconds",
+                    "cancellation_grace_seconds",
                     "quiet_window_seconds",
                     "max_lookup_concurrency",
                     "openr_mode",
@@ -958,7 +1206,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                         factory.call_args.kwargs,
                     )
 
-    def test_full_scale_factory_enables_churn_baseline_only_when_selected(
+    def test_full_scale_factory_keeps_attribute_churn_out_of_topology(
         self,
     ) -> None:
         inventory = MagicMock()
@@ -979,11 +1227,11 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "bgp_ebb_full_scale._get_bgp_ebb_full_scale_playbooks"
         )
 
-        for selected, expected_churn, expected_ebgp_prefix_count in (
-            (None, True, 850),
-            (["bgp_ebb_attribute_churn_playbook"], True, 750),
-            (["bgp_ebb_route_storm_playbook"], False, 750),
-            (["bgp_ebb_route_registry_runtime_update_playbook"], False, 850),
+        for selected, expected_ebgp_prefix_count, expected_shards in (
+            (None, 850, True),
+            (["bgp_ebb_attribute_churn_playbook"], 750, False),
+            (["bgp_ebb_route_storm_playbook"], 750, True),
+            (["bgp_ebb_route_registry_runtime_update_playbook"], 850, False),
         ):
             available_playbooks = []
             if selected:
@@ -1001,13 +1249,16 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
                 )
 
-            self.assertEqual(
-                expected_churn,
-                topology_factory.call_args.kwargs["enable_attribute_churn"],
+            self.assertNotIn(
+                "enable_attribute_churn", topology_factory.call_args.kwargs
             )
             self.assertEqual(
                 expected_ebgp_prefix_count,
                 topology_factory.call_args.kwargs["ebgp_prefix_count"],
+            )
+            self.assertEqual(
+                expected_shards,
+                topology_factory.call_args.kwargs["route_storm_shards"],
             )
             self.assertIsNone(
                 topology_factory.call_args.kwargs["ebgp_static_prefix_count"]
@@ -1060,7 +1311,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     topology_factory.call_args.kwargs["include_bgpmon"],
                 )
 
-    def test_bag012_stage1_uses_port_8_1_for_heavy_ibgp_routes(self) -> None:
+    def test_bag012_stage1_uses_default_port_assignment(self) -> None:
         for config in (
             BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
             BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
@@ -1074,10 +1325,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 connections = endpoint.direct_ixia_connections
                 self.assertIsNotNone(connections)
                 assert connections is not None
-                self.assertEqual(
+                self.assertCountEqual(
                     [
-                        ("Ethernet3/36/2", "8/2"),
                         ("Ethernet3/36/1", "8/1"),
+                        ("Ethernet3/36/2", "8/2"),
                         ("Ethernet3/36/3", "8/3"),
                     ],
                     [
@@ -1101,7 +1352,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             )
             if payload.get("custom_step_name") == "bgp_route_storm"
         )
-        self.assertEqual("Ethernet3/36/1", payload["ixia_interface_mimic_ibgp"])
+        self.assertEqual("Ethernet3/36/2", payload["ixia_interface_mimic_ibgp"])
+        self.assertNotIn("ixia_interfaces_mimic_ibgp", payload)
 
     def test_full_scale_factory_rejects_invalid_playbook_selections(self) -> None:
         inventory = MagicMock()

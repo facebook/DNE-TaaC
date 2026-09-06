@@ -47,6 +47,8 @@ class FpfThresholds:
     convergence_signal3_stability_duration_sec: float
 
     # --- ODS discard / congestion counters (create_fpf_ods_counter_check) ---
+    # Non-congestion discard values are allowed excess events/minute above the
+    # per-entity pre-test ``.sum.60`` ceiling. Congestion values remain absolute.
     ods_in_dst_null_discard_max: int
     ods_in_discard_max: int
     ods_in_congestion_max: int

@@ -21,6 +21,7 @@ from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
+    create_fpf_record_disruption_time_step,
     create_longevity_step,
     create_service_convergence_step,
     create_service_interruption_step,
@@ -87,6 +88,9 @@ def create_fpf_tc06_test_config() -> TestConfig:
             duration=180,
             description="Wait 180s (beyond 120s GR window — routes purged)",
         ),
+        create_fpf_record_disruption_time_step(
+            description="Record BGP restart time for RIB reconvergence SLA"
+        ),
         create_service_interruption_step(
             service=taac_types.Service.BGP,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
@@ -140,14 +144,14 @@ def create_fpf_tc06_test_config() -> TestConfig:
         reconvergence_service="bgpd",
         reconvergence_sla_sec=60.0,
         reconvergence_hosts=[OBSERVER_GTSWS[0]],
+        bgp_rib_restart_reconverge=True,
         # fsdb/HRT are coupled: a brief HRT FSDB-session census dip is expected
         # across a GR; skip the postcheck (precheck still asserts 32/32 baseline).
         skip_fsdb_session_postcheck=True,
-        # GR-beyond (DISRUPTIVE: routes purge past the GR window): the metric
-        # legitimately shows failure values mid-window. MODE A (last_sample)
-        # asserts only that the LAST in-window sample reconverged to the golden
-        # value; mid-window drops are ignored — applied to the convergence
-        # Signal-3, HRT remote-failure, and prod-prefix checks.
+        # GR-beyond (DISRUPTIVE: routes purge past the GR window): the affected
+        # BGP RIB uses the restart-aware contract above. MODE A applies to the
+        # FSDB/HRT checks and asserts only that the LAST in-window sample returns
+        # to the golden value; expected mid-window drops are ignored.
         convergence_blip_mode="last_sample",
         # Expected mid-disruption STSW packet loss to purged lane-0 dests —
         # informational, not a hard fail (user-confirmed).

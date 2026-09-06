@@ -18,9 +18,15 @@ from taac.libs.fpf.fpf_collector_registry import (
     evaluate_three_signals,
     everpaste_details_suffix,
     get_collector,
+    get_restart_completion_time,
+    get_restart_time,
     get_test_case_start_time,
+    validate_restart_tolerant_tuple,
 )
-from taac.libs.fpf.fpf_stress_checks import _parse_ts
+from taac.libs.fpf.fpf_stress_checks import (
+    _parse_ts,
+    BLIP_MODE_SKIP_NULL_STRICT,
+)
 from taac.health_check.health_check import types as hc_types
 
 JSONL_PATH = "/tmp/fpf_stress_hrt_bulk.jsonl"
@@ -57,6 +63,7 @@ class FpfHrtBulkConvergenceHealthCheck(
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         lanes: t.List[int] = check_params.get("lanes", [0, 1])
+        device_ids: t.List[int] = check_params.get("device_ids", [0])
         expected_per_lane: t.Dict[int, int] = {
             int(k): v for k, v in check_params.get("expected_per_lane", {}).items()
         }
@@ -77,6 +84,7 @@ class FpfHrtBulkConvergenceHealthCheck(
         if use_live:
             return await self._evaluate_from_live_collector(
                 lanes,
+                device_ids,
                 expected_per_lane,
                 impacted_lanes,
                 withdrawn_max,
@@ -90,6 +98,7 @@ class FpfHrtBulkConvergenceHealthCheck(
     async def _evaluate_from_live_collector(
         self,
         lanes: t.List[int],
+        device_ids: t.List[int],
         expected_per_lane: t.Dict[int, int],
         impacted_lanes: t.List[int],
         withdrawn_max: int,
@@ -147,19 +156,51 @@ class FpfHrtBulkConvergenceHealthCheck(
             "signal3_stability_duration_sec", DEFAULT_SIGNAL3_STABILITY_DURATION_SEC
         )
         stability_mode = check_params.get("stability_mode", "strict")
+        restart_tolerant_hosts = set(
+            check_params.get("restart_tolerant_hosts", []) or []
+        )
 
         impacted_set = set(impacted_lanes)
+        impacted_tuples: t.Dict[str, t.Dict[str, t.List[int]]] = check_params.get(
+            "impacted_tuple_lanes_by_host_device", {}
+        )
         normal_lanes = [lane for lane in lanes if lane not in impacted_set]
 
         # ---- Unimpacted injected lanes: full 3-signal convergence -----------
-        per_lane_results = collector.evaluate_per_lane_window(
-            window_start=window_start,
-            window_end=window_end,
-            lanes=normal_lanes,
-            expected_per_lane=expected_per_lane,
-            only_hosts=only_hosts,
-        )
+        if impacted_tuples:
+            per_lane_results = []
+            selected_hosts = only_hosts or collector.hosts
+            for host in selected_hosts:
+                for device_id in device_ids:
+                    excluded = set(
+                        impacted_tuples.get(host, {}).get(str(device_id), [])
+                    )
+                    tuple_lanes = [lane for lane in lanes if lane not in excluded]
+                    per_lane_results.extend(
+                        collector.evaluate_per_lane_window(
+                            window_start=window_start,
+                            window_end=window_end,
+                            lanes=tuple_lanes,
+                            device_ids=[device_id],
+                            expected_per_lane=expected_per_lane,
+                            only_hosts=[host],
+                        )
+                    )
+        else:
+            per_lane_results = collector.evaluate_per_lane_window(
+                window_start=window_start,
+                window_end=window_end,
+                lanes=normal_lanes,
+                device_ids=device_ids,
+                expected_per_lane=expected_per_lane,
+                only_hosts=only_hosts,
+            )
         for i, r in enumerate(per_lane_results):
+            effective_stability_mode = (
+                BLIP_MODE_SKIP_NULL_STRICT
+                if r.host in restart_tolerant_hosts
+                else stability_mode
+            )
             per_lane_results[i] = evaluate_three_signals(
                 result=r,
                 collector=collector,
@@ -170,16 +211,49 @@ class FpfHrtBulkConvergenceHealthCheck(
                 signal2_local_max_sec=signal2_max,
                 signal3_stability_duration_sec=signal3_duration,
                 lane_id=r.lane,
-                stability_mode=stability_mode,
+                stability_mode=effective_stability_mode,
+                host=r.host,
+                device_id=r.device_id,
             )
+            if effective_stability_mode == "strict" and r.error_count:
+                per_lane_results[i].passed = False
+                per_lane_results[
+                    i
+                ].detail += f" | FAIL — {r.error_count} explicit error/null sample(s)"
+
+        if restart_tolerant_hosts:
+            restart_ts = get_restart_time()
+            restart_completion_ts = get_restart_completion_time()
+            rows = collector.get_rows_in_window(window_start, window_end)
+            for result in per_lane_results:
+                if result.host not in restart_tolerant_hosts:
+                    continue
+                if restart_ts <= 0:
+                    recovered = False
+                    recovery_detail = "no recorded HRT restart timestamp"
+                else:
+                    recovered, recovery_detail = validate_restart_tolerant_tuple(
+                        rows=rows,
+                        host=t.cast(str, result.host),
+                        device_id=t.cast(int, result.device_id),
+                        lane=result.lane,
+                        expected=expected_per_lane.get(result.lane, 0),
+                        restart_ts=restart_ts,
+                        restart_completion_ts=(
+                            restart_completion_ts if restart_completion_ts > 0 else None
+                        ),
+                    )
+                result.detail += f" | restart recovery: {recovery_detail}"
+                if not recovered:
+                    result.passed = False
         for r in per_lane_results:
             overall = "PASS" if r.passed else "FAIL"
             self.logger.info(
-                f"  [HRT bulk live] Lane {r.lane}: [{overall}] — 3-signal evaluation"
+                f"  [HRT bulk live] {r.device}: [{overall}] — 3-signal evaluation"
             )
 
         normal_failures = [
-            f"Lane {r.lane}{_lbl(r.lane)}: {r.detail}"
+            f"{r.device}{_lbl(r.lane)}: {r.detail}"
             for r in per_lane_results
             if not r.passed
         ]
@@ -193,7 +267,10 @@ class FpfHrtBulkConvergenceHealthCheck(
                 allow = set(only_hosts)
                 rows = [r for r in rows if getattr(r, "host", None) in allow]
             for lane, passed, detail in self._evaluate_withdrawn_rows(
-                rows, impacted_lanes, withdrawn_max
+                rows,
+                impacted_lanes,
+                withdrawn_max,
+                impacted_tuples=impacted_tuples,
             ):
                 status = "PASS" if passed else "FAIL"
                 self.logger.info(
@@ -205,7 +282,7 @@ class FpfHrtBulkConvergenceHealthCheck(
                     withdrawn_failures.append(f"Lane {lane}{_lbl(lane)}: {detail}")
 
         detail_lines = [
-            f"Lane {r.lane}: [{'PASS' if r.passed else 'FAIL'}] {r.detail}"
+            f"{r.device}: [{'PASS' if r.passed else 'FAIL'}] {r.detail}"
             for r in per_lane_results
         ] + [f"(impacted) {d}" for d in (withdrawn_pass_detail + withdrawn_failures)]
         details = await everpaste_details_suffix(
@@ -238,7 +315,7 @@ class FpfHrtBulkConvergenceHealthCheck(
             )
 
         pass_bits = [
-            f"Lane {r.lane}: E2E={r.signal1_e2e_sec}s, "
+            f"{r.device}: E2E={r.signal1_e2e_sec}s, "
             f"GTSW-prop={r.signal2_local_sec}s, "
             f"stable={r.signal3_stability_duration_sec:.0f}s"
             for r in per_lane_results
@@ -255,14 +332,15 @@ class FpfHrtBulkConvergenceHealthCheck(
         rows: t.List[t.Any],
         impacted_lanes: t.List[int],
         withdrawn_max: int,
-    ) -> t.List[t.Tuple[int, bool, str]]:
+        impacted_tuples: t.Optional[t.Dict[str, t.Dict[str, t.List[int]]]] = None,
+    ) -> t.List[t.Tuple[t.Any, bool, str]]:
         """For each impacted lane, the latest in-window sample on every
         (host, device_id) the collector polled must be <= withdrawn_max.
 
         ``rows`` are HrtBulkRow dataclasses (each carries host, device_id,
         lane_counts, timestamp). Returns (lane, passed, detail) per lane.
         """
-        results: t.List[t.Tuple[int, bool, str]] = []
+        results: t.List[t.Tuple[t.Any, bool, str]] = []
         # latest row per (host, device_id)
         latest: t.Dict[t.Tuple[str, int], t.Tuple[float, t.Any]] = {}
         for row in rows:
@@ -279,6 +357,39 @@ class FpfHrtBulkConvergenceHealthCheck(
                 (lane, False, "no in-window samples to evaluate withdrawal")
                 for lane in sorted(impacted_lanes)
             ]
+
+        if impacted_tuples:
+            tuple_targets = [
+                (host, int(device_id), lane)
+                for host, devices in impacted_tuples.items()
+                for device_id, tuple_lanes in devices.items()
+                for lane in tuple_lanes
+            ]
+            results = []
+            for host, device_id, lane in sorted(tuple_targets):
+                label = f"{host}/dev{device_id}/L{lane}"
+                latest_entry = latest.get((host, device_id))
+                if latest_entry is None:
+                    results.append((label, False, "no in-window sample"))
+                    continue
+                row = latest_entry[1]
+                counts = getattr(row, "lane_counts", [])
+                if (
+                    not getattr(row, "valid", True)
+                    or str(getattr(row, "notes", "")).startswith("error:")
+                    or lane >= len(counts)
+                ):
+                    results.append((label, False, "last sample is error/null"))
+                    continue
+                count = counts[lane]
+                results.append(
+                    (
+                        label,
+                        count <= withdrawn_max,
+                        f"last={count}, required <= {withdrawn_max}",
+                    )
+                )
+            return results
 
         for lane in sorted(impacted_lanes):
             problems: t.List[str] = []

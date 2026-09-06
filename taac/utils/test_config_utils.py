@@ -5,11 +5,59 @@ from dataclasses import dataclass
 from typing import Any, List
 
 from ixia.ixia import types as ixia_types
+from taac.libs.custom_payload_registry import (
+    register_custom_frame_payload,
+)
+from taac.packet_headers import ARP_REQUEST_TRAFFIC_PACKET_HEADERS
 from taac.utils.common import async_everpaste_str
 from taac.utils.oss_taac_lib_utils import await_sync
 from taac.test_as_a_config import types as taac_types
 
 logger = logging.getLogger(__name__)
+
+
+# Valid RFC 826 ARP request body used by the CPU-queue traffic item. The
+# explicit IxNetwork header stack stops at Ethernet because its ARP stack hangs
+# on the lab chassis SDK.
+ARP_REQUEST_BODY_HEX: str = "00010800060400010011010000010a00fe010000000000000a00fefe"
+
+
+def create_raw_arp_request_traffic_item(
+    name: str,
+    source_endpoint: str,
+    destination_endpoint: str,
+    *,
+    line_rate_type: ixia_types.RateType = ixia_types.RateType.FRAMES_PER_SECOND,
+    line_rate: int = 2000,
+    enabled: bool = True,
+) -> taac_types.BasicTrafficItemConfig:
+    """Create the canonical raw ARP-request IXIA traffic item."""
+    register_custom_frame_payload(name, ARP_REQUEST_BODY_HEX)
+    return taac_types.BasicTrafficItemConfig(
+        src_endpoints=[
+            taac_types.TrafficEndpoint(
+                name=source_endpoint,
+                device_group_index=0,
+            ),
+        ],
+        dest_endpoints=[
+            taac_types.TrafficEndpoint(
+                name=destination_endpoint,
+                device_group_index=0,
+            ),
+        ],
+        name=name,
+        enabled=enabled,
+        line_rate_type=line_rate_type,
+        line_rate=line_rate,
+        traffic_type=ixia_types.TrafficType.RAW,
+        bidirectional=False,
+        packet_headers=ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
+        frame_size_settings=ixia_types.FrameSize(
+            type=ixia_types.FrameSizeType.FIXED,
+            fixed_size=64,
+        ),
+    )
 
 
 @dataclass

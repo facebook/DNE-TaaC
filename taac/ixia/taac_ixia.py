@@ -23,6 +23,7 @@ from taac.ixia.ixia import (  # oss-rewrite (force ShipIt re-export to taac.* ro
     IxiaOperationTimeoutError,
     IxiaSetupError,
 )
+from taac.ixia.ixia_tracer import TEARDOWN_PHASE
 from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     none_throws,
     retryable,
@@ -278,7 +279,11 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 f"Encountered error when capturing PTP drill down statistics: {e}"
             )
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry: this runs under `stat_view_snapshot`, so retrying here holds the
+    # chassis snapshot lock while the very error being retried
+    # ("...already in progress") is caused by snapshot contention — a retry
+    # storm that prolongs it. The sampler's next tick is the retry; the
+    # foreground caller (`get_latest_stats`) retries at its own level.
     def get_packet_loss_statistics(
         self,
         view: StatViewAssistant,
@@ -308,7 +313,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             stats.append(stat)
         return stats
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry — sampler-only; the next tick is the retry. See
+    # `get_packet_loss_statistics`.
     def get_traffic_rate_statistics(
         self,
         view: StatViewAssistant,
@@ -333,7 +339,8 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             stats.append(stat)
         return stats
 
-    @retryable(sleep_time=2, num_tries=100)
+    # No retry — sampler-only; the next tick is the retry. See
+    # `get_packet_loss_statistics`.
     def get_ptp_drill_down_statistics(
         self, ptp_drill_down_view: StatViewAssistant
     ) -> t.Dict:
@@ -511,11 +518,29 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.capturing = True
         self.start_capturing(self.sample_time)
 
-    def export_json_config(self) -> str:
-        json_config = self.session.Ixnetwork.ResourceManager.ExportConfig(
-            ["/descendant-or-self::*"],
-            False,
-            "json",
+    def export_json_config(self, *, baseline_invocation_id: str | None = None) -> str:
+        log_context = (
+            f" (invocation_id={baseline_invocation_id})"
+            if baseline_invocation_id is not None
+            else ""
+        )
+        started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Export started{log_context}")
+        try:
+            json_config = self.session.Ixnetwork.ResourceManager.ExportConfig(
+                ["/descendant-or-self::*"],
+                False,
+                "json",
+            )
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Export failed after "
+                f"{time.monotonic() - started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Export completed in "
+            f"{time.monotonic() - started:.1f}s{log_context}"
         )
         return json_config
 
@@ -524,14 +549,51 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         json_config = self.export_json_config()
         self.saved_configs[self.test_case_uuid] = json_config
 
-    def import_json_config(self, json_config: str) -> None:
-        self.session.Ixnetwork.ResourceManager.ImportConfig(json_config, False)
-        self.start_and_verify_protocols()
-        self.enable_traffic()
-        self.start_traffic(regenerate_traffic_items=True)
-        time.sleep(5)
-        self.stop_traffic()
-        self.enable_traffic(enable=False)
+    def import_json_config(
+        self,
+        json_config: str,
+        *,
+        baseline_invocation_id: str | None = None,
+    ) -> None:
+        log_context = (
+            f" (invocation_id={baseline_invocation_id})"
+            if baseline_invocation_id is not None
+            else ""
+        )
+        import_started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Import started{log_context}")
+        try:
+            self.session.Ixnetwork.ResourceManager.ImportConfig(json_config, False)
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Import failed after "
+                f"{time.monotonic() - import_started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Import completed in "
+            f"{time.monotonic() - import_started:.1f}s{log_context}"
+        )
+
+        activation_started = time.monotonic()
+        self.logger.info(f"[IXIA CONFIG] Post-import activation started{log_context}")
+        try:
+            self.start_and_verify_protocols()
+            self.enable_traffic()
+            self.start_traffic(regenerate_traffic_items=True)
+            time.sleep(5)
+            self.stop_traffic()
+            self.enable_traffic(enable=False)
+        except Exception:
+            self.logger.exception(
+                f"[IXIA CONFIG] Post-import activation failed after "
+                f"{time.monotonic() - activation_started:.1f}s{log_context}"
+            )
+            raise
+        self.logger.info(
+            f"[IXIA CONFIG] Post-import activation completed in "
+            f"{time.monotonic() - activation_started:.1f}s{log_context}"
+        )
 
     def import_saved_config(self) -> None:
         self.logger.info(f"Importing saved ixia config for {self.test_case_uuid}")
@@ -1414,6 +1476,29 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             return []
         return list(self.ixia_config.traffic_items or [])
 
+    def apply_traffic(self) -> None:
+        """Serialize `Traffic.Apply()` against chassis CSV snapshots.
+
+        Apply tears down and rebuilds the stat views, and the chassis allows
+        exactly one CSV snapshot at a time. A snapshot taken while Apply is in
+        flight fails — and Apply always wins the collision, so nothing surfaces
+        at `start_traffic` time. The damage stays invisible (the sampler logs
+        capture failures at DEBUG and keeps its previous state) until a
+        foreground consumer needs stats, which is why it presented as a health
+        check failing minutes later.
+
+        Evidence (2026-08-12 run): all six "Args do not match signature" errors
+        fell inside an Apply window, and the three steps where `start_traffic`
+        early-returned without applying produced none.
+
+        Taking the session-wide `stat_view_snapshot` lock makes Apply and
+        snapshots mutually exclusive. Safe to nest: `_snapshot_lock` is an
+        `RLock`, so callers already holding it (e.g. via `prepare_traffic`)
+        re-enter rather than deadlock.
+        """
+        with self.stat_view_snapshot():
+            super().apply_traffic()
+
     def prepare_traffic(self) -> None:
         self.regenerate_traffic_items()
         self.apply_traffic()
@@ -1421,6 +1506,9 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
 
     def begin_test_case(self, test_case_uuid, traffic_regexes=None) -> None:
         self.test_case_uuid = test_case_uuid
+        # The REST trace is cut here so the calls this test case drives land
+        # in their own slice, separate from setup and from its neighbours.
+        self.rotate_api_trace_phase(self._current_playbook_name or test_case_uuid)
         self.enable_traffic(traffic_regexes)
         self.prepare_traffic()
         if not self.capturing:
@@ -1432,3 +1520,4 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.paused = True
         self.log_to_scuba_ixia_packet_loss(none_throws(self.test_case_uuid))
         self.enable_traffic(traffic_regexes, enable=False)
+        self.rotate_api_trace_phase(TEARDOWN_PHASE)

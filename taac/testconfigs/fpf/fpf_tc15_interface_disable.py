@@ -45,6 +45,7 @@ from taac.steps.step_definitions import (
     create_longevity_step,
 )
 from taac.task_definitions import (
+    create_fpf_ensure_interfaces_enabled_task,
     create_fpf_inject_vf_groups_task,
     create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
@@ -98,10 +99,12 @@ CIRCUITS = [
     ),
 ]
 
-# Prod prefix monitored on the impacted host/dev (local VF1).
+# One server-originated dev0 VF1 prefix, observed from both the directly attached
+# host and the remote/client host for conditional-route propagation.
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
-PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_TARGET_PREFIX = get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)
+PROD_PREFIXES = [PROD_TARGET_PREFIX]
 
 HRT_MEMORY_HOSTS = ["rtptest1544.mwg2", "rtptest1599.mwg2"]
 IB_TRAFFIC_SERVER = GPU_HOSTS[0]
@@ -118,16 +121,32 @@ def _impacted_beths_by_host(circuits: list[Circuit]) -> dict[str, list[str]]:
     return {h: sorted(v) for h, v in sorted(out.items())}
 
 
-def _impacted_planes_by_host(circuits: list[Circuit]) -> dict[str, list[int]]:
-    out: dict[str, list[int]] = {}
-    for c in circuits:
-        out.setdefault(c.z_end_device, [])
-        if c.lane not in out[c.z_end_device]:
-            out[c.z_end_device].append(c.lane)
-    return {h: sorted(v) for h, v in sorted(out.items())}
+def _conditional_route_impacted_planes_by_host(
+    circuits: list[Circuit], observers: list[str]
+) -> dict[str, list[int]]:
+    """Expected plane loss for one origin route as seen by every observer."""
+    source_host = observers[0] if observers else PROD_PREFIX_HOST
+    source_planes = sorted({c.lane for c in circuits if c.z_end_device == source_host})
+    if not source_planes:
+        raise ValueError(
+            f"No impacted planes found for production-prefix origin {source_host}"
+        )
+    return {host: list(source_planes) for host in observers}
 
 
-def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
+def _conditional_route_prefixes_by_host(
+    observers: list[str],
+) -> dict[str, list[str]]:
+    return {host: [PROD_TARGET_PREFIX] for host in observers}
+
+
+def _disable_steps(
+    circuits: list[Circuit],
+    enable: bool,
+    *,
+    best_effort: bool = False,
+    record_event_time: bool = True,
+) -> list:
     """Thrift-based held disable/enable of the A-end interface(s) on the DUT.
 
     Uses the live-agent setPortState path (immediate + held) rather than the
@@ -140,6 +159,8 @@ def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
             create_fpf_set_interface_admin_step(
                 interfaces=intfs,
                 enable=enable,
+                best_effort=best_effort,
+                record_event_time=record_event_time,
                 description=(
                     f"{'Enable' if enable else 'Disable'} {intfs} on {dev} "
                     f"(thrift admin state)"
@@ -151,6 +172,10 @@ def _disable_steps(circuits: list[Circuit], enable: bool) -> list:
 
 def create_fpf_tc15_test_config() -> TestConfig:
     impacted_lanes = sorted({c.lane for c in CIRCUITS})
+    conditional_route_impacted_planes_by_host = (
+        _conditional_route_impacted_planes_by_host(CIRCUITS, GPU_HOSTS)
+    )
+    conditional_route_prefixes_by_host = _conditional_route_prefixes_by_host(GPU_HOSTS)
     n = num_disrupted_circuits(CIRCUITS)
     skip_ssh = skip_ssh_dependencies()
     spray = None if skip_ssh else SPRAY_HOSTS
@@ -188,8 +213,9 @@ def create_fpf_tc15_test_config() -> TestConfig:
         impacted_lanes=impacted_lanes,
         impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu(CIRCUITS),
         impacted_beths_by_host=_impacted_beths_by_host(CIRCUITS),
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_planes_by_host=conditional_route_impacted_planes_by_host,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=conditional_route_prefixes_by_host,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
@@ -226,6 +252,7 @@ def create_fpf_tc15_test_config() -> TestConfig:
         rf_vf_groups=RF_VF_GROUPS,
         playbook_name="fpf_tc15_interface_disable_restore",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=conditional_route_prefixes_by_host,
         skip_ssh_dependent_checks=skip_ssh,
         # BGP: tally established sessions at precheck (no fail on baseline-down),
         # assert unchanged at postcheck — a GPU-link re-enable must not drop any
@@ -245,7 +272,7 @@ def create_fpf_tc15_test_config() -> TestConfig:
         # that flags the recovery itself when it lands after the settle window.
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_planes_by_host=conditional_route_impacted_planes_by_host,
         # FSDB sessions: all 32 (4 GPUs x 8 GTSWs per BE node) should be up post
         # re-enable; the default len(observer_gtsws)*4 = 8 is wrong here. And
         # skip the session PRECHECK — a lingering graceful-restart hold from the
@@ -255,6 +282,7 @@ def create_fpf_tc15_test_config() -> TestConfig:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ensure_traffic_after_disruption=True,
         # After re-enable, every plane must be UP on the GPU's hrtctl plane-status.
         # (The disrupt half is a port DISABLE — the plane goes DOWN, not DRAINED —
         # so no plane-status postcheck is added there.)
@@ -265,10 +293,21 @@ def create_fpf_tc15_test_config() -> TestConfig:
         # LAST in-window sample reached the golden/UP state — the recovery
         # transient is tolerated (mid-window blips ignored).
         convergence_blip_mode="last_sample",
+        # Cleanup is an idempotent safety retry, not a second recovery event.
+        cleanup_steps=_disable_steps(
+            CIRCUITS,
+            enable=True,
+            best_effort=True,
+            record_event_time=False,
+        ),
     )
 
     setup_tasks = []
-    teardown_tasks = []
+    teardown_tasks = [
+        create_fpf_ensure_interfaces_enabled_task(
+            disable_interfaces_by_device(CIRCUITS)
+        )
+    ]
     if not skip_ssh:
         setup_tasks.append(
             create_fpf_start_ib_traffic_task(
@@ -285,8 +324,7 @@ def create_fpf_tc15_test_config() -> TestConfig:
             gtsws=OBSERVER_GTSWS,
             hosts=GPU_HOSTS,
             subnet_prefix=VF_COLLECTOR_SUBNET,
-            prod_prefixes=PROD_PREFIXES,
-            prod_prefix_host=PROD_PREFIX_HOST,
+            prod_prefixes_by_host=conditional_route_prefixes_by_host,
             prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
             fsdb_mode=FSDB_COLLECTOR_MODE,
             allow_baseline_failures=ALLOW_BASELINE_FAILURES,

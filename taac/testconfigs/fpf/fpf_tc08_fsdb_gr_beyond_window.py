@@ -37,6 +37,7 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.steps.step_definitions import (
     create_fpf_record_disruption_time_step,
+    create_fpf_record_restart_time_step,
     create_longevity_step,
     create_service_convergence_step,
     create_service_interruption_step,
@@ -114,6 +115,9 @@ def create_fpf_tc08_test_config() -> TestConfig:
                 f"Hold FSDB down {STOP_DURATION_SEC}s "
                 f"(>{GR_WINDOW_SEC}s GR window — lane-0 routes purge, beth0 drains)"
             ),
+        ),
+        create_fpf_record_restart_time_step(
+            description="Record FSDB restart time for ribMap reconvergence SLA"
         ),
         create_service_interruption_step(
             service=taac_types.Service.FSDB,
@@ -195,15 +199,17 @@ def create_fpf_tc08_test_config() -> TestConfig:
         reconvergence_service="fsdb",
         reconvergence_sla_sec=60.0,
         reconvergence_hosts=[OBSERVER_GTSWS[0]],
+        # Use a separate pre-START timestamp for ribMap recovery. The pre-STOP
+        # disruption timestamp above remains the anchor for the drain window.
+        fsdb_rib_restart_reconverge=True,
         # fsdb/HRT are coupled: the HRT FSDB-session census dips while fsdb
         # re-subscribes after the GR — expected, not a fault. Skip the postcheck
         # (precheck still asserts the 32/32 baseline).
         skip_fsdb_session_postcheck=True,
-        # GR-beyond (DISRUPTIVE: routes purge past the GR window): the metric
-        # legitimately shows failure values mid-window. MODE A (last_sample)
-        # asserts only that the LAST in-window sample reconverged to the golden
-        # value; mid-window drops are ignored — applied to the convergence
-        # Signal-3, HRT remote-failure, and prod-prefix checks.
+        # GR-beyond (DISRUPTIVE: routes purge past the GR window): the affected
+        # FSDB ribMap uses the restart-aware contract above. MODE A applies to
+        # the unaffected BGP and HRT checks and asserts only that the LAST
+        # in-window sample returns to the golden value.
         convergence_blip_mode="last_sample",
         # Expected mid-disruption STSW packet loss to purged lane-0 dests —
         # informational, not a hard fail (user-confirmed).

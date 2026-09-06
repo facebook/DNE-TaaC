@@ -110,7 +110,12 @@ _T = t.TypeVar("_T")
 _TRAFFIC_ENDPOINT_ROLES = frozenset({"ixia", "traffic", "trafficgen"})
 _EBB_FULL_SCALE_PROFILE = "ebb_full_scale"
 _EBB_FULL_SCALE_TOPOLOGY_NAMES = frozenset(
-    {"ebb_full_scale_with_bgpmon", "ebb_full_scale_no_bgpmon"}
+    {
+        "ebb_full_scale_with_bgpmon",
+        "ebb_full_scale_no_bgpmon",
+        "ebb_full_scale_with_bgpmon_route_sharded",
+        "ebb_full_scale_no_bgpmon_route_sharded",
+    }
 )
 _UG_NEW_PEER_JOIN_PROFILE = "ug_new_peer_join"
 _UG_NEW_PEER_JOIN_TOPOLOGY = "ug_new_peer_join"
@@ -1413,9 +1418,8 @@ def _uses_flat_ebb_prefix_geometry(
 ) -> bool:
     """Keep primary full-scale EBB pools addressable by logical prefix index."""
     return (
-        _is_ebb_full_scale(bound)
-        and advertisement.spec.allocation.network_group_index == 0
-    )
+        _is_ebb_full_scale(bound) or _is_profile_free_ebb_full_scale(bound)
+    ) and advertisement.spec.allocation.network_group_index == 0
 
 
 def _route_scale_for_advertisement(
@@ -1643,97 +1647,129 @@ def _route_attribute_mutation_for_advertisement(
 def _ebb_route_mutations(bound: BoundTopology) -> list[dict[str, t.Any]]:
     mutations = []
     for device_group in bound.device_groups:
-        for advertisement in device_group.prefix_advertisements:
-            spec = advertisement.spec
-            next_hop: dict[str, t.Any] | None = None
-            next_hop_distribution = spec.next_hop.distribution
-            if spec.next_hop.mode == NextHopMode.FORMULAIC:
-                formula = spec.next_hop.formulaic_source
-                if formula is None or next_hop_distribution is None:
-                    raise TopologyValidationError(
-                        bound.logical_topology.name,
-                        [
-                            ValidationIssue(
-                                path=(
-                                    f"device_groups.{device_group.name}."
-                                    f"prefix_advertisements.{spec.name}.next_hop"
-                                ),
-                                code="invalid_route_intent",
-                                message=(
-                                    "formulaic next-hop intent requires a source and "
-                                    "distribution"
-                                ),
-                            )
-                        ],
-                    )
-                next_hop = {
-                    "kind": "formulaic",
-                    "start": formula.start,
-                    "step": _ip_step(formula.step, device_group.afi),
-                    "distribution": next_hop_distribution.value,
-                }
-            elif spec.next_hop.mode == NextHopMode.EXPLICIT:
-                explicit = spec.next_hop.explicit_source
-                if explicit is None or next_hop_distribution is None:
-                    raise TopologyValidationError(
-                        bound.logical_topology.name,
-                        [
-                            ValidationIssue(
-                                path=(
-                                    f"device_groups.{device_group.name}."
-                                    f"prefix_advertisements.{spec.name}.next_hop"
-                                ),
-                                code="invalid_route_intent",
-                                message=(
-                                    "explicit next-hop intent requires a source and "
-                                    "distribution"
-                                ),
-                            )
-                        ],
-                    )
-                next_hop = {
-                    "kind": "explicit",
-                    "addresses": list(explicit.addresses),
-                    "distribution": next_hop_distribution.value,
-                }
-            elif spec.next_hop.mode == NextHopMode.SELF:
-                pass
-            else:
-                raise TopologyValidationError(
-                    bound.logical_topology.name,
-                    [
-                        ValidationIssue(
-                            path=(
-                                f"device_groups.{device_group.name}."
-                                f"prefix_advertisements.{spec.name}.next_hop.mode"
-                            ),
-                            code="unsupported_next_hop_mode",
-                            message=f"unsupported next-hop mode {spec.next_hop.mode!r}",
-                        )
-                    ],
+        route_groups = (
+            tuple(
+                (
+                    child.spec.legacy_ixia_device_group_name or child.name,
+                    child.peer_count,
+                    child.prefix_advertisements,
                 )
-            mutation = {
-                "device_group_name": (
-                    device_group.legacy_ixia_device_group_name or device_group.name
-                ),
-                "prefix_pool_name": spec.legacy_ixia_name or spec.name,
-                "afi": device_group.afi,
-                "peer_count": device_group.peer_count,
-                "prefixes_per_peer": spec.allocation.prefixes_per_peer,
-                "flat_prefix_geometry": _uses_flat_ebb_prefix_geometry(
-                    bound, advertisement
-                ),
-                "prefix": _formulaic_prefix_mutation(advertisement),
-                "next_hop": next_hop,
-                "attributes": dict(spec.attributes),
-            }
-            route_attributes = _route_attribute_mutation_for_advertisement(
-                advertisement
+                for child in device_group.ixia_children
             )
-            if route_attributes is not None:
-                mutation["route_attributes"] = route_attributes
-            mutations.append(mutation)
+            if device_group.ixia_children
+            else (
+                (
+                    device_group.legacy_ixia_device_group_name or device_group.name,
+                    device_group.peer_count,
+                    device_group.prefix_advertisements,
+                ),
+            )
+        )
+        for device_group_name, peer_count, advertisements in route_groups:
+            for advertisement in advertisements:
+                mutations.append(
+                    _ebb_route_mutation(
+                        bound,
+                        device_group,
+                        device_group_name=device_group_name,
+                        peer_count=peer_count,
+                        advertisement=advertisement,
+                    )
+                )
     return mutations
+
+
+def _ebb_route_mutation(
+    bound: BoundTopology,
+    device_group: BoundDeviceGroup,
+    *,
+    device_group_name: str,
+    peer_count: int,
+    advertisement: t.Any,
+) -> dict[str, t.Any]:
+    spec = advertisement.spec
+    next_hop: dict[str, t.Any] | None = None
+    next_hop_distribution = spec.next_hop.distribution
+    if spec.next_hop.mode == NextHopMode.FORMULAIC:
+        formula = spec.next_hop.formulaic_source
+        if formula is None or next_hop_distribution is None:
+            raise TopologyValidationError(
+                bound.logical_topology.name,
+                [
+                    ValidationIssue(
+                        path=(
+                            f"device_groups.{device_group.name}."
+                            f"prefix_advertisements.{spec.name}.next_hop"
+                        ),
+                        code="invalid_route_intent",
+                        message=(
+                            "formulaic next-hop intent requires a source and "
+                            "distribution"
+                        ),
+                    )
+                ],
+            )
+        next_hop = {
+            "kind": "formulaic",
+            "start": formula.start,
+            "step": _ip_step(formula.step, device_group.afi),
+            "distribution": next_hop_distribution.value,
+        }
+    elif spec.next_hop.mode == NextHopMode.EXPLICIT:
+        explicit = spec.next_hop.explicit_source
+        if explicit is None or next_hop_distribution is None:
+            raise TopologyValidationError(
+                bound.logical_topology.name,
+                [
+                    ValidationIssue(
+                        path=(
+                            f"device_groups.{device_group.name}."
+                            f"prefix_advertisements.{spec.name}.next_hop"
+                        ),
+                        code="invalid_route_intent",
+                        message=(
+                            "explicit next-hop intent requires a source and "
+                            "distribution"
+                        ),
+                    )
+                ],
+            )
+        next_hop = {
+            "kind": "explicit",
+            "addresses": list(explicit.addresses),
+            "distribution": next_hop_distribution.value,
+        }
+    elif spec.next_hop.mode == NextHopMode.SELF:
+        pass
+    else:
+        raise TopologyValidationError(
+            bound.logical_topology.name,
+            [
+                ValidationIssue(
+                    path=(
+                        f"device_groups.{device_group.name}."
+                        f"prefix_advertisements.{spec.name}.next_hop.mode"
+                    ),
+                    code="unsupported_next_hop_mode",
+                    message=f"unsupported next-hop mode {spec.next_hop.mode!r}",
+                )
+            ],
+        )
+    mutation = {
+        "device_group_name": device_group_name,
+        "prefix_pool_name": spec.legacy_ixia_name or spec.name,
+        "afi": device_group.afi,
+        "peer_count": peer_count,
+        "prefixes_per_peer": spec.allocation.prefixes_per_peer,
+        "flat_prefix_geometry": _uses_flat_ebb_prefix_geometry(bound, advertisement),
+        "prefix": _formulaic_prefix_mutation(advertisement),
+        "next_hop": next_hop,
+        "attributes": dict(spec.attributes),
+    }
+    route_attributes = _route_attribute_mutation_for_advertisement(advertisement)
+    if route_attributes is not None:
+        mutation["route_attributes"] = route_attributes
+    return mutation
 
 
 def _ebb_full_scale_ibgp_plane_device_groups(
@@ -4705,6 +4741,10 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return _preserve_ug_new_peer_join_task_artifacts(bound)
         if _is_profile_free_ug_backpressure(bound):
             return _preserve_ug_backpressure_task_artifacts(bound)
+        if _is_profile_free_ebb_full_scale(bound) and any(
+            group.ixia_children for group in bound.device_groups
+        ):
+            return _compile_route_sharded_ebb_full_scale(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5283,6 +5323,29 @@ def _compile_established_artifacts_with_native_basic_port_shadow(
             f"{bound.logical_topology.name}; native basic port configs drifted"
         )
     return established_artifacts
+
+
+def _compile_route_sharded_ebb_full_scale(
+    bound: BoundTopology,
+) -> CompiledTaacArtifacts:
+    device_config = bound.device_config or bound.logical_topology.device_config
+    native_bound = bound
+    # Native lifecycle rendering does not support OpenR standalone mode yet.
+    # Render the IXIA artifacts with OpenR disabled, then restore legacy tasks.
+    if device_config.openr_mode is not OpenRMode.NONE:
+        native_bound = replace(
+            bound,
+            logical_topology=replace(
+                bound.logical_topology,
+                device_config=replace(
+                    bound.logical_topology.device_config,
+                    openr_mode=OpenRMode.NONE,
+                ),
+            ),
+            device_config=replace(device_config, openr_mode=OpenRMode.NONE),
+        )
+    native_artifacts = compile_profile_free_eos(native_bound)
+    return _preserve_ebb_full_scale_task_artifacts(bound, native_artifacts)
 
 
 def _preserve_ebb_full_scale_task_artifacts(

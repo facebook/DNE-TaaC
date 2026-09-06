@@ -14,12 +14,13 @@ from taac.libs.fpf.fpf_collector_registry import (
     DEFAULT_SIGNAL1_E2E_MAX_SEC,
     DEFAULT_SIGNAL2_LOCAL_MAX_SEC,
     DEFAULT_SIGNAL3_STABILITY_DURATION_SEC,
-    evaluate_restart_reconverge,
     evaluate_three_signals,
     everpaste_details_suffix,
     get_collector,
     get_disruption_time,
+    get_restart_time,
     get_test_case_start_time,
+    wait_for_restart_reconverge,
 )
 from taac.libs.fpf.fpf_stress_checks import _parse_ts
 from taac.libs.fpf.fpf_thresholds import (
@@ -224,24 +225,30 @@ class FpfFsdbRibmapConvergenceHealthCheck(
         """mode="restart": tolerate the null/unresponsive polls during an FSDB
         restart and assert each device's ribMap returns to ``expected`` within
         the reconverge SLA, measured from the recorded restart moment."""
-        window_end = check_params.get("window_end", time.time())
+        window_end = check_params.get("window_end")
         disruption_ts = check_params.get("disruption_ts")
         if disruption_ts is None:
-            recorded = get_disruption_time()
+            recorded = (
+                get_restart_time()
+                if check_params.get("use_restart_time")
+                else get_disruption_time()
+            )
             disruption_ts = recorded if recorded > 0 else get_test_case_start_time()
         reconverge_sla = float(check_params.get("reconverge_sla_sec", default_sla_sec))
 
         self.logger.info(
-            f"  [FSDB ribMap restart] reconverge window {disruption_ts:.0f} to "
-            f"{window_end:.0f}; SLA {reconverge_sla:.0f}s from restart"
+            f"  [FSDB ribMap restart] waiting through "
+            f"{float(disruption_ts) + reconverge_sla:.0f}; "
+            f"SLA {reconverge_sla:.0f}s from restart"
         )
-        results = evaluate_restart_reconverge(
+        results, window_end = await wait_for_restart_reconverge(
             collector=collector,
             lane_map=lane_map,
             expected=expected,
             disruption_ts=float(disruption_ts),
-            window_end=float(window_end),
             reconverge_sla_sec=reconverge_sla,
+            window_end=float(window_end) if window_end is not None else None,
+            poll_interval_sec=float(check_params.get("restart_poll_interval_sec", 1.0)),
         )
         for lane_id, device, passed, _sec, _null, detail in results:
             self.logger.info(

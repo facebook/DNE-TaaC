@@ -92,6 +92,7 @@ def create_fpf_tc41_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc41_longevity_pristine",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,

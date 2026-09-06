@@ -21,6 +21,7 @@ from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
+    create_fpf_record_disruption_time_step,
     create_longevity_step,
     create_service_convergence_step,
     create_service_interruption_step,
@@ -82,6 +83,9 @@ def create_fpf_tc05_test_config() -> TestConfig:
             duration=90,
             description="Wait 90s (within 120s GR window)",
         ),
+        create_fpf_record_disruption_time_step(
+            description="Record BGP restart time for RIB reconvergence SLA"
+        ),
         create_service_interruption_step(
             service=taac_types.Service.BGP,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
@@ -120,14 +124,14 @@ def create_fpf_tc05_test_config() -> TestConfig:
         reconvergence_service="bgpd",
         reconvergence_sla_sec=60.0,
         reconvergence_hosts=[OBSERVER_GTSWS[0]],
+        bgp_rib_restart_reconverge=True,
         # fsdb/HRT are coupled: a brief HRT FSDB-session census dip is expected
         # across a GR; skip the postcheck (precheck still asserts 32/32 baseline).
         skip_fsdb_session_postcheck=True,
         # GR-within (graceful, within-window): a within-window graceful restart
-        # must NOT break forwarding. MODE B (skip_null_strict) tolerates null
-        # collection blips but fails on any non-null degradation signature and
-        # requires the last non-null sample to hold the golden value — applied to
-        # the convergence Signal-3, HRT remote-failure, and prod-prefix checks.
+        # must NOT break forwarding. The affected BGP RIB uses the restart-aware
+        # contract above; MODE B applies to FSDB/HRT checks and tolerates null
+        # collection blips while rejecting any non-null degradation signature.
         convergence_blip_mode="skip_null_strict",
     )
 

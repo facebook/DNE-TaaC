@@ -19,6 +19,11 @@ Params (via json_params):
         increment_step: str           hextet-advance delta (default "0:0:1::")
         community_list: str|None       preset name "gtsw"/"stsw"
         communities: list[str]|None    explicit "ASN:VALUE" list (used if no preset)
+        pods: int|None                 Pod Mosaic bucket count
+        prefixes_per_pod: int|None     expected prefixes in each pod bucket
+        base_asn_path: int|None        first Pod Mosaic origin ASN
+        increment_asn_per_pod: int     origin-ASN delta per pod (default 1)
+        batch_size: int                prefixes per BGP thrift RPC (default count)
     withdraw: bool                    True -> delNetworks (teardown). Default False.
     settle_sec: int                   sleep after a successful inject (default 0).
 
@@ -34,10 +39,12 @@ from taac.internal.driver.fboss_switch_internal import (
 )
 from taac.libs.fpf.inject_bgp_prefixes import (
     build_communities,
+    build_pod_mosaic_as_path_map,
     build_tip_prefix,
     COMMUNITY_PRESETS,
     expand_prefix_range,
     inject_prefixes,
+    pod_mosaic_loop_deny_violations,
     withdraw_prefixes,
 )
 from taac.tasks.base_task import BaseTask
@@ -62,6 +69,38 @@ def _build_communities_for_group(group: t.Dict[str, t.Any]) -> t.List[t.Any]:
     return build_communities(community_strs)
 
 
+def _build_pod_mosaic_for_group(
+    group: t.Dict[str, t.Any], prefixes: t.List[t.Any]
+) -> t.Optional[t.Dict[t.Any, t.List[int]]]:
+    pods_raw = group.get("pods")
+    if pods_raw is None:
+        return None
+    pods = int(pods_raw)
+    if pods < 2:
+        raise ValueError(f"Pod Mosaic requires pods >= 2, got {pods}")
+    base_asn_raw = group.get("base_asn_path")
+    if base_asn_raw is None:
+        raise ValueError("Pod Mosaic requires base_asn_path")
+    step = int(group.get("increment_asn_per_pod", 1))
+    if step == 0:
+        raise ValueError("increment_asn_per_pod must be non-zero")
+    prefixes_per_pod_raw = group.get("prefixes_per_pod")
+    if prefixes_per_pod_raw is not None:
+        expected = pods * int(prefixes_per_pod_raw)
+        if len(prefixes) != expected:
+            raise ValueError(
+                f"Pod Mosaic expected {pods} x {prefixes_per_pod_raw} = "
+                f"{expected} prefixes, got {len(prefixes)}"
+            )
+    pod_asns = [int(base_asn_raw) + i * step for i in range(pods)]
+    violations = pod_mosaic_loop_deny_violations(pod_asns)
+    if violations:
+        raise ValueError(
+            f"Pod Mosaic ASN(s) {violations} would be dropped by BGP loop detection"
+        )
+    return build_pod_mosaic_as_path_map(prefixes, pod_asns)
+
+
 class FpfInjectBgpPrefixesTask(BaseTask):
     """Inject or withdraw one or more BGP prefix groups across FBOSS devices."""
 
@@ -73,7 +112,15 @@ class FpfInjectBgpPrefixesTask(BaseTask):
         settle_sec: int = params.get("settle_sec", 0)
 
         # Build (device, prefixes, communities) work items across all groups.
-        inject_items: t.List[t.Tuple[str, t.List[t.Any], t.List[t.Any]]] = []
+        inject_items: t.List[
+            t.Tuple[
+                str,
+                t.List[t.Any],
+                t.List[t.Any],
+                t.Optional[t.Dict[t.Any, t.List[int]]],
+                int,
+            ]
+        ] = []
         for group in groups:
             devices: t.List[str] = group["devices"]
             prefix_base: str = group["prefix_base"]
@@ -82,8 +129,14 @@ class FpfInjectBgpPrefixesTask(BaseTask):
             prefix_strs = expand_prefix_range(prefix_base, count, increment_step)
             tip_prefixes = [build_tip_prefix(p) for p in prefix_strs]
             communities = _build_communities_for_group(group)
+            prefix_as_path = _build_pod_mosaic_for_group(group, tip_prefixes)
+            batch_size = int(group.get("batch_size", len(tip_prefixes)))
+            if batch_size < 1:
+                raise ValueError(f"batch_size must be >= 1, got {batch_size}")
             for device in devices:
-                inject_items.append((device, tip_prefixes, communities))
+                inject_items.append(
+                    (device, tip_prefixes, communities, prefix_as_path, batch_size)
+                )
 
         action = "Withdrawing" if withdraw else "Injecting"
         self.logger.info(
@@ -91,20 +144,36 @@ class FpfInjectBgpPrefixesTask(BaseTask):
             f"{len(inject_items)} (device, group) pairs"
         )
 
-        async def _do(device: str, tip_prefixes: t.List[t.Any], communities) -> None:
+        async def _do(
+            device: str,
+            tip_prefixes: t.List[t.Any],
+            communities: t.List[t.Any],
+            prefix_as_path: t.Optional[t.Dict[t.Any, t.List[int]]],
+            batch_size: int,
+        ) -> None:
             driver = FbossSwitchInternal(hostname=device, logger=self.logger)
             if withdraw:
-                await withdraw_prefixes(driver, tip_prefixes)
+                await withdraw_prefixes(
+                    driver,
+                    tip_prefixes,
+                    batch_size=batch_size,
+                )
             else:
-                await inject_prefixes(driver, tip_prefixes, communities)
+                await inject_prefixes(
+                    driver,
+                    tip_prefixes,
+                    communities,
+                    prefix_as_path=prefix_as_path,
+                    batch_size=batch_size,
+                )
 
         if withdraw:
             # Teardown: best-effort. Never let a withdrawal error mask the result.
             results = await asyncio.gather(
-                *(_do(d, p, c) for d, p, c in inject_items),
+                *(_do(d, p, c, a, b) for d, p, c, a, b in inject_items),
                 return_exceptions=True,
             )
-            for (device, _p, _c), res in zip(inject_items, results):
+            for (device, _p, _c, _a, _b), res in zip(inject_items, results):
                 if isinstance(res, Exception):
                     self.logger.error(
                         f"[FpfInjectBgpPrefixes] withdraw on {device} "
@@ -113,7 +182,7 @@ class FpfInjectBgpPrefixesTask(BaseTask):
             return
 
         # Setup: any injection failure aborts the test.
-        await asyncio.gather(*(_do(d, p, c) for d, p, c in inject_items))
+        await asyncio.gather(*(_do(d, p, c, a, b) for d, p, c, a, b in inject_items))
         self.logger.info(
             f"[FpfInjectBgpPrefixes] injection complete on "
             f"{len(inject_items)} (device, group) pairs"

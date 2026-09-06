@@ -461,6 +461,7 @@ def create_ixia_packet_loss_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
     sleep_time: int = 10,
     skip_traffic_items: t.Optional[t.List[str]] = None,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """IXIA_PACKET_LOSS_CHECK — generic thrift-input variant.
 
@@ -475,6 +476,8 @@ def create_ixia_packet_loss_check(
     (e.g. `{"expect_loss": True}`).
     `sleep_time` is the seconds the check waits between stopping traffic and
     sampling stats (lets in-flight frames drain before measuring); default 10.
+    `check_id` provides a stable identifier when the same check type is used
+    more than once in a playbook.
     """
     if json_params is not None:
         if skip_traffic_items is not None:
@@ -484,11 +487,13 @@ def create_ixia_packet_loss_check(
             }
         return PointInTimeHealthCheck(
             name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+            check_id=check_id,
             check_params=Params(json_params=json.dumps(json_params)),
             priority=priority,
         )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+        check_id=check_id,
         input_json=thrift_to_json(
             hc_types.IxiaPacketLossHealthCheckIn(
                 thresholds=thresholds or [],
@@ -2250,6 +2255,9 @@ def create_rss_delta_observe_check(
 def create_systemctl_active_state_check(
     services: t.Optional[t.List["hc_types.Service"]] = None,
     services_json: t.Optional[t.List[str]] = None,
+    retry_count: t.Optional[int] = None,
+    retry_delay_seconds: t.Optional[float] = None,
+    retry_delay_multiplier: t.Optional[float] = None,
 ) -> PointInTimeHealthCheck:
     """SYSTEMCTL_ACTIVE_STATE_CHECK — systemctl active-state verification.
 
@@ -2263,9 +2271,19 @@ def create_systemctl_active_state_check(
         raise ValueError(
             "services and services_json are mutually exclusive — pass at most one."
         )
+    retry_params: t.Dict[str, t.Any] = {}
+    if retry_count is not None:
+        retry_params["retry_count"] = retry_count
+    if retry_delay_seconds is not None:
+        retry_params["retry_delay_seconds"] = retry_delay_seconds
+    if retry_delay_multiplier is not None:
+        retry_params["retry_delay_multiplier"] = retry_delay_multiplier
     if services is None and services_json is None:
         return PointInTimeHealthCheck(
-            name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK
+            name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
+            check_params=(
+                Params(json_params=json.dumps(retry_params)) if retry_params else None
+            ),
         )
     if services is not None:
         return PointInTimeHealthCheck(
@@ -2273,10 +2291,14 @@ def create_systemctl_active_state_check(
             input_json=thrift_to_json(
                 hc_types.SystemctlActiveStateHealthCheckIn(services=services)
             ),
+            check_params=(
+                Params(json_params=json.dumps(retry_params)) if retry_params else None
+            ),
         )
+    json_params = {"services": services_json, **retry_params}
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
-        check_params=Params(json_params=json.dumps({"services": services_json})),
+        check_params=Params(json_params=json.dumps(json_params)),
     )
 
 
@@ -2448,6 +2470,9 @@ def create_drain_state_check(
 def create_unclean_exit_check(
     start_time_jq_var: t.Optional[str] = "test_case_start_time",
     exclude_services: t.Optional[t.List[str]] = None,
+    services: t.Optional[t.List[str]] = None,
+    sleep_timer: t.Optional[int] = None,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """UNCLEAN_EXIT_CHECK — detects unclean process exits since the test started.
 
@@ -2455,17 +2480,29 @@ def create_unclean_exit_check(
         start_time_jq_var: jq variable name carrying the lookback start time.
             Defaults to ``"test_case_start_time"``; set to ``None`` to omit.
         exclude_services: Process names to ignore (e.g. ``["bgpd"]`` for crash tests).
+        services: When set, limit validation to these process names.
+        sleep_timer: Optional delay in seconds before collecting exit state.
+        check_id: Stable identifier for this check instance.
     """
+    if exclude_services is not None and services is not None:
+        raise ValueError("exclude_services and services are mutually exclusive")
     jq_params = {"start_time": f".{start_time_jq_var}"} if start_time_jq_var else None
-    json_params = (
-        json.dumps({"exclude_services": exclude_services})
-        if exclude_services is not None
-        else None
-    )
+    json_payload: t.Dict[str, t.Any] = {}
+    if exclude_services is not None:
+        json_payload["exclude_services"] = exclude_services
+    if services is not None:
+        json_payload["services"] = services
+    if sleep_timer is not None:
+        json_payload["sleep_timer"] = sleep_timer
+    json_params = json.dumps(json_payload) if json_payload else None
     if not jq_params and not json_params:
-        return PointInTimeHealthCheck(name=hc_types.CheckName.UNCLEAN_EXIT_CHECK)
+        return PointInTimeHealthCheck(
+            name=hc_types.CheckName.UNCLEAN_EXIT_CHECK,
+            check_id=check_id,
+        )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.UNCLEAN_EXIT_CHECK,
+        check_id=check_id,
         check_params=Params(jq_params=jq_params, json_params=json_params),
     )
 
@@ -2890,8 +2927,13 @@ def create_fpf_stale_prefix_check(
 def create_fpf_hrt_fsdb_session_check(
     hosts: t.Optional[t.List[str]] = None,
     expected_session_count: t.Optional[int] = None,
+    device_ids: t.Optional[t.List[int]] = None,
+    planes_per_device: t.Optional[int] = None,
     impacted_lanes_by_host_gpu: t.Optional[
         t.Dict[str, t.Dict[int, t.List[int]]]
+    ] = None,
+    impacted_tuples_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
     ] = None,
     reconcile_device_id: t.Optional[int] = None,
     planes_per_gpu: t.Optional[int] = None,
@@ -2910,8 +2952,14 @@ def create_fpf_hrt_fsdb_session_check(
     params: t.Dict[str, t.Any] = {"hosts": hosts or []}
     if expected_session_count is not None:
         params["expected_session_count"] = expected_session_count
+    if device_ids is not None:
+        params["device_ids"] = device_ids
+    if planes_per_device is not None:
+        params["planes_per_device"] = planes_per_device
     if impacted_lanes_by_host_gpu is not None:
         params["impacted_lanes_by_host_gpu"] = impacted_lanes_by_host_gpu
+    if impacted_tuples_by_host_device is not None:
+        params["impacted_tuples_by_host_device"] = impacted_tuples_by_host_device
     if reconcile_device_id is not None:
         params["reconcile_device_id"] = reconcile_device_id
     if planes_per_gpu is not None:
@@ -2936,6 +2984,7 @@ def create_fpf_fsdb_ribmap_convergence_check(
     signal3_stability_duration_sec: t.Optional[float] = None,
     mode: t.Optional[str] = None,
     reconverge_sla_sec: t.Optional[float] = None,
+    use_restart_time: bool = False,
     stability_mode: str = "strict",
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
@@ -2943,7 +2992,9 @@ def create_fpf_fsdb_ribmap_convergence_check(
 
     mode="restart": tolerate null/unresponsive polls during an FSDB restart and
     assert each device's ribMap returns to expected_matched within
-    ``reconverge_sla_sec`` of the recorded restart moment.
+    ``reconverge_sla_sec`` of the recorded restart moment. Set
+    ``use_restart_time=True`` when the test also needs to retain an earlier
+    disruption timestamp for another observation window.
 
     ``stability_mode`` selects the Signal-3 (post-convergence stability) blip
     contract: "strict" (default, every sample held at expected — byte-identical
@@ -2974,6 +3025,8 @@ def create_fpf_fsdb_ribmap_convergence_check(
         params["mode"] = mode
     if reconverge_sla_sec is not None:
         params["reconverge_sla_sec"] = reconverge_sla_sec
+    if use_restart_time:
+        params["use_restart_time"] = True
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
     return PointInTimeHealthCheck(
@@ -3044,10 +3097,14 @@ def create_fpf_bgp_rib_convergence_check(
 
 def create_fpf_hrt_bulk_convergence_check(
     lanes: t.Optional[t.List[int]] = None,
+    device_ids: t.Optional[t.List[int]] = None,
     expected_per_lane: t.Optional[t.Dict[str, int]] = None,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
     impacted_lanes: t.Optional[t.List[int]] = None,
+    impacted_tuple_lanes_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
     withdrawn_max_count: t.Optional[int] = None,
     lane_labels: t.Optional[t.Dict[str, str]] = None,
     only_hosts: t.Optional[t.List[str]] = None,
@@ -3058,6 +3115,7 @@ def create_fpf_hrt_bulk_convergence_check(
     signal2_local_max_sec: t.Optional[float] = None,
     signal3_stability_duration_sec: t.Optional[float] = None,
     stability_mode: str = "strict",
+    restart_tolerant_hosts: t.Optional[t.List[str]] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_HRT_BULK_CONVERGENCE_CHECK — HRT bulk convergence per lane.
@@ -3070,12 +3128,18 @@ def create_fpf_hrt_bulk_convergence_check(
     ``only_hosts`` restricts evaluation to those GPU host(s) — for a link event
     only the impacted host's lane withdraws, so the unimpacted remote host must
     be excluded or it is a false FAIL.
+    ``device_ids`` expands each lane assertion across independent HRT devices.
+    ``impacted_tuple_lanes_by_host_device`` scopes withdrawal to exact
+    host/device/local-plane tuples on multi-device hosts.
 
     ``stability_mode`` selects the Signal-3 (post-convergence stability) blip
     contract for the unimpacted injected lanes: "strict" (default, byte-identical
     to legacy), "last_sample" (MODE A — only the last sample must equal expected),
     or "skip_null_strict" (MODE B — tolerate null samples; every non-null sample,
     and the last, must equal expected).
+    ``restart_tolerant_hosts`` applies null/error tolerance only to hosts whose
+    HRT process is intentionally restarted; all valid counts and all other hosts
+    remain strict, and a post-outage recovery sample is required.
     """
     params: t.Dict[str, t.Any] = {
         "lanes": lanes or [],
@@ -3085,6 +3149,12 @@ def create_fpf_hrt_bulk_convergence_check(
     }
     if impacted_lanes is not None:
         params["impacted_lanes"] = impacted_lanes
+    if impacted_tuple_lanes_by_host_device:
+        params["impacted_tuple_lanes_by_host_device"] = (
+            impacted_tuple_lanes_by_host_device
+        )
+    if device_ids and device_ids != [0]:
+        params["device_ids"] = device_ids
     if lane_labels:
         params["lane_labels"] = lane_labels
     if only_hosts:
@@ -3105,6 +3175,8 @@ def create_fpf_hrt_bulk_convergence_check(
         params["signal3_stability_duration_sec"] = signal3_stability_duration_sec
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
+    if restart_tolerant_hosts:
+        params["restart_tolerant_hosts"] = restart_tolerant_hosts
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_BULK_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3114,6 +3186,7 @@ def create_fpf_hrt_bulk_convergence_check(
 
 def create_fpf_hrt_remote_failure_convergence_check(
     lanes: t.Optional[t.List[int]] = None,
+    device_ids: t.Optional[t.List[int]] = None,
     expected_per_lane: t.Optional[t.Dict[str, int]] = None,
     direction: str = "drain",
     max_convergence_sec: int = 120,
@@ -3124,6 +3197,13 @@ def create_fpf_hrt_remote_failure_convergence_check(
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     collector_name: t.Optional[str] = None,
+    tuple_lanes_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
+    excluded_tuple_lanes_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
+    restart_tolerant_hosts: t.Optional[t.List[str]] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK — HRT negative-route convergence per lane.
@@ -3136,8 +3216,13 @@ def create_fpf_hrt_remote_failure_convergence_check(
     ``collector_name`` selects which registered HRT remote-failure collector to
     read (default "hrt_remote_failure"). For the 8-STSW split-per-VF injection,
     pass the per-group collector ("hrt_remote_failure_vf1" / "_vf2") so the stable
-    assertion on a group's own lanes sees only that group's (zero) failures, not
-    the other group's expected cross-plane failures.
+    assertion evaluates only that group's prefixes. ``expected_per_lane`` may be
+    set for transition checks; healthy per-VF stable checks default to zero.
+    Tuple include/exclude maps preserve exact host/device/local-plane scope for
+    multi-device link events.
+    ``restart_tolerant_hosts`` applies null/error tolerance only to intentionally
+    restarted HRT hosts; every valid count, final state, and unaffected host
+    remains strict, and a post-outage recovery sample is required.
     """
     params: t.Dict[str, t.Any] = {
         "lanes": lanes or [0, 1, 2, 3],
@@ -3149,6 +3234,14 @@ def create_fpf_hrt_remote_failure_convergence_check(
     }
     if collector_name:
         params["collector_name"] = collector_name
+    if tuple_lanes_by_host_device:
+        params["tuple_lanes_by_host_device"] = tuple_lanes_by_host_device
+    if excluded_tuple_lanes_by_host_device:
+        params["excluded_tuple_lanes_by_host_device"] = (
+            excluded_tuple_lanes_by_host_device
+        )
+    if device_ids and device_ids != [0]:
+        params["device_ids"] = device_ids
     if lane_labels:
         params["lane_labels"] = lane_labels
     if only_hosts:
@@ -3157,6 +3250,8 @@ def create_fpf_hrt_remote_failure_convergence_check(
         params["window_start"] = window_start
     if window_end is not None:
         params["window_end"] = window_end
+    if restart_tolerant_hosts:
+        params["restart_tolerant_hosts"] = restart_tolerant_hosts
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3170,10 +3265,12 @@ def create_fpf_prod_hrt_prefix_stability_check(
     expected_unreachable: t.Optional[t.List[int]] = None,
     expected_plane_up: t.Optional[t.List[int]] = None,
     prefixes: t.Optional[t.List[str]] = None,
+    prefixes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
     mode: t.Optional[str] = None,
     impacted_planes_by_host: t.Optional[t.Dict[str, t.List[int]]] = None,
     max_transition_sec: t.Optional[float] = None,
     local_prefixes: t.Optional[t.List[str]] = None,
+    affected_prefixes_by_host: t.Optional[t.Dict[str, t.List[str]]] = None,
     max_drain_sec: t.Optional[float] = None,
     disruption_ts: t.Optional[float] = None,
     lookback_sec: int = 900,
@@ -3182,6 +3279,7 @@ def create_fpf_prod_hrt_prefix_stability_check(
     window_end: t.Optional[float] = None,
     stability_mode: str = "strict",
     recovery_last_n: t.Optional[int] = None,
+    max_recovery_sec: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_PROD_HRT_PREFIX_STABILITY_CHECK — production HRT prefix reachability.
@@ -3201,6 +3299,17 @@ def create_fpf_prod_hrt_prefix_stability_check(
     is taken after the link recovers (plane comes back), instead of capturing the
     still-degraded state at window start and flagging the recovery as a
     regression. Ignored in transition mode.
+
+    ``mode="restart_recovery"`` uses the last complete pre-restart sample as
+    each prefix's baseline, tolerates empty/incomplete outage rows, and requires
+    full recovery within ``max_recovery_sec`` of the first complete sample after
+    restart completion or the final observed outage row. The final complete
+    sample must remain at baseline.
+
+    ``prefixes_by_host`` scopes each host to its configured prefix set and makes
+    every listed host required. ``affected_prefixes_by_host`` identifies which
+    of those routes must transition in local_drain/local_undrain mode; legacy
+    callers may continue using the global ``prefixes``/``local_prefixes`` lists.
     """
     params: t.Dict[str, t.Any] = {"lookback_sec": lookback_sec}
     if mode is not None:
@@ -3213,6 +3322,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["max_transition_sec"] = max_transition_sec
     if local_prefixes is not None:
         params["local_prefixes"] = local_prefixes
+    if affected_prefixes_by_host is not None:
+        params["affected_prefixes_by_host"] = affected_prefixes_by_host
     if max_drain_sec is not None:
         params["max_drain_sec"] = max_drain_sec
     if disruption_ts is not None:
@@ -3227,6 +3338,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["expected_plane_up"] = expected_plane_up
     if prefixes is not None:
         params["prefixes"] = prefixes
+    if prefixes_by_host is not None:
+        params["prefixes_by_host"] = prefixes_by_host
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
@@ -3235,6 +3348,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
         params["stability_mode"] = stability_mode
     if recovery_last_n is not None:
         params["recovery_last_n"] = recovery_last_n
+    if max_recovery_sec is not None:
+        params["max_recovery_sec"] = max_recovery_sec
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_PROD_HRT_PREFIX_STABILITY_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3244,7 +3359,11 @@ def create_fpf_prod_hrt_prefix_stability_check(
 
 def create_fpf_hrt_plane_status_check(
     mode: str = "all_up",
+    device_ids: t.Optional[t.List[int]] = None,
     impacted_planes: t.Optional[t.List[int]] = None,
+    impacted_tuples_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
     expected_planes: t.Optional[t.List[int]] = None,
     lookback_sec: int = 900,
     settle_sec: t.Optional[float] = None,
@@ -3274,8 +3393,12 @@ def create_fpf_hrt_plane_status_check(
     tolerated). Ignored by mode="drain".
     """
     params: t.Dict[str, t.Any] = {"mode": mode, "lookback_sec": lookback_sec}
+    if device_ids is not None and device_ids != [0]:
+        params["device_ids"] = device_ids
     if impacted_planes is not None:
         params["impacted_planes"] = impacted_planes
+    if impacted_tuples_by_host_device is not None:
+        params["impacted_tuples_by_host_device"] = impacted_tuples_by_host_device
     if expected_planes is not None:
         params["expected_planes"] = expected_planes
     if settle_sec is not None:
@@ -3293,11 +3416,68 @@ def create_fpf_hrt_plane_status_check(
     )
 
 
+def create_fpf_gar_vf_capacity_check(
+    *,
+    pairs: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    prefixes: t.Optional[t.List[str]] = None,
+    timeout_sec: float = 120,
+    poll_interval_sec: float = 5,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Validate production VF prefixes and GAR capacity on both rack sides."""
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_GAR_VF_CAPACITY_CHECK,
+        check_params=Params(
+            json_params=json.dumps(
+                {
+                    "pairs": pairs or [],
+                    "prefixes": prefixes or [],
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
+        check_id=check_id,
+    )
+
+
+def create_fpf_gar_scale_capacity_check(
+    *,
+    pairs: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    prefix_base: str = "",
+    prefix_count: int = 0,
+    increment_step: str = "0:0:1::",
+    timeout_sec: float = 120,
+    poll_interval_sec: float = 5,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Validate every injected scale prefix and GAR capacity on both rack sides."""
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_GAR_SCALE_CAPACITY_CHECK,
+        check_params=Params(
+            json_params=json.dumps(
+                {
+                    "pairs": pairs or [],
+                    "prefix_base": prefix_base,
+                    "prefix_count": prefix_count,
+                    "increment_step": increment_step,
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
+        check_id=check_id,
+    )
+
+
 def create_fpf_hrt_session_stat_check(
     mode: str = "disruption",
     expected_connected: int = 32,
     expected_connected_during: int = 28,
     impacted_lanes: t.Optional[t.List[int]] = None,
+    impacted_tuples_by_host_device: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
     recovery_min_sec: float = 60.0,
     lookback_sec: int = 900,
     window_start: t.Optional[float] = None,
@@ -3331,6 +3511,8 @@ def create_fpf_hrt_session_stat_check(
     }
     if impacted_lanes is not None:
         params["impacted_lanes"] = impacted_lanes
+    if impacted_tuples_by_host_device is not None:
+        params["impacted_tuples_by_host_device"] = impacted_tuples_by_host_device
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:
@@ -3525,6 +3707,11 @@ def create_fpf_ods_counter_check(
     aggregate: t.Optional[str] = None,
     require: str = "all",
     informational: bool = False,
+    baseline_excess_max: t.Optional[float] = None,
+    transient_excess_informational: bool = False,
+    baseline_lookback_sec: int = 420,
+    min_baseline_buckets: int = 5,
+    final_bucket_count: int = 2,
     check_id: t.Optional[str] = None,
     use_test_case_start_time: bool = True,
     min_ods_query_duration: int = 0,
@@ -3543,6 +3730,13 @@ def create_fpf_ods_counter_check(
     require="any"`` for "assert a transient event happened on the impacted path"
     checks — e.g. in_discard loss during a disable/drain, where the counter is 0
     at most samples and only spikes on the impacted device.
+
+    ``baseline_excess_max`` enables FPF's ``.sum.60`` discard policy: compare
+    each entity's complete test buckets with its complete pre-test bucket
+    ceiling, excluding the boundary-straddling bucket. The value is the allowed
+    additional events/minute. ``transient_excess_informational`` permits an
+    in-window spike but never permits the final complete bucket(s) to remain
+    above the baseline-adjusted limit.
     """
     params: t.Dict[str, t.Any] = {
         "entity_desc": entity_desc,
@@ -3560,11 +3754,22 @@ def create_fpf_ods_counter_check(
         # transient discards during a disruptive restart/coldboot.
         "informational": informational,
     }
+    if baseline_excess_max is not None:
+        params.update(
+            {
+                "baseline_excess_max": baseline_excess_max,
+                "transient_excess_informational": transient_excess_informational,
+                "baseline_lookback_sec": baseline_lookback_sec,
+                "min_baseline_buckets": min_baseline_buckets,
+                "final_bucket_count": final_bucket_count,
+            }
+        )
     if aggregate is not None:
         params["aggregate"] = aggregate
         params["require"] = require
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.GENERIC_ODS_CHECK,
+        check_scope=hc_types.Scope.DEFAULT,
         check_params=Params(json_params=json.dumps(params)),
         check_id=check_id,
     )

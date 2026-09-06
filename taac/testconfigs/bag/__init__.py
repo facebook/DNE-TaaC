@@ -20,9 +20,13 @@ from taac.testconfigs.bag.bag_qza1_stsw_pfc_test_config import (
 from taac.testconfigs.bag.bag_qza1_test_config import (
     BAG_QZA1_TEST_CONFIGS,
 )
+from taac.testconfigs.bag.stsw003_qza1_single_node_disruptive_test_config import (
+    STSW003_QZA1_SINGLE_NODE_DISRUPTIVE_TEST_CONFIG,
+)
 
 __all__ = [
     "BAG002_SNC1_ARBGP_4SESSION_TEST_CONFIG",
     "BAG_QZA1_STSW_PFC_TEST_CONFIGS",
     "BAG_QZA1_TEST_CONFIGS",
+    "STSW003_QZA1_SINGLE_NODE_DISRUPTIVE_TEST_CONFIG",
 ]

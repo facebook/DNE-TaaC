@@ -21,6 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import paramiko
+from taac.abstractions.churn.attribute import AttributeChurn
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -251,6 +252,14 @@ __all_hc_reexports__ = ["create_next_hop_count_check"]
 # =============================================================================
 # STEP BUILDERS - Create steps for test playbooks
 # =============================================================================
+
+
+def create_dummy_step(description: t.Optional[str] = None) -> Step:
+    """Create a no-op step for stable-state validation playbooks."""
+    return Step(
+        name=StepName.DUMMY_STEP,
+        description=description,
+    )
 
 
 def create_custom_step(
@@ -997,61 +1006,118 @@ def _validate_bgp_attribute_churn_geometry(
         )
 
 
+def _bgp_attribute_churn_integer(value: t.Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be an integer")
+    try:
+        normalized = int(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{field} must be an integer") from error
+    if normalized != value:
+        raise ValueError(f"{field} must be an integer")
+    return normalized
+
+
 def create_bgp_attribute_churn_step(
     *,
     hostname: str,
-    prefix_pool_names: t.Mapping[str, t.Mapping[str, str]],
-    peer_count_per_plane: int,
-    selected_block_count_per_afi: int,
-    samples_per_block: int,
-    routes_per_block: int,
-    duration_seconds: int,
-    max_iterations: int,
-    cadence_seconds: int,
+    attribute_churn: AttributeChurn,
     poll_interval_seconds: int,
     transition_timeout_seconds: int,
     reference_setup_timeout_seconds: int,
-    restore_timeout_seconds: int,
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     openr_mode: str,
-    attribute_matrix: t.Mapping[str, t.Mapping[str, t.Any]],
     convergence_hard_timeout_seconds: int = 300,
+    transient_observation_logging: str = "off",
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-10 dual-stack attribute-churn workflow."""
+    churn_params = attribute_churn.to_step_params()
     numeric_params = {
-        "peer_count_per_plane": peer_count_per_plane,
-        "selected_block_count_per_afi": selected_block_count_per_afi,
-        "samples_per_block": samples_per_block,
-        "routes_per_block": routes_per_block,
-        "duration_seconds": duration_seconds,
-        "max_iterations": max_iterations,
-        "cadence_seconds": cadence_seconds,
+        "peer_count_per_plane": _bgp_attribute_churn_integer(
+            churn_params["peer_count_per_plane"], "peer_count_per_plane"
+        ),
+        "selected_block_count_per_afi": _bgp_attribute_churn_integer(
+            churn_params["selected_block_count_per_afi"],
+            "selected_block_count_per_afi",
+        ),
+        "samples_per_block": _bgp_attribute_churn_integer(
+            churn_params["samples_per_block"], "samples_per_block"
+        ),
+        "routes_per_block": _bgp_attribute_churn_integer(
+            churn_params["routes_per_block"], "routes_per_block"
+        ),
+        "duration_seconds": _bgp_attribute_churn_integer(
+            churn_params["duration_seconds"], "duration_seconds"
+        ),
+        "max_iterations": _bgp_attribute_churn_integer(
+            churn_params["max_iterations"], "max_iterations"
+        ),
+        "cadence_seconds": _bgp_attribute_churn_integer(
+            churn_params["cadence_seconds"], "cadence_seconds"
+        ),
+        "geometry_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["geometry_timeout_seconds"], "geometry_timeout_seconds"
+        ),
+        "snapshot_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["snapshot_timeout_seconds"], "snapshot_timeout_seconds"
+        ),
+        "work_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["work_timeout_seconds"], "work_timeout_seconds"
+        ),
+        "cleanup_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["cleanup_timeout_seconds"], "cleanup_timeout_seconds"
+        ),
         "poll_interval_seconds": poll_interval_seconds,
         "transition_timeout_seconds": transition_timeout_seconds,
         "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
         "reference_setup_timeout_seconds": reference_setup_timeout_seconds,
-        "restore_timeout_seconds": restore_timeout_seconds,
+        "restore_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["restore_timeout_seconds"], "restore_timeout_seconds"
+        ),
+        "ixia_restore_timeout_seconds": _bgp_attribute_churn_integer(
+            churn_params["ixia_restore_timeout_seconds"],
+            "ixia_restore_timeout_seconds",
+        ),
+        "cancellation_grace_seconds": _bgp_attribute_churn_integer(
+            churn_params["cancellation_grace_seconds"],
+            "cancellation_grace_seconds",
+        ),
         "quiet_window_seconds": quiet_window_seconds,
         "max_lookup_concurrency": max_lookup_concurrency,
     }
     if not hostname:
         raise ValueError("hostname must be non-empty")
+    scenario_id = churn_params["scenario_id"]
+    if not isinstance(scenario_id, str) or not scenario_id:
+        raise ValueError("scenario_id must be non-empty")
     if openr_mode not in {"none", "standalone"}:
         raise ValueError("openr_mode must be none or standalone")
+    if transient_observation_logging not in {"off", "extended"}:
+        raise ValueError("transient_observation_logging must be off or extended")
     _validate_bgp_attribute_churn_geometry(numeric_params)
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "bgp_attribute_churn",
+        "scenario_id": scenario_id,
         "hostname": hostname,
         "prefix_pool_names": _normalize_bgp_attribute_churn_pool_names(
-            prefix_pool_names
+            t.cast(
+                t.Mapping[str, t.Mapping[str, str]], churn_params["prefix_pool_names"]
+            )
         ),
-        "attribute_matrix": _normalize_bgp_attribute_churn_matrix(attribute_matrix),
+        "attribute_matrix": _normalize_bgp_attribute_churn_matrix(
+            t.cast(
+                t.Mapping[str, t.Mapping[str, t.Any]],
+                churn_params["attribute_matrix"],
+            )
+        ),
         "openr_mode": openr_mode,
         **numeric_params,
     }
+    if transient_observation_logging == "extended":
+        params["transient_observation_logging"] = transient_observation_logging
     return create_custom_step(
         params_dict=params,
         description=description or "Run audited dual-stack BGP attribute churn",
@@ -1117,7 +1183,7 @@ def create_bgp_route_storm_step(
     bounded_validation: bool = False,
     convergence_hard_timeout_seconds: int = 300,
     heavy_setup_hard_timeout_seconds: int = 1_800,
-    heavy_route_batch_rows: int = 7_500,
+    heavy_route_batch_rows: int = 15_750,
     description: str | None = None,
 ) -> Step:
     """Create the audited CICD-EBB-11 route-storm workflow."""
@@ -2793,6 +2859,8 @@ def create_record_jq_timestamp_step(
 def create_fpf_set_interface_admin_step(
     interfaces: t.List[str],
     enable: bool,
+    best_effort: bool = False,
+    record_event_time: bool = True,
     description: t.Optional[str] = None,
 ) -> Step:
     """Disable/enable interface(s) on the live agent via thrift (held).
@@ -2804,25 +2872,28 @@ def create_fpf_set_interface_admin_step(
     tests that must have the port actually down during the assertion window; pair
     a disable (enable=False) with an enable (enable=True) to restore.
     """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_set_interface_admin",
+        "interfaces": interfaces,
+        "is_enable": enable,
+    }
+    if best_effort:
+        params["best_effort"] = True
+    if not record_event_time:
+        params["record_event_time"] = False
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"{'Enable' if enable else 'Disable'} {interfaces} (thrift admin state)",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_set_interface_admin",
-                    "interfaces": interfaces,
-                    "is_enable": enable,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
 def create_fpf_drain_interface_step(
     interfaces: t.Optional[t.List[str]],
     drain: bool,
+    target_device: t.Optional[str] = None,
+    mutation_token: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Soft-drain / undrain via the on-box LOCAL_DRAINER, calling the driver
@@ -2845,18 +2916,49 @@ def create_fpf_drain_interface_step(
         default_desc = f"{'Soft-drain' if drain else 'Undrain'} {intfs} (local drainer)"
     else:
         default_desc = f"{'Soft-drain' if drain else 'Undrain'} DEVICE (local drainer)"
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_drain_interface",
+        "interfaces": intfs,
+        "is_drain": drain,
+    }
+    if target_device:
+        params["target_device"] = target_device
+    if mutation_token:
+        params["mutation_token"] = mutation_token
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or default_desc,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_drain_interface",
-                    "interfaces": intfs,
-                    "is_drain": drain,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_fpf_conditional_undrain_step(
+    interfaces: t.Optional[t.List[str]],
+    mutation_token: str,
+    target_device: t.Optional[str] = None,
+    best_effort: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Restore only a drain owned by this playbook's mutation token.
+
+    With no matching marker the step is an explicit no-op. This makes it safe
+    to put in ``Playbook.cleanup_steps``: cancellation after the drain is
+    restored, while a precondition failure cannot clear ambient drain state.
+    """
+    intfs = interfaces or []
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_conditional_undrain",
+        "interfaces": intfs,
+        "mutation_token": mutation_token,
+        "best_effort": best_effort,
+    }
+    if target_device:
+        params["target_device"] = target_device
+    scope = f"interface(s) {intfs}" if intfs else "whole device"
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Restore owned drain on {scope}",
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -2867,6 +2969,7 @@ def create_fpf_verify_disruption_step(
     mode: str = "admin_oper",
     expect_drained: bool = True,
     fail_if_ineffective: bool = False,
+    target_device: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Disruption-effectiveness gate: verify the disrupted interface(s) actually
@@ -2881,26 +2984,28 @@ def create_fpf_verify_disruption_step(
     ``expect_drained`` — the correct signal for a link DRAIN, where the port
     stays admin=ENABLED / oper=UP by design (control up, data depreferenced).
 
+    mode="device_clean": read-only precondition that requires both the
+    device-level drain flag and every per-port drain flag to be clear.
+
     fail_if_ineffective=True RAISES (fails the step / aborts the playbook) when
     the disruption did not take, instead of only recording it for downstream
     SKIP. Use for a disable, where a no-op makes the whole test meaningless.
     """
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_verify_disruption",
+        "interfaces": interfaces,
+        "mode": mode,
+        "expect_admin_enabled": expect_admin_enabled,
+        "expect_oper_up": expect_oper_up,
+        "expect_drained": expect_drained,
+        "fail_if_ineffective": fail_if_ineffective,
+    }
+    if target_device:
+        params["target_device"] = target_device
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or f"Verify disruption effective on {interfaces}",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_verify_disruption",
-                    "interfaces": interfaces,
-                    "mode": mode,
-                    "expect_admin_enabled": expect_admin_enabled,
-                    "expect_oper_up": expect_oper_up,
-                    "expect_drained": expect_drained,
-                    "fail_if_ineffective": fail_if_ineffective,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 
@@ -2919,6 +3024,39 @@ def create_fpf_record_disruption_time_step(
         description=description or "Record FPF disruption time",
         step_params=Params(
             json_params=json.dumps({"custom_step_name": "record_fpf_disruption_time"})
+        ),
+    )
+
+
+def create_fpf_record_restart_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record an FPF recovery/restart timestamp without replacing disruption time.
+
+    Place immediately before starting a service after an intentional outage.
+    Restart-aware RIB checks can then measure their recovery SLA from this point
+    while disruption-window checks retain the original pre-outage timestamp.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF restart time",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "record_fpf_restart_time"})
+        ),
+    )
+
+
+def create_fpf_record_restart_completion_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record the timestamp immediately after a restart command completes."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF restart completion time",
+        step_params=Params(
+            json_params=json.dumps(
+                {"custom_step_name": "record_fpf_restart_completion_time"}
+            )
         ),
     )
 
@@ -3124,6 +3262,14 @@ def create_fpf_rapid_flap_step_lldp(
     neighbor_hosts: t.Optional[t.List[str]] = None,
     flap_down_time_sec: float = 6.0,
     flap_up_time_sec: float = 6.0,
+    fail_closed: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
+    require_exact_neighbor_hosts: bool = False,
+    final_up_timeout_sec: int = 60,
+    final_up_poll_interval_sec: int = 5,
+    nic_recovery_by_interface: t.Optional[
+        t.Dict[str, t.Dict[str, t.Union[str, int]]]
+    ] = None,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3163,9 +3309,44 @@ def create_fpf_rapid_flap_step_lldp(
             ``tx_enable -> sleep up -> tx_disable -> sleep down`` — and the
             handler leaves the link UP at the end. ``flap_interval_sec`` is
             unused with the symmetric cycle.
+        fail_closed: Opt into fatal discovery/execution/restore errors and
+            positive final-UP verification. False preserves legacy callers.
+        expected_interfaces: Exact LLDP-resolved interface set required when
+            fail_closed is enabled.
+        require_exact_neighbor_hosts: Require exact explicit-host LLDP coverage.
+        final_up_timeout_sec: Maximum wait for final admin+oper UP state.
+        final_up_poll_interval_sec: Final-state polling interval.
+        nic_recovery_by_interface: Optional exact interface -> {host, dev, lane}
+            PAOS-UP fallback for an admin-UP/oper-DOWN latch.
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
+    if fail_closed and not expected_interfaces:
+        raise ValueError(
+            "fail_closed rapid flap requires a non-empty exact "
+            "expected_interfaces scope"
+        )
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_rapid_flap_lldp",
+        "neighbor_pattern": None if neighbor_hosts else neighbor_pattern,
+        "neighbor_hosts": neighbor_hosts,
+        "duration_sec": duration_sec,
+        "flap_interval_sec": flap_interval_sec,
+        "down_time_sec": flap_down_time_sec,
+        "up_time_sec": flap_up_time_sec,
+    }
+    if fail_closed:
+        params.update(
+            {
+                "fail_closed": True,
+                "expected_interfaces": expected_interfaces,
+                "require_exact_neighbor_hosts": require_exact_neighbor_hosts,
+                "final_up_timeout_sec": final_up_timeout_sec,
+                "final_up_poll_interval_sec": final_up_poll_interval_sec,
+                "nic_recovery_by_interface": nic_recovery_by_interface,
+            }
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
@@ -3174,19 +3355,7 @@ def create_fpf_rapid_flap_step_lldp(
             f"(neighbors~={neighbor_hosts or neighbor_pattern!r}) "
             f"for {duration_sec}s"
         ),
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_rapid_flap_lldp",
-                    "neighbor_pattern": neighbor_pattern,
-                    "neighbor_hosts": neighbor_hosts,
-                    "duration_sec": duration_sec,
-                    "flap_interval_sec": flap_interval_sec,
-                    "down_time_sec": flap_down_time_sec,
-                    "up_time_sec": flap_up_time_sec,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
         device_regexes=device_regexes,
     )
 
@@ -3204,6 +3373,14 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     churn_every_sec: int = 120,
     churn_devices: t.Optional[t.List[str]] = None,
     uniform_interface_discovery: bool = False,
+    final_up_timeout_sec: int = 60,
+    final_up_poll_interval_sec: int = 5,
+    fail_closed: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
+    require_exact_neighbor_hosts: bool = False,
+    nic_recovery_by_gtsw_interface: t.Optional[
+        t.Dict[str, t.Dict[str, t.Dict[str, t.Union[str, int]]]]
+    ] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Flap the links facing a GPU host across MANY GTSWs CONCURRENTLY.
@@ -3233,13 +3410,28 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         churn_action: "restart" (default) or "crash".
         churn_every_sec: seconds between churn rounds (default 120 = 2 min).
         churn_devices: devices to churn (defaults to ``gtsws``).
+        final_up_timeout_sec: maximum wait for every touched interface to be
+            admin-enabled and operationally UP after cleanup (default 60).
+        final_up_poll_interval_sec: final-state polling interval (default 5).
+        fail_closed: Opt into fatal discovery/execution/restore errors and
+            positive final-UP verification. False preserves legacy callers.
+        expected_interfaces: Exact interface set required on each GTSW.
+        require_exact_neighbor_hosts: Require exact explicit-host LLDP coverage.
+        nic_recovery_by_gtsw_interface: Optional GTSW -> interface ->
+            {host, dev, lane} PAOS-UP fallback for an admin-UP/oper-DOWN latch.
         description: Custom step description.
     """
+    if fail_closed and not expected_interfaces:
+        raise ValueError(
+            "fail_closed multi-GTSW rapid flap requires a non-empty exact "
+            "expected_interfaces scope"
+        )
+
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "fpf_multi_gtsw_rapid_flap",
         "gtsws": gtsws,
         "neighbor_hosts": neighbor_hosts,
-        "neighbor_pattern": neighbor_pattern,
+        "neighbor_pattern": None if neighbor_hosts else neighbor_pattern,
         "duration_sec": duration_sec,
         "down_time_sec": flap_down_time_sec,
         "up_time_sec": flap_up_time_sec,
@@ -3249,6 +3441,17 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         "churn_devices": churn_devices,
         "uniform_interface_discovery": uniform_interface_discovery,
     }
+    if fail_closed:
+        params.update(
+            {
+                "fail_closed": True,
+                "expected_interfaces": expected_interfaces,
+                "require_exact_neighbor_hosts": require_exact_neighbor_hosts,
+                "final_up_timeout_sec": final_up_timeout_sec,
+                "final_up_poll_interval_sec": final_up_poll_interval_sec,
+                "nic_recovery_by_gtsw_interface": (nic_recovery_by_gtsw_interface),
+            }
+        )
     if churn_service is not None:
         params["churn_service"] = int(churn_service.value)
     return Step(
@@ -3297,6 +3500,74 @@ def create_fpf_multi_device_drain_step(
                 }
             )
         ),
+    )
+
+
+def create_fpf_gar_set_links_step(
+    targets: t.List[t.Dict[str, t.Any]],
+    mode: str,
+    disrupt: bool,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Disrupt or restore explicit GTSW-STSW member links for GAR tests.
+
+    Each target contains a device hostname and the exact interface list. The
+    custom step handles multiple devices concurrently, supports held admin-down
+    and per-interface soft-drain, and verifies the resulting state by read-back.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"GAR {mode} {'disrupt' if disrupt else 'restore'} on {len(targets)} pair(s)",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_gar_set_links",
+                    "targets": targets,
+                    "mode": mode,
+                    "disrupt": disrupt,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
+def create_fpf_gar_validate_step(
+    pairs: t.List[t.Dict[str, t.Any]],
+    prefix_base: str,
+    prefix_count: int,
+    increment_step: str = "0:0:1::",
+    timeout_sec: int = 120,
+    poll_interval_sec: int = 5,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Validate GAR BGP and Agent/FIB signals for a scaled prefix set.
+
+    Each pair specifies source, spine, observer, and expected_capacity. For
+    nonzero capacity the validator checks every prefix at all three devices;
+    for zero capacity it requires the prefixes to be pruned from both spine and
+    observer while remaining locally originated on the source GTSW.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Validate scaled GAR BGP and Agent signals",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_gar_validate",
+                    "pairs": pairs,
+                    "prefix_base": prefix_base,
+                    "prefix_count": prefix_count,
+                    "increment_step": increment_step,
+                    "timeout_sec": timeout_sec,
+                    "poll_interval_sec": poll_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
     )
 
 
@@ -3374,6 +3645,7 @@ def create_fpf_nic_mstreg_flap_step(
 def create_fpf_restart_ib_traffic_step(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Kill + restart the long-lived ``ib_write_bw`` flow on server + clients.
@@ -3390,27 +3662,40 @@ def create_fpf_restart_ib_traffic_step(
     Args:
         server: server host (e.g. ``"rtptest1544.mwg2"``).
         clients: client host(s) (non-empty).
+        binary_path: Absolute ib_write_bw path. Defaults to /usr/bin/ib_write_bw.
         description: Custom step description.
     """
+    payload: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_restart_ib_traffic",
+        "server": server,
+        "clients": clients,
+    }
+    if binary_path is not None:
+        payload["binary_path"] = binary_path
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"Restart ib_write_bw: server={server} clients={clients}",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_restart_ib_traffic",
-                    "server": server,
-                    "clients": clients,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(payload)),
     )
 
 
 def create_fpf_ensure_traffic_step(
     server: str,
     clients: t.List[str],
+    binary_path: t.Optional[str] = None,
+    device: t.Optional[str] = None,
+    gid_iface: t.Optional[str] = None,
+    gid_prefix: t.Optional[str] = None,
+    gid_index: t.Optional[int] = None,
+    port: t.Optional[int] = None,
+    msg_size: t.Optional[int] = None,
+    qp: t.Optional[int] = None,
+    tclass: t.Optional[int] = None,
+    iters: t.Optional[int] = None,
+    min_egress_gbps: t.Optional[float] = None,
+    settle_sec: t.Optional[int] = None,
+    ods_window_sec: t.Optional[int] = None,
     traffic_floor_gbps: t.Optional[float] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3418,16 +3703,22 @@ def create_fpf_ensure_traffic_step(
 
     Verifies all 4 RDMA traffic planes (beth0-3) carry traffic on server+clients
     by sampling ``/sys/class/net/bethN/statistics/tx_bytes`` directly (no ODS).
-    If any plane is below the floor it restarts ib_write_bw and re-checks; if a
-    plane STILL can't carry traffic it raises (fail fast) — converting a silent
-    plane wedge (e.g. the DUT not learning that plane's prefixes) into an early,
-    loud failure instead of a contaminated run. Place at the HEAD of each playbook
-    stage so every test case starts from verified-healthy traffic.
+    If all planes collapse or the exact configured process is absent/wrong, it
+    restarts ib_write_bw and re-checks process identity, ODS egress, and direct
+    lane rates. A partial dead-lane result fails without remediation so a fabric
+    verdict cannot be masked. Place at the HEAD of a subsequent playbook stage
+    so the preceding disruption verdict is recorded before any recovery.
 
     Args:
         server: server host (e.g. ``"rtptest1544.mwg2"``).
         clients: client host(s) (non-empty).
-        traffic_floor_gbps: per-plane egress floor in Gbps (default 50.0 in the
+        binary_path / device / gid_iface / gid_prefix / gid_index / port /
+            msg_size / qp / tclass / iters: The exact setup-time ib_write_bw
+            contract. Supplying these prevents recovery from silently using
+            different defaults.
+        min_egress_gbps / settle_sec / ods_window_sec: ODS recovery-validation
+            contract, shared with the setup task.
+        traffic_floor_gbps: per-plane egress floor in Gbps (default 5.0 in the
             handler — catches a dead/0 plane while tolerating normal variation).
         description: Custom step description.
     """
@@ -3436,6 +3727,24 @@ def create_fpf_ensure_traffic_step(
         "server": server,
         "clients": clients,
     }
+    optional_params = {
+        "binary_path": binary_path,
+        "device": device,
+        "gid_iface": gid_iface,
+        "gid_prefix": gid_prefix,
+        "gid_index": gid_index,
+        "port": port,
+        "msg_size": msg_size,
+        "qp": qp,
+        "tclass": tclass,
+        "iters": iters,
+        "min_egress_gbps": min_egress_gbps,
+        "settle_sec": settle_sec,
+        "ods_window_sec": ods_window_sec,
+    }
+    payload.update(
+        {key: value for key, value in optional_params.items() if value is not None}
+    )
     if traffic_floor_gbps is not None:
         payload["traffic_floor_gbps"] = traffic_floor_gbps
     return Step(
@@ -11550,6 +11859,7 @@ def create_fpf_bgp_prefix_injection_step(
     increment_step: str = "0:0:1::",
     community_list: t.Optional[str] = None,
     communities: t.Optional[t.List[str]] = None,
+    batch_size: t.Optional[int] = None,
     withdraw_only: bool = False,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -11564,6 +11874,8 @@ def create_fpf_bgp_prefix_injection_step(
         "increment_step": increment_step,
         "withdraw_only": withdraw_only,
     }
+    if batch_size is not None:
+        params["batch_size"] = batch_size
     if community_list is not None:
         params["community_list"] = community_list
     if communities is not None:

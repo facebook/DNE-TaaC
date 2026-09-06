@@ -14,6 +14,7 @@ from taac.ixia.ixia import (
     Ixia,
     IxiaOperationStateError,
     IxiaOperationTimeoutError,
+    IxiaScenarioQuarantineRecord,
     IxiaSessionQuarantinedError,
     IxnIxNetworkError,
     UhdIxNetworkError,
@@ -52,6 +53,8 @@ class ApplyChangesTimeoutTest(unittest.TestCase):
         self.ixia._bounded_apply_lock = threading.RLock()
         self.ixia._session_quarantine_reason = None
         self.ixia._quarantined_session_identity = None
+        self.ixia._scenario_quarantine_generation = 0
+        self.ixia._scenario_quarantine_record = None
         self.ixia.primary_chassis_ip = "::1"
         self.request = MagicMock(return_value=object())
         self.transport = SimpleNamespace(request=self.request)
@@ -93,6 +96,144 @@ class ApplyChangesTimeoutTest(unittest.TestCase):
         self.topology.ApplyOnTheFly.assert_called_once_with()
         self.topology.AbortApplyOnTheFly.assert_not_called()
         self.assertFalse(self.ixia.session_quarantined)
+
+    def test_scenario_quarantine_owns_recovery_state_and_blocks_mutation(self) -> None:
+        baseline = object()
+        journal = (("med", "started"),)
+
+        record = self.ixia.quarantine_scenario(
+            "restore could not be verified",
+            baseline,
+            journal,
+            time.monotonic() + 60.0,
+        )
+
+        self.assertIsInstance(record, IxiaScenarioQuarantineRecord)
+        self.assertIs(baseline, record.baseline)
+        self.assertIs(journal, record.mutation_journal)
+        self.assertIs(record, self.ixia.scenario_quarantine_record)
+        with self.assertRaisesRegex(IxiaSessionQuarantinedError, "unverified churn"):
+            self.ixia.apply_changes_bounded(1.0)
+        with self.assertRaisesRegex(IxiaSessionQuarantinedError, "unverified churn"):
+            self.ixia.apply_changes()
+        self.topology.ApplyOnTheFly.assert_not_called()
+
+    def test_expired_scenario_quarantine_remains_fail_closed(self) -> None:
+        now = 10.0
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.ixia.time.monotonic",
+            side_effect=lambda: now,
+        ):
+            self.ixia.quarantine_scenario("unverified", object(), (), 15.0)
+            now = 20.0
+            with self.assertRaisesRegex(
+                IxiaSessionQuarantinedError, "expired; explicit recovery"
+            ):
+                self.ixia.assert_session_not_quarantined()
+
+    def test_verified_same_session_recovery_clears_quarantine(self) -> None:
+        record = self.ixia.quarantine_scenario(
+            "unverified", object(), (), time.monotonic() + 60.0
+        )
+
+        self.ixia.reset_scenario_quarantine(
+            record.generation, restoration_verified=True
+        )
+
+        self.assertFalse(self.ixia.session_quarantined)
+        self.assertIsNone(self.ixia.scenario_quarantine_record)
+
+    def test_scenario_reset_preserves_existing_session_quarantine(self) -> None:
+        self.ixia._quarantine_session("ambiguous apply")
+        record = self.ixia.quarantine_scenario(
+            "unverified", object(), (), time.monotonic() + 60.0
+        )
+
+        self.ixia.reset_scenario_quarantine(
+            record.generation, restoration_verified=True
+        )
+
+        self.assertIsNone(self.ixia.scenario_quarantine_record)
+        with self.assertRaisesRegex(IxiaSessionQuarantinedError, "ambiguous apply"):
+            self.ixia.assert_session_not_quarantined()
+
+    def test_unknown_session_identity_cannot_verify_recovery(self) -> None:
+        self.ixia.session.Session.Id = None
+        record = self.ixia.quarantine_scenario(
+            "unverified", object(), (), time.monotonic() + 60.0
+        )
+
+        with self.assertRaisesRegex(
+            IxiaSessionQuarantinedError, "requires verified restoration"
+        ):
+            self.ixia.reset_scenario_quarantine(
+                record.generation, restoration_verified=True
+            )
+
+    def test_legacy_apply_does_not_retry_quarantine_precondition(self) -> None:
+        self.ixia._quarantine_session("ambiguous apply")
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils.time.sleep"
+            ) as retry_sleep,
+            self.assertRaisesRegex(IxiaSessionQuarantinedError, "ambiguous apply"),
+        ):
+            self.ixia.apply_changes()
+
+        retry_sleep.assert_not_called()
+        self.topology.ApplyOnTheFly.assert_not_called()
+
+    def test_legacy_apply_releases_mutation_lock_during_retry_delay(self) -> None:
+        lock_acquired_during_backoff = threading.Event()
+
+        def acquire_mutation_lock() -> None:
+            with self.ixia.mutation_transaction():
+                lock_acquired_during_backoff.set()
+
+        def verify_lock_is_released(delay_seconds: float) -> None:
+            if delay_seconds == 0:
+                return
+            contender = threading.Thread(target=acquire_mutation_lock)
+            contender.start()
+            self.assertTrue(lock_acquired_during_backoff.wait(timeout=1.0))
+            contender.join(timeout=1.0)
+            self.assertFalse(contender.is_alive())
+
+        self.topology.ApplyOnTheFly.side_effect = [RuntimeError("transient"), None]
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.ixia.time.sleep",
+            side_effect=verify_lock_is_released,
+        ):
+            self.ixia.apply_changes()
+
+        self.assertEqual(2, self.topology.ApplyOnTheFly.call_count)
+
+    def test_new_session_requires_explicit_reset_before_mutation(self) -> None:
+        record = self.ixia.quarantine_scenario(
+            "unverified", object(), (), time.monotonic() + 60.0
+        )
+        self.ixia.session.Session.Id = 18
+
+        with self.assertRaises(IxiaSessionQuarantinedError):
+            self.ixia.assert_session_not_quarantined()
+        self.ixia.reset_scenario_quarantine(record.generation, session_reset=True)
+
+        self.ixia.assert_session_not_quarantined()
+
+    def test_quarantine_generation_fences_stale_recovery(self) -> None:
+        first = self.ixia.quarantine_scenario(
+            "first", object(), (), time.monotonic() + 60.0
+        )
+        second = self.ixia.quarantine_scenario(
+            "second", object(), (), time.monotonic() + 60.0
+        )
+
+        with self.assertRaisesRegex(IxiaSessionQuarantinedError, "generation changed"):
+            self.ixia.reset_scenario_quarantine(
+                first.generation, restoration_verified=True
+            )
+        self.assertEqual(second, self.ixia.scenario_quarantine_record)
 
     def test_timeout_aborts_once_without_retrying_apply(self) -> None:
         def timeout_then_succeed(*args: object, **kwargs: object) -> object:

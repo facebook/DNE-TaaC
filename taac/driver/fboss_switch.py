@@ -165,6 +165,7 @@ from taac.driver.driver_constants import (
     CoreDumpFiles,
     DEFAULT_AGENT_REMOTE_PORT,
     DEFAULT_THRIFT_TIMEOUT,
+    describe_interface_state,
     DeviceDrainState,
     EcmpGroup,
     EGRESS_PKT_RATE_KEY,
@@ -179,6 +180,7 @@ from taac.driver.driver_constants import (
     InterfaceEventState,
     InterfaceFlapMethod,
     InterfaceInfo,
+    InterfaceState,
     NextHopAttributes,
     OPENR_FIB_AGENT_PORT,
     OPENR_THRIFT_CALL_TIMEOUT,
@@ -266,6 +268,18 @@ class FBOSSConsoleError(Exception):
 
 class MnpuNotEnabled(Exception):
     pass
+
+
+def _to_interface_state(port_status: PortStatus) -> InterfaceState:
+    # PortStatus.present is deprecated in ctrl.thrift, so transceiver presence
+    # is read off transceiverIdx instead.
+    return InterfaceState(
+        oper_up=port_status.up,
+        admin_enabled=port_status.enabled,
+        speed_mbps=port_status.speedMbps,
+        profile_id=port_status.profileID,
+        has_transceiver=port_status.transceiverIdx is not None,
+    )
 
 
 class FbossSwitch(AbstractSwitch):
@@ -667,6 +681,51 @@ class FbossSwitch(AbstractSwitch):
             if name in intf_map_result
         }
 
+    async def async_get_interfaces_state(
+        self, interface_names: List[str]
+    ) -> Dict[str, InterfaceState]:
+        """
+        Used to fetch the admin and operational state of the given interfaces
+        on FBOSS devices. An aggregated interface reports only its operational
+        state, since FBOSS exposes no admin state for one.
+        """
+        # agg_intf_map is a dict that has the mapping between aggregated interfaces
+        # and its member ports
+        aggregated_interfaces = await self.async_get_all_aggregated_interfaces()
+        intf_map_result: Dict[
+            str, InterfaceInfo
+        ] = await self.async_get_all_interfaces_info()
+        interface_state_map: Dict[str, InterfaceState] = {}
+        ports_status_map = await self.async_get_port_status()
+        for interface_name in interface_names:
+            # If the interface is an aggregated interface then its operational
+            # status is checked
+            if aggregated_interfaces and interface_name in aggregated_interfaces:
+                interface_state_map[interface_name] = InterfaceState(
+                    oper_up=await self.async_get_aggregated_interface_status(
+                        interface_name
+                    )
+                )
+                continue
+
+            # Otherwise, both states of the unbundled physical port are read
+            port_vlan_id_res: InterfaceInfo = intf_map_result[interface_name]
+            port_id = port_vlan_id_res.port_id
+            if port_id not in ports_status_map:
+                raise InterfaceNotFoundError(
+                    f"Please check if the Port ID {port_id} exists on "
+                    f"{self.hostname} for interface {interface_name}"
+                )
+            interface_state_map[interface_name] = _to_interface_state(
+                ports_status_map[port_id]
+            )
+        for interface_name, interface_state in interface_state_map.items():
+            self.logger.info(
+                f"Interface {interface_name} on {self.hostname}: "
+                f"{describe_interface_state(interface_state)}"
+            )
+        return interface_state_map
+
     async def async_get_interfaces_status(
         self, interface_names: List[str], skip_logging: bool = False
     ) -> Dict[str, bool]:
@@ -675,43 +734,11 @@ class FbossSwitch(AbstractSwitch):
         devices. True is returned if the interface is UP and False will be
         returned for UP/DOWN or DOWN/DOWN state.
         """
-        oper_state = None
-        # agg_intf_map is a dict that has the mapping between aggregated interfaces
-        # and its member ports
-        aggregated_interfaces = await self.async_get_all_aggregated_interfaces()
-        intf_map_result: Dict[
-            str, InterfaceInfo
-        ] = await self.async_get_all_interfaces_info()
-        interface_status_map: Dict[str, bool] = {}
-        ports_status_map = await self.async_get_port_status()
-        for interface_name in interface_names:
-            # If the interface is an aggregated interface then its operational
-            # status is checked
-            if aggregated_interfaces and interface_name in aggregated_interfaces:
-                oper_state = await self.async_get_aggregated_interface_status(
-                    interface_name
-                )
-
-            # Otherwise, the operational status of the unbundled physical port
-            # is checked
-            else:
-                port_vlan_id_res: InterfaceInfo = intf_map_result[interface_name]
-                port_id = port_vlan_id_res.port_id
-                if port_id not in ports_status_map:
-                    raise InterfaceNotFoundError(
-                        f"Please check if the Port ID {port_id} exists on "
-                        f"{self.hostname} for interface {interface_name}"
-                    )
-                oper_state = ports_status_map[port_id].up
-            if oper_state:
-                self.logger.info(f"Interface {interface_name} on {self.hostname} is UP")
-                interface_status_map[interface_name] = True
-            else:
-                self.logger.info(
-                    f"Interface {interface_name} on {self.hostname} is DOWN"
-                )
-                interface_status_map[interface_name] = False
-        return interface_status_map
+        interface_state_map = await self.async_get_interfaces_state(interface_names)
+        return {
+            interface_name: interface_state.oper_up
+            for interface_name, interface_state in interface_state_map.items()
+        }
 
     async def async_get_interfaces_speed_in_Gbps(
         self,
@@ -3726,6 +3753,24 @@ class FbossSwitch(AbstractSwitch):
             f"Softdrain of interface '{interface}' on {self.hostname} completed"
         )
 
+    async def async_softdrain_interfaces(
+        self, interfaces: List[str], task_id: int = 0
+    ) -> None:
+        """Soft-drain several interfaces in one local-drainer request.
+
+        The bulk API applies all interface policy changes before restarting
+        BGP, avoiding one BGP restart per interface.
+        """
+        self.logger.info(
+            f"Softdraining interfaces {interfaces} on {self.hostname} "
+            f"(task_id={task_id})"
+        )
+        async with self.get_async_local_drainer_client() as client:
+            await client.softdrain_interfaces(interfaces, task_id)
+        self.logger.info(
+            f"Softdrain of interfaces {interfaces} on {self.hostname} completed"
+        )
+
     async def async_undrain_interface(self, interface: str) -> None:
         """
         Undrain a single interface on this FBOSS switch via the on-box
@@ -3743,6 +3788,19 @@ class FbossSwitch(AbstractSwitch):
             await client.undrain_interface(interface)
         self.logger.info(
             f"Undrain of interface '{interface}' on {self.hostname} completed"
+        )
+
+    async def async_undrain_interfaces(self, interfaces: List[str]) -> None:
+        """Undrain several interfaces in one local-drainer request.
+
+        The bulk API applies all interface policy changes before restarting
+        BGP, avoiding one BGP restart per interface.
+        """
+        self.logger.info(f"Undraining interfaces {interfaces} on {self.hostname}")
+        async with self.get_async_local_drainer_client() as client:
+            await client.undrain_interfaces(interfaces)
+        self.logger.info(
+            f"Undrain of interfaces {interfaces} on {self.hostname} completed"
         )
 
     @memoize_on_app_overload()

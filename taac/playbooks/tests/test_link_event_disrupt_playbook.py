@@ -6,10 +6,11 @@
 Covers the ``ods_discard_informational`` knob added for tc36 (STSW all
 connections down): when True the disrupt playbook emits the same four
 ODS-counter checks as ``_build_fpf_generic_checks`` with the two DISCARD
-checks (``in_dst_null_discard``, ``in_discard``) marked informational and the
-two CONGESTION checks (``in_congestion``, ``out_congestion``) kept hard. When
-False the default behaviour is preserved (no four-check informational block;
-the ``flip_discards=True`` path still emits the ``loss_expected`` peak check).
+checks (``in_dst_null_discard``, ``in_discard``) allowing only transient
+baseline excess and the two CONGESTION checks (``in_congestion``,
+``out_congestion``) kept hard. When False the default behaviour is preserved
+(no four-check informational block; the ``flip_discards=True`` path still emits
+the ``loss_expected`` peak check).
 """
 
 import json
@@ -19,6 +20,7 @@ from taac.playbooks.playbook_definitions import (
     _build_fpf_generic_checks,
     create_fpf_link_event_disrupt_playbook,
 )
+from taac.health_check.health_check import types as hc_types
 
 
 _GTSWS = ["gtsw001.l1002.c087.mwg2"]
@@ -60,8 +62,8 @@ def _params(check) -> dict:
 
 class TestOdsDiscardInformationalKnob(unittest.TestCase):
     """The ``ods_discard_informational`` knob mirrors the service-restart
-    playbook plumbing: the two DISCARD <= checks come in informational, the
-    two CONGESTION <= checks stay hard."""
+    playbook plumbing: transient DISCARD excess is informational, final
+    recovery and both CONGESTION checks stay hard."""
 
     def test_informational_true_emits_four_checks_with_correct_flags(self):
         pb = _build(
@@ -78,9 +80,13 @@ class TestOdsDiscardInformationalKnob(unittest.TestCase):
             "ods_out_congestion",
         ):
             self.assertIn(cid, by_id, f"missing {cid}")
-        # Discard checks: informational=True.
-        self.assertIs(_params(by_id["ods_in_dst_null_discard"])["informational"], True)
-        self.assertIs(_params(by_id["ods_in_discard"])["informational"], True)
+        # Discard checks permit only transient baseline excess; final recovery
+        # remains hard.
+        for cid in ("ods_in_dst_null_discard", "ods_in_discard"):
+            params = _params(by_id[cid])
+            self.assertEqual(params["baseline_excess_max"], 10000)
+            self.assertIs(params["transient_excess_informational"], True)
+            self.assertFalse(params["informational"])
         # Congestion checks: informational=False (or absent => default False).
         self.assertFalse(
             _params(by_id["ods_in_congestion"]).get("informational", False)
@@ -137,10 +143,8 @@ class TestOdsDiscardInformationalKnob(unittest.TestCase):
 class TestBuildGenericChecksDiscardInformational(unittest.TestCase):
     """``_build_fpf_generic_checks`` (the helper shared by the
     hardening/service-restart playbooks) routes ``ods_discard_informational``
-    to all four discard/congestion ODS checks: a disruptive
-    restart/coldboot/reboot has expected mid-disruption packet loss AND
-    congestion, so both the discard and congestion breaches are recorded
-    without failing the test."""
+    to the two baseline-aware non-congestion discard checks. Congestion remains
+    an absolute-zero hard assertion."""
 
     def _generic_postchecks_by_id(self, *, ods_discard_informational: bool) -> dict:
         _, postchecks, _ = _build_fpf_generic_checks(
@@ -161,7 +165,7 @@ class TestBuildGenericChecksDiscardInformational(unittest.TestCase):
         )
         return {c.check_id: c for c in postchecks if c.check_id}
 
-    def test_true_marks_all_four_discard_congestion_checks_informational(self):
+    def test_true_allows_only_transient_discard_excess(self):
         by_id = self._generic_postchecks_by_id(ods_discard_informational=True)
         for cid in (
             "ods_in_dst_null_discard",
@@ -170,16 +174,17 @@ class TestBuildGenericChecksDiscardInformational(unittest.TestCase):
             "ods_out_congestion",
         ):
             self.assertIn(cid, by_id, f"missing {cid}")
-        # All FOUR discard/congestion checks are informational: a disruptive
-        # restart/coldboot/reboot has expected mid-disruption packet loss AND
-        # congestion, so both the discard and congestion breaches are recorded
-        # without failing the test.
-        self.assertIs(_params(by_id["ods_in_dst_null_discard"])["informational"], True)
-        self.assertIs(_params(by_id["ods_in_discard"])["informational"], True)
-        self.assertIs(_params(by_id["ods_in_congestion"])["informational"], True)
-        self.assertIs(_params(by_id["ods_out_congestion"])["informational"], True)
+        for cid in ("ods_in_dst_null_discard", "ods_in_discard"):
+            params = _params(by_id[cid])
+            self.assertEqual(params["baseline_excess_max"], 10000)
+            self.assertIs(params["transient_excess_informational"], True)
+            self.assertFalse(params["informational"])
+        for cid in ("ods_in_congestion", "ods_out_congestion"):
+            params = _params(by_id[cid])
+            self.assertNotIn("baseline_excess_max", params)
+            self.assertFalse(params["informational"])
 
-    def test_false_default_keeps_all_four_checks_hard(self):
+    def test_fpf_multi_entity_checks_run_once(self):
         by_id = self._generic_postchecks_by_id(ods_discard_informational=False)
         for cid in (
             "ods_in_dst_null_discard",
@@ -187,10 +192,16 @@ class TestBuildGenericChecksDiscardInformational(unittest.TestCase):
             "ods_in_congestion",
             "ods_out_congestion",
         ):
-            self.assertFalse(
-                _params(by_id[cid]).get("informational", False),
-                f"{cid} should be hard by default",
-            )
+            self.assertEqual(by_id[cid].check_scope, hc_types.Scope.DEFAULT)
+
+    def test_false_default_keeps_all_four_checks_hard(self):
+        by_id = self._generic_postchecks_by_id(ods_discard_informational=False)
+        for cid in ("ods_in_dst_null_discard", "ods_in_discard"):
+            params = _params(by_id[cid])
+            self.assertEqual(params["baseline_excess_max"], 10000)
+            self.assertFalse(params["transient_excess_informational"])
+        for cid in ("ods_in_congestion", "ods_out_congestion"):
+            self.assertFalse(_params(by_id[cid]).get("informational", False))
 
 
 if __name__ == "__main__":

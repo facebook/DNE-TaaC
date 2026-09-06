@@ -28,9 +28,12 @@ Usage in TestConfig:
 """
 
 import asyncio
+import posixpath
 import re
+import shlex
 import time
 import typing as t
+from dataclasses import dataclass
 
 from taac.internal.driver.lab_ssh_transport import (
     async_exec as lab_ssh_async_exec,
@@ -74,14 +77,244 @@ DEFAULT_REDUCE_DESC = "sum,groupbytag(entity, hostname)"
 DEFAULT_MIN_EGRESS_GBPS = 10.0
 DEFAULT_SETTLE_SEC = 120
 DEFAULT_ODS_WINDOW_SEC = 120
-
-_SERVER_LOG = "/tmp/ib_write_bw_server.log"
-_CLIENT_LOG = "/tmp/ib_write_bw_client.log"
+DEFAULT_PROCESS_VALIDATION_ATTEMPTS = 2
+DEFAULT_PROCESS_VALIDATION_INTERVAL_SEC = 1.0
 
 # Conservative allowlists to keep params out of the shell command grammar.
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _DEVICE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_:.-]+$")
+_ABSOLUTE_BINARY_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
+_WORLD_WRITABLE_STAGING_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+@dataclass(frozen=True)
+class IbWriteBwProcess:
+    """One live ib_write_bw process read directly from procfs."""
+
+    pid: int
+    cmdline: str
+    cgroup: str
+
+
+def _validate_binary_path(binary_path: str) -> str:
+    if not isinstance(binary_path, str) or not _ABSOLUTE_BINARY_RE.fullmatch(
+        binary_path
+    ):
+        raise ValueError(
+            "Invalid ib_write_bw binary path: expected an absolute path without "
+            f"whitespace, got {binary_path!r}"
+        )
+    if posixpath.normpath(binary_path) != binary_path:
+        raise ValueError(
+            "Invalid ib_write_bw binary path: path must be canonical without "
+            f"'.', '..', or duplicate separators, got {binary_path!r}"
+        )
+    if any(
+        binary_path == root or binary_path.startswith(f"{root}/")
+        for root in _WORLD_WRITABLE_STAGING_ROOTS
+    ):
+        raise ValueError(
+            "Invalid ib_write_bw binary path: world-writable staging roots "
+            f"{_WORLD_WRITABLE_STAGING_ROOTS} are not trusted; got {binary_path!r}"
+        )
+    return binary_path
+
+
+def _build_ib_mode_validation_cmd() -> str:
+    """Return the shell fragment that rejects group/world-writable modes."""
+    return (
+        'case "$mode" in ""|*[!0-7]*) '
+        'echo "INVALID_MODE:$candidate:$mode"; exit 5;; esac; '
+        'if [ "$((0$mode & 022))" -ne 0 ]; then '
+        'echo "GROUP_OR_WORLD_WRITABLE:$candidate:$mode"; exit 7; fi; '
+    )
+
+
+def build_ib_binary_probe_cmd(binary_path: str = IB_WRITE_BW_BIN) -> str:
+    """Return a fail-closed executable and root-owned path-chain check."""
+    path = shlex.quote(_validate_binary_path(binary_path))
+    return (
+        f"if [ ! -e {path} ]; then echo MISSING; exit 2; fi; "
+        f"if [ ! -f {path} ]; then echo NOT_REGULAR; exit 3; fi; "
+        f"if [ ! -x {path} ]; then echo NOT_EXECUTABLE; exit 4; fi; "
+        f"candidate={path}; "
+        "while :; do "
+        "metadata=$(stat -Lc '%u %a' -- \"$candidate\" 2>/dev/null) || "
+        '{ echo "STAT_FAILED:$candidate"; exit 5; }; '
+        "owner=${metadata%% *}; mode=${metadata#* }; "
+        'if [ "$owner" != 0 ]; then echo "NOT_ROOT_OWNED:$candidate:$owner"; '
+        "exit 6; fi; "
+        f"{_build_ib_mode_validation_cmd()}"
+        '[ "$candidate" = / ] && break; '
+        'candidate=${candidate%/*}; [ -n "$candidate" ] || candidate=/; '
+        "done; "
+        'printf "OK\\n"'
+    )
+
+
+async def validate_remote_ib_binary(
+    *,
+    host: str,
+    binary_path: str,
+    ssh_run: t.Callable[..., t.Awaitable[t.Tuple[int, str, str]]],
+) -> None:
+    """Require a root-owned executable under a non-writable path on ``host``."""
+    path = _validate_binary_path(binary_path)
+    rc, out, err = await ssh_run(host, build_ib_binary_probe_cmd(path))
+    if rc != 0 or out.strip() != "OK":
+        detail = err.strip() or out.strip() or "no output"
+        raise RuntimeError(
+            f"{host}: ib_write_bw binary validation failed for {path!r} "
+            f"(rc={rc}): {detail}"
+        )
+
+
+async def launch_validated_ib_process(
+    *,
+    host: str,
+    binary_path: str,
+    launch_cmd: str,
+    ssh_run: t.Callable[..., t.Awaitable[t.Tuple[int, str, str]]],
+) -> t.Tuple[int, str, str]:
+    """Revalidate the binary immediately before issuing its launch command."""
+    await validate_remote_ib_binary(
+        host=host,
+        binary_path=binary_path,
+        ssh_run=ssh_run,
+    )
+    return await ssh_run(host, launch_cmd)
+
+
+def build_ib_process_snapshot_cmd(binary_path: str = IB_WRITE_BW_BIN) -> str:
+    """Return a fail-closed process inventory command without duplicate zeros.
+
+    A shell ``pgrep -c ... || echo 0`` prints two zero lines because ``pgrep``
+    already prints ``0`` before returning status 1.  The old recovery check then
+    compared the combined string with ``"0"`` and incorrectly accepted it.  This
+    command emits zero rows when no process exists and one tab-delimited row per
+    exact executable match, including the evidence needed to diagnose cgroup
+    ownership after an HRT restart.
+    """
+    path = shlex.quote(_validate_binary_path(binary_path))
+    return (
+        "for proc in /proc/[0-9]*; do "
+        '[ -r "$proc/cmdline" ] || continue; '
+        "first=$(tr '\\0' '\\n' < \"$proc/cmdline\" 2>/dev/null | head -n 1); "
+        f'[ "$first" = {path} ] || continue; '
+        'pid="${proc##*/}"; '
+        'printf "PID=%s\\tCMD=" "$pid"; '
+        "tr '\\0' ' ' < \"$proc/cmdline\" 2>/dev/null; "
+        'printf "\\tCGROUP="; '
+        "tr '\\n' ';' < \"$proc/cgroup\" 2>/dev/null; "
+        'printf "\\n"; '
+        "done"
+    )
+
+
+def parse_ib_process_snapshot(output: str) -> list[IbWriteBwProcess]:
+    """Parse the strict procfs inventory emitted by build_ib_process_snapshot_cmd."""
+    processes: list[IbWriteBwProcess] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = line.split("\t")
+        if (
+            len(fields) != 3
+            or not fields[0].startswith("PID=")
+            or not fields[1].startswith("CMD=")
+            or not fields[2].startswith("CGROUP=")
+        ):
+            raise ValueError(f"malformed ib_write_bw process row: {raw_line!r}")
+        pid_text = fields[0].removeprefix("PID=")
+        cmdline = fields[1].removeprefix("CMD=").strip()
+        cgroup = fields[2].removeprefix("CGROUP=").strip()
+        if not pid_text.isdigit() or not cmdline or not cgroup:
+            raise ValueError(f"incomplete ib_write_bw process row: {raw_line!r}")
+        processes.append(
+            IbWriteBwProcess(pid=int(pid_text), cmdline=cmdline, cgroup=cgroup)
+        )
+    return processes
+
+
+def validate_ib_process_snapshot(
+    output: str,
+    *,
+    host: str,
+    role: str,
+    expected_cmd: str,
+) -> IbWriteBwProcess:
+    """Require exactly one process whose argv is byte-for-byte configuration-equal."""
+    processes = parse_ib_process_snapshot(output)
+    if len(processes) != 1:
+        raise ValueError(
+            f"{host} {role}: expected exactly one ib_write_bw process, "
+            f"found {len(processes)}; raw={output!r}"
+        )
+    process = processes[0]
+    expected_argv = shlex.split(expected_cmd)
+    actual_argv = shlex.split(process.cmdline)
+    if actual_argv != expected_argv:
+        raise ValueError(
+            f"{host} {role}: ib_write_bw command mismatch; "
+            f"expected={expected_cmd!r}, actual={process.cmdline!r}, "
+            f"pid={process.pid}, cgroup={process.cgroup!r}"
+        )
+    return process
+
+
+def parse_background_pid(output: str, *, host: str, role: str) -> int:
+    """Require one unambiguous PID from the remote background launch shell."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1 or not lines[0].isdigit():
+        raise ValueError(f"{host} {role}: malformed background PID output: {output!r}")
+    return int(lines[0])
+
+
+async def validate_remote_ib_process(
+    *,
+    host: str,
+    role: str,
+    expected_cmd: str,
+    ssh_run: t.Callable[..., t.Awaitable[t.Tuple[int, str, str]]],
+    attempts: int = DEFAULT_PROCESS_VALIDATION_ATTEMPTS,
+    interval_sec: float = DEFAULT_PROCESS_VALIDATION_INTERVAL_SEC,
+) -> list[IbWriteBwProcess]:
+    """Validate the exact process repeatedly so an immediate exit cannot pass."""
+    if attempts < 1:
+        raise ValueError("process validation attempts must be at least 1")
+    snapshots: list[IbWriteBwProcess] = []
+    expected_argv = shlex.split(expected_cmd)
+    if not expected_argv:
+        raise ValueError("expected ib_write_bw command must not be empty")
+    command = build_ib_process_snapshot_cmd(expected_argv[0])
+    for attempt in range(attempts):
+        rc, out, err = await ssh_run(host, command)
+        if rc != 0:
+            raise RuntimeError(
+                f"{host} {role}: process inventory SSH failed (rc={rc}): "
+                f"{err.strip() or out.strip() or 'no output'}"
+            )
+        try:
+            snapshots.append(
+                validate_ib_process_snapshot(
+                    out,
+                    host=host,
+                    role=role,
+                    expected_cmd=expected_cmd,
+                )
+            )
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if attempt + 1 < attempts:
+            await asyncio.sleep(interval_sec)
+    return snapshots
+
+
+def make_traffic_attempt_id() -> str:
+    """Create a shell-safe, collision-resistant suffix for preserved attempt logs."""
+    return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
 
 
 def _validate_hostname(host: str) -> str:
@@ -205,11 +438,12 @@ def build_ib_write_bw_cmd(
     tclass: int = DEFAULT_TCLASS,
     iters: int = DEFAULT_ITERS,
     server: t.Optional[str] = None,
+    binary_path: str = IB_WRITE_BW_BIN,
 ) -> str:
     """Build the ib_write_bw command. If ``server`` is set, it's a client cmd."""
     _validate_device(device)
     cmd = (
-        f"{IB_WRITE_BW_BIN} -S 0 --report_gbits"
+        f"{_validate_binary_path(binary_path)} -S 0 --report_gbits"
         f" -d {device} -m {int(msg_size)} -x {int(gid_index)} --qp {int(qp)}"
         f" -a -F --tclass {int(tclass)} -p {int(port)} --ipv6-addr -n {int(iters)}"
         f" -b --run_infinitely"
@@ -217,6 +451,81 @@ def build_ib_write_bw_cmd(
     if server is not None:
         cmd += f" {_validate_hostname(server)}"
     return cmd
+
+
+async def validate_ib_ods_egress(
+    *,
+    hosts: list[str],
+    min_egress_gbps: float = DEFAULT_MIN_EGRESS_GBPS,
+    ods_window_sec: int = DEFAULT_ODS_WINDOW_SEC,
+    key_desc: str = DEFAULT_KEY_DESC,
+    transform_desc: str = DEFAULT_TRANSFORM_DESC,
+    reduce_desc: str = DEFAULT_REDUCE_DESC,
+    artifact_label: str = "ib_write_bw egress",
+) -> tuple[list[str], str]:
+    """Require fresh-enough ODS egress for every configured traffic endpoint."""
+    end_time = int(time.time())
+    start_time = end_time - ods_window_sec
+    entity_desc = ",".join(hosts)
+    logger.info(
+        f"[FpfIbTraffic] querying ODS egress for {entity_desc} "
+        f"key={key_desc} window {start_time}->{end_time}"
+    )
+    ods_data = await async_query_ods(
+        entity_desc=entity_desc,
+        key_desc=key_desc,
+        reduce_desc=reduce_desc,
+        transform_desc=transform_desc,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    ods_url = await async_generate_ods_url(
+        entity_desc=entity_desc,
+        key_desc=key_desc,
+        reduce_desc=reduce_desc,
+        transform_desc=transform_desc,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    ods_url = await async_get_fburl(ods_url)
+    register_artifact("ods", artifact_label, ods_url)
+
+    egress_by_host: t.Dict[str, float] = {}
+    for entity, key_data in (ods_data or {}).items():
+        latest_val: t.Optional[float] = None
+        latest_ts = -1
+        for _key_name, ts_data in key_data.items():
+            for ts, val in ts_data.items():
+                if ts > latest_ts:
+                    latest_ts, latest_val = ts, val
+        if latest_val is not None:
+            egress_by_host[entity] = latest_val
+
+    violations: list[str] = []
+    pass_details: list[str] = []
+    for host in hosts:
+        short = host.split(".")[0]
+        val = egress_by_host.get(host)
+        if val is None:
+            for entity, candidate in egress_by_host.items():
+                if host in entity or short in entity:
+                    val = candidate
+                    break
+        if val is None:
+            violations.append(f"{host}: no ODS egress data")
+        elif val <= min_egress_gbps:
+            violations.append(f"{host}: {val:.2f} Gbps <= {min_egress_gbps:.1f}")
+        else:
+            pass_details.append(f"{host}: {val:.2f} Gbps")
+
+    if violations:
+        raise RuntimeError(
+            f"ib_write_bw egress below {min_egress_gbps:.1f} Gbps/host — "
+            + "; ".join(violations)
+            + (f" | OK: {'; '.join(pass_details)}" if pass_details else "")
+            + f" | ODS: {ods_url}"
+        )
+    return pass_details, ods_url
 
 
 class FpfStartIbTrafficTask(BaseTask):
@@ -250,6 +559,7 @@ class FpfStartIbTrafficTask(BaseTask):
         clients = [_validate_hostname(c) for c in params["clients"]]
         if not clients:
             raise ValueError("fpf_start_ib_traffic requires at least one client host")
+        binary_path = _validate_binary_path(params.get("binary_path", IB_WRITE_BW_BIN))
         device = _validate_device(params.get("device", DEFAULT_DEVICE))
         # GID index is discovered per host from show_gids unless explicitly set.
         gid_override = params.get("gid_index")
@@ -270,6 +580,17 @@ class FpfStartIbTrafficTask(BaseTask):
         key_desc = params.get("key_desc", DEFAULT_KEY_DESC)
         transform_desc = params.get("transform_desc", DEFAULT_TRANSFORM_DESC)
         reduce_desc = params.get("reduce_desc", DEFAULT_REDUCE_DESC)
+        process_validation_attempts = int(
+            params.get(
+                "process_validation_attempts", DEFAULT_PROCESS_VALIDATION_ATTEMPTS
+            )
+        )
+        process_validation_interval_sec = float(
+            params.get(
+                "process_validation_interval_sec",
+                DEFAULT_PROCESS_VALIDATION_INTERVAL_SEC,
+            )
+        )
 
         all_hosts = [server, *clients]
         gid_note = (
@@ -279,7 +600,7 @@ class FpfStartIbTrafficTask(BaseTask):
         )
         logger.info(
             f"[FpfStartIbTraffic] server={server} clients={clients} "
-            f"device={device} {gid_note} port={port}; "
+            f"binary={binary_path} device={device} {gid_note} port={port}; "
             f"settle={settle_sec}s, threshold={min_egress_gbps:.1f} Gbps/host"
         )
 
@@ -288,6 +609,16 @@ class FpfStartIbTrafficTask(BaseTask):
                 return int(gid_override)
             return await self._resolve_gid_index(host, gid_iface, gid_prefix)
 
+        # Validate every endpoint before killing an existing flow. A missing or
+        # non-executable staged binary must fail setup without destroying the
+        # only traffic process that may still be running.
+        for host in all_hosts:
+            await validate_remote_ib_binary(
+                host=host,
+                binary_path=binary_path,
+                ssh_run=self._ssh_run,
+            )
+
         # Clean any stale ib_write_bw on every host first (best-effort).
         for host in all_hosts:
             await self._ssh_run(host, "pkill -f ib_write_bw 2>/dev/null || true")
@@ -295,53 +626,104 @@ class FpfStartIbTrafficTask(BaseTask):
 
         # Start server, then each client, in the background. The RoCEv2 GID
         # index (-x) is resolved per host (each host's own show_gids).
+        attempt_id = make_traffic_attempt_id()
+        server_log = f"/tmp/ib_write_bw_server_{attempt_id}.log"
         server_gid = await _gid_for(server)
         server_cmd = build_ib_write_bw_cmd(
-            device, server_gid, port, msg_size, qp, tclass, iters
+            device,
+            server_gid,
+            port,
+            msg_size,
+            qp,
+            tclass,
+            iters,
+            binary_path=binary_path,
         )
-        server_full = f"setsid nohup {server_cmd} > {_SERVER_LOG} 2>&1 & echo $!"
+        server_full = f"setsid nohup {server_cmd} > {server_log} 2>&1 & echo $!"
         logger.info(f"[FpfStartIbTraffic] {server} SERVER cmd: {server_full}")
-        rc, out, err = await self._ssh_run(server, server_full)
+        rc, out, err = await launch_validated_ib_process(
+            host=server,
+            binary_path=binary_path,
+            launch_cmd=server_full,
+            ssh_run=self._ssh_run,
+        )
         if rc != 0:
             raise Exception(
                 f"[FpfStartIbTraffic] failed to start server on {server} "
-                f"(rc={rc}): {err.strip() or out.strip()}"
+                f"(rc={rc}): {err.strip() or out.strip()} | log={server_log}"
             )
-        logger.info(f"[FpfStartIbTraffic] server started on {server} pid={out.strip()}")
+        try:
+            server_pid = parse_background_pid(out, host=server, role="server")
+        except ValueError as error:
+            raise RuntimeError(f"{error} | attempt_log={server_log}") from error
+        logger.info(
+            f"[FpfStartIbTraffic] server started on {server} pid={server_pid} "
+            f"log={server_log}"
+        )
         await asyncio.sleep(2)
 
+        expected_commands = {server: ("server", server_cmd, server_log)}
         for host in clients:
             client_gid = await _gid_for(host)
             client_cmd = build_ib_write_bw_cmd(
-                device, client_gid, port, msg_size, qp, tclass, iters, server=server
+                device,
+                client_gid,
+                port,
+                msg_size,
+                qp,
+                tclass,
+                iters,
+                server=server,
+                binary_path=binary_path,
             )
-            client_full = f"setsid nohup {client_cmd} > {_CLIENT_LOG} 2>&1 & echo $!"
+            client_log = f"/tmp/ib_write_bw_client_{attempt_id}.log"
+            client_full = f"setsid nohup {client_cmd} > {client_log} 2>&1 & echo $!"
             logger.info(f"[FpfStartIbTraffic] {host} CLIENT cmd: {client_full}")
-            rc, out, err = await self._ssh_run(host, client_full)
+            rc, out, err = await launch_validated_ib_process(
+                host=host,
+                binary_path=binary_path,
+                launch_cmd=client_full,
+                ssh_run=self._ssh_run,
+            )
             if rc != 0:
                 raise Exception(
                     f"[FpfStartIbTraffic] failed to start client on {host} "
-                    f"(rc={rc}): {err.strip() or out.strip()}"
+                    f"(rc={rc}): {err.strip() or out.strip()} | log={client_log}"
                 )
+            try:
+                client_pid = parse_background_pid(out, host=host, role="client")
+            except ValueError as error:
+                raise RuntimeError(f"{error} | attempt_log={client_log}") from error
             logger.info(
-                f"[FpfStartIbTraffic] client started on {host} pid={out.strip()}"
+                f"[FpfStartIbTraffic] client started on {host} pid={client_pid} "
+                f"log={client_log}"
             )
+            expected_commands[host] = ("client", client_cmd, client_log)
             await asyncio.sleep(1)
 
-        # Confirm the process is actually up on every host.
+        # Validate the exact argv repeatedly. This rejects zero processes,
+        # duplicates, malformed SSH output, a wrong device/port/peer, and a
+        # process that exits immediately after launch. Record cgroup membership
+        # so a later HRT-restart failure can distinguish kill-domain coupling
+        # from device reinitialization.
         await asyncio.sleep(2)
-        not_running: t.List[str] = []
         for host in all_hosts:
-            _, out, _ = await self._ssh_run(host, "pgrep -c ib_write_bw || echo 0")
-            count = out.strip() or "0"
-            logger.info(f"[FpfStartIbTraffic] {host}: {count} ib_write_bw process(es)")
-            if count == "0":
-                not_running.append(host)
-        if not_running:
-            raise Exception(
-                "[FpfStartIbTraffic] ib_write_bw not running after start on: "
-                + ", ".join(not_running)
-                + f" (check {_SERVER_LOG}/{_CLIENT_LOG} on the hosts)"
+            role, expected_cmd, log_path = expected_commands[host]
+            try:
+                snapshots = await validate_remote_ib_process(
+                    host=host,
+                    role=role,
+                    expected_cmd=expected_cmd,
+                    ssh_run=self._ssh_run,
+                    attempts=process_validation_attempts,
+                    interval_sec=process_validation_interval_sec,
+                )
+            except RuntimeError as error:
+                raise RuntimeError(f"{error} | attempt_log={log_path}") from error
+            process = snapshots[-1]
+            logger.info(
+                f"[FpfStartIbTraffic] {host} {role}: validated pid={process.pid} "
+                f"cmd={process.cmdline!r} cgroup={process.cgroup!r} log={log_path}"
             )
 
         # Let traffic ramp, then validate egress via ODS.
@@ -351,77 +733,21 @@ class FpfStartIbTrafficTask(BaseTask):
         )
         await asyncio.sleep(settle_sec)
 
-        end_time = int(time.time())
-        start_time = end_time - ods_window_sec
-        entity_desc = ",".join(all_hosts)
-        logger.info(
-            f"[FpfStartIbTraffic] querying ODS egress for {entity_desc} "
-            f"key={key_desc} window {start_time}->{end_time}"
-        )
-        ods_data = await async_query_ods(
-            entity_desc=entity_desc,
-            key_desc=key_desc,
-            reduce_desc=reduce_desc,
-            transform_desc=transform_desc,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        ods_url = await async_generate_ods_url(
-            entity_desc=entity_desc,
-            key_desc=key_desc,
-            reduce_desc=reduce_desc,
-            transform_desc=transform_desc,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        ods_url = await async_get_fburl(ods_url)
-        register_artifact("ods", "ib_write_bw egress (setup)", ods_url)
-
-        # Per-host latest egress in Gbps (entities are regrouped to hostname).
-        egress_by_host: t.Dict[str, float] = {}
-        for entity, key_data in (ods_data or {}).items():
-            latest_val: t.Optional[float] = None
-            latest_ts = -1
-            for _key_name, ts_data in key_data.items():
-                for ts, val in ts_data.items():
-                    if ts > latest_ts:
-                        latest_ts, latest_val = ts, val
-            if latest_val is not None:
-                egress_by_host[entity] = latest_val
-
-        violations: t.List[str] = []
-        pass_details: t.List[str] = []
-        # Match each requested host against the grouped ODS entities. With
-        # `groupbytag(entity, hostname)` ODS returns entities shaped like
-        # "HOSTNAME::rtptest1555.mwg2:sum" (tag prefix + :reduce suffix), so we
-        # match on the host's short label appearing anywhere in the entity.
-        for host in all_hosts:
-            short = host.split(".")[0]
-            val = egress_by_host.get(host)
-            if val is None:
-                for ent, v in egress_by_host.items():
-                    if host in ent or short in ent:
-                        val = v
-                        break
-            if val is None:
-                violations.append(f"{host}: no ODS egress data")
-            elif val <= min_egress_gbps:
-                violations.append(f"{host}: {val:.2f} Gbps <= {min_egress_gbps:.1f}")
-            else:
-                pass_details.append(f"{host}: {val:.2f} Gbps")
-
+        try:
+            pass_details, ods_url = await validate_ib_ods_egress(
+                hosts=all_hosts,
+                min_egress_gbps=min_egress_gbps,
+                ods_window_sec=ods_window_sec,
+                key_desc=key_desc,
+                transform_desc=transform_desc,
+                reduce_desc=reduce_desc,
+                artifact_label=f"ib_write_bw egress setup {attempt_id}",
+            )
+        except RuntimeError as error:
+            logs = {host: values[2] for host, values in expected_commands.items()}
+            raise RuntimeError(f"{error} | attempt_logs={logs}") from error
         for detail in pass_details:
             logger.info(f"[FpfStartIbTraffic] [PASS] {detail}")
-        for v in violations:
-            logger.info(f"[FpfStartIbTraffic] [FAIL] {v}")
-
-        if violations:
-            raise Exception(
-                f"[FpfStartIbTraffic] egress below {min_egress_gbps:.1f} Gbps/host — "
-                + "; ".join(violations)
-                + (f" | OK: {'; '.join(pass_details)}" if pass_details else "")
-                + f" | ODS: {ods_url}"
-            )
         logger.info(
             f"[FpfStartIbTraffic] SUCCESS — all {len(all_hosts)} host(s) egressing "
             f">{min_egress_gbps:.1f} Gbps: {'; '.join(pass_details)} | ODS: {ods_url}"

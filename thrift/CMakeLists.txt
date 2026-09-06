@@ -398,7 +398,7 @@ add_taac_thrift_python_library(
     "${FBOSS_THRIFT_DIR}/configerator/structs/neteng/bgp_policy/thrift/rib_policy.thrift"
     NAMESPACE "neteng.bgp_policy.thrift"
     OPTIONS json
-    DEPENDS thrift_roots
+    DEPENDS thrift_roots fboss_configerator_common_py
 )
 add_taac_thrift_python_library(
     nsf_policy_py

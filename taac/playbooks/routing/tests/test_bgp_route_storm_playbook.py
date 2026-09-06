@@ -125,7 +125,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                 "withdraw_seconds": 30,
                 "convergence_hard_timeout_seconds": 300,
                 "heavy_setup_hard_timeout_seconds": 1_800,
-                "heavy_route_batch_rows": 7_500,
+                "heavy_route_batch_rows": 15_750,
                 "as_path_pool_size": 10,
                 "as_path_length": 255,
                 "as_set_length": 255,
