@@ -1,16 +1,17 @@
 # RBB SRv6 qualification — device_info TEMPLATE (replace with your values).
 #
-# Two FBOSS DUTs: R1 (head/mid) and R2 (tail). Copy this file, fill in your real
-# hostnames/addresses, and either:
-#   * point the harness at it:  --device-info-csv path/to/your_device_info.csv
-#     (this also sets TAAC_DEVICE_INFO_PATH), and
-#   * bind the RBB roles:       export TAAC_RBB_R1_HOST=<r1 hostname>
-#                               export TAAC_RBB_R2_HOST=<r2 hostname>
-#     (the values must match the hostname column below).
+# Two FBOSS DUTs: R1 (ingress/head + transit) and R2 (midpoint adjacency + tail
+# decap). `./scripts/run-rbb-srv6.sh --init` copies this file into the default
+# local configuration directory. Fill in your real hostnames/addresses, then
+# bind the RBB roles in rbb.env:
+#       TAAC_RBB_R1_HOST=<r1 hostname>
+#       TAAC_RBB_R2_HOST=<r2 hostname>
+# The values must match the hostname column below. Use runner --config-dir when
+# the initialized configuration is outside the checkout.
 #
 # Columns: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system,hardware
 # Only hostname + operating_system are required for driver selection (FBOSS).
 # Lines starting with '#' are comments. Values shown use documentation ranges
 # (RFC 3849 / RFC 5737) — they are placeholders, not a real lab.
-rbb-r1.lab.example,,,,RBB,FBOSS,CISCO_8501
-rbb-r2.lab.example,,,,RBB,FBOSS,CISCO_8501
+rbb-r1.lab.example,,,,RBB,FBOSS,GENERIC_FBOSS
+rbb-r2.lab.example,,,,RBB,FBOSS,GENERIC_FBOSS

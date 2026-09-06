@@ -164,14 +164,11 @@ from taac.tasks.verify_best_path_changes_task import (
 )
 
 # RBB SRv6 qualification tasks (see taac/testconfigs/routing/qual_rbb.py).
-from taac.tasks.rbb_core_interface_setup_task import (
-    RbbCoreInterfaceSetupTask,
+from taac.tasks.rbb_dut_bootstrap_task import (
+    RbbDutBootstrapTask,
 )
 from taac.tasks.rbb_edge_ebgp_task import (
     RbbEdgeEbgpTask,
-)
-from taac.tasks.rbb_ixia_edge_l3_task import (
-    RbbIxiaEdgeL3Task,
 )
 from taac.tasks.rbb_srv6_counter_delta_task import (
     RbbSrv6CounterDeltaTask,
@@ -179,24 +176,9 @@ from taac.tasks.rbb_srv6_counter_delta_task import (
 from taac.tasks.rbb_srv6_direct_route_task import (
     RbbSrv6DirectRouteTask,
 )
-from taac.tasks.rbb_srv6_program_task import (
-    RbbSrv6ProgramTask,
-)
 from taac.tasks.rbb_srv6_verify_task import (
     RbbSrv6VerifyTask,
 )
-
-# RBB from-scratch FBOSS provisioning tasks (opt-in; TAAC_RBB_PROVISION=1).
-from taac.tasks.provision_fboss_agent_config_task import (
-    ProvisionFbossAgentConfigTask,
-)
-from taac.tasks.provision_fboss_bgp_config_task import (
-    ProvisionFbossBgpConfigTask,
-)
-from taac.tasks.provision_fboss_openr_config_task import (
-    ProvisionFbossOpenrConfigTask,
-)
-
 
 TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     AristaDaemonControlTask,
@@ -246,16 +228,11 @@ TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     VerifyBestPathChangesTask,
     SetPortChannelMinLinkPatcherTask,
     SetupBaseConfigsTask,
-    RbbCoreInterfaceSetupTask,
+    RbbDutBootstrapTask,
     RbbEdgeEbgpTask,
-    RbbIxiaEdgeL3Task,
     RbbSrv6CounterDeltaTask,
     RbbSrv6DirectRouteTask,
-    RbbSrv6ProgramTask,
     RbbSrv6VerifyTask,
-    ProvisionFbossAgentConfigTask,
-    ProvisionFbossBgpConfigTask,
-    ProvisionFbossOpenrConfigTask,
 ]
 
 # Add internal tasks only when not in OSS mode

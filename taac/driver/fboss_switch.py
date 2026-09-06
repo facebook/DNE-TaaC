@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import socket
 import time
 import typing
@@ -75,7 +76,15 @@ try:
         get_rib_entries,
         get_rib_subprefixes,
     )
-except ImportError:
+except ModuleNotFoundError as exc:
+    _canonical_rib_module = "neteng.fboss.bgp.client.canonical_rib_py3"
+    # Only tolerate the known OSS omission. A missing transitive dependency
+    # inside a present canonical_rib module is a broken build and must surface.
+    if not TAAC_OSS or not (
+        exc.name == _canonical_rib_module
+        or _canonical_rib_module.startswith(f"{exc.name}.")
+    ):
+        raise
     # The neteng.fboss.bgp subpackage (canonical_rib_py3) is generated only
     # in Meta-internal builds; the OSS thrift build does not produce it. Keep
     # the driver module importable in OSS by deferring the failure to call
@@ -104,17 +113,21 @@ from neteng.fboss.bgp_thrift.types import (
     TOriginatedRoute,
 )
 
-try:
-    from neteng.fboss.bgp_thrift.types import (
-        TGetUpdateGroupSummariesResponse,
+# This response type is absent from the OSS fboss thrift-defs build (drift vs
+# Meta-internal). It is used only as a local-variable annotation below, so an
+# inert placeholder keeps the driver importable without masking unrelated
+# import failures from this generated module.
+if not TAAC_OSS:
+    TGetUpdateGroupSummariesResponse = (
+        fboss_bgp_thrift_types.TGetUpdateGroupSummariesResponse
     )
-except ImportError:
-    # TGetUpdateGroupSummariesResponse is absent from the OSS fboss thrift-defs
-    # build (drift vs Meta-internal). It is only referenced as a local-variable
-    # annotation (not evaluated at runtime), so a placeholder keeps this module
-    # importable in OSS without changing behavior.
-    class TGetUpdateGroupSummariesResponse:  # noqa: F811
-        pass
+else:
+    TGetUpdateGroupSummariesResponse = getattr(
+        fboss_bgp_thrift_types,
+        "TGetUpdateGroupSummariesResponse",
+        type("TGetUpdateGroupSummariesResponse", (), {}),
+    )
+
 from neteng.fboss.ctrl.clients import FbossCtrl
 from neteng.fboss.ctrl.types import (
     AggregatePortThrift,
@@ -3303,7 +3316,9 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(
+                    f"mkdir -p -- {shlex.quote(parent)}"
+                )
 
         self.logger.info(
             f"Writing {len(contents)} bytes to {self.hostname}:{remote_path}"
@@ -3322,7 +3337,9 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(
+                    f"mkdir -p -- {shlex.quote(parent)}"
+                )
 
         self.logger.info(
             f"Copying {local_path} to {self.hostname}:{remote_path}"

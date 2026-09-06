@@ -40,9 +40,3 @@ paramiko>=2.12.0,<4
 # OTG/snappi traffic-generator client. Imported in taac/ixia/otg_traffic_gen.py
 # for the ixia-c (containerlab) backend.
 snappi>=1.0.0
-
-# Structured-model lib for the investigation-report feature. Imported at module
-# scope in taac/libs/investigation_report.py (from pydantic import BaseModel),
-# which taac/libs/taac_runner.py imports unconditionally. The investigation
-# agent itself is disabled under TAAC_OSS, but the import still resolves at load.
-pydantic>=2.0.0

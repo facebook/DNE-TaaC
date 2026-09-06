@@ -666,8 +666,13 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
 
         await runner.async_test_setUp()
 
-        self.assertEqual(runner.run_tasks.await_args_list[0].args[0], [pre_task])
-        self.assertEqual(runner.run_tasks.await_args_list[1].args[0], [secondary_post])
+        setup_task_calls = [call.args[0] for call in runner.run_tasks.await_args_list]
+        self.assertIn([pre_task], setup_task_calls)
+        self.assertIn([secondary_post], setup_task_calls)
+        self.assertLess(
+            setup_task_calls.index([pre_task]),
+            setup_task_calls.index([secondary_post]),
+        )
 
         runner.run_tasks.reset_mock()
         teardown_events = []
@@ -694,7 +699,10 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(teardown_events, ["selected-tasks", "orchestrator"])
 
     async def test_teardown_task_failure_still_releases_resources(self) -> None:
-        config = _config()
+        teardown = taac_types.Task(
+            task_name="failing-cleanup", params=taac_types.Params()
+        )
+        config = _config(primary_teardown_tasks=[teardown])
         logger = logging.getLogger("taac-fallback-task-failure-test")
         logger.setLevel(logging.INFO)
         runner = TaacRunner(config, logger=logger)
@@ -710,6 +718,36 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "task cleanup failed"):
             await runner.async_test_tearDown()
 
+        runner.test_setup_orchestrator.async_tearDown.assert_awaited_once()
+
+    async def test_teardown_attempts_later_tasks_after_an_earlier_failure(
+        self,
+    ) -> None:
+        first = taac_types.Task(
+            task_name="first-cleanup", params=taac_types.Params()
+        )
+        second = taac_types.Task(
+            task_name="second-cleanup", params=taac_types.Params()
+        )
+        config = _config(primary_teardown_tasks=[first, second])
+        runner = TaacRunner(config)
+        runner.selected_ixia_candidate = runner.ixia_candidates[0]
+        runner.run_tasks = AsyncMock(
+            side_effect=[RuntimeError("first cleanup failed"), None]
+        )
+        runner.test_setup_orchestrator.async_tearDown = AsyncMock()
+        summary = MagicMock()
+        summary.start_section.return_value = MagicMock()
+        summary.sections = []
+        summary.async_upload_and_log_summary = AsyncMock()
+        runner.test_summary = summary
+
+        with self.assertRaisesRegex(RuntimeError, "first cleanup failed"):
+            await runner.async_test_tearDown()
+
+        self.assertEqual(runner.run_tasks.await_count, 2)
+        self.assertEqual(runner.run_tasks.await_args_list[0].args[0], (first,))
+        self.assertEqual(runner.run_tasks.await_args_list[1].args[0], (second,))
         runner.test_setup_orchestrator.async_tearDown.assert_awaited_once()
 
     async def test_setup_only_strict_teardown_failure_fails_run(self) -> None:

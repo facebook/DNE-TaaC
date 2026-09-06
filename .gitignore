@@ -5,3 +5,13 @@ build/
 # getdeps scratch / CMake build output
 __pycache__/
 *.pyc
+
+# Local TAAC environment profiles and secrets. Commit only redacted
+# `*.example` templates; keep real lab addresses and credentials local.
+*.local.env
+*.secrets.env
+*.secrets.json
+
+# Adopter-owned topology, profiles, and credentials used by local OSS runs.
+# Templates live under examples/; the populated copies never belong in Git.
+/.taac/
