@@ -1,10 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
-"""RBB SRv6 encap/decap counter-delta task (gate S25).
+"""RBB SRv6-path counter-delta task (gate S25).
 
-Proves the data plane actually SRv6-encapsulated (R1) and decapsulated (R2) the
-traffic that crossed the core, by asserting a real INCREASE in the relevant
-counter across a traffic window — not just that a counter exists.
+Asserts a real counter INCREASE across the traffic window, rather than merely
+checking that a counter exists. The portable defaults measure the selected
+core-egress and tail-edge path. Platforms with per-SRv6-object counters should
+provide those through the documented command/regex overrides for strict
+encapsulation/decapsulation evidence.
 
 Two-phase, keyed by ``hostname:direction`` in the task's shared-data namespace
 so a snapshot taken before traffic and an assert taken after traffic compare the
@@ -13,7 +15,9 @@ same counter on the same box:
 * ``action="snapshot"`` — read the counter, store the baseline value.
 * ``action="assert"``   — read the counter again, compute ``now - baseline`` and
   raise ``TestCaseFailure`` (a FAIL verdict) when the delta is below
-  ``min_delta`` (default 1), i.e. no encap/decap happened.
+  ``min_delta`` (default 1), i.e. no traffic crossed the selected measured
+  path. With platform-specific SRv6-object overrides, the same result is strict
+  encap/decap evidence.
 
 The exact counter CLI + the integer-extraction regex are scenario-supplied
 (``counter_cmd`` / ``counter_regex``; see ``bgp_rbb_scenario_profiles``) so the
@@ -33,18 +37,9 @@ from taac.utils.oss_taac_lib_utils import ConsoleFileLogger
 _SNAPSHOT = "snapshot"
 _ASSERT = "assert"
 
-# Process-local baseline cache keyed by ``hostname:direction``. The RUN_TASK_STEP
-# runner constructs a fresh task instance per step and does NOT thread the
-# playbook ``shared_data`` through ``run_task`` (see steps.RunTaskStep), so the
-# per-instance ``self._data`` from one step is invisible to the next. The
-# snapshot and assert steps run sequentially (blocking, awaited) in the same
-# playbook process, so a module-level dict reliably carries the baseline between
-# them regardless of the shared-data plumbing.
-_BASELINE_CACHE: t.Dict[str, int] = {}
-
 
 class RbbSrv6CounterDeltaTask(BaseTask):
-    """Snapshot/assert an SRv6 encap or decap counter delta on one DUT."""
+    """Snapshot/assert a selected path or SRv6-object counter on one DUT."""
 
     # pyre-ignore[15]
     NAME: str = "rbb_srv6_counter_delta"
@@ -59,8 +54,8 @@ class RbbSrv6CounterDeltaTask(BaseTask):
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    def _extract(self, output: str, regex: str) -> int:
-        """Sum every integer captured by ``regex`` in ``output`` (0 if none)."""
+    def _extract(self, output: str, regex: str) -> t.Optional[int]:
+        """Sum every captured integer, or return ``None`` when none matched."""
         total = 0
         found = False
         for m in re.finditer(regex, output):
@@ -69,7 +64,7 @@ class RbbSrv6CounterDeltaTask(BaseTask):
                 found = True
             except (IndexError, ValueError):
                 continue
-        return total if found else 0
+        return total if found else None
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """Snapshot or assert an SRv6 counter delta.
@@ -101,24 +96,30 @@ class RbbSrv6CounterDeltaTask(BaseTask):
         direction = params.get("direction", "srv6")
         gate = params.get("gate", "rbb_srv6_counter_delta")
         key = f"{hostname}:{direction}"
+        min_delta = int(params.get("min_delta", 1))
+        if action == _ASSERT and min_delta < 1:
+            raise ValueError(
+                "rbb_srv6_counter_delta 'min_delta' must be at least 1 for "
+                f"an assert action, got {min_delta}"
+            )
 
         driver = await async_get_device_driver(hostname)
         output = await driver.async_run_cmd_on_shell(counter_cmd) or ""
         value = self._extract(output, counter_regex)
+        if value is None:
+            raise TestCaseFailure(
+                f"[{gate}] counter regex did not match output on {hostname}: "
+                f"{counter_regex!r}"
+            )
 
         if action == _SNAPSHOT:
-            _BASELINE_CACHE[key] = value
-            # Also mirror into the task shared-data view for parity when present.
             self._data[key] = value
             self.logger.info(
                 f"{hostname} -- [{gate}] {direction} counter baseline={value}"
             )
             return
 
-        min_delta = int(params.get("min_delta", 1))
-        if key in _BASELINE_CACHE:
-            baseline = _BASELINE_CACHE[key]
-        elif key in self._data:
+        if key in self._data:
             baseline = self._data[key]
         else:
             baseline = None
@@ -134,7 +135,7 @@ class RbbSrv6CounterDeltaTask(BaseTask):
         )
         if delta < min_delta:
             raise TestCaseFailure(
-                f"[{gate}] SRv6 {direction} counter delta on {hostname} was "
+                f"[{gate}] selected {direction}-path counter delta on {hostname} was "
                 f"{delta} (< required {min_delta}); expected traffic to "
                 f"{direction} across the core"
             )

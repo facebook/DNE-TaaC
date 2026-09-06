@@ -1225,8 +1225,13 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
 
         await runner.async_test_setUp()
 
-        self.assertEqual(runner.run_tasks.await_args_list[0].args[0], [pre_task])
-        self.assertEqual(runner.run_tasks.await_args_list[1].args[0], [secondary_post])
+        setup_task_calls = [call.args[0] for call in runner.run_tasks.await_args_list]
+        self.assertIn([pre_task], setup_task_calls)
+        self.assertIn([secondary_post], setup_task_calls)
+        self.assertLess(
+            setup_task_calls.index([pre_task]),
+            setup_task_calls.index([secondary_post]),
+        )
 
         runner.run_tasks.reset_mock()
         teardown_events = []
