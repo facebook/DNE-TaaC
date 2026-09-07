@@ -56,8 +56,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--secrets-file",
         help=(
             "Path to an OSS TAAC JSON credentials file. The supported schema "
-            "contains common DUT and IXIA username/password fields. The file "
-            "must not be accessible by group or other users (chmod 600)."
+            "contains shared or hostname-specific DUT credentials and common "
+            "IXIA username/password fields. The file must not be accessible "
+            "by group or other users (chmod 600)."
         ),
     )
 

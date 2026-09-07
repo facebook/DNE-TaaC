@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from taac.runner.oss_exceptions import OSSConfigError
-from taac.runner.oss_secrets import load_oss_secrets
+from taac.runner.oss_secrets import get_oss_dut_credentials, load_oss_secrets
 
 
 _MAX_INPUT_BYTES = 1024 * 1024
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CREDENTIAL_ENV_NAMES = {
+    "_TAAC_OSS_DUT_HOST_CREDENTIALS",
     "TAAC_SSH_USER",
     "TAAC_SSH_PASSWORD",
     "TAAC_IXIA_USERNAME",
@@ -124,6 +125,29 @@ def _require_values(names: Iterable[str]) -> None:
     missing = sorted(name for name in names if not os.environ.get(name, "").strip())
     if missing:
         raise OSSConfigError("Missing required setting(s): " + ", ".join(missing))
+
+
+def _validate_dut_credentials(
+    hostnames: Iterable[str], setup_option: str = ""
+) -> None:
+    for hostname in hostnames:
+        username, password = get_oss_dut_credentials(hostname)
+        missing = []
+        if not username or not username.strip():
+            missing.append("username")
+        if not password:
+            missing.append("password")
+        if missing:
+            raise OSSConfigError(
+                f"Missing DUT SSH {', '.join(missing)} for configured DUT "
+                f"'{hostname}'"
+            )
+        if setup_option and username.strip() != "root":
+            raise OSSConfigError(
+                f"{setup_option} requires dut.username 'root' for every DUT "
+                "because it writes system configuration and does not use a "
+                f"sudo wrapper; credential for '{hostname}' is not root"
+            )
 
 
 def _is_endpoint_placeholder(value: str) -> bool:
@@ -242,8 +266,6 @@ def run_preflight(
     required = {
         "TAAC_RBB_R1_HOST",
         "TAAC_RBB_R2_HOST",
-        "TAAC_SSH_USER",
-        "TAAC_SSH_PASSWORD",
     }
     if with_traffic:
         required.update(
@@ -265,15 +287,6 @@ def run_preflight(
         raise OSSConfigError(
             "fresh-image traffic requires --setup-dut-edges"
         )
-    if (setup_duts or setup_dut_edges) and os.environ[
-        "TAAC_SSH_USER"
-    ].strip() != "root":
-        setup_option = "--setup-duts" if setup_duts else "--setup-dut-edges"
-        raise OSSConfigError(
-            f"{setup_option} requires dut.username 'root' because it writes "
-            "system configuration and does not use a sudo wrapper"
-        )
-
     r1_host = os.environ["TAAC_RBB_R1_HOST"].strip()
     r2_host = os.environ["TAAC_RBB_R2_HOST"].strip()
     if r1_host.lower() == r2_host.lower():
@@ -284,6 +297,11 @@ def run_preflight(
     ):
         if _is_endpoint_placeholder(value):
             raise OSSConfigError(f"Replace the placeholder value for {name}")
+
+    setup_option = ""
+    if setup_duts or setup_dut_edges:
+        setup_option = "--setup-duts" if setup_duts else "--setup-dut-edges"
+    _validate_dut_credentials((r1_host, r2_host), setup_option)
 
     if with_traffic:
         for name in ("TAAC_RBB_IXIA_CHASSIS", "TAAC_IXIA_API_SERVER"):
