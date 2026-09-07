@@ -107,6 +107,9 @@ from taac.health_checks.device_health_checks.openr_fib_validate_health_check imp
 from taac.health_checks.device_health_checks.openr_initialized_health_check import (
     OpenrInitializedHealthCheck,
 )
+from taac.health_checks.device_health_checks.openr_kvstore_keys_health_check import (
+    OpenrKvstoreKeysHealthCheck,
+)
 from taac.health_checks.device_health_checks.openr_overload_state_health_check import (
     OpenrOverloadStateHealthCheck,
 )
@@ -285,6 +288,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     OpenrFibValidateHealthCheck,
     OpenrOverloadStateHealthCheck,
     OpenrKvstoreConsistencyHealthCheck,
+    OpenrKvstoreKeysHealthCheck,
     AristaFbossNextHopValidityHealthCheck,
     PortChannelExpectedStateHealthCheck,
     # TmReconciliationFiringHealthCheck,  # ODS-dependent (taac.internal), excluded in OSS

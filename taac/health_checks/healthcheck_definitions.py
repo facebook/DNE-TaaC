@@ -253,6 +253,85 @@ def create_openr_spark_neighbor_check(
     )
 
 
+def create_openr_kvstore_keys_check(
+    expected_nodes: t.Optional[t.List[str]] = None,
+    prefixes_per_node: t.Optional[int] = None,
+    area: t.Optional[str] = None,
+    device_names: t.Optional[t.List[str]] = None,
+    expected_nodes_jq_var: t.Optional[str] = None,
+    prefixes_per_node_jq_var: t.Optional[str] = None,
+    check_id: t.Optional[str] = None,
+    check_scope: t.Optional["hc_types.Scope"] = None,
+    retry_count: t.Optional[int] = None,
+    retry_delay_seconds: t.Optional[float] = None,
+    retry_delay_multiplier: t.Optional[float] = None,
+) -> PointInTimeHealthCheck:
+    """OPENR_KVSTORE_KEYS_CHECK — asserts specific injected KvStore keys exist.
+
+    For each expected synthetic node the check asserts that ``adj:<node>`` is
+    present and that exactly ``prefixes_per_node`` keys match
+    ``prefix:<node>:``. Scoping to the injected node names is what makes the
+    assertion immune to the DUT's own real keys: a lab box already holds
+    thousands of genuine ``prefix:`` keys, so a total-based count is satisfied
+    by real traffic alone.
+
+    Both expectations are normally sourced from the Open/R scale injection
+    step, which derives the node list from the same topology flags it passes to
+    the injector. A check with neither FAILs rather than skipping.
+
+    Args:
+        expected_nodes: synthetic node names that must be present. A static
+            value here overrides ``expected_nodes_jq_var``.
+        prefixes_per_node: exact number of ``prefix:`` keys per expected node,
+            i.e. the injector's ``num_prefixes_per_node``.
+        area: restrict the audit to one KvStore area. Default: all areas.
+        device_names: restrict the check to these devices. Device health checks
+            run across the whole topology, so a DUT + helper rig must scope the
+            assertion to the DUT.
+        expected_nodes_jq_var / prefixes_per_node_jq_var: jq variables holding
+            the expectations published by the injection step. This is the
+            shipped wiring.
+        retry_count: retries after the initial attempt when the check FAILs.
+            KvStore flooding settles asynchronously, so a short retry is
+            usually appropriate here.
+    """
+    json_payload: t.Dict[str, t.Any] = {}
+    for key, value in (
+        ("expected_nodes", expected_nodes),
+        ("prefixes_per_node", prefixes_per_node),
+        ("area", area),
+        ("device_names", device_names),
+        ("retry_count", retry_count),
+        ("retry_delay_seconds", retry_delay_seconds),
+        ("retry_delay_multiplier", retry_delay_multiplier),
+    ):
+        if value is not None:
+            json_payload[key] = value
+
+    jq_params: t.Dict[str, str] = {}
+    for key, jq_var in (
+        ("expected_nodes", expected_nodes_jq_var),
+        ("prefixes_per_node", prefixes_per_node_jq_var),
+    ):
+        # A static expectation wins over the jq-sourced one so a run can
+        # deliberately tighten the gate without rewiring the injection step.
+        if jq_var is not None and key not in json_payload:
+            jq_params[key] = f".{jq_var}"
+
+    check_params = None
+    if json_payload or jq_params:
+        check_params = Params(
+            json_params=json.dumps(json_payload) if json_payload else None,
+            jq_params=jq_params or None,
+        )
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.OPENR_KVSTORE_KEYS_CHECK,
+        check_params=check_params,
+        check_id=check_id,
+        check_scope=check_scope,
+    )
+
+
 def create_bgp_rib_fib_consistency_check(
     extra_json_params: t.Optional[t.Dict[str, t.Any]] = None,
     check_id: t.Optional[str] = None,
