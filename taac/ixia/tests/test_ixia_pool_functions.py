@@ -5,7 +5,38 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from ixia.ixia import types as ixia_types
-from taac.ixia.ixia import Ixia
+from taac.ixia.ixia import (
+    BgpIpv6Peer,
+    Ipv4PrefixPools,
+    Ipv6PrefixPools,
+    Ixia,
+    _is_ipv4_prefix_pool,
+    _is_ipv6_bgp_peer,
+)
+
+
+class TestPublicRestpyTypeCompatibility(unittest.TestCase):
+    def test_runtime_compatibility_symbols_remain_importable(self) -> None:
+        public_v4 = type("Ipv4PrefixPools", (), {})()
+        public_v6 = type("Ipv6PrefixPools", (), {})()
+        public_peer = type("BgpIpv6Peer", (), {})()
+        self.assertIsInstance(public_v4, Ipv4PrefixPools)
+        self.assertIsInstance(public_v6, Ipv6PrefixPools)
+        self.assertIsInstance(public_peer, BgpIpv6Peer)
+
+    def test_hashed_public_prefix_pool_modules_are_identified_by_class(self) -> None:
+        public_v4 = type("Ipv4PrefixPools", (), {})()
+        public_v6 = type("Ipv6PrefixPools", (), {})()
+        self.assertTrue(_is_ipv4_prefix_pool(public_v4))
+        self.assertFalse(_is_ipv4_prefix_pool(public_v6))
+
+    def test_unknown_prefix_pool_fails_closed(self) -> None:
+        with self.assertRaisesRegex(TypeError, "unsupported RESTPy prefix-pool"):
+            _is_ipv4_prefix_pool(type("UnknownPrefixPool", (), {})())
+
+    def test_hashed_public_ipv6_peer_module_is_identified_by_class(self) -> None:
+        public_peer = type("BgpIpv6Peer", (), {})()
+        self.assertTrue(_is_ipv6_bgp_peer(public_peer))
 
 
 class _MultiValue:

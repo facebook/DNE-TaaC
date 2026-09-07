@@ -9748,9 +9748,22 @@ class RunTaskStep(StepBase[taac_types.RunTaskInput]):
         task = input.task
         dict_params = self.parameter_evaluator.evaluate(task.params)
         if input.blocking:
-            await run_task(task, dict_params, self.ixia, self.logger)
+            await run_task(
+                task,
+                dict_params,
+                self.ixia,
+                self.logger,
+                self.shared_data,
+            )
         else:
-            run_in_thread(run_task, task, dict_params, self.ixia, self.logger)
+            run_in_thread(
+                run_task,
+                task,
+                dict_params,
+                self.ixia,
+                self.logger,
+                self.shared_data,
+            )
 
 
 _PERCENT_ECMP_MEMBERS_VALID_BGP = 0.25

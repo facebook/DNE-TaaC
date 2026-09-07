@@ -24,6 +24,9 @@ SSH auth configured via environment variables:
   TAAC_SSH_KEY      — path to SSH private key (default: ~/.ssh/id_rsa)
   TAAC_SSH_USER     — SSH username (default: root)
   TAAC_SSH_PASSWORD — SSH password (optional, for password-based auth)
+
+The OSS secrets loader can additionally supply hostname-specific username and
+password values. Explicit constructor arguments still take precedence.
 """
 
 import asyncio
@@ -52,13 +55,27 @@ def _get_ssh_key_path() -> t.Optional[str]:
     return None
 
 
-def _get_ssh_username(override: t.Optional[str] = None) -> str:
+def _get_ssh_username(
+    override: t.Optional[str] = None, hostname: str = ""
+) -> str:
     if override:
         return override
+    if hostname:
+        from taac.runner.oss_secrets import get_oss_dut_credentials
+
+        username, _ = get_oss_dut_credentials(hostname)
+        if username:
+            return username
     return os.environ.get("TAAC_SSH_USER", "root")
 
 
-def _get_ssh_password() -> t.Optional[str]:
+def _get_ssh_password(hostname: str = "") -> t.Optional[str]:
+    if hostname:
+        from taac.runner.oss_secrets import get_oss_dut_credentials
+
+        _, password = get_oss_dut_credentials(hostname)
+        if password:
+            return password
     return os.environ.get("TAAC_SSH_PASSWORD")
 
 
@@ -108,8 +125,8 @@ class AsyncSSHClient:
             self._hostname = str(ssh_entity)
 
         self._port = port
-        self._username = _get_ssh_username(username)
-        self._password = password or _get_ssh_password()
+        self._username = _get_ssh_username(username, self._hostname)
+        self._password = password or _get_ssh_password(self._hostname)
         self._password_list = password_list or []
         self._timeout = timeout
         self._conn = None
@@ -350,8 +367,8 @@ class ParamikoClient:
             self._hostname = str(ssh_entity)
 
         self._port = port
-        self._username = _get_ssh_username(username)
-        self._password = password or _get_ssh_password()
+        self._username = _get_ssh_username(username, self._hostname)
+        self._password = password or _get_ssh_password(self._hostname)
         self._password_list = password_list or []
         self._timeout = timeout or _DEFAULT_CONNECT_TIMEOUT_SEC
         self._client = None

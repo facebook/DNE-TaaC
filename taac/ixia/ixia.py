@@ -426,31 +426,45 @@ def _apply_and_verify_device_group_toggle(
         )
 
 
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
-    BgpIpv6Peer as IxnBgpIpv6Peer,
-)
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
-    BgpIpv6Peer as UhdBgpIpv6Peer,
-)
+class _RestPyClassName(type):
+    """Version-neutral ``isinstance`` adapter for generated RESTPy classes."""
 
-BgpIpv6Peer = t.Union[IxnBgpIpv6Peer, UhdBgpIpv6Peer]
+    def __instancecheck__(cls, instance: t.Any) -> bool:
+        return type(instance).__name__.lower() == cls.restpy_class_name
 
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
-    Ipv4PrefixPools as IxnIpv4PrefixPools,
-)
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
-    Ipv4PrefixPools as UhdIpv4PrefixPools,
-)
 
-Ipv4PrefixPools = t.Union[IxnIpv4PrefixPools, UhdIpv4PrefixPools]
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
-    Ipv6PrefixPools as IxnIpv6PrefixPools,
-)
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
-    Ipv6PrefixPools as UhdIpv6PrefixPools,
-)
+class Ipv4PrefixPools(metaclass=_RestPyClassName):
+    """Runtime protocol for public/internal RESTPy IPv4 prefix-pool objects."""
 
-Ipv6PrefixPools = t.Union[IxnIpv6PrefixPools, UhdIpv6PrefixPools]
+    restpy_class_name = "ipv4prefixpools"
+
+
+class Ipv6PrefixPools(metaclass=_RestPyClassName):
+    """Runtime protocol for public/internal RESTPy IPv6 prefix-pool objects."""
+
+    restpy_class_name = "ipv6prefixpools"
+
+
+class BgpIpv6Peer(metaclass=_RestPyClassName):
+    """Runtime protocol for public/internal RESTPy IPv6 BGP-peer objects."""
+
+    restpy_class_name = "bgpipv6peer"
+
+
+def _is_ipv4_prefix_pool(prefix_pool: t.Any) -> bool:
+    """Identify a RESTPy prefix pool across public/internal module hashes."""
+    if isinstance(prefix_pool, Ipv4PrefixPools):
+        return True
+    if isinstance(prefix_pool, Ipv6PrefixPools):
+        return False
+    raise TypeError(
+        f"unsupported RESTPy prefix-pool object {type(prefix_pool).__name__}"
+    )
+
+
+def _is_ipv6_bgp_peer(peer: t.Any) -> bool:
+    """Identify a RESTPy IPv6 BGP peer across public/internal module hashes."""
+    return isinstance(peer, BgpIpv6Peer)
 
 
 if t.TYPE_CHECKING:
@@ -518,6 +532,27 @@ if t.TYPE_CHECKING:
         BgpIpv4Peer as UhdBgpIpv4Peer,
     )
     BgpIpv4Peer = t.Union[IxnBgpIpv4Peer, UhdBgpIpv4Peer]
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
+        BgpIpv6Peer as IxnBgpIpv6Peer,
+    )
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
+        BgpIpv6Peer as UhdBgpIpv6Peer,
+    )
+    BgpIpv6Peer = t.Union[IxnBgpIpv6Peer, UhdBgpIpv6Peer]
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
+        Ipv4PrefixPools as IxnIpv4PrefixPools,
+    )
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
+        Ipv4PrefixPools as UhdIpv4PrefixPools,
+    )
+    Ipv4PrefixPools = t.Union[IxnIpv4PrefixPools, UhdIpv4PrefixPools]
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
+        Ipv6PrefixPools as IxnIpv6PrefixPools,
+    )
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
+        Ipv6PrefixPools as UhdIpv6PrefixPools,
+    )
+    Ipv6PrefixPools = t.Union[IxnIpv6PrefixPools, UhdIpv6PrefixPools]
     from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpiprouteproperty_3dbf4edca5d6573869a4ee79cda6644b import (
         BgpIPRouteProperty as IxnBgpIPRouteProperty,
     )
@@ -3617,9 +3652,9 @@ class Ixia:
 
             # fmt: off
             # BgpIpv4Peer does not have the Next Hop Encoding capability
-            elif capability == ixia_types.BgpCapability.NHEncodingCapabilities and (
-                isinstance(bgp_peer_obj, IxnBgpIpv6Peer)
-                or isinstance(bgp_peer_obj, UhdBgpIpv6Peer)
+            elif (
+                capability == ixia_types.BgpCapability.NHEncodingCapabilities
+                and _is_ipv6_bgp_peer(bgp_peer_obj)
             ):
                 bgp_cap_obj_map[capability] = (
                     bgp_peer_obj.CapabilityNHEncodingCapabilities
@@ -4374,7 +4409,7 @@ class Ixia:
         for prefix_pool in prefix_pools:
             bgp_ip_route_property: "BgpIPRouteProperty" = (
                 (prefix_pool.BgpIPRouteProperty.find())
-                if isinstance(prefix_pool, Ipv4PrefixPools)
+                if _is_ipv4_prefix_pool(prefix_pool)
                 else prefix_pool.BgpV6IPRouteProperty.find()
             )[0]
             bgp_ip_route_property.EnableFlapping.Single(value=is_flap)
@@ -4834,7 +4869,7 @@ class Ixia:
         for prefix_pool in prefix_pools:
             bgp_ip_route_property: "BgpIPRouteProperty" = (
                 (prefix_pool.BgpIPRouteProperty.find())
-                if isinstance(prefix_pool, Ipv4PrefixPools)
+                if _is_ipv4_prefix_pool(prefix_pool)
                 else prefix_pool.BgpV6IPRouteProperty.find()
             )[0]
             if enable is not None:
@@ -4918,7 +4953,7 @@ class Ixia:
             if enable is not None:
                 bgp_ip_route_property: "BgpIPRouteProperty" = (
                     (prefix_pool.BgpIPRouteProperty.find())
-                    if isinstance(prefix_pool, Ipv4PrefixPools)
+                    if _is_ipv4_prefix_pool(prefix_pool)
                     else prefix_pool.BgpV6IPRouteProperty.find()
                 )[0]
                 # Resolved per pool: assigning back to session_end_idx would
@@ -7495,7 +7530,7 @@ class Ixia:
         for prefix_pool in prefix_pools:
             bgp_ip_route_property: "BgpIPRouteProperty" = (
                 (prefix_pool.BgpIPRouteProperty.find())
-                if isinstance(prefix_pool, Ipv4PrefixPools)
+                if _is_ipv4_prefix_pool(prefix_pool)
                 else prefix_pool.BgpV6IPRouteProperty.find()
             )[0]
 
@@ -10491,7 +10526,7 @@ class Ixia:
         ipv6_prefix_pool_to_network_group_map, ipv4_prefix_pool_to_network_group_map = (
             self.map_prefix_pools_to_network_groups()
         )
-        if isinstance(prefix_pool_obj, Ipv4PrefixPools):
+        if _is_ipv4_prefix_pool(prefix_pool_obj):
             return ipv4_prefix_pool_to_network_group_map[prefix_pool_obj.Name]
         else:
             return ipv6_prefix_pool_to_network_group_map[prefix_pool_obj.Name]
@@ -10532,7 +10567,7 @@ class Ixia:
         ipv6_prefix_pool_to_device_group_map, ipv4_prefix_pool_to_device_group_map = (
             self.map_prefix_pools_to_device_groups()
         )
-        if isinstance(prefix_pool_obj, Ipv4PrefixPools):
+        if _is_ipv4_prefix_pool(prefix_pool_obj):
             return ipv4_prefix_pool_to_device_group_map[prefix_pool_obj.Name]
         else:
             return ipv6_prefix_pool_to_device_group_map[prefix_pool_obj.Name]
@@ -10541,7 +10576,7 @@ class Ixia:
         self, prefix_pool_obj: t.Union["Ipv4PrefixPools", "Ipv6PrefixPools"]
     ) -> t.Union["BgpIpv4Peer", "BgpIpv6Peer"]:
         device_group_obj = self.map_prefix_pool_to_device_group(prefix_pool_obj)
-        if isinstance(prefix_pool_obj, Ipv4PrefixPools):
+        if _is_ipv4_prefix_pool(prefix_pool_obj):
             return device_group_obj.Ethernet.find().Ipv4.find().BgpIpv4Peer.find()
         else:
             return device_group_obj.Ethernet.find().Ipv6.find().BgpIpv6Peer.find()
