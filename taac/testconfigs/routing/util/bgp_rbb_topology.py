@@ -23,7 +23,7 @@ generic ``bgp_rbb_constants`` defaults) and are matched against the CSV
 hostnames. When no circuit CSV is supplied, read-only factory inspection may use
 generic documentation-only placeholder wiring. Live traffic requires an
 explicit, complete CSV. No secrets are read here (credentials stay in
-``TAAC_SSH_*`` at run time).
+the private secrets loader or ``TAAC_SSH_*`` overrides at run time).
 """
 
 from __future__ import annotations

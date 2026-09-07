@@ -121,6 +121,13 @@ class TestRbbPreflight(TestCase):
             encoding="utf-8",
         )
 
+    def _replace_dut_credentials(self, dut_credentials) -> None:
+        secrets_path = self.config_dir / "secrets.json"
+        secrets = json.loads(secrets_path.read_text(encoding="utf-8"))
+        secrets["dut"] = dut_credentials
+        secrets_path.write_text(json.dumps(secrets), encoding="utf-8")
+        secrets_path.chmod(0o600)
+
     def test_init_creates_private_templates_without_overwriting(self) -> None:
         result = self._run_init()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -191,6 +198,54 @@ class TestRbbPreflight(TestCase):
         self.assertIn("live IXIA traffic", result.stdout)
         self.assertNotIn("ixia-secret", result.stdout + result.stderr)
 
+    def test_check_accepts_distinct_per_host_dut_credentials(self) -> None:
+        self._write_valid_config()
+        self._replace_dut_credentials(
+            {
+                "username": "",
+                "password": "",
+                "hosts": {
+                    "rbb-r1.lab.local": {
+                        "username": "r1-user",
+                        "password": "r1-secret",
+                    },
+                    "rbb-r2.lab.local": {
+                        "username": "r2-user",
+                        "password": "r2-secret",
+                    },
+                },
+            }
+        )
+
+        result = self._run_check(with_traffic=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("r1-secret", result.stdout + result.stderr)
+        self.assertNotIn("r2-secret", result.stdout + result.stderr)
+
+    def test_check_rejects_missing_effective_per_host_credential(self) -> None:
+        self._write_valid_config(ixia_credentials=False)
+        self._replace_dut_credentials(
+            {
+                "username": "",
+                "password": "",
+                "hosts": {
+                    "rbb-r1.lab.local": {
+                        "username": "r1-user",
+                        "password": "r1-secret",
+                    },
+                    "rbb-r2.lab.local": {"username": "r2-user"},
+                },
+            }
+        )
+
+        result = self._run_check()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("password", result.stderr)
+        self.assertIn("rbb-r2.lab.local", result.stderr)
+        self.assertNotIn("r1-secret", result.stdout + result.stderr)
+
     def test_check_rejects_ixia_prefix_with_host_bits(self) -> None:
         self._write_valid_config()
         profile = self.config_dir / "rbb.env"
@@ -231,6 +286,50 @@ class TestRbbPreflight(TestCase):
         result = self._run_check(setup_duts=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("requires dut.username 'root'", result.stderr)
+
+    def test_bootstrap_accepts_distinct_root_credentials(self) -> None:
+        self._write_valid_config(ixia_credentials=False)
+        self._replace_dut_credentials(
+            {
+                "username": "",
+                "password": "",
+                "hosts": {
+                    "rbb-r1.lab.local": {
+                        "username": "root",
+                        "password": "r1-secret",
+                    },
+                    "rbb-r2.lab.local": {
+                        "username": "root",
+                        "password": "r2-secret",
+                    },
+                },
+            }
+        )
+
+        result = self._run_check(setup_duts=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("r1-secret", result.stdout + result.stderr)
+        self.assertNotIn("r2-secret", result.stdout + result.stderr)
+
+    def test_bootstrap_rejects_non_root_per_host_credential(self) -> None:
+        self._write_valid_config(ixia_credentials=False)
+        self._replace_dut_credentials(
+            {
+                "username": "root",
+                "password": "shared-secret",
+                "hosts": {
+                    "rbb-r2.lab.local": {"username": "operator"},
+                },
+            }
+        )
+
+        result = self._run_check(setup_duts=True)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requires dut.username 'root'", result.stderr)
+        self.assertIn("rbb-r2.lab.local", result.stderr)
+        self.assertNotIn("shared-secret", result.stdout + result.stderr)
 
     def test_edge_setup_rejects_non_root_credential_before_device_contact(self) -> None:
         self._write_valid_config()

@@ -13,7 +13,7 @@ import json
 import os
 import stat
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from taac.runner.oss_exceptions import OSSConfigError
 
@@ -26,6 +26,51 @@ _FIELD_TO_ENV: Dict[Tuple[str, str], str] = {
     ("ixia", "username"): "TAAC_IXIA_USERNAME",
     ("ixia", "password"): "TAAC_IXIA_PASSWORD",
 }
+_CREDENTIAL_FIELDS = ("username", "password")
+_DUT_HOST_CREDENTIALS_ENV = "_TAAC_OSS_DUT_HOST_CREDENTIALS"
+
+
+def _normalize_dut_hostname(hostname: str) -> str:
+    """Normalize a DUT lookup key without changing addresses or aliases."""
+
+    return hostname.strip().lower().rstrip(".")
+
+
+def get_oss_dut_credentials(
+    hostname: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return the effective SSH username/password for *hostname*.
+
+    Explicit ``TAAC_SSH_*`` environment variables retain their existing
+    highest-precedence behavior. Otherwise, a non-empty per-host value wins
+    over the shared ``dut`` value loaded into that environment variable. A
+    per-host entry may override only one field and inherit the other.
+
+    The lookup is deliberately exact apart from DNS case and a trailing dot.
+    Keys under ``dut.hosts`` should therefore match the values passed through
+    ``--dut`` (for RBB, ``TAAC_RBB_R1_HOST`` / ``TAAC_RBB_R2_HOST``).
+    """
+
+    try:
+        credentials_by_host = json.loads(
+            os.environ.get(_DUT_HOST_CREDENTIALS_ENV, "{}")
+        )
+    except (TypeError, json.JSONDecodeError):
+        credentials_by_host = {}
+    if not isinstance(credentials_by_host, dict):
+        credentials_by_host = {}
+    credentials = credentials_by_host.get(_normalize_dut_hostname(hostname), {})
+    if not isinstance(credentials, dict):
+        credentials = {}
+
+    def effective(field: str, env_name: str) -> Optional[str]:
+        environment_value = os.environ.get(env_name) or None
+        return credentials.get(field) or environment_value
+
+    return (
+        effective("username", "TAAC_SSH_USER"),
+        effective("password", "TAAC_SSH_PASSWORD"),
+    )
 
 
 def _object_without_duplicate_keys(
@@ -85,8 +130,10 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
 
     Non-empty values from the file are applied with ``setdefault`` so an
     explicitly exported environment variable remains the highest-precedence
-    one-run override. The returned set contains environment-variable names,
-    never their values.
+    one-run override. Per-host DUT credentials are stored in a private worker
+    environment value and selected by the SSH clients using their destination
+    hostname. The returned set contains public environment-variable names,
+    never secret values or hostnames.
     """
 
     path = Path(secrets_file).expanduser()
@@ -105,6 +152,9 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
             f"Secrets file '{path}' must set integer version={_SCHEMA_VERSION}"
         )
 
+    # Parse and validate the complete document before changing process state.
+    parsed_fields: Dict[Tuple[str, str], str] = {}
+    parsed_host_credentials: Dict[str, Dict[str, str]] = {}
     populated: Set[str] = set()
     for section_name in ("dut", "ixia"):
         section = data.get(section_name, {})
@@ -113,9 +163,11 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
                 f"Secrets file '{path}' field '{section_name}' must be an object"
             )
 
-        allowed_fields = {
+        allowed_fields: Set[str] = {
             field for section_key, field in _FIELD_TO_ENV if section_key == section_name
         }
+        if section_name == "dut":
+            allowed_fields.add("hosts")
         unknown_fields = sorted(set(section) - allowed_fields)
         if unknown_fields:
             raise OSSConfigError(
@@ -123,7 +175,7 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
                 "field(s)"
             )
 
-        for field_name in allowed_fields:
+        for field_name in _CREDENTIAL_FIELDS:
             value = section.get(field_name, "")
             if not isinstance(value, str):
                 raise OSSConfigError(
@@ -135,10 +187,76 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
                     f"Secrets file '{path}' field "
                     f"'{section_name}.{field_name}' must not contain a NUL byte"
                 )
-            if not value:
-                continue
-            env_name = _FIELD_TO_ENV[(section_name, field_name)]
-            os.environ.setdefault(env_name, value)
-            populated.add(env_name)
+            parsed_fields[(section_name, field_name)] = value
+
+    dut_section = data.get("dut", {})
+    assert isinstance(dut_section, dict)
+    hosts = dut_section.get("hosts", {})
+    if not isinstance(hosts, dict):
+        raise OSSConfigError(
+            f"Secrets file '{path}' field 'dut.hosts' must be an object"
+        )
+    for hostname, credentials in hosts.items():
+        normalized_hostname = _normalize_dut_hostname(hostname)
+        if not normalized_hostname:
+            raise OSSConfigError(
+                f"Secrets file '{path}' contains an empty dut.hosts key"
+            )
+        if normalized_hostname in parsed_host_credentials:
+            raise OSSConfigError(
+                f"Secrets file '{path}' contains duplicate normalized DUT host keys"
+            )
+        if not isinstance(credentials, dict):
+            raise OSSConfigError(
+                f"Secrets file '{path}' contains a non-object dut.hosts entry"
+            )
+        unknown_fields = sorted(set(credentials) - set(_CREDENTIAL_FIELDS))
+        if unknown_fields:
+            raise OSSConfigError(
+                f"Secrets file '{path}' contains unsupported dut.hosts field(s)"
+            )
+        parsed_credentials: Dict[str, str] = {}
+        for field_name in _CREDENTIAL_FIELDS:
+            value = credentials.get(field_name, "")
+            if not isinstance(value, str):
+                raise OSSConfigError(
+                    f"Secrets file '{path}' contains a non-string dut.hosts "
+                    f"credential field"
+                )
+            if "\x00" in value:
+                raise OSSConfigError(
+                    f"Secrets file '{path}' contains a NUL byte in a "
+                    f"dut.hosts credential field"
+                )
+            if value:
+                parsed_credentials[field_name] = value
+        parsed_host_credentials[normalized_hostname] = parsed_credentials
+
+    # Capture overrides before applying shared file values. This lets an
+    # explicitly exported TAAC_SSH_* value override even a per-host entry.
+    explicit_dut_env = {
+        env_name
+        for env_name in ("TAAC_SSH_USER", "TAAC_SSH_PASSWORD")
+        if os.environ.get(env_name)
+    }
+    for credentials in parsed_host_credentials.values():
+        if "TAAC_SSH_USER" in explicit_dut_env:
+            credentials.pop("username", None)
+        if "TAAC_SSH_PASSWORD" in explicit_dut_env:
+            credentials.pop("password", None)
+    for field_key, value in parsed_fields.items():
+        if not value:
+            continue
+        env_name = _FIELD_TO_ENV[field_key]
+        os.environ.setdefault(env_name, value)
+        populated.add(env_name)
+    # Workers may start with multiprocessing's forkserver/spawn modes, where
+    # Python module globals are not inherited. Keep the validated host map in
+    # one private environment variable so those workers resolve credentials in
+    # exactly the same way as the parent process. Existing TAAC credentials are
+    # already environment-backed; this variable is likewise never logged.
+    os.environ[_DUT_HOST_CREDENTIALS_ENV] = json.dumps(
+        parsed_host_credentials, separators=(",", ":"), sort_keys=True
+    )
 
     return populated

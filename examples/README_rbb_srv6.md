@@ -71,8 +71,9 @@ lab details from accidental commits or image builds:
 
 The command creates `.taac/` as mode `700`, creates `secrets.json` as mode
 `600`, and never replaces an existing file. Edit `device_info.csv`,
-`circuit_info.csv`, and `rbb.env` for the lab. Fill `secrets.json` with the
-common credentials used by the two DUTs and by the IxNetwork API server:
+`circuit_info.csv`, and `rbb.env` for the lab. When both DUTs use the same SSH
+credentials, fill `secrets.json` with the shared DUT credentials and the
+IxNetwork API-server credentials:
 
 ```json
 {
@@ -81,6 +82,35 @@ common credentials used by the two DUTs and by the IxNetwork API server:
   "ixia": {"username": "admin", "password": "your-ixia-password"}
 }
 ```
+
+When DUT credentials differ, add entries under `dut.hosts`. Each key must match
+the corresponding `TAAC_RBB_R1_HOST` or `TAAC_RBB_R2_HOST` value (DNS matching
+is case-insensitive and ignores one trailing dot):
+
+```json
+{
+  "version": 1,
+  "dut": {
+    "username": "",
+    "password": "",
+    "hosts": {
+      "rbb-r1.lab.example": {
+        "username": "r1-admin",
+        "password": "your-r1-password"
+      },
+      "rbb-r2.lab.example": {
+        "username": "r2-admin",
+        "password": "your-r2-password"
+      }
+    }
+  },
+  "ixia": {"username": "admin", "password": "your-ixia-password"}
+}
+```
+
+Host entries may override only one field and inherit the other from the shared
+`dut` entry. Explicit `TAAC_SSH_*` environment variables override both shared
+and per-host file values for a deliberate one-run override.
 
 The runner accepts this file through `--secrets-file`, validates its schema and
 `chmod 600` permissions, mounts the local input directory read-only in the
