@@ -21137,10 +21137,18 @@ def create_cpu_queue_playbooks(
                 steps=[create_longevity_step(duration=60)],
             )
         ],
+        # This config traps TTL/hop-limit errors to the low CPU queue (rxReason
+        # TTL_1 -> q0), and the SAI TTL-error trap groups hop-limit/TTL 0 and 1
+        # together, so hop-limit-0 lands on the low queue too, same as CPU_044.
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[],
-                no_discard_queues=[low_queue, mid_queue, high_queue],
+                active_queues=[low_queue],
+                inactive_queues=[mid_queue, high_queue],
+                inactive_max_pps_per_queue={
+                    mid_queue: mid_q_noise,
+                    high_queue: high_q_noise,
+                },
+                no_discard_queues=[mid_queue, high_queue],
                 active_min_out_pps_per_queue={low_queue: 10},
             )
         ],
@@ -21180,10 +21188,18 @@ def create_cpu_queue_playbooks(
                 steps=[create_longevity_step(duration=30)],
             )
         ],
+        # This config traps TTL/hop-limit errors to the low CPU queue (rxReason
+        # TTL_1 -> q0), and the SAI TTL-error trap groups TTL 0 and 1 together,
+        # so TTL=0 lands on the low queue too, same as CPU_044.
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[],
-                no_discard_queues=[low_queue, mid_queue, high_queue],
+                active_queues=[low_queue],
+                inactive_queues=[mid_queue, high_queue],
+                inactive_max_pps_per_queue={
+                    mid_queue: mid_q_noise,
+                    high_queue: high_q_noise,
+                },
+                no_discard_queues=[mid_queue, high_queue],
                 active_min_out_pps_per_queue={low_queue: 10},
             )
         ],
