@@ -1305,6 +1305,159 @@ def create_bgp_multipath_oscillation_step(
     )
 
 
+def create_openr_scale_injection_step(
+    helper_name: str,
+    dut_name: str,
+    dut_host: str,
+    num_spines: int,
+    num_leaves: int,
+    dut_role: str = "leaf",
+    dut_port: int = 2018,
+    simulate_neighbors: bool = False,
+    verify_routes: bool = False,
+    remote_path: str = "/mnt/flash/scale_test_server",
+    forbidden_dut_hosts: t.Optional[t.List[str]] = None,
+    topology_type: t.Optional[str] = None,
+    num_prefixes_per_node: t.Optional[int] = None,
+    num_sites: t.Optional[int] = None,
+    num_super_spines: t.Optional[int] = None,
+    extra_flags: t.Optional[t.List[str]] = None,
+    run_duration_sec: t.Optional[int] = None,
+    run_timeout_sec: int = 240,
+    require_reachable: bool = True,
+    require_binary_present: bool = True,
+    restart_openr: bool = False,
+    openr_ready_timeout_sec: t.Optional[int] = None,
+    jq_var_prefix: str = "openr_scale",
+    area: t.Optional[str] = None,
+    areas: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Run the Open/R ``scale_test_server`` injector on ``helper_name``.
+
+    Injects a synthetic fabric into ``dut_name``'s KvStore and fails when the
+    DUT received fewer key-values than the fabric should have sent.
+    ``kvstore.received_key_vals`` is sampled from the DUT's own Open/R over
+    Thrift immediately before and after the injector runs; the injector's own
+    report of what it sent is exactly the number a policed path invalidates, so
+    it is never the source. ``kvstore.updated_key_vals`` is logged over the same
+    window as a diagnostic -- gating on the merged subset belongs to the
+    KvStore-merge test, which carries a clean-store precondition.
+
+    Also publishes what was injected, as jq variables for
+    ``create_openr_kvstore_keys_check``:
+
+    * ``<jq_var_prefix>_expected_nodes`` -- the synthetic node names the
+      injector builds, derived from the same topology flags this step passes to
+      it. The DUT replaces index 0 of its own role, so that name is excluded.
+    * ``<jq_var_prefix>_prefixes_per_node`` -- how many ``prefix:`` keys each of
+      those nodes must have.
+    * ``<jq_var_prefix>_expected_keys_sent``,
+      ``<jq_var_prefix>_expected_node_count`` and
+      ``<jq_var_prefix>_pre_injection_counts`` -- diagnostics for the run log.
+
+    The expectation is derived from the command line rather than read out of the
+    injector's output. The only count the binary reports before injecting is its
+    *generated* topology, logged before the DUT replaces a node, so it is high
+    by ``1 + num_prefixes_per_node`` and can never be the expectation.
+
+    Args:
+        helper_name: device running the injector. The binary is expected to be
+            pre-staged at ``remote_path``; this step never builds, copies or
+            removes it.
+        dut_name: device running real Open/R, whose KvStore is measured.
+        dut_host: address the injector connects to. MUST be the DUT's inband
+            address -- the mgmt path is control-plane policed and resets the
+            large ``adj:`` requests mid-flight.
+        forbidden_dut_hosts: addresses that must never be used as ``dut_host``.
+            List the DUT's mgmt address here to make that mistake fail loudly.
+        num_spines / num_leaves: fabric size. 64/40 is the BBF-representative
+            point: the target fabric is 99 nodes (64 spines + 31 data leaves +
+            4 control leaves), and per-leaf adjacency count is driven by spine
+            count x links-per-spine, so 64 spines makes a leaf DUT exactly
+            representative while leaf count only scales fabric size.
+        dut_role: ``leaf`` (neighbors are spines) or ``spine``.
+        simulate_neighbors: run SparkFaker as well as KvStore injection.
+            Defaults to False: Spark simulation needs a VLAN trunk between the
+            helper and the DUT.
+        verify_routes: have the injector wait for the DUT to compute routes.
+            Defaults to False -- this test gates on key-values reaching the
+            DUT's KvStore, not on route computation or FIB programming.
+        run_duration_sec: how long the injector serves the fabric before
+            exiting. The injected keys outlive it, so this only has to cover the
+            injection itself.
+        run_timeout_sec: cap on the foreground command; must exceed
+            ``run_duration_sec``. The device command channel gives up near 300s.
+        require_binary_present: verify ``test -x remote_path`` on the helper
+            before injecting, so a missing pre-staged binary fails as a setup
+            problem rather than as an empty injector run.
+        restart_openr: cycle Open/R on the DUT before injecting. Defaults to
+            False. The gate measures key-values received across the injection,
+            which is independent of what the store already holds, and a
+            restart's full sync from the peer inflates that same counter. Open/R
+            on EOS is a configured daemon, so this is ``daemon Openr`` /
+            ``shutdown`` then ``no shutdown``, verified from both sides via
+            Open/R's own Thrift interface.
+        openr_ready_timeout_sec: budget for Open/R to serve Thrift again after
+            the restart. Observed cost to INITIALIZED is ~26s.
+        area: restrict key accounting to one KvStore area. Read side only --
+            it scopes what the step counts, and does not reach the injector.
+        areas: comma-separated area names for the injector's ``--areas``. Two or
+            more replicate the topology into each area and patch the DUT in as an
+            ABR; the binary treats one name as single-area. Distinct from
+            ``area``, which only scopes counting.
+    """
+    if num_spines <= 0 or num_leaves <= 0:
+        raise ValueError(
+            f"num_spines and num_leaves must be positive, got "
+            f"{num_spines} and {num_leaves}"
+        )
+    if dut_role not in ("leaf", "spine"):
+        raise ValueError(f"dut_role must be 'leaf' or 'spine', got {dut_role!r}")
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "openr_scale_injection",
+        "helper_name": helper_name,
+        "dut_name": dut_name,
+        "dut_host": dut_host,
+        "dut_port": dut_port,
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "dut_role": dut_role,
+        "simulate_neighbors": simulate_neighbors,
+        "verify_routes": verify_routes,
+        "remote_path": remote_path,
+        "run_timeout_sec": run_timeout_sec,
+        "require_reachable": require_reachable,
+        "require_binary_present": require_binary_present,
+        "restart_openr": restart_openr,
+        "jq_var_prefix": jq_var_prefix,
+    }
+    for key, value in (
+        ("forbidden_dut_hosts", forbidden_dut_hosts),
+        ("topology_type", topology_type),
+        ("num_prefixes_per_node", num_prefixes_per_node),
+        ("num_sites", num_sites),
+        ("num_super_spines", num_super_spines),
+        ("extra_flags", extra_flags),
+        ("run_duration_sec", run_duration_sec),
+        ("openr_ready_timeout_sec", openr_ready_timeout_sec),
+        ("area", area),
+        ("areas", areas),
+    ):
+        if value is not None:
+            params[key] = value
+
+    return create_custom_step(
+        params_dict=params,
+        description=description
+        or (
+            f"Inject {num_spines}-spine/{num_leaves}-leaf Open/R topology into "
+            f"{dut_name} KvStore from {helper_name}"
+        ),
+    )
+
+
 def create_snapshot_bgp_sent_route_counts_step(
     hostname: str,
     snapshot_key: str,
