@@ -9,10 +9,11 @@ run's derived ``RbbTopology`` (see
 ``TAAC_RBB_R2_HOST`` and the reserved IXIA port is the topology's selected edge
 (``circuit_info.csv`` plus optional selector), not hardcoded here.
 
-Both are FBOSS boxes reached over SSH; credentials are NOT committed — the FBOSS
-driver picks up ``TAAC_SSH_USER`` / ``TAAC_SSH_PASSWORD`` at run time. OSS
-users can supply them through the runner's private ``--secrets-file`` JSON
-input (rule: no hardcoded credentials).
+Both are FBOSS boxes reached over SSH; credentials are NOT committed. The FBOSS
+driver selects shared or hostname-specific credentials from the runner's
+private ``--secrets-file`` JSON input, with ``TAAC_SSH_USER`` /
+``TAAC_SSH_PASSWORD`` available as one-run overrides (rule: no hardcoded
+credentials).
 
 ``netwhoami`` returns no record for lab boxes, so a synthesized
 ``MockDeviceInfo`` is supplied via ``oss_mock_device_data`` (mirrors the EBB
