@@ -5266,6 +5266,38 @@ class FbossSwitch(AbstractSwitch):
         )
         return result
 
+    async def async_get_openr_kvstore_keys(self) -> Dict[str, List[str]]:
+        """
+        Returns every Open/R KvStore key name, grouped by area.
+        Thrift equivalent of ``breeze kvstore keys``.
+
+        Uses ``getKvStoreHashFilteredArea``, which returns key metadata without
+        the serialized values. That matters at scale: a 4k-key BBF topology is
+        ~25 MB of values but only ~200 KB of key names, and the large
+        ``adj:`` databases are ~51 KB each.
+
+        Returns a dict mapping area -> sorted list of key names.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        result: Dict[str, List[str]] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                publication = await client.getKvStoreHashFilteredArea(
+                    KeyDumpParams(), area
+                )
+                result[area] = sorted(publication.keyVals.keys())
+        self.logger.info(
+            f"{self.hostname}: kvstore key counts per area: "
+            f"{ {area: len(keys) for area, keys in result.items()} }"
+        )
+        return result
+
     async def async_get_openr_kvstore_kv_signature(self) -> Dict[str, str]:
         """
         Returns a SHA-256 hash of the KvStore per area.  All switches in
@@ -5485,10 +5517,11 @@ class FbossSwitch(AbstractSwitch):
             "links": links,
         }
 
-    async def async_get_openr_monitor_counters(self) -> Mapping[str, int]:
+    async def async_get_openr_monitor_counters(
+        self, counter_names: Optional[Sequence[str]] = None
+    ) -> Mapping[str, int]:
         """
-        Returns Open/R runtime counters (memory, CPU, SPF time, flood
-        rate, etc.) via fb303.
+        Returns Open/R runtime counters, narrowed to ``counter_names`` when given.
         Thrift equivalent of ``breeze monitor counters``.
         """
         if TAAC_OSS:
@@ -5497,7 +5530,10 @@ class FbossSwitch(AbstractSwitch):
                 "Not available in OSS mode."
             )
         async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
-            counters = await client.getCounters()
+            if counter_names is None:
+                counters = await client.getCounters()
+            else:
+                counters = await client.getSelectedCounters(list(counter_names))
         self.logger.info(
             f"{self.hostname}: retrieved {len(counters)} monitor counter(s)"
         )
