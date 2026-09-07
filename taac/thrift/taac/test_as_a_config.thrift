@@ -420,6 +420,9 @@ struct BgpConfig {
   20: optional ixia.BgpAsSetMode as_set_mode;
   21: i32 hold_timer = 30;
   22: i32 keepalive_timer = 10;
+  # Ordered, timed BGP UPDATEs sent once the session is established — an escape
+  # hatch from the declarative route_scales model.  See ixia.BgpUpdateSequence.
+  23: optional ixia.BgpUpdateSequence update_sequence;
 }
 
 struct DeviceGroupConfig {

@@ -46,8 +46,160 @@ AbstractTrafficGenerator          (taac/ixia/abstract_traffic_generator.py)
 | `taac/libs/otg_traffic_generator.py` | `TrafficGenerator` subclass — OTG port-config pipeline |
 | `taac/libs/test_setup_orchestrator.py` | Backend dispatch (`traffic_generator_backend` → `"otg"` / `"restpy"`) |
 | `taac/otg/otg_basic_l3_test_config.py` | Example: L3 forwarding TestConfig |
+| `taac/otg/otg_bgp_session_test_config.py` | Example: BGP session + forwarding TestConfig |
+| `taac/otg/otg_hardening_builders.py` | Hardening conveyor: shared builders (a library, no `test_config()`) |
+| `taac/otg/otg_hardening_{restarts,ecmp,malformed}_test_config.py` | Per-profile configs that fit ixia-c community edition's 4-session cap |
+| `taac/otg/otg_hardening_playbooks.py` | Hardening playbook factories (ported from the FBOSS conveyor) |
 | `taac/otg/tests/test_otg_traffic_gen.py` | Unit tests for OtgTrafficGen |
+| `taac/otg/tests/test_otg_hardening_playbooks.py` | Unit tests for the hardening playbook factories |
 | `examples/topology/otg_l3_forwarding_*.csv` | Sample topology files |
+| `examples/topology/otg_hardening_*.csv` | Sample topology for the hardening conveyor |
+| `taac/otg/HARDENING_SETUP.md` | Testbed setup the hardening conveyor requires, plus known gaps |
+
+### Hardening conveyor
+
+The hardening profiles port a subset of
+`taac/testconfigs/fboss_solution_tests/fboss_bgp_and_platform_hardening_conveyor.py`
+to the OTG backend. All eight playbooks ship across three runnable configs that
+each fit ixia-c community edition's caps, sharing the builders in
+`otg_hardening_builders.py`:
+
+- **Six port directly** — the four service restarts,
+  `test_ecmp_group_overload_limit` and `test_cpu_high_priority_queue_overload`.
+- **`test_bgp_malformed_packet_test` uses a different mechanism.** Upstream
+  toggles a NEXT_HOP attribute flag, which a route range cannot express, so this
+  authors the exact UPDATE bytes instead (`otg_bgp_malformed_updates.py`, and
+  limitation class 2 below). More precise than upstream, not less.
+- **`test_ecmp_member_overload_limit` is redesigned** and renamed
+  `test_otg_ecmp_member_overload_limit` to say so — its upstream member pressure
+  came from a COOP patcher unavailable in OSS mode.
+
+
+Step-facing APIs added to `OtgTrafficGen`, all reachable via
+`create_ixia_api_step` (a bare `getattr(ixia, api_name)`):
+
+| API | OTG mechanism |
+|-----|---------------|
+| `toggle_device_groups` | Drives the group's BGP peers UP/DOWN via `control_state` — no `set_config`, so unrelated sessions do not flap |
+| `enable_traffic` | Mutates the disabled-flow set and transmit state only, never `self.config` |
+| `apply_packet_headers` | Narrow restpy-`PacketHeader` → snappi translation; raises `NotImplementedError` on anything outside its whitelist |
+
+Device-group names and the regexes matching them both live in
+`otg_hardening_playbooks.py`, with the configs importing them — deliberately, as
+a mismatch fails *silently*: `toggle_device_groups` logs a warning, returns, and
+the playbook reports green having done nothing.
+
+Failure behaviour is deliberately loud where a silent one would fake a pass:
+
+| Condition | Behaviour |
+|---|---|
+| Device-group regex matches nothing | warning + no-op, as `restart_bgp_peers` does |
+| Unsupported packet-header stack/field | `NotImplementedError` naming it — never a silent drop |
+| Missing DUT MAC for the CP flow | `RuntimeError` at config-build time, not mid-run |
+| Fewer than 2 TGEN links | `RuntimeError` |
+| Over the declared interface/session budget | `RuntimeError` naming the dimension and the knobs |
+
+Playbook factories are unit-tested in `tests/test_otg_hardening_playbooks.py` and
+the new `OtgTrafficGen` APIs in `tests/test_otg_traffic_gen.py`. The **configs**
+are not: a config exists to be *run*, which needs a real DUT and OTG endpoint —
+`pyproject.toml` excludes `taac/testconfigs` from collection for the same reason.
+Use `--dry-run` for a DUT-free build check.
+
+Two things to know when reading or asserting on a built config: step and check
+arguments are **double-encoded** — `step_params.json_params` carries an
+`args_json` string that is itself JSON — and snapshot checkpoint IDs are
+top-level fields on the check, not part of any payload.
+
+### Hardening conveyor: testbed setup
+
+Ports, interface addressing, the seven BGP peers, advertised prefixes, the
+required DUT MAC, and CPU-queue provisioning are in
+**[`HARDENING_SETUP.md`](HARDENING_SETUP.md)**, along with two known gaps that
+affect what the tests actually exercise.
+
+## BGP and OTG: classes of limitation
+
+Porting BGP tests from restpy hits several *different* kinds of wall with
+different workarounds, and conflating them leads to declaring things impossible
+that aren't. Everything below was verified against the installed snappi schema —
+before concluding "OTG can't do X", check the schema.
+
+### 1. Mutation granularity — what can change at runtime
+
+`set_config` replaces the whole config, restarting protocols and reconverging
+**every** session — roughly 30–60s per call, and a blast radius far wider than the
+thing under test. That is decisive for `test_cpu_high_priority_queue_overload`,
+whose snapshot check asserts sessions did **not** flap: routing `enable_traffic`
+through a re-push would fail it on self-inflicted churn. The narrower primitives:
+
+| Mechanism | Scope | Restarts protocols |
+|---|---|---|
+| `set_config` | everything | **yes — all sessions** |
+| `update_config` (PATCH `/config`) | flow `rate` / `size`; ISIS only | no |
+| `append_config` / `delete_config` | **flows only** — not devices or peers | no |
+| `control_state.protocol.bgp.peers` | named peers UP / DOWN | no |
+| `control_state.protocol.route` | named route ranges ADVERTISE / WITHDRAW | no |
+| `control_state.traffic.flow_transmit` | named flows START / STOP | no |
+| `control_action.protocol.bgp` | NOTIFICATION; initiate graceful restart | no |
+
+So the data plane has fine-grained runtime mutation, while devices and peers
+cannot be added or removed without `set_config`. What you *can* change live is
+their **state**: peers up/down, route ranges advertised/withdrawn.
+
+This is a hard property of the declarative model, with no escape hatch — the
+workaround is always to find the `control_state` primitive rather than re-push.
+
+`toggle_device_groups` uses peer UP/DOWN. For the ECMP playbooks
+`control_state.protocol.route` would be finer: withdrawing a named route range
+removes next-hops without taking the session down at all, so there is no session
+churn for a flap check to explain away. Peer UP/DOWN stays **required** for
+`test_bgp_malformed_packet_test`, where session establishment is what triggers the
+UPDATE replay. Switching the ECMP path to route withdraw is an open improvement.
+
+### 2. Declarative-model expressiveness — what the model can describe
+
+The route-range model describes only *conformant* BGP — `next_hop_mode` is
+`local_ip` or `manual`, and nothing omits a mandatory attribute — so
+malformed-input testing looks impossible from that API alone.
+
+**This class has an escape hatch**, which is what distinguishes it from class 1:
+`peer.replay_updates.raw_bytes` takes arbitrary UPDATE bytes (hex, 1–8154) through
+the emulated speaker's established session. See `otg_bgp_malformed_updates.py`.
+
+The two classes compose usefully. A replay sequence carries advertises *and*
+withdraws with per-entry timing, and OTG replays it on every establishment — so it
+is **pre-declared in the pushed config but triggered live** by a `control_state`
+peer UP, making mutations that would need `set_config` runtime-triggerable. What
+remains out of reach is changing the sequence itself mid-test.
+
+### 3. Description-mechanism mismatch — a porting limit, not an OTG limit
+
+restpy's `PacketHeader` regex-queries IxNetwork's *remote* object tree and sets
+vendor attribute names on what it finds; snappi is a local typed schema. The
+*packet* is expressible, the *way restpy describes it* is not. Handled by a narrow
+whitelist translator that raises `NotImplementedError` rather than dropping
+fields — deliberately narrow, since a general translator would build capability
+nothing here uses.
+
+The translation is simpler than it looks: `TrafficGenerator.create_packet_headers`
+already flattens `attrs_json` **and** resolves every `Reference` (from config
+alone — endpoint MACs and device-group IPs) into the ixia-side `Field.attrs` list.
+So `OtgTrafficGen` receives a plain `{name: value}` dict with no reference
+indirection, and consumes the **ixia-side** struct rather than the taac-side one.
+
+### 4. Field-level constraints — expressible, with rules to translate for
+
+Expressible, but needing conversion — each caused a real bug:
+
+- `bgp.router_id` must be a dotted-quad IPv4, so v6-only peers need a derived
+  synthetic ID — and it must be **distinct per speaker** or sessions fail.
+- IPv6 route-range `step` is in units of *prefixes*, not an address delta, and
+  is uint32-bounded.
+- Route-range names must be unique across device groups; the default
+  `route_v4`/`route_v6` collide.
+- Thrift optional lists arrive as `thrift.python.types.List`, which is **not** a
+  `list` or `tuple` — an `isinstance(x, (list, tuple))` guard silently drops
+  real config. Use `_nonempty_sequence`.
 
 ## Design Decisions
 
