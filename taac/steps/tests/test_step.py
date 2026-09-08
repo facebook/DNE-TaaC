@@ -98,6 +98,21 @@ class StepEverpasteFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.step.setUp.assert_awaited_once()
         self.step.run.assert_awaited_once()
 
+    @patch(f"{MODULE}.log_step_info")
+    @patch(f"{MODULE}.async_everpaste_if_needed", new_callable=AsyncMock)
+    async def test_run_can_leave_ixia_traffic_stopped(
+        self, mock_everpaste, mock_log_step
+    ):
+        mock_everpaste.return_value = "input logged"
+        self.step.ixia = MagicMock()
+        self.step.setUp = AsyncMock()
+        self.step.run = AsyncMock()
+
+        await self.step._run(taac_types.BaseInput(), {"skip_start_traffic": True})
+
+        self.step.ixia.start_traffic.assert_not_called()
+        self.step.run.assert_awaited_once()
+
     @patch(f"{MODULE}.async_write_test_result", new_callable=AsyncMock)
     @patch(f"{MODULE}.async_get_fburl", new_callable=AsyncMock)
     @patch(f"{MODULE}.async_everpaste_str", new_callable=AsyncMock)

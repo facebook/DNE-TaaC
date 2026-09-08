@@ -103,7 +103,7 @@ class Step(t.Generic[StepInput], ABC):
     async def _run(self, input: StepInput, params: t.Dict[str, t.Any]) -> None:
         step_start_time = time.time()
         try:
-            if self.ixia:
+            if self.ixia and not params.get("skip_start_traffic", False):
                 self.ixia.start_traffic()
             log_step_info(
                 self.__class__.STEP_NAME.name,

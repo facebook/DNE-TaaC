@@ -3049,20 +3049,14 @@ def create_fpf_drain_interface_step(
     mutation_token: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Soft-drain / undrain via the on-box LOCAL_DRAINER, calling the driver
-    directly. With ``interfaces`` -> per-port (``async_softdrain_interface`` /
-    ``async_undrain_interface``); with EMPTY/None ``interfaces`` -> device-level
-    soft-drain of the whole DUT (``async_onbox_softdrain_device`` /
-    ``async_onbox_undrain_device``).
+    """Soft-drain / undrain through the on-box LOCAL_DRAINER FPF custom task.
 
-    Unlike ``create_drain_undrain_step(interfaces=...)`` (whose LOCAL_DRAINER path
-    resolves the interface against the discovered fabric topology and raises
-    "Interface not found" for the GPU-facing GTSW port), the per-port path here
-    passes the name straight to the drainer — the GPU-facing port is a real agent
-    port but is not in the fabric-discovered interface list. And unlike the
-    generic device path (which HARD-drains via ``async_onbox_drain_device``), the
-    device path here SOFT-drains for the control-up/data-drains contract. Use for
-    FPF link drain/undrain (per-port) and device drain/undrain (no interfaces).
+    Interface targets are passed directly to the FPF custom task, which applies
+    them through the singular local-drainer interface API. GPU-facing agent
+    ports therefore need not appear in testbed topology. With no interfaces,
+    this performs a whole-device soft drain or undrain. This FPF helper also
+    supports remote-device selection and mutation tokens; use the generic
+    drain/undrain factory for the bulk local/NDS workflow.
     """
     intfs = interfaces or []
     if intfs:
@@ -3289,12 +3283,26 @@ def create_fpf_ndp_clear_loop_step(
     )
 
 
+def _add_skip_start_traffic_param(
+    params: t.Dict[str, t.Any], start_traffic: bool
+) -> None:
+    if not start_traffic:
+        params["skip_start_traffic"] = True
+
+
+def _skip_start_traffic_step_params(start_traffic: bool) -> t.Optional[Params]:
+    params: t.Dict[str, t.Any] = {}
+    _add_skip_start_traffic_param(params, start_traffic)
+    return Params(json_params=json.dumps(params)) if params else None
+
+
 def create_fpf_rapid_flap_step(
     interfaces_by_device: t.Dict[str, t.List[str]],
     duration_sec: int,
     flap_interval_sec: int = 1,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """Rapidly flap per-device interfaces over a window.
 
@@ -3312,22 +3320,21 @@ def create_fpf_rapid_flap_step(
             the per-flap cost used to derive the flap count (default 1).
         device_regexes: Optional device-regex scope.
         description: Custom step description.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
     """
+    params_dict = {
+        "custom_step_name": "fpf_rapid_flap",
+        "interfaces_by_device": interfaces_by_device,
+        "duration_sec": duration_sec,
+        "flap_interval_sec": flap_interval_sec,
+    }
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"Rapid-flap interfaces for {duration_sec}s "
         f"({', '.join(interfaces_by_device.keys())})",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_rapid_flap",
-                    "interfaces_by_device": interfaces_by_device,
-                    "duration_sec": duration_sec,
-                    "flap_interval_sec": flap_interval_sec,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params_dict)),
         device_regexes=device_regexes,
     )
 
@@ -4169,6 +4176,7 @@ def create_run_task_step(
     params_dict: t.Dict[str, t.Any],
     description: t.Optional[str] = None,
     ixia_needed: bool = False,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a generic step to run a task.
@@ -4178,6 +4186,8 @@ def create_run_task_step(
         params_dict: Parameters to pass to the task
         description: Custom description for the step
         ixia_needed: Whether the task requires Ixia
+        start_traffic: Whether the generic step pre-hook should ensure IXIA
+            traffic is running before the task.
 
     Returns:
         Step object for running the task
@@ -4199,6 +4209,7 @@ def create_run_task_step(
                 )
             )
         ),
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4393,6 +4404,7 @@ def create_longevity_step(
     collect_port_state: bool = False,
     poll_interval: int = 5,
     fail_on_flap: bool = True,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a longevity step that waits for a specified duration.
@@ -4411,11 +4423,13 @@ def create_longevity_step(
         fail_on_flap: When collecting port state, fail the step if any monitored
             interface flaps during the hold. A steady-state longevity hold
             should see zero flaps, so any flap is a real defect.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for longevity/wait
     """
     params_dict: t.Dict[str, t.Any] = {"duration": duration}
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     if description:
         params_dict["description"] = description
     if collect_port_state:
@@ -4437,6 +4451,7 @@ def create_service_interruption_step(
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to interrupt a service (restart, crash, etc.).
@@ -4447,6 +4462,7 @@ def create_service_interruption_step(
         create_cold_boot_file: Whether to create a cold boot file
         description: Custom description for the step
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for service interruption
@@ -4463,6 +4479,7 @@ def create_service_interruption_step(
         description=description,
         id=step_id,
         device_regexes=device_regexes,
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4473,6 +4490,7 @@ def create_service_convergence_step(
     service_convergence_timeout: t.Optional[t.Dict[taac_types.Service, int]] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to wait for service convergence.
@@ -4483,6 +4501,7 @@ def create_service_convergence_step(
         timeout: Optional timeout in seconds for convergence (simple timeout)
         service_convergence_timeout: Optional dict mapping services to their timeout values
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for service convergence
@@ -4507,6 +4526,7 @@ def create_service_convergence_step(
         description=description,
         id=step_id,
         device_regexes=device_regexes,
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4521,6 +4541,7 @@ def create_interface_flap_step(
     delay: t.Optional[int] = None,
     device_name: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to enable or disable interfaces.
@@ -4536,6 +4557,7 @@ def create_interface_flap_step(
         delay: Optional delay between interface operations in seconds
         device_name: Optional device name for the interface flap (used with SSH method)
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for interface flap
@@ -4549,6 +4571,7 @@ def create_interface_flap_step(
         params_dict["delay"] = delay
     if device_name is not None:
         params_dict["device_name"] = device_name
+    _add_skip_start_traffic_param(params_dict, start_traffic)
 
     params = Params(
         json_params=json.dumps(params_dict),
@@ -4594,6 +4617,7 @@ def create_validation_step(
     point_in_time_checks: t.List[taac_types.PointInTimeHealthCheck],
     stage: taac_types.ValidationStage = taac_types.ValidationStage.MID_TEST,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a validation step with point-in-time health checks.
@@ -4602,6 +4626,9 @@ def create_validation_step(
         point_in_time_checks: List of health checks to perform
         stage: Validation stage (PRE_TEST, MID_TEST, POST_TEST)
         description: Custom description for the step
+        start_traffic: Whether the generic step pre-hook should ensure IXIA
+            traffic is running. Set False for recovery validation that must run
+            while traffic remains stopped.
 
     Returns:
         Step object for validation
@@ -4615,6 +4642,7 @@ def create_validation_step(
             )
         ),
         description=description,
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4870,6 +4898,8 @@ def create_drain_undrain_step(
     drain_handler: t.Optional[taac_types.DrainHandler] = None,
     interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    hard_drain_interfaces: bool = False,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to drain or undrain a device, or specific interfaces.
@@ -4883,17 +4913,39 @@ def create_drain_undrain_step(
             up); with NDS the interface list is passed through to the NDS drain.
             When omitted, the whole device is drained.
         description: Custom description for the step
+        hard_drain_interfaces: For a LOCAL_DRAINER interface drain, use the
+            bulk hard ``drain_interfaces`` API instead of the bulk
+            ``softdrain_interfaces`` API. Set this on its paired undrain as
+            well, because hard-drained interfaces report UNKNOWN rather than
+            an authoritative ``isDrained`` value. Invalid for device drains.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for drain/undrain operation
     """
+    if hard_drain_interfaces and (
+        drain_handler != taac_types.DrainHandler.LOCAL_DRAINER or not interfaces
+    ):
+        raise ValueError(
+            "hard_drain_interfaces requires a LOCAL_DRAINER operation with at "
+            "least one interface"
+        )
     input_kwargs: t.Dict[str, t.Any] = {"drain": drain}
     if drain_handler is not None:
         input_kwargs["drain_handler"] = drain_handler
 
-    step_params = None
+    step_params_dict: t.Dict[str, t.Any] = {}
     if interfaces:
-        step_params = Params(json_params=json.dumps({"interfaces": interfaces}))
+        step_params_dict.update(
+            {
+                "interfaces": interfaces,
+                "hard_drain_interfaces": hard_drain_interfaces,
+            }
+        )
+    _add_skip_start_traffic_param(step_params_dict, start_traffic)
+    step_params = (
+        Params(json_params=json.dumps(step_params_dict)) if step_params_dict else None
+    )
 
     return Step(
         name=StepName.DRAIN_UNDRAIN_STEP,
@@ -4969,6 +5021,7 @@ def create_verify_port_speed_step_v2(
     ports: t.List[str],
     speed_to_verify: int,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to verify port speed.
@@ -4977,20 +5030,19 @@ def create_verify_port_speed_step_v2(
         ports: List of port names to verify
         speed_to_verify: Expected speed in Gbps
         description: Custom description for the step
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for port speed verification
     """
+    params_dict: t.Dict[str, t.Any] = {
+        "ports": ports,
+        "speed_to_verify": speed_to_verify,
+    }
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     return Step(
         name=StepName.VERIFY_PORT_SPEED,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "ports": ports,
-                    "speed_to_verify": speed_to_verify,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params_dict)),
         description=description,
     )
 
@@ -9711,6 +9763,92 @@ class RunSSHCmdStep(StepBase[taac_types.BaseInput]):
 
 class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
     STEP_NAME = taac_types.StepName.DRAIN_UNDRAIN_STEP
+    LOCAL_DRAINER_READBACK_ATTEMPTS = 3
+    LOCAL_DRAINER_READBACK_INTERVAL_SECONDS = 5
+    LOCAL_DRAINER_READBACK_TIMEOUT_SECONDS = 30.0
+
+    async def _read_local_drainer_interface_states(
+        self,
+        fboss_driver: t.Any,
+        names: t.Sequence[str],
+        expected_drained: bool,
+    ) -> t.Tuple[t.Dict[str, object], BaseException | None]:
+        try:
+            all_ports = await fboss_driver.async_get_all_port_info()
+        except Exception as error:
+            observed = f"not read ({type(error).__name__}: {error})"
+            return dict.fromkeys(names, observed), error
+
+        ports_by_name = {
+            port.name: port
+            for port in all_ports.values()
+            if getattr(port, "name", None)
+        }
+        mismatches = {}
+        for name in names:
+            port = ports_by_name.get(name)
+            observed: object = "not present in Agent port map"
+            if port is not None:
+                observed = port.isDrained
+            if observed is None or observed != expected_drained:
+                mismatches[name] = observed
+        return mismatches, None
+
+    async def _wait_for_local_drainer_interface_state(
+        self,
+        fboss_driver: t.Any,
+        interface_names: t.Sequence[str],
+        expected_drained: bool,
+    ) -> None:
+        pending = set(interface_names)
+        mismatched_interfaces: t.Dict[str, object] = dict.fromkeys(
+            interface_names, "not read"
+        )
+        last_exception: BaseException | None = None
+
+        async def poll() -> None:
+            nonlocal last_exception, mismatched_interfaces
+            for attempt in range(1, self.LOCAL_DRAINER_READBACK_ATTEMPTS + 1):
+                names = sorted(pending)
+                (
+                    mismatched_interfaces,
+                    read_error,
+                ) = await self._read_local_drainer_interface_states(
+                    fboss_driver, names, expected_drained
+                )
+                if read_error is not None:
+                    last_exception = read_error
+                    self.logger.warning(
+                        "LOCAL_DRAINER readback incomplete for %s (attempt %s/%s)",
+                        names,
+                        attempt,
+                        self.LOCAL_DRAINER_READBACK_ATTEMPTS,
+                    )
+                pending.clear()
+                pending.update(mismatched_interfaces)
+                if not pending:
+                    return
+                if attempt < self.LOCAL_DRAINER_READBACK_ATTEMPTS:
+                    await asyncio.sleep(self.LOCAL_DRAINER_READBACK_INTERVAL_SECONDS)
+
+        try:
+            await asyncio.wait_for(
+                poll(), timeout=self.LOCAL_DRAINER_READBACK_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as error:
+            last_exception = error
+
+        if not pending:
+            return
+
+        expected = "drained" if expected_drained else "undrained"
+        error = RuntimeError(
+            f"LOCAL_DRAINER interface readback did not reach "
+            f"{expected}: {mismatched_interfaces}"
+        )
+        if last_exception is not None:
+            raise error from last_exception
+        raise error
 
     async def run(
         self,
@@ -9723,33 +9861,51 @@ class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
                 try_json_to_thrift(interface, taac_types.TestInterface)
                 for interface in try_json_loads(interfaces)
             ]
-            interfaces = [
-                (
-                    self.device.get_interface_by_name(interface)
-                    if isinstance(interface, str)
-                    else interface
-                )
+        if input.drain_handler == taac_types.DrainHandler.LOCAL_DRAINER:
+            # A local-drainer target need not be part of the testbed topology.
+            # Preserve raw names so unrelated DUT uplinks remain valid targets.
+            interface_names = [
+                interface if isinstance(interface, str) else interface.interface_name
                 for interface in interfaces
             ]
-        interface_names = [interface.interface_name for interface in interfaces]
-        if input.drain_handler == taac_types.DrainHandler.LOCAL_DRAINER:
             if interface_names:
-                # Per-port (link) drain: soft-drain each interface on-box
-                # (depreferences BGP advertisements without bringing the link
-                # down at the data plane). undrain_interface reverses it.
-                # softdrain/undrain_interface are FbossSwitch-only; cast to Any
-                # to avoid importing FbossSwitch here (keeps the BUCK target light).
+                # Use one bulk request so all link policies are applied before
+                # the local drainer restarts BGP. Singular calls would trigger
+                # one BGP restart per interface.
                 fboss_driver = t.cast(t.Any, self.driver)
-                for name in interface_names:
-                    if input.drain:
-                        await fboss_driver.async_softdrain_interface(name)
-                    else:
-                        await fboss_driver.async_undrain_interface(name)
+                hard_interface_operation = params.get("hard_drain_interfaces", False)
+                hard_interface_drain = input.drain and hard_interface_operation
+                if hard_interface_drain:
+                    await fboss_driver.async_drain_interfaces(interface_names)
+                elif input.drain:
+                    await fboss_driver.async_softdrain_interfaces(interface_names)
+                else:
+                    await fboss_driver.async_undrain_interfaces(interface_names)
+                # FBOSS hard drain is a routing-policy operation and does not
+                # populate Agent PortInfo.isDrained (local_drainer explicitly
+                # reports per-interface state as UNKNOWN).  That field is an
+                # authoritative readback only for soft drain and undrain.
+                if not hard_interface_operation:
+                    await self._wait_for_local_drainer_interface_state(
+                        fboss_driver,
+                        interface_names,
+                        input.drain,
+                    )
             elif input.drain:
                 await self.driver.async_onbox_drain_device()
             else:
                 await self.driver.async_onbox_undrain_device()
         elif input.drain_handler == taac_types.DrainHandler.NDS:
+            # NDS requires topology-backed interfaces. Resolve and validate raw
+            # names before constructing the external drainer request.
+            interface_names = [
+                (
+                    self.device.get_interface_by_name(interface).interface_name
+                    if isinstance(interface, str)
+                    else interface.interface_name
+                )
+                for interface in interfaces
+            ]
             await async_nds_drain(
                 self.device.name,
                 force_undrain=not input.drain,
