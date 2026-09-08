@@ -3,14 +3,20 @@
 # pyre-unsafe
 
 import base64
+import hashlib
 import json
+import re
 
 from ixia.ixia import types as ixia_thrift
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_session_establish_check,
     create_bgp_session_snapshot_check,
     create_core_dumps_snapshot_check,
+    create_cpu_queue_snapshot_check,
     create_device_core_dumps_check,
+    create_fpf_ods_counter_check,
     create_ixia_packet_loss_check,
+    create_ixia_traffic_rate_check,
     create_unclean_exit_check,
 )
 from taac.packet_headers import (
@@ -21,17 +27,33 @@ from taac.packet_headers import (
     NDP_NS_MULTICAST_TRAFFIC_PACKET_HEADERS,
 )
 from taac.playbooks.playbook_definitions import (
+    create_access_policy_playbook,
     create_hatch_chaos_soak_playbook,
     create_stable_state_validation_playbook,
 )
 from taac.stages.stage_definitions import (
+    create_concurrent_steps_stage,
     create_longevity_stage,
     create_steps_stage,
 )
 from taac.steps.step_definitions import (
+    create_drain_undrain_step,
     create_dummy_step,
+    create_fpf_rapid_flap_step,
+    create_interface_flap_step,
+    create_longevity_step,
+    create_regenerate_traffic_step,
     create_run_commands_on_shell_step,
+    create_run_task_step,
+    create_service_convergence_step,
+    create_service_interruption_step,
+    create_stop_traffic_step,
+    create_system_reboot_step,
+    create_validation_step,
+    create_verify_port_operational_state_step,
+    create_verify_port_speed_step_v2,
 )
+from taac.task_definitions import create_run_task
 from taac.utils.test_config_utils import (
     create_raw_arp_request_traffic_item,
 )
@@ -43,7 +65,8 @@ TEST_CONFIG_NAME = "QZD1_HATCH_STABLE_STATE"
 PLAYBOOK_NAME = "test_stable_state_acl_traffic_matrix"
 CHAOS_PLAYBOOK_NAME = "test_hatch_chaos_soak"
 
-DUT = "rsw001.p006.f01.qzd1"
+W400C_DUT = "rsw001.p006.f01.qzd1"
+DUT = W400C_DUT
 IXIA_CHASSIS_IP = "2401:db00:116:3006:21a:c5ff:fe01:6f54"
 DUT_MAC = "76:d4:dd:40:0e:10"
 
@@ -63,6 +86,11 @@ FBOSS10_IPV6_BY_DUT: dict[str, str] = {
 PORT_A = "eth1/13/1"
 PORT_B = "eth1/15/1"
 PORT_C = "eth1/17/1"
+SPEED_FLIP_PORT = "eth1/9/1"
+UNRELATED_LINK_DRAIN_PORTS = ("eth1/1/1", "eth1/3/1")
+
+SPEED_FLIP_PATCHER_NAME = "qzd1_hatch_access_policy_speed_200g"
+SPEED_FLIP_200G_PROFILE = "PROFILE_200G_4_PAM4_RS544X2N_COPPER"
 
 # W400 (rsw002) carries the same roles on different ports.
 W400_PORT_A = "eth1/20/1"
@@ -158,7 +186,7 @@ def _raw_tcp_syn_traffic_items(port_a, port_b, port_c):
         ("RAW_TCP_SYN_R_TO_B_EXPECT_BLOCK", port_a, port_b, 40009),
         ("RAW_TCP_SYN_R_TO_U_EXPECT_BLOCK", port_a, port_c, 40010),
         ("RAW_TCP_SYN_B_TO_U_EXPECT_BLOCK", port_b, port_c, 40011),
-        ("RAW_TCP_SYN_U_TO_R_EXPECT_BLOCK", port_c, port_a, 40012),
+        ("RAW_TCP_SYN_U_TO_R_EXPECT_ALLOW", port_c, port_a, 40012),
         ("RAW_TCP_SYN_U_TO_B_EXPECT_BLOCK", port_c, port_b, 40013),
     ]
 
@@ -168,7 +196,7 @@ def _udp_traffic_items(port_a, port_b, port_c):
         ("UDP443_R_TO_U_EXPECT_BLOCK", port_a, port_c, 443, 40014),
         ("UDP443_B_TO_U_EXPECT_BLOCK", port_b, port_c, 443, 40015),
         ("UDP443_U_TO_B_EXPECT_BLOCK", port_c, port_b, 443, 40016),
-        ("UDP443_U_TO_R_EXPECT_BLOCK", port_c, port_a, 443, 40017),
+        ("UDP443_U_TO_R_EXPECT_ALLOW", port_c, port_a, 443, 40017),
     ]
 
 
@@ -274,6 +302,8 @@ ALLOWED_TRAFFIC_ITEMS = [
     "TCP22_U_TO_R_EXPECT_ALLOW",
     "TCP443_R_TO_B_EXPECT_ALLOW",
     "TCP443_R_TO_U_EXPECT_ALLOW",
+    "UDP443_U_TO_R_EXPECT_ALLOW",
+    "RAW_TCP_SYN_U_TO_R_EXPECT_ALLOW",
 ]
 
 # Port-independent: the raw-SYN names are appended per config, since those
@@ -286,12 +316,21 @@ BLOCKED_TCP_TRAFFIC_ITEMS = [
     "TCP443_B_TO_U_EXPECT_BLOCK",
 ]
 
-BLOCKED_UDP_TRAFFIC_ITEMS = [item[0] for item in UDP_TRAFFIC_ITEMS]
+BLOCKED_UDP_TRAFFIC_ITEMS = [
+    "UDP443_R_TO_U_EXPECT_BLOCK",
+    "UDP443_B_TO_U_EXPECT_BLOCK",
+    "UDP443_U_TO_B_EXPECT_BLOCK",
+]
 
 BLOCKED_TRAFFIC_ITEMS = (
     BLOCKED_TCP_TRAFFIC_ITEMS
     + BLOCKED_UDP_TRAFFIC_ITEMS
-    + [item[0] for item in RAW_TCP_SYN_TRAFFIC_ITEMS]
+    + [
+        "RAW_TCP_SYN_R_TO_B_EXPECT_BLOCK",
+        "RAW_TCP_SYN_R_TO_U_EXPECT_BLOCK",
+        "RAW_TCP_SYN_B_TO_U_EXPECT_BLOCK",
+        "RAW_TCP_SYN_U_TO_B_EXPECT_BLOCK",
+    ]
 )
 
 # The chaos soak deliberately holds Port B UNCONSTRAINED, not Blocked, so its
@@ -326,6 +365,44 @@ CHAOS_ALLOWED_TRAFFIC_ITEMS = [
     "RAW_TCP_SYN_B_TO_U_EXPECT_BLOCK",
     "RAW_TCP_SYN_U_TO_R_EXPECT_BLOCK",
     "RAW_TCP_SYN_U_TO_B_EXPECT_BLOCK",
+]
+
+R_U_DATA_PLANE_TRAFFIC_ITEMS = [
+    "TCP22_U_TO_R_EXPECT_ALLOW",
+    "TCP22_R_TO_U_EXPECT_BLOCK",
+    "TCP443_R_TO_U_EXPECT_ALLOW",
+    "UDP443_R_TO_U_EXPECT_BLOCK",
+    "UDP443_U_TO_R_EXPECT_ALLOW",
+    "RAW_TCP_SYN_R_TO_U_EXPECT_BLOCK",
+    "RAW_TCP_SYN_U_TO_R_EXPECT_ALLOW",
+]
+RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS = [
+    # Access policy is enforced on ingress. U-to-R traffic enters the
+    # Unconstrained port, while TCP/443 is explicitly allowed from R-to-U.
+    "TCP22_U_TO_R_EXPECT_ALLOW",
+    "TCP443_R_TO_U_EXPECT_ALLOW",
+    "UDP443_U_TO_R_EXPECT_ALLOW",
+    "RAW_TCP_SYN_U_TO_R_EXPECT_ALLOW",
+]
+RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS = [
+    "TCP22_R_TO_U_EXPECT_BLOCK",
+    "UDP443_R_TO_U_EXPECT_BLOCK",
+    "RAW_TCP_SYN_R_TO_U_EXPECT_BLOCK",
+]
+SPLIT_AGENT_CRITICAL_SERVICES = [
+    "fboss_sw_agent",
+    "fboss_hw_agent@0",
+    "bgpd",
+    "fsdb",
+    "qsfp_service",
+    "openr",
+]
+MONOLITHIC_AGENT_CRITICAL_SERVICES = [
+    "wedge_agent",
+    "bgpd",
+    "fsdb",
+    "qsfp_service",
+    "openr",
 ]
 
 
@@ -719,32 +796,1539 @@ def _port_config(port, starting_ip, gateway, mask, dut=DUT):
     )
 
 
-def _unclean_exit_check():
+def _stable_check_id(prefix, values):
+    normalized = [
+        re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") for value in sorted(values)
+    ]
+    suffix = f"_plus_{len(normalized) - 2}" if len(normalized) > 2 else ""
+    summary_limit = 48 - len(suffix)
+    summary = "_".join(normalized[:2])[:summary_limit] + suffix
+    digest = hashlib.sha256("\0".join(sorted(values)).encode()).hexdigest()[:6]
+    return f"{prefix}_{summary[:48]}_{digest}"
+
+
+def _unclean_exit_check(dut=W400C_DUT, exclude_services=None):
+    excluded = set(exclude_services or [])
+    critical_services = (
+        SPLIT_AGENT_CRITICAL_SERVICES
+        if dut == W400C_DUT
+        else MONOLITHIC_AGENT_CRITICAL_SERVICES
+    )
+    services = [service for service in critical_services if service not in excluded]
     return create_unclean_exit_check(
-        check_id="agent_fsdb_bgp_qsfp_unclean_exit",
-        services=["wedge_agent", "fsdb", "bgpd", "qsfp_service"],
+        # Exclusions are scenario-specific. Keep the check identity stable for
+        # the device's critical-service set so snapshots remain comparable.
+        check_id=_stable_check_id("access_policy_unclean_exit", critical_services),
+        services=services,
         sleep_timer=0,
     )
 
 
 def _traffic_loss_check(allowed=None, blocked=None):
-    return create_ixia_packet_loss_check(
-        check_id="acl_traffic_loss_percentage",
-        clear_traffic_stats=True,
-        sleep_time=15,
-        thresholds=[
+    thresholds = []
+    allowed_names = allowed if allowed is not None else ALLOWED_TRAFFIC_ITEMS
+    blocked_names = blocked if blocked is not None else BLOCKED_TRAFFIC_ITEMS
+    if allowed_names:
+        thresholds.append(
             hc_thrift.PacketLossThreshold(
-                names=allowed if allowed is not None else ALLOWED_TRAFFIC_ITEMS,
+                names=allowed_names,
                 str_value="0",
                 metric=hc_thrift.PacketLossMetric.PERCENTAGE,
                 comparison=hc_thrift.ComparisonType.EQUAL_TO,
-            ),
+            )
+        )
+    if blocked_names:
+        thresholds.append(
             hc_thrift.PacketLossThreshold(
-                names=blocked if blocked is not None else BLOCKED_TRAFFIC_ITEMS,
+                names=blocked_names,
                 str_value="100",
                 metric=hc_thrift.PacketLossMetric.PERCENTAGE,
                 comparison=hc_thrift.ComparisonType.EQUAL_TO,
+            )
+        )
+    if not thresholds:
+        raise ValueError("At least one allowed or blocked traffic item is required")
+    return create_ixia_packet_loss_check(
+        check_id=_stable_check_id(
+            "acl_traffic_loss_percentage",
+            [f"allow:{name}" for name in allowed_names]
+            + [f"block:{name}" for name in blocked_names],
+        ),
+        clear_traffic_stats=True,
+        sleep_time=15,
+        thresholds=thresholds,
+    )
+
+
+def _set_access_policy_step(dut, policies, description, *, start_traffic=True):
+    return create_run_task_step(
+        task_name="coop_set_access_policy",
+        params_dict={"hostname": dut, "policies": policies},
+        description=description,
+        start_traffic=start_traffic,
+    )
+
+
+def _access_policy_hardware_check_step(
+    dut, expectations, description, *, start_traffic=True
+):
+    return create_run_task_step(
+        task_name="validate_access_policy_hardware",
+        params_dict={
+            "hostname": dut,
+            "expectations": expectations,
+            # W400C programs access policy through the SAI PORT ingress-ACL
+            # bind point.  Passing it explicitly also lets an all-Unconstrained
+            # state be validated, where no programmed port remains from which
+            # the validator could infer the mechanism.
+            "mechanism": "port-bindpoint",
+        },
+        description=description,
+        start_traffic=start_traffic,
+    )
+
+
+def _bgp_established_check(
+    restarted=False, expected_sessions=4, max_session_uptime_sec=600
+):
+    return create_bgp_session_establish_check(
+        expected_established_sessions=expected_sessions,
+        max_session_uptime_sec=max_session_uptime_sec if restarted else None,
+        retry_count=12,
+        retry_delay_seconds=10,
+        retry_delay_multiplier=1,
+    )
+
+
+def _common_postchecks(
+    *,
+    traffic_check,
+    dut=W400C_DUT,
+    restarted=False,
+    expected_bgp_sessions=4,
+    max_session_uptime_sec=600,
+):
+    return [
+        traffic_check,
+        _bgp_established_check(
+            restarted=restarted,
+            expected_sessions=expected_bgp_sessions,
+            max_session_uptime_sec=max_session_uptime_sec,
+        ),
+        _unclean_exit_check(dut),
+        create_device_core_dumps_check(),
+    ]
+
+
+def _snapshot_checks(dut, restarted=False):
+    bgp_check = (
+        create_bgp_session_snapshot_check(
+            skip_flap_check=True,
+            skip_uptime_check=True,
+            assert_reconvergence=True,
+            max_convergence_sec=120,
+            convergence_service=(
+                "fboss_sw_agent" if dut == W400C_DUT else "wedge_agent"
             ),
+            reconvergence_hosts=[dut],
+        )
+        if restarted
+        else create_bgp_session_snapshot_check()
+    )
+    return [bgp_check, create_core_dumps_snapshot_check()]
+
+
+def _policy_cleanup_steps(dut, port_a, port_b, port_c):
+    return [
+        _set_access_policy_step(
+            dut,
+            {
+                port_a: "UNCONSTRAINED",
+                port_b: "UNCONSTRAINED",
+                port_c: "UNCONSTRAINED",
+            },
+            "Restore all IXIA-facing ports to Unconstrained",
+            start_traffic=False,
+        )
+    ]
+
+
+def _transition_playbooks(dut, port_a, port_b, port_c):
+    all_unconstrained = {
+        port_a: "UNCONSTRAINED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+    restricted = {port_a: "RESTRICTED"}
+    restricted_with_blocked = {
+        port_a: "RESTRICTED",
+        port_b: "BLOCKED",
+    }
+    cleanup_steps = _policy_cleanup_steps(dut, port_a, port_b, port_c)
+    restricted_traffic = _traffic_loss_check(
+        RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS,
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+    # Names containing EXPECT_BLOCK describe their Restricted-mode behavior.
+    # Once R is Unconstrained, every selected R-U flow must be lossless.
+    unconstrained_traffic = _traffic_loss_check(R_U_DATA_PLANE_TRAFFIC_ITEMS, [])
+
+    def policy_step(policy, description, *, start_traffic=True):
+        return _set_access_policy_step(
+            dut,
+            policy,
+            description,
+            start_traffic=start_traffic,
+        )
+
+    def hardware_step(mode):
+        return _access_policy_hardware_check_step(
+            dut,
+            {port_a: mode},
+            f"Validate {mode} Agent and hardware state on {port_a}",
+        )
+
+    def blocked_port_step():
+        return create_verify_port_operational_state_step(
+            interfaces=[port_b],
+            operational_state=False,
+            description=f"Validate Blocked port {port_b} is operationally down",
+            device_regexes=[dut],
+        )
+
+    def reset_and_restart_traffic_steps():
+        return [
+            create_regenerate_traffic_step(),
+            create_longevity_step(
+                duration=30,
+                description="Establish a fresh IXIA measurement window",
+            ),
+        ]
+
+    return [
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_to_restricted",
+            description="Transition R from Unconstrained to Restricted and validate forwarding and control-plane stability.",
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained, "Prepare all IXIA ports as Unconstrained"
+                        ),
+                        policy_step(
+                            restricted, "Transition R from Unconstrained to Restricted"
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold Restricted state for convergence",
+                        ),
+                        hardware_step("restricted"),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_to_unconstrained",
+            description="Validate Restricted traffic mid-test, transition R to Unconstrained, and validate all R-U traffic lossless.",
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(traffic_check=unconstrained_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained, "Prepare all IXIA ports as Unconstrained"
+                        ),
+                        policy_step(restricted, "Prepare R as Restricted"),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description="Validate Restricted R-U traffic before transition",
+                        ),
+                        hardware_step("restricted"),
+                        policy_step(
+                            {port_a: "UNCONSTRAINED"}, "Transition R to Unconstrained"
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold for policy convergence before final traffic validation",
+                        ),
+                        hardware_step("unconstrained"),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_restricted_blocked_restricted",
+            description=(
+                "Transition port R from Unconstrained to Restricted to Blocked, "
+                "verify that Blocked disables the port, then return it to "
+                "Restricted and validate the normal R-U stable state."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        policy_step(
+                            restricted,
+                            "Transition R from Unconstrained to Restricted",
+                        ),
+                        create_stop_traffic_step(),
+                        policy_step(
+                            {port_a: "BLOCKED"},
+                            "Transition R from Restricted to Blocked",
+                            start_traffic=False,
+                        ),
+                        create_verify_port_operational_state_step(
+                            interfaces=[port_a],
+                            operational_state=False,
+                            description=(
+                                f"Mid-test: validate Blocked port {port_a} is "
+                                "operationally down"
+                            ),
+                            device_regexes=[dut],
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[_bgp_established_check()],
+                            description=(
+                                "Mid-test: validate BGP remains stable while R is "
+                                "Blocked"
+                            ),
+                            start_traffic=False,
+                        ),
+                        create_stop_traffic_step(),
+                        policy_step(
+                            {port_a: "RESTRICTED"},
+                            "Transition R from Blocked back to Restricted",
+                            start_traffic=False,
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description=(
+                                "Wait two minutes for Restricted policy and port "
+                                "convergence"
+                            ),
+                            start_traffic=False,
+                        ),
+                        *reset_and_restart_traffic_steps(),
+                        hardware_step("restricted"),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_blocked_unconstrained",
+            description=(
+                "Transition port R from Unconstrained to Blocked, verify that "
+                "the port is disabled, then return it to Unconstrained and "
+                "validate every selected R-U flow at zero-percent loss."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(traffic_check=unconstrained_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        create_stop_traffic_step(),
+                        policy_step(
+                            {port_a: "BLOCKED"},
+                            "Transition R from Unconstrained to Blocked",
+                            start_traffic=False,
+                        ),
+                        create_verify_port_operational_state_step(
+                            interfaces=[port_a],
+                            operational_state=False,
+                            description=(
+                                f"Mid-test: validate Blocked port {port_a} is "
+                                "operationally down"
+                            ),
+                            device_regexes=[dut],
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[_bgp_established_check()],
+                            description=(
+                                "Mid-test: validate BGP remains stable while R is "
+                                "Blocked"
+                            ),
+                            start_traffic=False,
+                        ),
+                        create_stop_traffic_step(),
+                        policy_step(
+                            {port_a: "UNCONSTRAINED"},
+                            "Transition R from Blocked back to Unconstrained",
+                            start_traffic=False,
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description=(
+                                "Wait two minutes for Unconstrained policy and port "
+                                "convergence"
+                            ),
+                            start_traffic=False,
+                        ),
+                        *reset_and_restart_traffic_steps(),
+                        hardware_step("unconstrained"),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_to_restricted_agent_warmboot",
+            description="Transition R to Restricted, warmboot Agent, and validate policy stickiness.",
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic, restarted=True
+            ),
+            snapshot_checks=_snapshot_checks(dut, restarted=True),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained, "Prepare all IXIA ports as Unconstrained"
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Transition R to Restricted and B to Blocked",
+                        ),
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT, device_regexes=[dut]
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=300,
+                            device_regexes=[dut],
+                        ),
+                        create_longevity_step(
+                            duration=120, description="Hold after Agent warmboot"
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_to_restricted_blocked_agent_coldboot",
+            description=(
+                "Transition R to Restricted and B to Blocked, coldboot Agent, "
+                "then validate policy and stable-state recovery."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic,
+                restarted=True,
+                max_session_uptime_sec=600,
+            ),
+            # Coldboot intentionally restarts the routing stack. Validate BGP
+            # recovery explicitly in postchecks and independently compare cores.
+            snapshot_checks=[create_core_dumps_snapshot_check()],
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Transition R to Restricted and B to Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish the Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description=(
+                                "Validate Restricted R-U traffic before Agent coldboot"
+                            ),
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT,
+                            trigger=taac_thrift.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                            create_cold_boot_file=True,
+                            device_regexes=[dut],
+                            description="Coldboot Agent with the one-shot cold-boot marker",
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=600,
+                            device_regexes=[dut],
+                            description="Wait for Agent and BGP after coldboot",
+                        ),
+                        create_stop_traffic_step(),
+                        create_regenerate_traffic_step(),
+                        create_longevity_step(
+                            duration=120,
+                            description=(
+                                "Measure the recovered Restricted stable state for "
+                                "two minutes"
+                            ),
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_unconstrained_to_restricted_blocked_device_reboot",
+            description=(
+                "Transition R to Restricted and B to Blocked, reboot the device, "
+                "then validate policy and stable-state recovery."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic,
+                restarted=True,
+                max_session_uptime_sec=600,
+            ),
+            # A full reboot intentionally restarts BGP. Validate its recovered
+            # count and uptime explicitly, while independently comparing cores.
+            snapshot_checks=[create_core_dumps_snapshot_check()],
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Transition R to Restricted and B to Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish the Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description=(
+                                "Validate Restricted R-U traffic before device reboot"
+                            ),
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                        create_system_reboot_step(
+                            trigger=taac_thrift.SystemRebootTrigger.FULL_SYSTEM_REBOOT,
+                            description="Perform a full device reboot",
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=900,
+                            device_regexes=[dut],
+                            description="Wait for Agent and BGP after device reboot",
+                        ),
+                        create_stop_traffic_step(),
+                        create_regenerate_traffic_step(),
+                        create_longevity_step(
+                            duration=120,
+                            description=(
+                                "Measure the recovered Restricted stable state for "
+                                "two minutes"
+                            ),
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_to_unconstrained_agent_warmboot",
+            description="Transition R to Unconstrained, warmboot Agent, and validate policy removal stickiness.",
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=unconstrained_traffic, restarted=True
+            ),
+            snapshot_checks=_snapshot_checks(dut, restarted=True),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained, "Prepare all IXIA ports as Unconstrained"
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Prepare R as Restricted and B as Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description="Validate Restricted R-U traffic before transition",
+                        ),
+                        hardware_step("restricted"),
+                        policy_step(
+                            {port_a: "UNCONSTRAINED"}, "Transition R to Unconstrained"
+                        ),
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT, device_regexes=[dut]
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=300,
+                            device_regexes=[dut],
+                        ),
+                        create_longevity_step(
+                            duration=120, description="Hold after Agent warmboot"
+                        ),
+                        hardware_step("unconstrained"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_agent_warmboot_then_restricted_to_unconstrained",
+            description=(
+                "Warmboot Agent while R is Restricted, validate recovery, then "
+                "transition R to Unconstrained and validate policy removal."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=unconstrained_traffic, restarted=True
+            ),
+            snapshot_checks=_snapshot_checks(dut, restarted=True),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Prepare R as Restricted and B as Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description="Validate Restricted R-U traffic before warmboot",
+                        ),
+                        hardware_step("restricted"),
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT,
+                            device_regexes=[dut],
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=300,
+                            device_regexes=[dut],
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold Restricted state after Agent warmboot",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description="Validate Restricted traffic after Agent warmboot",
+                        ),
+                        hardware_step("restricted"),
+                        policy_step(
+                            {port_a: "UNCONSTRAINED"},
+                            "Transition R from Restricted to Unconstrained",
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold Unconstrained state for convergence",
+                        ),
+                        hardware_step("unconstrained"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_agent_warmboot_then_unconstrained_to_restricted",
+            description=(
+                "Warmboot Agent while R is Unconstrained, validate recovery, then "
+                "transition R to Restricted and validate policy programming."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic, restarted=True
+            ),
+            snapshot_checks=_snapshot_checks(dut, restarted=True),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish Unconstrained traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[unconstrained_traffic],
+                            description=(
+                                "Validate Unconstrained R-U traffic before warmboot"
+                            ),
+                        ),
+                        hardware_step("unconstrained"),
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT,
+                            device_regexes=[dut],
+                        ),
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=300,
+                            device_regexes=[dut],
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold Unconstrained state after Agent warmboot",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[unconstrained_traffic],
+                            description=(
+                                "Validate Unconstrained traffic after Agent warmboot"
+                            ),
+                        ),
+                        hardware_step("unconstrained"),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Transition R to Restricted and B to Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold Restricted state for convergence",
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_blocked_repeated_agent_crash_10m",
+            description=(
+                "Keep R Restricted and B Blocked while crashing Agent every 30 "
+                "seconds for ten minutes, then validate full stable-state recovery."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=[
+                restricted_traffic,
+                _bgp_established_check(restarted=True),
+                _unclean_exit_check(
+                    dut,
+                    exclude_services=[
+                        "wedge_agent",
+                        "fboss_sw_agent",
+                        "fboss_hw_agent@0",
+                    ],
+                ),
+                create_device_core_dumps_check(),
+            ],
+            # Repeated intentional crashes make a single restart timestamp an
+            # invalid basis for the generic BGP snapshot reconvergence check.
+            # The postcheck above validates four established sessions and
+            # recent uptime after the final crash; retain the independent core
+            # comparison here.
+            snapshot_checks=[create_core_dumps_snapshot_check()],
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        policy_step(
+                            all_unconstrained,
+                            "Prepare all IXIA ports as Unconstrained",
+                        ),
+                        policy_step(
+                            restricted_with_blocked,
+                            "Prepare R as Restricted and B as Blocked",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Establish the Restricted traffic baseline",
+                        ),
+                        create_validation_step(
+                            point_in_time_checks=[restricted_traffic],
+                            description="Validate Restricted R-U traffic before crashes",
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                ),
+                create_steps_stage(
+                    iteration=20,
+                    description=(
+                        "Crash Agent every 30 seconds for ten minutes without "
+                        "overlapping explicit restart operations"
+                    ),
+                    steps=[
+                        create_service_interruption_step(
+                            service=taac_thrift.Service.AGENT,
+                            trigger=taac_thrift.ServiceInterruptionTrigger.CRASH,
+                            device_regexes=[dut],
+                            description="Crash Agent with SIGKILL",
+                        ),
+                        create_longevity_step(
+                            duration=30,
+                            description="Hold 30 seconds before the next Agent crash",
+                        ),
+                    ],
+                ),
+                create_steps_stage(
+                    steps=[
+                        create_service_convergence_step(
+                            services=[
+                                taac_thrift.Service.AGENT,
+                                taac_thrift.Service.BGP,
+                            ],
+                            timeout=600,
+                            device_regexes=[dut],
+                            description=(
+                                "Wait for Agent and BGP convergence after the crash "
+                                "campaign"
+                            ),
+                        ),
+                        create_stop_traffic_step(),
+                        create_regenerate_traffic_step(),
+                        create_longevity_step(
+                            duration=120,
+                            description=(
+                                "Measure the recovered Restricted stable state for "
+                                "two minutes"
+                            ),
+                        ),
+                        hardware_step("restricted"),
+                        blocked_port_step(),
+                    ]
+                ),
+            ],
+        ),
+    ]
+
+
+def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
+    """Validate Restricted-policy stickiness across single and rapid flaps."""
+    all_unconstrained = {
+        port_a: "UNCONSTRAINED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+    restricted_policies = {
+        port_a: "RESTRICTED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+    restricted_traffic = _traffic_loss_check(
+        RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS,
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+    deny_only_traffic = _traffic_loss_check(
+        [],
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+    flap_method = taac_thrift.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
+
+    def prepare_steps(*, block_port_b=False):
+        policies = dict(restricted_policies)
+        if block_port_b:
+            policies[port_b] = "BLOCKED"
+        steps = [
+            _set_access_policy_step(
+                dut,
+                all_unconstrained,
+                "Prepare all IXIA ports as Unconstrained",
+                start_traffic=False,
+            ),
+            _set_access_policy_step(
+                dut,
+                policies,
+                (
+                    "Prepare R as Restricted and B as Blocked"
+                    if block_port_b
+                    else "Prepare R as Restricted"
+                ),
+                start_traffic=False,
+            ),
+            _access_policy_hardware_check_step(
+                dut,
+                {port_a: "restricted"},
+                "Validate Restricted SW/HW state before port disruption",
+                start_traffic=False,
+            ),
+            create_validation_step(
+                point_in_time_checks=[_bgp_established_check()],
+                stage=taac_thrift.ValidationStage.PRE_TEST,
+                description="Validate four-session BGP baseline",
+                start_traffic=False,
+            ),
+            create_longevity_step(
+                duration=30,
+                description="Start R-U traffic and establish Restricted baseline",
+            ),
+            create_validation_step(
+                point_in_time_checks=[restricted_traffic],
+                description="Validate full Restricted traffic baseline",
+            ),
+        ]
+        if block_port_b:
+            steps.append(
+                create_verify_port_operational_state_step(
+                    interfaces=[port_b],
+                    operational_state=False,
+                    description=f"Validate Blocked port {port_b} is down",
+                    device_regexes=[dut],
+                )
+            )
+        return steps
+
+    def mid_and_fresh_post_steps(recovery_seconds=30):
+        return [
+            create_validation_step(
+                point_in_time_checks=[deny_only_traffic],
+                description=(
+                    "Mid-test: require every Restricted deny flow to remain at "
+                    "100% loss; transient loss on allow flows is tolerated"
+                ),
+            ),
+            create_run_task_step(
+                task_name="ixia_stop_traffic_and_wait",
+                params_dict={"wait_seconds": 0},
+                description="Stop traffic and clear the disruption window",
+                ixia_needed=True,
+                start_traffic=False,
+            ),
+            create_longevity_step(
+                duration=recovery_seconds,
+                description="Restart traffic and establish a fresh recovery window",
+            ),
+            _access_policy_hardware_check_step(
+                dut,
+                {port_a: "restricted"},
+                "Validate Restricted SW/HW state after port disruption",
+            ),
+        ]
+
+    cleanup_steps = [
+        create_interface_flap_step(
+            enable=True,
+            interfaces=[port_a],
+            interface_flap_method=flap_method,
+            delay=0,
+            description=f"Ensure {port_a} is enabled during cleanup",
+            start_traffic=False,
+        ),
+        *_policy_cleanup_steps(dut, port_a, port_b, port_c),
+    ]
+
+    return [
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_single_port_flap",
+            description=(
+                "Disable Restricted port R once, hold it down for six seconds, "
+                "enable it, and validate deny-path and full traffic recovery."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[],
+            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(
+                    steps=prepare_steps()
+                    + [
+                        create_interface_flap_step(
+                            enable=False,
+                            interfaces=[port_a],
+                            interface_flap_method=flap_method,
+                            delay=0,
+                            description=f"Disable Restricted port {port_a}",
+                            start_traffic=False,
+                        ),
+                        create_longevity_step(
+                            duration=6,
+                            description="Hold Restricted port down for six seconds",
+                            start_traffic=False,
+                        ),
+                        create_interface_flap_step(
+                            enable=True,
+                            interfaces=[port_a],
+                            interface_flap_method=flap_method,
+                            delay=0,
+                            description=f"Enable Restricted port {port_a}",
+                            start_traffic=False,
+                        ),
+                    ]
+                    + mid_and_fresh_post_steps()
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_rapid_port_flaps_15m",
+            description=(
+                "Rapid-flap Restricted port R every six seconds for 15 minutes "
+                "and validate deny-path stickiness and full traffic recovery."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[],
+            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            snapshot_checks=_snapshot_checks(dut),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(steps=prepare_steps()),
+                create_steps_stage(
+                    steps=[
+                        create_fpf_rapid_flap_step(
+                            interfaces_by_device={dut: [port_a]},
+                            duration_sec=900,
+                            flap_interval_sec=6,
+                            device_regexes=[dut],
+                            description=(
+                                f"Rapid-flap Restricted port {port_a} every six "
+                                "seconds for 15 minutes"
+                            ),
+                        )
+                    ]
+                ),
+                create_steps_stage(steps=mid_and_fresh_post_steps()),
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_rapid_port_flaps_with_agent_warmboot",
+            description=(
+                "Rapid-flap Restricted port R every six seconds for 15 minutes "
+                "and warmboot Agent concurrently at minute ten."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic,
+                restarted=True,
+                max_session_uptime_sec=1800,
+            ),
+            snapshot_checks=_snapshot_checks(dut, restarted=True),
+            cleanup_steps=cleanup_steps,
+            stages=[
+                create_steps_stage(steps=prepare_steps(block_port_b=True)),
+                create_concurrent_steps_stage(
+                    step_tracks=[
+                        [
+                            create_fpf_rapid_flap_step(
+                                interfaces_by_device={dut: [port_a]},
+                                duration_sec=900,
+                                flap_interval_sec=6,
+                                device_regexes=[dut],
+                                description=(
+                                    f"Rapid-flap Restricted port {port_a} every "
+                                    "six seconds for 15 minutes"
+                                ),
+                            )
+                        ],
+                        [
+                            create_longevity_step(
+                                duration=600,
+                                description=(
+                                    "Wait until minute ten of the rapid-flap window"
+                                ),
+                                start_traffic=False,
+                            ),
+                            create_service_interruption_step(
+                                service=taac_thrift.Service.AGENT,
+                                device_regexes=[dut],
+                                description=(
+                                    "Warmboot Agent during Restricted rapid flaps"
+                                ),
+                                start_traffic=False,
+                            ),
+                            create_service_convergence_step(
+                                services=[
+                                    taac_thrift.Service.AGENT,
+                                    taac_thrift.Service.BGP,
+                                ],
+                                timeout=300,
+                                device_regexes=[dut],
+                                description=(
+                                    "Wait for Agent and BGP convergence after warmboot"
+                                ),
+                                start_traffic=False,
+                            ),
+                        ],
+                    ],
+                    description=(
+                        "Run 15-minute Restricted rapid flaps with Agent warmboot "
+                        "at minute ten"
+                    ),
+                ),
+                create_steps_stage(
+                    steps=mid_and_fresh_post_steps(recovery_seconds=120)
+                    + [
+                        create_verify_port_operational_state_step(
+                            interfaces=[port_b],
+                            operational_state=False,
+                            description=(
+                                f"Validate Blocked port {port_b} remains down "
+                                "after Agent warmboot"
+                            ),
+                            device_regexes=[dut],
+                        )
+                    ]
+                ),
+            ],
+        ),
+    ]
+
+
+def _speed_flip_playbooks(dut, port_a, port_b, port_c, speed_flip_port):
+    """Validate access-policy programming across a non-IXIA port speed flip."""
+    all_unconstrained = {
+        port_a: "UNCONSTRAINED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+        speed_flip_port: "UNCONSTRAINED",
+    }
+    restricted = {
+        port_a: "RESTRICTED",
+        port_b: "BLOCKED",
+        speed_flip_port: "RESTRICTED",
+    }
+    restricted_traffic = _traffic_loss_check(
+        RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS,
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+
+    def register_200g_speed_patcher_step(description):
+        return create_run_task_step(
+            task_name="coop_register_patcher",
+            params_dict={
+                "hostname": dut,
+                "config_name": "agent",
+                "patcher_name": SPEED_FLIP_PATCHER_NAME,
+                "py_func_name": "change_speed",
+                "patcher_args": json.dumps(
+                    {
+                        "intfs": speed_flip_port,
+                        "profile_id": SPEED_FLIP_200G_PROFILE,
+                        "speed": "TWOHUNDREDG",
+                    }
+                ),
+                "patcher_desc": (
+                    "Set the Hatch access-policy speed-flip validation port to 200G"
+                ),
+            },
+            description=description,
+            start_traffic=False,
+        )
+
+    def unregister_200g_speed_patcher_step(description):
+        return create_run_task_step(
+            task_name="coop_unregister_patchers",
+            params_dict={
+                "hostname": dut,
+                "config_names": ["agent"],
+                "regex": f"^{SPEED_FLIP_PATCHER_NAME}$",
+            },
+            description=description,
+            start_traffic=False,
+        )
+
+    def warmboot_and_converge_steps(description, *, wait_for_bgp=True):
+        services = [taac_thrift.Service.AGENT]
+        if wait_for_bgp:
+            services.append(taac_thrift.Service.BGP)
+        return [
+            create_service_interruption_step(
+                service=taac_thrift.Service.AGENT,
+                description=description,
+                device_regexes=[dut],
+                start_traffic=False,
+            ),
+            create_service_convergence_step(
+                services=services,
+                timeout=300,
+                description=(
+                    "Wait for Agent and BGP convergence"
+                    if wait_for_bgp
+                    else "Wait for Agent convergence at the temporary 200G state"
+                ),
+                device_regexes=[dut],
+                start_traffic=False,
+            ),
+        ]
+
+    def restore_speed_and_policy_steps():
+        return [
+            unregister_200g_speed_patcher_step(
+                "Remove the 200G speed patcher during cleanup"
+            ),
+            *warmboot_and_converge_steps(
+                "Warmboot Agent to restore the original 100G configuration"
+            ),
+            _set_access_policy_step(
+                dut,
+                all_unconstrained,
+                "Restore access-policy ports to Unconstrained",
+                start_traffic=False,
+            ),
+            create_verify_port_speed_step_v2(
+                ports=[speed_flip_port],
+                speed_to_verify=100,
+                description=f"Verify {speed_flip_port} restored to 100G",
+                start_traffic=False,
+            ),
+        ]
+
+    def common_preparation_steps():
+        return [
+            _set_access_policy_step(
+                dut,
+                all_unconstrained,
+                "Prepare all access-policy ports as Unconstrained",
+                start_traffic=False,
+            ),
+            create_verify_port_speed_step_v2(
+                ports=[speed_flip_port],
+                speed_to_verify=100,
+                description=f"Verify {speed_flip_port} starts at 100G",
+                start_traffic=False,
+            ),
+            _set_access_policy_step(
+                dut,
+                restricted,
+                (
+                    f"Set {port_a} and {speed_flip_port} to Restricted and "
+                    f"{port_b} to Blocked"
+                ),
+                start_traffic=False,
+            ),
+            _access_policy_hardware_check_step(
+                dut,
+                {port_a: "restricted", speed_flip_port: "restricted"},
+                "Validate both Restricted ports in Agent and uncached hardware",
+                start_traffic=False,
+            ),
+            create_verify_port_operational_state_step(
+                interfaces=[port_b],
+                operational_state=False,
+                description=f"Validate Blocked port {port_b} is down",
+                device_regexes=[dut],
+            ),
+            create_longevity_step(
+                duration=30,
+                description="Establish the Restricted R-U traffic baseline",
+            ),
+            create_validation_step(
+                point_in_time_checks=[restricted_traffic],
+                stage=taac_thrift.ValidationStage.MID_TEST,
+                description="Validate Restricted R-U traffic before the speed change",
+            ),
+        ]
+
+    return [
+        create_access_policy_playbook(
+            name="test_access_policy_restricted_non_ixia_port_speed_to_200g_warmboot",
+            description=(
+                f"Put {speed_flip_port} in Restricted mode, apply a COOP 200G "
+                "copper-profile patcher, warmboot Agent, and verify policy "
+                "stickiness on both Restricted ports without disturbing R-U traffic."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic,
+                restarted=True,
+                expected_bgp_sessions=3,
+            ),
+            # The 100G -> 200G speed change intentionally removes one BGP
+            # adjacency. Core-dump comparison remains valid, but a BGP
+            # before/after identity comparison does not.
+            snapshot_checks=[create_core_dumps_snapshot_check()],
+            cleanup_steps=restore_speed_and_policy_steps(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        *common_preparation_steps(),
+                        register_200g_speed_patcher_step(
+                            f"Register the COOP 200G speed patcher for {speed_flip_port}"
+                        ),
+                        *warmboot_and_converge_steps(
+                            "Warmboot Agent to activate the 200G speed patcher",
+                            wait_for_bgp=False,
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold the 200G state after Agent warmboot",
+                        ),
+                        create_verify_port_speed_step_v2(
+                            ports=[speed_flip_port],
+                            speed_to_verify=200,
+                            description=f"Verify {speed_flip_port} is at 200G",
+                        ),
+                        _access_policy_hardware_check_step(
+                            dut,
+                            {port_a: "restricted", speed_flip_port: "restricted"},
+                            "Verify both Restricted bindings survived the speed change and warmboot",
+                        ),
+                        create_verify_port_operational_state_step(
+                            interfaces=[port_b],
+                            operational_state=False,
+                            description=(
+                                f"Verify Blocked port {port_b} remains down after "
+                                "the speed-change warmboot"
+                            ),
+                            device_regexes=[dut],
+                        ),
+                    ]
+                )
+            ],
+        ),
+        create_access_policy_playbook(
+            name="test_access_policy_remove_speed_patcher_to_100g_warmboot",
+            description=(
+                f"Remove the COOP 200G patcher for {speed_flip_port}, return that "
+                "port to Unconstrained, warmboot Agent, and verify the original "
+                "100G state while the primary Restricted port remains programmed."
+            ),
+            device_regexes=[dut],
+            traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+            prechecks=[_bgp_established_check()],
+            postchecks=_common_postchecks(
+                traffic_check=restricted_traffic, restarted=True
+            ),
+            # The setup intentionally transitions the link 100G -> 200G before
+            # restoring it to 100G, so original BGP-session identity is not a
+            # valid lifecycle invariant. The postcheck still requires all four
+            # sessions to recover after the final warmboot.
+            snapshot_checks=[create_core_dumps_snapshot_check()],
+            cleanup_steps=restore_speed_and_policy_steps(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        *common_preparation_steps(),
+                        register_200g_speed_patcher_step(
+                            f"Prepare {speed_flip_port} at 200G through COOP"
+                        ),
+                        *warmboot_and_converge_steps(
+                            "Warmboot Agent to establish the 200G starting state",
+                            wait_for_bgp=False,
+                        ),
+                        create_verify_port_speed_step_v2(
+                            ports=[speed_flip_port],
+                            speed_to_verify=200,
+                            description=f"Verify {speed_flip_port} reached 200G",
+                        ),
+                        _set_access_policy_step(
+                            dut,
+                            {speed_flip_port: "UNCONSTRAINED"},
+                            f"Remove Restricted policy from {speed_flip_port}",
+                            start_traffic=False,
+                        ),
+                        unregister_200g_speed_patcher_step(
+                            f"Remove the 200G speed patcher from {speed_flip_port}"
+                        ),
+                        *warmboot_and_converge_steps(
+                            "Warmboot Agent to restore the original 100G configuration"
+                        ),
+                        create_longevity_step(
+                            duration=120,
+                            description="Hold the restored 100G state after warmboot",
+                        ),
+                        create_verify_port_speed_step_v2(
+                            ports=[speed_flip_port],
+                            speed_to_verify=100,
+                            description=f"Verify {speed_flip_port} returned to 100G",
+                        ),
+                        _access_policy_hardware_check_step(
+                            dut,
+                            {
+                                port_a: "restricted",
+                                speed_flip_port: "unconstrained",
+                            },
+                            "Verify only the primary port remains Restricted in hardware",
+                        ),
+                        create_verify_port_operational_state_step(
+                            interfaces=[port_b],
+                            operational_state=False,
+                            description=(
+                                f"Verify Blocked port {port_b} remains down after "
+                                "the speed-restoration warmboot"
+                            ),
+                            device_regexes=[dut],
+                        ),
+                    ]
+                )
+            ],
+        ),
+    ]
+
+
+def _link_down_policy_transition_playbook(dut, port_a, port_b, port_c):
+    """Apply Restricted policy while the protected port is disabled."""
+    all_unconstrained = {
+        port_a: "UNCONSTRAINED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+    restricted_traffic = _traffic_loss_check(
+        RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS,
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+    unconstrained_traffic = _traffic_loss_check(R_U_DATA_PLANE_TRAFFIC_ITEMS, [])
+    return create_access_policy_playbook(
+        name="test_access_policy_unconstrained_to_restricted_while_port_disabled",
+        description=(
+            "Start with R Unconstrained, disable it, apply Restricted policy while "
+            "down, re-enable it, restart traffic, and validate the final state as "
+            "a normal Restricted port."
+        ),
+        device_regexes=[dut],
+        traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+        prechecks=[_bgp_established_check()],
+        postchecks=_common_postchecks(traffic_check=restricted_traffic),
+        snapshot_checks=_snapshot_checks(dut),
+        cleanup_steps=[
+            create_interface_flap_step(
+                enable=True,
+                interfaces=[port_a],
+                interface_flap_method=taac_thrift.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                description=f"Ensure {port_a} is enabled during cleanup",
+                start_traffic=False,
+            ),
+            *_policy_cleanup_steps(dut, port_a, port_b, port_c),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    _set_access_policy_step(
+                        dut,
+                        all_unconstrained,
+                        "Prepare all IXIA-facing ports as Unconstrained",
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=30,
+                        description="Start traffic and establish the Unconstrained baseline",
+                    ),
+                    create_validation_step(
+                        point_in_time_checks=[unconstrained_traffic],
+                        stage=taac_thrift.ValidationStage.MID_TEST,
+                        description="Validate all selected R-U traffic is lossless before the trigger",
+                    ),
+                    create_interface_flap_step(
+                        enable=False,
+                        interfaces=[port_a],
+                        interface_flap_method=taac_thrift.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        description=f"Disable Unconstrained port {port_a}",
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=30,
+                        description="Hold the port disabled before changing policy",
+                        start_traffic=False,
+                    ),
+                    _set_access_policy_step(
+                        dut,
+                        {port_a: "RESTRICTED"},
+                        f"Apply Restricted policy to disabled port {port_a}",
+                        start_traffic=False,
+                    ),
+                    create_interface_flap_step(
+                        enable=True,
+                        interfaces=[port_a],
+                        interface_flap_method=taac_thrift.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        description=f"Re-enable Restricted port {port_a}",
+                        start_traffic=False,
+                    ),
+                    create_run_task_step(
+                        task_name="ixia_stop_traffic_and_wait",
+                        params_dict={"wait_seconds": 0},
+                        description="Stop traffic and clear the transition window",
+                        ixia_needed=True,
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=120,
+                        description="Restart traffic and hold the final Restricted state",
+                    ),
+                    _access_policy_hardware_check_step(
+                        dut,
+                        {port_a: "restricted"},
+                        f"Validate Restricted Agent and hardware state on {port_a}",
+                    ),
+                ]
+            )
         ],
     )
 
@@ -1392,6 +2976,346 @@ def _chaos_stop_stage(dut):
     )
 
 
+def _unrelated_link_drain_playbook(
+    dut,
+    port_a,
+    port_b,
+    port_c,
+    drain_interfaces,
+):
+    """Verify an unrelated bulk link drain does not alter R-port behavior."""
+    restricted_traffic = _traffic_loss_check(
+        RESTRICTED_R_U_LOSSLESS_TRAFFIC_ITEMS,
+        RESTRICTED_R_U_BLOCKED_TRAFFIC_ITEMS,
+    )
+    restricted_policies = {
+        port_a: "RESTRICTED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+
+    def stable_state_checks(*, restarted=False):
+        return [
+            restricted_traffic,
+            _bgp_established_check(restarted=restarted),
+            _unclean_exit_check(dut),
+            create_device_core_dumps_check(),
+        ]
+
+    return create_access_policy_playbook(
+        name="test_access_policy_unrelated_link_drain_undrain",
+        description=(
+            f"Keep {port_a} Restricted while bulk-draining unrelated links "
+            f"{list(drain_interfaces)}, then bulk-undrain them and verify the "
+            "Restricted R-U traffic and health contract in both phases."
+        ),
+        device_regexes=[dut],
+        traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
+        prechecks=[_bgp_established_check()],
+        postchecks=stable_state_checks(),
+        # A hard interface drain must not restart BGP. Compare cores and retain
+        # the original session-uptime baseline across both drain transitions.
+        snapshot_checks=[create_core_dumps_snapshot_check()],
+        cleanup_steps=[
+            create_drain_undrain_step(
+                drain=False,
+                drain_handler=taac_thrift.DrainHandler.LOCAL_DRAINER,
+                interfaces=list(drain_interfaces),
+                hard_drain_interfaces=True,
+                description="Ensure all unrelated links are undrained",
+                start_traffic=False,
+            ),
+            *_policy_cleanup_steps(dut, port_a, port_b, port_c),
+        ],
+        stages=[
+            create_steps_stage(
+                steps=[
+                    create_drain_undrain_step(
+                        drain=False,
+                        drain_handler=taac_thrift.DrainHandler.LOCAL_DRAINER,
+                        interfaces=list(drain_interfaces),
+                        hard_drain_interfaces=True,
+                        description=f"Ensure unrelated links start undrained: {list(drain_interfaces)}",
+                        start_traffic=False,
+                    ),
+                    _set_access_policy_step(
+                        dut,
+                        restricted_policies,
+                        f"Keep {port_a} Restricted and the other IXIA ports Unconstrained",
+                        start_traffic=False,
+                    ),
+                    _access_policy_hardware_check_step(
+                        dut,
+                        {port_a: "restricted"},
+                        f"Validate Restricted Agent and hardware state on {port_a}",
+                        start_traffic=False,
+                    ),
+                    create_run_task_step(
+                        task_name="ixia_stop_traffic_and_wait",
+                        params_dict={"wait_seconds": 0},
+                        description="Stop traffic to reset the measurement window",
+                        ixia_needed=True,
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=30,
+                        description="Restart traffic and establish the Restricted baseline",
+                    ),
+                    create_validation_step(
+                        point_in_time_checks=stable_state_checks(),
+                        stage=taac_thrift.ValidationStage.MID_TEST,
+                        description="Validate the Restricted baseline before link drain",
+                    ),
+                    create_drain_undrain_step(
+                        drain=True,
+                        drain_handler=taac_thrift.DrainHandler.LOCAL_DRAINER,
+                        interfaces=list(drain_interfaces),
+                        description=f"Bulk drain unrelated links {list(drain_interfaces)}",
+                        hard_drain_interfaces=True,
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=120,
+                        description="Hold the drained state for two minutes",
+                    ),
+                    _access_policy_hardware_check_step(
+                        dut,
+                        {port_a: "restricted"},
+                        f"Verify {port_a} remains Restricted while unrelated links are drained",
+                    ),
+                    create_validation_step(
+                        point_in_time_checks=stable_state_checks(),
+                        stage=taac_thrift.ValidationStage.MID_TEST,
+                        description="Validate stable state after unrelated link drain",
+                    ),
+                    create_drain_undrain_step(
+                        drain=False,
+                        drain_handler=taac_thrift.DrainHandler.LOCAL_DRAINER,
+                        interfaces=list(drain_interfaces),
+                        description=f"Bulk undrain unrelated links {list(drain_interfaces)}",
+                        hard_drain_interfaces=True,
+                        start_traffic=False,
+                    ),
+                    create_longevity_step(
+                        duration=120,
+                        description="Hold the recovered state for two minutes",
+                    ),
+                    _access_policy_hardware_check_step(
+                        dut,
+                        {port_a: "restricted"},
+                        f"Verify {port_a} remains Restricted after link undrain",
+                    ),
+                ]
+            )
+        ],
+    )
+
+
+def _cpu_stress_playbooks(dut, port_a, port_b, port_c):
+    cleanup_steps = _policy_cleanup_steps(dut, port_a, port_b, port_c)
+    queue_expectations = {
+        "RAW_LLDP_R": ([2], [2], [0, 7]),
+        "RAW_LACP_R": ([], [], [0, 2, 7]),
+        # Preserve ARP as a strict negative-safety test.  The known device
+        # behavior is expected to fail this contract; do not waive the BGP or
+        # unexpected CPU-queue signals merely to make the playbook pass.
+        "RAW_ARP_R": ([], [], [0, 2, 7]),
+        # DHCPv6 stress is intentionally disruptive on this platform. Unlike
+        # LLDP, it does not produce a material MID-queue signal; the contract is
+        # a BGP flap during stress followed by full recovery after traffic stops.
+        "RAW_DHCPV6_R": ([], [], [0, 2, 7]),
+        "RAW_BGP_R": ([], [], [0, 2, 7]),
+        "RAW_NDP_R": ([7], [7], [0, 2]),
+        # Thrift traffic to the device-local fboss10 address is classified into
+        # the MID CPU queue on W400C.  A live five-minute run measured ~9.3K
+        # packets/s on queue 2, so the shared 1K packets/s floor is deliberately
+        # conservative while still rejecting background-only traffic.
+        "TCP_SYN_5909_R": ([2], [2], [0, 7]),
+        # UDP/5909 is not admitted by the Restricted ACL even though its
+        # destination is fboss10. It must increment the ingress ACL-discard
+        # counter without reaching any CPU queue.
+        "UDP_5909_R": ([], [], [0, 2, 7]),
+    }
+    expected_bgp_flap_items = {
+        "RAW_BGP_R",
+        "RAW_DHCPV6_R",
+        "RAW_NDP_R",
+    }
+    restricted_policies = {
+        port_a: "RESTRICTED",
+        port_b: "UNCONSTRAINED",
+        port_c: "UNCONSTRAINED",
+    }
+    playbooks = []
+    for traffic_item, (active, active_discards, inactive) in queue_expectations.items():
+        expects_bgp_flap = traffic_item in expected_bgp_flap_items
+        playbook_description = (
+            f"Run {traffic_item} for five minutes, prove that BGP flapped "
+            "during stress, then stop traffic and validate recovery."
+            if expects_bgp_flap
+            else f"Run {traffic_item} for five minutes and "
+            "validate CPU queue/discard signals and BGP stability."
+        )
+        stage_steps = [
+            _set_access_policy_step(
+                dut,
+                restricted_policies,
+                "Prepare Restricted CPU-stress ingress",
+                start_traffic=False,
+            ),
+            create_validation_step(
+                point_in_time_checks=[_bgp_established_check()],
+                stage=taac_thrift.ValidationStage.PRE_TEST,
+                description="Validate BGP baseline before CPU stress",
+                start_traffic=False,
+            ),
+            _access_policy_hardware_check_step(
+                dut,
+                {port_a: "restricted"},
+                "Validate Restricted SW/HW state before CPU stress",
+                start_traffic=False,
+            ),
+        ]
+        stage_steps.append(
+            create_longevity_step(
+                duration=300,
+                description=f"Run {traffic_item} for five minutes",
+            )
+        )
+        tx_rate_check = create_ixia_traffic_rate_check(
+            thresholds=[
+                hc_thrift.TrafficRateThreshold(
+                    names=[traffic_item],
+                    value=1,
+                    threshold_type=hc_thrift.ThresholdType.PERCENT,
+                    metric=hc_thrift.TrafficRateMetric.TX_RATE,
+                )
+            ],
+            base_bandwidth_gbps=200,
+        )
+        acl_discard_check = create_fpf_ods_counter_check(
+            entity_desc=dut,
+            key_desc=f"fboss.agent.{port_a}.in_acl_discards.sum.60",
+            validation_expr=">= 1000000",
+            aggregate="max",
+            counter_name=f"{port_a} Restricted ACL discards for {traffic_item}",
+            check_id=f"{traffic_item.lower()}_restricted_acl_discards",
+            min_ods_query_duration=300,
+        )
+        if expects_bgp_flap:
+            stage_steps.extend(
+                [
+                    create_validation_step(
+                        point_in_time_checks=[
+                            tx_rate_check,
+                            *(
+                                [acl_discard_check]
+                                if traffic_item == "RAW_BGP_R"
+                                else []
+                            ),
+                            create_bgp_session_establish_check(
+                                max_established_sessions=3,
+                                retry_count=12,
+                                retry_delay_seconds=10,
+                                retry_delay_multiplier=1,
+                            ),
+                        ],
+                        description=(
+                            f"Confirm {traffic_item} reduced the Established "
+                            "BGP session count below four"
+                        ),
+                    ),
+                    create_run_task_step(
+                        task_name="ixia_stop_traffic_and_wait",
+                        params_dict={"wait_seconds": 300},
+                        description=(
+                            f"Stop {traffic_item} and hold a five-minute BGP "
+                            "recovery window"
+                        ),
+                        ixia_needed=True,
+                        start_traffic=False,
+                    ),
+                    create_validation_step(
+                        point_in_time_checks=[
+                            create_bgp_session_establish_check(
+                                expected_established_sessions=4,
+                                session_restarted_after_jq_var="test_case_start_time",
+                                retry_count=12,
+                                retry_delay_seconds=10,
+                                retry_delay_multiplier=1,
+                            ),
+                            _unclean_exit_check(dut),
+                            create_device_core_dumps_check(),
+                        ],
+                        stage=taac_thrift.ValidationStage.POST_TEST,
+                        description=(
+                            "Validate four recovered BGP sessions and fresh "
+                            f"uptime while {traffic_item} remains stopped"
+                        ),
+                        start_traffic=False,
+                    ),
+                ]
+            )
+        playbooks.append(
+            create_access_policy_playbook(
+                name=f"test_access_policy_cpu_{traffic_item.lower()}",
+                description=playbook_description,
+                device_regexes=[dut],
+                traffic_items_to_start=[traffic_item],
+                # Policy and a traffic-off BGP baseline are established inside
+                # the stage so high-rate traffic cannot start before its ingress
+                # mode is programmed.
+                prechecks=[],
+                postchecks=(
+                    []
+                    if expects_bgp_flap
+                    else [
+                        tx_rate_check,
+                        _bgp_established_check(),
+                        _unclean_exit_check(dut),
+                        create_device_core_dumps_check(),
+                        *(
+                            [acl_discard_check]
+                            if traffic_item in {"RAW_BGP_R", "UDP_5909_R"}
+                            else []
+                        ),
+                    ]
+                ),
+                snapshot_checks=[
+                    create_bgp_session_snapshot_check(
+                        skip_flap_check=True if expects_bgp_flap else None,
+                        skip_uptime_check=True if expects_bgp_flap else None,
+                    ),
+                    create_core_dumps_snapshot_check(),
+                    create_cpu_queue_snapshot_check(
+                        active_queues=active,
+                        active_discard_queues=active_discards,
+                        no_discard_queues=(
+                            inactive if traffic_item == "UDP_5909_R" else None
+                        ),
+                        inactive_queues=inactive,
+                        inactive_max_pps_per_queue=dict.fromkeys(inactive, 500),
+                        active_min_out_pps_per_queue=dict.fromkeys(
+                            active, 500 if expects_bgp_flap else 1000
+                        ),
+                    ),
+                ],
+                cleanup_steps=[
+                    create_run_task_step(
+                        task_name="ixia_stop_traffic_and_wait",
+                        params_dict={"wait_seconds": 0},
+                        description=f"Leave {traffic_item} stress traffic stopped",
+                        ixia_needed=True,
+                        start_traffic=False,
+                    )
+                ]
+                + cleanup_steps,
+                stages=[create_steps_stage(steps=stage_steps)],
+            )
+        )
+    return playbooks
+
+
 def _build_test_config(
     name,
     dut,
@@ -1428,6 +3352,9 @@ def _build_test_config(
         + [item[0] for item in udp_items]
         + [item[0] for item in raw_tcp_syn_items]
     )
+    is_w400c = dut == W400C_DUT
+    stable_allowed = R_U_DATA_PLANE_TRAFFIC_ITEMS
+    stable_blocked = []
     return taac_thrift.TestConfig(
         name=name,
         basset_pool="dne.test",
@@ -1436,6 +3363,11 @@ def _build_test_config(
         # CPU-control-plane items retained for manual activation.  Avoid loading a
         # topology-only cache that may predate those traffic-item definitions.
         ixia_config_cache=taac_thrift.IxiaConfigCache(enabled=False),
+        # This access-policy config validates forwarding with explicit IXIA
+        # traffic health checks.  Avoid the setup-time protocol-stat snapshot:
+        # it uses the chassis-global DefaultSnapshotSettings resource and can
+        # contend with other session readers even though protocols started.
+        skip_ixia_protocol_verification=True,
         endpoints=[
             taac_thrift.Endpoint(
                 name=dut,
@@ -1451,6 +3383,23 @@ def _build_test_config(
                     )
                     for port, ixia_port in zip(ports, ixia_ports)
                 ],
+            )
+        ],
+        # Access policy can administratively disable an IXIA-facing port.  It
+        # must be cleared before IXIA protocol readiness, which runs before any
+        # playbook stage.  The typed COOP API performs Agent config activation.
+        setup_tasks=[
+            create_run_task(
+                task_name="coop_set_access_policy",
+                params_dict={
+                    "hostname": dut,
+                    "policies": {
+                        port_a: "UNCONSTRAINED",
+                        port_b: "UNCONSTRAINED",
+                        port_c: "UNCONSTRAINED",
+                    },
+                },
+                ixia_needed=False,
             )
         ],
         basic_port_configs=[
@@ -1558,20 +3507,28 @@ def _build_test_config(
             create_stable_state_validation_playbook(
                 name=playbook_name,
                 description=(
-                    "Stable-state validation of the Restricted, Blocked, and "
-                    "Unconstrained port ACL traffic matrix. No DUT state is changed."
+                    "Stable-state validation of the all-Unconstrained R/U "
+                    "traffic baseline. No DUT state is changed."
                 ),
                 device_regexes=[dut],
-                traffic_items_to_start=[item[0] for item in traffic_items]
-                + [item[0] for item in udp_items]
-                + [item[0] for item in raw_tcp_syn_items],
+                # Traffic sourced from or destined to a Blocked port is omitted:
+                # that port is administratively disabled and IXIA cannot resolve
+                # its endpoint.  The traffic definitions remain available for
+                # targeted/manual use.
+                traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
                 prechecks=[
-                    _unclean_exit_check(),
-                    _traffic_loss_check(ALLOWED_TRAFFIC_ITEMS, blocked),
+                    _unclean_exit_check(dut),
+                    _traffic_loss_check(
+                        stable_allowed,
+                        stable_blocked,
+                    ),
                 ],
                 postchecks=[
-                    _unclean_exit_check(),
-                    _traffic_loss_check(ALLOWED_TRAFFIC_ITEMS, blocked),
+                    _unclean_exit_check(dut),
+                    _traffic_loss_check(
+                        stable_allowed,
+                        stable_blocked,
+                    ),
                 ],
                 stages=[
                     create_steps_stage(
@@ -1630,6 +3587,24 @@ def _build_test_config(
                 )
             ]
             if chaos_ports
+            else []
+        )
+        + (
+            _transition_playbooks(dut, port_a, port_b, port_c)
+            + _restricted_port_flap_playbooks(dut, port_a, port_b, port_c)
+            + _speed_flip_playbooks(dut, port_a, port_b, port_c, SPEED_FLIP_PORT)
+            + [_link_down_policy_transition_playbook(dut, port_a, port_b, port_c)]
+            + [
+                _unrelated_link_drain_playbook(
+                    dut,
+                    port_a,
+                    port_b,
+                    port_c,
+                    UNRELATED_LINK_DRAIN_PORTS,
+                )
+            ]
+            + _cpu_stress_playbooks(dut, port_a, port_b, port_c)
+            if is_w400c
             else []
         ),
     )

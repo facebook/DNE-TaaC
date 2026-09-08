@@ -254,6 +254,32 @@ def create_hatch_chaos_soak_playbook(
     )
 
 
+def create_access_policy_playbook(
+    *,
+    name: str,
+    description: str,
+    device_regexes: t.List[str],
+    stages: t.List[Stage],
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
+    prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    cleanup_steps: t.Optional[t.List[Step]] = None,
+) -> Playbook:
+    """Create one access-policy transition or resilience playbook."""
+    return Playbook(
+        name=name,
+        description=description,
+        device_regexes=device_regexes,
+        stages=stages,
+        traffic_items_to_start=traffic_items_to_start,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=cleanup_steps,
+    )
+
+
 def create_agent_restart_playbook(
     wedge_agent_restart_no_of_interations: int = 10,
 ) -> Playbook:
