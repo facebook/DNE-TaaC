@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import later.unittest
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
+    IxiaStopTrafficAndWaitTask,
     RunCommandsOnShell,
     ValidateBgpcppUpdateGroupState,
 )
@@ -16,6 +17,24 @@ from taac.tasks.all import (
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
 RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
+
+
+class IxiaStopTrafficAndWaitTaskTest(later.unittest.TestCase):
+    @patch(f"{ALL_PATH}.asyncio.sleep", new_callable=AsyncMock)
+    async def test_stops_traffic_before_waiting(self, sleep: AsyncMock) -> None:
+        ixia = MagicMock()
+        task = IxiaStopTrafficAndWaitTask(ixia=ixia, logger=MagicMock())
+
+        await task.run({"wait_seconds": 300})
+
+        ixia.stop_traffic.assert_called_once_with()
+        sleep.assert_awaited_once_with(300.0)
+
+    async def test_rejects_negative_wait(self) -> None:
+        task = IxiaStopTrafficAndWaitTask(ixia=MagicMock(), logger=MagicMock())
+
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            await task.run({"wait_seconds": -1})
 
 
 def _count_chunk_commands(call_args_list) -> int:

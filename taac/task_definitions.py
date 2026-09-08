@@ -111,6 +111,82 @@ def create_deploy_eos_image_task(
 # =============================================================================
 
 
+_ACCESS_POLICY_MODES = frozenset(
+    {
+        "block",
+        "blocked",
+        "restrict",
+        "restricted",
+        "unconstrained",
+        "unrestricted",
+    }
+)
+
+
+def _validate_access_policy_modes(policies: t.Mapping[str, str]) -> t.Dict[str, str]:
+    validated = dict(policies)
+    for port_name, mode in validated.items():
+        if not isinstance(port_name, str) or not port_name.strip():
+            raise ValueError(
+                f"Access-policy port name must be non-empty: {port_name!r}"
+            )
+        if (
+            not isinstance(mode, str)
+            or mode.strip().lower() not in _ACCESS_POLICY_MODES
+        ):
+            raise ValueError(f"Unknown access-policy mode {mode!r} for {port_name}")
+    return validated
+
+
+def create_coop_set_access_policy_task(
+    hostname: str,
+    policies: t.Mapping[str, str],
+) -> Task:
+    """Create one atomic internal COOP access-policy mutation task."""
+    return Task(
+        task_name="coop_set_access_policy",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hostname": hostname,
+                    "policies": _validate_access_policy_modes(policies),
+                }
+            )
+        ),
+    )
+
+
+def create_validate_access_policy_hardware_task(
+    hostname: str,
+    expectations: t.Mapping[str, str],
+    mechanism: t.Optional[str] = None,
+) -> Task:
+    """Create a COOP/Agent/SAI access-policy drift validation task."""
+    if mechanism not in (None, "port-bindpoint", "class-id", "hybrid"):
+        raise ValueError(f"Unknown access-policy hardware mechanism {mechanism!r}")
+    params: t.Dict[str, t.Any] = {
+        "hostname": hostname,
+        "expectations": _validate_access_policy_modes(expectations),
+    }
+    if mechanism is not None:
+        params["mechanism"] = mechanism
+    return Task(
+        task_name="validate_access_policy_hardware",
+        params=Params(json_params=json.dumps(params)),
+    )
+
+
+def create_ixia_stop_traffic_and_wait_task(wait_seconds: int = 0) -> Task:
+    """Create an IXIA traffic-stop task with an optional traffic-off hold."""
+    if wait_seconds < 0:
+        raise ValueError("wait_seconds must be non-negative")
+    return Task(
+        task_name="ixia_stop_traffic_and_wait",
+        ixia_needed=True,
+        params=Params(json_params=json.dumps({"wait_seconds": wait_seconds})),
+    )
+
+
 def create_coop_unregister_patchers_task(
     hostnames: t.List[str] | str,
     config_names: t.Optional[t.List[str]] = None,
