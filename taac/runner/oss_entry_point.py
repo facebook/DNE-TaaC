@@ -47,9 +47,11 @@ from taac.runner.oss_exceptions import (
     OSSConfigError,
     OSSConnectionError,
     OSSInfrastructureError,
+    OSSTeardownError,
     OSSTestbedError,
 )
 from taac.runner.oss_return_code import OSSReturnCode
+from taac.runner.oss_secrets import load_oss_secrets
 from taac.runner.oss_test_executor import OSSTestExecutor
 from taac.runner.oss_test_result import OSSTestResult
 from taac.runner.oss_test_status import OSSTestStatus
@@ -289,6 +291,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     aggregator = OSSResultAggregator()
 
     try:
+        # Load adopter-owned credentials before constructing configs, drivers,
+        # or traffic generators. The loader maps its strict JSON schema onto
+        # the TAAC_* environment variables already consumed by OSS code.
+        if args.secrets_file:
+            loaded_secret_names = load_oss_secrets(args.secrets_file)
+            logger.info(
+                "Loaded OSS credentials: "
+                + (", ".join(sorted(loaded_secret_names)) or "no non-empty fields")
+            )
+
         # Build testbed topology from circuit CSV so callable configs
         # can receive it instead of importing loaders directly.
         topology = build_testbed_topology(args.duts)
@@ -403,8 +415,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # from execute_playbook / tearDown produces "attached to a
             # different loop" errors or silent connection failures.
             async def _run_lifecycle() -> None:
-                await taac_runner.async_test_setUp()
+                primary_error: Optional[BaseException] = None
                 try:
+                    # Setup can fail after config-specific tasks have already
+                    # changed a DUT (for example, while IXIA is initialized).
+                    # Keep it inside the teardown guard so partial setup is
+                    # always given a chance to restore its snapshots.
+                    await taac_runner.async_test_setUp()
                     for playbook in playbooks:
                         for dut in args.duts:
                             logger.info(f"\nExecuting {playbook.name} on {dut}...")
@@ -445,6 +462,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     else:
                                         # Add failed retry result
                                         aggregator.add_result(retry_result)
+                except BaseException as exc:
+                    primary_error = exc
+                    raise
                 finally:
                     try:
                         logger.info("Running async_test_tearDown()...")
@@ -452,6 +472,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                     except Exception as td_exc:
                         logger.error(f"Error during teardown: {td_exc}")
                         logger.exception(td_exc)
+                        # A teardown failure can mean the DUT was not restored.
+                        # Record it independently, including when setup/test
+                        # already failed, so neither lifecycle error masks the
+                        # other in machine-readable output.
+                        teardown_error = OSSTeardownError(
+                            f"Test config '{config_name}' teardown failed: {td_exc}"
+                        )
+                        aggregator.add_result(
+                            OSSTestResult(
+                                test_config=config_name,
+                                playbook="__teardown__",
+                                dut=",".join(args.duts),
+                                status=OSSTestStatus.TEARDOWN_FAILED,
+                                duration=0.0,
+                                message=str(teardown_error),
+                                exception=teardown_error,
+                                exception_type=type(td_exc).__name__,
+                                exception_message=str(td_exc),
+                                is_transient=False,
+                                traceback=traceback.format_exc(),
+                            )
+                        )
+                        # If setup/test is already unwinding, preserve that
+                        # primary exception; the dedicated result above still
+                        # makes teardown failure visible.  With no prior error,
+                        # propagate teardown failure so the lifecycle fails.
+                        if primary_error is None:
+                            raise teardown_error from td_exc
 
             # Enforce --timeout on the full setUp → execute → tearDown
             # lifecycle. `asyncio.wait_for` cancels the wrapped coroutine

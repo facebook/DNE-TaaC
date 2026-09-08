@@ -34,6 +34,8 @@ class TestOSSTestExecutor(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_playbook = mock.MagicMock()
         self.mock_playbook.name = "test_playbook"
+        self.mock_runner.topology.get_device_by_name.return_value = mock.MagicMock()
+        self.mock_runner.playbook_applies_to_device.return_value = True
 
     @staticmethod
     def _async_raise(exc):
@@ -66,6 +68,20 @@ class TestOSSTestExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.dut, "device1")
         self.assertEqual(result.test_config, "test_config")
         self.assertFalse(result.is_transient)
+
+    async def test_filtered_playbook_returns_omitted_without_running(self):
+        self.mock_runner.playbook_applies_to_device.return_value = False
+        self.mock_runner.run_tests = mock.AsyncMock()
+
+        result = await self.executor.execute_playbook(
+            playbook=self.mock_playbook,
+            dut="device2",
+            test_config="test_config",
+        )
+
+        self.assertEqual(result.status, OSSTestStatus.OMITTED)
+        self.assertIn("filters do not match", result.message)
+        self.mock_runner.run_tests.assert_not_awaited()
 
     async def test_assertion_error_returns_failed(self):
         self.mock_runner.run_tests = self._async_raise(

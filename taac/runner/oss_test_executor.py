@@ -89,6 +89,34 @@ class OSSTestExecutor:
         is_transient = False
 
         try:
+            # TaacRunner intentionally treats a playbook whose device filters
+            # do not match as a no-op.  A no-op is not a passed execution,
+            # though: reporting it as PASSED gives multi-DUT OSS runs a false
+            # green cell.  Resolve the DUT after setup (when topology exists)
+            # and preserve the runner's filtering semantics as OMITTED.
+            test_device = self._taac_runner.topology.get_device_by_name(dut)
+            if not self._taac_runner.playbook_applies_to_device(
+                playbook, test_device
+            ):
+                status = OSSTestStatus.OMITTED
+                message = "Playbook device filters do not match this DUT"
+                self._logger.info(
+                    f"Playbook '{playbook.name}' OMITTED on {dut}: {message}"
+                )
+                duration = time.time() - start_time
+                return OSSTestResult(
+                    test_config=test_config,
+                    playbook=playbook.name,
+                    dut=dut,
+                    status=status,
+                    duration=duration,
+                    message=message,
+                    is_transient=False,
+                    log_file=self._logger.get_log_file()
+                    if hasattr(self._logger, "get_log_file")
+                    else None,
+                )
+
             self._logger.info(f"Executing playbook '{playbook.name}' on {dut}")
             # Call run_tests one (playbook, dut) at a time rather than batching
             # the whole grid into a single run_tests(all_playbooks, all_duts):

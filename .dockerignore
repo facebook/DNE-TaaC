@@ -30,3 +30,9 @@
 !README.md
 !CODE_OF_CONDUCT.md
 !CONTRIBUTING.md
+
+# Defense in depth: never send adopter-owned credentials to a Docker build,
+# even if a future allowlist rule broadens the build context.
+.taac/
+*.secrets.env
+*.secrets.json

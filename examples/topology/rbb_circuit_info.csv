@@ -1,0 +1,31 @@
+# RBB SRv6 qualification — circuit_info TEMPLATE (replace with your values).
+#
+# This file is the SINGLE source of physical wiring for the RBB SRv6 slice.
+# taac/testconfigs/routing/util/bgp_rbb_topology.py derives from it:
+#   * CORE port-channels + members — rows whose two endpoints are BOTH DUTs and
+#     whose local endpoint carries a parent port-channel (columns 4 & 8). Members
+#     are grouped per node under that parent.
+#   * IXIA edges + IXIA-port map     — rows with role=IXIA (last column). The
+#     DUT-side local_interface maps to the IXIA-side neighbor_interface, which is
+#     expressed as "slot/port" (e.g. 1/3) so it drops straight into IxNetwork.
+#
+# `./scripts/run-rbb-srv6.sh --init` copies this into the default local
+# configuration directory. Bind the RBB roles in rbb.env with
+# TAAC_RBB_R1_HOST / TAAC_RBB_R2_HOST; they must match the hostnames below. Use
+# runner --config-dir when the initialized configuration is outside the checkout.
+#
+# Columns:
+#   hostname,local_interface,local_platform,local_parent_interface,\
+#   neighbor_hostname,neighbor_interface,neighbor_platform,neighbor_parent_interface,\
+#   status,role
+# status=3 => active. Lines starting with '#' are comments. All names below are
+# generic placeholders — replace with your real interfaces / IXIA card-port pairs.
+#
+# --- Core underlay: two one-member port-channels between R1 and R2. This shape
+# works with fresh-image bootstrap. Case 2 may add rows with the same parent
+# names to describe wider preconfigured LAGs. Each row describes both ends. ---
+rbb-r1.lab.example,eth1/1,FBOSS,port-channel1,rbb-r2.lab.example,eth1/1,FBOSS,port-channel1,3,
+rbb-r1.lab.example,eth1/2,FBOSS,port-channel2,rbb-r2.lab.example,eth1/2,FBOSS,port-channel2,3,
+# --- IXIA edges: DUT edge interface <-> IXIA physical port (slot/port) ---
+rbb-r1.lab.example,eth1/5,FBOSS,,ixia,1/1,IXIA,,3,IXIA
+rbb-r2.lab.example,eth1/5,FBOSS,,ixia,1/2,IXIA,,3,IXIA

@@ -113,6 +113,7 @@ class TestCLIParser(TestCase):
         # Verify all required attributes exist
         self.assertTrue(hasattr(args, "test_configs"))
         self.assertTrue(hasattr(args, "duts"))
+        self.assertTrue(hasattr(args, "secrets_file"))
         self.assertTrue(hasattr(args, "ixia_api_server"))
         self.assertTrue(hasattr(args, "ixia_session_id"))
         self.assertTrue(hasattr(args, "skip_ixia_setup"))
@@ -629,8 +630,67 @@ class TestEntryPointIntegration(TestCase):
 
             # setUp crash → execute_playbook never called.
             self.assertEqual(mock_executor.execute_playbook.call_count, 0)
+            # A config-specific setup task may have changed a DUT before a
+            # later setup phase failed. Partial setup must still run teardown.
+            mock_runner.async_test_tearDown.assert_called_once()
 
             # 2 playbooks × 2 DUTs = 4 synthetic error records.
+            self.assertEqual(exit_code, OSSReturnCode.TEST_CASE_FAILURE)
+        finally:
+            if os.path.exists(config_path):
+                os.unlink(config_path)
+
+    @patch("taac.runner.oss_entry_point.OSSTestExecutor")
+    @patch("taac.runner.oss_entry_point.TaacRunner")
+    @patch("taac.runner.oss_entry_point.load_test_config")
+    def test_main_teardown_crash_cannot_leave_success_exit(
+        self,
+        mock_load_config,
+        mock_taac_runner_class,
+        mock_executor_class,
+    ):
+        """A failure after all test cells passed still fails the run."""
+        test_config = self._create_minimal_test_config()
+        mock_load_config.return_value = test_config
+
+        mock_runner = Mock()
+        mock_runner.async_test_setUp = AsyncMock()
+        mock_runner.async_test_tearDown = AsyncMock(
+            side_effect=RuntimeError("restore failed")
+        )
+        mock_taac_runner_class.return_value = mock_runner
+
+        passed = OSSTestResult(
+            test_config="minimal_test",
+            playbook="test_playbook",
+            dut="dummy-device",
+            status=OSSTestStatus.PASSED,
+            duration=0.1,
+        )
+        mock_executor = Mock()
+        mock_executor.execute_playbook = AsyncMock(return_value=passed)
+        mock_executor_class.return_value = mock_executor
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            config_path = f.name
+            f.write("test_config = None")
+
+        try:
+            with patch(
+                "sys.argv",
+                [
+                    "oss_entry_point.py",
+                    "--test-configs",
+                    config_path,
+                    "--dut",
+                    "dummy-device",
+                    "--ixia-api-server",
+                    "10.0.0.1",
+                ],
+            ):
+                exit_code = oss_entry_point.main()
+
+            mock_runner.async_test_tearDown.assert_awaited_once()
             self.assertEqual(exit_code, OSSReturnCode.TEST_CASE_FAILURE)
         finally:
             if os.path.exists(config_path):

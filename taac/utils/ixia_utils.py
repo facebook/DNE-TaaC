@@ -6,6 +6,7 @@ import typing as t
 
 from ixia.ixia import types as ixia_types
 from taac.constants import IxiaEndpointInfo
+from taac.ixia.ixnetwork_restpy_constants import API_SERVER_USERNAME
 from taac.utils.oss_taac_constants import InsufficientInputError
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
@@ -94,11 +95,12 @@ async def async_create_optical_switch_ixia_connection_assets(
 
 def fetch_ixia_password_oss() -> str:
     """
-    OSS-compatible implementation to fetch Ixia password from a CSV file.
+    Fetch the OSS IxNetwork password without requiring a committed secret.
 
-    Reads the password from 'vendor_ixia_pwd.csv' file which should be placed
-    in the oss_topology_info directory. The CSV should contain comments starting
-    with '#' and a single line with the password value.
+    ``TAAC_IXIA_PASSWORD`` is the preferred input and is populated by the OSS
+    runner when ``--secrets-file`` is used. The in-package
+    ``vendor_ixia_pwd.csv`` lookup remains only for compatibility with existing
+    installations.
 
     Returns:
         The Ixia password string.
@@ -124,12 +126,8 @@ def fetch_ixia_password_oss() -> str:
     if not csv_path.exists():
         raise FileNotFoundError(
             f"Ixia password file not found at: {csv_path}\n"
-            "Please create the file 'vendor_ixia_pwd.csv' in the oss_topology_info "
-            "directory with a single row containing the Ixia password.\n"
-            "Format: password (lines starting with '#' are treated as comments)\n"
-            "Example content:\n"
-            "# Ixia vendor password\n"
-            "your_ixia_password_here"
+            "Pass a protected JSON file to the OSS runner with --secrets-file, "
+            "or inject TAAC_IXIA_PASSWORD from a secret manager."
         )
 
     try:
@@ -146,10 +144,8 @@ def fetch_ixia_password_oss() -> str:
             # If we get here, no valid password was found
             raise ValueError(
                 f"Ixia password file at {csv_path} does not contain a valid password.\n"
-                "Please add the Ixia password on a new line (lines starting with '#' are comments).\n"
-                "Example content:\n"
-                "# Ixia vendor password\n"
-                "your_ixia_password_here"
+                "Pass a protected JSON file to the OSS runner with --secrets-file, "
+                "or inject TAAC_IXIA_PASSWORD from a secret manager."
             )
     except IOError as e:
         raise ValueError(
@@ -163,7 +159,7 @@ def fetch_ixia_password() -> str:
     Abstraction layer for fetching Ixia password.
 
     Uses TAAC_OSS environment variable to determine implementation:
-    - OSS mode (TAAC_OSS=1): Reads password from vendor_ixia_pwd.csv file
+    - OSS mode (TAAC_OSS=1): Uses TAAC_IXIA_PASSWORD, with a legacy CSV fallback
     - Meta mode (default): Uses Meta's internal keychain service
 
     Returns:
@@ -183,6 +179,18 @@ def fetch_ixia_password() -> str:
         )
 
         return fetch_ixia_password_internal()
+
+
+def fetch_ixia_username() -> str:
+    """Return the IxNetwork login name without changing internal defaults.
+
+    OSS adopters can supply ``TAAC_IXIA_USERNAME`` through the runner's JSON
+    secrets file. Internal callers retain the long-standing default.
+    """
+
+    if TAAC_OSS:
+        return os.environ.get("TAAC_IXIA_USERNAME") or API_SERVER_USERNAME
+    return API_SERVER_USERNAME
 
 
 def get_attr_value(value: t.Any) -> ixia_types.AttrValue:
