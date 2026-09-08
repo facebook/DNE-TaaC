@@ -700,11 +700,12 @@ class TrafficGenerator:
         local_as: int,
     ) -> ixia_types.BgpPeerConfig:
         """
-        Create a BgpPeerConfig with optional as_set_mode support.
+        Create a BgpPeerConfig with optional ``as_set_mode`` support.
 
-        The as_set_mode field may not be available in all versions of the IXIA types.
-        This method handles the field conditionally to maintain backward compatibility.
+        A declared ``tcp_window_size_bytes`` value requires schema support.
+        Older IXIA output schemas can omit ``as_set_mode``.
         """
+        tcp_window_size_bytes = bgp_config.tcp_window_size_bytes
         # Build base kwargs
         peer_config_kwargs = {
             "local_as": local_as,
@@ -740,6 +741,8 @@ class TrafficGenerator:
             "hold_timer": bgp_config.hold_timer,
             "keepalive_timer": bgp_config.keepalive_timer,
         }
+        if tcp_window_size_bytes is not None:
+            peer_config_kwargs["tcp_window_size_bytes"] = tcp_window_size_bytes
 
         # Try to add as_set_mode if the field is supported
         if bgp_config.as_set_mode is not None:
@@ -755,7 +758,17 @@ class TrafficGenerator:
                     f"ignoring value: {bgp_config.as_set_mode}"
                 )
 
-        return ixia_types.BgpPeerConfig(**peer_config_kwargs)
+        try:
+            return ixia_types.BgpPeerConfig(**peer_config_kwargs)
+        except TypeError as error:
+            if tcp_window_size_bytes is None or "tcp_window_size_bytes" not in str(
+                error
+            ):
+                raise
+            raise RuntimeError(
+                "Could not construct IXIA BgpPeerConfig with declared "
+                f"tcp_window_size_bytes={tcp_window_size_bytes}: {error}"
+            ) from error
 
     def get_matching_basic_port_config(
         self,

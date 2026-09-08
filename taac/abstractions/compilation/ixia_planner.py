@@ -249,6 +249,9 @@ def plan_ixia(
                     hold_timer_s=bgp_behavior.hold_timer_s,
                     keepalive_timer_s=bgp_behavior.keepalive_timer_s,
                     enable_graceful_restart=bgp_behavior.enable_graceful_restart,
+                    tcp_window_size_bytes=(
+                        device_group.slow_peer_tcp_window_size_bytes
+                    ),
                 )
             )
             _append_identity(

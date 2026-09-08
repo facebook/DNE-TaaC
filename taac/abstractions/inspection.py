@@ -72,6 +72,7 @@ def inspect_resolved_intent(bound: BoundTopology) -> ResolvedIntentReport:
             ),
             route_attributes=device_group.route_attributes,
             provenance=device_group.provenance,
+            slow_peer=device_group.slow_peer,
             ixia_children=tuple(
                 ResolvedIxiaDeviceGroupChild(
                     name=child.spec.name,
