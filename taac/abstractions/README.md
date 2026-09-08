@@ -106,6 +106,21 @@ DICE distinguishes two nested restoration boundaries:
   after its mutations. For attribute churn, this is an exact restoration of
   the captured IXIA backing vectors rather than a second full-config import.
 
+Implementation note: `BaselineLifecycle` defines a `PLAYBOOK` scope for nested
+restoration boundaries, but `TaacRunner` does not currently capture or restore
+that scope. In CICD-EBB-10, "Playbook baseline" refers to the attribute-churn
+implementation's own `baseline_snapshot` and cleanup phases. Only the outer
+topology baseline is currently managed by `TaacRunner` through
+`BaselineScope.TOPOLOGY` and `IxiaTopologyBaselineParticipant`.
+
+Successful restoration is reported at each ownership boundary with explicit
+messages:
+
+```text
+[DONE]  Playbook baseline restored and verified | participant=attribute_churn
+[DONE]  Topology baseline restored and verified | participant=ixia_topology | invocation=<id>
+```
+
 The intended lifecycle is:
 
 ```text

@@ -1431,9 +1431,11 @@ class TaacRunner:
             return ()
         errors = await self._baseline_lifecycle.restore(BaselineScope.TOPOLOGY, context)
         if not errors:
-            self.logger.info(
-                "Restored and verified topology baseline for "
-                f"invocation {context.invocation_id}"
+            log_phase_end(
+                "Topology baseline restored and verified | "
+                "participant=ixia_topology | "
+                f"invocation={context.invocation_id}",
+                logger=self.logger,
             )
         return errors
 
