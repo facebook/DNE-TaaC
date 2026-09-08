@@ -97,6 +97,184 @@ class TestBgpSessionEstablishedHealthCheck(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
 
+    async def test_max_established_count_validates_expected_degradation(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ESTABLISHED),
+                _make_bgp_session("2401:db00::2", TBgpPeerState.ACTIVE),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"max_established_session_count": 1},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("BGP degradation observed", result.message)
+
+    async def test_max_established_count_fails_without_degradation(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ESTABLISHED),
+                _make_bgp_session("2401:db00::2", TBgpPeerState.ESTABLISHED),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"max_established_session_count": 1},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("Expected BGP degradation", result.message)
+
+    async def test_max_established_count_rejects_zero_in_scope_sessions(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ESTABLISHED),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "max_established_session_count": 1,
+                "ignore_all_prefixes_except": ["2401:db00::2"],
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("No in-scope BGP sessions", result.message)
+
+    async def test_invalid_max_established_count_returns_fail(self):
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"max_established_session_count": "not-an-integer"},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("Invalid max_established_session_count", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks.bgp_session_health_check.time.time",
+        return_value=1_000.0,
+    )
+    async def test_session_restarted_after_epoch_returns_pass(self, _mock_time):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session(
+                    "2401:db00::1", TBgpPeerState.ESTABLISHED, uptime=50_000
+                ),
+                _make_bgp_session("2401:db00::2", TBgpPeerState.ACTIVE, uptime=0),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"session_restarted_after": 900.0},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("re-established after the test began", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks.bgp_session_health_check.time.time",
+        return_value=1_000.0,
+    )
+    async def test_no_session_restarted_after_epoch_returns_fail(self, _mock_time):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session(
+                    "2401:db00::1", TBgpPeerState.ESTABLISHED, uptime=200_000
+                ),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"min_established_pct": 0.0, "session_restarted_after": 900.0},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("expected in-test BGP flap was not observed", result.message)
+
+    async def test_invalid_restart_epoch_returns_fail(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ESTABLISHED),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"session_restarted_after": "not-an-epoch"},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("Invalid session_restarted_after", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.device_health_checks.bgp_session_health_check.time.time",
+        return_value=1_000.0,
+    )
+    async def test_future_restart_epoch_returns_fail(self, _mock_time):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ESTABLISHED),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"session_restarted_after": 1_001.0},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("timestamp is 1.0s in the future", result.message)
+
+    async def test_missing_session_uptime_returns_fail(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session(
+                    "2401:db00::1", TBgpPeerState.ESTABLISHED, uptime=None
+                ),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"session_restarted_after": 900.0},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("No valid uptime", result.message)
+
+    async def test_restart_check_without_established_session_is_explicit(self):
+        self.health_check.driver.async_get_bgp_sessions = AsyncMock(
+            return_value=[
+                _make_bgp_session("2401:db00::1", TBgpPeerState.ACTIVE),
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {"min_established_pct": 0.0, "session_restarted_after": 900.0},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("No Established BGP sessions remain", result.message)
+
 
 class TestHealthCheckRetry(unittest.IsolatedAsyncioTestCase):
     """Tests for the configurable per-check retry logic in run()."""
@@ -400,6 +578,27 @@ class TestCreateBgpSessionEstablishCheckRetryParams(unittest.TestCase):
         self.assertNotIn("retry_count", payload)
         self.assertNotIn("retry_delay_seconds", payload)
         self.assertNotIn("retry_delay_multiplier", payload)
+
+    def test_factory_session_restart_epoch_uses_test_start_jq(self):
+        check = create_bgp_session_establish_check(
+            min_established_pct=0.0,
+            session_restarted_after_jq_var="test_case_start_time",
+        )
+
+        self.assertIsNotNone(check.check_params)
+        self.assertEqual(
+            check.check_params.jq_params,
+            {"session_restarted_after": ".test_case_start_time"},
+        )
+
+    def test_factory_max_established_count(self):
+        check = create_bgp_session_establish_check(max_established_sessions=3)
+
+        self.assertIsNotNone(check.check_params)
+        self.assertEqual(
+            json.loads(check.check_params.json_params)["max_established_session_count"],
+            3,
+        )
 
 
 # eBGP peers hang off the IXIA parent; iBGP planes live elsewhere. UG 2.2.1

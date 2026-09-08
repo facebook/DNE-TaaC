@@ -56,6 +56,18 @@ class CpuQueueHealthCheck(
     ) -> hc_types.HealthCheckResult:
         failure_reasons = []
         elapsed_secs = post_snapshot.timestamp - pre_snapshot.timestamp
+        if elapsed_secs < 0:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=(
+                    "CPU queue snapshots must not move backwards in time; "
+                    f"pre={pre_snapshot.timestamp}, post={post_snapshot.timestamp}"
+                ),
+            )
+        # Snapshot timestamps have one-second precision. A fast pre/post pair
+        # can legitimately share a timestamp; evaluate it as a one-second
+        # window rather than rejecting otherwise valid counter deltas.
+        elapsed_secs = max(1, elapsed_secs)
 
         all_queues = set(
             # pyre-ignore
@@ -92,43 +104,63 @@ class CpuQueueHealthCheck(
                 post_snapshot.data.portStats_.queueOutDiscardPackets_.get(queue)
             )
 
-            if (
-                pre_snapshot_out_packets[queue] is None
-                or pre_snapshot_out_packets[queue] is None
-            ):
+            pre_out_packets = pre_snapshot_out_packets[queue]
+            post_out_packets = post_snapshot_out_packets[queue]
+            if pre_out_packets is None or post_out_packets is None:
                 continue
 
-            out_packets_increase[queue] = (
-                # pyre-ignore
-                post_snapshot_out_packets[queue] - pre_snapshot_out_packets[queue]
-            )
+            out_packets_increase[queue] = post_out_packets - pre_out_packets
             out_pps[queue] = out_packets_increase[queue] / elapsed_secs
 
         for queue in input.active_queues:
-            if queue not in out_packets_increase:
+            pre_out_packets = pre_snapshot_out_packets[queue]
+            post_out_packets = post_snapshot_out_packets[queue]
+            if post_out_packets is None:
                 failure_reasons.append(
                     f"No out_packets counters found for queue {queue}"
                 )
                 continue
 
-            if out_packets_increase[queue] <= 0:
+            packets_increase = (
+                post_out_packets
+                if pre_out_packets is None
+                else out_packets_increase[queue]
+            )
+            packets_per_second = packets_increase / elapsed_secs
+
+            if packets_increase <= 0:
                 failure_reasons.append(
                     f"No output packet increase detected on queue {queue}"
                 )
-            elif out_pps[queue] < min_out_pps_threshold[queue]:
+            elif packets_per_second < min_out_pps_threshold[queue]:
                 failure_reasons.append(
-                    f"Output packet per second on queue {queue} ({out_pps[queue]}) is below threshold ({min_out_pps_threshold[queue]})"
+                    f"Output packet per second on queue {queue} "
+                    f"({packets_per_second}) is below threshold "
+                    f"({min_out_pps_threshold[queue]})"
                 )
             else:
                 self.logger.debug(
-                    f"Successfully validated that that the output packet per second of {out_pps[queue]} "
+                    f"Successfully validated that that the output packet per second of {packets_per_second} "
                     f"on queue {queue} is above the defined minimum threshold {min_out_pps_threshold[queue]}."
                 )
 
         for queue in input.inactive_queues or []:
-            if queue not in out_packets_increase:
+            pre_out_packets = pre_snapshot_out_packets[queue]
+            post_out_packets = post_snapshot_out_packets[queue]
+            # FBOSS omits queues with no packets from the sparse counter map.
+            if pre_out_packets is None and post_out_packets is None:
+                continue
+            if pre_out_packets is None and post_out_packets is not None:
+                observed_pps = post_out_packets / elapsed_secs
+                if observed_pps > min_out_pps_threshold[queue]:
+                    failure_reasons.append(
+                        f"Output packet increase ({observed_pps} pps) "
+                        f"detected on inactive queue {queue}"
+                    )
+                continue
+            if post_out_packets is None:
                 failure_reasons.append(
-                    f"No out_packets counters found for queue {queue}"
+                    f"Incomplete out_packets counters for queue {queue}"
                 )
                 continue
 
@@ -138,38 +170,46 @@ class CpuQueueHealthCheck(
                 )
 
         for queue in input.no_discard_queues or []:
-            if (
-                post_snapshot_discard_packets[queue] is None
-                or pre_snapshot_discard_packets[queue] is None
-            ):
+            pre_discards = pre_snapshot_discard_packets[queue]
+            post_discards = post_snapshot_discard_packets[queue]
+            if pre_discards is None and post_discards is None:
+                # Queue counters are sparse. Absence in both snapshots means
+                # zero discards throughout the observation window.
+                continue
+            if pre_discards is None and post_discards is not None:
+                if post_discards > 0:
+                    failure_reasons.append(
+                        f"Detected {post_discards} packet discard(s) on queue "
+                        f"{queue} from a sparse zero baseline"
+                    )
+                continue
+            if post_discards is None:
                 failure_reasons.append(
-                    f"No packet discard counters found for queue {queue}"
+                    f"Incomplete packet discard counters for queue {queue}"
                 )
-            elif (
-                # pyre-ignore
-                post_snapshot_discard_packets[queue]
-                > pre_snapshot_discard_packets[queue]
-            ):
+                continue
+            assert pre_discards is not None
+            if post_discards > pre_discards:
                 failure_reasons.append(
                     f"Detected packet discards on queue {queue}. The number of out byte discards "
-                    f"increased from {pre_snapshot_discard_packets[queue]} at {pre_snapshot.timestamp} to "
-                    f"{post_snapshot_discard_packets[queue]} at {post_snapshot.timestamp}"
+                    f"increased from {pre_discards} at {pre_snapshot.timestamp} to "
+                    f"{post_discards} at {post_snapshot.timestamp}"
                 )
 
         for queue in input.active_discard_queues or []:
-            if (
-                post_snapshot_discard_packets[queue] is None
-                or pre_snapshot_discard_packets[queue] is None
-            ):
+            pre_discards = pre_snapshot_discard_packets[queue]
+            post_discards = post_snapshot_discard_packets[queue]
+            if post_discards is None:
                 failure_reasons.append(
                     f"No packet discard counters found for queue {queue}"
                 )
-            elif (
-                # pyre-ignore
-                post_snapshot_discard_packets[queue]
-                <= pre_snapshot_discard_packets[queue]
-            ):
-                failure_reasons.append(f"No packet discards detected on queue {queue}")
+                continue
+            baseline_discards = 0 if pre_discards is None else pre_discards
+            if post_discards <= baseline_discards:
+                failure_reasons.append(
+                    f"No packet discard increase detected on queue {queue}: "
+                    f"pre={pre_discards!r}, post={post_discards}"
+                )
 
         if failure_reasons:
             # Use the Everpaste URL directly; it is already a clickable internalfb.com

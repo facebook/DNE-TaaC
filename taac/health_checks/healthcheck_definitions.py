@@ -104,8 +104,10 @@ def create_bgp_session_establish_check(
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     expected_established_sessions: t.Optional[int] = None,
     expected_established_sessions_static: t.Optional[int] = None,
+    max_established_sessions: t.Optional[int] = None,
     min_established_pct: t.Optional[float] = None,
     max_session_uptime_sec: t.Optional[float] = None,
+    session_restarted_after_jq_var: t.Optional[str] = None,
     verbose: bool = False,
     check_id: t.Optional[str] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
@@ -123,6 +125,9 @@ def create_bgp_session_establish_check(
         expected_established_sessions_static: Same assertion via the
             `static_params` ParamValue variant (used by EBB). Mutually
             exclusive with `expected_established_sessions`.
+        max_established_sessions: Maximum number of sessions that may be
+            Established. Use this for a MID_TEST assertion that traffic caused
+            the expected session degradation.
         min_established_pct: Minimum fraction of sessions that must be
             Established (0.0–1.0). E.g. 0.5 = at least 50% must be up.
             When set, overrides the default all-or-nothing behavior.
@@ -130,6 +135,11 @@ def create_bgp_session_establish_check(
             least one established session has ``uptime <= max_session_uptime_sec``,
             confirming sessions came up recently after a process restart.
             Use as a postcheck for BGP/agent restart test cases.
+        session_restarted_after_jq_var: When set, resolves the named TAAC jq
+            variable (normally ``test_case_start_time``) into an epoch and
+            requires at least one currently Established session to have been
+            established after that epoch. This is suitable for a MID_TEST
+            assertion that stress traffic actually caused a BGP flap.
         verbose: Pass ``verbose=True`` through to the check for richer logs.
         retry_count: Number of retries after the initial attempt when the
             check returns FAIL.  0 (default) = single-shot, no retry.
@@ -145,13 +155,20 @@ def create_bgp_session_establish_check(
             1.0 = constant delay, 1.5 = 50 % longer each retry,
             2.0 = double each retry.
     """
-    if (
-        expected_established_sessions is not None
-        and expected_established_sessions_static is not None
-    ):
+    count_constraints = sum(
+        value is not None
+        for value in (
+            expected_established_sessions,
+            expected_established_sessions_static,
+            max_established_sessions,
+            min_established_pct,
+        )
+    )
+    if count_constraints > 1:
         raise ValueError(
-            "expected_established_sessions and expected_established_sessions_static "
-            "are mutually exclusive — pass exactly one."
+            "expected_established_sessions, expected_established_sessions_static, "
+            "max_established_sessions, and min_established_pct are mutually "
+            "exclusive"
         )
     json_payload: t.Dict[str, t.Any] = {}
     if ignore_all_prefixes_except is not None:
@@ -166,6 +183,8 @@ def create_bgp_session_establish_check(
         )
     if parent_prefixes_to_ignore is not None:
         json_payload["parent_prefixes_to_ignore"] = parent_prefixes_to_ignore
+    if max_established_sessions is not None:
+        json_payload["max_established_session_count"] = max_established_sessions
     if min_established_pct is not None:
         json_payload["min_established_pct"] = min_established_pct
     if max_session_uptime_sec is not None:
@@ -188,11 +207,15 @@ def create_bgp_session_establish_check(
         }
     # Emit check_params=None when no payload to match the inline-construction
     # serialized output (PointInTimeHealthCheck(name=...) → check_params=None).
+    jq_params = None
+    if session_restarted_after_jq_var is not None:
+        jq_params = {"session_restarted_after": f".{session_restarted_after_jq_var}"}
     check_params = None
-    if json_payload or static_params:
+    if json_payload or static_params or jq_params:
         check_params = Params(
             json_params=json.dumps(json_payload) if json_payload else None,
             static_params=static_params,
+            jq_params=jq_params,
         )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK,
@@ -2144,6 +2167,7 @@ def create_bgp_peer_route_snapshot_check() -> SnapshotHealthCheck:
 def create_cpu_queue_snapshot_check(
     active_queues: t.Optional[t.List[int]] = None,
     no_discard_queues: t.Optional[t.List[int]] = None,
+    active_discard_queues: t.Optional[t.List[int]] = None,
     active_min_out_pps_per_queue: t.Optional[t.Dict[int, int]] = None,
     inactive_queues: t.Optional[t.List[int]] = None,
     inactive_max_pps_per_queue: t.Optional[t.Dict[int, int]] = None,
@@ -2161,6 +2185,7 @@ def create_cpu_queue_snapshot_check(
         active_queues: Queue IDs that MUST see non-zero tx packets in the window.
         no_discard_queues: Queue IDs that MUST NOT see any discards (e.g. high-
             priority BGP_CP queue).
+        active_discard_queues: Queue IDs that MUST see discard-counter growth.
         active_min_out_pps_per_queue: Per-queue minimum out-pps requirements
             (e.g. ``{low_queue: 10}``).
         inactive_queues: Queue IDs that MUST stay below a noise threshold (A2
@@ -2196,6 +2221,8 @@ def create_cpu_queue_snapshot_check(
         kwargs["inactive_queues"] = inactive_queues
     if no_discard_queues is not None:
         kwargs["no_discard_queues"] = no_discard_queues
+    if active_discard_queues is not None:
+        kwargs["active_discard_queues"] = active_discard_queues
     if active_min_out_pps_per_queue is not None:
         kwargs["active_min_out_pps_per_queue"] = active_min_out_pps_per_queue
     return SnapshotHealthCheck(
