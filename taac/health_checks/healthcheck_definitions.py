@@ -2259,13 +2259,16 @@ def create_cpu_percentile_observe_check(
     summary_jq_var: str = CPU_SUMMARY_JQ_VAR,
     gate_percentile: float = 95.0,
     gate_threshold_pct: t.Optional[float] = None,
+    gate_thresholds_pct: t.Optional[t.Mapping[int | float, float]] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
 ) -> PointInTimeHealthCheck:
     """CPU_PERCENTILE_CHECK — report bgpcpp CPU percentiles into the results table.
 
     Reads the percentile summary stashed as a jq var by the START/STOP collector
-    (``summary_jq_var``) and reports it. ``gate_threshold_pct`` gates the raw
-    ``gate_percentile``; leave it None to report the value without gating it.
+    (``summary_jq_var``) and reports it. ``gate_threshold_pct`` gates one raw
+    ``gate_percentile`` for compatibility; ``gate_thresholds_pct`` gates every
+    configured raw percentile with AND semantics. Leave both unset to report
+    the values without gating them.
 
     "Observe-only" applies to the LEVEL comparison only, and the check is not
     inert without a threshold. It FAILs unconditionally when the collector
@@ -2278,10 +2281,27 @@ def create_cpu_percentile_observe_check(
         gate_percentile: raw percentile to gate on when a threshold is set.
         gate_threshold_pct: level gate threshold. None leaves the CPU level
             ungated; it does not make the check unable to fail.
+        gate_thresholds_pct: raw percentile-to-threshold mapping. Every entry
+            must pass. A non-empty mapping cannot be combined with
+            ``gate_threshold_pct``.
     """
+    if gate_threshold_pct is not None and gate_thresholds_pct:
+        raise ValueError(
+            "CPU percentile check cannot combine gate_threshold_pct with "
+            "gate_thresholds_pct"
+        )
     json_payload: t.Dict[str, t.Any] = {"gate_percentile": gate_percentile}
     if gate_threshold_pct is not None:
         json_payload["gate_threshold_pct"] = gate_threshold_pct
+    if gate_thresholds_pct:
+        normalized_thresholds: t.Dict[str, float] = {}
+        for percentile, threshold in sorted(gate_thresholds_pct.items()):
+            if not float(percentile).is_integer():
+                raise ValueError(
+                    f"CPU gate percentile must be an integer: {percentile}"
+                )
+            normalized_thresholds[str(int(percentile))] = threshold
+        json_payload["gate_thresholds_pct"] = normalized_thresholds
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.CPU_PERCENTILE_CHECK,
         check_params=Params(

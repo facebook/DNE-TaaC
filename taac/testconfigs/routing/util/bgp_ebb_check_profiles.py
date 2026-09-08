@@ -185,6 +185,7 @@ class CpuCharacterizationConfig:
     summary_jq_var: str
     gate_percentile: float = 95.0
     gate_threshold_pct: t.Optional[float] = None
+    gate_thresholds_pct: tuple[tuple[int, float], ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -199,6 +200,21 @@ class RssDeltaConfig:
 
     summary_jq_var: str
     max_growth_pct: t.Optional[float] = None
+
+
+@dataclasses.dataclass(frozen=True)
+class CharacterizationGates:
+    """Blocking CPU percentile and RSS growth criteria for one playbook.
+
+    Collection remains independently controlled by ``CharacterizationConfig``.
+    An empty instance preserves observe-only reporting.
+    """
+
+    cpu_thresholds_pct: tuple[tuple[int, float], ...] = ()
+    rss_max_growth_pct: t.Optional[float] = None
+
+
+NO_CHARACTERIZATION_GATES = CharacterizationGates()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -348,6 +364,11 @@ def _characterization_postchecks(
                 summary_jq_var=ctx.cpu_characterization.summary_jq_var,
                 gate_percentile=ctx.cpu_characterization.gate_percentile,
                 gate_threshold_pct=ctx.cpu_characterization.gate_threshold_pct,
+                gate_thresholds_pct=(
+                    dict(ctx.cpu_characterization.gate_thresholds_pct)
+                    if ctx.cpu_characterization.gate_thresholds_pct
+                    else None
+                ),
             )
         )
     return postchecks

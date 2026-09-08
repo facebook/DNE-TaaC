@@ -64,6 +64,10 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.sustained_
 from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
     build_bgp_ug_2_7_playbook,
 )
+from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
+    CharacterizationGates,
+    NO_CHARACTERIZATION_GATES,
+)
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,
     EBGP_PEER_COUNT_V4,
@@ -124,6 +128,45 @@ _UG_2_7_2_EBGP_POOLS = (
     rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V4}$",
     rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V6}$",
 )
+
+_UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
+    "bgp_ebb_attribute_churn_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 5.0), (95, 60.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_route_storm_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 35.0), (95, 100.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_multipath_group_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 6.0), (95, 70.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_igp_pnh_metric_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 30.0), (95, 100.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_longevity_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 150.0), (95, 180.0)), rss_max_growth_pct=35.0
+    ),
+    "bgp_ebb_ebgp_route_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 60.0), (95, 160.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_ibgp_route_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 90.0), (95, 160.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_igp_unresolvable_pnh_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 4.0), (95, 5.0)), rss_max_growth_pct=10.0
+    ),
+}
+
+_NON_UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
+    "bgp_ebb_attribute_churn_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 140.0), (95, 150.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_ebgp_route_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 140.0), (95, 190.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_igp_unresolvable_pnh_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 7.0), (95, 140.0)), rss_max_growth_pct=10.0
+    ),
+}
 
 
 class _Ug272PeerCohorts(t.NamedTuple):
@@ -617,6 +660,17 @@ def _expected_established_session_count() -> int:
     )
 
 
+def _characterization_gates(
+    playbook_name: str, enable_update_group: bool
+) -> CharacterizationGates:
+    gates_by_playbook = (
+        _UG_CHARACTERIZATION_GATES
+        if enable_update_group
+        else _NON_UG_CHARACTERIZATION_GATES
+    )
+    return gates_by_playbook.get(playbook_name, NO_CHARACTERIZATION_GATES)
+
+
 def _get_bgp_ebb_full_scale_playbooks(
     physical_inventory: PhysicalInventory,
     profile: BgpPlusPlusProfile,
@@ -712,6 +766,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             total_session_count=session_count,
             profile=profile,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_attribute_churn_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_route_storm_playbook(
             device_name=device_name,
@@ -725,6 +782,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             quiet_window_seconds=route_storm_quiet_window_seconds,
             bounded_validation=route_storm_bounded_validation,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_route_storm_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(
             device_name=device_name,
@@ -743,6 +803,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             oscillation_interval_seconds=multipath_oscillation_interval_seconds,
             cycle_count=multipath_cycle_count,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_multipath_group_oscillation_playbook",
+                enable_update_group,
+            ),
         ),
         get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             device_name=device_name,
@@ -754,6 +818,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_igp_pnh_metric_oscillation_playbook",
+                enable_update_group,
+            ),
         ),
         get_bgp_ebb_fauu_drain_undrain_playbook(
             device_name=device_name,
@@ -779,6 +847,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             device_name=device_name,
             duration=_LONGEVITY_DURATION_SECONDS,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_longevity_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_daemon_restart_playbook(
             device_name=device_name,
@@ -827,6 +898,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_ebgp_route_oscillation_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name=device_name,
@@ -848,6 +922,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_ibgp_route_oscillation_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_igp_unresolvable_pnh_playbook(
             device_name=device_name,
@@ -860,6 +937,9 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_peer_identity=expected_peer_identity,
             bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_igp_unresolvable_pnh_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_nexthop_group_count_threshold_playbook(
             device_name=device_name,

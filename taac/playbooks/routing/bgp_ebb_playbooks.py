@@ -90,9 +90,11 @@ from taac.task_definitions import (
     create_nexthop_group_poll_periodic_task,
 )
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
+    CharacterizationGates,
     CheckProfile,
     CpuCharacterizationConfig,
     get_profile_checks,
+    NO_CHARACTERIZATION_GATES,
     ProfileContext,
     RssDeltaConfig,
     RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
@@ -179,6 +181,7 @@ def _characterized(
 def _characterization_profile_configs(
     phase: str,
     config: CharacterizationConfig,
+    gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> tuple[t.Optional[CpuCharacterizationConfig], t.Optional[RssDeltaConfig]]:
     """Build the postcheck configs that read what a bracket on ``phase`` wrote.
 
@@ -193,14 +196,22 @@ def _characterization_profile_configs(
         phase: The phase passed to _characterized() for this playbook.
         config: The same CharacterizationConfig passed to _characterized(); a
             disabled measurement yields None so no postcheck is added for it.
+        gates: Optional blocking criteria for the collected summary. Empty
+            criteria preserve observe-only reporting.
 
     Returns:
         (cpu_characterization, rss_delta), each None when that measurement is
         disabled. Feed straight into the matching ProfileContext fields.
     """
+    if gates.cpu_thresholds_pct and not config.enable_cpu:
+        raise ValueError("CPU characterization gates require CPU collection")
+    if gates.rss_max_growth_pct is not None and not config.enable_rss:
+        raise ValueError("RSS characterization gate requires RSS collection")
+
     cpu = (
         CpuCharacterizationConfig(
             summary_jq_var=characterization_summary_jq_var(KIND_CPU_PERCENTILE, phase),
+            gate_thresholds_pct=gates.cpu_thresholds_pct,
         )
         if config.enable_cpu
         else None
@@ -208,6 +219,7 @@ def _characterization_profile_configs(
     rss = (
         RssDeltaConfig(
             summary_jq_var=characterization_summary_jq_var(KIND_RSS_DELTA, phase),
+            max_growth_pct=gates.rss_max_growth_pct,
         )
         if config.enable_rss
         else None
@@ -597,6 +609,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     duration_seconds: int = DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
     transient_observation_logging: str = "off",
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
 
@@ -632,7 +645,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
@@ -703,6 +716,7 @@ def get_bgp_ebb_route_storm_playbook(
     quiet_window_seconds: int = 120,
     bounded_validation: bool = False,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """Build CICD-EBB-11: BGP route storm.
 
@@ -735,7 +749,7 @@ def get_bgp_ebb_route_storm_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     instability_checks = get_profile_checks(
         CheckProfile.CHURN_STORM,
@@ -826,6 +840,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-07: IGP PNH metric oscillation.
@@ -876,7 +891,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     igp_checks = get_profile_checks(
         CheckProfile.IGP_INSTABILITY,
@@ -1133,6 +1148,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-09: Multipath-group oscillation.
@@ -1192,7 +1208,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
@@ -1464,6 +1480,7 @@ def get_bgp_ebb_longevity_playbook(
     postcheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-15: Longevity.
@@ -1491,7 +1508,7 @@ def get_bgp_ebb_longevity_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_SOAK, characterization
+        PHASE_SOAK, characterization, characterization_gates
     )
     soak_checks = get_profile_checks(
         CheckProfile.SOAK_NO_PRECHECK,
@@ -1542,6 +1559,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-05: eBGP route oscillation.
@@ -1560,7 +1578,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
@@ -1643,6 +1661,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-06: iBGP route oscillation.
@@ -1661,7 +1680,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     osc_checks = get_profile_checks(
         CheckProfile.OSCILLATION,
@@ -1739,6 +1758,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     bgp_mon_parent_network: t.Optional[str] = None,
     tcp_dump_capture_interface: t.Optional[str] = None,
     characterization: CharacterizationConfig = DISABLED,
+    characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
     """
     Build CICD-EBB-08: IGP unresolvable PNH.
@@ -1781,7 +1801,7 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
-        PHASE_WORKLOAD, characterization
+        PHASE_WORKLOAD, characterization, characterization_gates
     )
     # Readiness and withdrawal snapshots must count the same scoped peer set.
     igp_checks = get_profile_checks(
