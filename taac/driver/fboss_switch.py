@@ -70,10 +70,6 @@ if not TAAC_OSS:
     from fboss.fb_thrift_clients import FbossAgentClient
 
 
-from neteng.fboss.bgp.client.canonical_rib_py3 import (
-    get_rib_entries,
-    get_rib_subprefixes,
-)
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService
@@ -82,7 +78,6 @@ from neteng.fboss.bgp_thrift.types import (
     TBgpSession,
     TGetUpdateGroupInfoRequest,
     TGetUpdateGroupInfoResponse,
-    TGetUpdateGroupSummariesResponse,
     TOriginatedRoute,
 )
 from neteng.fboss.ctrl.clients import FbossCtrl
@@ -115,6 +110,30 @@ from neteng.fboss.switch_config.thrift_types import SwitchDrainState
 from neteng.fboss.switch_config.types import DsfNode
 from neteng.fboss.transceiver import thrift_types as transceiver_types
 from neteng.fboss.transceiver.thrift_types import ReadRequest, TransceiverIOParameters
+
+if not TAAC_OSS:
+    from neteng.fboss.bgp.client.canonical_rib_py3 import (
+        get_rib_entries,
+        get_rib_subprefixes,
+    )
+    from neteng.fboss.bgp_thrift.types import TGetUpdateGroupSummariesResponse
+else:
+
+    async def get_rib_entries(
+        client: TBgpService,
+        afi: TBgpAfi,
+        *,
+        rpc_options: t.Any = None,
+    ) -> t.List[TRibEntry]:
+        return list(await client.getRibEntries(afi, rpc_options=rpc_options))
+
+    async def get_rib_subprefixes(
+        client: TBgpService,
+        prefix: str,
+        *,
+        rpc_options: t.Any = None,
+    ) -> t.List[TRibEntry]:
+        return list(await client.getRibSubprefixes(prefix, rpc_options=rpc_options))
 
 # =============================================================================
 # TAAC / DNE (OSS-compatible)
@@ -2043,7 +2062,7 @@ class FbossSwitch(AbstractSwitch):
         return interface_bgp_session_state_map
 
     async def async_create_cold_boot_file(self) -> None:
-        cmd: str = "touch /dev/shm/fboss/warm_boot/cold_boot_once_0 && "
+        cmd: str = "touch /dev/shm/fboss/warm_boot/cold_boot_once_0"
         await self.async_run_cmd_on_shell(cmd)
 
     async def _async_get_port_id_from_interface_name(self, interface_name: str) -> int:

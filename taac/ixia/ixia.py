@@ -4,6 +4,7 @@
 # pyre-unsafe
 
 import functools
+import importlib
 import importlib.metadata
 import inspect
 import ipaddress
@@ -12,6 +13,7 @@ import json
 import logging
 import operator
 import os
+import pkgutil
 import random
 import re
 import threading
@@ -451,9 +453,31 @@ def _apply_and_verify_device_group_toggle(
         )
 
 
-from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
-    BgpIpv6Peer as IxnBgpIpv6Peer,
-)
+try:
+    from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_8b9aa9838ebd53702954aa471913ed1e import (
+        BgpIpv6Peer as IxnBgpIpv6Peer,
+    )
+except ModuleNotFoundError:
+    # IxNetwork RESTPy bakes a generated schema hash into module names. OSS
+    # releases can carry a different compatible hash than Meta's pinned copy,
+    # so discover the installed module instead of failing at import time.
+    _ixn_topology_package = importlib.import_module(
+        "ixnetwork_restpy.testplatform.sessions.ixnetwork.topology"
+    )
+    _ixn_bgp_ipv6_modules = sorted(
+        module.name
+        for module in pkgutil.iter_modules(_ixn_topology_package.__path__)
+        if module.name.startswith("bgpipv6peer_")
+    )
+    if len(_ixn_bgp_ipv6_modules) != 1:
+        raise ImportError(
+            "Expected exactly one compatible bgpipv6peer module in "
+            f"ixnetwork_restpy, found {_ixn_bgp_ipv6_modules}"
+        )
+    _ixn_bgp_ipv6_module = _ixn_bgp_ipv6_modules[0]
+    IxnBgpIpv6Peer = importlib.import_module(
+        f"{_ixn_topology_package.__name__}.{_ixn_bgp_ipv6_module}"
+    ).BgpIpv6Peer
 from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
     BgpIpv6Peer as UhdBgpIpv6Peer,
 )
@@ -6531,8 +6555,15 @@ class Ixia:
 
     @staticmethod
     def fetch_ixia_credentials(secret_name: str, secret_group: str) -> t.Optional[str]:
-        """Fetches Ixia credentials. In OSS mode, reads from env/CSV. Internal uses keychain."""
+        """Fetch IXIA credentials through the environment-selected provider."""
         if TAAC_OSS:
+            from taac.utils.meta_internal_bridge_client import (
+                bridge_enabled,
+                fetch_ixia_password,
+            )
+
+            if bridge_enabled():
+                return fetch_ixia_password(secret_name, secret_group)
             from taac.utils.oss_ixia_utils import (
                 get_oss_ixia_password,
             )
@@ -6544,7 +6575,7 @@ class Ixia:
             fetch_ixia_password_internal,
         )
 
-        return fetch_ixia_password_internal()
+        return fetch_ixia_password_internal(secret_name, secret_group)
 
     def configure_l1_settings(
         self,

@@ -352,6 +352,11 @@ class TestEntryPointIntegration(TestCase):
             # Verify execute_playbook was called
             self.assertTrue(mock_executor.execute_playbook.called)
 
+            # OSS execution does not install Meta rsyslog configuration on the DUT.
+            self.assertTrue(
+                mock_taac_runner_class.call_args.kwargs["skip_fboss_rsyslog"]
+            )
+
             # CRITICAL: Verify the parameter name is 'test_config' not 'test_config_name'
             call_kwargs = mock_executor.execute_playbook.call_args.kwargs
             self.assertIn(

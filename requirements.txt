@@ -11,6 +11,10 @@
 # Imported at module scope in taac/libs/taac_runner.py.
 tabulate>=0.9.0
 
+# Imported at module scope by taac/libs/investigation_report.py, which is a
+# dependency of taac/libs/taac_runner.py.
+pydantic>=2.0.0
+
 # IXIA traffic-generator client library. Imported at module scope in
 # taac/ixia/taac_ixia.py (from ixnetwork_restpy.assistants.statistics...).
 ixnetwork-restpy>=1.0.0

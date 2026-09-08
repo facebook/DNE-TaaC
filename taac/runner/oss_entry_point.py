@@ -388,6 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 skip_oss_setup_tasks=args.skip_oss_setup_tasks,
                 skip_teardown_tasks=args.skip_teardown_tasks,
                 skip_post_setup_wait=args.skip_post_setup_wait,
+                skip_fboss_rsyslog=True,
             )
 
             # Create executor for this config

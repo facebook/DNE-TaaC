@@ -19,6 +19,11 @@ LOGGER: ConsoleFileLogger = get_root_logger()
 
 # Environment variable to control OSS mode
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+TAAC_OSS_META_INTERNAL = os.environ.get("TAAC_OSS_META_INTERNAL", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 @memoize_forever
@@ -175,14 +180,22 @@ def fetch_ixia_password() -> str:
         Exception: In Meta mode, if keychain retrieval fails.
     """
     if TAAC_OSS:
-        return fetch_ixia_password_oss()
-    else:
-        # Lazy import for OSS compatibility - only needed when this method is called in Meta mode
-        from taac.ixia.internal_credentials import (
-            fetch_ixia_password_internal,
-        )
+        if TAAC_OSS_META_INTERNAL:
+            from taac.utils.meta_internal_bridge_client import (
+                bridge_enabled,
+                fetch_ixia_password as fetch_ixia_password_from_bridge,
+            )
 
-        return fetch_ixia_password_internal()
+            if bridge_enabled():
+                return fetch_ixia_password_from_bridge()
+        return fetch_ixia_password_oss()
+
+    # Lazy import for OSS compatibility - only needed in an internal runtime.
+    from taac.ixia.internal_credentials import (
+        fetch_ixia_password_internal,
+    )
+
+    return fetch_ixia_password_internal()
 
 
 def get_attr_value(value: t.Any) -> ixia_types.AttrValue:
