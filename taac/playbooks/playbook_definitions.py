@@ -226,6 +226,34 @@ def create_stable_state_validation_playbook(
     )
 
 
+def create_hatch_chaos_soak_playbook(
+    *,
+    name: str,
+    device_regexes: t.List[str],
+    traffic_items_to_start: t.List[str],
+    stages: t.List[Stage],
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.List[PointInTimeHealthCheck],
+    snapshot_checks: t.List[SnapshotHealthCheck],
+) -> Playbook:
+    """Create the QZD1 Hatch access-policy chaos-soak playbook."""
+    return Playbook(
+        name=name,
+        description=(
+            "Overnight chaos soak: agent warmboot every 2.5 min overlapped with "
+            "R/C access-policy transitions and 6s port flaps on 4 non-IXIA "
+            "ports, while the 3 IXIA ports hold a static policy so the traffic "
+            "matrix stays a fixed 5-blocked / 12-allowed expectation."
+        ),
+        device_regexes=device_regexes,
+        traffic_items_to_start=traffic_items_to_start,
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
 def create_agent_restart_playbook(
     wedge_agent_restart_no_of_interations: int = 10,
 ) -> Playbook:
