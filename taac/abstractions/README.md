@@ -176,6 +176,28 @@ Do not add an `abstractions/routing/` layer. Routing-specific behavior belongs
 in concrete topology or compiler names, such as `ebb_full_scale.py` and
 `EosBgpCppCompiler`.
 
+### BGP slow-peer control
+
+An IXIA BGP device group can opt in to slow-peer behavior:
+
+```python
+DeviceGroupSpec(
+    name="dg_ibgp_v4_dc_p1",
+    ...,
+    slow_peer=BgpSlowPeerConfig(),
+)
+```
+
+`BgpSlowPeerConfig()` uses a 1,500-byte TCP receive window. Set
+`tcp_window_size_bytes` from 1 through 65,535 bytes to use a different value.
+The setting applies to all BGP peers in the device group. DICE does not support
+a peer-level override inside one device group.
+
+Leave `slow_peer` unset for normal IXIA behavior. DICE does not write a TCP
+window for a normal device group because the NGPF default is not a stable
+contract. The setting is independent of DUT Update Group configuration and
+can be used by any DICE logical topology.
+
 ---
 
 ## 3. Binding
