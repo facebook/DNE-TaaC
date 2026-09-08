@@ -70,10 +70,13 @@ if not TAAC_OSS:
     from fboss.fb_thrift_clients import FbossAgentClient
 
 
-from neteng.fboss.bgp.client.canonical_rib_py3 import (
-    get_rib_entries,
-    get_rib_subprefixes,
-)
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if t.TYPE_CHECKING or not TAAC_OSS:
+    from neteng.fboss.bgp.client.canonical_rib_py3 import (
+        get_rib_entries,
+        get_rib_subprefixes,
+    )
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService

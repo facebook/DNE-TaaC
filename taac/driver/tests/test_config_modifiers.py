@@ -32,6 +32,7 @@ from configerator.structs.neteng.robotron.bgp_policy.thrift_types import (
     DrainState,
     FlowControlAction,
 )
+from taac.driver import config_modifiers as _config_modifiers
 from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.config_modifiers import (
     _FILE_EXISTS_SENTINEL as FILE_EXISTS_SENTINEL,
@@ -61,7 +62,10 @@ from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.driver.fboss_switch import FbossSwitch
 from thrift.python.serializer import deserialize, Protocol, serialize
 
-_MODULE = "neteng.test_infra.dne.taac.driver.config_modifiers"
+# ShipIt rewrites import statements but not string literals, so a hardcoded
+# dotted path is only correct in one of the two worlds; read the name off the
+# imported module instead.
+_MODULE = _config_modifiers.__name__
 
 
 class _Device:
