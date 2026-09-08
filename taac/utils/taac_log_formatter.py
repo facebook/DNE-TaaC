@@ -101,7 +101,7 @@ def log_results_table(
           LLDP_CHECK                          PASS
           IXIA_PACKET_LOSS_CHECK              FAIL        Packet loss > 0.01%
           ---------------------------------------------------------------------------
-          Overall: 2 PASSED, 1 FAILED
+          Overall: 2 PASSED, 1 FAILED, 1 SKIPPED  (SKIPPED shown only when nonzero)
     """
     _logger = logger or get_root_logger()
     if not results:
@@ -126,6 +126,7 @@ def log_results_table(
 
     passed = 0
     failed = 0
+    skipped = 0
     for result in results:
         check_name = result.get("check_name", "Unknown")
         status = result.get("status", "UNKNOWN")
@@ -133,11 +134,15 @@ def log_results_table(
         _logger.info(f"  {check_name:<35} {status:<10} {message}")
         if status.upper() in ("PASS", "PASSED", "SUCCESS"):
             passed += 1
+        elif status.upper() in ("SKIP", "SKIPPED"):
+            skipped += 1
         else:
             failed += 1
 
     _logger.info("  " + "-" * (width - 4))
-    overall = f"Overall: {passed} PASSED, {failed} FAILED"
+    overall = f"Overall: {passed} PASSED, {failed} FAILED" + (
+        f", {skipped} SKIPPED" if skipped else ""
+    )
     _logger.info(f"  {overall}")
     _logger.info("")
 

@@ -1,5 +1,19 @@
 # Sample ixia-c deployment with vlan subinterfaces
 # pointing to the host NIC.
+#
+# Wiring assumption: the host NIC (enp3s0) carries a VLAN-tagged trunk into a
+# fanout switch, which splits the traffic by VLAN onto two untagged
+# DUT-facing ports:
+#   vlan1 -> DUT eth1/1/1 (Port A, 10.0.3.0/24)
+#   vlan2 -> DUT eth1/2/1 (Port B, 10.0.4.0/24)
+# The fanout's DUT-facing ports must be access (untagged) ports — the sample
+# agent config (switch01.fboss_sw_agent.example.conf) expects untagged
+# traffic on two separate DUT ports.
+#
+# Pairs with: examples/topology/single_switch_otg/ CSVs and
+# TAAC_TGEN_BACKEND=otg --ixia-api-server https://localhost:8443
+# (the TAAC container runs with --network host, so localhost reaches the
+# 8443:8443 mapping below).
 name: ixc-2port
 topology:
   nodes:
