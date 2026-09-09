@@ -5284,7 +5284,12 @@ class Ixia:
     ) -> None:
         """API to configure IPv6 entries"""
         if device_group_regex:
-            device_groups = self.find_device_groups(device_group_regex)
+            # ignore_case: same trap as configure_ipv4_entries — callers pass
+            # DUT interface names but device groups are named with upper-cased
+            # port identifiers, so a case-sensitive match silently no-ops.
+            device_groups = self.find_device_groups(
+                device_group_regex, ignore_case=True
+            )
             for device_group in device_groups:
                 for ethernet in device_group.Ethernet.find():
                     for ipv6 in ethernet.Ipv6.find():
@@ -5316,7 +5321,11 @@ class Ixia:
         sleep_time_between_toggle_s: int = 30,
     ) -> None:
         """API to configure IPv6 entries"""
-        device_groups = self.find_device_groups(device_group_regex)
+        # ignore_case: callers pass DUT interface names (e.g. "eth1/31/1")
+        # but device groups are named with upper-cased port identifiers
+        # ("DEVICE_GROUP_D1_<DUT>:ETH1/31/1") — a case-sensitive match makes
+        # the whole call a silent no-op.
+        device_groups = self.find_device_groups(device_group_regex, ignore_case=True)
         for device_group in device_groups:
             for ethernet in device_group.Ethernet.find():
                 for ipv4 in ethernet.Ipv4.find():
@@ -5337,7 +5346,9 @@ class Ixia:
         self.apply_changes()
         if not toggle_all_ipv6_ipv4_only_protocol:
             return
-        all_device_groups = self.find_device_groups(device_group_regex)
+        all_device_groups = self.find_device_groups(
+            device_group_regex, ignore_case=True
+        )
         bgp_device_group_name = self.get_bgp_device_group_name(all_device_groups)
         for device_group in all_device_groups:
             if device_group.Name not in bgp_device_group_name:
@@ -6854,6 +6865,110 @@ class Ixia:
         )
         return device_groups
 
+    def _remove_orphaned_session(
+        self, orphan_id
+    ) -> t.Tuple[bool, t.Optional[Exception]]:
+        """Best-effort ``Sessions.remove()`` of ``orphan_id``, verified server-side.
+
+        ``Sessions.remove()`` has a failure mode that makes a naive
+        retry-on-the-same-object a FALSE SUCCESS: on a non-transient server
+        error it clears the local object's property list first and then raises
+        a plain string (surfacing as TypeError), so a second ``remove()``
+        iterates an empty list, issues no HTTP call, and returns cleanly.
+        Therefore re-find the session by id on a fresh handle each attempt, and
+        trust only the server's word (absence from ``find``) as success.
+
+        Returns ``(destroyed, last_exception)``.
+        """
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                stale = self.session.TestPlatform.Sessions.find(Id=orphan_id)
+                if len(stale) == 0:
+                    return True, last_exc
+                stale.remove()
+            except Exception as exc:
+                last_exc = exc
+            try:
+                if len(self.session.TestPlatform.Sessions.find(Id=orphan_id)) == 0:
+                    return True, last_exc
+            except Exception as exc:
+                last_exc = exc
+            if attempt == 1:
+                self.logger.warning(
+                    f"{_YELLOW}[IXIA]{_RESET} Session {orphan_id} still present "
+                    f"after remove attempt"
+                    + (f" ({type(last_exc).__name__})" if last_exc else "")
+                    + " — retrying in 5s"
+                )
+                time.sleep(5)
+        return False, last_exc
+
+    def _tombstone_orphaned_session(self, orphan_id) -> t.Optional[str]:
+        """Rename an undestroyable session so it self-identifies in the session list.
+
+        The rename is a platform-metadata PATCH (linux API server only —
+        elsewhere the setter just warns), so verify by reading the name back
+        rather than trusting the setter. Returns the applied name, or ``None``
+        if the rename failed or is unsupported.
+        """
+        tombstone = (
+            f"STALE-ORPHANED-{self.session_name or 'unnamed'}-{int(time.time())}"
+        )
+        try:
+            test_platform = self.session.TestPlatform
+            if test_platform.Platform != "linux":
+                return None
+            stale = test_platform.Sessions.find(Id=orphan_id)
+            if not len(stale):
+                return None
+            stale.Name = tombstone
+            if test_platform.Sessions.find(Id=orphan_id).Name == tombstone:
+                return tombstone
+        except Exception:
+            return None
+        return None
+
+    def _destroy_orphaned_session(self, orphan_id) -> None:
+        """Destroy the session a previous failed setup attempt left behind.
+
+        Orphaned "Active" sessions cost API-server memory and count against the
+        API server's concurrent-session cap; enough of them and NEW session
+        creation starts 5xx-ing, which feeds the very retry path that calls
+        this — so a destroy failure must never be silent.
+        """
+        # `session_id` can come from the constructor while `session` is still
+        # None: there is then no handle to reach the API server with, and this
+        # object never created a session of its own to orphan.
+        if self.session is None:
+            return
+        # Use warning level so messages pass through suppress_console_logs
+        self.logger.warning(
+            f"{_YELLOW}[IXIA]{_RESET} Destroying session "
+            f"{_YELLOW}{orphan_id}{_RESET} from previous failed attempt "
+            f"before retry"
+        )
+        destroyed, last_exc = self._remove_orphaned_session(orphan_id)
+        if destroyed:
+            return
+        tombstone = self._tombstone_orphaned_session(orphan_id)
+        self.logger.error(
+            f"[IXIA] Could not destroy session {orphan_id} from the previous "
+            f"failed attempt"
+            + (
+                f" (last error {type(last_exc).__name__}: {last_exc})"
+                if last_exc
+                else ""
+            )
+            + ". It is now ORPHANED on the API server"
+            + (
+                f" (tombstone-renamed to {tombstone!r})"
+                if tombstone
+                else " (tombstone rename also failed/unsupported)"
+            )
+            + f" — clean up manually via /api/v1/sessions/{orphan_id}."
+        )
+
     @timeit
     @retryable(num_tries=3, sleep_time=30, print_ex=True)
     def _create_basic_setup(
@@ -6884,16 +6999,7 @@ class Ixia:
         # still be committing server-side when NewConfig() wipes the SDM
         # registry, leading to NullReferenceException in IxNetwork.
         if self.session_id and not self.is_existing_session:
-            _log(
-                f"{_YELLOW}[IXIA]{_RESET} Destroying session "
-                f"{_YELLOW}{self.session_id}{_RESET} from previous failed "
-                f"attempt before retry"
-            )
-            try:
-                if self.session:
-                    self.session.Session.remove()
-            except Exception:
-                pass
+            self._destroy_orphaned_session(self.session_id)
             self.session_id = None
             self.vport_indices = {}
             self.tag_name_to_device_group_name_list = defaultdict(list)
