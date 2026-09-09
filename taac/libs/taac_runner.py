@@ -39,7 +39,6 @@ from taac.constants import (
     FbossPackage,
     TestCaseFailure,
     TestDevice,
-    TestResult,
     TestTopology,
 )
 from taac.custom_test_handlers.base_custom_test_handler import (
@@ -98,6 +97,7 @@ from taac.libs.ixia_config_baseline import (
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.libs.periodic_task_executor import PeriodicTaskExecutor
+from taac.libs.run_result import worst_check_status
 from taac.libs.test_setup_orchestrator import (
     TestSetupOrchestrator,
 )
@@ -152,6 +152,12 @@ from taac.utils.oss_taac_lib_utils import (
     get_root_logger,
     none_throws,
 )
+from taac.utils.result_rendering import (
+    check_stage_name,
+    format_epoch_timestamp,
+    message_with_url,
+    section_failed,
+)
 from taac.utils.taac_log_formatter import (
     format_step_label,
     log_phase_end,
@@ -163,7 +169,6 @@ from taac.utils.taac_log_formatter import (
     suppress_console_logs,
 )
 from taac.utils.taac_test_summary import (
-    FAILED_SECTION_STATUSES,
     SectionResult,
     SectionStatus,
     TaacTestSummary,
@@ -192,6 +197,7 @@ else:
     UTP_TEST_CATALOG: t.List[t.Any] = []
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
+from taac.test_run_result import types as trr_types
 from tabulate import tabulate
 
 if not TAAC_OSS:
@@ -356,7 +362,6 @@ class TaacRunner:
         logger: t.Optional[ConsoleFileLogger] = None,
         # Netcastle runner specific
         is_autotester_run: bool = False,
-        test_results: t.Optional[t.List[TestResult]] = None,
         # EOS image ID for Arista device image deployment
         eos_image_id: t.Optional[str] = None,
         # Whether to clear old EOS images from flash before deployment
@@ -393,8 +398,8 @@ class TaacRunner:
             else test_config
         )
         self._validate_no_test_config_level_checks()
-        # results of the entire test run. test_results can be passed in as an empty list
-        self.test_run_results = test_results if test_results is not None else []
+        # One entry per (playbook, dut, iteration) executed by this run.
+        self.playbook_results: t.List[trr_types.PlaybookResult] = []
         self.logger = logger or get_root_logger()
         self.duts: t.List[str] = [
             endpoint.name for endpoint in self.test_config.endpoints if endpoint.dut
@@ -885,7 +890,7 @@ class TaacRunner:
         device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
     ) -> Step:
         step_cls = NAME_TO_STEP[step.name]
         step_obj = step_cls(
@@ -919,7 +924,7 @@ class TaacRunner:
         test_device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
     ) -> None:
         run_coros = []
         for concurrent_step in concurrent_steps:
@@ -941,7 +946,7 @@ class TaacRunner:
         test_device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         iteration: int = 1,
     ) -> None:
         step_objs_list = []
@@ -1017,7 +1022,7 @@ class TaacRunner:
         stage-level filtering instead treat them as mutually exclusive.
 
         Public because the netcastle front end (`taac_test_framework.py`) calls
-        it to skip a test case before it builds a `TestResult` for the DUT.
+        it to skip a test case before it builds a `CheckResult` for the DUT.
         """
         if playbook.device_regexes and not any(
             re.match(regex, test_device.name) for regex in playbook.device_regexes
@@ -1066,7 +1071,8 @@ class TaacRunner:
         self._npi_iteration_outcomes = npi_iteration_outcomes
         _run_exc: BaseException | None = None
         _npi_iteration_count = 0
-        test_case_results: t.List[TestResult] = []
+        recorded_iterations = 0
+        test_case_results: t.List[trr_types.CheckResult] = []
         test_case_start_time = int(time.time())
         iteration_count = self._get_test_case_iteration_count(playbook)
 
@@ -1273,6 +1279,11 @@ class TaacRunner:
                         [_teardown_exc] if _teardown_exc is not None else []
                     )
                     self._raise_test_case_cleanup_errors(_stage_exc, _cleanup_errors)
+
+                self._record_playbook_result(
+                    playbook, test_device, _npi_iteration_count, test_case_results
+                )
+                recorded_iterations = _npi_iteration_count
         except Exception as e:
             _run_exc = e
             self._record_npi_iteration_error(
@@ -1290,6 +1301,13 @@ class TaacRunner:
                 _run_exc,
                 sys.exception(),
             )
+            # The iteration that was in flight when the run broke off, recorded
+            # only here so it carries the checks the fallback cleanup above
+            # just appended to test_case_results.
+            if _npi_iteration_count > recorded_iterations:
+                self._record_playbook_result(
+                    playbook, test_device, _npi_iteration_count, test_case_results
+                )
             # Publish NPI result immediately after all iterations complete,
             # before returning to run_tests for the next playbook.
             # This ensures the result reflects the full aggregated outcome
@@ -1299,6 +1317,23 @@ class TaacRunner:
             )
             if _run_exc is not None:
                 raise _run_exc
+
+    def _record_playbook_result(
+        self,
+        playbook: taac_types.Playbook,
+        test_device: TestDevice,
+        iteration: int,
+        results: t.Sequence[trr_types.CheckResult],
+    ) -> None:
+        self.playbook_results.append(
+            trr_types.PlaybookResult(
+                playbook_name=playbook.name,
+                dut=test_device.name,
+                iteration=iteration,
+                status=worst_check_status(results),
+                results=list(results),
+            )
+        )
 
     def _record_npi_iteration_error(
         self,
@@ -1450,7 +1485,7 @@ class TaacRunner:
     async def _run_test_case_fallback_cleanup(
         self,
         test_case_name: str,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_device: TestDevice,
         test_case_start_time: int,
         run_error: BaseException | None,
@@ -1589,11 +1624,8 @@ class TaacRunner:
         except Exception as e:
             self.logger.warning(f"NPI result publish failed (non-fatal): {e}")
 
-    def check_failure(self, test_case_results: t.List[TestResult]) -> bool:
-        return any(
-            result.test_status in [hc_status.name for hc_status in FAILED_HC_STATUSES]
-            for result in test_case_results
-        )
+    def check_failure(self, test_case_results: t.List[trr_types.CheckResult]) -> bool:
+        return any(result.status in FAILED_HC_STATUSES for result in test_case_results)
 
     async def initialize_and_setup_snapshot_checks(
         self,
@@ -1645,7 +1677,7 @@ class TaacRunner:
         snapshot_checks: t.List[AbstractSnapshotHealthCheck],
         id: str,
         current_timestamp: int,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_case_name: str,
     ) -> None:
         for check in snapshot_checks:
@@ -1714,7 +1746,7 @@ class TaacRunner:
         return "Unnamed Stage"
 
     async def _log_post_test_results(
-        self, test_case_results: t.List[TestResult]
+        self, test_case_results: t.List[trr_types.CheckResult]
     ) -> None:
         """Log a summary table of POST_TEST health check results.
 
@@ -1727,7 +1759,7 @@ class TaacRunner:
         post_test_results = [
             result
             for result in test_case_results
-            if result.check_stage and "POST_TEST" in str(result.check_stage)
+            if result.check_stage == taac_types.ValidationStage.POST_TEST
         ]
 
         if not post_test_results:
@@ -1736,25 +1768,18 @@ class TaacRunner:
         # Format results for the table
         formatted_results = []
         for result in post_test_results:
-            status = result.test_status or "UNKNOWN"
-            # Normalize status display
-            if status.upper() in ("PASS", "PASSED", "SUCCESS"):
-                display_status = "PASS"
-            elif status.upper() in ("FAIL", "FAILED", "FAILURE"):
-                display_status = "FAIL"
-            else:
-                display_status = status
-
-            message = result.message or ""
+            display_status = result.status.name
+            message = message_with_url(result.message, result.message_url)
 
             # For failed checks, upload details to Everpaste and append URL
             if display_status == "FAIL" and message:
                 try:
                     detail_lines = [
                         f"Health Check: {result.check_name}",
-                        f"Device: {result.hostnames or 'N/A'}",
-                        f"Stage: {result.check_stage or 'N/A'}",
-                        f"Time: {result.start_time} - {result.end_time}",
+                        f"Device: {', '.join(result.hostnames) or 'N/A'}",
+                        f"Stage: {check_stage_name(result.check_stage, absent='N/A')}",
+                        f"Time: {format_epoch_timestamp(result.start_time_epoch_s)} - "
+                        f"{format_epoch_timestamp(result.end_time_epoch_s)}",
                         "",
                         "Details:",
                         message,
@@ -1778,7 +1803,9 @@ class TaacRunner:
             logger=self.logger,
         )
 
-    def _log_failed_health_checks(self, failed_checks: t.List[TestResult]) -> None:
+    def _log_failed_health_checks(
+        self, failed_checks: t.List[trr_types.CheckResult]
+    ) -> None:
         """Log detailed information about failed health checks."""
         self.logger.info("=" * 80)
         self.logger.info(f"{'FAILED HEALTH CHECK DETAILS':^80}")
@@ -1787,9 +1814,14 @@ class TaacRunner:
 
         for i, check in enumerate(failed_checks, 1):
             self.logger.info(f"  [{i}] {check.check_name or 'Unknown Check'}")
-            self.logger.info(f"      Stage: {check.check_stage or 'N/A'}")
-            self.logger.info(f"      Device: {check.hostnames or 'N/A'}")
-            self.logger.info(f"      Time: {check.start_time} - {check.end_time}")
+            self.logger.info(
+                f"      Stage: {check_stage_name(check.check_stage, absent='N/A')}"
+            )
+            self.logger.info(f"      Device: {', '.join(check.hostnames) or 'N/A'}")
+            self.logger.info(
+                f"      Time: {format_epoch_timestamp(check.start_time_epoch_s)} - "
+                f"{format_epoch_timestamp(check.end_time_epoch_s)}"
+            )
             if check.message:
                 # Log full message, splitting long messages across lines
                 msg_lines = check.message.split("\n")
@@ -1800,6 +1832,8 @@ class TaacRunner:
                     self.logger.info(
                         f"             ... ({len(msg_lines) - 10} more lines)"
                     )
+            if check.message_url:
+                self.logger.info(f"      Full message: {check.message_url}")
             self.logger.info("")
 
         self.logger.info("=" * 80)
@@ -1811,7 +1845,7 @@ class TaacRunner:
         test_device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
     ) -> None:
         stage_name = self._get_stage_display_name(stage)
         stage_section = self.test_summary.start_section(stage_name, indent_level=1)
@@ -2321,7 +2355,7 @@ class TaacRunner:
     async def _finalize_test_case_periodic_task_executor(
         self,
         executor: t.Optional[PeriodicTaskExecutor],
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,
@@ -2386,7 +2420,7 @@ class TaacRunner:
     def _end_ixia_test_case(
         self,
         playbook: taac_types.Playbook,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         periodic_workers_stopped: t.Optional[bool],
     ) -> t.Optional[str]:
         if periodic_workers_stopped is False:
@@ -2421,7 +2455,7 @@ class TaacRunner:
     def _end_ixia_test_case_safely(
         self,
         playbook: taac_types.Playbook,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         periodic_workers_stopped: t.Optional[bool],
     ) -> tuple[t.Optional[str], list[BaseException]]:
         ixia_teardown_errors: list[BaseException] = []
@@ -2491,7 +2525,7 @@ class TaacRunner:
     def _record_npi_teardown_outcome(
         self,
         test_case_name: str,
-        test_case_results: t.Sequence[TestResult],
+        test_case_results: t.Sequence[trr_types.CheckResult],
         exceptions: t.Sequence[BaseException],
         topology_restore_errors: t.Sequence[BaseException],
     ) -> None:
@@ -2668,7 +2702,7 @@ class TaacRunner:
         self,
         playbook: taac_types.Playbook,
         test_device: TestDevice,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_case_start_time: int,
     ) -> None:
         # Executed at the end of each test
@@ -2707,7 +2741,6 @@ class TaacRunner:
                     logger=self.logger,
                 )
                 self.logger.info(f"\n{tabulate_test_results(test_case_results)}")
-                self.test_run_results.extend(test_case_results)
                 if self.check_failure(test_case_results):
                     collected_logs = await self.async_fboss_collect_and_print_logs(
                         test_case_start_time
@@ -2727,17 +2760,13 @@ class TaacRunner:
                     # Only mark as postcheck failure if ALL failures
                     # are from POST_TEST health checks. Pre-check failures
                     # and stage execution errors remain as ERROR.
-                    failed_statuses = [
-                        hc_status.name for hc_status in FAILED_HC_STATUSES
-                    ]
                     failed_results = [
                         result
                         for result in test_case_results
-                        if result.test_status in failed_statuses
+                        if result.status in FAILED_HC_STATUSES
                     ]
                     postcheck_only = bool(failed_results) and all(
-                        result.check_stage is not None
-                        and "POST_TEST" in str(result.check_stage)
+                        result.check_stage == taac_types.ValidationStage.POST_TEST
                         for result in failed_results
                     )
                     # Thread per-HC failure_detail into the exception so the
@@ -2749,8 +2778,8 @@ class TaacRunner:
                     # and consumers have to dig into worker logs.
                     hc_details = "\n".join(
                         f"  - {result.check_name or '<unnamed>'} "
-                        f"({result.check_stage or '<unknown_stage>'}): "
-                        f"{result.message or '<no detail>'}"
+                        f"({check_stage_name(result.check_stage, absent='<unknown_stage>')}): "
+                        f"{message_with_url(result.message, result.message_url) or '<no detail>'}"
                         for result in failed_results
                     )
                     investigation_suffix = (
@@ -2842,7 +2871,7 @@ class TaacRunner:
         self,
         playbook: taac_types.Playbook,
         test_device: TestDevice,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_case_start_time: int,
         collected_logs: t.Sequence[HostLog],
         ixia_config_snapshot: t.Optional[str],
@@ -2914,7 +2943,7 @@ class TaacRunner:
         self,
         playbook: taac_types.Playbook,
         test_device: TestDevice,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_case_start_time: int,
         collected_logs: t.Sequence[HostLog],
     ) -> str:
@@ -3107,7 +3136,7 @@ class TaacRunner:
         return [
             section.name
             for section in self.test_summary.sections
-            if section.status in FAILED_SECTION_STATUSES
+            if section_failed(section.status)
         ]
 
     async def _everpaste_evidence(self, text: str) -> str:
@@ -3120,7 +3149,7 @@ class TaacRunner:
     def _snapshot_ixia_config(
         self,
         playbook: taac_types.Playbook,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
     ) -> t.Optional[str]:
         """Render the generator's configuration while this test case's traffic is up.
 
@@ -3659,7 +3688,7 @@ class TaacRunner:
 
     async def async_run_periodic_task_checks(
         self,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_device: TestDevice,
         test_case_name: str,
         test_case_start_time: int,

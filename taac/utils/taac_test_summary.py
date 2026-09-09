@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
-import enum
 import logging
 import time
 import typing as t
@@ -15,25 +14,23 @@ from taac.utils.common import (  # oss-rewrite (force ShipIt re-export to taac.*
 from taac.utils.investigation_log_marker import (
     is_investigation_transcript,
 )
+from taac.utils.result_rendering import (
+    failure_detail_lines,
+    section_failed,
+    section_row_lines,
+    section_status_string,
+    section_table,
+    truncate_message,
+)
 from taac.utils.taac_log_formatter import (
     format_duration,
     log_phase_end,
     log_phase_start,
 )
+from taac.test_run_result import types as trr_types
 
-
-class SectionStatus(enum.Enum):
-    PASS = "PASS"
-    FAIL = "FAIL"
-    INFRA_ERROR = "INFRA_ERROR"
-    SKIPPED = "SKIPPED"
-    IN_PROGRESS = "IN_PROGRESS"
-
-
-FAILED_SECTION_STATUSES = {
-    SectionStatus.FAIL,
-    SectionStatus.INFRA_ERROR,
-}
+# Re-exported under the historical name so callers keep importing it from here.
+SectionStatus = trr_types.SectionStatus
 
 
 @dataclass
@@ -46,6 +43,20 @@ class SectionResult:
     error_message: str = ""
     indent_level: int = 0
     start_time: float = 0.0
+
+
+def _to_thrift(section: SectionResult) -> trr_types.SectionResult:
+    """Project a tracked section into its serializable, renderable form."""
+    return trr_types.SectionResult(
+        name=section.name,
+        status=section.status,
+        duration_secs=section.duration_secs,
+        indent_level=section.indent_level,
+        everpaste_url=section.everpaste_url or None,
+        error_message=section.error_message or None,
+        start_time_epoch_s=int(section.start_time),
+        end_time_epoch_s=int(section.start_time + section.duration_secs),
+    )
 
 
 class _SectionLogHandler(logging.Handler):
@@ -209,7 +220,7 @@ class TaacTestSummary:
             return ""
         header = (
             f"=== Section: {section.name} ===\n"
-            f"Status: {section.status.value}\n"
+            f"Status: {section.status.name}\n"
             f"Duration: {format_duration(section.duration_secs)}\n"
             f"{'=' * 60}\n\n"
         )
@@ -226,62 +237,18 @@ class TaacTestSummary:
         return section.everpaste_url
 
     def _get_status_string(self, status: SectionStatus) -> str:
-        """Convert a SectionStatus to its display string."""
-        status_map = {
-            SectionStatus.FAIL: "FAIL",
-            SectionStatus.INFRA_ERROR: "INFRA_ERROR",
-            SectionStatus.PASS: "PASS",
-            SectionStatus.SKIPPED: "SKIP",
-        }
-        return status_map.get(status, "...")
+        return section_status_string(status)
 
     def _truncate_message(self, message: str, max_length: int) -> str:
-        """Truncate a message to max_length, appending '...' if truncated."""
-        if len(message) > max_length:
-            return message[:max_length] + "..."
-        return message
+        return truncate_message(message, max_length)
 
     def _format_section_row(self, section: SectionResult) -> t.List[str]:
-        """Format a single section as table row(s) including failure reason if applicable."""
-        lines = []
-        indent = "  " * section.indent_level
-        display_name = f"{indent}{section.name}"
-        status_str = self._get_status_string(section.status)
-        duration_str = (
-            format_duration(section.duration_secs) if section.duration_secs > 0 else "-"
-        )
-        # "-" means "not uploaded separately", not "no logs". Passing sections
-        # are covered by the full-log paste linked at the bottom of the summary.
-        url = section.everpaste_url or "-"
-        lines.append(f"  {display_name:<45} {status_str:<10} {duration_str:<15} {url}")
-        if section.status in FAILED_SECTION_STATUSES and section.error_message:
-            short_err = self._truncate_message(section.error_message, 80)
-            lines.append(f"  {indent}  └─ REASON: {short_err}")
-        return lines
+        return section_row_lines(_to_thrift(section))
 
     def _format_failure_details(
         self, failed_sections: t.List[SectionResult]
     ) -> t.List[str]:
-        """Format the failure details section for failed sections."""
-        lines = []
-        lines.append("=" * 100)
-        lines.append(f"{'FAILURE DETAILS':^100}")
-        lines.append("=" * 100)
-        lines.append("")
-        for s in failed_sections:
-            # pyrefly: ignore [bad-argument-type]
-            lines.append(f"  ✗ {s.name}")
-            # pyrefly: ignore [bad-argument-type]
-            lines.append(f"    Duration: {format_duration(s.duration_secs)}")
-            # pyrefly: ignore [bad-argument-type]
-            lines.append(f"    Logs: {s.everpaste_url or 'N/A'}")
-            if s.error_message:
-                err = self._truncate_message(s.error_message, 500)
-                # pyrefly: ignore [bad-argument-type]
-                lines.append(f"    Error: {err}")
-            lines.append("")
-        # pyrefly: ignore [bad-return]
-        return lines
+        return failure_detail_lines([_to_thrift(s) for s in failed_sections])
 
     async def async_generate_summary(self) -> str:
         """
@@ -302,7 +269,7 @@ class TaacTestSummary:
         # Passing rows show "-" in the Logs column and point at the full log.
         for section in self.sections:
             if (
-                section.status in FAILED_SECTION_STATUSES
+                section_failed(section.status)
                 and section.log_lines
                 and not section.everpaste_url
             ):
@@ -311,34 +278,11 @@ class TaacTestSummary:
 
     def render_summary(self) -> str:
         """Render the section table without uploading anything."""
-        lines = []
-        lines.append("=" * 100)
-        lines.append(f"{'TEST EXECUTION SUMMARY':^100}")
-        lines.append("=" * 100)
-        lines.append("")
-        header = f"  {'Section':<45} {'Status':<10} {'Duration':<15} {'Logs'}"
-        lines.append(header)
-        lines.append("  " + "-" * 95)
+        return section_table(self.build_section_results())
 
-        all_pass = True
-        for section in self.sections:
-            if section.status in FAILED_SECTION_STATUSES:
-                all_pass = False
-            # pyrefly: ignore [bad-argument-type]
-            lines.extend(self._format_section_row(section))
-
-        lines.append("  " + "-" * 95)
-        overall = "ALL SECTIONS PASSED" if all_pass else "SOME SECTIONS FAILED"
-        # pyrefly: ignore [bad-argument-type]
-        lines.append(f"  Overall: {overall}")
-        lines.append("")
-
-        failed = [s for s in self.sections if s.status in FAILED_SECTION_STATUSES]
-        if failed:
-            # pyrefly: ignore [bad-argument-type]
-            lines.extend(self._format_failure_details(failed))
-
-        return "\n".join(lines)
+    def build_section_results(self) -> t.List[trr_types.SectionResult]:
+        """Project the tracked sections into their serializable thrift form."""
+        return [_to_thrift(section) for section in self.sections]
 
     async def async_upload_and_log_summary(self) -> str:
         """
