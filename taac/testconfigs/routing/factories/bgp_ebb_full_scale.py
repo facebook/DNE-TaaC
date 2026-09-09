@@ -792,6 +792,11 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_route_registry_runtime_update_playbook",
+                enable_update_group,
+            ),
         ),
         get_bgp_ebb_multipath_group_oscillation_playbook(
             device_name=device_name,
@@ -832,6 +837,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
             bgp_mon_parent_network=bound_bgp_mon_network,
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_fauu_drain_undrain_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_plane_drain_undrain_playbook(
             device_name=device_name,
@@ -842,6 +851,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
             bgp_mon_parent_network=bound_bgp_mon_network,
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_plane_drain_undrain_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_longevity_playbook(
             device_name=device_name,
@@ -889,6 +902,10 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_ebgp_session_oscillation_playbook", enable_update_group
+            ),
         ),
         get_bgp_ebb_ebgp_route_oscillation_playbook(
             device_name=device_name,
@@ -912,6 +929,11 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_ibgp_plane_session_oscillation_playbook",
+                enable_update_group,
+            ),
         ),
         get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name=device_name,
@@ -948,6 +970,11 @@ def _get_bgp_ebb_full_scale_playbooks(
             nexthop_group_threshold=_NEXTHOP_GROUP_THRESHOLD,
             enable_update_group=enable_update_group,
             bgp_mon_parent_network=bound_bgp_mon_network,
+            characterization=OBSERVE_ONLY_ON_DEVICE,
+            characterization_gates=_characterization_gates(
+                "bgp_ebb_nexthop_group_count_threshold_playbook",
+                enable_update_group,
+            ),
         ),
     ]
     return playbooks

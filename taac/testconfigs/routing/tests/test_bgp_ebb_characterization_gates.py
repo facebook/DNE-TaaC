@@ -12,15 +12,22 @@ from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, TestCo
 
 
 _PLAYBOOK_NAMES = (
-    "bgp_ebb_attribute_churn_playbook",
-    "bgp_ebb_route_storm_playbook",
-    "bgp_ebb_multipath_group_oscillation_playbook",
-    "bgp_ebb_igp_pnh_metric_oscillation_playbook",
-    "bgp_ebb_longevity_playbook",
     "bgp_ebb_daemon_restart_playbook",
+    "bgp_ebb_cold_start_playbook",
+    "bgp_ebb_ebgp_session_oscillation_playbook",
+    "bgp_ebb_ibgp_plane_session_oscillation_playbook",
     "bgp_ebb_ebgp_route_oscillation_playbook",
     "bgp_ebb_ibgp_route_oscillation_playbook",
+    "bgp_ebb_igp_pnh_metric_oscillation_playbook",
     "bgp_ebb_igp_unresolvable_pnh_playbook",
+    "bgp_ebb_multipath_group_oscillation_playbook",
+    "bgp_ebb_attribute_churn_playbook",
+    "bgp_ebb_route_storm_playbook",
+    "bgp_ebb_route_registry_runtime_update_playbook",
+    "bgp_ebb_fauu_drain_undrain_playbook",
+    "bgp_ebb_plane_drain_undrain_playbook",
+    "bgp_ebb_longevity_playbook",
+    "bgp_ebb_nexthop_group_count_threshold_playbook",
 )
 
 _UG_GATES = {
@@ -116,6 +123,15 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
 
                 self.assertIsNotNone(cpu_check)
                 self.assertIsNotNone(rss_check)
+                if playbook_name != "bgp_ebb_cold_start_playbook":
+                    stage_ids = {stage.id for stage in playbook.stages or []}
+                    phase = (
+                        "soak"
+                        if playbook_name == "bgp_ebb_longevity_playbook"
+                        else "workload"
+                    )
+                    self.assertIn(f"{phase}_characterization_start", stage_ids)
+                    self.assertIn(f"{phase}_characterization_stop", stage_ids)
                 cpu_params = _params(cpu_check)
                 rss_params = _params(rss_check)
                 expected = expected_gates.get(playbook_name)
