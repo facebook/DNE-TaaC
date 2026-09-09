@@ -10977,6 +10977,18 @@ _SUPPORTED_51T_SPEED_COMBINATIONS = {
     (400, 400),
 }
 _PLATFORM_SPEED_PROFILE_MAPPING = {
+    # Wedge800 (TH5-T, NextHop). Optical-family cage profiles per the on-box
+    # platform_mapping.json (nexthop/wedge800bnhp): 800G=39, 400G=38, 200G=25,
+    # 100G=23. Copper-family cages carry 22/24 at 100G/200G instead, so this
+    # one-id-per-speed table can satisfy only one end of a mixed-media link.
+    # 800G exists only on the /1 subport; flipping /1 to 800G subsumes its
+    # /5 mate.
+    "WEDGE800BNHP": {
+        PortSpeed.EIGHTHUNDREDG: "PROFILE_800G_8_PAM4_RS544X2N_OPTICAL",
+        PortSpeed.FOURHUNDREDG: "PROFILE_400G_4_PAM4_RS544X2N_OPTICAL",
+        PortSpeed.TWOHUNDREDG: "PROFILE_200G_4_PAM4_RS544X2N_OPTICAL",
+        PortSpeed.HUNDREDG: "PROFILE_100G_4_NRZ_RS528_OPTICAL",
+    },
     "MONTBLANC": {
         PortSpeed.EIGHTHUNDREDG: "PROFILE_800G_8_PAM4_RS544X2N_OPTICAL",
         PortSpeed.FOURHUNDREDG: "PROFILE_400G_4_PAM4_RS544X2N_OPTICAL",

@@ -7581,6 +7581,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
     snapshot_checks: list[SnapshotHealthCheck] | None = None,
     traffic_items_to_start: list[str] | None = None,
     playbook_name: str = "test_bgp_longevity_ndp_device_group_toggle",
+    expected_device_group_matches: int | None = None,
 ) -> Playbook:
     """BGP longevity — shut and re-enable the NDP IPv6 device group on a duty cycle.
 
@@ -7595,7 +7596,10 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
 
     Args:
         device_group_name_regex: IXIA device-group regex for the NDP group
-            (IXIA names groups ``D<device_group_index + 1>``).
+            (IXIA names groups ``DEVICE_GROUP_D<device_group_index>_<HOST:INTF>``).
+        expected_device_group_matches: When set, each toggle asserts the regex
+            selected exactly this many groups -- a miss otherwise toggles
+            nothing and silently passes.
         uptime_s: Seconds the group stays enabled per cycle.
         downtime_s: Seconds the group stays shut per cycle.
         total_duration_s: Target wall-clock for the whole playbook.
@@ -7617,9 +7621,12 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
             f"uptime_s + downtime_s ({cycle_s}s) exceeds total_duration_s "
             f"({total_duration_s}s); no full cycle would run"
         )
+    toggle_args = {"device_group_name_regex": device_group_name_regex}
+    if expected_device_group_matches is not None:
+        toggle_args["expected_match_count"] = expected_device_group_matches
     enable_step = create_ixia_api_step(
         api_name="toggle_device_groups",
-        args_dict={"enable": True, "device_group_name_regex": device_group_name_regex},
+        args_dict={"enable": True, **toggle_args},
         description=f"Enable NDP device group {device_group_name_regex}",
     )
     return build_2_ixia_hardening_playbook(
@@ -7646,10 +7653,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
                     ),
                     create_ixia_api_step(
                         api_name="toggle_device_groups",
-                        args_dict={
-                            "enable": False,
-                            "device_group_name_regex": device_group_name_regex,
-                        },
+                        args_dict={"enable": False, **toggle_args},
                         description=(
                             f"Shut down NDP device group {device_group_name_regex}"
                         ),
