@@ -135,6 +135,10 @@ def _traffic_loss_validation_step(description: str) -> Step:
             ),
         ],
         description=description,
+        # This is the dataplane acceptance gate.  Without fail-fast, TAAC
+        # records the health failure for the final summary but prints a green
+        # step/stage result, which can make 100% loss look successful.
+        fail_fast=True,
     )
 
 

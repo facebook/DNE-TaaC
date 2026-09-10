@@ -423,6 +423,23 @@ def build_agent_config(
             "installed AgentConfig must contain platform and defaultCommandLineArgs"
         )
     cfg = copy.deepcopy(dict(base))
+    # These FBOSS features are opt-in and their binary defaults are false.
+    # Fresh OSS images do not enable them in their service command line:
+    #
+    # * without LACP, aggregate members never enter forwarding state;
+    # * without the next-hop ID manager, config-created adjacency MySIDs stay
+    #   unresolved and are not programmed in SAI, even though ``show mysid``
+    #   still lists their logical entries.
+    #
+    # FBOSS initializes unset gflags from this image-owned map at process
+    # startup.  The bootstrap task detects this change and restarts the agent.
+    cfg["defaultCommandLineArgs"].update(
+        {
+            "enable_lacp": "true",
+            "enable_nexthop_id_manager": "true",
+            "resolve_nexthops_from_id": "true",
+        }
+    )
     sw = cfg.get("sw")
     if not isinstance(sw, dict):
         raise ValueError("installed AgentConfig must contain a sw object")
@@ -571,6 +588,7 @@ def build_agent_config(
                         "holdTimerMultiplier": 3,
                         "memberPortID": port_id,
                         "priority": 32768,
+                        # switch_config.LacpPortRate: SLOW=0, FAST=1.
                         "rate": 0,
                     }
                 ],
@@ -754,6 +772,11 @@ def build_bgp_config(
     if not isinstance(cfg.get("net_service_config"), dict):
         raise ValueError("installed bgp.json needs a net_service_config object")
     for field in ("peer_groups", "peers", "networks4", "networks6"):
+        # Older stock images emitted every empty repeated field. Newer images
+        # omit only the optional peer_groups placeholder; the builder creates
+        # the required group below, so absence is equivalent to an empty list.
+        if field == "peer_groups" and field not in cfg:
+            continue
         value = cfg.get(field)
         if not isinstance(value, list):
             raise ValueError(f"installed bgp.json field {field!r} must be a list")
@@ -830,9 +853,35 @@ def build_openr_config(
             "preconfigured workflow without --setup-duts"
         )
     areas = cfg.get("areas")
-    if not isinstance(areas, list) or len(areas) != 1 or not isinstance(areas[0], dict):
-        raise ValueError("installed openr.conf must contain exactly one area object")
-    area = areas[0]
+    if not isinstance(areas, list):
+        raise ValueError("installed openr.conf areas must be a list")
+    if not areas:
+        # Newer stock images ship an empty fresh-image placeholder instead of
+        # a default area. Build the same minimal area which would otherwise be
+        # patched below; node_name still proves that this is unconfigured.
+        area = {
+            "area_id": "0",
+            "neighbor_regexes": [],
+            "include_interface_regexes": [],
+            "exclude_interface_regexes": [],
+            "redistribute_interface_regexes": [],
+        }
+        cfg["areas"] = [area]
+        # The OpenR binary shipped with this placeholder calls Watchdog::addQueue
+        # unconditionally even when the optional flag defaults to false. Supply
+        # the Thrift defaults explicitly so that fresh-image OpenR is runnable.
+        cfg["enable_watchdog"] = True
+        cfg["watchdog_config"] = {
+            "interval_s": 20,
+            "thread_timeout_s": 300,
+            "max_memory_mb": 800,
+        }
+    elif len(areas) == 1 and isinstance(areas[0], dict):
+        area = areas[0]
+    else:
+        raise ValueError(
+            "installed openr.conf must contain zero or one area object"
+        )
     area_id = area.get("area_id")
     if not isinstance(area_id, str) or not area_id:
         raise ValueError("installed openr.conf area_id must be a non-empty string")

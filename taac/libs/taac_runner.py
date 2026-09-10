@@ -660,6 +660,22 @@ class TaacRunner:
             pass
         return " | ".join(desc_parts)
 
+    @async_retryable(
+        retries=_TASK_ATTEMPTS,
+        sleep_time=_TASK_RETRY_SLEEP_SECONDS,
+        exceptions=(Exception,),
+    )
+    async def _run_task_with_retry(self, task: taac_types.Task) -> None:
+        """Retry one task without replaying already completed stateful tasks."""
+        dict_params = self.parameter_evaluator.evaluate(task.params)
+        await run_task(
+            task,
+            dict_params,
+            t.cast(TaacIxia, self.ixia),
+            self.logger,
+            self.shared_task_data,
+        )
+
     async def _run_task_once(
         self,
         task: taac_types.Task,
@@ -672,24 +688,12 @@ class TaacRunner:
             f"[Task {index}/{total}] Running: {task_desc} (host: {task.hostname})"
         )
         start = time.time()
-        dict_params = self.parameter_evaluator.evaluate(task.params)
-        await run_task(
-            task,
-            dict_params,
-            t.cast(TaacIxia, self.ixia),
-            self.logger,
-            self.shared_task_data,
-        )
+        await self._run_task_with_retry(task)
         elapsed = time.time() - start
         self.logger.warning(
             f"[Task {index}/{total}] Completed: {task_desc} ({elapsed:.1f}s)"
         )
 
-    @async_retryable(
-        retries=_TASK_ATTEMPTS,
-        sleep_time=_TASK_RETRY_SLEEP_SECONDS,
-        exceptions=(Exception,),
-    )
     async def run_tasks(self, tasks: t.Sequence[taac_types.Task]) -> None:
         total = len(tasks)
         for idx, task in enumerate(tasks, 1):

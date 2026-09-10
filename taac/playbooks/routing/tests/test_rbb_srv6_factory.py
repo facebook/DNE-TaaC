@@ -53,6 +53,16 @@ class ScenarioBuilderTest(unittest.TestCase):
             SRV6_3_USIDS_PROFILE.decap_sid,
         )
 
+    def test_two_node_wire_order_revisits_r1_before_tail_decap(self) -> None:
+        self.assertEqual(
+            SRV6_3_USIDS_PROFILE.encap_usids,
+            (
+                SRV6_3_USIDS_PROFILE.usid_mid,
+                SRV6_3_USIDS_PROFILE.usid_head,
+                SRV6_3_USIDS_PROFILE.usid_tail,
+            ),
+        )
+
     def test_verify_specs_assert_route_ownership_transition(self) -> None:
         te = verify_route_owner_te_agent_spec(SRV6_3_USIDS_PROFILE)
         self.assertIn(C.ROUTE_OWNER_TE_AGENT, te["expect_contains"])
@@ -87,12 +97,14 @@ class ScenarioBuilderTest(unittest.TestCase):
         self.assertIn(SRV6_3_USIDS_PROFILE.locator_token, r1["expect_contains"])
         self.assertIn(SRV6_3_USIDS_PROFILE.usid_head, r1["expect_contains"])
         self.assertIn(C.SRV6_BEHAVIOR_ADJACENCY, r1["expect_contains"])
+        self.assertIn("resolved via", r1["expect_contains"])
         self.assertNotIn(C.SRV6_BEHAVIOR_DECAP, r1["expect_contains"])
         # The tail (R2) additionally terminates: decap behavior asserted.
         r2 = verify_srv6_tunnels_spec("r2", SRV6_3_USIDS_PROFILE)
         self.assertIn(SRV6_3_USIDS_PROFILE.usid_mid, r2["expect_contains"])
         self.assertIn(SRV6_3_USIDS_PROFILE.decap_sid, r2["expect_contains"])
         self.assertIn(C.SRV6_BEHAVIOR_DECAP, r2["expect_contains"])
+        self.assertIn("resolved via", r2["expect_contains"])
 
     def test_verify_pc_rif_spec_checks_interface_address(self) -> None:
         topo = _generic_topology()

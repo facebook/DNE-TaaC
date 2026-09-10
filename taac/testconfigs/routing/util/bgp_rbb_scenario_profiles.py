@@ -52,19 +52,26 @@ class Srv6Profile:
 
     @property
     def encap_usids(self) -> t.Tuple[str, ...]:
-        """uSIDs placed on the wire by the local SRv6 headend.
+        """uSIDs placed on the wire by the two-node RBB emulation.
 
-        ``usids`` describes the complete logical head→mid→tail chain.  The
-        direct route is installed on the head itself, so its own MySID must not
-        be the first active function in the encapsulated packet.  The wire
-        container therefore starts with the next endpoint (mid) and ends with
-        the decap function.
+        ``usids`` is declared in logical head→mid→tail order, but R1 is both
+        the local encapsulating headend and the transit node used to emulate a
+        three-node path over two physical DUTs.  The active on-wire functions
+        must therefore be mid(R2)→head(R1)→tail(R2): R2's midpoint
+        adjacency returns the packet over the second core link, R1's head
+        adjacency sends it back over the first, and R2 finally decapsulates it.
+
+        Omitting the R1 transit function produces mid→tail.  The midpoint
+        adjacency still sends that packet back to R1, where no active MySID
+        matches the tail function, causing complete traffic loss.
         """
-        if len(self.usids) < 2:
+        if len(self.usids) != 3:
             raise ValueError(
-                "an SRv6 headend route requires at least a head and a remote uSID"
+                "the two-node RBB 3-uSID emulation requires head, midpoint, "
+                "and tail functions"
             )
-        return self.usids[1:]
+        head, midpoint, tail = self.usids
+        return (midpoint, head, tail)
 
 
 # TC1: full 3-uSID head→mid→tail chain.
@@ -267,7 +274,16 @@ def verify_srv6_tunnels_spec(
     adjacency_token = str(
         ipaddress.ip_address(str(adjacency_sid).split("/", 1)[0])
     )
-    expect = [profile.locator_token, adjacency_token, C.SRV6_BEHAVIOR_ADJACENCY]
+    # A logical MySID entry is visible even when its adjacency is unresolved.
+    # SAI only receives a usable uA entry after the neighbor observer binds a
+    # next hop, which the CLI renders as ``resolved via ...``.  Require that
+    # token so S11 cannot pass while all midpoint traffic is being dropped.
+    expect = [
+        profile.locator_token,
+        adjacency_token,
+        C.SRV6_BEHAVIOR_ADJACENCY,
+        "resolved via",
+    ]
     if node == "r2":
         decap_token = str(
             ipaddress.ip_address(str(profile.decap_sid).split("/", 1)[0])

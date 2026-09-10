@@ -5225,6 +5225,7 @@ def create_validation_step(
     stage: taac_types.ValidationStage = taac_types.ValidationStage.MID_TEST,
     description: t.Optional[str] = None,
     start_traffic: bool = True,
+    fail_fast: bool = False,
 ) -> Step:
     """
     Create a validation step with point-in-time health checks.
@@ -5236,6 +5237,7 @@ def create_validation_step(
         start_traffic: Whether the generic step pre-hook should ensure IXIA
             traffic is running. Set False for recovery validation that must run
             while traffic remains stopped.
+        fail_fast: Report the validation step as failed as soon as a check fails
 
     Returns:
         Step object for validation
@@ -5246,6 +5248,7 @@ def create_validation_step(
             taac_types.ValidationInput(
                 point_in_time_checks=point_in_time_checks,
                 stage=stage,
+                fail_fast=fail_fast,
             )
         ),
         description=description,
