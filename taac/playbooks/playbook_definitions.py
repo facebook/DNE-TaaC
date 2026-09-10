@@ -96,20 +96,21 @@ from taac.packet_headers import (
     TC2_PFC_PAUSE_PACKET_HEADERS,
 )
 from taac.testconfigs.routing.util.bgp_dc_healthchecks import (
+    BGP_RESTART_STEPS,
     BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
     get_ixia_healthcheck_ignore_cpu_and_v4_directional_traffic,
     get_ixia_healthcheck_stable_state,
 )
 from taac.testconfigs.routing.util.bgp_dc_stages import (
+    BGP_RESTART_STAGE,
     DISABLE_PREFIX_FLAPS_STAGE,
     DISABLE_SESSION_FLAPS_STAGE,
-    FREQUENT_BEST_PATH_COMPUTATION_STAGE,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.stages.stage_definitions import (
-    create_route_oscillations_stage,
+    create_attribute_churn_stage,
     create_validated_bgp_route_oscillations_stage,
     create_longevity_stage,
     create_periodic_service_restart_stage,
@@ -126,8 +127,6 @@ from taac.stages.stage_definitions import (
 from taac.steps.step_definitions import (
     create_bgp_instability_setup_steps,
     create_multipath_nexthop_count_health_check_step,
-    COLD_START_PREFIX_OSCILLATIONS,
-    CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
     create_clear_port_stats_step,
     create_clear_traffic_stats_step,
@@ -166,7 +165,6 @@ from taac.steps.step_definitions import (
     duration_only_rogue_session_prefix_flaps_s,
     REVERT_LOCAL_PREFERENCE_STEPS,
     ROGUE_PREFIX_SESSION_FLAP_STEPS,
-    TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY,
     wait_time_after_disable_churn_s,
 )
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
@@ -320,10 +318,6 @@ def create_bgp_restart_playbook() -> Playbook:
     from taac.health_checks.constants import (
         SERVICES_TO_MONITOR_DURING_BGP_RESTART,
     )
-    from taac.testconfigs.routing.util.bgp_dc_stages import (
-        BGP_RESTART_STAGE,
-    )
-
     return Playbook(
         name="test_bgp_restart",
         postchecks=[
@@ -7576,6 +7570,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
     uptime_s: int = 900,
     downtime_s: int = 120,
     total_duration_s: int = 3600,
+    cycles: int | None = None,
     prechecks: list[PointInTimeHealthCheck] | None = None,
     postchecks: list[PointInTimeHealthCheck] | None = None,
     snapshot_checks: list[SnapshotHealthCheck] | None = None,
@@ -7598,7 +7593,10 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
             (IXIA names groups ``D<device_group_index + 1>``).
         uptime_s: Seconds the group stays enabled per cycle.
         downtime_s: Seconds the group stays shut per cycle.
-        total_duration_s: Target wall-clock for the whole playbook.
+        total_duration_s: Target wall-clock used to derive cycles when
+            ``cycles`` is not supplied.
+        cycles: Explicit number of up/down cycles. This is preferred for
+            execution profiles whose duty-cycle timing differs from NPI.
         prechecks / postchecks / snapshot_checks: Playbook-level checks.
         traffic_items_to_start: IXIA traffic items to run for this playbook.
         playbook_name: Test-case id used by ``--regex`` selection.
@@ -7611,7 +7609,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
             would yield zero cycles and a playbook that does nothing.
     """
     cycle_s = uptime_s + downtime_s
-    cycles = total_duration_s // cycle_s
+    cycles = cycles if cycles is not None else total_duration_s // cycle_s
     if cycles < 1:
         raise ValueError(
             f"uptime_s + downtime_s ({cycle_s}s) exceeds total_duration_s "
@@ -10170,8 +10168,68 @@ def get_platform_hardening_playbooks(
 #  in Phase 4 v2)
 # =============================================================================
 
+# One authoritative view of BGP-hardening execution timing. NPI remains the
+# default profile; CI/CD deliberately shortens only the cases called out by the
+# qualification plan while leaving all health checks intact.
+BGP_HARDENING_TIMING_PROFILES: dict[str, dict[str, int]] = {
+    "npi": {
+        "prefix_flap_duration_s": 1000,
+        "activate_deactivate_cycles": 2,
+        "activate_deactivate_hold_s": 120,
+        "session_flap_duration_s": 3600,
+        "bgp_restart_iterations": 25,
+        "rogue_churn_duration_s": 1000,
+        "steady_state_duration_s": 1000,
+        "device_group_toggle_cycles": 12,
+        "device_group_toggle_state_s": 120,
+        "best_path_changes": 360,
+        "best_path_change_interval_s": 10,
+        "cold_start_oscillation_cycles": 9,
+        "cold_start_protocol_hold_s": 120,
+        "cold_start_oscillation_hold_s": 120,
+        "local_pref_cycles": 30,
+        "local_pref_churn_interval_s": 60,
+        "bgpd_crash_iterations": 5,
+        "bgpd_crash_recovery_wait_s": 120,
+        "ndp_toggle_cycles": 3,
+        "ndp_uptime_s": 900,
+        "ndp_downtime_s": 120,
+    },
+    "cicd": {
+        "prefix_flap_duration_s": 300,
+        "activate_deactivate_cycles": 2,
+        "activate_deactivate_hold_s": 120,
+        "session_flap_duration_s": 600,
+        "bgp_restart_iterations": 5,
+        "rogue_churn_duration_s": 300,
+        "steady_state_duration_s": 300,
+        "device_group_toggle_cycles": 2,
+        "device_group_toggle_state_s": 120,
+        "best_path_changes": 5,
+        "best_path_change_interval_s": 10,
+        "cold_start_oscillation_cycles": 2,
+        "cold_start_protocol_hold_s": 120,
+        "cold_start_oscillation_hold_s": 120,
+        "local_pref_cycles": 5,
+        "local_pref_churn_interval_s": 60,
+        "bgpd_crash_iterations": 2,
+        "bgpd_crash_recovery_wait_s": 120,
+        "ndp_toggle_cycles": 2,
+        "ndp_uptime_s": 60,
+        "ndp_downtime_s": 60,
+    },
+}
 
-def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
+
+def _repeat_bgp_hardening_steps(steps: list[Step], cycles: int) -> list[Step]:
+    if cycles < 1:
+        raise ValueError(f"BGP hardening cycles must be positive, got {cycles}")
+    return [step for _ in range(cycles) for step in steps]
+
+
+def create_longevity_prefix_flap_all_prefixes_playbook(
+    duration_s: int = duration_all_prefix_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: sustained prefix-flap across all prefix groups."""
     return Playbook(
         name="test_longevity_prefix_flap_all_prefixes",
@@ -10184,7 +10242,7 @@ def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
                         churn_mode="prefix_flap",
                         enable_prefix_flap=True,
                         is_all_prefix_groups=True,
-                        churn_duration_s=duration_all_prefix_flaps_s,
+                        churn_duration_s=duration_s,
                     ),
                 ]
             ),
@@ -10193,20 +10251,45 @@ def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
     )
 
 
-def create_longevity_activate_deactivate_all_prefixes_playbook() -> Playbook:
+def create_longevity_activate_deactivate_all_prefixes_playbook(
+    cycles: int = 2,
+    hold_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: continuously activate/deactivate all prefixes."""
     return Playbook(
         name="test_longevity_activate_deactivate_all_prefixes",
         cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS,
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
-            create_steps_stage(steps=CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES),
+            create_steps_stage(
+                steps=_repeat_bgp_hardening_steps(
+                    [
+                        create_toggle_ixia_prefix_session_flap_churn_step(
+                            churn_mode="activate_deactivate_prefix",
+                            enable_prefix_flap=False,
+                            is_all_prefix_groups=True,
+                            churn_duration_s=wait_time_after_disable_churn_s,
+                        ),
+                        create_longevity_step(duration=hold_s),
+                        create_toggle_ixia_prefix_session_flap_churn_step(
+                            churn_mode="activate_deactivate_prefix",
+                            enable_prefix_flap=True,
+                            is_all_prefix_groups=True,
+                            churn_duration_s=wait_time_after_disable_churn_s,
+                        ),
+                        create_longevity_step(duration=hold_s),
+                    ],
+                    cycles,
+                )
+            ),
             DISABLE_PREFIX_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
+def create_longevity_session_flap_all_prefixes_playbook(
+    duration_s: int = duration_all_session_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: sustained session-flap across all session groups."""
     return Playbook(
         name="test_longevity_session_flap_all_prefixes",
@@ -10222,7 +10305,7 @@ def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
                         churn_mode="session_flap",
                         enable_session_flap=True,
                         is_all_session_groups=True,
-                        churn_duration_s=duration_all_session_flaps_s,
+                        churn_duration_s=duration_s,
                     ),
                 ]
             ),
@@ -10231,7 +10314,9 @@ def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
     )
 
 
-def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook() -> Playbook:
+def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(
+    bgp_restart_iterations: int = 25,
+) -> Playbook:
     """BGP_DC longevity playbook: prefix-flap combined with BGP daemon restart."""
     return Playbook(
         name="test_longevity_prefix_flap_all_prefixes_plus_bgp_restart",
@@ -10251,12 +10336,18 @@ def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook() -> Pla
                     ),
                 ]
             ),
+            create_steps_stage(
+                iteration=bgp_restart_iterations,
+                steps=BGP_RESTART_STEPS,
+            ),
             DISABLE_PREFIX_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook() -> Playbook:
+def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(
+    bgp_restart_iterations: int = 25,
+) -> Playbook:
     """BGP_DC longevity playbook: session-flap combined with BGP daemon restart."""
     return Playbook(
         name="test_longevity_session_flap_all_prefixes_plus_bgp_restart",
@@ -10277,12 +10368,18 @@ def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook() -> Pl
                     ),
                 ]
             ),
+            create_steps_stage(
+                iteration=bgp_restart_iterations,
+                steps=BGP_RESTART_STEPS,
+            ),
             DISABLE_SESSION_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_rogue_prefix_session_enable_playbook() -> Playbook:
+def create_longevity_rogue_prefix_session_enable_playbook(
+    duration_s: int = duration_only_rogue_session_prefix_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: enable rogue prefix + session and hold."""
     return Playbook(
         name="test_longevity_rogue_prefix_session_enable",
@@ -10290,16 +10387,16 @@ def create_longevity_rogue_prefix_session_enable_playbook() -> Playbook:
         stages=[
             create_steps_stage(
                 steps=[
-                    create_longevity_step(
-                        duration=duration_only_rogue_session_prefix_flaps_s
-                    ),
+                    create_longevity_step(duration=duration_s),
                 ]
             )
         ],
     )
 
 
-def create_longevity_no_prefix_no_session_flap_playbook() -> Playbook:
+def create_longevity_no_prefix_no_session_flap_playbook(
+    duration_s: int = duration_no_prefix_session_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: baseline hold with no churn."""
     return Playbook(
         name="test_longevity_no_prefix_no_session_flap",
@@ -10309,14 +10406,17 @@ def create_longevity_no_prefix_no_session_flap_playbook() -> Playbook:
             DISABLE_PREFIX_FLAPS_STAGE,
             create_steps_stage(
                 steps=[
-                    create_longevity_step(duration=duration_no_prefix_session_flaps_s),
+                    create_longevity_step(duration=duration_s),
                 ]
             ),
         ],
     )
 
 
-def create_longevity_continuous_toggle_device_group_playbook() -> Playbook:
+def create_longevity_continuous_toggle_device_group_playbook(
+    cycles: int = 12,
+    state_duration_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: continuously toggle rogue device groups."""
     return Playbook(
         name="test_longevity_continuous_toggle_device_group",
@@ -10336,12 +10436,37 @@ def create_longevity_continuous_toggle_device_group_playbook() -> Playbook:
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
             DISABLE_PREFIX_FLAPS_STAGE,
-            create_steps_stage(steps=TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY),
+            create_steps_stage(
+                steps=_repeat_bgp_hardening_steps(
+                    [
+                        create_ixia_api_step(
+                            api_name="toggle_device_groups",
+                            args_dict={
+                                "enable": True,
+                                "device_group_name_regex": "ROGUE|NO_PACKET_LOSS_EXPECTED|ECMP_1|ARP|NDP",
+                            },
+                        ),
+                        create_longevity_step(duration=state_duration_s),
+                        create_ixia_api_step(
+                            api_name="toggle_device_groups",
+                            args_dict={
+                                "enable": False,
+                                "device_group_name_regex": "ROGUE|NO_PACKET_LOSS_EXPECTED|ECMP_1|ARP|NDP",
+                            },
+                        ),
+                        create_longevity_step(duration=state_duration_s),
+                    ],
+                    cycles,
+                )
+            ),
         ],
     )
 
 
-def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
+def create_longevity_frequent_best_path_computation_playbook(
+    changes: int = 360,
+    interval_s: int = 10,
+) -> Playbook:
     """BGP_DC longevity playbook: frequent best-path computation via LOCAL_PREF churn."""
     return Playbook(
         name="test_longevity_frequent_best_path_computation",
@@ -10349,20 +10474,28 @@ def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
             DISABLE_PREFIX_FLAPS_STAGE,
-            FREQUENT_BEST_PATH_COMPUTATION_STAGE,
+            create_attribute_churn_stage(
+                prefix_pool_regex=".*",
+                prefix_pool_regex_as_path=".*",
+                prefix_start_index=0,
+                churn_time=interval_s,
+                local_pref_iters=changes,
+                med_iters=0,
+                origin_iters=0,
+                as_path_iters=0,
+            ),
         ],
     )
 
 
-def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() -> (
-    Playbook
-):
+def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
+    oscillation_cycles: int = 9,
+    protocol_hold_s: int = 120,
+    oscillation_hold_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: cold-start with prefix + session oscillations."""
     return Playbook(
         name="test_longevity_cold_start_with_prefix_and_session_oscillations",
-        postchecks_to_skip=[
-            hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK,
-        ],
         cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS
         + [
             create_ixia_api_step(
@@ -10386,6 +10519,28 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() 
             create_steps_stage(
                 steps=[
                     create_ixia_api_step(
+                        api_name="stop_protocols",
+                        args_dict={"sleep_timer": wait_time_after_disable_churn_s},
+                        description="Cold start: stop all IXIA protocols",
+                    ),
+                    create_longevity_step(
+                        duration=protocol_hold_s,
+                        description="Hold all IXIA protocols down for cold start",
+                    ),
+                    create_ixia_api_step(
+                        api_name="start_protocols",
+                        args_dict={"sleep_timer": wait_time_after_disable_churn_s},
+                        description="Cold start: restart all IXIA protocols",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Wait for agent and BGP convergence after cold start",
+                    ),
+                ]
+            ),
+            create_steps_stage(
+                steps=[
+                    create_ixia_api_step(
                         api_name="rename_device_groups",
                         args_dict={
                             "device_group_name_regex": "NO_PACKET_LOSS_EXPECTED",
@@ -10403,7 +10558,55 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() 
                     ),
                 ]
             ),
-            create_steps_stage(steps=COLD_START_PREFIX_OSCILLATIONS),
+            create_steps_stage(
+                steps=[
+                    step
+                    for cycle in range(oscillation_cycles)
+                    for step in (
+                        [
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="activate_deactivate_prefix",
+                                enable_prefix_flap=False,
+                                prefix_flap_tag_names=[
+                                    "PREFIX_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="activate_deactivate_prefix",
+                                enable_prefix_flap=True,
+                                prefix_flap_tag_names=[
+                                    "PREFIX_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                        ]
+                        if cycle % 2 == 0
+                        else [
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="session_flap",
+                                enable_session_flap=False,
+                                session_flap_tag_names=[
+                                    "SESSION_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="session_flap",
+                                enable_session_flap=True,
+                                session_flap_tag_names=[
+                                    "SESSION_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                        ]
+                    )
+                ]
+            ),
         ],
     )
 
@@ -10417,18 +10620,89 @@ def get_longevity_playbooks(device_name: str, **kwargs):
     pattern in ``factories/bgp_dc_chronos_node.py``.
     """
     del device_name  # unused after dropping IXIA traffic checks
-    return [
-        create_longevity_prefix_flap_all_prefixes_playbook(),
-        create_longevity_activate_deactivate_all_prefixes_playbook(),
-        create_longevity_session_flap_all_prefixes_playbook(),
-        create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(),
-        create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(),
-        create_longevity_rogue_prefix_session_enable_playbook(),
-        create_longevity_no_prefix_no_session_flap_playbook(),
-        create_longevity_continuous_toggle_device_group_playbook(),
-        create_longevity_frequent_best_path_computation_playbook(),
-        create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(),
+    profile = kwargs.get("bgp_hardening_timing_profile") or (
+        BGP_HARDENING_TIMING_PROFILES["npi"]
+    )
+    chronos_playbooks = [
+        create_longevity_prefix_flap_all_prefixes_playbook(
+            duration_s=profile["prefix_flap_duration_s"]
+        ),
+        create_longevity_activate_deactivate_all_prefixes_playbook(
+            cycles=profile["activate_deactivate_cycles"],
+            hold_s=profile["activate_deactivate_hold_s"],
+        ),
+        create_longevity_session_flap_all_prefixes_playbook(
+            duration_s=profile["session_flap_duration_s"]
+        ),
+        create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(
+            bgp_restart_iterations=profile["bgp_restart_iterations"]
+        ),
+        create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(
+            bgp_restart_iterations=profile["bgp_restart_iterations"]
+        ),
+        create_longevity_rogue_prefix_session_enable_playbook(
+            duration_s=profile["rogue_churn_duration_s"]
+        ),
+        create_longevity_no_prefix_no_session_flap_playbook(
+            duration_s=profile["steady_state_duration_s"]
+        ),
+        create_longevity_continuous_toggle_device_group_playbook(
+            cycles=profile["device_group_toggle_cycles"],
+            state_duration_s=profile["device_group_toggle_state_s"],
+        ),
+        create_longevity_frequent_best_path_computation_playbook(
+            changes=profile["best_path_changes"],
+            interval_s=profile["best_path_change_interval_s"],
+        ),
+        create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
+            oscillation_cycles=profile["cold_start_oscillation_cycles"],
+            protocol_hold_s=profile["cold_start_protocol_hold_s"],
+            oscillation_hold_s=profile["cold_start_oscillation_hold_s"],
+        ),
     ]
+    if not kwargs.get("include_extended_bgp_hardening_playbooks", False):
+        return chronos_playbooks
+
+    by_name = {playbook.name: playbook for playbook in chronos_playbooks}
+    by_name.update(
+        {
+            "test_bgp_longevity_local_pref_churn": create_bgp_longevity_local_pref_churn_playbook(
+                prefix_pool_regex=kwargs.get(
+                    "bgp_longevity_prefix_pool_regex", ".*"
+                ),
+                cycles=profile["local_pref_cycles"],
+                churn_interval_s=profile["local_pref_churn_interval_s"],
+            ),
+            "test_bgp_longevity_bgpd_crash": create_bgp_longevity_bgpd_crash_playbook(
+                iterations=profile["bgpd_crash_iterations"],
+                recovery_wait_s=profile["bgpd_crash_recovery_wait_s"],
+            ),
+            "test_bgp_longevity_ndp_device_group_toggle": create_bgp_longevity_ndp_device_group_toggle_playbook(
+                device_group_name_regex=kwargs.get(
+                    "bgp_longevity_ndp_device_group_regex", "D3"
+                ),
+                cycles=profile["ndp_toggle_cycles"],
+                uptime_s=profile["ndp_uptime_s"],
+                downtime_s=profile["ndp_downtime_s"],
+            ),
+        }
+    )
+    ordered_names = [
+        "test_longevity_prefix_flap_all_prefixes",
+        "test_longevity_activate_deactivate_all_prefixes",
+        "test_bgp_longevity_local_pref_churn",
+        "test_longevity_session_flap_all_prefixes",
+        "test_longevity_prefix_flap_all_prefixes_plus_bgp_restart",
+        "test_longevity_session_flap_all_prefixes_plus_bgp_restart",
+        "test_longevity_rogue_prefix_session_enable",
+        "test_longevity_no_prefix_no_session_flap",
+        "test_longevity_continuous_toggle_device_group",
+        "test_longevity_frequent_best_path_computation",
+        "test_longevity_cold_start_with_prefix_and_session_oscillations",
+        "test_bgp_longevity_bgpd_crash",
+        "test_bgp_longevity_ndp_device_group_toggle",
+    ]
+    return [by_name[name] for name in ordered_names]
 
 
 def transform_to_endurance_playbook(

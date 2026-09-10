@@ -18,6 +18,10 @@ from taac.utils.health_check_utils import is_parent_prefix
 from taac.health_check.health_check import types as hc_types
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
+# NetOS launches bgpd with this fixed FBOSS runtime path; TAAC reads that
+# service-owned file and does not use /dev/shm for its own storage.
+# patternlint-disable-next-line no-dev-shm-usage
+NETOS_BGPCPP_CONFIG_PATH = "/dev/shm/fboss/bgpcpp_startup_config"
 
 
 class BgpSessionEstablishedHealthCheck(
@@ -41,17 +45,24 @@ class BgpSessionEstablishedHealthCheck(
     async def _read_bgpcpp_config(self, hostname: str) -> t.Optional[t.Dict[str, str]]:
         """Read bgpcpp_config from the device and extract expected peer addresses.
 
-        Reads /mnt/flash/bgpcpp_config, parses the JSON, and builds a map of
+        Reads the active BGP++ config path for the device OS, parses the JSON,
+        and builds a map of
         {normalized_peer_addr: normalized_local_addr} from the configured peers.
 
         Returns None if the file cannot be read or parsed.
         """
         try:
+            # NetOS keeps the active config in the fwdstack runtime namespace;
+            # classic FBOSS keeps it on /mnt/flash. async_read_file routes the
+            # command through that same namespace on NetOS.
             # pyrefly: ignore [missing-attribute]
-            config_content = await self.driver.async_read_file(BGPCPP_CONFIG_PATH)
+            is_netos = await self.driver.async_is_netos()
+            config_path = NETOS_BGPCPP_CONFIG_PATH if is_netos else BGPCPP_CONFIG_PATH
+            # pyrefly: ignore [missing-attribute]
+            config_content = await self.driver.async_read_file(config_path)
             if not config_content:
                 self.logger.info(
-                    f"{hostname}: No bgpcpp_config found at {BGPCPP_CONFIG_PATH}, "
+                    f"{hostname}: No bgpcpp_config found at {config_path}, "
                     "skipping peer identity validation"
                 )
                 return None

@@ -11,7 +11,9 @@ from neteng.fboss.bgp_thrift.types import TBgpPeerState
 from neteng.netcastle.logger import ConsoleFileLogger
 from taac.constants import TestDevice
 from taac.health_checks.device_health_checks.bgp_session_health_check import (
+    BGPCPP_CONFIG_PATH,
     BgpSessionEstablishedHealthCheck,
+    NETOS_BGPCPP_CONFIG_PATH,
 )
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
@@ -39,6 +41,49 @@ class TestBgpSessionEstablishedHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "rsw001.p001.f01.ash6"
         self.input = hc_types.BaseHealthCheckIn()
+
+    async def test_read_bgpcpp_config_uses_netos_runtime_path(self):
+        self.health_check.driver.async_is_netos = AsyncMock(return_value=True)
+        self.health_check.driver.async_read_file = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "peers": [
+                        {
+                            "peer_addr": "2401:db00::1",
+                            "local_addr": "2401:db00::2",
+                        }
+                    ]
+                }
+            )
+        )
+
+        expected = await self.health_check._read_bgpcpp_config(self.device.name)
+
+        self.assertEqual(expected, {"2401:db00::1": "2401:db00::2"})
+        self.health_check.driver.async_read_file.assert_awaited_once_with(
+            NETOS_BGPCPP_CONFIG_PATH
+        )
+
+    async def test_read_bgpcpp_config_uses_legacy_path_off_netos(self):
+        self.health_check.driver.async_is_netos = AsyncMock(return_value=False)
+        self.health_check.driver.async_read_file = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "peers": [
+                        {
+                            "peer_addr": "2401:db00::1",
+                            "local_addr": "2401:db00::2",
+                        }
+                    ]
+                }
+            )
+        )
+
+        await self.health_check._read_bgpcpp_config(self.device.name)
+
+        self.health_check.driver.async_read_file.assert_awaited_once_with(
+            BGPCPP_CONFIG_PATH
+        )
 
     async def test_all_sessions_established_returns_pass(self):
         """All BGP sessions established should return PASS."""

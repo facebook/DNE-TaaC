@@ -72,6 +72,26 @@ from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Service, TestConfig
 
 
+def _select_2_ixia_hardening_playbooks(
+    playbooks: list[taac_types.Playbook],
+    playbooks_selected: list[str] | None,
+) -> list[taac_types.Playbook]:
+    """Return requested hardening playbooks in caller-specified order."""
+    if playbooks_selected is None:
+        return playbooks
+
+    playbooks_by_name = {playbook.name: playbook for playbook in playbooks}
+    unknown_names = [
+        name for name in playbooks_selected if name not in playbooks_by_name
+    ]
+    if unknown_names:
+        raise ValueError(
+            "Unknown 2-IXIA hardening playbook selections: "
+            f"{unknown_names}; available: {sorted(playbooks_by_name)}"
+        )
+    return [playbooks_by_name[name] for name in playbooks_selected]
+
+
 def get_fauu_eb_peer_group_tasks(device_name):
     """
     Returns the common FAUU EB peer group configuration tasks for devices with "uu" in the name.
@@ -816,13 +836,17 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     uplink_flap_interval_s=30,
     uplink_flap_settle_s=30,
     include_bgp_longevity_playbooks=False,
+    playbooks_selected=None,
     bgp_longevity_prefix_pool_regex=".*",
     bgp_longevity_local_pref_cycles=30,
+    bgp_longevity_local_pref_churn_interval_s=60,
     bgp_longevity_bgpd_crash_iterations=5,
+    bgp_longevity_bgpd_crash_recovery_wait_s=120,
     bgp_longevity_ndp_device_group_regex="D3",
     bgp_longevity_ndp_uptime_s=900,
     bgp_longevity_ndp_downtime_s=120,
     bgp_longevity_ndp_total_duration_s=3600,
+    bgp_longevity_ndp_cycles=None,
 ):
     """Build the BGP/FBOSS platform-hardening conveyor TestConfig for two IXIA chassis.
 
@@ -904,6 +928,11 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         ),
     ]
 
+    directional_traffic_items = [
+        f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+        f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+    ]
+
     # TestConfig-level checks moved to playbook level
     _tc_prechecks = [
         create_ixia_packet_loss_check(
@@ -916,10 +945,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     expect_packet_loss=True,
                 ),
                 hc_types.PacketLossThreshold(
-                    names=[
-                        "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                        "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                    ],
+                    names=directional_traffic_items,
                     str_value="0.1",
                     expect_packet_loss=False,
                 ),
@@ -942,10 +968,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     expect_packet_loss=True,
                 ),
                 hc_types.PacketLossThreshold(
-                    names=[
-                        "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                        "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                    ],
+                    names=directional_traffic_items,
                     # todo (change this)
                     expect_packet_loss=False,
                 ),
@@ -979,10 +1002,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     # while the ports are down (tolerant, so a clean ECMP re-hash does not fail
     # it); stats are then cleared so the up-stage check can assert zero loss on
     # the recovered path alone.
-    _uplink_flap_traffic_items = [
-        "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-        "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-    ]
+    _uplink_flap_traffic_items = directional_traffic_items
     _flap_down_stage_checks = [
         create_ixia_packet_loss_check(
             thresholds=[
@@ -1069,12 +1089,14 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             create_bgp_longevity_local_pref_churn_playbook(
                 prefix_pool_regex=bgp_longevity_prefix_pool_regex,
                 cycles=bgp_longevity_local_pref_cycles,
+                churn_interval_s=bgp_longevity_local_pref_churn_interval_s,
                 prechecks=_tc_prechecks,
                 postchecks=_tc_postchecks,
                 snapshot_checks=_tc_snapshot_checks,
             ),
             create_bgp_longevity_bgpd_crash_playbook(
                 iterations=bgp_longevity_bgpd_crash_iterations,
+                recovery_wait_s=bgp_longevity_bgpd_crash_recovery_wait_s,
                 prechecks=_tc_prechecks,
                 postchecks=_tc_postchecks,
                 snapshot_checks=_tc_snapshot_checks,
@@ -1084,6 +1106,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 uptime_s=bgp_longevity_ndp_uptime_s,
                 downtime_s=bgp_longevity_ndp_downtime_s,
                 total_duration_s=bgp_longevity_ndp_total_duration_s,
+                cycles=bgp_longevity_ndp_cycles,
                 prechecks=_tc_prechecks,
                 postchecks=_tc_postchecks,
                 snapshot_checks=_tc_snapshot_checks,
@@ -1098,7 +1121,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         else []
     )
 
-    return TestConfig(
+    test_config = TestConfig(
         name=test_config_name,
         ixia_protocol_verification_timeout=1200,  # todo remove this (should be 300)
         skip_ixia_protocol_verification=True,
@@ -2229,7 +2252,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     create_bgp_convergence_check(),
                     create_bgp_rib_fib_consistency_check(
                         extra_json_params={
-                            "parent_prefixes_to_ignore": ["103.0.0.0/8", "6000:1::/32"]
+                            "parent_prefixes_to_ignore": [
+                                "103.0.0.0/8",
+                                "6000:1::/32",
+                            ]
                         }
                     ),
                 ]
@@ -2253,7 +2279,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     create_bgp_convergence_check(),
                     create_bgp_rib_fib_consistency_check(
                         extra_json_params={
-                            "parent_prefixes_to_ignore": ["103.0.0.0/8", "6000:1::/32"]
+                            "parent_prefixes_to_ignore": [
+                                "103.0.0.0/8",
+                                "6000:1::/32",
+                            ]
                         }
                     ),
                 ]
@@ -2286,10 +2315,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                                 expect_packet_loss=True,
                             ),
                             hc_types.PacketLossThreshold(
-                                names=[
-                                    "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                    "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                ],
+                                names=directional_traffic_items,
                                 expect_packet_loss=False,
                             ),
                         ],
@@ -2338,10 +2364,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                                 expect_packet_loss=True,
                             ),
                             hc_types.PacketLossThreshold(
-                                names=[
-                                    "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                    "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                ],
+                                names=directional_traffic_items,
                                 expect_packet_loss=False,
                             ),
                         ],
@@ -2391,10 +2414,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                                 expect_packet_loss=True,
                             ),
                             hc_types.PacketLossThreshold(
-                                names=[
-                                    "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                    "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                                ],
+                                names=directional_traffic_items,
                                 expect_packet_loss=False,
                             ),
                         ],
@@ -2597,7 +2617,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     create_bgp_convergence_check(),
                     create_bgp_rib_fib_consistency_check(
                         extra_json_params={
-                            "parent_prefixes_to_ignore": ["103.0.0.0/8", "6000:1::/32"]
+                            "parent_prefixes_to_ignore": [
+                                "103.0.0.0/8",
+                                "6000:1::/32",
+                            ]
                         }
                     ),
                 ]
@@ -2621,7 +2644,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                     create_bgp_convergence_check(),
                     create_bgp_rib_fib_consistency_check(
                         extra_json_params={
-                            "parent_prefixes_to_ignore": ["103.0.0.0/8", "6000:1::/32"]
+                            "parent_prefixes_to_ignore": [
+                                "103.0.0.0/8",
+                                "6000:1::/32",
+                            ]
                         }
                     ),
                 ]
@@ -2630,6 +2656,11 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         ]
         + _uplink_flap_playbooks
         + _bgp_longevity_playbooks,
+    )
+    return test_config(
+        playbooks=_select_2_ixia_hardening_playbooks(
+            list(test_config.playbooks), playbooks_selected
+        )
     )
 
 

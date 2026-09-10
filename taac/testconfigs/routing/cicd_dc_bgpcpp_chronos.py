@@ -20,6 +20,9 @@ from taac.abstractions.physical_inventory import (
     FSW_FUJI_QZD1,
     SSW_ELBERT_QZD1,
 )
+from taac.playbooks.playbook_definitions import (
+    BGP_HARDENING_TIMING_PROFILES,
+)
 from taac.testconfigs.routing.factories.bgp_dc_chronos_node import (
     create_bgp_dc_chronos_node_test_config,
 )
@@ -46,7 +49,7 @@ CHRONOS_NODE_FSW_FUJI_TEST_CONFIG = create_bgp_dc_chronos_node_test_config(
 )
 
 # ─── CHRONOS_NODE_FULL_SCALE_SSW_ELBERT_QZD1 ──────────────────────────────
-# Full-scale longevity mix on the Elbert SSW.
+# Full route scale with the compact BGP-hardening CI/CD timing profile.
 CHRONOS_NODE_FULL_SCALE_SSW_ELBERT_QZD1_TEST_CONFIG = (
     create_bgp_dc_chronos_node_test_config(
         SSW_ELBERT_QZD1,
@@ -54,13 +57,21 @@ CHRONOS_NODE_FULL_SCALE_SSW_ELBERT_QZD1_TEST_CONFIG = (
         playbooks_selected=[
             "test_longevity_prefix_flap_all_prefixes",
             "test_longevity_activate_deactivate_all_prefixes",
+            "test_bgp_longevity_local_pref_churn",
             "test_longevity_session_flap_all_prefixes",
             "test_longevity_prefix_flap_all_prefixes_plus_bgp_restart",
             "test_longevity_session_flap_all_prefixes_plus_bgp_restart",
             "test_longevity_rogue_prefix_session_enable",
             "test_longevity_no_prefix_no_session_flap",
             "test_longevity_continuous_toggle_device_group",
+            "test_longevity_frequent_best_path_computation",
+            "test_longevity_cold_start_with_prefix_and_session_oscillations",
+            "test_bgp_longevity_bgpd_crash",
+            "test_bgp_longevity_ndp_device_group_toggle",
         ],
+        bgp_hardening_timing_profile=BGP_HARDENING_TIMING_PROFILES["cicd"],
+        include_extended_bgp_hardening_playbooks=True,
+        basset_pool="dne.regression",
     )
 )
 
