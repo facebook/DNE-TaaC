@@ -165,7 +165,7 @@ class RbbSrv6ThreeUsidsPlaybookTest(unittest.TestCase):
         self.assertEqual(
             install_params["srv6_segments"],
             [
-                "2001:db8:6:27d6:7fff::",
+                "2001:db8:6:27d6:27cc:7fff::",
             ],
         )
         self.assertEqual(install_params["srv6_tunnel_id"], "srv6_tunnel")
@@ -200,6 +200,21 @@ class RbbSrv6ThreeUsidsPlaybookTest(unittest.TestCase):
                 self.assertEqual(
                     threshold["metric"], hc_types.PacketLossMetric.PERCENTAGE.value
                 )
+
+    def test_packet_loss_validation_is_fail_fast(self) -> None:
+        pb = _tc1(include_traffic=True)
+        loss_validations = []
+        for step in _all_steps(pb):
+            if step.name != StepName.VALIDATION_STEP:
+                continue
+            payload = json.loads(step.input_json)
+            if any(
+                check["name"] == hc_types.CheckName.IXIA_PACKET_LOSS_CHECK.value
+                for check in payload["point_in_time_checks"]
+            ):
+                loss_validations.append(payload)
+        self.assertTrue(loss_validations)
+        self.assertTrue(all(payload["fail_fast"] for payload in loss_validations))
 
     def test_has_validation_steps(self) -> None:
         pb = _tc1(include_traffic=True)

@@ -4441,6 +4441,7 @@ def create_validation_step(
     point_in_time_checks: t.List[taac_types.PointInTimeHealthCheck],
     stage: taac_types.ValidationStage = taac_types.ValidationStage.MID_TEST,
     description: t.Optional[str] = None,
+    fail_fast: bool = False,
 ) -> Step:
     """
     Create a validation step with point-in-time health checks.
@@ -4449,6 +4450,7 @@ def create_validation_step(
         point_in_time_checks: List of health checks to perform
         stage: Validation stage (PRE_TEST, MID_TEST, POST_TEST)
         description: Custom description for the step
+        fail_fast: Report the validation step as failed as soon as a check fails
 
     Returns:
         Step object for validation
@@ -4459,6 +4461,7 @@ def create_validation_step(
             taac_types.ValidationInput(
                 point_in_time_checks=point_in_time_checks,
                 stage=stage,
+                fail_fast=fail_fast,
             )
         ),
         description=description,
