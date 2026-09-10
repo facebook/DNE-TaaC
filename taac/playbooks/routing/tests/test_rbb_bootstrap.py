@@ -8,10 +8,14 @@ import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from taac.driver.driver_constants import FbossSystemctlServiceName
+from taac.driver.driver_constants import (
+    FbossSystemctlServiceName,
+    SystemctlServiceStatus,
+)
 from taac.tasks.rbb_dut_bootstrap_task import (
     BOOTSTRAP_BACKUP_SUFFIX,
     RbbDutBootstrapTask,
+    _is_supported_bgp_policy_placeholder,
 )
 from taac.tasks.rbb_edge_config_utils import async_remove_file
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
@@ -196,7 +200,17 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
         self.assertEqual(base["sw"]["ports"][0]["state"], 0)
         self.assertEqual(docs.agent["platform"], base["platform"])
         self.assertEqual(
-            docs.agent["defaultCommandLineArgs"], base["defaultCommandLineArgs"]
+            {
+                key: value
+                for key, value in docs.agent["defaultCommandLineArgs"].items()
+                if key
+                not in {
+                    "enable_lacp",
+                    "enable_nexthop_id_manager",
+                    "resolve_nexthops_from_id",
+                }
+            },
+            base["defaultCommandLineArgs"],
         )
         self.assertEqual(
             {
@@ -204,7 +218,18 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
                 for key in set(base) | set(docs.agent)
                 if base.get(key) != docs.agent.get(key)
             },
-            {"sw"},
+            {"defaultCommandLineArgs", "sw"},
+        )
+        self.assertEqual(
+            docs.agent["defaultCommandLineArgs"]["enable_lacp"], "true"
+        )
+        self.assertEqual(
+            docs.agent["defaultCommandLineArgs"]["enable_nexthop_id_manager"],
+            "true",
+        )
+        self.assertEqual(
+            docs.agent["defaultCommandLineArgs"]["resolve_nexthops_from_id"],
+            "true",
         )
         self.assertEqual(
             {
@@ -236,6 +261,7 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
         aggregates = docs.agent["sw"]["aggregatePorts"]
         self.assertEqual([aggregate["key"] for aggregate in aggregates], [161, 162])
         self.assertEqual(aggregates[0]["memberPorts"][0]["memberPortID"], 1)
+        self.assertEqual(aggregates[0]["memberPorts"][0]["rate"], 0)
         self.assertEqual(
             aggregates[0]["minimumCapacityToUp"], {"linkPercentage": 0.75}
         )
@@ -345,6 +371,70 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
             ),
         )
 
+    def test_fresh_image_builder_accepts_omitted_empty_peer_groups(self) -> None:
+        bgp = _base_bgp()
+        del bgp["peer_groups"]
+        docs = build_bootstrap_documents(
+            base_agent=_base_agent(),
+            base_bgp=bgp,
+            base_openr=_base_openr(),
+            role="r1",
+            core_pcs=_core_pcs(),
+        )
+        self.assertEqual(len(docs.bgp["peer_groups"]), 1)
+        self.assertEqual(
+            docs.bgp["peer_groups"][0]["name"],
+            "RBB-IBGP-LOOPBACK-V4V6",
+        )
+
+    def test_fresh_image_builder_accepts_empty_openr_areas(self) -> None:
+        openr = _base_openr()
+        openr["areas"] = []
+        openr["enable_watchdog"] = False
+        openr["watchdog_config"] = {
+            "interval_s": 1,
+            "thread_timeout_s": 1,
+            "max_memory_mb": 1,
+        }
+        docs = build_bootstrap_documents(
+            base_agent=_base_agent(),
+            base_bgp=_base_bgp(),
+            base_openr=openr,
+            role="r1",
+            core_pcs=_core_pcs(),
+        )
+        self.assertEqual(len(docs.openr["areas"]), 1)
+        self.assertEqual(docs.openr["areas"][0]["area_id"], "0")
+        self.assertEqual(
+            docs.openr["areas"][0]["include_interface_regexes"],
+            ["^fboss2001$", "^fboss2002$"],
+        )
+        self.assertEqual(
+            docs.openr["areas"][0]["redistribute_interface_regexes"],
+            ["^fboss4000$"],
+        )
+        self.assertTrue(docs.openr["enable_watchdog"])
+        self.assertEqual(
+            docs.openr["watchdog_config"],
+            {
+                "interval_s": 20,
+                "thread_timeout_s": 300,
+                "max_memory_mb": 800,
+            },
+        )
+
+    def test_fresh_image_builder_rejects_multiple_openr_areas(self) -> None:
+        openr = _base_openr()
+        openr["areas"].append(copy.deepcopy(openr["areas"][0]))
+        with self.assertRaisesRegex(ValueError, "zero or one area object"):
+            build_bootstrap_documents(
+                base_agent=_base_agent(),
+                base_bgp=_base_bgp(),
+                base_openr=openr,
+                role="r1",
+                core_pcs=_core_pcs(),
+            )
+
     def test_fresh_image_builder_refuses_preconfigured_state(self) -> None:
         agent = _base_agent()
         agent["sw"]["interfaces"][0]["ipAddresses"] = ["10.0.0.1/31"]
@@ -447,6 +537,30 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
 
 
 class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
+    def test_accepts_stock_bgp_policy_placeholder_variants(self) -> None:
+        self.assertTrue(_is_supported_bgp_policy_placeholder({}))
+        self.assertTrue(
+            _is_supported_bgp_policy_placeholder(
+                {
+                    "policies": {},
+                    "prefix_sets": {},
+                    "as_path_sets": {},
+                    "community_sets": {},
+                }
+            )
+        )
+
+    def test_rejects_partial_bgp_policy_placeholder(self) -> None:
+        self.assertFalse(
+            _is_supported_bgp_policy_placeholder(
+                {
+                    "policies": {},
+                    "prefix_sets": {},
+                    "as_path_sets": {},
+                }
+            )
+        )
+
     def _driver(self) -> MagicMock:
         driver = MagicMock()
         driver.async_check_if_file_exists = AsyncMock(return_value=False)
@@ -469,6 +583,7 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         driver.async_get_interfaces_operational_state = AsyncMock(
             return_value={pc.members[0]: True for pc in _core_pcs()}
         )
+        driver.async_get_aggregated_interface_status = AsyncMock(return_value=True)
         peer = MagicMock(peer_addr=C.R1_ROUTER_ID)
         peer.peer.peer_state.name = "ESTABLISHED"
         driver.async_get_bgp_sessions = AsyncMock(return_value=[peer])
@@ -484,12 +599,9 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
             role="r2",
             core_pcs=_core_pcs(),
         )
-        policy = {
-            "policies": {},
-            "prefix_sets": {},
-            "as_path_sets": {},
-            "community_sets": {},
-        }
+        # Current fboss-buildimage releases use the minimal empty-object
+        # placeholder; older releases use four explicit empty policy maps.
+        policy = {}
         read_values = {
             C.AGENT_CONFIG_PATH: _base_agent(),
             C.OPENR_CONFIG_PATH: _base_openr(),
@@ -565,14 +677,20 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(write_json.await_count, 5)
         written_documents = [call.args[2] for call in write_json.await_args_list]
         self.assertIn(documents.agent, written_documents)
-        driver.async_agent_config_reload.assert_awaited_once()
-        driver.async_restart_service.assert_awaited_once_with(
+        driver.async_agent_config_reload.assert_not_awaited()
+        driver.async_restart_service.assert_any_await(
+            FbossSystemctlServiceName.FBOSS_SW_AGENT
+        )
+        driver.async_restart_service.assert_any_await(
             FbossSystemctlServiceName.OPENR
         )
         driver.async_start_service.assert_awaited_once_with(
             FbossSystemctlServiceName.BGP
         )
         driver.async_get_interfaces_operational_state.assert_awaited_once()
+        self.assertEqual(
+            driver.async_get_aggregated_interface_status.await_count, 2
+        )
         driver.async_get_bgp_sessions.assert_awaited_once()
 
     async def test_restore_preserves_artifacts_until_services_are_restored(self) -> None:
@@ -636,10 +754,13 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         driver.async_stop_service.assert_awaited_once_with(
             FbossSystemctlServiceName.BGP
         )
-        driver.async_restart_service.assert_awaited_once_with(
+        driver.async_restart_service.assert_any_await(
             FbossSystemctlServiceName.OPENR
         )
-        driver.async_agent_config_reload.assert_awaited_once()
+        driver.async_agent_config_reload.assert_not_awaited()
+        driver.async_restart_service.assert_any_await(
+            FbossSystemctlServiceName.FBOSS_SW_AGENT
+        )
         self.assertEqual(write_json.await_args.args[2]["phase"], "restored")
         self.assertEqual(discard.await_count, 3)
         self.assertEqual(set_mode.await_count, 3)
@@ -698,6 +819,28 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(driver.async_stop_service.await_count, 3)
         driver.async_restart_service.assert_not_awaited()
         remove.assert_awaited_once_with(driver, C.BOOTSTRAP_STATE_PATH)
+
+    async def test_restore_normalizes_stopped_failed_service(self) -> None:
+        task = RbbDutBootstrapTask(hostname="rbb-r1", logger=MagicMock())
+        driver = self._driver()
+        driver.async_stop_service = AsyncMock(side_effect=AssertionError)
+        driver.async_get_service_status = AsyncMock(
+            side_effect=(
+                SystemctlServiceStatus.FAILED,
+                SystemctlServiceStatus.INACTIVE,
+            )
+        )
+
+        await task._stop_service_for_restore(
+            driver,
+            "rbb-r1",
+            FbossSystemctlServiceName.OPENR,
+        )
+
+        driver.async_run_cmd_on_shell.assert_awaited_once_with(
+            "systemctl reset-failed openr"
+        )
+        self.assertEqual(driver.async_get_service_status.await_count, 2)
 
     async def test_stale_recovery_state_blocks_before_read_or_write(self) -> None:
         task = RbbDutBootstrapTask(hostname="rbb-r1", logger=MagicMock())

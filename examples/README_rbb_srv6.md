@@ -206,7 +206,7 @@ name alone is not accepted as RIF evidence.
 Build the TAAC image once before checking or running the hardware workflow:
 
 ```bash
-./docker/build-taac-image.sh --num-jobs 2
+./docker/build-taac-image.sh
 ```
 
 Validate all local inputs before contacting the lab:
@@ -264,6 +264,28 @@ with another layout may override these with `TAAC_RBB_AGENT_CONFIG_PATH`,
 Preflight requires distinct, canonical absolute paths and rejects shell-active
 or TAAC-reserved artifact names. On the DUT, each source configuration must be
 a regular, non-symlink file so snapshot and ownership restoration are exact.
+
+Stock image releases may represent an empty `/opt/bgpd/policy.json` either as
+`{}` or as an object containing the four empty `policies`, `prefix_sets`,
+`as_path_sets`, and `community_sets` maps. Fresh-image bootstrap accepts both
+forms but continues to reject partially structured policy documents.
+Newer stock `bgp.json` placeholders may also omit the empty optional
+`peer_groups` field; bootstrap accepts that omission and still rejects any
+non-empty or malformed pre-existing peer configuration.
+Likewise, newer stock `openr.conf` placeholders may contain an empty `areas`
+list. Bootstrap creates area `0` only for that fresh-image placeholder; it
+also supplies the OpenR watchdog defaults required by that image's daemon and
+continues to reject multiple or malformed pre-existing area definitions.
+The generated AgentConfig enables LACP and the FBOSS next-hop ID manager
+(`enable_nexthop_id_manager` and `resolve_nexthops_from_id`). The latter two
+flags are required for an adjacency micro-SID to resolve through its neighbor
+and be usable in hardware; a MySID row without a `resolved via` next hop is not
+sufficient forwarding evidence. S11 therefore requires `fboss2 show mysid` to
+report both the expected SID/type and `resolved via` on each DUT.
+If a temporarily started daemon crashes, restore normalizes systemd's stopped
+`failed` state before restoring files so recovery snapshots are not stranded.
+Setup retries only the task that failed. It does not replay an already-complete
+stateful task, which preserves the first failure and its recovery snapshot.
 
 For a complete fresh-image IXIA run, also request the independent DUT-edge
 overlay. The runner rejects this mode without `--setup-dut-edges`, because a
@@ -363,8 +385,9 @@ flowchart LR
 
 The scenario defines a logical head → midpoint → tail chain. Because
 encapsulation happens at R1, the on-wire container starts at the R2 midpoint
-and ends at the R2 tail; the midpoint adjacency sends the packet back through
-R1 as transit before the tail SID returns it to R2 for decapsulation. The first
+and is ordered midpoint(R2) → head(R1) → tail(R2); the midpoint adjacency
+sends the packet back through R1, the R1 adjacency returns it to R2, and the
+tail SID decapsulates it. The first
 and last user-declared core port-channels provide the physical directions used
 by that two-node emulation (the same bundle may serve both when only one is
 declared); their interface numbers are not fixed.
@@ -415,6 +438,9 @@ ordinary IPv6 forwarding.
 | A `.taac-rbb-edge-orig` snapshot already exists | Treat it as an interrupted-run recovery point; inspect or restore it before retrying. |
 | Edge setup cannot find the required base JSON config | Configure the DUT underlay and SRv6 base state before running the qualification. |
 | Fresh-image setup reports a nonnumeric or multi-member core LAG | For the first bootstrap implementation, use `port-channel<N>` with one physical member per core LAG; preconfigure wider LAGs and run without `--setup-duts`. |
+| Fresh-image setup times out although physical core members show Up | Check `fboss2 show aggregate-port` on both DUTs. Physical link state alone does not prove that the LAG is forwarding; bootstrap now waits for both member and aggregate status. |
+| S11 shows the SID but SRv6 traffic is lost | The adjacency MySID must include `resolved via` in `fboss2 show mysid`. Confirm the generated agent flags include `enable_nexthop_id_manager=true` and `resolve_nexthops_from_id=true`, then restart the agent. |
+| Pre-IXIA setup expects a documentation-range iBGP peer such as `192.0.2.2` | Set `TAAC_RBB_R1_ROUTER_ID` and `TAAC_RBB_R2_ROUTER_ID` in `.taac/rbb.env` to the actual loopbacks. The generated iBGP peers are derived from these values. |
 | A `.taac-rbb-bootstrap-orig` snapshot or bootstrap state file exists | Treat it as an interrupted-run recovery point. Do not delete or overwrite it until the original files/service state have been inspected or restored. |
 | IXIA `test port hosts ... are not in a ready state` | `TAAC_RBB_IXIA_CHASSIS` must be the **physical chassis** IP, not the IxNetwork API server. |
 | `Ixia password ... does not contain a valid password` | Fill `ixia.password` in `.taac/secrets.json`, or inject `TAAC_IXIA_PASSWORD` from a secret manager. |

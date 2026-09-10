@@ -27,7 +27,10 @@ import shlex
 import typing as t
 
 from taac.constants import TestCaseFailure
-from taac.driver.driver_constants import FbossSystemctlServiceName
+from taac.driver.driver_constants import (
+    FbossSystemctlServiceName,
+    SystemctlServiceStatus,
+)
 from taac.tasks.base_task import BaseTask
 from taac.tasks.rbb_edge_config_utils import (
     async_backup_before_overwrite,
@@ -54,11 +57,31 @@ _STATE_VERSION = 1
 _CONTROL_PLANE_TIMEOUT_SEC = 120
 _CONTROL_PLANE_POLL_SEC = 5
 _CONFIG_PATHS = (C.AGENT_CONFIG_PATH, C.OPENR_CONFIG_PATH, C.BGP_CONFIG_PATH)
+_BGP_POLICY_MAP_KEYS = (
+    "policies",
+    "prefix_sets",
+    "as_path_sets",
+    "community_sets",
+)
 _SERVICES = {
     "agent": FbossSystemctlServiceName.FBOSS_SW_AGENT,
     "openr": FbossSystemctlServiceName.OPENR,
     "bgp": FbossSystemctlServiceName.BGP,
 }
+
+
+def _is_supported_bgp_policy_placeholder(policy: t.Mapping[str, t.Any]) -> bool:
+    """Accept empty or explicitly structured stock FBOSS policy documents.
+
+    Older images initialize each policy map explicitly, while newer images
+    ship ``policy.json`` as ``{}``. The RBB bootstrap neither references nor
+    changes policy data, so both shapes are valid. A partially structured
+    document remains rejected instead of silently treating malformed policy
+    state as a stock baseline.
+    """
+    return not policy or all(
+        isinstance(policy.get(key), dict) for key in _BGP_POLICY_MAP_KEYS
+    )
 
 
 class RbbDutBootstrapTask(BaseTask):
@@ -203,6 +226,37 @@ class RbbDutBootstrapTask(BaseTask):
             )
         return state
 
+    async def _stop_service_for_restore(
+        self,
+        driver: t.Any,
+        hostname: str,
+        service: FbossSystemctlServiceName,
+    ) -> None:
+        """Stop a service and normalize systemd's non-running failed state."""
+        try:
+            await driver.async_stop_service(service)
+            return
+        except AssertionError:
+            # FbossSwitch.async_stop_service currently accepts only INACTIVE.
+            # A crashed service can remain FAILED after a successful stop even
+            # though no process is running, which must not strand snapshots.
+            status = await driver.async_get_service_status(service)
+            if status != SystemctlServiceStatus.FAILED:
+                raise
+
+        await driver.async_run_cmd_on_shell(
+            f"systemctl reset-failed {shlex.quote(service.value)}"
+        )
+        status = await driver.async_get_service_status(service)
+        if status != SystemctlServiceStatus.INACTIVE:
+            raise TestCaseFailure(
+                f"{hostname}: could not normalize stopped service "
+                f"{service.value} to inactive during bootstrap restore"
+            )
+        self.logger.info(
+            f"{hostname} -- reset failed state for stopped service {service.value}"
+        )
+
     async def _file_mode(self, driver: t.Any, hostname: str, path: str) -> str:
         quoted = shlex.quote(path)
         output = await driver.async_run_cmd_on_shell(
@@ -297,12 +351,10 @@ class RbbDutBootstrapTask(BaseTask):
         base_openr = await self._read_json(driver, hostname, C.OPENR_CONFIG_PATH)
         base_bgp = await self._read_json(driver, hostname, C.BGP_CONFIG_PATH)
         policy = await self._read_json(driver, hostname, C.BGP_POLICY_PATH)
-        if not all(
-            isinstance(policy.get(key), dict)
-            for key in ("policies", "prefix_sets", "as_path_sets", "community_sets")
-        ):
+        if not _is_supported_bgp_policy_placeholder(policy):
             raise TestCaseFailure(
-                f"{hostname}: {C.BGP_POLICY_PATH} is not the expected bgpd policy object"
+                f"{hostname}: {C.BGP_POLICY_PATH} is neither an empty nor the "
+                "expected structured bgpd policy object"
             )
         try:
             documents = build_bootstrap_documents(
@@ -454,7 +506,12 @@ class RbbDutBootstrapTask(BaseTask):
                     file_modes[C.AGENT_CONFIG_PATH],
                 )
             await self._activate_agent(
-                driver, service_states["agent"] == "active"
+                driver,
+                service_states["agent"] == "active",
+                force_restart=(
+                    documents.agent.get("defaultCommandLineArgs")
+                    != base_agent.get("defaultCommandLineArgs")
+                ),
             )
 
             if C.OPENR_CONFIG_PATH in changed_paths:
@@ -531,6 +588,7 @@ class RbbDutBootstrapTask(BaseTask):
     ) -> None:
         """Bound setup on R2 by core-link and reciprocal iBGP convergence."""
         members = [member for pc in core_pcs for member in pc.members]
+        port_channels = [pc.show_name for pc in core_pcs]
         expected_peer = C.R1_ROUTER_ID
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CONTROL_PLANE_TIMEOUT_SEC
@@ -538,7 +596,14 @@ class RbbDutBootstrapTask(BaseTask):
         while True:
             try:
                 states = await driver.async_get_interfaces_operational_state(members)
-                links_up = all(states.get(member) is True for member in members)
+                member_links_up = all(
+                    states.get(member) is True for member in members
+                )
+                port_channel_states = {
+                    name: await driver.async_get_aggregated_interface_status(name)
+                    for name in port_channels
+                }
+                links_up = member_links_up and all(port_channel_states.values())
                 sessions = await driver.async_get_bgp_sessions()
                 established = set()
                 for session in sessions:
@@ -550,7 +615,9 @@ class RbbDutBootstrapTask(BaseTask):
                         established.add(str(session.peer_addr))
                 peer_up = expected_peer in established
                 last_detail = (
-                    f"links_up={links_up}, established_peers={sorted(established)}"
+                    f"member_links_up={member_links_up}, "
+                    f"port_channels={port_channel_states}, "
+                    f"established_peers={sorted(established)}"
                 )
                 if links_up and peer_up:
                     self.logger.info(
@@ -567,8 +634,14 @@ class RbbDutBootstrapTask(BaseTask):
                 )
             await asyncio.sleep(_CONTROL_PLANE_POLL_SEC)
 
-    async def _activate_agent(self, driver: t.Any, was_active: bool) -> None:
-        if was_active:
+    async def _activate_agent(
+        self, driver: t.Any, was_active: bool, *, force_restart: bool = False
+    ) -> None:
+        if was_active and force_restart:
+            await driver.async_restart_service(
+                FbossSystemctlServiceName.FBOSS_SW_AGENT
+            )
+        elif was_active:
             try:
                 await driver.async_agent_config_reload()
             except Exception as reload_exc:  # noqa: BLE001
@@ -697,9 +770,15 @@ class RbbDutBootstrapTask(BaseTask):
         # files back; this avoids briefly loading a restored placeholder file.
         for name in ("bgp", "openr"):
             if service_states[name] == "inactive":
-                await driver.async_stop_service(_SERVICES[name])
+                await self._stop_service_for_restore(
+                    driver, hostname, _SERVICES[name]
+                )
         if service_states["agent"] == "inactive":
-            await driver.async_stop_service(FbossSystemctlServiceName.FBOSS_SW_AGENT)
+            await self._stop_service_for_restore(
+                driver,
+                hostname,
+                FbossSystemctlServiceName.FBOSS_SW_AGENT,
+            )
 
         for path in (C.BGP_CONFIG_PATH, C.OPENR_CONFIG_PATH, C.AGENT_CONFIG_PATH):
             if path in changed_paths:
@@ -723,7 +802,11 @@ class RbbDutBootstrapTask(BaseTask):
                 )
 
         if service_states["agent"] == "active":
-            await self._activate_agent(driver, was_active=True)
+            # Restoring defaultCommandLineArgs requires a process restart;
+            # config reload cannot remove a startup-only FBOSS feature flag.
+            await self._activate_agent(
+                driver, was_active=True, force_restart=True
+            )
         if service_states["openr"] == "active":
             await driver.async_restart_service(FbossSystemctlServiceName.OPENR)
         if service_states["bgp"] == "active":
