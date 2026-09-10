@@ -200,6 +200,7 @@ from taac.utils.common import (
     async_everpaste_str,
     create_everpaste_fburl,
 )
+from taac.utils import meta_internal_bridge_client
 from taac.utils.oss_driver_utils import AsyncSSHClient
 from taac.utils.oss_taac_lib_utils import (
     async_memoize_timed,
@@ -3240,6 +3241,8 @@ class FbossSwitch(AbstractSwitch):
         block: bool = True,
         return_on_msg: t.Optional[str] = None,
         *args,
+        ssh_port: int = 22,
+        username: t.Optional[str] = None,
         **kwargs,
     ) -> str:
         """
@@ -3248,24 +3251,35 @@ class FbossSwitch(AbstractSwitch):
         OSS implementation uses asyncssh from oss_driver_utils.
         The internal mixin overrides this with Meta's AsyncSSHClient/ParamikoClient.
         """
-        ssh_port = 22
-
         self.logger.debug(f"Running cmd {cmd} on {self.hostname}")
 
-        # Pass username=None so AsyncSSHClient falls back to TAAC_SSH_USER
-        # (default "root"); password is similarly picked up from
-        # TAAC_SSH_PASSWORD when set. See oss_driver_utils for the
-        # supported env vars.
-        async with AsyncSSHClient(
-            self.hostname, port=ssh_port, username=None
-        ) as client:
-            result = await client.async_run(
-                cmd=cmd,
+        if TAAC_OSS and meta_internal_bridge_client.bridge_enabled():
+            result = await meta_internal_bridge_client.ssh_exec(
+                hostname=self.hostname,
+                command=cmd,
                 timeout_sec=timeout,
-                print_stdout=print_stdout,
                 block=block,
                 return_on_msg=return_on_msg,
+                port=ssh_port,
+                username=username,
             )
+            if print_stdout and result.stdout:
+                self.logger.info(result.stdout)
+        else:
+            # Pass username=None so AsyncSSHClient falls back to TAAC_SSH_USER
+            # (default "root"); password is similarly picked up from
+            # TAAC_SSH_PASSWORD when set. See oss_driver_utils for the
+            # supported env vars.
+            async with AsyncSSHClient(
+                self.hostname, port=ssh_port, username=username
+            ) as client:
+                result = await client.async_run(
+                    cmd=cmd,
+                    timeout_sec=timeout,
+                    print_stdout=print_stdout,
+                    block=block,
+                    return_on_msg=return_on_msg,
+                )
 
         # pyrefly: ignore [bad-return]
         return result.stdout if result else None

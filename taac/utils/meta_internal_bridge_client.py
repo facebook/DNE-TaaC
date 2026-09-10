@@ -2,16 +2,21 @@
 
 # pyre-strict
 
-"""Client for the narrow Meta-only credential broker used by OSS TAAC CI."""
+"""Client for the narrow Meta-only host bridge used by OSS TAAC CI."""
 
+import asyncio
 import json
 import os
 import socket
+import subprocess
 import typing as t
 
 
 BRIDGE_SOCKET_ENV: str = "TAAC_META_INTERNAL_BRIDGE_SOCKET"
-_MAX_RESPONSE_BYTES: int = 64 * 1024
+# Log collection sends command output in the JSON response. Agent and qsfp
+# logs routinely exceed 64 KiB, so retain a bounded limit large enough for the
+# same diagnostic reads supported by the direct SSH implementation.
+_MAX_RESPONSE_BYTES: int = 64 * 1024 * 1024
 
 
 class MetaInternalBridgeError(RuntimeError):
@@ -84,3 +89,46 @@ def fetch_ixia_password(
     if not isinstance(password, str) or not password:
         raise MetaInternalBridgeError("Meta bridge returned an empty IXIA password")
     return password
+
+
+async def ssh_exec(
+    *,
+    hostname: str,
+    command: str,
+    timeout_sec: int = 300,
+    block: bool = True,
+    return_on_msg: str | None = None,
+    port: int = 22,
+    username: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a DUT shell command through the authenticated host bridge."""
+    request: dict[str, t.Any] = {
+        "operation": "ssh_exec",
+        "host": hostname,
+        "command": command,
+        "timeout_sec": timeout_sec,
+        "block": block,
+        "return_on_msg": return_on_msg,
+        "port": port,
+        "username": username,
+    }
+    result = await asyncio.to_thread(_request, request, timeout_sec + 30)
+    stdout = result.get("stdout")
+    stderr = result.get("stderr")
+    returncode = result.get("returncode")
+    if not isinstance(stdout, str) or not isinstance(stderr, str):
+        raise MetaInternalBridgeError("Meta bridge returned invalid SSH output")
+    if not isinstance(returncode, int):
+        raise MetaInternalBridgeError("Meta bridge returned an invalid SSH return code")
+    if returncode != 0:
+        error_output = stderr.strip() or stdout.strip() or "no output"
+        raise MetaInternalBridgeError(
+            f"SSH command failed on {hostname} with exit code {returncode}: "
+            f"{error_output}"
+        )
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )

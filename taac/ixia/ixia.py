@@ -130,13 +130,21 @@ else:
         DESIRED_V6_BGP_PREFIX_NAME,
         DESIRED_VPORT_NAME,
     )
-from uhd_restpy.assistants.sessions.sessionassistant import (
-    SessionAssistant as UhdSessionAssistant,
-)
-from uhd_restpy.assistants.statistics.statviewassistant import (
-    StatViewAssistant as UhdStatViewAssistant,
-)
-from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
+if TAAC_OSS:
+    # uhd_restpy is Meta-only and was removed from the OSS dependency surface
+    # in D96670156. UHD chassis are not supported in OSS mode, so keep the
+    # shared implementation type-correct without importing that package.
+    UhdSessionAssistant = IxnSessionAssistant
+    UhdStatViewAssistant = IxnStatViewAssistant
+    UhdIxNetworkError = IxnIxNetworkError
+else:
+    from uhd_restpy.assistants.sessions.sessionassistant import (
+        SessionAssistant as UhdSessionAssistant,
+    )
+    from uhd_restpy.assistants.statistics.statviewassistant import (
+        StatViewAssistant as UhdStatViewAssistant,
+    )
+    from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
 
 
 warnings.filterwarnings(action="ignore", category=ResourceWarning)
@@ -478,26 +486,37 @@ except ModuleNotFoundError:
     IxnBgpIpv6Peer = importlib.import_module(
         f"{_ixn_topology_package.__name__}.{_ixn_bgp_ipv6_module}"
     ).BgpIpv6Peer
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
-    BgpIpv6Peer as UhdBgpIpv6Peer,
-)
+if TAAC_OSS:
+    UhdBgpIpv6Peer = IxnBgpIpv6Peer
+else:
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
+        BgpIpv6Peer as UhdBgpIpv6Peer,
+    )
 
 BgpIpv6Peer = t.Union[IxnBgpIpv6Peer, UhdBgpIpv6Peer]
 
 from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
     Ipv4PrefixPools as IxnIpv4PrefixPools,
 )
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
-    Ipv4PrefixPools as UhdIpv4PrefixPools,
-)
+
+if TAAC_OSS:
+    UhdIpv4PrefixPools = IxnIpv4PrefixPools
+else:
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
+        Ipv4PrefixPools as UhdIpv4PrefixPools,
+    )
 
 Ipv4PrefixPools = t.Union[IxnIpv4PrefixPools, UhdIpv4PrefixPools]
 from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
     Ipv6PrefixPools as IxnIpv6PrefixPools,
 )
-from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
-    Ipv6PrefixPools as UhdIpv6PrefixPools,
-)
+
+if TAAC_OSS:
+    UhdIpv6PrefixPools = IxnIpv6PrefixPools
+else:
+    from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
+        Ipv6PrefixPools as UhdIpv6PrefixPools,
+    )
 
 Ipv6PrefixPools = t.Union[IxnIpv6PrefixPools, UhdIpv6PrefixPools]
 

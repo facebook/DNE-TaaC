@@ -28,9 +28,14 @@ from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-expo
     none_throws,
     retryable,
 )
-from uhd_restpy.assistants.statistics.statviewassistant import (
-    StatViewAssistant as UhdStatViewAssistant,
-)
+
+if TAAC_OSS:
+    # UHD is unsupported in OSS mode and uhd_restpy is not distributed there.
+    UhdStatViewAssistant = IxnStatViewAssistant
+else:
+    from uhd_restpy.assistants.statistics.statviewassistant import (
+        StatViewAssistant as UhdStatViewAssistant,
+    )
 
 StatViewAssistant = t.Union[IxnStatViewAssistant, UhdStatViewAssistant]
 

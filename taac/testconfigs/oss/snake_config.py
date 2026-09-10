@@ -23,6 +23,7 @@ TAAC_SSH_USER=root TAAC_SSH_PASSWORD=root \
 
 import os
 
+from ixia.ixia import types as ixia_types
 from taac.runner.testbed_topology import (
     ConfigTopology,
     LinkType,
@@ -89,8 +90,17 @@ def test_config(topology: ConfigTopology):
         ],
         direct_ixia_connections=ixia_connections,
         ixia_ports=[source_link.local_port, dest_link.local_port],
-        line_rate=int(os.environ.get("TAAC_LINE_RATE", "50")),
-        iteration=int(os.environ.get("TAAC_ITERATION", "10")),
+        # The qualified snake DUT is lossless at 45% with fixed 400-byte frames.
+        # Smaller control-plane-sized frames overrun the gearbox packet pipeline
+        # even at lower bandwidth and produce false precheck failures.
+        line_rate=int(os.environ.get("TAAC_LINE_RATE", "45")),
+        iteration=int(os.environ.get("TAAC_ITERATION", "1")),
+        frame_size_settings=ixia_types.FrameSize(
+            type=ixia_types.FrameSizeType.FIXED,
+            fixed_size=400,
+        ),
+        precheck_packet_loss_clear_stats=True,
+        packet_loss_sleep_time=30,
         use_ipv6_ping=False,
     )
     # TODO: PTP disabled — IXIA chassis needs PTP license

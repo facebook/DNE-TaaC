@@ -20,13 +20,14 @@ TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 # Escape hatch for validating the OSS stack from INSIDE Meta.
 #
 # `TAAC_OSS=1` selects the OSS device driver, which authenticates with a plain
-# SSH key/password and speaks plaintext thrift. Neither is suitable for a Meta
-# lab device: those use CoreSSH certificates and secure thrift.
+# SSH key/password and speaks plaintext thrift. Meta lab devices use CoreSSH;
+# most also require secure thrift. This compatibility mode is limited to an
+# explicitly authorized snake DUT with a verified clear-thrift endpoint.
 #
-# With TAAC_OSS_META_INTERNAL=1 every other OSS code path stays active — CSV
-# topology, oss_entry_point, the `taac.*` import layout, IXIA setup — but device
-# device access uses the Meta-internal driver. Only IXIA credential retrieval is
-# delegated to the narrow host-side bridge.
+# With TAAC_OSS_META_INTERNAL=1 every OSS code path stays active — CSV topology,
+# oss_entry_point, the `taac.*` import layout, IXIA setup, and the exported
+# driver. Meta-only SSH and IXIA credential access are delegated to the narrow
+# host-side bridge.
 #
 # This mode validates the OSS runner and surrounding stack, not the exported
 # device transport. Validate that transport against non-Meta hardware.
@@ -36,17 +37,15 @@ TAAC_OSS_META_INTERNAL = os.environ.get("TAAC_OSS_META_INTERNAL", "").lower() in
     "yes",
 )
 
-USE_INTERNAL_DRIVERS = (not TAAC_OSS) or TAAC_OSS_META_INTERNAL
-
 if TAAC_OSS and TAAC_OSS_META_INTERNAL:
     LOGGER.warning(
-        "TAAC_OSS_META_INTERNAL=1: running the OSS stack with Meta-internal "
-        "device drivers. Device access (SSH and thrift) is not the OSS path."
+        "TAAC_OSS_META_INTERNAL=1: running the OSS stack with the exported "
+        "device driver. Shell commands use the authenticated host bridge."
     )
 
 # Keep this literal condition: the OSS compliance checker recognizes this as
 # the guard for the internal imports below.
-if not TAAC_OSS or TAAC_OSS_META_INTERNAL:
+if not TAAC_OSS:
     from taac.internal.driver.arista_fboss_switch import (
         AristaFbossSwitch,
     )
@@ -210,12 +209,7 @@ async def async_get_device_driver(
     # pyrefly: ignore [bad-argument-type]
     driver_args_dict = json.loads(HOST_TO_DRIVER_ARGS_MAP.get(hostname, "{}"))
 
-    # Meta-internal mode uses FbossSwitchInternal and its secure client provider.
-    if (
-        device_os_type == taac_types.DeviceOsType.FBOSS
-        and TAAC_OSS
-        and not TAAC_OSS_META_INTERNAL
-    ):
+    if device_os_type == taac_types.DeviceOsType.FBOSS and TAAC_OSS:
         from taac.utils.oss_client_factory import OSSClientFactory
 
         client_factory = OSSClientFactory()
