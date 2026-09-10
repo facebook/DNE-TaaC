@@ -458,13 +458,6 @@ add_taac_thrift_python_library(
     OPTIONS json
     DEPENDS thrift_roots health_check_py ixia_py
 )
-add_taac_thrift_python_library(
-    test_run_result_py
-    "${UPSTREAM_THRIFT_DIR}/taac/test_run_result.thrift"
-    NAMESPACE "taac"
-    OPTIONS json
-    DEPENDS thrift_roots health_check_py test_as_a_config_py
-)
 
 # ============================================================================
 # SECTION C: Install generated Python to site-packages
@@ -522,7 +515,6 @@ add_custom_target(all_thrift_bindings ALL DEPENDS
     bgp_thrift_py.py_sources_built
     health_check_py.py_sources_built
     test_as_a_config_py.py_sources_built
-    test_run_result_py.py_sources_built
 )
 
 # Per-library install rules are emitted inside the add_taac_thrift_python_library
