@@ -2,6 +2,7 @@
 
 # pyre-unsafe
 import asyncio
+import contextlib
 import json
 import time
 import typing as t
@@ -91,7 +92,7 @@ def _params(step: Step) -> dict:
     return json.loads(step.step_params.json_params)
 
 
-class TestFpfRecoveredStateGate(unittest.TestCase):
+class TestFpfRecoveredStateGate(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _timestamp(epoch: float) -> str:
         return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
@@ -168,7 +169,7 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             for host in hosts
             for row in rows(host=host, prefixes={"2401:db00::/64": reachability})
         ]
-        return {
+        collectors = {
             "hrt": bulk,
             "hrt_plane_status": plane,
             "hrt_fsdb_session": sessions,
@@ -176,6 +177,55 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             "hrt_remote_failure_vf2": remote_vf2,
             "prod_hrt_prefix": prod,
         }
+        for collector in collectors.values():
+            collector.POLL_TIMEOUT_SEC = 1.0
+            collector.interval_sec = 0.1
+        return collectors
+
+    async def _verify(
+        self,
+        collectors: dict[str, MagicMock],
+        params: dict,
+        refresh: t.Optional[t.Callable[[], None]] = None,
+        monotonic_side_effect: t.Optional[t.List[float]] = None,
+    ) -> None:
+        initial_rows = {
+            name: tuple(collector.rows) for name, collector in collectors.items()
+        }
+        refreshed = False
+
+        async def _refresh(_delay: float) -> None:
+            nonlocal refreshed
+            if refreshed:
+                return
+            refreshed = True
+            if refresh is not None:
+                refresh()
+                return
+            for name, collector in collectors.items():
+                collector.rows.extend(initial_rows[name])
+
+        patches = [
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=_refresh,
+            ),
+        ]
+        if monotonic_side_effect is not None:
+            patches.append(
+                patch(
+                    "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                    side_effect=monotonic_side_effect,
+                )
+            )
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            await _make_custom_step().fpf_verify_recovered_state(params)
 
     def _params(self) -> dict:
         prod_expectation = {
@@ -204,7 +254,7 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             "max_age_sec": 30,
         }
 
-    def test_factory_and_exact_both_host_gate(self):
+    async def test_factory_and_exact_both_host_gate(self):
         params = self._params()
         step = create_fpf_verify_recovered_state_step(**params)
         self.assertEqual(
@@ -212,57 +262,90 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
         )
         self.assertEqual(_params(step)["future_timestamp_grace_sec"], 1.0)
         collectors = self._collectors()
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            _make_custom_step().fpf_verify_recovered_state(params)
+        await self._verify(collectors, params)
 
-    def test_missing_control_prefix_fails_closed(self):
+    async def test_post_gate_append_accepts_request_timestamp_36s_old(self):
+        collectors = self._collectors()
+        request_start = time.time() - 36.0
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(request_start)
+
+        await self._verify(collectors, self._params())
+
+    async def test_post_gate_refresh_timeout_reports_missing_keys_and_contract(self):
+        collectors = self._collectors()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "timed out.*hrt:client/dev0.*timeout1s\\+interval0.1s",
+        ):
+            await self._verify(
+                collectors,
+                self._params(),
+                refresh=lambda: None,
+                monotonic_side_effect=[0.0, 0.0, 3.0],
+            )
+
+    async def test_first_fresh_bad_row_fails_without_later_good_masking(self):
+        collectors = self._collectors()
+        initial_rows = {
+            name: tuple(collector.rows) for name, collector in collectors.items()
+        }
+
+        def _append_bad_then_good() -> None:
+            bad_bulk = SimpleNamespace(**vars(initial_rows["hrt"][0]))
+            bad_bulk.lane_counts = [4031, 4032, 4032, 4032]
+            collectors["hrt"].rows.append(bad_bulk)
+            for name, collector in collectors.items():
+                collector.rows.extend(initial_rows[name])
+
+        with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
+            await self._verify(
+                collectors,
+                self._params(),
+                refresh=_append_bad_then_good,
+            )
+
+    async def test_missing_control_prefix_fails_closed(self):
         collectors = self._collectors()
         collectors["prod_hrt_prefix"].rows = collectors["prod_hrt_prefix"].rows[:1]
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "no row for client"):
-                _make_custom_step().fpf_verify_recovered_state(self._params())
+        with self.assertRaisesRegex(RuntimeError, "prod_hrt_prefix:client"):
+            await self._verify(
+                collectors,
+                self._params(),
+                monotonic_side_effect=[0.0, 3.0],
+            )
 
-    def test_missing_client_session_fails_closed(self):
+    async def test_missing_client_session_fails_closed(self):
         collectors = self._collectors()
         collectors["hrt_fsdb_session"].rows = collectors["hrt_fsdb_session"].rows[:1]
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "no row for client"):
-                _make_custom_step().fpf_verify_recovered_state(self._params())
+        with self.assertRaisesRegex(RuntimeError, "hrt_fsdb_session:client"):
+            await self._verify(
+                collectors,
+                self._params(),
+                monotonic_side_effect=[0.0, 3.0],
+            )
 
-    def test_plane_counts_are_keyed_by_declared_plane_ids(self):
+    async def test_plane_counts_are_keyed_by_declared_plane_ids(self):
         collectors = self._collectors()
         first = collectors["hrt"].rows[0]
         first.plane_ids = [3, 2, 1, 0]
         first.lane_counts = [4032, 4032, 4032, 4031]
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
-                _make_custom_step().fpf_verify_recovered_state(self._params())
+        with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
+            await self._verify(collectors, self._params())
 
-    def test_prod_prefix_wrong_device_fails_closed(self):
+    async def test_prod_prefix_wrong_device_fails_closed(self):
         collectors = self._collectors()
         collectors["prod_hrt_prefix"].rows[0].prefixes["2401:db00::/64"].device_ids = [
             1
         ]
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "actual="):
-                _make_custom_step().fpf_verify_recovered_state(self._params())
+        with self.assertRaisesRegex(RuntimeError, "actual="):
+            await self._verify(collectors, self._params())
 
-    def test_legacy_rf_rows_keep_full_plane_vector_but_check_each_vf_half(self):
+    async def test_legacy_rf_rows_keep_full_plane_vector_but_check_each_vf_half(
+        self,
+    ):
         collectors = self._collectors()
         collectors["hrt"].rows = [
             SimpleNamespace(
@@ -347,26 +430,18 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             {"suffix": "vf2", "lanes": [4, 5, 6, 7]},
         ]
 
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            _make_custom_step().fpf_verify_recovered_state(params)
+        await self._verify(collectors, params)
 
-    def test_rf_row_missing_full_collector_plane_fails_closed(self):
+    async def test_rf_row_missing_full_collector_plane_fails_closed(self):
         collectors = self._collectors()
         row = collectors["hrt_remote_failure_vf1"].rows[0]
         row.plane_ids = [0, 1, 2]
         row.lane_counts = [0, 0, 0]
 
-        with patch(
-            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
-            side_effect=collectors.get,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "full collector planes"):
-                _make_custom_step().fpf_verify_recovered_state(self._params())
+        with self.assertRaisesRegex(RuntimeError, "full collector planes"):
+            await self._verify(collectors, self._params())
 
-    def test_small_future_timestamp_within_grace_is_fresh(self):
+    async def test_small_future_timestamp_within_grace_is_fresh(self):
         collectors = self._collectors()
         for collector in collectors.values():
             for row in collector.rows:
@@ -384,9 +459,9 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
                 return_value=1000.0,
             ),
         ):
-            _make_custom_step().fpf_verify_recovered_state(params)
+            await self._verify(collectors, params)
 
-    def test_future_timestamp_beyond_grace_fails_distinctly(self):
+    async def test_future_timestamp_beyond_grace_fails_distinctly(self):
         collectors = self._collectors()
         for collector in collectors.values():
             for row in collector.rows:
@@ -405,7 +480,7 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "in the future \\(grace 1s\\)"),
         ):
-            _make_custom_step().fpf_verify_recovered_state(params)
+            await self._verify(collectors, params)
 
 
 class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):
