@@ -24984,7 +24984,12 @@ def _fpf_recovered_state_contract(
         suffix = str(group.get("suffix", ""))
         group_devices = [int(value) for value in group.get("device_ids", [0])]
         group_planes = [int(value) for value in group.get("lanes", [])]
-        if not suffix or not group_planes:
+        # A lane-filtered legacy topology can leave one VF half empty. It is an
+        # inactive group, not a malformed recovery contract. Active groups still
+        # have to cover every declared device/local-plane tuple below.
+        if not group_devices or not group_planes:
+            continue
+        if not suffix:
             raise ValueError("every recovered RF VF group needs a suffix and lanes")
         if len(group_devices) != len(set(group_devices)) or len(group_planes) != len(
             set(group_planes)
@@ -25836,11 +25841,13 @@ def create_fpf_hardening_playbook_v2(
     recovered_baseline_qualification_sec: int | None = None,
     prod_prefix_device_id: int = 0,
     prod_prefix_vf_suffix: str = "vf1",
+    prod_prefix_host: str | None = None,
     scale_mutation_mode: bool = False,
     scale_recovery_sla_sec: float = 120.0,
     scale_recovery_stability_sec: float = 60.0,
     collector_poll_interval_sec: float = 5.0,
     collector_poll_duration_budget_sec: float = 10.0,
+    collector_future_timestamp_grace_sec: float = 1.0,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25942,6 +25949,12 @@ def create_fpf_hardening_playbook_v2(
     be hidden by the earlier intentional outage. This policy is deliberately
     separate from ``collector_precheck_lookback_sec``, which remains a generic
     historical precheck window for non-recovery callers such as scale tests.
+    ``prod_prefix_host`` identifies the host used by the legacy singular
+    production-prefix collector when ``prod_prefixes_by_host`` is absent, so the
+    recovered gate observes the same host as collector setup. The recovered
+    point gate snapshots collector rows before taking one common timestamp and
+    accepts only ``collector_future_timestamp_grace_sec`` of bounded future
+    skew; larger future timestamps fail closed.
 
     ``impacted_lanes_drained`` (default None) marks the given fabric lanes as
     DRAINED/impacted for a drain-longevity config where the drain STAYS in effect
@@ -26012,6 +26025,15 @@ def create_fpf_hardening_playbook_v2(
                 "recovered_baseline_qualification_sec must be an integer >= "
                 f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}"
             )
+    if (
+        isinstance(collector_future_timestamp_grace_sec, bool)
+        or not isinstance(collector_future_timestamp_grace_sec, (int, float))
+        or not math.isfinite(collector_future_timestamp_grace_sec)
+        or collector_future_timestamp_grace_sec < 0
+    ):
+        raise ValueError(
+            "collector_future_timestamp_grace_sec must be a finite non-negative number"
+        )
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
     resolved_lanes = lanes if lanes is not None else [0, 1]
@@ -26022,8 +26044,15 @@ def create_fpf_hardening_playbook_v2(
             for device_id in group.get("device_ids", [0])
         }
     ) or [0]
+    if prod_prefix_host is not None and prod_prefix_host not in hosts:
+        raise ValueError(
+            f"prod_prefix_host {prod_prefix_host!r} is not in collector hosts {hosts}"
+        )
+    resolved_prod_prefix_host = prod_prefix_host or (hosts[0] if hosts else None)
     resolved_prod_prefixes_by_host = prod_prefixes_by_host or (
-        {hosts[0]: list(prod_prefixes)} if hosts and prod_prefixes else None
+        {resolved_prod_prefix_host: list(prod_prefixes)}
+        if resolved_prod_prefix_host and prod_prefixes
+        else None
     )
     recovered_device_planes_by_host: dict[str, dict[str, list[int]]] = {}
     recovered_prod_expectations_by_host: dict[
@@ -26159,6 +26188,9 @@ def create_fpf_hardening_playbook_v2(
     if _ib_server is None and spray_hosts and len(spray_hosts) >= 2:
         _ib_server = spray_hosts[0]
         _ib_clients = list(spray_hosts[1:])
+    traffic_after_disruption = ensure_traffic_after_disruption or (
+        recovered_baseline_qualification_sec is not None and bool(disruption_steps)
+    )
     traffic_readiness_step = None
     if ib_traffic_config:
         traffic_readiness_step = create_fpf_ensure_traffic_step(
@@ -26166,7 +26198,7 @@ def create_fpf_hardening_playbook_v2(
             description=(
                 "Strict post-restore traffic readiness: validate the canonical "
                 "process and egress contract after repair and convergence"
-                if ensure_traffic_after_disruption
+                if traffic_after_disruption
                 else (
                     "Strict traffic readiness: validate the canonical process "
                     "and egress contract; recover only after the prior verdict"
@@ -26180,16 +26212,13 @@ def create_fpf_hardening_playbook_v2(
             description=(
                 "Strict post-restore traffic readiness: ensure all 4 planes carry "
                 "traffic after repair and convergence"
-                if ensure_traffic_after_disruption
+                if traffic_after_disruption
                 else (
                     "Strict traffic precheck: ensure all 4 planes carry traffic "
                     "(restart ib_write_bw if collapsed; fail hard on a plane wedge)"
                 )
             ),
         )
-    traffic_after_disruption = ensure_traffic_after_disruption or (
-        recovered_baseline_qualification_sec is not None and bool(disruption_steps)
-    )
     if traffic_readiness_step is not None and not traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
     if disruption_steps:
@@ -26207,6 +26236,9 @@ def create_fpf_hardening_playbook_v2(
                         recovered_prod_expectations_by_host
                     ),
                     rf_vf_groups=rf_vf_groups or [],
+                    future_timestamp_grace_sec=(
+                        collector_future_timestamp_grace_sec
+                    ),
                     description=(
                         "Fail-closed current recovery gate: exact sessions, "
                         "prod-prefix, HRT/RF tuples, and planes"

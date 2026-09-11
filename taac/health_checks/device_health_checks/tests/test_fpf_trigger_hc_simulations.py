@@ -60,6 +60,7 @@ from taac.libs.fpf.fpf_stress_checks import (
     HrtBulkRow,
     HrtRemoteFailureCollector,
     HrtRemoteFailureRow,
+    normalize_scale_recovery_poll_duration,
     PerLaneResult,
     ProdHrtPrefixRow,
 )
@@ -383,6 +384,14 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         self.assertTrue(result[5])
         self.assertIn("malformed RPC duration", result[4])
         self.assertNotIn("could not be scoped", result[4])
+
+    def test_poll_duration_normalization_accepts_only_json_numeric_values(self):
+        self.assertEqual(normalize_scale_recovery_poll_duration(1), 1.0)
+        self.assertEqual(normalize_scale_recovery_poll_duration(1.25), 1.25)
+        self.assertEqual(normalize_scale_recovery_poll_duration("2.5"), 2.5)
+        for malformed in (True, None, [], object(), "nan", "inf", -1):
+            with self.subTest(malformed=repr(malformed)):
+                self.assertIsNone(normalize_scale_recovery_poll_duration(malformed))
 
     def test_exact_lane_map_is_complete_and_well_typed(self):
         self.assertEqual(

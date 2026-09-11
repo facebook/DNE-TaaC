@@ -6,6 +6,7 @@ import json
 import time
 import typing as t
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -91,6 +92,12 @@ def _params(step: Step) -> dict:
 
 
 class TestFpfRecoveredStateGate(unittest.TestCase):
+    @staticmethod
+    def _timestamp(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S.%f%z"
+        )
+
     def _collectors(self) -> dict[str, MagicMock]:
         now = time.strftime("%Y-%m-%d %H:%M:%S.000%z")
         hosts = ["server", "client"]
@@ -203,6 +210,7 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
         self.assertEqual(
             _params(step)["custom_step_name"], "fpf_verify_recovered_state"
         )
+        self.assertEqual(_params(step)["future_timestamp_grace_sec"], 1.0)
         collectors = self._collectors()
         with patch(
             "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
@@ -253,6 +261,151 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "actual="):
                 _make_custom_step().fpf_verify_recovered_state(self._params())
+
+    def test_legacy_rf_rows_keep_full_plane_vector_but_check_each_vf_half(self):
+        collectors = self._collectors()
+        collectors["hrt"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[4032] * 8,
+                plane_ids=list(range(8)),
+            )
+        ]
+        collectors["hrt_plane_status"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                plane_states=dict.fromkeys(range(8), "UP"),
+            )
+        ]
+        collectors["hrt_fsdb_session"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                connected=32,
+            )
+        ]
+        collectors["hrt_remote_failure_vf1"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[0, 0, 0, 0, 4032, 4032, 4032, 4032],
+                plane_ids=list(range(8)),
+            )
+        ]
+        collectors["hrt_remote_failure_vf2"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[4032, 4032, 4032, 4032, 0, 0, 0, 0],
+                plane_ids=list(range(8)),
+            )
+        ]
+        reachability = collectors["prod_hrt_prefix"].rows[0].prefixes["2401:db00::/64"]
+        reachability.unreachable_planes = [4, 5, 6, 7]
+        reachability.plane_up = list(range(8))
+        collectors["prod_hrt_prefix"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                prefixes={"2401:db00::/64": reachability},
+            )
+        ]
+        params = self._params()
+        params["device_planes_by_host"] = {"server": {"0": list(range(8))}}
+        params["prod_prefix_expectations_by_host"] = {
+            "server": {
+                "2401:db00::/64": {
+                    "device_ids": [0],
+                    "reachable_planes": [0, 1, 2, 3],
+                    "drained_planes": [],
+                    "unreachable_planes": [4, 5, 6, 7],
+                    "plane_up": list(range(8)),
+                    "plane_down": [],
+                }
+            }
+        }
+        params["rf_vf_groups"] = [
+            {"suffix": "vf1", "lanes": [0, 1, 2, 3]},
+            {"suffix": "vf2", "lanes": [4, 5, 6, 7]},
+        ]
+
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            _make_custom_step().fpf_verify_recovered_state(params)
+
+    def test_rf_row_missing_full_collector_plane_fails_closed(self):
+        collectors = self._collectors()
+        row = collectors["hrt_remote_failure_vf1"].rows[0]
+        row.plane_ids = [0, 1, 2]
+        row.lane_counts = [0, 0, 0]
+
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "full collector planes"):
+                _make_custom_step().fpf_verify_recovered_state(self._params())
+
+    def test_small_future_timestamp_within_grace_is_fresh(self):
+        collectors = self._collectors()
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(1000.1)
+        params = self._params()
+        params["future_timestamp_grace_sec"] = 0.5
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.time",
+                return_value=1000.0,
+            ),
+        ):
+            _make_custom_step().fpf_verify_recovered_state(params)
+
+    def test_future_timestamp_beyond_grace_fails_distinctly(self):
+        collectors = self._collectors()
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(1001.1)
+        params = self._params()
+        params["future_timestamp_grace_sec"] = 1.0
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.time",
+                return_value=1000.0,
+            ),
+            self.assertRaisesRegex(RuntimeError, "in the future \\(grace 1s\\)"),
+        ):
+            _make_custom_step().fpf_verify_recovered_state(params)
 
 
 class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):

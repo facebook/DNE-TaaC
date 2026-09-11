@@ -3675,7 +3675,8 @@ def create_fpf_hrt_session_stat_check(
 
     ``only_hosts`` scopes a disruption contract to the affected host while the
     shared collector can still retain unaffected hosts for subsequent recovery
-    gates and stable checks.
+    gates and stable checks. ``None`` preserves host auto-discovery; an explicit
+    nonempty scope fails closed if any requested host has no in-window samples.
     """
     params: t.Dict[str, t.Any] = {
         "mode": mode,

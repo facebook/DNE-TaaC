@@ -19,7 +19,9 @@ Two contracts via ``mode``:
     Signal 2 — AFTER the disruption stops the count recovers to
       ``expected_connected`` (32) and holds there for >= ``recovery_min_sec``.
     FAILs if either signal is violated, SKIPs when there are no in-window
-    samples, else PASSes. SKIPs (inconclusive) when the disruption was verified
+    samples and no exact host scope was requested, else PASSes. An explicitly
+    requested host with no samples FAILs closed. SKIPs (inconclusive) when the
+    disruption was verified
     ineffective.
 
   mode="stable": the CONNECTED count stays at ``expected_connected`` across the
@@ -161,7 +163,10 @@ class FpfHrtSessionStatHealthCheck(
         # The single collector may hold both the affected host and unaffected
         # controls. A disruption check can explicitly select only the host whose
         # session census is expected to drop; stable checks default to all hosts.
-        configured_hosts = [str(host) for host in check_params.get("only_hosts", [])]
+        configured_hosts = [
+            str(host) for host in (check_params.get("only_hosts") or [])
+        ]
+        exact_host_scope = bool(configured_hosts)
         hosts = configured_hosts or collector.hosts_in_window(window_start, window_end)
         if not hosts:
             hosts = list(getattr(collector, "hosts", []) or [])
@@ -199,6 +204,12 @@ class FpfHrtSessionStatHealthCheck(
                     impacted_lanes,
                     impacted_tuples_by_host_device.get(host, {}),
                     recovery_min_sec,
+                )
+            if exact_host_scope and hr.status == "SKIP":
+                hr.status = "FAIL"
+                hr.reason = (
+                    "Requested scoped host has no in-window HRT session samples — "
+                    f"{hr.reason}"
                 )
             host_results.append(hr)
 

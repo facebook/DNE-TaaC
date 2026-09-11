@@ -455,6 +455,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                 self.assertEqual(_step_params(steps[anchor + 1])["duration"], 120)
                 self.assertEqual(_step_params(steps[anchor + 2])["duration"], 300)
                 gate_params = _step_params(steps[gate])
+                self.assertEqual(gate_params["future_timestamp_grace_sec"], 1.0)
                 self.assertEqual(
                     gate_params["device_planes_by_host"],
                     {
@@ -478,6 +479,14 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                 )
                 self.assertEqual(
                     _params(collector)["fsdb_session_hosts"], [SERVER, CLIENT]
+                )
+                collector_params = _params(collector)
+                expected_prod_hosts = set(
+                    collector_params.get("prod_prefixes_by_host", {})
+                ) or {collector_params["prod_prefix_host"]}
+                self.assertEqual(
+                    set(gate_params["prod_prefix_expectations_by_host"]),
+                    expected_prod_hosts,
                 )
 
         tc30_longevity = fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[-1]

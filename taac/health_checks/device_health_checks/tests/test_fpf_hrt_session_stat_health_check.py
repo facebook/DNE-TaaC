@@ -140,6 +140,58 @@ class TestFpfHrtSessionStatHealthCheck(unittest.IsolatedAsyncioTestCase):
         collector.evaluate_window.assert_called_once()
         self.assertEqual(collector.evaluate_window.call_args.kwargs["host"], GPU_HOST)
 
+    async def test_only_hosts_none_preserves_auto_discovery(self):
+        res = FsdbSessionWindowResult(
+            host=GPU_HOST,
+            samples=40,
+            error_samples=0,
+            min_connected=28,
+            max_connected=32,
+            last_connected=32,
+            reached_expected=True,
+            impacted_lane_churn={0: True},
+        )
+        collector = _make_collector(res)
+
+        result = await self._run(
+            collector,
+            {
+                "mode": "disruption",
+                "only_hosts": None,
+                "expected_connected_during": 28,
+                "impacted_lanes": [0],
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertEqual(collector.hosts_in_window.call_count, 1)
+
+    async def test_explicit_scoped_host_without_samples_fails_closed(self):
+        missing = FsdbSessionWindowResult(
+            host="missing-host",
+            samples=0,
+            error_samples=0,
+            min_connected=None,
+            max_connected=None,
+            last_connected=None,
+            reached_expected=False,
+            detail="no non-null in-window samples",
+        )
+        collector = _make_collector(missing, hosts=(GPU_HOST,))
+
+        result = await self._run(
+            collector,
+            {
+                "mode": "disruption",
+                "only_hosts": ["missing-host"],
+                "expected_connected_during": 28,
+                "impacted_lanes": [0],
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("Requested scoped host", result.message)
+
     async def test_disruption_uses_exact_device_local_plane_churn(self):
         """A healthy dev0/L0 cannot satisfy the impacted dev1/L0 tuple."""
         res = FsdbSessionWindowResult(

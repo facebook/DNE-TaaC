@@ -3252,6 +3252,7 @@ def create_fpf_verify_recovered_state_step(
     ],
     rf_vf_groups: t.List[t.Dict[str, t.Any]],
     max_age_sec: float = 30.0,
+    future_timestamp_grace_sec: float = 1.0,
     description: t.Optional[str] = None,
 ) -> Step:
     """Point gate for fresh exact recovered state before baseline qualification."""
@@ -3270,6 +3271,7 @@ def create_fpf_verify_recovered_state_step(
                     ),
                     "rf_vf_groups": rf_vf_groups,
                     "max_age_sec": max_age_sec,
+                    "future_timestamp_grace_sec": future_timestamp_grace_sec,
                 }
             )
         ),

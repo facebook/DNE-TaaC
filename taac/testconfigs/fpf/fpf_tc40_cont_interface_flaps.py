@@ -192,6 +192,7 @@ def create_fpf_cont_interface_flaps_test_config(
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name=f"{test_name}_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefix_host=PROD_PREFIX_HOST,
         prod_prefixes_by_host=prod_prefixes_by_host,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
