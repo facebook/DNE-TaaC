@@ -171,6 +171,7 @@ def create_fpf_tc35_test_config() -> TestConfig:
                 hosts=GPU_HOSTS,
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,

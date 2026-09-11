@@ -209,7 +209,7 @@ def create_fpf_agent_kill_test_config(
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 enable_fsdb_session_collector=True,
-                fsdb_session_host=GPU_HOSTS[0],
+                fsdb_session_hosts=GPU_HOSTS,
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
                 rf_vf_groups=RF_VF_GROUPS,
             ),

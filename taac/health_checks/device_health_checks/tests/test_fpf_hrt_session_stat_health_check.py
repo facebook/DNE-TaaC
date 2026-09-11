@@ -113,6 +113,33 @@ class TestFpfHrtSessionStatHealthCheck(unittest.IsolatedAsyncioTestCase):
         result = await self._run(collector, params)
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    async def test_disruption_only_hosts_excludes_unaffected_control(self):
+        res = FsdbSessionWindowResult(
+            host=GPU_HOST,
+            samples=40,
+            error_samples=0,
+            min_connected=28,
+            max_connected=32,
+            last_connected=32,
+            reached_expected=True,
+            impacted_lane_churn={0: True},
+        )
+        collector = _make_collector(res, hosts=(GPU_HOST, "control-host"))
+        result = await self._run(
+            collector,
+            {
+                "mode": "disruption",
+                "only_hosts": [GPU_HOST],
+                "expected_connected": 32,
+                "expected_connected_during": 28,
+                "impacted_lanes": [0],
+                "recovery_min_sec": 60,
+            },
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        collector.evaluate_window.assert_called_once()
+        self.assertEqual(collector.evaluate_window.call_args.kwargs["host"], GPU_HOST)
+
     async def test_disruption_uses_exact_device_local_plane_churn(self):
         """A healthy dev0/L0 cannot satisfy the impacted dev1/L0 tuple."""
         res = FsdbSessionWindowResult(

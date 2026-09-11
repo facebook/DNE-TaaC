@@ -350,6 +350,40 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         )[0]
         self.assertTrue(result.passed)
 
+    def test_jsonl_malformed_duration_is_not_an_unscoped_timestamp(self):
+        rows = [
+            {
+                "timestamp": _ts_str(WINDOW_START - 5),
+                "lane_counts": [0],
+                "duration_sec": "ignored-before-trigger",
+            },
+            *[
+                {
+                    "timestamp": _ts_str(WINDOW_START + offset),
+                    "lane_counts": [152 if offset == 30 else 0],
+                    "duration_sec": "bad" if offset == 125 else 0.0,
+                }
+                for offset in [30, *range(120, 181, 5)]
+            ],
+        ]
+        result = FpfHrtRemoteFailureConvergenceHealthCheck(
+            logger=MagicMock()
+        )._evaluate_scale_recovery_from_rows(
+            lane_id=0,
+            expected=0,
+            rows=rows,
+            trigger_ts=WINDOW_START,
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            observation_end_ts=WINDOW_START + 190,
+            poll_grace_sec=10,
+            poll_duration_budget_sec=10,
+        )
+        self.assertFalse(result[1])
+        self.assertTrue(result[5])
+        self.assertIn("malformed RPC duration", result[4])
+        self.assertNotIn("could not be scoped", result[4])
+
     def test_exact_lane_map_is_complete_and_well_typed(self):
         self.assertEqual(
             _normalize_expected_per_lane([0, 1], {"0": 4000, "1": 4000}, True),

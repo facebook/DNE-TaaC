@@ -156,7 +156,7 @@ PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_TARGET_PREFIX = get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)
 PROD_PREFIXES = [PROD_TARGET_PREFIX]
-PROD_PREFIXES_BY_HOST = {PROD_PREFIX_HOST: PROD_PREFIXES}
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 
 # The legacy DUT GTSW (gtsw001) owns lane 0 and remains the TC17 link target.
 # TC19 selects its whole-device drain target independently so a known ambient
@@ -770,6 +770,7 @@ def _fsdb_kill_window_playbooks(
     postchecks = [
         create_fpf_hrt_session_stat_check(
             mode="disruption",
+            only_hosts=[dut_host],
             expected_connected=EXPECTED_FSDB_SESSION_COUNT,
             expected_connected_during=connected_during,
             impacted_lanes=([0] if HRT_DEVICE_IDS == [0] else None),
@@ -1664,7 +1665,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
                 # (tc28/39/49/50/51/52/55) assert against it. Superset of tc41's
                 # collectors task — harmless for the playbooks that don't use it.
                 enable_fsdb_session_collector=True,
-                fsdb_session_host=GPU_HOSTS[0],
+                fsdb_session_hosts=GPU_HOSTS,
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
                 rf_vf_groups=RF_VF_GROUPS,
             ),

@@ -29,6 +29,7 @@ from taac.libs.fpf.fpf_stress_checks import (
     DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
     derive_scale_recovery_poll_grace_sec,
     evaluate_scale_recovery_samples,
+    normalize_scale_recovery_poll_duration,
 )
 from taac.health_check.health_check import types as hc_types
 
@@ -552,6 +553,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         sample_durations_sec: t.Dict[float, float] = {}
         error_count = 0
         unscoped_timestamp_count = 0
+        invalid_duration_count = 0
         for row in rows:
             try:
                 row_ts = _parse_ts(row["timestamp"]).timestamp()
@@ -570,12 +572,13 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 error_count += 1
                 continue
             samples.append((row_ts, int(lane_counts[lane_id])))
-            try:
-                sample_durations_sec[row_ts] = max(
-                    0.0, float(row.get("duration_sec", 0.0))
-                )
-            except (TypeError, ValueError):
-                unscoped_timestamp_count += 1
+            duration = normalize_scale_recovery_poll_duration(
+                row.get("duration_sec", 0.0)
+            )
+            if duration is None:
+                invalid_duration_count += 1
+            else:
+                sample_durations_sec[row_ts] = duration
 
         evaluation = evaluate_scale_recovery_samples(
             samples,
@@ -589,6 +592,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             poll_duration_budget_sec=poll_duration_budget_sec,
             sample_durations_sec=sample_durations_sec,
             unscoped_timestamp_count=unscoped_timestamp_count,
+            invalid_duration_count=invalid_duration_count,
         )
         return (
             lane_id,

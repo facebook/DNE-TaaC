@@ -94,6 +94,8 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
     def _collectors(self) -> dict[str, MagicMock]:
         now = time.strftime("%Y-%m-%d %H:%M:%S.000%z")
         hosts = ["server", "client"]
+        device_ids = [0, 1]
+        local_planes = [0, 1, 2, 3]
 
         def rows(**kwargs):
             return [SimpleNamespace(timestamp=now, valid=True, notes="", **kwargs)]
@@ -102,33 +104,56 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
         bulk.rows = [
             row
             for host in hosts
+            for device_id in device_ids
             for row in rows(
-                host=host, device_id=0, lane_counts=[4032, 4032, 4032, 4032]
+                host=host,
+                device_id=device_id,
+                lane_counts=[4032, 4032, 4032, 4032],
+                plane_ids=local_planes,
             )
         ]
         plane = MagicMock()
         plane.rows = [
             row
             for host in hosts
+            for device_id in device_ids
             for row in rows(
                 host=host,
-                device_id=0,
+                device_id=device_id,
                 plane_states={0: "UP", 1: "UP", 2: "UP", 3: "UP"},
             )
         ]
         sessions = MagicMock()
         sessions.rows = [row for host in hosts for row in rows(host=host, connected=32)]
-        remote = MagicMock()
-        remote.rows = [
+        remote_vf1 = MagicMock()
+        remote_vf1.rows = [
             row
             for host in hosts
-            for row in rows(host=host, device_id=0, lane_counts=[0, 0, 0, 0])
+            for row in rows(
+                host=host,
+                device_id=0,
+                lane_counts=[0, 0, 0, 0],
+                plane_ids=local_planes,
+            )
+        ]
+        remote_vf2 = MagicMock()
+        remote_vf2.rows = [
+            row
+            for host in hosts
+            for row in rows(
+                host=host,
+                device_id=1,
+                lane_counts=[0, 0, 0, 0],
+                plane_ids=local_planes,
+            )
         ]
         reachability = SimpleNamespace(
+            device_ids=[0],
             reachable_planes=[0, 1, 2, 3],
             drained_planes=[],
-            unreachable_planes=[4, 5, 6, 7],
-            plane_up=list(range(8)),
+            unreachable_planes=[],
+            plane_up=[0, 1, 2, 3],
+            plane_down=[],
         )
         prod = MagicMock()
         prod.rows = [
@@ -140,23 +165,34 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             "hrt": bulk,
             "hrt_plane_status": plane,
             "hrt_fsdb_session": sessions,
-            "hrt_remote_failure_vf1": remote,
+            "hrt_remote_failure_vf1": remote_vf1,
+            "hrt_remote_failure_vf2": remote_vf2,
             "prod_hrt_prefix": prod,
         }
 
     def _params(self) -> dict:
-        return {
-            "hosts": ["server", "client"],
+        prod_expectation = {
             "device_ids": [0],
-            "planes": [0, 1, 2, 3],
+            "reachable_planes": [0, 1, 2, 3],
+            "drained_planes": [],
+            "unreachable_planes": [],
+            "plane_up": [0, 1, 2, 3],
+            "plane_down": [],
+        }
+        return {
+            "device_planes_by_host": {
+                host: {"0": [0, 1, 2, 3], "1": [0, 1, 2, 3]}
+                for host in ("server", "client")
+            },
             "expected_count": 4032,
             "expected_sessions": 32,
-            "prefixes_by_host": {
-                "server": ["2401:db00::/64"],
-                "client": ["2401:db00::/64"],
+            "prod_prefix_expectations_by_host": {
+                host: {"2401:db00::/64": prod_expectation}
+                for host in ("server", "client")
             },
             "rf_vf_groups": [
-                {"suffix": "vf1", "device_ids": [0], "lanes": [0, 1, 2, 3]}
+                {"suffix": "vf1", "device_ids": [0], "lanes": [0, 1, 2, 3]},
+                {"suffix": "vf2", "device_ids": [1], "lanes": [0, 1, 2, 3]},
             ],
             "max_age_sec": 30,
         }
@@ -182,6 +218,40 @@ class TestFpfRecoveredStateGate(unittest.TestCase):
             side_effect=collectors.get,
         ):
             with self.assertRaisesRegex(RuntimeError, "no row for client"):
+                _make_custom_step().fpf_verify_recovered_state(self._params())
+
+    def test_missing_client_session_fails_closed(self):
+        collectors = self._collectors()
+        collectors["hrt_fsdb_session"].rows = collectors["hrt_fsdb_session"].rows[:1]
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no row for client"):
+                _make_custom_step().fpf_verify_recovered_state(self._params())
+
+    def test_plane_counts_are_keyed_by_declared_plane_ids(self):
+        collectors = self._collectors()
+        first = collectors["hrt"].rows[0]
+        first.plane_ids = [3, 2, 1, 0]
+        first.lane_counts = [4032, 4032, 4032, 4031]
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
+                _make_custom_step().fpf_verify_recovered_state(self._params())
+
+    def test_prod_prefix_wrong_device_fails_closed(self):
+        collectors = self._collectors()
+        collectors["prod_hrt_prefix"].rows[0].prefixes["2401:db00::/64"].device_ids = [
+            1
+        ]
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "actual="):
                 _make_custom_step().fpf_verify_recovered_state(self._params())
 
 

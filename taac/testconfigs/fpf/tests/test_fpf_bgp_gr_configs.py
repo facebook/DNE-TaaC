@@ -938,6 +938,12 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         hosts = ["twshared1352.03.mwg2", "twshared1375.03.mwg2"]
         with (
             patch.object(fpf_shared_injection_suite, "GPU_HOSTS", hosts),
+            patch.object(fpf_shared_injection_suite, "PROD_PREFIX_HOST", hosts[0]),
+            patch.object(
+                fpf_shared_injection_suite,
+                "PROD_PREFIXES_BY_HOST",
+                {hosts[0]: [fpf_shared_injection_suite.PROD_TARGET_PREFIX]},
+            ),
             patch.dict(
                 os.environ,
                 {"TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5"},
@@ -1076,11 +1082,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         for check in baseline_prod_checks:
             self.assertEqual(
                 _check_params(check)["prefixes_by_host"],
-                {
-                    fpf_shared_injection_suite.PROD_PREFIX_HOST: [
-                        fpf_shared_injection_suite.PROD_TARGET_PREFIX
-                    ]
-                },
+                {hosts[0]: [fpf_shared_injection_suite.PROD_TARGET_PREFIX]},
             )
 
         expected_conditional_route_impacts = {host: [0] for host in hosts}

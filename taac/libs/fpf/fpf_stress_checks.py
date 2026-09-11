@@ -483,6 +483,19 @@ def scale_recovery_observation_sec(
     )
 
 
+def normalize_scale_recovery_poll_duration(value: object) -> Optional[float]:
+    """Return a finite non-negative RPC duration, or ``None`` if malformed."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(duration) or duration < 0:
+        return None
+    return duration
+
+
 def evaluate_scale_recovery_samples(
     samples: Sequence[Tuple[float, int]],
     *,
@@ -496,6 +509,7 @@ def evaluate_scale_recovery_samples(
     poll_duration_budget_sec: float = 0.0,
     sample_durations_sec: Optional[Dict[float, float]] = None,
     unscoped_timestamp_count: int = 0,
+    invalid_duration_count: int = 0,
 ) -> ScaleRecoveryEvaluation:
     """Require bounded recovery plus complete, fresh exact-state evidence.
 
@@ -547,22 +561,12 @@ def evaluate_scale_recovery_samples(
                 f"the {max_convergence_sec:g}s recovery window",
             )
     else:
-        recovery_index = next(
-            (
-                index
-                for index in range(first_mismatch_index + 1, len(ordered))
-                if ordered[index][1] == expected
-            ),
-            None,
-        )
-        if recovery_index is None:
-            return ScaleRecoveryEvaluation(
-                False,
-                False,
-                last_actual,
-                None,
-                f"never recovered to exact {expected}",
-            )
+        # The exact-final guard above guarantees an expected-valued sample after
+        # the first mismatch, so this bounded scan has no impossible sentinel
+        # branch while still preserving explicit post-recovery regression checks.
+        recovery_index = first_mismatch_index + 1
+        while ordered[recovery_index][1] != expected:
+            recovery_index += 1
         regression = next(
             (
                 (ts, value)
@@ -642,6 +646,11 @@ def evaluate_scale_recovery_samples(
         coverage_gaps.append(
             f"{unscoped_timestamp_count} row(s) had unparseable timestamps and "
             "could not be scoped before/after the mutation"
+        )
+    if invalid_duration_count:
+        coverage_gaps.append(
+            f"{invalid_duration_count} post-mutation row(s) had malformed RPC "
+            "duration metadata"
         )
     if coverage_gaps:
         return ScaleRecoveryEvaluation(
@@ -1898,6 +1907,7 @@ class HrtRemoteFailureCollector(BaseCollector):
             sample_durations_sec: Dict[float, float] = {}
             error_count = 0
             unscoped_timestamp_count = 0
+            invalid_duration_count = 0
             for row in self.rows:
                 try:
                     row_ts = _parse_ts(row.timestamp).timestamp()
@@ -1913,7 +1923,11 @@ class HrtRemoteFailureCollector(BaseCollector):
                     error_count += 1
                     continue
                 samples.append((row_ts, row.lane_counts[lane_id]))
-                sample_durations_sec[row_ts] = max(0.0, row.duration_sec)
+                duration = normalize_scale_recovery_poll_duration(row.duration_sec)
+                if duration is None:
+                    invalid_duration_count += 1
+                else:
+                    sample_durations_sec[row_ts] = duration
 
             evaluation = evaluate_scale_recovery_samples(
                 samples,
@@ -1931,6 +1945,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                 poll_duration_budget_sec=poll_duration_budget_sec,
                 sample_durations_sec=sample_durations_sec,
                 unscoped_timestamp_count=unscoped_timestamp_count,
+                invalid_duration_count=invalid_duration_count,
             )
             results.append(
                 PerLaneResult(

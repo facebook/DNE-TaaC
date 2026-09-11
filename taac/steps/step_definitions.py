@@ -3244,12 +3244,12 @@ def create_fpf_record_recovered_baseline_time_step(
 
 def create_fpf_verify_recovered_state_step(
     *,
-    hosts: t.List[str],
-    device_ids: t.List[int],
-    planes: t.List[int],
+    device_planes_by_host: t.Dict[str, t.Dict[str, t.List[int]]],
     expected_count: int,
     expected_sessions: int,
-    prefixes_by_host: t.Dict[str, t.List[str]],
+    prod_prefix_expectations_by_host: t.Dict[
+        str, t.Dict[str, t.Dict[str, t.List[int]]]
+    ],
     rf_vf_groups: t.List[t.Dict[str, t.Any]],
     max_age_sec: float = 30.0,
     description: t.Optional[str] = None,
@@ -3262,12 +3262,12 @@ def create_fpf_verify_recovered_state_step(
             json_params=json.dumps(
                 {
                     "custom_step_name": "fpf_verify_recovered_state",
-                    "hosts": hosts,
-                    "device_ids": device_ids,
-                    "planes": planes,
+                    "device_planes_by_host": device_planes_by_host,
                     "expected_count": expected_count,
                     "expected_sessions": expected_sessions,
-                    "prefixes_by_host": prefixes_by_host,
+                    "prod_prefix_expectations_by_host": (
+                        prod_prefix_expectations_by_host
+                    ),
                     "rf_vf_groups": rf_vf_groups,
                     "max_age_sec": max_age_sec,
                 }

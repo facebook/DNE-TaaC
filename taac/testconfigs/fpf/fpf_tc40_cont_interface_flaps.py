@@ -216,6 +216,7 @@ def create_fpf_cont_interface_flaps_test_config(
                 hosts=GPU_HOSTS,
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=(
                     None if observe_prod_prefix_on_all_hosts else PROD_PREFIXES

@@ -193,6 +193,7 @@ def create_fpf_tc32_test_config() -> TestConfig:
                 hosts=GPU_HOSTS,
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=PROD_PREFIXES,
                 prod_prefix_host=PROD_PREFIX_HOST,

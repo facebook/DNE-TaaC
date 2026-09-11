@@ -3061,6 +3061,7 @@ def create_fpf_hrt_fsdb_session_check(
     impacted_tuples_by_host_device: t.Optional[
         t.Dict[str, t.Dict[str, t.List[int]]]
     ] = None,
+    only_hosts: t.Optional[t.List[str]] = None,
     reconcile_device_id: t.Optional[int] = None,
     planes_per_gpu: t.Optional[int] = None,
     check_id: t.Optional[str] = None,
@@ -3086,6 +3087,8 @@ def create_fpf_hrt_fsdb_session_check(
         params["impacted_lanes_by_host_gpu"] = impacted_lanes_by_host_gpu
     if impacted_tuples_by_host_device is not None:
         params["impacted_tuples_by_host_device"] = impacted_tuples_by_host_device
+    if only_hosts:
+        params["only_hosts"] = only_hosts
     if reconcile_device_id is not None:
         params["reconcile_device_id"] = reconcile_device_id
     if planes_per_gpu is not None:
@@ -3645,6 +3648,7 @@ def create_fpf_hrt_session_stat_check(
     impacted_tuples_by_host_device: t.Optional[
         t.Dict[str, t.Dict[str, t.List[int]]]
     ] = None,
+    only_hosts: t.Optional[t.List[str]] = None,
     recovery_min_sec: float = 60.0,
     lookback_sec: int = 900,
     window_start: t.Optional[float] = None,
@@ -3668,6 +3672,10 @@ def create_fpf_hrt_session_stat_check(
 
     mode="stable": the CONNECTED count stays at ``expected_connected`` across the
     whole window with no churn.
+
+    ``only_hosts`` scopes a disruption contract to the affected host while the
+    shared collector can still retain unaffected hosts for subsequent recovery
+    gates and stable checks.
     """
     params: t.Dict[str, t.Any] = {
         "mode": mode,
@@ -3680,6 +3688,8 @@ def create_fpf_hrt_session_stat_check(
         params["impacted_lanes"] = impacted_lanes
     if impacted_tuples_by_host_device is not None:
         params["impacted_tuples_by_host_device"] = impacted_tuples_by_host_device
+    if only_hosts:
+        params["only_hosts"] = only_hosts
     if window_start is not None:
         params["window_start"] = window_start
     if window_end is not None:

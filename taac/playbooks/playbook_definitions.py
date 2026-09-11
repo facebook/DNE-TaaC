@@ -24934,6 +24934,123 @@ def create_fpf_prefix_injection_stress_playbook(
 FPF_RECOVERED_BASELINE_QUALIFICATION_SEC: int = 120
 
 
+def _fpf_recovered_state_contract(
+    *,
+    hosts: list[str],
+    device_ids: list[int],
+    local_planes: list[int],
+    prefixes_by_host: dict[str, list[str]],
+    prod_prefix_device_id: int,
+    prod_prefix_vf_suffix: str,
+    rf_vf_groups: list[dict[str, t.Any]],
+) -> tuple[
+    dict[str, dict[str, list[int]]],
+    dict[str, dict[str, dict[str, list[int]]]],
+]:
+    """Build an exact serialized HRT topology and prod-prefix contract.
+
+    The same device can expose both VF halves as distinct plane ranges (legacy
+    dev0/planes0..7), or each VF can be a separate device with local planes
+    0..3.  Deriving the producer's plane universe from the declared RF groups
+    preserves both layouts without treating local plane IDs as global lanes.
+    """
+    if not hosts or len(hosts) != len(set(hosts)):
+        raise ValueError("recovered-state hosts must be nonempty and unique")
+    if not device_ids or len(device_ids) != len(set(device_ids)):
+        raise ValueError("recovered-state device_ids must be nonempty and unique")
+    if not local_planes or len(local_planes) != len(set(local_planes)):
+        raise ValueError("recovered-state local planes must be nonempty and unique")
+    if any(device_id < 0 for device_id in device_ids) or any(
+        plane < 0 for plane in local_planes
+    ):
+        raise ValueError("recovered-state device and local-plane IDs must be >= 0")
+    unknown_prefix_hosts = sorted(set(prefixes_by_host) - set(hosts))
+    if unknown_prefix_hosts:
+        raise ValueError(
+            f"prod-prefix expectations contain unknown hosts: {unknown_prefix_hosts}"
+        )
+    if prod_prefix_device_id not in device_ids:
+        raise ValueError(
+            f"prod-prefix device {prod_prefix_device_id} is not collected: "
+            f"{device_ids}"
+        )
+
+    declared_devices = set(device_ids)
+    declared_planes = set(local_planes)
+    producer_planes: set[int] | None = None
+    producer_plane_universe: set[int] = set()
+    rf_planes_by_device = {device_id: set() for device_id in device_ids}
+    for group in rf_vf_groups:
+        suffix = str(group.get("suffix", ""))
+        group_devices = [int(value) for value in group.get("device_ids", [0])]
+        group_planes = [int(value) for value in group.get("lanes", [])]
+        if not suffix or not group_planes:
+            raise ValueError("every recovered RF VF group needs a suffix and lanes")
+        if len(group_devices) != len(set(group_devices)) or len(group_planes) != len(
+            set(group_planes)
+        ):
+            raise ValueError(f"RF group {suffix} has duplicate device or plane IDs")
+        if not set(group_devices).issubset(declared_devices):
+            raise ValueError(
+                f"RF group {suffix} has devices outside collected topology: "
+                f"{group_devices} vs {device_ids}"
+            )
+        if not set(group_planes).issubset(declared_planes):
+            raise ValueError(
+                f"RF group {suffix} has planes outside collected topology: "
+                f"{group_planes} vs {local_planes}"
+            )
+        for device_id in group_devices:
+            rf_planes_by_device[device_id].update(group_planes)
+        if prod_prefix_device_id in group_devices:
+            producer_plane_universe.update(group_planes)
+            if suffix == prod_prefix_vf_suffix:
+                if producer_planes is not None:
+                    raise ValueError(
+                        f"duplicate prod-prefix VF group {prod_prefix_vf_suffix!r}"
+                    )
+                producer_planes = set(group_planes)
+
+    incomplete_devices = {
+        device_id: sorted(declared_planes - covered_planes)
+        for device_id, covered_planes in rf_planes_by_device.items()
+        if covered_planes != declared_planes
+    }
+    if incomplete_devices:
+        raise ValueError(
+            "RF VF groups do not cover every declared device/local-plane tuple: "
+            f"{incomplete_devices}"
+        )
+
+    if prefixes_by_host and producer_planes is None:
+        raise ValueError(
+            f"prod-prefix VF group {prod_prefix_vf_suffix!r} does not contain "
+            f"device {prod_prefix_device_id}"
+        )
+
+    device_planes_by_host = {
+        host: {str(device_id): sorted(local_planes) for device_id in device_ids}
+        for host in hosts
+    }
+    prod_prefix_expectations_by_host = {
+        host: {
+            prefix: {
+                "device_ids": [prod_prefix_device_id],
+                "reachable_planes": sorted(producer_planes or set()),
+                "drained_planes": [],
+                "unreachable_planes": sorted(
+                    producer_plane_universe - (producer_planes or set())
+                ),
+                "plane_up": sorted(producer_plane_universe),
+                "plane_down": [],
+            }
+            for prefix in prefixes
+        }
+        for host, prefixes in prefixes_by_host.items()
+    }
+    return device_planes_by_host, prod_prefix_expectations_by_host
+
+
 def _build_fpf_generic_checks(
     *,
     hosts: list[str],
@@ -25717,6 +25834,8 @@ def create_fpf_hardening_playbook_v2(
     ensure_traffic_after_disruption: bool = False,
     collector_precheck_lookback_sec: int | None = None,
     recovered_baseline_qualification_sec: int | None = None,
+    prod_prefix_device_id: int = 0,
+    prod_prefix_vf_suffix: str = "vf1",
     scale_mutation_mode: bool = False,
     scale_recovery_sla_sec: float = 120.0,
     scale_recovery_stability_sec: float = 60.0,
@@ -25882,15 +26001,17 @@ def create_fpf_hardening_playbook_v2(
     scale_poll_grace_sec = derive_scale_recovery_poll_grace_sec(
         poll_interval_sec=collector_poll_interval_sec
     )
-    if (
-        recovered_baseline_qualification_sec is not None
-        and recovered_baseline_qualification_sec
-        != FPF_RECOVERED_BASELINE_QUALIFICATION_SEC
-    ):
-        raise ValueError(
-            "recovered_baseline_qualification_sec must use the canonical "
-            f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}s qualification"
-        )
+    if recovered_baseline_qualification_sec is not None:
+        if not isinstance(recovered_baseline_qualification_sec, int) or isinstance(
+            recovered_baseline_qualification_sec, bool
+        ) or (
+            recovered_baseline_qualification_sec
+            < FPF_RECOVERED_BASELINE_QUALIFICATION_SEC
+        ):
+            raise ValueError(
+                "recovered_baseline_qualification_sec must be an integer >= "
+                f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}"
+            )
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
     resolved_lanes = lanes if lanes is not None else [0, 1]
@@ -25901,7 +26022,26 @@ def create_fpf_hardening_playbook_v2(
             for device_id in group.get("device_ids", [0])
         }
     ) or [0]
-    resolved_prod_prefixes_by_host = prod_prefixes_by_host
+    resolved_prod_prefixes_by_host = prod_prefixes_by_host or (
+        {hosts[0]: list(prod_prefixes)} if hosts and prod_prefixes else None
+    )
+    recovered_device_planes_by_host: dict[str, dict[str, list[int]]] = {}
+    recovered_prod_expectations_by_host: dict[
+        str, dict[str, dict[str, list[int]]]
+    ] = {}
+    if recovered_baseline_qualification_sec is not None:
+        (
+            recovered_device_planes_by_host,
+            recovered_prod_expectations_by_host,
+        ) = _fpf_recovered_state_contract(
+            hosts=hosts,
+            device_ids=resolved_hrt_device_ids,
+            local_planes=resolved_lanes,
+            prefixes_by_host=resolved_prod_prefixes_by_host or {},
+            prod_prefix_device_id=prod_prefix_device_id,
+            prod_prefix_vf_suffix=prod_prefix_vf_suffix,
+            rf_vf_groups=rf_vf_groups or [],
+        )
     # Default the expected HRT FSDB session count to 32 — the per-BE-node count
     # is FIXED at 32 (every one of the 4 GPUs subscribes to all 8 GTSWs:
     # 4 x 8 = 32) regardless of how many GTSWs we observe. The previous
@@ -26047,45 +26187,48 @@ def create_fpf_hardening_playbook_v2(
                 )
             ),
         )
-    if traffic_readiness_step is not None and not ensure_traffic_after_disruption:
+    traffic_after_disruption = ensure_traffic_after_disruption or (
+        recovered_baseline_qualification_sec is not None and bool(disruption_steps)
+    )
+    if traffic_readiness_step is not None and not traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
     if disruption_steps:
         stage_steps.extend(disruption_steps)
-    if traffic_readiness_step is not None and ensure_traffic_after_disruption:
+    if traffic_readiness_step is not None and traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
+    if recovered_baseline_qualification_sec is not None:
+        stage_steps.extend(
+            [
+                create_fpf_verify_recovered_state_step(
+                    device_planes_by_host=recovered_device_planes_by_host,
+                    expected_count=prefix_count,
+                    expected_sessions=fsdb_sessions_per_host,
+                    prod_prefix_expectations_by_host=(
+                        recovered_prod_expectations_by_host
+                    ),
+                    rf_vf_groups=rf_vf_groups or [],
+                    description=(
+                        "Fail-closed current recovery gate: exact sessions, "
+                        "prod-prefix, HRT/RF tuples, and planes"
+                    ),
+                ),
+                create_fpf_record_recovered_baseline_time_step(
+                    description=(
+                        "Anchor recovered baseline after exact current-state "
+                        "and traffic gates"
+                    )
+                ),
+                create_longevity_step(
+                    duration=recovered_baseline_qualification_sec,
+                    description=(
+                        "Recovered-state qualification — require exact healthy "
+                        "state continuously for "
+                        f"{recovered_baseline_qualification_sec}s"
+                    ),
+                ),
+            ]
+        )
     if not disruption_steps:
-        if recovered_baseline_qualification_sec is not None:
-            stage_steps.extend(
-                [
-                    create_fpf_verify_recovered_state_step(
-                        hosts=hosts,
-                        device_ids=resolved_hrt_device_ids,
-                        planes=resolved_lanes,
-                        expected_count=prefix_count,
-                        expected_sessions=fsdb_sessions_per_host,
-                        prefixes_by_host=resolved_prod_prefixes_by_host or {},
-                        rf_vf_groups=rf_vf_groups or [],
-                        description=(
-                            "Fail-closed current recovery gate: exact sessions, "
-                            "both-host prod-prefix, HRT/RF tuples, and planes"
-                        ),
-                    ),
-                    create_fpf_record_recovered_baseline_time_step(
-                        description=(
-                            "Anchor recovered baseline after exact current-state "
-                            "and traffic gates"
-                        )
-                    ),
-                    create_longevity_step(
-                        duration=FPF_RECOVERED_BASELINE_QUALIFICATION_SEC,
-                        description=(
-                            "Recovered-state qualification — require exact healthy "
-                            "state continuously for "
-                            f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}s"
-                        ),
-                    ),
-                ]
-            )
         if soak_duration_sec > 0:
             stage_steps.append(
                 create_longevity_step(
@@ -26204,72 +26347,62 @@ def create_fpf_hardening_playbook_v2(
             if not _glanes:
                 continue
             if scale_mutation_mode:
-                remote_failure_check = (
-                    create_fpf_hrt_remote_failure_convergence_check(
-                        lanes=_glanes,
-                        device_ids=_g.get("device_ids", [0]),
-                        expected_per_lane=_gexpected,
-                        direction=_rf_direction,
-                        max_convergence_sec=int(scale_recovery_sla_sec),
-                        recovery_stability_sec=scale_recovery_stability_sec,
-                        poll_grace_sec=scale_poll_grace_sec,
-                        poll_interval_sec=collector_poll_interval_sec,
-                        poll_duration_budget_sec=collector_poll_duration_budget_sec,
-                        use_live_collectors=True,
-                        use_mutation_time=True,
-                        collector_name=f"hrt_remote_failure_{_g['suffix']}",
-                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                        check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
-                    )
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
+                    direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
+                    recovery_stability_sec=scale_recovery_stability_sec,
+                    poll_grace_sec=scale_poll_grace_sec,
+                    poll_interval_sec=collector_poll_interval_sec,
+                    poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
                 )
             else:
-                remote_failure_check = (
-                    create_fpf_hrt_remote_failure_convergence_check(
-                        lanes=_glanes,
-                        device_ids=_g.get("device_ids", [0]),
-                        expected_per_lane=_gexpected,
-                        direction=_rf_direction,
-                        use_live_collectors=True,
-                        use_mutation_time=False,
-                        collector_name=f"hrt_remote_failure_{_g['suffix']}",
-                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                        check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
-                    )
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
+                    direction=_rf_direction,
+                    use_live_collectors=True,
+                    collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
                 )
-            convergence_postchecks.append(remote_failure_check)
+            convergence_postchecks.append(rf_check)
     else:
         _stable_lanes = [lane for lane in resolved_lanes if lane not in drained_lanes]
         if _stable_lanes:
             if scale_mutation_mode:
-                remote_failure_check = (
-                    create_fpf_hrt_remote_failure_convergence_check(
-                        lanes=_stable_lanes,
-                        device_ids=resolved_hrt_device_ids,
-                        direction=_rf_direction,
-                        max_convergence_sec=int(scale_recovery_sla_sec),
-                        recovery_stability_sec=scale_recovery_stability_sec,
-                        poll_grace_sec=scale_poll_grace_sec,
-                        poll_interval_sec=collector_poll_interval_sec,
-                        poll_duration_budget_sec=collector_poll_duration_budget_sec,
-                        use_live_collectors=True,
-                        use_mutation_time=True,
-                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                        check_id="fpf_remote_failure_stable",
-                    )
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_stable_lanes,
+                    device_ids=resolved_hrt_device_ids,
+                    direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
+                    recovery_stability_sec=scale_recovery_stability_sec,
+                    poll_grace_sec=scale_poll_grace_sec,
+                    poll_interval_sec=collector_poll_interval_sec,
+                    poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id="fpf_remote_failure_stable",
                 )
             else:
-                remote_failure_check = (
-                    create_fpf_hrt_remote_failure_convergence_check(
-                        lanes=_stable_lanes,
-                        device_ids=resolved_hrt_device_ids,
-                        direction=_rf_direction,
-                        use_live_collectors=True,
-                        use_mutation_time=False,
-                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                        check_id="fpf_remote_failure_stable",
-                    )
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_stable_lanes,
+                    device_ids=resolved_hrt_device_ids,
+                    direction=_rf_direction,
+                    use_live_collectors=True,
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id="fpf_remote_failure_stable",
                 )
-            convergence_postchecks.append(remote_failure_check)
+            convergence_postchecks.append(rf_check)
     # Fifth collector ↔ fifth validating check: production HRT prefix
     # reachability stability. Only added when the prod_hrt_prefix collector
     # was started (prod_prefixes supplied to FpfStartCollectorsTask).

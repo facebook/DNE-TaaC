@@ -234,12 +234,27 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
         self.assertEqual(len(checks), 1)
         params = _check_params(checks[0])
         self.assertEqual(params["mode"], "disruption")
+        self.assertEqual(
+            params["only_hosts"],
+            [fpf_tc29_fsdb_gr_stop30_reenable.GPU_HOSTS[0]],
+        )
         self.assertEqual(params["expected_connected_during"], 28)
         self.assertEqual(params["impacted_lanes"], [0])
         # Bumped 30 -> 60: a 120s post-re-enable settle inside the disrupt
         # playbook gives the collector window time to observe the 28 -> 32
         # recovery and a full 60s held floor.
         self.assertEqual(params["recovery_min_sec"], 60)
+
+    def test_collects_sessions_for_recovery_gate_on_both_hosts(self):
+        collector = next(
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        self.assertEqual(
+            json.loads(collector.params.json_params)["fsdb_session_hosts"],
+            fpf_tc29_fsdb_gr_stop30_reenable.GPU_HOSTS,
+        )
 
     def test_disrupt_has_post_reenable_settle(self):
         # FIX 6: a settle longevity step follows the re-enable so the session
@@ -373,6 +388,17 @@ class TestFpfTc31FsdbEnableRecover(unittest.TestCase):
         params = _check_params(checks[0])
         self.assertEqual(params["mode"], "stable")
         self.assertEqual(params["expected_connected"], 32)
+
+    def test_collects_sessions_for_recovery_gate_on_both_hosts(self):
+        collector = next(
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        self.assertEqual(
+            json.loads(collector.params.json_params)["fsdb_session_hosts"],
+            fpf_tc31_fsdb_enable_recover.GPU_HOSTS,
+        )
 
     def test_longevity_playbook_has_v2_stable_check_set(self):
         ids = set(_checks_by_id(self.cfg.playbooks[1]).keys())
