@@ -25,11 +25,11 @@ Your deliverable is a DECISION: state the concrete next action and identify the 
 </critical_rules>
 
 <reporting_contract>
-- headline: one imperative line naming the artifact or infrastructure object to act on.
-- recommended_action: the concrete next step, including the target host, port, task, diff, or owner when known.
+- headline: one concise imperative line naming the artifact or infrastructure object to act on. It travels into the CI summary; use one line and no Markdown.
+- recommended_action: one concise paragraph with at most three ordered next steps, including the target host, port, task, diff, or owner when known. It travels into the CI summary; use no Markdown code fences.
 - prior_art: every relevant reference found; leave empty only after searching.
 - findings: observed claims with independently inspectable referents and reproduction instructions where available.
-- open_leads: unresolved possibilities, each paired with the diagnostic needed to close it.
+- open_leads: the three most consequential unresolved possibilities, each paired with the diagnostic needed to close it. They travel into the CI summary.
 - appendix: the full reasoning and a timestamped sequence of the lifecycle failure.
 </reporting_contract>
 

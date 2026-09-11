@@ -86,11 +86,11 @@ Investigative discipline (apply to every claim you make):
 </investigation_workflow>
 
 <reporting_contract>
-- headline: ONE imperative line naming the artifact to act on. It is the only line that travels outside this report, so it has to stand alone without the appendix. "Land D114316715 and purge the cached .ixncfg on the IXIA chassis" is a headline. "IXIA configuration issues observed during the test" is not.
-- recommended_action: what to do next, naming a concrete artifact: the diff to land, the task to file or update, the check to re-specify, the config field to correct, the device to pull. If what this failure needs is a human looking at one specific thing, say which thing and on which host.
+- headline: ONE concise imperative line naming the artifact to act on. It travels into the CI summary, so it has to stand alone without the appendix. "Land D114316715 and purge the cached .ixncfg on the IXIA chassis" is a headline. "IXIA configuration issues observed during the test" is not. Use one line and no Markdown.
+- recommended_action: ONE concise paragraph stating what to do next, naming a concrete artifact: the diff to land, the task to file or update, the check to re-specify, the config field to correct, the device to pull, and the owner when known. It also travels into the CI summary. Use at most three ordered steps and no Markdown code fences.
 - prior_art: every reference you found for this failure on this test config, this check, or this platform. Leave it empty only after you have actually searched, and state in the appendix what you searched for.
 - findings: each one a claim, the referent that backs it, and where one exists a reproduce recipe (host, the exact command, and what its output shows if the claim holds). Nothing runs these commands for you; they are recorded so a human or a later job can. Include one finding per failing check stating whether that check's premise holds on this hardware.
-- open_leads: everything you could not attach a referent to, each with the diagnostic that would close it. Running out of budget produces an open lead, not a silence.
+- open_leads: everything you could not attach a referent to, each with the diagnostic that would close it. Prioritize the three most consequential leads because they travel into the CI summary. Running out of budget produces an open lead, not a silence.
 - appendix: the full narrative, written out in full, and the only place length is welcome. It carries the reasoning, the axis comparison, the control groups you used, what you searched for and did not find, and a timestamped sequence spanning the disruptive-operation window: what happened before it, what it did, what changed at the moment it ran, and whether the system returned to its pre-trigger baseline afterwards. Nothing in the appendix substitutes for a headline that stands on its own.
 </reporting_contract>
 

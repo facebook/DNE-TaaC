@@ -44,6 +44,10 @@ _SECTION_STATUS_DISPLAY: t.Dict[trr_types.SectionStatus, str] = {
 }
 
 MAX_REPORTED_MESSAGE_CHARS: int = 200
+MAX_INVESTIGATION_ASSESSMENT_CHARS: int = 600
+MAX_INVESTIGATION_ACTION_CHARS: int = 1200
+MAX_INVESTIGATION_FOLLOWUP_CHARS: int = 600
+MAX_INVESTIGATION_FOLLOWUPS: int = 3
 
 
 def section_failed(status: trr_types.SectionStatus) -> bool:
@@ -90,11 +94,13 @@ def truncate_message(message: str, max_length: int) -> str:
     return message
 
 
-def _collapse_and_truncate(message: str) -> str:
+def _collapse_and_truncate(
+    message: str, max_length: int = MAX_REPORTED_MESSAGE_CHARS
+) -> str:
     collapsed = " ".join(message.split())
-    if len(collapsed) <= MAX_REPORTED_MESSAGE_CHARS:
+    if len(collapsed) <= max_length:
         return collapsed
-    return collapsed[:MAX_REPORTED_MESSAGE_CHARS] + "..."
+    return collapsed[:max_length] + "..."
 
 
 def check_stage_name(
@@ -265,8 +271,34 @@ def investigation_artifact_lines(
             scope = f"{scope} | {identity}"
         lines.append(f"  {scope}")
         if artifact.headline:
-            lines.append(f"    {artifact.headline}")
-        lines.append(f"    Transcript: {artifact.transcript_url}")
+            assessment = _collapse_and_truncate(
+                artifact.headline, MAX_INVESTIGATION_ASSESSMENT_CHARS
+            )
+            lines.append(f"    Assessment: {assessment}")
+        else:
+            lines.append(
+                "    Assessment: unavailable (the AI report was not structured)"
+            )
+        if artifact.recommended_action:
+            action = _collapse_and_truncate(
+                artifact.recommended_action, MAX_INVESTIGATION_ACTION_CHARS
+            )
+            lines.append(f"    Recommended action: {action}")
+        open_leads = [lead for lead in artifact.open_leads if lead.strip()]
+        if open_leads:
+            lines.append("    Follow-ups:")
+            lines.extend(
+                "      - "
+                + _collapse_and_truncate(lead, MAX_INVESTIGATION_FOLLOWUP_CHARS)
+                for lead in open_leads[:MAX_INVESTIGATION_FOLLOWUPS]
+            )
+            omitted = len(open_leads) - MAX_INVESTIGATION_FOLLOWUPS
+            if omitted > 0:
+                lines.append(
+                    f"      - ({omitted} more follow-up"
+                    f"{'s' if omitted != 1 else ''} in the full transcript)"
+                )
+        lines.append(f"    Full transcript: {artifact.transcript_url}")
     return lines
 
 

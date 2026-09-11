@@ -55,12 +55,17 @@ class InvestigationReport(BaseModel):
 
     headline: str = Field(
         description=(
-            "One imperative line naming the artifact to act on. It has to "
-            "stand alone, without the appendix."
+            "One concise imperative line naming the artifact to act on. Keep it "
+            "on one line, without Markdown, and make it stand alone without the "
+            "appendix."
         )
     )
     recommended_action: str = Field(
-        description="What to do next, naming a concrete artifact."
+        description=(
+            "One concise paragraph stating what to do next, naming the concrete "
+            "artifact, target, and owner when known. Use at most three ordered "
+            "steps and no Markdown code fences."
+        )
     )
     prior_art: list[str] = Field(
         default_factory=list,
@@ -81,7 +86,7 @@ class InvestigationReport(BaseModel):
         default_factory=list,
         description=(
             "What no referent could be produced for, each with the diagnostic "
-            "that would close it."
+            "that would close it. Prioritize the three most consequential leads."
         ),
     )
     appendix: str = Field(

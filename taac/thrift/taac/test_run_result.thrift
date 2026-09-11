@@ -92,6 +92,9 @@ struct InvestigationArtifact {
   3: string transcript_url;
   4: optional string playbook_name;
   5: optional string dut;
+  // Additive presentation fields: older schema-v2 consumers safely omit them.
+  6: optional string recommended_action;
+  7: list<string> open_leads;
 }
 
 struct RunResult {

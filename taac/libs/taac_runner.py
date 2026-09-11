@@ -3534,6 +3534,11 @@ class TaacRunner:
         if not transcript_url:
             return
         headline = render_headline(report)
+        recommended_action = None
+        open_leads: t.List[str] = []
+        if report is not None:
+            recommended_action = report.recommended_action.strip() or None
+            open_leads = [lead.strip() for lead in report.open_leads if lead.strip()]
         self.investigation_artifacts.append(
             trr_types.InvestigationArtifact(
                 phase=phase,
@@ -3541,6 +3546,8 @@ class TaacRunner:
                 transcript_url=transcript_url,
                 playbook_name=playbook_name,
                 dut=dut,
+                recommended_action=recommended_action,
+                open_leads=open_leads,
             )
         )
         if phase == trr_types.InvestigationPhase.TEST_CASE:
