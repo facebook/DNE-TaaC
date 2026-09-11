@@ -26,11 +26,26 @@ from taac.libs.fpf.fpf_collector_registry import (
 )
 from taac.libs.fpf.fpf_stress_checks import (
     _parse_ts,
+    derive_scale_recovery_poll_grace_sec,
     evaluate_scale_recovery_samples,
 )
 from taac.health_check.health_check import types as hc_types
 
 JSONL_PATH = "/tmp/fpf_stress_hrt_remote_failure.jsonl"
+
+
+def _resolve_jsonl_observation_end(
+    rows: t.Sequence[t.Mapping[str, t.Any]], configured_window_end: t.Any
+) -> t.Optional[float]:
+    """Resolve an offline window end without eagerly parsing the fallback."""
+    if configured_window_end is not None:
+        return float(configured_window_end)
+    for row in reversed(rows):
+        try:
+            return _parse_ts(row["timestamp"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 class FpfHrtRemoteFailureConvergenceHealthCheck(
@@ -139,6 +154,11 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 status=hc_types.HealthCheckStatus.SKIP,
                 message=f"No live HRT remote-failure collector '{collector_name}' in registry",
             )
+        poll_grace_sec = check_params.get("poll_grace_sec")
+        if direction == "scale_recovery" and poll_grace_sec is None:
+            poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+                poll_interval_sec=getattr(collector, "interval_sec", None)
+            )
 
         # Lane -> host-NIC mapping note (e.g. "→ beth0@rtptest1544") for messages.
         lane_labels: t.Dict[str, str] = check_params.get("lane_labels", {})
@@ -216,6 +236,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             direction=host_direction,
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
+                            poll_grace_sec=poll_grace_sec,
                             only_hosts=[host],
                         )
                     )
@@ -233,6 +254,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             direction=direction,
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
+                            poll_grace_sec=poll_grace_sec,
                             only_hosts=[host],
                         )
                     )
@@ -255,6 +277,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             direction=direction,
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
+                            poll_grace_sec=poll_grace_sec,
                             only_hosts=[host],
                         )
                     )
@@ -268,6 +291,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 direction=direction,
                 max_convergence_sec=max_convergence_sec,
                 recovery_stability_sec=recovery_stability_sec,
+                poll_grace_sec=poll_grace_sec,
                 only_hosts=only_hosts,
             )
 
@@ -310,7 +334,8 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         details = await everpaste_details_suffix(
             f"HRT remote-failure ({direction}) — per-lane detail",
             [
-                f"{r.device}{_lbl(r.lane)}: [{'PASS' if r.passed else 'FAIL'}] "
+                f"{r.device}{_lbl(r.lane)}: "
+                f"[{'PASS' if r.passed else 'SKIP' if r.inconclusive else 'FAIL'}] "
                 f"{r.detail}"
                 for r in per_lane_results
             ],
@@ -385,9 +410,15 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
 
         first_ts = _parse_ts(rows[0]["timestamp"]).timestamp()
         trigger_ts = first_ts + trigger_delay_sec
-        observation_end_ts = float(
-            check_params.get("window_end", _parse_ts(rows[-1]["timestamp"]).timestamp())
+        observation_end_ts = _resolve_jsonl_observation_end(
+            rows, check_params.get("window_end")
         )
+        if observation_end_ts is None:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message="INCONCLUSIVE — JSONL has no parseable observation timestamp",
+            )
+        poll_grace_sec = check_params.get("poll_grace_sec")
 
         results = [
             self._evaluate_lane_from_rows(
@@ -399,6 +430,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 max_convergence_sec,
                 recovery_stability_sec,
                 observation_end_ts,
+                float(poll_grace_sec) if poll_grace_sec is not None else None,
             )
             for lane_id in sorted(lanes)
         ]
@@ -406,7 +438,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         failures = [r for r in results if not r[1] and not r[5]]
         inconclusive = [r for r in results if r[5]]
         for lane_id, passed, _actual, _conv, detail, is_inconclusive in results:
-            status = "PASS" if passed else "INCONCLUSIVE" if is_inconclusive else "FAIL"
+            status = "PASS" if passed else "SKIP" if is_inconclusive else "FAIL"
             self.logger.info(
                 f"  [HRT remote_failure] Lane {lane_id}: [{status}] {detail}"
             )
@@ -439,6 +471,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         max_convergence_sec: int,
         recovery_stability_sec: float,
         observation_end_ts: float,
+        poll_grace_sec: t.Optional[float],
     ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         if direction in (
             "stable",
@@ -457,6 +490,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 max_convergence_sec,
                 recovery_stability_sec,
                 observation_end_ts,
+                poll_grace_sec,
             )
         if direction == "drain":
             result = self._evaluate_drain_from_rows(
@@ -477,10 +511,18 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         max_convergence_sec: int,
         recovery_stability_sec: float,
         observation_end_ts: float,
+        poll_grace_sec: t.Optional[float],
     ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         samples: t.List[t.Tuple[float, int]] = []
         error_count = 0
         for row in rows:
+            try:
+                row_ts = _parse_ts(row["timestamp"]).timestamp()
+            except (KeyError, ValueError):
+                error_count += 1
+                continue
+            if row_ts < trigger_ts:
+                continue
             lane_counts = row.get("lane_counts", [])
             if not row.get("valid", True) or str(row.get("notes", "")).startswith(
                 "error:"
@@ -488,11 +530,6 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 error_count += 1
                 continue
             if lane_id >= len(lane_counts):
-                error_count += 1
-                continue
-            try:
-                row_ts = _parse_ts(row["timestamp"]).timestamp()
-            except (KeyError, ValueError):
                 error_count += 1
                 continue
             samples.append((row_ts, int(lane_counts[lane_id])))
@@ -505,6 +542,11 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             observation_end_ts=observation_end_ts,
             max_convergence_sec=max_convergence_sec,
             recovery_stability_sec=recovery_stability_sec,
+            poll_grace_sec=(
+                poll_grace_sec
+                if poll_grace_sec is not None
+                else derive_scale_recovery_poll_grace_sec(samples)
+            ),
         )
         return (
             lane_id,

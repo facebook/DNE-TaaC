@@ -67,6 +67,22 @@ def _longevity_playbook_has_checks(tc, test):
     test.assertTrue(longevity.postchecks, "longevity playbook should have postchecks")
 
 
+def _assert_recovered_collector_prechecks(tc, test):
+    prechecks = {
+        check.check_id: check
+        for check in tc.playbooks[1].prechecks or []
+        if check.check_id
+    }
+    for check_id in (
+        "fpf_prod_hrt_prefix_stability_precheck",
+        "fpf_hrt_system_memory_precheck",
+        "fpf_hrt_driver_disconnect_precheck",
+    ):
+        params = json.loads(prechecks[check_id].check_params.json_params)
+        test.assertEqual(params["lookback_sec"], 120)
+        test.assertFalse(params["use_test_case_start_time"])
+
+
 # Stable-state hardening v2 check IDs that every tc32-tc35 longevity playbook
 # must carry (the runner re-stamps test_case_start_time at the start of this
 # playbook so the checks anchor at the post-disruption stable window). Note:
@@ -131,6 +147,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
         _disrupt_playbook_has_no_checks(tc, self)
         _longevity_playbook_has_checks(tc, self)
         _longevity_carries_v2_stable_check_set(tc, self, vf_grouped=vf_grouped)
+        _assert_recovered_collector_prechecks(tc, self)
 
         # Scaled window: 15 min flaps, 5 min longevity.
         self.assertEqual(flap_sec, 900)
@@ -303,6 +320,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
 
     def test_tc40_opts_into_fail_closed_multi_gtsw_safety(self):
         config = fpf_tc40_cont_interface_flaps.TEST_CONFIG
+        _assert_recovered_collector_prechecks(config, self)
         flap = _params(_steps(config.playbooks[0])[0])
         self.assertTrue(flap["fail_closed"])
         self.assertTrue(flap["require_exact_neighbor_hosts"])
@@ -382,6 +400,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
                     self,
                     vf_grouped=True,
                 )
+                _assert_recovered_collector_prechecks(config, self)
 
                 steps = _steps(config.playbooks[0])
                 self.assertEqual(len(steps), 2)
@@ -449,6 +468,7 @@ class TestStswDrainReinjectConfigs(unittest.TestCase):
         _disrupt_playbook_has_no_checks(TC35, self)
         _longevity_playbook_has_checks(TC35, self)
         _longevity_carries_v2_stable_check_set(TC35, self, vf_grouped=True)
+        _assert_recovered_collector_prechecks(TC35, self)
         self.assertEqual(TC35_LONGEVITY_SEC, 300)
 
         steps = _steps(TC35.playbooks[0])

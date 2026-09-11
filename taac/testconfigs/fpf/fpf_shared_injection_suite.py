@@ -709,6 +709,7 @@ def _kill_playbooks(
             "formula(/ $1 125000000),latest(3),max" if is_fsdb_kill else None
         ),
         recovery_last_n=(10 if is_fsdb_kill else None),
+        collector_precheck_lookback_sec=stable_after_kill_sec,
     )
     return [disrupt_playbook, longevity_playbook]
 
@@ -830,6 +831,7 @@ def _fsdb_kill_window_playbooks(
         # samples for the sustained (>=5min) kill only. tc28 (60s kill) keeps the
         # strict whole-window contract (it already passes clean).
         remote_failure_last_n=(kill_duration_sec >= 300),
+        collector_precheck_lookback_sec=stable_after_kill_sec,
     )
     return [disrupt_playbook, longevity_playbook]
 
@@ -997,6 +999,7 @@ def _tc52(*, spray, skip_ssh) -> list:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
+        collector_precheck_lookback_sec=post_restart_settle_sec,
     )
     return [disrupt_playbook, longevity_playbook]
 
@@ -1130,6 +1133,7 @@ def _tc38(*, spray, skip_ssh) -> list:
         lanes=INJECTED_LANES,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        collector_precheck_lookback_sec=settle_after_clear_sec,
     )
     return [disrupt_playbook, stable_playbook]
 
@@ -1572,6 +1576,7 @@ def _tc55(*, spray, skip_ssh) -> list:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
+        collector_precheck_lookback_sec=longevity_settle_sec,
     )
     return [disrupt_playbook, longevity_playbook]
 

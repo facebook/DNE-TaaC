@@ -93,6 +93,10 @@ def _checks_by_id(playbook) -> dict:
     return {c.check_id: c for c in (playbook.postchecks or []) if c.check_id}
 
 
+def _prechecks_by_id(playbook) -> dict:
+    return {c.check_id: c for c in (playbook.prechecks or []) if c.check_id}
+
+
 def _make_session_collector(
     window_result: FsdbSessionWindowResult,
     recovery=(True, 90.0, "recovered to 32 and held for 90.0s (>= floor)"),
@@ -113,8 +117,8 @@ def _make_session_collector(
 
 
 # Stable-state hardening v2 check IDs that EVERY tc28-31 longevity playbook
-# must carry (anchored at the longevity playbook start by the runner's
-# per-playbook re-stamp of test_case_start_time). The remote-failure stable
+# must carry. Collector prechecks use an explicit recovered rolling baseline;
+# postchecks use the runner's per-playbook test_case_start_time. The remote-failure stable
 # check(s) are asserted separately (single broad check vs. per-VF-group) — see
 # below.
 _V2_STABLE_REQUIRED_IDS = {
@@ -263,6 +267,22 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
             f"missing stable check IDs: {required - ids}",
         )
 
+    def test_longevity_collector_prechecks_use_recovered_120s_baseline(self):
+        playbook = self.cfg.playbooks[1]
+        prechecks = _prechecks_by_id(playbook)
+        for check_id in (
+            "fpf_prod_hrt_prefix_stability_precheck",
+            "fpf_hrt_system_memory_precheck",
+            "fpf_hrt_driver_disconnect_precheck",
+        ):
+            params = _check_params(prechecks[check_id])
+            self.assertEqual(params["lookback_sec"], 120)
+            self.assertFalse(params["use_test_case_start_time"])
+        postcheck = _check_params(
+            _checks_by_id(playbook)["fpf_prod_hrt_prefix_stability"]
+        )
+        self.assertNotIn("use_test_case_start_time", postcheck)
+
 
 class TestFpfTc30FsdbGrStop180(unittest.TestCase):
     def setUp(self):
@@ -347,6 +367,17 @@ class TestFpfTc31FsdbEnableRecover(unittest.TestCase):
             required.issubset(ids),
             f"missing stable check IDs: {required - ids}",
         )
+
+    def test_longevity_collector_prechecks_use_recovered_120s_baseline(self):
+        prechecks = _prechecks_by_id(self.cfg.playbooks[1])
+        for check_id in (
+            "fpf_prod_hrt_prefix_stability_precheck",
+            "fpf_hrt_system_memory_precheck",
+            "fpf_hrt_driver_disconnect_precheck",
+        ):
+            params = _check_params(prechecks[check_id])
+            self.assertEqual(params["lookback_sec"], 120)
+            self.assertFalse(params["use_test_case_start_time"])
 
 
 class _SessionStatHCExpectationsBase(unittest.IsolatedAsyncioTestCase):

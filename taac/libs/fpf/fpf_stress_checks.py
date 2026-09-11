@@ -21,6 +21,7 @@ import asyncio
 import atexit
 import ipaddress
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ from taac.libs.collectors.base_collector import (  # noqa: F401
     BaseCollector,
 )
 
-DEFAULT_SCALE_RECOVERY_POLL_GRACE_SEC: float = 10.0
+SCALE_RECOVERY_POLL_GRACE_INTERVALS: float = 2.0
 from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
     _count_matching,
     get_bgp_rib,
@@ -441,6 +442,43 @@ class ScaleRecoveryEvaluation:
     detail: str
 
 
+def derive_scale_recovery_poll_grace_sec(
+    samples: Sequence[Tuple[float, int]] = (),
+    *,
+    poll_interval_sec: Optional[float] = None,
+) -> Optional[float]:
+    """Return two polling intervals of tolerance for live or offline data."""
+    interval = poll_interval_sec
+    if interval is None:
+        timestamps = sorted({timestamp for timestamp, _value in samples})
+        deltas = [
+            current - previous
+            for previous, current in zip(timestamps, timestamps[1:])
+            if current > previous
+        ]
+        if not deltas:
+            return None
+        deltas.sort()
+        interval = deltas[len(deltas) // 2]
+    if interval <= 0:
+        return None
+    return interval * SCALE_RECOVERY_POLL_GRACE_INTERVALS
+
+
+def scale_recovery_observation_sec(
+    max_convergence_sec: float,
+    recovery_stability_sec: float,
+    poll_interval_sec: float,
+) -> int:
+    """Observation horizon covering recovery, stability, and polling grace."""
+    poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=poll_interval_sec
+    )
+    if poll_grace_sec is None:
+        raise ValueError("poll_interval_sec must be positive")
+    return math.ceil(max_convergence_sec + recovery_stability_sec + poll_grace_sec)
+
+
 def evaluate_scale_recovery_samples(
     samples: Sequence[Tuple[float, int]],
     *,
@@ -450,7 +488,7 @@ def evaluate_scale_recovery_samples(
     observation_end_ts: float,
     max_convergence_sec: float,
     recovery_stability_sec: float,
-    poll_grace_sec: float = DEFAULT_SCALE_RECOVERY_POLL_GRACE_SEC,
+    poll_grace_sec: Optional[float],
 ) -> ScaleRecoveryEvaluation:
     """Require bounded recovery plus complete, fresh exact-state evidence.
 
@@ -460,19 +498,23 @@ def evaluate_scale_recovery_samples(
     recovery, or a non-exact final value remain hard failures.
     """
     ordered = sorted((ts, value) for ts, value in samples if ts >= trigger_ts)
-    if not ordered:
-        return ScaleRecoveryEvaluation(
-            False, False, 0, None, "no valid post-mutation samples"
-        )
-    last_ts, last_actual = ordered[-1]
     if error_count:
         return ScaleRecoveryEvaluation(
             False,
             False,
-            last_actual,
+            ordered[-1][1] if ordered else 0,
             None,
-            f"{error_count} invalid/missing sample(s) in scale window",
+            f"{error_count} invalid/missing post-mutation sample(s)",
         )
+    if not ordered:
+        return ScaleRecoveryEvaluation(
+            False,
+            True,
+            0,
+            None,
+            "INCONCLUSIVE — no valid post-mutation samples",
+        )
+    last_ts, last_actual = ordered[-1]
     if last_actual != expected:
         return ScaleRecoveryEvaluation(
             False,
@@ -499,21 +541,10 @@ def evaluate_scale_recovery_samples(
             )
     else:
         recovery_index = next(
-            (
-                index
-                for index in range(first_mismatch_index + 1, len(ordered))
-                if ordered[index][1] == expected
-            ),
-            None,
+            index
+            for index in range(first_mismatch_index + 1, len(ordered))
+            if ordered[index][1] == expected
         )
-        if recovery_index is None:
-            return ScaleRecoveryEvaluation(
-                False,
-                False,
-                last_actual,
-                None,
-                f"never recovered to exact {expected}",
-            )
         regression = next(
             (
                 (ts, value)
@@ -546,14 +577,21 @@ def evaluate_scale_recovery_samples(
         )
 
     stable_tail_sec = round(last_ts - recovery_ts, 1)
-    required_observation_end = trigger_ts + max_convergence_sec + recovery_stability_sec
+    required_observation_end = (
+        trigger_ts
+        + max_convergence_sec
+        + recovery_stability_sec
+        + (poll_grace_sec or 0.0)
+    )
     coverage_gaps = []
+    if poll_grace_sec is None:
+        coverage_gaps.append("poll cadence could not be derived")
     if observation_end_ts < required_observation_end:
         coverage_gaps.append(
             f"window ended at mutation+{observation_end_ts - trigger_ts:.1f}s "
             f"before required {max_convergence_sec + recovery_stability_sec:g}s"
         )
-    if observation_end_ts - last_ts > poll_grace_sec:
+    if poll_grace_sec is not None and observation_end_ts - last_ts > poll_grace_sec:
         coverage_gaps.append(
             f"last valid sample was {observation_end_ts - last_ts:.1f}s old "
             f"(freshness limit {poll_grace_sec:g}s)"
@@ -563,6 +601,19 @@ def evaluate_scale_recovery_samples(
             f"only {stable_tail_sec}s of exact-state tail was observed "
             f"(need {recovery_stability_sec:g}s)"
         )
+    if poll_grace_sec is not None:
+        tail = ordered[recovery_index:]
+        discontinuities = [
+            (previous[0], current[0])
+            for previous, current in zip(tail, tail[1:])
+            if current[0] - previous[0] > poll_grace_sec
+        ]
+        if discontinuities:
+            largest_gap = max(end - start for start, end in discontinuities)
+            coverage_gaps.append(
+                f"stable tail contains a {largest_gap:.1f}s sample gap "
+                f"(continuity limit {poll_grace_sec:g}s)"
+            )
     if coverage_gaps:
         return ScaleRecoveryEvaluation(
             False,
@@ -1745,6 +1796,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         expected_per_lane: Optional[Dict[int, int]] = None,
         max_convergence_sec: int = 120,
         recovery_stability_sec: float = 60.0,
+        poll_grace_sec: Optional[float] = None,
         observation_end_ts: Optional[float] = None,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
@@ -1752,10 +1804,11 @@ class HrtRemoteFailureCollector(BaseCollector):
     ) -> List[PerLaneResult]:
         """Allow scale-time RF transients but require bounded exact recovery.
 
-        Recovery is the first valid expected-valued sample after the final
-        mismatch.  It must occur within ``max_convergence_sec`` of the scale
-        mutation, the final sample must equal the expected count, and any
-        invalid/missing sample fails the tuple.
+        Recovery is the first valid expected-valued sample after the scale
+        transition. It must occur within ``max_convergence_sec`` of the scale
+        mutation, remain exact with continuous collector coverage for
+        ``recovery_stability_sec``, and finish at the expected count. Invalid
+        post-mutation samples and post-recovery regressions fail the tuple.
         """
         if not _single_tuple:
             results: List[PerLaneResult] = []
@@ -1778,6 +1831,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             expected_per_lane=expected_per_lane,
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
+                            poll_grace_sec=poll_grace_sec,
                             observation_end_ts=observation_end_ts,
                             _single_tuple=True,
                         )
@@ -1798,15 +1852,17 @@ class HrtRemoteFailureCollector(BaseCollector):
             samples: List[Tuple[float, int]] = []
             error_count = 0
             for row in self.rows:
+                try:
+                    row_ts = _parse_ts(row.timestamp).timestamp()
+                except ValueError:
+                    error_count += 1
+                    continue
+                if row_ts < trigger_ts:
+                    continue
                 if not row.valid or row.notes.startswith("error:"):
                     error_count += 1
                     continue
                 if lane_id >= len(row.lane_counts):
-                    error_count += 1
-                    continue
-                try:
-                    row_ts = _parse_ts(row.timestamp).timestamp()
-                except ValueError:
                     error_count += 1
                     continue
                 samples.append((row_ts, row.lane_counts[lane_id]))
@@ -1823,6 +1879,11 @@ class HrtRemoteFailureCollector(BaseCollector):
                 ),
                 max_convergence_sec=max_convergence_sec,
                 recovery_stability_sec=recovery_stability_sec,
+                poll_grace_sec=(
+                    poll_grace_sec
+                    if poll_grace_sec is not None
+                    else derive_scale_recovery_poll_grace_sec(samples)
+                ),
             )
             results.append(
                 PerLaneResult(
@@ -1849,6 +1910,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         direction: str = "drain",
         max_convergence_sec: int = 120,
         recovery_stability_sec: float = 60.0,
+        poll_grace_sec: Optional[float] = None,
         only_hosts: Optional[List[str]] = None,
         device_ids: Optional[List[int]] = None,
     ) -> List[PerLaneResult]:
@@ -1904,6 +1966,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     expected_per_lane=expected_per_lane,
                     max_convergence_sec=max_convergence_sec,
                     recovery_stability_sec=recovery_stability_sec,
+                    poll_grace_sec=poll_grace_sec,
                     observation_end_ts=window_end,
                     device_ids=device_ids,
                     only_hosts=only_hosts,

@@ -26,9 +26,9 @@ Two-playbook "longevity-anchored health check" structure:
     the data plane should stay clean since GR holds forwarding state).
 
   Playbook 2 (stable-state longevity, 5 min): full stable-state hardening
-    contract; the runner re-stamps test_case_start_time at its start so all its
-    HCs (including session-stat in STABLE mode = 32, no churn) anchor at longevity
-    start.
+    contract. Collector-backed prechecks use the recovered rolling 120s baseline
+    because they execute before the runner re-stamps the new playbook start;
+    postchecks remain strictly anchored to the longevity playbook.
 
 ASSUMPTIONS:
   - GR grace-period behavior: within the grace window forwarding state is held, so
@@ -38,8 +38,8 @@ ASSUMPTIONS:
   - recovery_min_sec=60 — the post-re-enable 120s settle inside the disrupt
     playbook gives the collector ample window to observe a full 60s of held
     recovery after the sessions return to 32.
-  - lookback_sec=900 anchors at Playbook-1 start and spans
-    stabilize(120)+stop(30)+reenable-settle(120); 900s comfortably covers it.
+  - The longevity collector prechecks use the recovered 120s rolling baseline;
+    the intentional Playbook-1 outage is not stable-state history.
   - host-spray all_samples=True is the per-sample sustained-fairness assertion the
     spec calls for (track all samples for all beths of both hosts).
 
@@ -228,6 +228,7 @@ def create_fpf_tc29_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        collector_precheck_lookback_sec=REENABLE_SETTLE_SEC,
     )
 
     return TestConfig(

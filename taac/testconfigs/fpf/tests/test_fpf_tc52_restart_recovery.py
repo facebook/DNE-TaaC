@@ -115,6 +115,38 @@ class TestFpfTc52RestartRecovery(unittest.TestCase):
             _playbook(config, "fpf_tc52_hrt_restart_longevity"),
         )
 
+    def test_shared_recovered_longevity_prechecks_use_rolling_baseline(self):
+        config = (
+            fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
+        )
+        recovered_playbooks = (
+            "fpf_tc28_fsdb_kill_longevity",
+            "fpf_tc39_fsdb_kill5m_longevity",
+            "fpf_tc49_bgp_kill_5s_10min_longevity",
+            "fpf_tc50_wedge_agent_kill_5s_10min_longevity",
+            "fpf_tc51_fsdb_kill_5s_10min_longevity",
+            "fpf_tc52_hrt_restart_longevity",
+            "fpf_tc55_gtsw_device_reboot_longevity",
+            "fpf_tc38_persistent_ndp_clear_stable",
+            "fpf_tc58_multi_fboss_process_kill_15s_5min_longevity",
+        )
+        for playbook_name in recovered_playbooks:
+            with self.subTest(playbook=playbook_name):
+                playbook = _playbook(config, playbook_name)
+                prechecks = {
+                    check.check_id: check
+                    for check in playbook.prechecks or []
+                    if check.check_id
+                }
+                for check_id in (
+                    "fpf_prod_hrt_prefix_stability_precheck",
+                    "fpf_hrt_system_memory_precheck",
+                    "fpf_hrt_driver_disconnect_precheck",
+                ):
+                    params = _params(prechecks[check_id].check_params)
+                    self.assertEqual(params["lookback_sec"], 120)
+                    self.assertFalse(params["use_test_case_start_time"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,7 @@ from taac.health_checks.device_health_checks.fpf_hrt_bulk_convergence_health_che
     FpfHrtBulkConvergenceHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_hrt_remote_failure_convergence_health_check import (
+    _resolve_jsonl_observation_end,
     FpfHrtRemoteFailureConvergenceHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_hrt_session_stat_health_check import (
@@ -54,6 +55,7 @@ from taac.libs.fpf.fpf_collector_registry import (
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import PrefixReachability
 from taac.libs.fpf.fpf_stress_checks import (
+    derive_scale_recovery_poll_grace_sec,
     FsdbSessionWindowResult,
     HrtBulkRow,
     HrtRemoteFailureCollector,
@@ -107,18 +109,17 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         clear_all()
 
     def test_prod_precheck_uses_recent_baseline_instead_of_playbook_start(self):
-        set_test_case_start_time(WINDOW_END - 5)
+        set_test_case_start_time(WINDOW_END - 300)
         with patch(f"{REGISTRY_MODULE}.time.time", return_value=WINDOW_END):
-            self.assertEqual(
-                resolve_observation_window(
-                    {"lookback_sec": 120, "use_test_case_start_time": False}
-                ),
-                (WINDOW_END - 120, WINDOW_END),
+            rolling = resolve_observation_window(
+                {"lookback_sec": 120, "use_test_case_start_time": False}
             )
-            self.assertEqual(
-                resolve_observation_window({"lookback_sec": 900}),
-                (WINDOW_END - 5, WINDOW_END),
-            )
+            legacy = resolve_observation_window({"lookback_sec": 900})
+            self.assertEqual(rolling, (WINDOW_END - 120, WINDOW_END))
+            self.assertEqual(legacy, (WINDOW_END - 300, WINDOW_END))
+            intentional_outage_ts = WINDOW_END - 200
+            self.assertFalse(rolling[0] <= intentional_outage_ts <= rolling[1])
+            self.assertTrue(legacy[0] <= intentional_outage_ts <= legacy[1])
 
     def test_final_exact_rejects_under_and_over_count(self):
         for actual in (3999, 4001):
@@ -142,6 +143,21 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
             actual=4000,
         )
         self.assertTrue(enforce_final_exact(exact, 4000).passed)
+
+    def test_jsonl_window_end_is_lazy_and_offline_grace_is_derived(self):
+        self.assertEqual(
+            _resolve_jsonl_observation_end(
+                [{"timestamp": "not parsed when explicitly configured"}],
+                WINDOW_END,
+            ),
+            WINDOW_END,
+        )
+        self.assertEqual(
+            derive_scale_recovery_poll_grace_sec(
+                [(WINDOW_START, 0), (WINDOW_START + 5, 0), (WINDOW_START + 10, 0)]
+            ),
+            10,
+        )
 
     def _rf_result(
         self,
@@ -172,12 +188,17 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
             expected_per_lane={0: 0},
             direction="scale_recovery",
             max_convergence_sec=120,
+            poll_grace_sec=10,
             only_hosts=[GPU_HOST],
             device_ids=[0],
         )[0]
 
     def test_scale_rf_allows_bounded_transient_and_requires_exact_final(self):
-        passing = self._rf_result([152, 0, 0], [30, 120, 180], window_end_offset=190)
+        passing = self._rf_result(
+            [152, *([0] * 13)],
+            [30, *range(120, 181, 5)],
+            window_end_offset=190,
+        )
         self.assertTrue(passing.passed)
         self.assertFalse(passing.inconclusive)
 
@@ -187,25 +208,88 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         self.assertIn("insufficient collector coverage", truncated.detail)
 
         self.assertFalse(self._rf_result([0, 152, 152], [5, 30, 60]).passed)
-        late = self._rf_result([152, 0, 0], [30, 150, 295])
+        late = self._rf_result([152, *([0] * 30)], [30, *range(150, 296, 5)])
         self.assertFalse(late.passed)
         self.assertFalse(late.inconclusive)
         self.assertIn("> 120s SLA", late.detail)
 
-        regressed = self._rf_result([152, 0, 7, 0], [30, 60, 100, 295])
+        regressed = self._rf_result(
+            [152, *([0] * 8), 7, *([0] * 39)],
+            [30, *range(60, 100, 5), 100, *range(105, 300, 5)],
+        )
         self.assertFalse(regressed.passed)
         self.assertFalse(regressed.inconclusive)
         self.assertIn("regressed", regressed.detail)
 
-        self.assertFalse(
-            self._rf_result([0, 152, 0, 0], [5, 30, 60, 295], invalid_index=1).passed
-        )
+        invalid = self._rf_result([0, 152, 0, 0], [5, 30, 60, 295], invalid_index=1)
+        self.assertFalse(invalid.passed)
+        self.assertFalse(invalid.inconclusive)
 
         short_horizon = self._rf_result(
-            [152, 0, 0], [30, 60, 165], window_end_offset=170
+            [152, *([0] * 22)],
+            [30, *range(60, 166, 5)],
+            window_end_offset=170,
         )
         self.assertFalse(short_horizon.passed)
         self.assertTrue(short_horizon.inconclusive)
+
+    def test_scale_rf_requires_continuous_tail_and_post_trigger_data(self):
+        gapped = self._rf_result(
+            [152, 0, 0, 0], [30, 120, 150, 185], window_end_offset=190
+        )
+        self.assertFalse(gapped.passed)
+        self.assertTrue(gapped.inconclusive)
+        self.assertIn("sample gap", gapped.detail)
+
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START - 5),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[],
+                valid=False,
+                notes="error: pre-trigger timeout",
+            ),
+            *[
+                HrtRemoteFailureRow(
+                    timestamp=_ts_str(WINDOW_START + offset),
+                    host=GPU_HOST,
+                    device_id=0,
+                    lane_counts=[count, 0, 0, 0],
+                )
+                for count, offset in zip([152, *([0] * 13)], [30, *range(120, 181, 5)])
+            ],
+        ]
+        result = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(result.passed)
+
+        collector.rows = collector.rows[:1]
+        no_post_trigger = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(no_post_trigger.inconclusive)
+        self.assertIn("no valid post-mutation", no_post_trigger.detail)
 
     def test_exact_lane_map_is_complete_and_well_typed(self):
         self.assertEqual(
@@ -238,12 +322,13 @@ class FpfScaleRecoveryStatusTest(unittest.IsolatedAsyncioTestCase):
             for count, offset in ((0, 5), (152, 30), (0, 60), (0, 120))
         ]
         health_check = FpfHrtRemoteFailureConvergenceHealthCheck(logger=MagicMock())
+        details = AsyncMock(return_value="")
         with (
             patch(f"{REMOTE_MODULE}.get_collector", return_value=collector),
             patch(f"{REMOTE_MODULE}.get_mutation_time", return_value=WINDOW_START),
             patch(
                 f"{REMOTE_MODULE}.everpaste_details_suffix",
-                new=AsyncMock(return_value=""),
+                new=details,
             ),
         ):
             result = await health_check._run(
@@ -264,6 +349,7 @@ class FpfScaleRecoveryStatusTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, hc_types.HealthCheckStatus.SKIP)
         self.assertIn("INCONCLUSIVE", result.message)
+        self.assertIn("[SKIP]", details.call_args.args[1][0])
 
 
 # ---------------------------------------------------------------------------

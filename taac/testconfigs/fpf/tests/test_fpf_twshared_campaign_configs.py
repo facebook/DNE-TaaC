@@ -370,6 +370,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     self.assertTrue(params["use_mutation_time"])
                     if "remote_failure" in check.check_id:
                         self.assertEqual(params["direction"], "scale_recovery")
+                        self.assertEqual(params["poll_grace_sec"], 10.0)
                     else:
                         self.assertTrue(params["require_final_exact"])
 
@@ -380,12 +381,58 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     and "exact 60s stable tail" in (step.description or "")
                 ]
                 self.assertEqual(len(observation_steps), 2)
+                expected_observation = int(
+                    module.SCALE_RECOVERY_SLA_SEC
+                    + module.SCALE_RECOVERY_STABILITY_SEC
+                    + 2 * module.COLLECTOR_POLL_INTERVAL_SEC
+                )
+                self.assertEqual(module.SCALE_OBSERVATION_SEC, expected_observation)
                 self.assertTrue(
                     all(
-                        _step_params(step)["duration"] == 190
+                        _step_params(step)["duration"] == expected_observation
                         for step in observation_steps
                     )
                 )
+                collector = next(
+                    task
+                    for task in module.TEST_CONFIG.setup_tasks
+                    if task.task_name == "fpf_start_collectors"
+                )
+                self.assertEqual(
+                    _params(collector)["poll_interval_sec"],
+                    module.COLLECTOR_POLL_INTERVAL_SEC,
+                )
+
+    def test_recovered_disruption_longevity_uses_rolling_prechecks(self):
+        recovered = (
+            fpf_tc29_fsdb_gr_stop30_reenable,
+            fpf_tc31_fsdb_enable_recover,
+            fpf_tc33_gtsw_stsw_links_down,
+            fpf_tc35_stsw_undrain_reinject,
+            fpf_tc40_cont_interface_flaps,
+            fpf_tc42_cont_flaps_wedge_restart,
+            fpf_tc43_cont_flaps_bgp_restart,
+            fpf_tc44_cont_flaps_fsdb_restart,
+        )
+        for module in recovered:
+            with self.subTest(config=module.TEST_CONFIG.name):
+                longevity = module.TEST_CONFIG.playbooks[-1]
+                prechecks = {
+                    check.check_id: check
+                    for check in longevity.prechecks or []
+                    if check.check_id
+                }
+                for check_id in (
+                    "fpf_prod_hrt_prefix_stability_precheck",
+                    "fpf_hrt_system_memory_precheck",
+                    "fpf_hrt_driver_disconnect_precheck",
+                ):
+                    params = json.loads(prechecks[check_id].check_params.json_params)
+                    self.assertEqual(params["lookback_sec"], 120)
+                    self.assertFalse(params["use_test_case_start_time"])
+
+        tc30_longevity = fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[-1]
+        self.assertEqual(list(tc30_longevity.prechecks or []), [])
 
     def test_tc46_has_exact_8k_checkpoint_before_withdrawal(self):
         playbook = fpf_tc46_scale_down_8k_4k.TEST_CONFIG.playbooks[0]
@@ -441,6 +488,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             self.assertEqual(params["direction"], "scale_recovery")
             self.assertEqual(params["max_convergence_sec"], 120)
             self.assertEqual(params["recovery_stability_sec"], 60.0)
+            self.assertEqual(params["poll_grace_sec"], 10.0)
         session_params = json.loads(
             by_id["fpf_tc46_8k_hrt_sessions"]["check_params"]["json_params"]
         )

@@ -25542,6 +25542,9 @@ def create_fpf_scale_checkpoint_checks(
     expected_count: int,
     expected_session_count: int,
     check_id_prefix: str,
+    scale_recovery_sla_sec: float = 120.0,
+    scale_recovery_stability_sec: float = 60.0,
+    collector_poll_interval_sec: float = 5.0,
 ) -> list:
     """Build the strict point-in-time gate between two scale mutations."""
     from taac.health_checks.healthcheck_definitions import (
@@ -25554,6 +25557,13 @@ def create_fpf_scale_checkpoint_checks(
     )
     from taac.libs.fpf.fpf_thresholds import (
         ACTIVE as FPF_ACTIVE_THRESHOLDS,
+    )
+    from taac.libs.fpf.fpf_stress_checks import (
+        derive_scale_recovery_poll_grace_sec,
+    )
+
+    poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=collector_poll_interval_sec
     )
 
     checks = []
@@ -25611,10 +25621,9 @@ def create_fpf_scale_checkpoint_checks(
                 device_ids=group.get("device_ids", [0]),
                 expected_per_lane={str(lane): 0 for lane in group_lanes},
                 direction="scale_recovery",
-                max_convergence_sec=120,
-                recovery_stability_sec=(
-                    FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
-                ),
+                max_convergence_sec=int(scale_recovery_sla_sec),
+                recovery_stability_sec=scale_recovery_stability_sec,
+                poll_grace_sec=poll_grace_sec,
                 use_live_collectors=True,
                 use_mutation_time=True,
                 collector_name=f"hrt_remote_failure_{group['suffix']}",
@@ -25702,6 +25711,9 @@ def create_fpf_hardening_playbook_v2(
     ensure_traffic_after_disruption: bool = False,
     collector_precheck_lookback_sec: int | None = None,
     scale_mutation_mode: bool = False,
+    scale_recovery_sla_sec: float = 120.0,
+    scale_recovery_stability_sec: float = 60.0,
+    collector_poll_interval_sec: float = 5.0,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25843,6 +25855,13 @@ def create_fpf_hardening_playbook_v2(
 
     from taac.libs.fpf.fpf_thresholds import (
         ACTIVE as FPF_ACTIVE_THRESHOLDS,
+    )
+    from taac.libs.fpf.fpf_stress_checks import (
+        derive_scale_recovery_poll_grace_sec,
+    )
+
+    scale_poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=collector_poll_interval_sec
     )
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
@@ -26126,10 +26145,14 @@ def create_fpf_hardening_playbook_v2(
                     device_ids=_g.get("device_ids", [0]),
                     expected_per_lane=_gexpected,
                     direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
                     recovery_stability_sec=(
-                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                        scale_recovery_stability_sec
                         if scale_mutation_mode
                         else None
+                    ),
+                    poll_grace_sec=(
+                        scale_poll_grace_sec if scale_mutation_mode else None
                     ),
                     use_live_collectors=True,
                     use_mutation_time=scale_mutation_mode,
@@ -26146,10 +26169,14 @@ def create_fpf_hardening_playbook_v2(
                     lanes=_stable_lanes,
                     device_ids=resolved_hrt_device_ids,
                     direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
                     recovery_stability_sec=(
-                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                        scale_recovery_stability_sec
                         if scale_mutation_mode
                         else None
+                    ),
+                    poll_grace_sec=(
+                        scale_poll_grace_sec if scale_mutation_mode else None
                     ),
                     use_live_collectors=True,
                     use_mutation_time=scale_mutation_mode,

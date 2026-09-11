@@ -25,8 +25,9 @@ playbooks moves all prechecks AFTER the enable+settle:
     plane-status no-churn, BGP RIB + FSDB ribMap converged, host-spray
     floor+fairness, generic device checks), PLUS the HRT session-stat check in
     STABLE mode asserting the census is back to 32 with no churn. The runner
-    re-stamps test_case_start_time at THIS playbook's start, so every precheck and
-    postcheck anchors at longevity start — AFTER the enable+settle.
+    uses the recovered rolling 120s baseline for collector-backed prechecks,
+    which execute before the runner re-stamps the playbook start. Postchecks
+    remain strictly anchored to the longevity playbook.
 
 ASSUMPTIONS:
   - This config is run after fpf_tc30 left fsdb down; if fsdb is already up, the
@@ -173,6 +174,7 @@ def create_fpf_tc31_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        collector_precheck_lookback_sec=ENABLE_SETTLE_SEC,
     )
 
     return TestConfig(

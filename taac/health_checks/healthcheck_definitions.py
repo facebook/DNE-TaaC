@@ -3335,6 +3335,7 @@ def create_fpf_hrt_remote_failure_convergence_check(
     direction: str = "drain",
     max_convergence_sec: int = 120,
     recovery_stability_sec: t.Optional[float] = None,
+    poll_grace_sec: t.Optional[float] = None,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
     lane_labels: t.Optional[t.Dict[str, str]] = None,
@@ -3369,6 +3370,9 @@ def create_fpf_hrt_remote_failure_convergence_check(
     ``restart_tolerant_hosts`` applies null/error tolerance only to intentionally
     restarted HRT hosts; every valid count, final state, and unaffected host
     remains strict, and a post-outage recovery sample is required.
+    ``poll_grace_sec`` is the maximum permitted age/gap between scale-recovery
+    samples. Live callers normally derive it from the collector cadence; offline
+    evaluation infers it from JSONL timestamps when omitted.
     """
     params: t.Dict[str, t.Any] = {
         "lanes": lanes or [0, 1, 2, 3],
@@ -3380,6 +3384,8 @@ def create_fpf_hrt_remote_failure_convergence_check(
     }
     if recovery_stability_sec is not None:
         params["recovery_stability_sec"] = recovery_stability_sec
+    if poll_grace_sec is not None:
+        params["poll_grace_sec"] = poll_grace_sec
     if collector_name:
         params["collector_name"] = collector_name
     if tuple_lanes_by_host_device:

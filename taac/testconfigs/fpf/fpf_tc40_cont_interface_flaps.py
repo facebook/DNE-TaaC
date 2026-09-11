@@ -203,6 +203,7 @@ def create_fpf_cont_interface_flaps_test_config(
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
         hrt_device_ids=HRT_DEVICE_IDS,
+        collector_precheck_lookback_sec=INJECT_SETTLE_SEC,
     )
 
     return TestConfig(

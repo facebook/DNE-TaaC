@@ -88,6 +88,7 @@ RF_VF_GROUPS = fpf_rf_vf_groups(
 IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 TRIGGER_STSWS = ALL_STSWS
 LONGEVITY_SEC = 300
+RECOVERED_BASELINE_LOOKBACK_SEC = 120
 
 # STSW plane to undrain (the first STSW plane: stsw001.s001.l202.mwg2).
 UNDRAIN_TARGET_STSW = TRIGGER_STSWS[0]
@@ -157,6 +158,7 @@ def create_fpf_tc35_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         hrt_device_ids=HRT_DEVICE_IDS,
+        collector_precheck_lookback_sec=RECOVERED_BASELINE_LOOKBACK_SEC,
     )
 
     return TestConfig(

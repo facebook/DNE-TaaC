@@ -5,6 +5,9 @@
 """TC45: scale both VF groups from 4,000 to 8,000 prefixes per plane."""
 
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
+from taac.libs.fpf.fpf_stress_checks import (
+    scale_recovery_observation_sec,
+)
 from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
     create_fpf_scale_checkpoint_checks,
@@ -52,7 +55,14 @@ SCALE_LOW = 4000
 SCALE_HIGH = 8000
 SCALE_BATCH_SIZE = 252
 SETTLE_SEC = 120
-SCALE_OBSERVATION_SEC = 190
+SCALE_RECOVERY_SLA_SEC = 120.0
+SCALE_RECOVERY_STABILITY_SEC = 60.0
+COLLECTOR_POLL_INTERVAL_SEC = 5.0
+SCALE_OBSERVATION_SEC = scale_recovery_observation_sec(
+    SCALE_RECOVERY_SLA_SEC,
+    SCALE_RECOVERY_STABILITY_SEC,
+    COLLECTOR_POLL_INTERVAL_SEC,
+)
 LONGEVITY_SEC = 300
 INJECTED_LANES = fpf_hrt_lanes()
 HRT_DEVICE_IDS = fpf_hrt_device_ids()
@@ -134,7 +144,8 @@ def create_fpf_tc45_test_config() -> TestConfig:
                 duration=SCALE_OBSERVATION_SEC,
                 description=(
                     f"Observe {SCALE_OBSERVATION_SEC}s at {SCALE_LOW} prefixes "
-                    "for 120s recovery plus an exact 60s stable tail"
+                    f"for {SCALE_RECOVERY_SLA_SEC:g}s recovery plus an exact "
+                    f"{SCALE_RECOVERY_STABILITY_SEC:g}s stable tail"
                 ),
             ),
             create_validation_step(
@@ -148,6 +159,9 @@ def create_fpf_tc45_test_config() -> TestConfig:
                     expected_count=SCALE_LOW,
                     expected_session_count=EXPECTED_FSDB_SESSION_COUNT,
                     check_id_prefix="fpf_tc45_4k",
+                    scale_recovery_sla_sec=SCALE_RECOVERY_SLA_SEC,
+                    scale_recovery_stability_sec=SCALE_RECOVERY_STABILITY_SEC,
+                    collector_poll_interval_sec=COLLECTOR_POLL_INTERVAL_SEC,
                 ),
                 description=(
                     "Validate exact 4K device/VF counts, HRT 32/32, RF recovery, "
@@ -162,7 +176,8 @@ def create_fpf_tc45_test_config() -> TestConfig:
                 duration=SCALE_OBSERVATION_SEC,
                 description=(
                     f"Observe {SCALE_OBSERVATION_SEC}s at {SCALE_HIGH} prefixes "
-                    "for 120s recovery plus an exact 60s stable tail"
+                    f"for {SCALE_RECOVERY_SLA_SEC:g}s recovery plus an exact "
+                    f"{SCALE_RECOVERY_STABILITY_SEC:g}s stable tail"
                 ),
             ),
         ],
@@ -173,6 +188,9 @@ def create_fpf_tc45_test_config() -> TestConfig:
         rf_vf_groups=RF_VF_GROUPS,
         collector_precheck_lookback_sec=SETTLE_SEC,
         scale_mutation_mode=True,
+        scale_recovery_sla_sec=SCALE_RECOVERY_SLA_SEC,
+        scale_recovery_stability_sec=SCALE_RECOVERY_STABILITY_SEC,
+        collector_poll_interval_sec=COLLECTOR_POLL_INTERVAL_SEC,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
@@ -214,6 +232,7 @@ def create_fpf_tc45_test_config() -> TestConfig:
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 rf_vf_groups=RF_VF_GROUPS,
+                poll_interval_sec=COLLECTOR_POLL_INTERVAL_SEC,
             ),
         ],
         teardown_tasks=[

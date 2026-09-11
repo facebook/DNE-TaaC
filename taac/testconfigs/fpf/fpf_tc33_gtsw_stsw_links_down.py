@@ -88,6 +88,7 @@ IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 # Scaled flap window (15 min) compressed to a normal slot.
 FLAP_DURATION_SEC = 900
 FLAP_INTERVAL_SEC = 1
+RECOVERED_BASELINE_LOOKBACK_SEC = 120
 # Longevity window after flaps stop; stable-state checks anchor at its start.
 LONGEVITY_SEC = 300
 
@@ -164,6 +165,7 @@ def create_fpf_tc33_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        collector_precheck_lookback_sec=RECOVERED_BASELINE_LOOKBACK_SEC,
     )
 
     return TestConfig(
