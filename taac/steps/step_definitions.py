@@ -3394,8 +3394,12 @@ def create_fpf_repeated_sw_hw_agent_crash_step(
 
 
 def create_fpf_ndp_clear_loop_step(
+    target_interface: str,
+    neighbor_host: str,
     every_sec: int = 1,
     duration_sec: int = 120,
+    remote_timeout_sec: float = 0.8,
+    local_timeout_sec: float = 1.0,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3407,11 +3411,25 @@ def create_fpf_ndp_clear_loop_step(
     (no new StepName enum).
 
     Args:
+        target_interface: Exact local interface whose NDP entries are cleared.
+        neighbor_host: Exact LLDP neighbor expected on ``target_interface``.
         every_sec: Seconds between successive clears (default 1).
         duration_sec: Total clearing window in seconds (default 120).
+        remote_timeout_sec: On-device timeout for one clear (default 0.8).
+        local_timeout_sec: TAAC-side timeout for one clear (default 1.0).
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
+    if not target_interface or not neighbor_host:
+        raise ValueError("NDP clear requires target_interface and neighbor_host")
+    if not (
+        0 < remote_timeout_sec < local_timeout_sec <= 1.0
+        and local_timeout_sec <= every_sec
+    ):
+        raise ValueError(
+            "NDP clear requires 0 < remote_timeout_sec < "
+            "local_timeout_sec <= 1s and local_timeout_sec <= every_sec"
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or f"Clear NDP every {every_sec}s for {duration_sec}s",
@@ -3419,8 +3437,12 @@ def create_fpf_ndp_clear_loop_step(
             json_params=json.dumps(
                 {
                     "custom_step_name": "fpf_ndp_clear_loop",
+                    "target_interface": target_interface,
+                    "neighbor_host": neighbor_host,
                     "every_sec": every_sec,
                     "duration_sec": duration_sec,
+                    "remote_timeout_sec": remote_timeout_sec,
+                    "local_timeout_sec": local_timeout_sec,
                 }
             )
         ),

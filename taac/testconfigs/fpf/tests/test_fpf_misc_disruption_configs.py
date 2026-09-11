@@ -36,8 +36,11 @@ from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
     TEST_CONFIG as TC37,
 )
 from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
+    NDP_CLEAR_CIRCUIT,
     NDP_CLEAR_DURATION_SEC,
     NDP_CLEAR_EVERY_SEC,
+    NDP_CLEAR_LOCAL_TIMEOUT_SEC,
+    NDP_CLEAR_REMOTE_TIMEOUT_SEC,
     SETTLE_AFTER_CLEAR_SEC,
     TEST_CONFIG as TC38,
 )
@@ -362,9 +365,19 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
         loop_params = _params(loop)
         self.assertEqual(loop_params["every_sec"], NDP_CLEAR_EVERY_SEC)
         self.assertEqual(loop_params["duration_sec"], NDP_CLEAR_DURATION_SEC)
+        self.assertEqual(
+            loop_params["target_interface"], NDP_CLEAR_CIRCUIT.a_end_interface
+        )
+        self.assertEqual(loop_params["neighbor_host"], NDP_CLEAR_CIRCUIT.z_end_device)
+        self.assertEqual(
+            loop_params["remote_timeout_sec"], NDP_CLEAR_REMOTE_TIMEOUT_SEC
+        )
+        self.assertEqual(loop_params["local_timeout_sec"], NDP_CLEAR_LOCAL_TIMEOUT_SEC)
         self.assertEqual(NDP_CLEAR_DURATION_SEC, 120)
         # Per the config docstring, every_sec is 1 (rapid clear).
         self.assertEqual(NDP_CLEAR_EVERY_SEC, 1)
+        self.assertLess(NDP_CLEAR_REMOTE_TIMEOUT_SEC, NDP_CLEAR_LOCAL_TIMEOUT_SEC)
+        self.assertLessEqual(NDP_CLEAR_LOCAL_TIMEOUT_SEC, NDP_CLEAR_EVERY_SEC)
         # Scoped to the observer GTSW.
         from taac.testconfigs.fpf.fpf_hardening_common import (
             OBSERVER_GTSWS,

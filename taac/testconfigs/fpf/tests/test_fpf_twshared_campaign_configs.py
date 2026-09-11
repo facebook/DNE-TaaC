@@ -212,6 +212,23 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             json.loads(tc38_spray.check_params.json_params)["excluded_lanes_by_host"],
             {SERVER: ["beth0"]},
         )
+        tc38_clear = next(
+            step
+            for step in _steps(fpf_tc38_persistent_ndp_clear.TEST_CONFIG.playbooks[0])
+            if _step_params(step).get("custom_step_name") == "fpf_ndp_clear_loop"
+        )
+        self.assertEqual(
+            _step_params(tc38_clear),
+            {
+                "custom_step_name": "fpf_ndp_clear_loop",
+                "target_interface": "eth1/41/5",
+                "neighbor_host": SERVER,
+                "every_sec": 1,
+                "duration_sec": 120,
+                "remote_timeout_sec": 0.8,
+                "local_timeout_sec": 1.0,
+            },
+        )
 
     def test_fsdb_stop_and_recovery_remain_an_ordered_pair(self):
         tc30_steps = _steps(

@@ -3,6 +3,7 @@
 # pyre-unsafe
 import asyncio
 import contextlib
+import ipaddress
 import json
 import time
 import typing as t
@@ -612,32 +613,241 @@ class TestRepeatedSwHwAgentCrashStep(unittest.IsolatedAsyncioTestCase):
 
 
 class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
+    TARGET_INTERFACE = "eth1/41/5"
+    NEIGHBOR_HOST = "twshared1352.03.mwg2"
+
+    @staticmethod
+    def _ndp_entry(
+        address: str,
+        *,
+        port: int = 205,
+        mac: str = "ba:ce:00:00:00:e8",
+        vlan_id: int = 2093,
+        vlan_name: str = "downlink_93",
+        state: str = "REACHABLE",
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            ip=SimpleNamespace(addr=ipaddress.IPv6Address(address).packed),
+            mac=mac,
+            port=port,
+            state=state,
+            vlanID=vlan_id,
+            vlanName=vlan_name,
+        )
+
+    def _params(self, *, duration_sec: int = 120) -> dict:
+        return {
+            "target_interface": self.TARGET_INTERFACE,
+            "neighbor_host": self.NEIGHBOR_HOST,
+            "every_sec": 1,
+            "duration_sec": duration_sec,
+            "remote_timeout_sec": 0.8,
+            "local_timeout_sec": 1.0,
+        }
+
+    def _configure_live_shape(self, cs: CustomStep) -> AsyncMock:
+        driver = _driver_mock(cs)
+        driver.async_get_lldp_neighbors.return_value = {
+            self.TARGET_INTERFACE: SimpleNamespace(
+                remote_device_name=self.NEIGHBOR_HOST
+            )
+        }
+        driver.async_get_interface_name_to_port_id_and_vlan_id.return_value = (
+            SimpleNamespace(port_id=205)
+        )
+        unrelated = [
+            self._ndp_entry(f"2401:db00:ffff::{index}", port=99)
+            for index in range(1, 412)
+        ]
+        driver.async_get_ndp_table.return_value = [
+            *unrelated,
+            self._ndp_entry("2401:db00:292a:8154:bace::b"),
+            self._ndp_entry("fe80::b8ce:ff:fe00:e8"),
+        ]
+        return driver
+
     def test_factory_shape(self):
         step = create_fpf_ndp_clear_loop_step(
-            every_sec=1, duration_sec=120, device_regexes=["gtsw001.*"]
+            target_interface=self.TARGET_INTERFACE,
+            neighbor_host=self.NEIGHBOR_HOST,
+            every_sec=1,
+            duration_sec=120,
+            remote_timeout_sec=0.8,
+            local_timeout_sec=1.0,
+            device_regexes=["gtsw001.*"],
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         p = _params(step)
         self.assertEqual(p["custom_step_name"], "fpf_ndp_clear_loop")
         self.assertEqual(p["every_sec"], 1)
         self.assertEqual(p["duration_sec"], 120)
+        self.assertEqual(p["target_interface"], self.TARGET_INTERFACE)
+        self.assertEqual(p["neighbor_host"], self.NEIGHBOR_HOST)
+        self.assertEqual(p["remote_timeout_sec"], 0.8)
+        self.assertEqual(p["local_timeout_sec"], 1.0)
 
-    async def test_clears_expected_number_of_times(self):
+        with self.assertRaisesRegex(ValueError, "local_timeout_sec <= 1s"):
+            create_fpf_ndp_clear_loop_step(
+                target_interface=self.TARGET_INTERFACE,
+                neighbor_host=self.NEIGHBOR_HOST,
+                every_sec=2,
+                remote_timeout_sec=1,
+                local_timeout_sec=1.5,
+            )
+
+    async def test_scoped_fixed_rate_completes_exactly_120_slots(self):
         cs = _make_custom_step()
-        ticks = [0.0] + [float(i) for i in range(120)] + [1000.0]
+        driver = self._configure_live_shape(cs)
+        clock = 0.0
+        active = 0
+        max_active = 0
+        clear_calls = 0
 
-        async def fake_sleep(d):
-            pass
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+
+        async def run_command(command: str, _timeout: int) -> str:
+            nonlocal active, clear_calls, max_active
+            if command.startswith("pkill -TERM"):
+                return "__FPF_NDP_CLEAR_CLEANUP__=clean"
+            active += 1
+            max_active = max(max_active, active)
+            clear_calls += 1
+            active -= 1
+            flushed = 2 if clear_calls == 1 else 0
+            return f"Flushed {flushed} entries\n__FPF_NDP_CLEAR_RC__=0"
+
+        driver.async_run_cmd_on_shell.side_effect = run_command
 
         with (
-            patch("time.time", side_effect=ticks),
-            patch("asyncio.sleep", side_effect=fake_sleep),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
         ):
-            await cs.fpf_ndp_clear_loop({"every_sec": 1, "duration_sec": 120})
+            await cs.fpf_ndp_clear_loop(self._params())
 
-        self.assertEqual(cs.driver.async_run_cmd_on_shell.await_count, 120)
-        for call in cs.driver.async_run_cmd_on_shell.await_args_list:
-            self.assertEqual(call.args[0], "fboss2 clear ndp")
+        commands = [
+            call.args[0] for call in driver.async_run_cmd_on_shell.await_args_list
+        ]
+        clear_commands = [
+            command for command in commands if command.startswith("set +e")
+        ]
+        self.assertEqual(len(clear_commands), 120)
+        self.assertEqual(max_active, 1)
+        for command in clear_commands:
+            self.assertIn("2401:db00:292a:8154:bace::b/128", command)
+            self.assertIn("fe80::b8ce:ff:fe00:e8/128", command)
+            self.assertNotIn("2401:db00:ffff::1/128", command)
+            self.assertIn("timeout --signal=TERM --kill-after=0.1s 0.8s", command)
+        cleanup = commands[-1]
+        self.assertTrue(cleanup.startswith("pkill -TERM"))
+        self.assertNotIn("pkill -f fboss2", cleanup)
+
+    async def test_lldp_mismatch_fails_before_clear(self):
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+        driver.async_get_lldp_neighbors.return_value[
+            self.TARGET_INTERFACE
+        ].remote_device_name = "wrong-host.mwg2"
+
+        with self.assertRaisesRegex(RuntimeError, "LLDP neighbor=wrong-host"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        driver.async_run_cmd_on_shell.assert_not_awaited()
+
+    async def test_empty_or_ambiguous_exact_port_scope_fails(self):
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value = []
+        with self.assertRaisesRegex(RuntimeError, "no flushable IPv6 NDP entries"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value.append(
+            self._ndp_entry("2401:db00:292a:8154:bace::c", mac="00:11:22:33:44:55")
+        )
+        with self.assertRaisesRegex(RuntimeError, "ambiguous NDP scope"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+    async def test_timeout_is_fail_closed_and_cleans_only_run_token(self):
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+
+        async def run_command(command: str, _timeout: int) -> str:
+            if command.startswith("pkill -TERM"):
+                return "__FPF_NDP_CLEAR_CLEANUP__=clean"
+            raise asyncio.TimeoutError
+
+        driver.async_run_cmd_on_shell.side_effect = run_command
+        with self.assertRaisesRegex(RuntimeError, "exceeded local timeout 1s"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        commands = [
+            call.args[0] for call in driver.async_run_cmd_on_shell.await_args_list
+        ]
+        self.assertEqual(sum(command.startswith("set +e") for command in commands), 1)
+        self.assertTrue(commands[-1].startswith("pkill -TERM"))
+        self.assertNotIn("pkill -f fboss2", commands[-1])
+
+    async def test_zero_total_flush_fails_exact_rate_contract(self):
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+
+        async def run_command(command: str, _timeout: int) -> str:
+            if command.startswith("pkill -TERM"):
+                return "__FPF_NDP_CLEAR_CLEANUP__=clean"
+            return "Flushed 0 entries\n__FPF_NDP_CLEAR_RC__=0"
+
+        driver.async_run_cmd_on_shell.side_effect = run_command
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+            self.assertRaisesRegex(RuntimeError, "total_flushed=0"),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=2))
+
+    async def test_cancelled_clear_runs_token_cleanup(self):
+        cs = _make_custom_step()
+        driver = self._configure_live_shape(cs)
+
+        async def run_command(command: str, _timeout: int) -> str:
+            if command.startswith("pkill -TERM"):
+                return "__FPF_NDP_CLEAR_CLEANUP__=clean"
+            raise asyncio.CancelledError
+
+        driver.async_run_cmd_on_shell.side_effect = run_command
+        with self.assertRaises(asyncio.CancelledError):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        commands = [
+            call.args[0] for call in driver.async_run_cmd_on_shell.await_args_list
+        ]
+        self.assertEqual(sum(command.startswith("set +e") for command in commands), 1)
+        self.assertTrue(commands[-1].startswith("pkill -TERM"))
 
 
 class TestOwnedDrainCleanup(unittest.IsolatedAsyncioTestCase):
