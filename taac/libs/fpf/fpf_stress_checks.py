@@ -43,6 +43,8 @@ from taac.libs.collectors.base_collector import (  # noqa: F401
     _parse_ts,
     BaseCollector,
 )
+
+DEFAULT_SCALE_RECOVERY_POLL_GRACE_SEC: float = 10.0
 from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
     _count_matching,
     get_bgp_rib,
@@ -425,6 +427,161 @@ class PerLaneResult:
     host: Optional[str] = None
     device_id: Optional[int] = None
     error_count: int = 0
+    inconclusive: bool = False
+
+
+@dataclass(frozen=True)
+class ScaleRecoveryEvaluation:
+    """Shared live/JSONL verdict for a scale-time remote-failure series."""
+
+    passed: bool
+    inconclusive: bool
+    actual: int
+    recovery_sec: Optional[float]
+    detail: str
+
+
+def evaluate_scale_recovery_samples(
+    samples: Sequence[Tuple[float, int]],
+    *,
+    error_count: int,
+    expected: int,
+    trigger_ts: float,
+    observation_end_ts: float,
+    max_convergence_sec: float,
+    recovery_stability_sec: float,
+    poll_grace_sec: float = DEFAULT_SCALE_RECOVERY_POLL_GRACE_SEC,
+) -> ScaleRecoveryEvaluation:
+    """Require bounded recovery plus complete, fresh exact-state evidence.
+
+    Unlike generic three-signal convergence, scale recovery does not grant
+    partial stability credit. Insufficient observation is explicit and distinct
+    from a product failure; invalid samples, a late recovery, a regression after
+    recovery, or a non-exact final value remain hard failures.
+    """
+    ordered = sorted((ts, value) for ts, value in samples if ts >= trigger_ts)
+    if not ordered:
+        return ScaleRecoveryEvaluation(
+            False, False, 0, None, "no valid post-mutation samples"
+        )
+    last_ts, last_actual = ordered[-1]
+    if error_count:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            last_actual,
+            None,
+            f"{error_count} invalid/missing sample(s) in scale window",
+        )
+    if last_actual != expected:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            last_actual,
+            None,
+            f"final={last_actual}, expected exact final={expected}",
+        )
+
+    first_mismatch_index = next(
+        (index for index, (_, value) in enumerate(ordered) if value != expected),
+        None,
+    )
+    if first_mismatch_index is None:
+        recovery_index = 0
+        if ordered[0][0] - trigger_ts > max_convergence_sec:
+            return ScaleRecoveryEvaluation(
+                False,
+                True,
+                last_actual,
+                None,
+                "INCONCLUSIVE — first valid exact-state sample arrived after "
+                f"the {max_convergence_sec:g}s recovery window",
+            )
+    else:
+        recovery_index = next(
+            (
+                index
+                for index in range(first_mismatch_index + 1, len(ordered))
+                if ordered[index][1] == expected
+            ),
+            None,
+        )
+        if recovery_index is None:
+            return ScaleRecoveryEvaluation(
+                False,
+                False,
+                last_actual,
+                None,
+                f"never recovered to exact {expected}",
+            )
+        regression = next(
+            (
+                (ts, value)
+                for ts, value in ordered[recovery_index + 1 :]
+                if value != expected
+            ),
+            None,
+        )
+        if regression is not None:
+            regression_sec = round(regression[0] - trigger_ts, 1)
+            return ScaleRecoveryEvaluation(
+                False,
+                False,
+                last_actual,
+                None,
+                f"regressed to {regression[1]} at mutation+{regression_sec}s "
+                f"after reaching exact {expected}",
+            )
+
+    recovery_ts = ordered[recovery_index][0]
+    recovery_sec = round(recovery_ts - trigger_ts, 1)
+    if recovery_sec > max_convergence_sec:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            last_actual,
+            recovery_sec,
+            f"recovered to exact {expected} in {recovery_sec}s "
+            f"> {max_convergence_sec:g}s SLA",
+        )
+
+    stable_tail_sec = round(last_ts - recovery_ts, 1)
+    required_observation_end = trigger_ts + max_convergence_sec + recovery_stability_sec
+    coverage_gaps = []
+    if observation_end_ts < required_observation_end:
+        coverage_gaps.append(
+            f"window ended at mutation+{observation_end_ts - trigger_ts:.1f}s "
+            f"before required {max_convergence_sec + recovery_stability_sec:g}s"
+        )
+    if observation_end_ts - last_ts > poll_grace_sec:
+        coverage_gaps.append(
+            f"last valid sample was {observation_end_ts - last_ts:.1f}s old "
+            f"(freshness limit {poll_grace_sec:g}s)"
+        )
+    if stable_tail_sec < recovery_stability_sec:
+        coverage_gaps.append(
+            f"only {stable_tail_sec}s of exact-state tail was observed "
+            f"(need {recovery_stability_sec:g}s)"
+        )
+    if coverage_gaps:
+        return ScaleRecoveryEvaluation(
+            False,
+            True,
+            last_actual,
+            recovery_sec,
+            "INCONCLUSIVE — insufficient collector coverage: "
+            + "; ".join(coverage_gaps),
+        )
+
+    return ScaleRecoveryEvaluation(
+        True,
+        False,
+        last_actual,
+        recovery_sec,
+        f"recovered to exact {expected} in {recovery_sec}s "
+        f"(SLA {max_convergence_sec:g}s), held for {stable_tail_sec}s; "
+        f"final={last_actual}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1588,6 +1745,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         expected_per_lane: Optional[Dict[int, int]] = None,
         max_convergence_sec: int = 120,
         recovery_stability_sec: float = 60.0,
+        observation_end_ts: Optional[float] = None,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
         _single_tuple: bool = False,
@@ -1620,6 +1778,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             expected_per_lane=expected_per_lane,
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
+                            observation_end_ts=observation_end_ts,
                             _single_tuple=True,
                         )
                         for result in tuple_results:
@@ -1652,70 +1811,31 @@ class HrtRemoteFailureCollector(BaseCollector):
                     continue
                 samples.append((row_ts, row.lane_counts[lane_id]))
 
-            last_actual = samples[-1][1] if samples else 0
-            last_mismatch_index = max(
-                (
-                    index
-                    for index, (_, value) in enumerate(samples)
-                    if value != expected
+            evaluation = evaluate_scale_recovery_samples(
+                samples,
+                error_count=error_count,
+                expected=expected,
+                trigger_ts=trigger_ts,
+                observation_end_ts=(
+                    observation_end_ts
+                    if observation_end_ts is not None
+                    else (samples[-1][0] if samples else trigger_ts)
                 ),
-                default=-1,
+                max_convergence_sec=max_convergence_sec,
+                recovery_stability_sec=recovery_stability_sec,
             )
-            recovery_index = last_mismatch_index + 1
-            recovered = recovery_index < len(samples)
-            recovery_sec = (
-                round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
-            )
-            stable_tail_sec = (
-                round(samples[-1][0] - samples[recovery_index][0], 1)
-                if recovered
-                else 0.0
-            )
-            passed = (
-                bool(samples)
-                and error_count == 0
-                and recovered
-                and last_actual == expected
-                and recovery_sec is not None
-                and recovery_sec <= max_convergence_sec
-                and stable_tail_sec >= recovery_stability_sec
-            )
-            if not samples:
-                detail = "no valid samples"
-            elif error_count:
-                detail = f"{error_count} invalid/missing sample(s) in scale window"
-            elif last_actual != expected:
-                detail = f"final={last_actual}, expected exact final={expected}"
-            elif recovery_sec is None:
-                detail = f"never recovered to exact {expected}"
-            elif recovery_sec > max_convergence_sec:
-                detail = (
-                    f"recovered to exact {expected} in {recovery_sec}s "
-                    f"> {max_convergence_sec}s SLA"
-                )
-            elif stable_tail_sec < recovery_stability_sec:
-                detail = (
-                    f"recovered to exact {expected} in {recovery_sec}s, but only "
-                    f"{stable_tail_sec}s of stable zero tail was observed "
-                    f"(need {recovery_stability_sec}s)"
-                )
-            else:
-                detail = (
-                    f"recovered to exact {expected} in {recovery_sec}s "
-                    f"(SLA {max_convergence_sec}s), held for {stable_tail_sec}s; "
-                    f"final={last_actual}"
-                )
             results.append(
                 PerLaneResult(
                     lane=lane_id,
                     device=f"HRT neg L{lane_id}",
                     check_type="HRT remote_failure scale recovery",
-                    passed=passed,
+                    passed=evaluation.passed,
                     expected=expected,
-                    actual=last_actual,
-                    convergence_sec=recovery_sec,
-                    detail=detail,
+                    actual=evaluation.actual,
+                    convergence_sec=evaluation.recovery_sec,
+                    detail=evaluation.detail,
                     error_count=error_count,
+                    inconclusive=evaluation.inconclusive,
                 )
             )
         return results
@@ -1784,6 +1904,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     expected_per_lane=expected_per_lane,
                     max_convergence_sec=max_convergence_sec,
                     recovery_stability_sec=recovery_stability_sec,
+                    observation_end_ts=window_end,
                     device_ids=device_ids,
                     only_hosts=only_hosts,
                 )

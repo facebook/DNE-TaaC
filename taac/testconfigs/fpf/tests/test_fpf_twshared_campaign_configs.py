@@ -373,6 +373,20 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     else:
                         self.assertTrue(params["require_final_exact"])
 
+                observation_steps = [
+                    step
+                    for step in _steps(ramp)
+                    if step.name == taac_types.StepName.LONGEVITY_STEP
+                    and "exact 60s stable tail" in (step.description or "")
+                ]
+                self.assertEqual(len(observation_steps), 2)
+                self.assertTrue(
+                    all(
+                        _step_params(step)["duration"] == 190
+                        for step in observation_steps
+                    )
+                )
+
     def test_tc46_has_exact_8k_checkpoint_before_withdrawal(self):
         playbook = fpf_tc46_scale_down_8k_4k.TEST_CONFIG.playbooks[0]
         steps = _steps(playbook)

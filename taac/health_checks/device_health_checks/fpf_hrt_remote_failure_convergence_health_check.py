@@ -24,7 +24,10 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_test_case_start_time,
     validate_restart_tolerant_tuple,
 )
-from taac.libs.fpf.fpf_stress_checks import _parse_ts
+from taac.libs.fpf.fpf_stress_checks import (
+    _parse_ts,
+    evaluate_scale_recovery_samples,
+)
 from taac.health_check.health_check import types as hc_types
 
 JSONL_PATH = "/tmp/fpf_stress_hrt_remote_failure.jsonl"
@@ -294,9 +297,12 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 if not recovered:
                     result.passed = False
 
-        failures = [r for r in per_lane_results if not r.passed]
+        failures = [r for r in per_lane_results if not r.passed and not r.inconclusive]
+        inconclusive = [r for r in per_lane_results if r.inconclusive]
         for r in per_lane_results:
-            status = "PASS" if r.passed else "FAIL"
+            status = (
+                "PASS" if r.passed else "INCONCLUSIVE" if r.inconclusive else "FAIL"
+            )
             self.logger.info(
                 f"  [HRT remote_failure live] {r.device}: [{status}] {r.detail}"
             )
@@ -311,9 +317,10 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             collectors=[collector],
             window_start=window_start,
             window_end=window_end,
-            result_status=("FAIL" if failures else "PASS"),
+            result_status=("FAIL" if failures else "SKIP" if inconclusive else "PASS"),
             result_reason="; ".join(
-                f"{r.device}{_lbl(r.lane)}: {r.detail}" for r in failures
+                f"{r.device}{_lbl(r.lane)}: {r.detail}"
+                for r in [*failures, *inconclusive]
             )[:300],
         )
 
@@ -334,6 +341,14 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=fail_summary + details,
+            )
+        if inconclusive:
+            summary = "; ".join(
+                f"{r.device}{_lbl(r.lane)}: {r.detail}" for r in inconclusive
+            )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=summary + details,
             )
         pass_summary = "; ".join(f"{r.device}: {r.detail}" for r in per_lane_results)
         return hc_types.HealthCheckResult(
@@ -370,6 +385,9 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
 
         first_ts = _parse_ts(rows[0]["timestamp"]).timestamp()
         trigger_ts = first_ts + trigger_delay_sec
+        observation_end_ts = float(
+            check_params.get("window_end", _parse_ts(rows[-1]["timestamp"]).timestamp())
+        )
 
         results = [
             self._evaluate_lane_from_rows(
@@ -380,13 +398,15 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 direction,
                 max_convergence_sec,
                 recovery_stability_sec,
+                observation_end_ts,
             )
             for lane_id in sorted(lanes)
         ]
 
-        failures = [r for r in results if not r[1]]
-        for lane_id, passed, _actual, _conv, detail in results:
-            status = "PASS" if passed else "FAIL"
+        failures = [r for r in results if not r[1] and not r[5]]
+        inconclusive = [r for r in results if r[5]]
+        for lane_id, passed, _actual, _conv, detail, is_inconclusive in results:
+            status = "PASS" if passed else "INCONCLUSIVE" if is_inconclusive else "FAIL"
             self.logger.info(
                 f"  [HRT remote_failure] Lane {lane_id}: [{status}] {detail}"
             )
@@ -396,6 +416,12 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=fail_summary,
+            )
+        if inconclusive:
+            summary = "; ".join(f"Lane {r[0]}: {r[4]}" for r in inconclusive)
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=summary,
             )
         pass_summary = "; ".join(f"Lane {r[0]}: {r[4]}" for r in results)
         return hc_types.HealthCheckResult(
@@ -412,14 +438,16 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         direction: str,
         max_convergence_sec: int,
         recovery_stability_sec: float,
-    ) -> t.Tuple[int, bool, int, t.Optional[float], str]:
+        observation_end_ts: float,
+    ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         if direction in (
             "stable",
             "stable_last_sample",
             "stable_skip_null_strict",
             "stable_last_n",
         ):
-            return self._evaluate_stable_from_rows(lane_id, expected, rows, direction)
+            result = self._evaluate_stable_from_rows(lane_id, expected, rows, direction)
+            return (*result, False)
         if direction == "scale_recovery":
             return self._evaluate_scale_recovery_from_rows(
                 lane_id,
@@ -428,14 +456,17 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 trigger_ts,
                 max_convergence_sec,
                 recovery_stability_sec,
+                observation_end_ts,
             )
         if direction == "drain":
-            return self._evaluate_drain_from_rows(
+            result = self._evaluate_drain_from_rows(
                 lane_id, expected, rows, max_convergence_sec
             )
-        return self._evaluate_recovery_from_rows(
+            return (*result, False)
+        result = self._evaluate_recovery_from_rows(
             lane_id, expected, rows, max_convergence_sec
         )
+        return (*result, False)
 
     def _evaluate_scale_recovery_from_rows(
         self,
@@ -445,7 +476,8 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         trigger_ts: float,
         max_convergence_sec: int,
         recovery_stability_sec: float,
-    ) -> t.Tuple[int, bool, int, t.Optional[float], str]:
+        observation_end_ts: float,
+    ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         samples: t.List[t.Tuple[float, int]] = []
         error_count = 0
         for row in rows:
@@ -465,54 +497,23 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 continue
             samples.append((row_ts, int(lane_counts[lane_id])))
 
-        last_actual = samples[-1][1] if samples else 0
-        last_mismatch_index = max(
-            (index for index, (_, value) in enumerate(samples) if value != expected),
-            default=-1,
+        evaluation = evaluate_scale_recovery_samples(
+            samples,
+            error_count=error_count,
+            expected=expected,
+            trigger_ts=trigger_ts,
+            observation_end_ts=observation_end_ts,
+            max_convergence_sec=max_convergence_sec,
+            recovery_stability_sec=recovery_stability_sec,
         )
-        recovery_index = last_mismatch_index + 1
-        recovered = recovery_index < len(samples)
-        recovery_sec = (
-            round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
+        return (
+            lane_id,
+            evaluation.passed,
+            evaluation.actual,
+            evaluation.recovery_sec,
+            evaluation.detail,
+            evaluation.inconclusive,
         )
-        stable_tail_sec = (
-            round(samples[-1][0] - samples[recovery_index][0], 1) if recovered else 0.0
-        )
-        passed = (
-            bool(samples)
-            and error_count == 0
-            and recovered
-            and last_actual == expected
-            and recovery_sec is not None
-            and recovery_sec <= max_convergence_sec
-            and stable_tail_sec >= recovery_stability_sec
-        )
-        if not samples:
-            detail = "no valid samples"
-        elif error_count:
-            detail = f"{error_count} invalid/missing sample(s) in scale window"
-        elif last_actual != expected:
-            detail = f"final={last_actual}, expected exact final={expected}"
-        elif recovery_sec is None:
-            detail = f"never recovered to exact {expected}"
-        elif recovery_sec > max_convergence_sec:
-            detail = (
-                f"recovered to exact {expected} in {recovery_sec}s "
-                f"> {max_convergence_sec}s SLA"
-            )
-        elif stable_tail_sec < recovery_stability_sec:
-            detail = (
-                f"recovered to exact {expected} in {recovery_sec}s, but only "
-                f"{stable_tail_sec}s of stable zero tail was observed "
-                f"(need {recovery_stability_sec}s)"
-            )
-        else:
-            detail = (
-                f"recovered to exact {expected} in {recovery_sec}s "
-                f"(SLA {max_convergence_sec}s), held for {stable_tail_sec}s; "
-                f"final={last_actual}"
-            )
-        return lane_id, passed, last_actual, recovery_sec, detail
 
     def _evaluate_stable_from_rows(
         self,

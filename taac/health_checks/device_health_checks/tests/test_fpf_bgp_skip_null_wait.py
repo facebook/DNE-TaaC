@@ -254,6 +254,12 @@ class RemoteFailureWindowBoundaryTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.assertEqual(
+            collector.evaluate_per_lane_window.call_args.kwargs[
+                "recovery_stability_sec"
+            ],
+            60.0,
+        )
         return collector.evaluate_per_lane_window.call_args.kwargs["window_start"]
 
     async def test_stale_prior_playbook_disruption_is_excluded(self):

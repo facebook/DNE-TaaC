@@ -144,7 +144,12 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         self.assertTrue(enforce_final_exact(exact, 4000).passed)
 
     def _rf_result(
-        self, counts: list[int], offsets: list[int], *, invalid_index: int | None = None
+        self,
+        counts: list[int],
+        offsets: list[int],
+        *,
+        invalid_index: int | None = None,
+        window_end_offset: int = 300,
     ) -> PerLaneResult:
         collector = HrtRemoteFailureCollector(
             hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
@@ -162,7 +167,7 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         ]
         return collector.evaluate_per_lane_window(
             window_start=WINDOW_START,
-            window_end=WINDOW_END,
+            window_end=WINDOW_START + window_end_offset,
             lanes=[0],
             expected_per_lane={0: 0},
             direction="scale_recovery",
@@ -172,13 +177,35 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         )[0]
 
     def test_scale_rf_allows_bounded_transient_and_requires_exact_final(self):
-        self.assertTrue(self._rf_result([0, 152, 0, 0], [5, 30, 60, 120]).passed)
-        self.assertFalse(self._rf_result([0, 152, 0], [5, 30, 60]).passed)
+        passing = self._rf_result([152, 0, 0], [30, 120, 180], window_end_offset=190)
+        self.assertTrue(passing.passed)
+        self.assertFalse(passing.inconclusive)
+
+        truncated = self._rf_result([0, 152, 0, 0], [5, 30, 60, 120])
+        self.assertFalse(truncated.passed)
+        self.assertTrue(truncated.inconclusive)
+        self.assertIn("insufficient collector coverage", truncated.detail)
+
         self.assertFalse(self._rf_result([0, 152, 152], [5, 30, 60]).passed)
-        self.assertFalse(self._rf_result([0, 152, 0, 0], [5, 30, 150, 220]).passed)
+        late = self._rf_result([152, 0, 0], [30, 150, 295])
+        self.assertFalse(late.passed)
+        self.assertFalse(late.inconclusive)
+        self.assertIn("> 120s SLA", late.detail)
+
+        regressed = self._rf_result([152, 0, 7, 0], [30, 60, 100, 295])
+        self.assertFalse(regressed.passed)
+        self.assertFalse(regressed.inconclusive)
+        self.assertIn("regressed", regressed.detail)
+
         self.assertFalse(
-            self._rf_result([0, 152, 0, 0], [5, 30, 60, 120], invalid_index=1).passed
+            self._rf_result([0, 152, 0, 0], [5, 30, 60, 295], invalid_index=1).passed
         )
+
+        short_horizon = self._rf_result(
+            [152, 0, 0], [30, 60, 165], window_end_offset=170
+        )
+        self.assertFalse(short_horizon.passed)
+        self.assertTrue(short_horizon.inconclusive)
 
     def test_exact_lane_map_is_complete_and_well_typed(self):
         self.assertEqual(
@@ -194,6 +221,49 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
             with self.subTest(raw=raw):
                 _expected, error = _normalize_expected_per_lane([0, 1], raw, True)
                 self.assertIsNotNone(error)
+
+
+class FpfScaleRecoveryStatusTest(unittest.IsolatedAsyncioTestCase):
+    async def test_truncated_currently_zero_series_is_inconclusive(self):
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[count, 0, 0, 0],
+            )
+            for count, offset in ((0, 5), (152, 30), (0, 60), (0, 120))
+        ]
+        health_check = FpfHrtRemoteFailureConvergenceHealthCheck(logger=MagicMock())
+        with (
+            patch(f"{REMOTE_MODULE}.get_collector", return_value=collector),
+            patch(f"{REMOTE_MODULE}.get_mutation_time", return_value=WINDOW_START),
+            patch(
+                f"{REMOTE_MODULE}.everpaste_details_suffix",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = await health_check._run(
+                MagicMock(spec=TestDevice),
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "lanes": [0],
+                    "expected_per_lane": {"0": 0},
+                    "direction": "scale_recovery",
+                    "max_convergence_sec": 120,
+                    "recovery_stability_sec": 60,
+                    "use_live_collectors": True,
+                    "use_mutation_time": True,
+                    "only_hosts": [GPU_HOST],
+                    "window_end": WINDOW_END,
+                },
+            )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.SKIP)
+        self.assertIn("INCONCLUSIVE", result.message)
 
 
 # ---------------------------------------------------------------------------

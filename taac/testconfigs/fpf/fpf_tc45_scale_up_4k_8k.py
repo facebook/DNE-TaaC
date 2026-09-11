@@ -52,6 +52,7 @@ SCALE_LOW = 4000
 SCALE_HIGH = 8000
 SCALE_BATCH_SIZE = 252
 SETTLE_SEC = 120
+SCALE_OBSERVATION_SEC = 190
 LONGEVITY_SEC = 300
 INJECTED_LANES = fpf_hrt_lanes()
 HRT_DEVICE_IDS = fpf_hrt_device_ids()
@@ -130,8 +131,11 @@ def create_fpf_tc45_test_config() -> TestConfig:
             ),
             *_inject_both_vfs(SCALE_LOW, "Scale baseline"),
             create_longevity_step(
-                duration=SETTLE_SEC,
-                description=f"Settle {SETTLE_SEC}s at {SCALE_LOW} prefixes",
+                duration=SCALE_OBSERVATION_SEC,
+                description=(
+                    f"Observe {SCALE_OBSERVATION_SEC}s at {SCALE_LOW} prefixes "
+                    "for 120s recovery plus an exact 60s stable tail"
+                ),
             ),
             create_validation_step(
                 point_in_time_checks=create_fpf_scale_checkpoint_checks(
@@ -155,8 +159,11 @@ def create_fpf_tc45_test_config() -> TestConfig:
             ),
             *_inject_both_vfs(SCALE_HIGH, "Scale up"),
             create_longevity_step(
-                duration=SETTLE_SEC,
-                description=f"Settle {SETTLE_SEC}s at {SCALE_HIGH} prefixes",
+                duration=SCALE_OBSERVATION_SEC,
+                description=(
+                    f"Observe {SCALE_OBSERVATION_SEC}s at {SCALE_HIGH} prefixes "
+                    "for 120s recovery plus an exact 60s stable tail"
+                ),
             ),
         ],
         playbook_name="fpf_tc45_scale_up_4k_8k_disrupt",
