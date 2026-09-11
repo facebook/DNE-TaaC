@@ -3709,6 +3709,9 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     uniform_interface_discovery: bool = False,
     final_up_timeout_sec: int = 60,
     final_up_poll_interval_sec: int = 5,
+    retry_final_cleanup_after_churn: bool = False,
+    final_cleanup_service_recovery_timeout_sec: int = 120,
+    final_cleanup_retry_timeout_sec: int = 120,
     fail_closed: bool = False,
     expected_interfaces: t.Optional[t.List[str]] = None,
     require_exact_neighbor_hosts: bool = False,
@@ -3770,6 +3773,8 @@ def create_fpf_multi_gtsw_rapid_flap_step(
             f"Unsupported service churn action {churn_action!r}; expected "
             "'restart' or 'crash'"
         )
+    if retry_final_cleanup_after_churn and churn_service is None:
+        raise ValueError("retry_final_cleanup_after_churn requires churn_service")
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "fpf_multi_gtsw_rapid_flap",
@@ -3803,6 +3808,16 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     if churn_service is not None:
         params["churn_service"] = int(churn_service.value)
         params["churn_recovery_poll_interval_sec"] = churn_recovery_poll_interval_sec
+    if retry_final_cleanup_after_churn:
+        params.update(
+            {
+                "retry_final_cleanup_after_churn": True,
+                "final_cleanup_service_recovery_timeout_sec": (
+                    final_cleanup_service_recovery_timeout_sec
+                ),
+                "final_cleanup_retry_timeout_sec": final_cleanup_retry_timeout_sec,
+            }
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
@@ -4135,10 +4150,49 @@ def create_fpf_restart_hrt_step(
     )
 
 
+def create_fpf_up_port_baseline_step(
+    *,
+    action: str,
+    devices: t.List[str],
+    baseline_key: str,
+    expected_interfaces_by_device: t.Optional[t.Mapping[str, t.Sequence[str]]] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Capture or verify the exact run-scoped set of operationally-UP ports."""
+    if action not in {"capture", "verify"}:
+        raise ValueError("action must be 'capture' or 'verify'")
+    if not devices:
+        raise ValueError("devices must be non-empty")
+    if not baseline_key:
+        raise ValueError("baseline_key must be non-empty")
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_up_port_baseline",
+        "action": action,
+        "devices": devices,
+        "baseline_key": baseline_key,
+    }
+    if expected_interfaces_by_device is not None:
+        params["expected_interfaces_by_device"] = {
+            str(device): [str(interface) for interface in interfaces]
+            for device, interfaces in expected_interfaces_by_device.items()
+        }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"{action.title()} UP-port baseline {baseline_key!r} on {devices}",
+        step_params=Params(json_params=json.dumps(params)),
+        device_regexes=device_regexes,
+    )
+
+
 def create_fpf_lldp_batched_set_interface_admin_step(
     neighbor_pattern: str,
     enable: bool,
     device_regexes: t.Optional[t.List[str]] = None,
+    interface_cache_key: t.Optional[str] = None,
+    use_cached_interfaces: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Resolve interfaces from LLDP at runtime, then batch admin-enable/disable.
@@ -4161,6 +4215,12 @@ def create_fpf_lldp_batched_set_interface_admin_step(
             LLDP remote system name on the DUT (e.g. ``"gtsw001*"``).
         enable: True to enable (no-shut), False to disable (held admin-down).
         device_regexes: Optional device-regex scope (e.g. the DUT STSW).
+        interface_cache_key: Run-scoped key under which a disable step stores
+            the exact resolved interface set for a later enable step.
+        use_cached_interfaces: Prefer the cached set when enabling. If the
+            cache is absent, ``expected_interfaces`` is the fail-closed fallback.
+        expected_interfaces: Exact allowlist for LLDP resolution and the
+            LLDP-independent restore-only fallback.
         description: Custom step description.
     """
     return Step(
@@ -4176,6 +4236,19 @@ def create_fpf_lldp_batched_set_interface_admin_step(
                     "custom_step_name": "fpf_lldp_batched_set_interface_admin",
                     "neighbor_pattern": neighbor_pattern,
                     "is_enable": enable,
+                    **(
+                        {"interface_cache_key": interface_cache_key}
+                        if interface_cache_key
+                        else {}
+                    ),
+                    **(
+                        {"use_cached_interfaces": True} if use_cached_interfaces else {}
+                    ),
+                    **(
+                        {"expected_interfaces": expected_interfaces}
+                        if expected_interfaces is not None
+                        else {}
+                    ),
                 }
             )
         ),
@@ -4195,11 +4268,12 @@ def create_fpf_stsw_drain_and_reinject_steps(
     """Drain (or undrain) an STSW plane, then re-inject the FPF prefixes.
 
     Composition (no new step type): drains/undrains ``stsw`` via the existing
-    LOCAL_DRAINER drain/undrain step, then re-injects ``prefix_count`` prefixes
-    on ``trigger_stsws`` via ``create_fpf_bgp_prefix_injection_step``. When
-    draining, an optional ``drain_community`` is appended to ``community_list`` so
-    the re-injected prefixes carry the extra drain-marker community; when
-    undraining, the base ``community_list`` is used unchanged.
+    LOCAL_DRAINER drain/undrain step, verifies the requested state fail-closed,
+    then re-injects ``prefix_count`` prefixes on ``trigger_stsws`` via
+    ``create_fpf_bgp_prefix_injection_step``. When draining, an optional
+    ``drain_community`` is supplied as an extra BGP community (not concatenated
+    into the named community-list preset); when undraining, only the base preset
+    is used.
 
     Used by the cascaded STSW-plane-drain + GTSW-device-drain FPF configs.
 
@@ -4216,19 +4290,22 @@ def create_fpf_stsw_drain_and_reinject_steps(
             independently instead of advertising one prefix base on every STSW.
 
     Returns:
-        Ordered [drain/undrain step, prefix-injection step].
+        Ordered drain/undrain, readback, and prefix-injection step(s).
     """
-    if drained and drain_community:
-        injected_communities = f"{community_list} {drain_community}"
-    else:
-        injected_communities = community_list
-
     action = "Drain" if drained else "Undrain"
-    drain_step = create_drain_undrain_step(
+    drain_step = create_fpf_drain_interface_step(
+        interfaces=[],
         drain=drained,
-        drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
-        device_regexes=[stsw],
+        target_device=stsw,
         description=f"{action} STSW {stsw} (local drainer)",
+    )
+    verify_step = create_fpf_verify_disruption_step(
+        interfaces=[],
+        mode="device_drain",
+        expect_drained=drained,
+        fail_if_ineffective=True,
+        target_device=stsw,
+        description=f"Fail-closed readback: STSW {stsw} is {action.lower()}ed",
     )
     if injection_groups is not None:
         if not injection_groups:
@@ -4255,21 +4332,28 @@ def create_fpf_stsw_drain_and_reinject_steps(
                     prefix_base=prefix_base,
                     count=count,
                     batch_size=batch_size,
-                    community_list=injected_communities,
+                    community_list=str(group.get("community_list", community_list)),
+                    extra_communities=(
+                        [drain_community] if drained and drain_community else None
+                    ),
                     description=(
                         f"Re-inject {count} prefixes from {prefix_base} on "
                         f"{', '.join(devices)} after {action.lower()} of {stsw}"
                     ),
                 )
             )
-        return [drain_step, *injection_steps]
+        return [drain_step, verify_step, *injection_steps]
 
     return [
         drain_step,
+        verify_step,
         create_fpf_bgp_prefix_injection_step(
             devices=trigger_stsws,
             count=prefix_count,
-            community_list=injected_communities,
+            community_list=community_list,
+            extra_communities=(
+                [drain_community] if drained and drain_community else None
+            ),
             description=f"Re-inject {prefix_count} prefixes on "
             f"{', '.join(trigger_stsws)} after {action.lower()} of {stsw}",
         ),
@@ -12495,6 +12579,7 @@ def create_fpf_bgp_prefix_injection_step(
     increment_step: str = "0:0:1::",
     community_list: t.Optional[str] = None,
     communities: t.Optional[t.List[str]] = None,
+    extra_communities: t.Optional[t.List[str]] = None,
     batch_size: t.Optional[int] = None,
     withdraw_only: bool = False,
     description: t.Optional[str] = None,
@@ -12516,6 +12601,8 @@ def create_fpf_bgp_prefix_injection_step(
         params["community_list"] = community_list
     if communities is not None:
         params["communities"] = communities
+    if extra_communities is not None:
+        params["extra_communities"] = extra_communities
     return Step(
         name=StepName.FPF_BGP_PREFIX_INJECTION_STEP,
         step_params=Params(json_params=json.dumps(params)),

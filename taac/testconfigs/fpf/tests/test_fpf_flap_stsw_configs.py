@@ -19,6 +19,10 @@ from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_tc32_downlink_flaps,
     fpf_tc40_cont_interface_flaps,
+    fpf_tc42_cont_flaps_wedge_restart,
+    fpf_tc43_cont_flaps_bgp_restart,
+    fpf_tc44_cont_flaps_fsdb_restart,
+    fpf_tc55_gtsw_device_reboot,
     fpf_tc56_cont_flaps_qsfp_restart,
     fpf_tc57_cont_flaps_qsfp_crash,
 )
@@ -38,6 +42,7 @@ from taac.testconfigs.fpf.fpf_tc35_stsw_undrain_reinject import (
     LONGEVITY_SEC as TC35_LONGEVITY_SEC,
     TEST_CONFIG as TC35,
 )
+from taac.health_check.health_check.types import CheckName
 from taac.test_as_a_config.types import Service, StepName
 
 
@@ -51,6 +56,10 @@ def _steps(playbook):
 
 def _params(step) -> dict:
     return json.loads(step.step_params.json_params)
+
+
+def _check_ids(playbook) -> set[str]:
+    return {check.check_id for check in playbook.postchecks or [] if check.check_id}
 
 
 def _disrupt_playbook_has_no_checks(tc, test):
@@ -310,7 +319,12 @@ class TestRapidFlapConfigs(unittest.TestCase):
 
                 tc40_module = importlib.reload(fpf_tc40_cont_interface_flaps)
                 tc40 = tc40_module.create_fpf_tc40_test_config()
-                tc40_flap = _params(_steps(tc40.playbooks[0])[0])
+                tc40_flap = next(
+                    _params(step)
+                    for step in _steps(tc40.playbooks[0])
+                    if _params(step).get("custom_step_name")
+                    == "fpf_multi_gtsw_rapid_flap"
+                )
                 self.assertTrue(tc40_flap["fail_closed"])
                 self.assertEqual(tc40_flap["neighbor_hosts"], [hosts[0]])
                 self.assertEqual(
@@ -335,7 +349,11 @@ class TestRapidFlapConfigs(unittest.TestCase):
     def test_tc40_opts_into_fail_closed_multi_gtsw_safety(self):
         config = fpf_tc40_cont_interface_flaps.TEST_CONFIG
         _assert_recovered_baseline_qualification(config, self)
-        flap = _params(_steps(config.playbooks[0])[0])
+        flap = next(
+            _params(step)
+            for step in _steps(config.playbooks[0])
+            if _params(step).get("custom_step_name") == "fpf_multi_gtsw_rapid_flap"
+        )
         self.assertTrue(flap["fail_closed"])
         self.assertTrue(flap["require_exact_neighbor_hosts"])
         self.assertEqual(
@@ -417,8 +435,12 @@ class TestRapidFlapConfigs(unittest.TestCase):
                 _assert_recovered_baseline_qualification(config, self)
 
                 steps = _steps(config.playbooks[0])
-                self.assertEqual(len(steps), 2)
-                flap = _params(steps[0])
+                self.assertEqual(len(steps), 3)
+                self.assertEqual(
+                    _params(steps[0])["custom_step_name"],
+                    "fpf_up_port_baseline",
+                )
+                flap = _params(steps[1])
                 self.assertEqual(flap["duration_sec"], 1800)
                 self.assertEqual(flap["down_time_sec"], 7.0)
                 self.assertEqual(flap["up_time_sec"], 7.0)
@@ -448,26 +470,150 @@ class TestRapidFlapConfigs(unittest.TestCase):
                     // flap["churn_every_sec"],
                     2,
                 )
-                self.assertEqual(_params(steps[1])["duration"], 300)
+                self.assertEqual(_params(steps[2])["duration"], 120)
 
     def test_tc33_uplink_flaps(self):
-        self._assert_flap_config(
-            TC33,
-            "fpf_tc33_gtsw_stsw_links_down",
-            TC33_FLAP_SEC,
-            TC33_LONGEVITY_SEC,
-            UPLINK_NEIGHBOR_PATTERN,
-            vf_grouped=True,
-        )
+        self.assertEqual(TC33.name, "fpf_tc33_gtsw_stsw_links_down")
+        self.assertEqual(TC33_FLAP_SEC, 900)
+        self.assertEqual(TC33_LONGEVITY_SEC, 300)
+        self.assertEqual(len(TC33.playbooks), 2)
+        _longevity_carries_v2_stable_check_set(TC33, self, vf_grouped=True)
+        _assert_recovered_baseline_qualification(TC33, self)
         # tc33 intentionally flaps ALL gtsw001 STSW uplinks via the spine glob —
         # no exact host scoping.
-        flap_params = _params(_steps(TC33.playbooks[0])[0])
+        flap_params = next(
+            _params(step)
+            for step in _steps(TC33.playbooks[0])
+            if _params(step).get("custom_step_name") == "fpf_rapid_flap_lldp"
+        )
         self.assertIsNone(flap_params["neighbor_hosts"])
+        self.assertEqual(flap_params["neighbor_pattern"], UPLINK_NEIGHBOR_PATTERN)
+
+    def test_tc33_disrupt_is_traffic_agnostic_safety_window(self):
+        disrupt = TC33.playbooks[0]
+        params = [_params(step) for step in _steps(disrupt)]
+        custom_names = [p.get("custom_step_name") for p in params]
+        self.assertEqual(custom_names[0], "fpf_up_port_baseline")
+        self.assertIn("fpf_rapid_flap_lldp", custom_names)
+        self.assertEqual(params[-1]["duration"], 120)
+
+        names = {check.name for check in disrupt.postchecks or []}
+        self.assertIn(CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK, names)
+        self.assertIn(CheckName.UNCLEAN_EXIT_CHECK, names)
+        self.assertIn(CheckName.DEVICE_CORE_DUMPS_CHECK, names)
+        self.assertNotIn(CheckName.FPF_HOST_SPRAY_CHECK, names)
+        ids = _check_ids(disrupt)
+        self.assertFalse(any("convergence" in check_id for check_id in ids))
+
+        longevity_params = [_params(step) for step in _steps(TC33.playbooks[1])]
+        longevity_names = [p.get("custom_step_name") for p in longevity_params]
+        self.assertEqual(longevity_names[0], "fpf_ensure_traffic")
+        self.assertEqual(longevity_names[-1], "fpf_up_port_baseline")
+        self.assertEqual(longevity_params[-1]["action"], "verify")
+
+    def test_tc42_to_tc44_flap_all_eight_gtsws_and_split_disrupt_longevity(self):
+        cases = (
+            fpf_tc42_cont_flaps_wedge_restart.TEST_CONFIG,
+            fpf_tc43_cont_flaps_bgp_restart.TEST_CONFIG,
+            fpf_tc44_cont_flaps_fsdb_restart.TEST_CONFIG,
+        )
+        for config in cases:
+            with self.subTest(config=config.name):
+                self.assertEqual(len(config.playbooks), 2)
+                disrupt, longevity = config.playbooks
+                params = [_params(step) for step in _steps(disrupt)]
+                flap = next(
+                    p
+                    for p in params
+                    if p.get("custom_step_name") == "fpf_multi_gtsw_rapid_flap"
+                )
+                self.assertEqual(flap["gtsws"], fpf_tc40_cont_interface_flaps.ALL_GTSWS)
+                self.assertEqual(
+                    flap["expected_interfaces"],
+                    fpf_tc40_cont_interface_flaps.FLAP_INTERFACES,
+                )
+                self.assertEqual(len(flap["gtsws"]), 8)
+                self.assertEqual(len(flap["expected_interfaces"]), 4)
+                self.assertEqual(params[-1]["duration"], 120)
+
+                names = {check.name for check in disrupt.postchecks or []}
+                self.assertIn(CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK, names)
+                self.assertIn(CheckName.UNCLEAN_EXIT_CHECK, names)
+                self.assertIn(CheckName.DEVICE_CORE_DUMPS_CHECK, names)
+                self.assertNotIn(CheckName.FPF_HOST_SPRAY_CHECK, names)
+
+                longevity_params = [_params(step) for step in _steps(longevity)]
+                longevity_names = [p.get("custom_step_name") for p in longevity_params]
+                self.assertEqual(longevity_names[0], "fpf_ensure_traffic")
+                self.assertEqual(longevity_names[-1], "fpf_up_port_baseline")
+                self.assertEqual(
+                    longevity_params[-1]["devices"],
+                    fpf_tc40_cont_interface_flaps.ALL_GTSWS,
+                )
+
+    def test_tc42_retries_final_cleanup_after_wedge_agent_readiness(self):
+        params = next(
+            _params(step)
+            for step in _steps(
+                fpf_tc42_cont_flaps_wedge_restart.TEST_CONFIG.playbooks[0]
+            )
+            if _params(step).get("custom_step_name") == "fpf_multi_gtsw_rapid_flap"
+        )
+        self.assertEqual(params["final_up_timeout_sec"], 60)
+        self.assertTrue(params["retry_final_cleanup_after_churn"])
+        self.assertEqual(params["final_cleanup_service_recovery_timeout_sec"], 120)
+        self.assertEqual(params["final_cleanup_retry_timeout_sec"], 120)
+
+    def test_tc55_reboot_drained_then_explicit_undrain_recovery(self):
+        config = fpf_tc55_gtsw_device_reboot.TEST_CONFIG
+        self.assertEqual(len(config.playbooks), 2)
+        disrupt, recovery = config.playbooks
+        self.assertEqual(
+            recovery.name,
+            "fpf_tc55_gtsw_device_reboot_recovery_undrain",
+        )
+        disrupt_ids = _check_ids(disrupt)
+        self.assertIn("gtsw_reboot_drained_state", disrupt_ids)
+        self.assertIn("gtsw_reboot_drained_traffic", disrupt_ids)
+        self.assertNotIn("fpf_hrt_postcheck", disrupt_ids)
+
+        recovery_steps = _steps(recovery)
+        undrain_index = next(
+            i
+            for i, step in enumerate(recovery_steps)
+            if _params(step).get("custom_step_name") == "fpf_drain_interface"
+            and not _params(step)["is_drain"]
+        )
+        ensure_index = next(
+            i
+            for i, step in enumerate(recovery_steps)
+            if _params(step).get("custom_step_name") == "fpf_ensure_traffic"
+        )
+        verify_index = next(
+            i
+            for i, step in enumerate(recovery_steps)
+            if _params(step).get("custom_step_name") == "fpf_up_port_baseline"
+            and _params(step)["action"] == "verify"
+        )
+        self.assertLess(undrain_index, ensure_index)
+        self.assertLess(ensure_index, verify_index)
+        self.assertIn(
+            300,
+            [
+                _params(step)["duration"]
+                for step in recovery_steps
+                if step.name == StepName.LONGEVITY_STEP
+            ],
+        )
 
     def test_tc32_and_tc33_target_different_neighbor_classes(self):
         """Downlinks use an exact GPU host; uplinks use the STSW glob."""
         tc32_params = _params(_steps(TC32.playbooks[0])[0])
-        tc33_params = _params(_steps(TC33.playbooks[0])[0])
+        tc33_params = next(
+            _params(step)
+            for step in _steps(TC33.playbooks[0])
+            if _params(step).get("custom_step_name") == "fpf_rapid_flap_lldp"
+        )
         self.assertEqual(tc32_params["neighbor_hosts"], [GPU_HOSTS[0]])
         self.assertIsNone(tc32_params["neighbor_pattern"])
         self.assertIsNone(tc33_params["neighbor_hosts"])
@@ -478,31 +624,63 @@ class TestStswDrainReinjectConfigs(unittest.TestCase):
     def test_tc35_undrain_step_ordering_and_base_community(self):
         self.assertEqual(TC35.name, "fpf_tc35_stsw_undrain_reinject")
         self.assertIn("fpf", TC35.tags or [])
-        self.assertEqual(len(TC35.playbooks), 2)
-        _disrupt_playbook_has_no_checks(TC35, self)
-        _longevity_playbook_has_checks(TC35, self)
-        _longevity_carries_v2_stable_check_set(TC35, self, vf_grouped=True)
-        _assert_recovered_baseline_qualification(TC35, self)
+        self.assertEqual(len(TC35.playbooks), 1)
+        self.assertEqual(
+            TC35.playbooks[0].name,
+            "fpf_tc35_stsw_undrain_reinject_longevity",
+        )
+        self.assertTrue(TC35.playbooks[0].postchecks)
         self.assertEqual(TC35_LONGEVITY_SEC, 300)
 
         steps = _steps(TC35.playbooks[0])
-        # undrain, one re-injection per VF group, longevity.
-        self.assertEqual(len(steps), 4)
-        self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
-        self.assertEqual(steps[1].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
-        self.assertEqual(steps[2].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
-        self.assertEqual(steps[3].name, StepName.LONGEVITY_STEP)
+        custom = [_params(step) for step in steps if step.name == StepName.CUSTOM_STEP]
+        drain_indices = [
+            i
+            for i, params in enumerate(custom)
+            if params.get("custom_step_name") == "fpf_drain_interface"
+        ]
+        self.assertEqual([custom[i]["is_drain"] for i in drain_indices], [True, False])
+        gates = [
+            params
+            for params in custom
+            if params.get("custom_step_name") == "fpf_verify_disruption"
+        ]
+        self.assertEqual([params["expect_drained"] for params in gates], [True, False])
+        self.assertTrue(all(params["fail_if_ineffective"] for params in gates))
 
-        # Undrain always re-injects, but with the BASE community only (the
-        # drain-marker community "65446:10" must not appear).
-        injections = [_params(step) for step in steps[1:3]]
+        injections = [
+            _params(step)
+            for step in steps
+            if step.name == StepName.FPF_BGP_PREFIX_INJECTION_STEP
+        ]
+        self.assertEqual(len(injections), 4)
+        drain_injections, live_injections = injections[:2], injections[2:]
+        self.assertTrue(
+            all(
+                params["extra_communities"] == ["65446:10"]
+                for params in drain_injections
+            )
+        )
         self.assertEqual(
-            {params["prefix_base"] for params in injections},
+            {params["prefix_base"] for params in live_injections},
             {"5000:dd::/64", "5000:ee::/64"},
         )
-        for params in injections:
-            self.assertNotIn("65446:10", params["community_list"])
+        for params in live_injections:
+            self.assertNotIn("extra_communities", params)
+            self.assertEqual(params["community_list"], "stsw")
             self.assertEqual(params["count"], 1000)
+        durations = [
+            _params(step)["duration"]
+            for step in steps
+            if step.name == StepName.LONGEVITY_STEP
+        ]
+        self.assertGreaterEqual(durations.count(300), 3)
+        ensure_index = next(
+            i
+            for i, params in enumerate(custom)
+            if params.get("custom_step_name") == "fpf_ensure_traffic"
+        )
+        self.assertGreater(ensure_index, drain_indices[-1])
 
 
 if __name__ == "__main__":

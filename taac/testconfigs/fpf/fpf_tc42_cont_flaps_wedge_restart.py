@@ -17,5 +17,6 @@ TEST_CONFIG = create_fpf_cont_interface_flaps_test_config(
     churn_service=taac_types.Service.AGENT,
     churn_action="restart",
     churn_every_sec=RESTART_EVERY_SEC,
+    retry_final_cleanup_after_churn=True,
     observe_prod_prefix_on_all_hosts=True,
 )

@@ -23,6 +23,10 @@ from taac.testconfigs.fpf import (
     fpf_tc15_interface_disable,
     fpf_tc23_bgp_restart,
     fpf_tc25_wedge_agent_restart,
+    fpf_tc27_agent_coldboot,
+    fpf_tc35_stsw_undrain_reinject,
+    fpf_tc36_stsw_all_connections_down,
+    fpf_tc54_stsw_device_drain,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
     fpf_rf_vf_groups,
@@ -47,6 +51,12 @@ def _step_params(step) -> dict:
     return json.loads(step.step_params.json_params)
 
 
+def _task_params(task) -> dict:
+    if task.params is None or task.params.json_params is None:
+        return {}
+    return json.loads(task.params.json_params)
+
+
 def _all_checks(config):
     for playbook in config.playbooks:
         yield from playbook.prechecks or []
@@ -58,6 +68,44 @@ def _all_steps(config):
     for playbook in config.playbooks:
         for stage in playbook.stages:
             yield from stage.steps or []
+
+
+def _reload_shared_suite_modules():
+    """Reload environment-derived standalone factories before their umbrella."""
+    importlib.reload(fpf_hardening_common)
+    importlib.reload(fpf_tc35_stsw_undrain_reinject)
+    importlib.reload(fpf_tc36_stsw_all_connections_down)
+    importlib.reload(fpf_tc54_stsw_device_drain)
+    return importlib.reload(fpf_shared_injection_suite)
+
+
+class TestCampaignExecutionContracts(unittest.TestCase):
+    def test_tc27_collects_fsdb_session_timeline_every_two_seconds(self) -> None:
+        for config in (
+            fpf_tc27_agent_coldboot.TEST_CONFIG,
+            fpf_shared_injection_suite.TEST_CONFIG,
+        ):
+            collector = next(
+                task
+                for task in config.setup_tasks or []
+                if task.task_name == "fpf_start_collectors"
+            )
+            params = _task_params(collector)
+            self.assertEqual(params["fsdb_session_poll_interval_sec"], 2.0)
+
+    def test_shared_suite_contains_phase_correct_stsw_and_reboot_playbooks(
+        self,
+    ) -> None:
+        names = {
+            playbook.name
+            for playbook in fpf_shared_injection_suite.TEST_CONFIG.playbooks
+        }
+        self.assertIn("fpf_tc35_stsw_undrain_reinject_longevity", names)
+        self.assertIn("fpf_tc36_stsw_all_connections_down_disrupt", names)
+        self.assertIn("fpf_tc36_stsw_all_connections_down_restore", names)
+        self.assertIn("fpf_tc54_stsw_device_drain_disrupt", names)
+        self.assertIn("fpf_tc55_gtsw_device_reboot_disrupt", names)
+        self.assertIn("fpf_tc55_gtsw_device_reboot_recovery_undrain", names)
 
 
 def _assert_restart_contract(test, playbook) -> None:
@@ -376,8 +424,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             ):
                 os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)
                 os.environ.pop("TAAC_FPF_SKIP_IB_TRAFFIC", None)
-                importlib.reload(fpf_hardening_common)
-                importlib.reload(fpf_shared_injection_suite)
+                _reload_shared_suite_modules()
                 config = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
 
                 start = next(
@@ -470,8 +517,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                     {check.check_id for check in baseline.postchecks or []},
                 )
         finally:
-            importlib.reload(fpf_hardening_common)
-            importlib.reload(fpf_shared_injection_suite)
+            _reload_shared_suite_modules()
 
     def test_standalone_tc25_honors_twshared_hosts_topology_and_no_ib_mode(self):
         hosts = ["twshared1352.03.mwg2", "twshared1388.03.mwg2"]
@@ -578,8 +624,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"TAAC_FPF_SKIP_IB_TRAFFIC": "1"}):
                 os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)
-                importlib.reload(fpf_hardening_common)
-                importlib.reload(fpf_shared_injection_suite)
+                _reload_shared_suite_modules()
                 config = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
 
                 task_names = {
@@ -601,8 +646,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                 ]
                 self.assertEqual(ensure_steps, [])
         finally:
-            importlib.reload(fpf_hardening_common)
-            importlib.reload(fpf_shared_injection_suite)
+            _reload_shared_suite_modules()
 
     def test_standalone_tc25_retains_legacy_single_device_defaults(self):
         topology_vars = (

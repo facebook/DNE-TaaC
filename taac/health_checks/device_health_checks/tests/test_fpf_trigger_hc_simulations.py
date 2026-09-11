@@ -1036,7 +1036,13 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
             self.addCleanup(p.stop)
             p.start()
 
-    async def _run(self, rows, *, mode: str = "transition"):
+    async def _run(
+        self,
+        rows,
+        *,
+        mode: str = "transition",
+        impacted_planes_by_host=None,
+    ):
         collector = MagicMock()
         collector.hosts = [GPU_HOST, REMOTE_GPU_HOST]
         collector.get_rows_in_window.return_value = rows
@@ -1064,10 +1070,14 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
                         GPU_HOST: [PROD_PREFIX],
                         REMOTE_GPU_HOST: [PROD_PREFIX],
                     },
-                    "impacted_planes_by_host": {
-                        GPU_HOST: [0],
-                        REMOTE_GPU_HOST: [0],
-                    },
+                    "impacted_planes_by_host": (
+                        impacted_planes_by_host
+                        if impacted_planes_by_host is not None
+                        else {
+                            GPU_HOST: [0],
+                            REMOTE_GPU_HOST: [0],
+                        }
+                    ),
                     "max_transition_sec": 30.0,
                     "max_drain_sec": 30.0,
                     "disruption_ts": WINDOW_START + 10.0,
@@ -1175,6 +1185,19 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("required host", result.message)
+
+    async def test_remote_samples_without_plane_scope_report_attribution_gap(self):
+        rows = [
+            *self._host_rows(GPU_HOST, transition=True),
+            *self._host_rows(REMOTE_GPU_HOST, transition=True),
+        ]
+        result = await self._run(
+            rows,
+            impacted_planes_by_host={GPU_HOST: [0]},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("configured-prefix sample", result.message)
+        self.assertIn("no affected plane scope", result.message)
 
 
 class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTestCase):

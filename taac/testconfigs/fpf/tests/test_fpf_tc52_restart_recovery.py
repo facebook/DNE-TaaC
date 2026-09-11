@@ -126,7 +126,7 @@ class TestFpfTc52RestartRecovery(unittest.TestCase):
             "fpf_tc50_wedge_agent_kill_5s_10min_longevity",
             "fpf_tc51_fsdb_kill_5s_10min_longevity",
             "fpf_tc52_hrt_restart_longevity",
-            "fpf_tc55_gtsw_device_reboot_longevity",
+            "fpf_tc55_gtsw_device_reboot_recovery_undrain",
             "fpf_tc38_persistent_ndp_clear_stable",
             "fpf_tc58_multi_fboss_process_kill_15s_5min_longevity",
         )

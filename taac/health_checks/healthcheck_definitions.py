@@ -2573,6 +2573,7 @@ def create_clear_counters_check() -> PointInTimeHealthCheck:
 def create_drain_state_check(
     expected_drained: t.Optional[bool] = None,
     device_name: t.Optional[str] = None,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """DRAIN_STATE_CHECK — verifies the drain state of a device.
 
@@ -2590,6 +2591,7 @@ def create_drain_state_check(
         check_params=(
             Params(json_params=json.dumps(json_payload)) if json_payload else None
         ),
+        check_id=check_id,
     )
 
 

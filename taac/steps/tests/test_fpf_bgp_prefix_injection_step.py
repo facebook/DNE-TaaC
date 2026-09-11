@@ -174,6 +174,29 @@ class TestFpfBgpPrefixInjectionStep(unittest.IsolatedAsyncioTestCase):
         "neteng.test_infra.dne.taac.steps.fpf_bgp_prefix_injection_step.inject_prefixes",
         new_callable=AsyncMock,
     )
+    async def test_extra_community_is_appended_to_valid_preset(
+        self, mock_inject, mock_driver_cls
+    ):
+        mock_driver_cls.return_value = MagicMock()
+        params = {
+            "devices": ["stsw001.s001.l202.mwg2"],
+            "prefix_base": "5000:dd::/64",
+            "count": 1,
+            "community_list": "stsw",
+            "extra_communities": ["65446:10"],
+        }
+        await self.step_instance.setUp(taac_types.BaseInput(), params)
+        await self.step_instance.run(taac_types.BaseInput(), params)
+        communities = mock_inject.call_args[0][2]
+        self.assertEqual(len(communities), len(COMMUNITY_PRESETS["stsw"]) + 1)
+
+    @patch(
+        "neteng.test_infra.dne.taac.steps.fpf_bgp_prefix_injection_step.FbossSwitchInternal"
+    )
+    @patch(
+        "neteng.test_infra.dne.taac.steps.fpf_bgp_prefix_injection_step.inject_prefixes",
+        new_callable=AsyncMock,
+    )
     async def test_explicit_communities(self, mock_inject, mock_driver_cls):
         """Explicit communities list is used when community_list is absent."""
         mock_driver_cls.return_value = MagicMock()

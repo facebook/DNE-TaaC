@@ -13,13 +13,17 @@ GTSW lane (lane 0) loses its STSW uplink set wholesale.
 The LLDP query + disable is performed from the GTSW side (the test owner's
 request): on gtsw001, resolve the uplinks facing stsw001.s001 and shut them.
 
-DISRUPTION MECHANISM (runtime LLDP):
+DISRUPTION MECHANISM (runtime LLDP plus run-scoped restore state):
   Uses ``create_fpf_lldp_batched_set_interface_admin_step``: at step run time,
   on ``DUT_GTSW`` (gtsw001), the handler enumerates LLDP neighbors and matches
   the remote system name against ``MEMBER_NEIGHBOR_PATTERN`` (fnmatch glob over
   the specific STSW plane being downed, ``"stsw001.s001*"``) to get gtsw001's
   local uplink interfaces facing that STSW, then issues a SINGLE batched
-  ``async_thrift_disable_enable_interfaces`` call over the resolved tuple.
+  ``async_thrift_disable_enable_interfaces`` call over the resolved tuple. The
+  exact 36-interface set is cached before disable. Restore consumes that cache
+  because LLDP disappears while every member is down; a restore-only run uses
+  the same explicit, validated 36-port allowlist as its fallback. Both mutations
+  verify admin state after the batched call.
   Broadening the pattern to ``"stsw*"`` would down ALL planes' uplinks at once;
   we scope to the single plane under test.
   "Batched" here means one ``async_agent_client`` context with sequential
@@ -29,6 +33,10 @@ DISRUPTION MECHANISM (runtime LLDP):
 
 EXPECTATIONS (mirror the STSW/GTSW DEVICE-DRAIN test, TC19, with the
 all-connections-down nuances):
+  - The directly-injected test prefixes and GTSW-side RIB on the impacted lane
+    (lane 0) are withdrawn while all 36 uplinks are down. The disrupted phase
+    therefore omits the inapplicable lane-0 BGP/FSDB stability checks while
+    keeping the unaffected observer strict; the restore phase checks both.
   - The directly-injected test prefixes on the impacted lane (lane 0) are
     WITHDRAWN from the bulk/prod collectors of THAT (impacted) lane — those
     collectors no longer see lane-0 prefixes. They instead surface in the
@@ -60,10 +68,9 @@ gate; the restore playbook re-enables the whole member set and validates full
 stable-state recovery.
 
 Assumptions:
-  - Member interfaces are resolved live from LLDP on ``DUT_GTSW`` (gtsw001);
-    the config no longer carries a static member list. ``MEMBER_NEIGHBOR_PATTERN``
-    (``"stsw001.s001*"``) is a fnmatch glob over the LLDP remote system name,
-    scoped to the single STSW plane under test.
+  - Member interfaces are resolved live from LLDP on ``DUT_GTSW`` (gtsw001)
+    for disruption and must exactly match ``EXPECTED_MEMBER_INTERFACES``.
+    Restore uses the cached set or that same allowlist when invoked separately.
   - Batched-at-once semantics: a single
     ``async_thrift_disable_enable_interfaces`` call over the resolved tuple
     issues sequential per-port ``setPortState`` calls inside ONE
@@ -81,6 +88,9 @@ Usage:
     --debug --continue-on-precheck-failure --skip-fboss-rsyslog
 """
 
+from taac.health_checks.healthcheck_definitions import (
+    create_fpf_prod_hrt_prefix_stability_check,
+)
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
@@ -88,6 +98,7 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.steps.step_definitions import (
     create_fpf_lldp_batched_set_interface_admin_step,
+    create_fpf_up_port_baseline_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -160,6 +171,49 @@ DISRUPT_STSW = TRIGGER_STSWS[0]  # stsw001.s001.l202.mwg2
 # NOTE: broadening to ``stsw*`` would down ALL STSW planes' uplinks at once;
 # we intentionally scope to the single plane under test.
 MEMBER_NEIGHBOR_PATTERN = "stsw001.s001*"
+INTERFACE_CACHE_KEY = "tc36_gtsw_stsw_members"
+UP_PORT_BASELINE_KEY = "tc36_pre_disruption_up_ports"
+# Exact 36-port scope observed from the healthy LLDP baseline. Restore-only
+# invocations use this fail-closed allowlist because LLDP is absent while every
+# member is held admin-down.
+EXPECTED_MEMBER_INTERFACES = [
+    "eth1/10/1",
+    "eth1/10/5",
+    "eth1/14/1",
+    "eth1/14/5",
+    "eth1/18/1",
+    "eth1/18/5",
+    "eth1/2/1",
+    "eth1/2/5",
+    "eth1/22/1",
+    "eth1/22/5",
+    "eth1/23/1",
+    "eth1/23/5",
+    "eth1/26/1",
+    "eth1/26/5",
+    "eth1/30/1",
+    "eth1/30/5",
+    "eth1/34/1",
+    "eth1/34/5",
+    "eth1/38/1",
+    "eth1/38/5",
+    "eth1/42/1",
+    "eth1/42/5",
+    "eth1/46/1",
+    "eth1/46/5",
+    "eth1/50/1",
+    "eth1/50/5",
+    "eth1/54/1",
+    "eth1/54/5",
+    "eth1/58/1",
+    "eth1/58/5",
+    "eth1/6/1",
+    "eth1/6/5",
+    "eth1/62/1",
+    "eth1/62/5",
+    "eth1/63/1",
+    "eth1/63/5",
+]
 
 # The MONITORED circuit on the impacted GTSW lane (lane 0). Shutting the STSW
 # uplink bundle for gtsw001 depreferences/withdraws this plane, so the observed
@@ -178,6 +232,11 @@ PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
+# The source keeps its own route reachable. Conditional-route withdrawal and
+# recovery are observed on the remote host, while the source must remain stable.
+IMPACTED_PROD_PREFIXES_BY_HOST = {GPU_HOSTS[1]: PROD_PREFIXES}
+UNAFFECTED_PROD_PREFIXES_BY_HOST = {GPU_HOSTS[0]: PROD_PREFIXES}
+IMPACTED_PLANES_BY_HOST = {GPU_HOSTS[1]: [0]}
 
 
 def _impacted_beths_by_host(circuits: list[Circuit]) -> dict[str, list[str]]:
@@ -215,6 +274,9 @@ def _stsw_member_disable_steps(enable: bool) -> list:
             neighbor_pattern=MEMBER_NEIGHBOR_PATTERN,
             enable=enable,
             device_regexes=[DUT_GTSW],
+            interface_cache_key=INTERFACE_CACHE_KEY,
+            use_cached_interfaces=enable,
+            expected_interfaces=EXPECTED_MEMBER_INTERFACES,
             description=(
                 f"{'Enable' if enable else 'Disable'} ALL LLDP-resolved "
                 f"{DUT_GTSW} uplink interfaces with neighbor~="
@@ -239,6 +301,17 @@ def create_fpf_tc36_test_config() -> TestConfig:
     # so the disruption can never silently no-op. A future LLDP-aware
     # verify_disruption step is a follow-up.
     disrupt_steps = [
+        create_fpf_up_port_baseline_step(
+            action="capture",
+            devices=[DUT_GTSW],
+            baseline_key=UP_PORT_BASELINE_KEY,
+            expected_interfaces_by_device={DUT_GTSW: EXPECTED_MEMBER_INTERFACES},
+            device_regexes=[DUT_GTSW],
+            description=(
+                "Capture and validate the exact 36 operationally-UP TC36 "
+                "uplinks before disruption"
+            ),
+        ),
         *_stsw_member_disable_steps(enable=False),
         create_longevity_step(
             duration=LONGEVITY_SEC,
@@ -261,13 +334,13 @@ def create_fpf_tc36_test_config() -> TestConfig:
         impacted_lanes=impacted_lanes,
         impacted_lanes_by_host_gpu=impacted_lanes_by_host_gpu(CIRCUITS),
         impacted_beths_by_host=_impacted_beths_by_host(CIRCUITS),
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_planes_by_host=IMPACTED_PLANES_BY_HOST,
         prod_prefixes=PROD_PREFIXES,
-        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
+        prod_prefixes_by_host=IMPACTED_PROD_PREFIXES_BY_HOST,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
-        spray_hosts=spray,
-        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
+        spray_hosts=None,
+        ib_traffic_config=None,
         # Losing the STSW uplink bundle WITHDRAWS the impacted lane's injected
         # prefixes from the bulk/prod collectors; they surface in the
         # remote-failure collector (lane 0 rises 0->count) instead.
@@ -287,6 +360,14 @@ def create_fpf_tc36_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         hrt_device_ids=HRT_DEVICE_IDS,
+        gtsw_rib_unavailable_lanes=impacted_lanes,
+        prod_prefix_precheck_lookback_sec=120,
+        additional_postchecks=[
+            create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=UNAFFECTED_PROD_PREFIXES_BY_HOST,
+                check_id="fpf_prod_hrt_prefix_unaffected_stability",
+            )
+        ],
         playbook_name="fpf_tc36_stsw_all_connections_down_disrupt",
     )
 
@@ -310,7 +391,7 @@ def create_fpf_tc36_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc36_stsw_all_connections_down_restore",
         prod_prefixes=PROD_PREFIXES,
-        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
+        prod_prefixes_by_host=IMPACTED_PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         use_bgp_snapshot=True,
         prod_prefix_settle_sec=120,
@@ -330,13 +411,41 @@ def create_fpf_tc36_test_config() -> TestConfig:
         plane_status_check=True,
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
-        impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
+        impacted_planes_by_host=IMPACTED_PLANES_BY_HOST,
         # Check all 8 injected lanes recovered (not just the default [0,1]).
         lanes=INJECTED_LANES,
         # Prefixes injected once by the setup task; do not re-inject on restore.
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         hrt_device_ids=HRT_DEVICE_IDS,
+        ensure_traffic_after_disruption=True,
+        recovered_baseline_qualification_sec=120,
+        bgp_convergence_blip_mode="skip_null_strict",
+        bgp_require_final_exact=True,
+        additional_postchecks=[
+            create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=UNAFFECTED_PROD_PREFIXES_BY_HOST,
+                settle_sec=120,
+                check_id="fpf_prod_hrt_prefix_unaffected_stability",
+            )
+        ],
+        final_validation_steps=[
+            create_longevity_step(
+                duration=300,
+                description="Strict stable-state soak after link and traffic recovery",
+            ),
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=[DUT_GTSW],
+                baseline_key=UP_PORT_BASELINE_KEY,
+                expected_interfaces_by_device={DUT_GTSW: EXPECTED_MEMBER_INTERFACES},
+                device_regexes=[DUT_GTSW],
+                description=(
+                    "Assert every exact TC36 uplink that was UP before "
+                    "disruption is operationally UP after longevity"
+                ),
+            ),
+        ],
     )
 
     setup_tasks = [*ib_setup]

@@ -47,6 +47,7 @@ from taac.steps.step_definitions import (
     create_fpf_repeated_service_crash_step,
     create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_stsw_drain_and_reinject_steps,
+    create_fpf_up_port_baseline_step,
     create_fpf_verify_recovered_state_step,
 )
 from taac.test_as_a_config.types import Service, Step, StepName, TestConfig
@@ -78,6 +79,7 @@ def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6") -> CustomStep:
     cs.hostname = hostname
     cs.driver = AsyncMock()
     cs.logger = MagicMock()
+    cs.parameter_evaluator.jq_vars = {}
     return cs
 
 
@@ -93,6 +95,121 @@ def _params(step: Step) -> dict:
     assert step.step_params is not None
     assert step.step_params.json_params is not None
     return json.loads(step.step_params.json_params)
+
+
+class TestFpfUpPortBaselineStep(unittest.IsolatedAsyncioTestCase):
+    def test_factory_serializes_run_scoped_capture(self) -> None:
+        step = create_fpf_up_port_baseline_step(
+            action="capture",
+            devices=["gtsw001", "gtsw002"],
+            baseline_key="rapid_flap_ports",
+            device_regexes=["gtsw001"],
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        self.assertEqual(list(step.device_regexes or []), ["gtsw001"])
+        self.assertEqual(
+            _params(step),
+            {
+                "custom_step_name": "fpf_up_port_baseline",
+                "action": "capture",
+                "devices": ["gtsw001", "gtsw002"],
+                "baseline_key": "rapid_flap_ports",
+            },
+        )
+
+    async def test_capture_then_verify_requires_every_previously_up_port(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        drivers = {
+            "gtsw001": AsyncMock(),
+            "gtsw002": AsyncMock(),
+        }
+        drivers["gtsw001"].async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/1/1": True, "eth1/1/2": False},
+            {"eth1/1/1": True, "eth1/1/2": False},
+        ]
+        drivers["gtsw002"].async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/2/1": True},
+            {"eth1/2/1": False},
+        ]
+        params = {
+            "devices": list(drivers),
+            "baseline_key": "rapid_flap_ports",
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            side_effect=lambda host, *_: drivers[host],
+        ):
+            await cs.fpf_up_port_baseline({**params, "action": "capture"})
+            with self.assertRaisesRegex(TestCaseFailure, "gtsw002:eth1/2/1"):
+                await cs.fpf_up_port_baseline({**params, "action": "verify"})
+
+    async def test_verify_passes_and_consumes_matching_baseline(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/1/1": True, "eth1/1/2": False},
+            {"eth1/1/1": True, "eth1/1/2": True},
+        ]
+        params = {
+            "devices": ["gtsw001"],
+            "baseline_key": "reboot_ports",
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            await cs.fpf_up_port_baseline({**params, "action": "capture"})
+            await cs.fpf_up_port_baseline({**params, "action": "verify"})
+        self.assertNotIn(
+            "fpf_up_port_baseline::reboot_ports",
+            cs.parameter_evaluator.jq_vars,
+        )
+
+    async def test_verify_uses_exact_expected_fallback_without_capture(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+            "eth1/41/5": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            await cs.fpf_up_port_baseline(
+                {
+                    "action": "verify",
+                    "devices": ["gtsw001"],
+                    "baseline_key": "tc36_ports",
+                    "expected_interfaces_by_device": {
+                        "gtsw001": ["eth1/1/1", "eth1/2/1"]
+                    },
+                }
+            )
+
+    async def test_capture_fails_if_expected_port_is_not_up(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            with self.assertRaisesRegex(TestCaseFailure, "gtsw001:eth1/2/1"):
+                await cs.fpf_up_port_baseline(
+                    {
+                        "action": "capture",
+                        "devices": ["gtsw001"],
+                        "baseline_key": "tc36_ports",
+                        "expected_interfaces_by_device": {
+                            "gtsw001": ["eth1/1/1", "eth1/2/1"]
+                        },
+                    }
+                )
 
 
 class TestFpfRecoveredStateGate(unittest.IsolatedAsyncioTestCase):
@@ -1804,6 +1921,112 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["churn_recovery_timeout_sec"], 120)
         self.assertEqual(params["churn_recovery_poll_interval_sec"], 5)
 
+    def test_factory_serializes_retryable_post_churn_cleanup(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=900,
+            churn_service=Service.AGENT,
+            retry_final_cleanup_after_churn=True,
+            final_cleanup_service_recovery_timeout_sec=120,
+            final_cleanup_retry_timeout_sec=120,
+            fail_closed=True,
+            expected_interfaces=["eth1/41/5"],
+        )
+        params = _params(step)
+        self.assertTrue(params["retry_final_cleanup_after_churn"])
+        self.assertEqual(params["final_cleanup_service_recovery_timeout_sec"], 120)
+        self.assertEqual(params["final_cleanup_retry_timeout_sec"], 120)
+
+    async def test_cleanup_race_retries_after_churn_service_is_ready(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = {
+            "eth1/41/5": SwitchLldpData(
+                remote_device_name="twshared1352.03.mwg2",
+                remote_intf_name="beth0",
+            )
+        }
+        restore = AsyncMock(side_effect=[RuntimeError("switch is initializing"), None])
+        wait_ready = AsyncMock()
+        with (
+            patch("time.time", return_value=0.0),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=restore),
+            patch.object(cs, "_wait_for_fpf_service_active", new=wait_ready),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001"],
+                    "neighbor_hosts": ["twshared1352.03.mwg2"],
+                    "duration_sec": 0,
+                    "churn_service": int(Service.AGENT.value),
+                    "churn_devices": ["gtsw001"],
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "retry_final_cleanup_after_churn": True,
+                    "final_cleanup_service_recovery_timeout_sec": 120,
+                    "final_cleanup_retry_timeout_sec": 120,
+                    "final_up_timeout_sec": 60,
+                }
+            )
+        self.assertEqual(restore.await_count, 2)
+        wait_ready.assert_awaited_once()
+
+    async def test_post_churn_cleanup_preserves_natural_recovery_failure(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = {
+            "eth1/41/5": SwitchLldpData(
+                remote_device_name="twshared1352.03.mwg2",
+                remote_intf_name="beth0",
+            )
+        }
+        restore = AsyncMock(
+            side_effect=[
+                TestCaseFailure("natural interface recovery exceeded 60s"),
+                None,
+            ]
+        )
+        with (
+            self.assertRaisesRegex(
+                TestCaseFailure,
+                "natural interface recovery exceeded 60s",
+            ),
+            patch("time.time", return_value=0.0),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=restore),
+            patch.object(
+                cs,
+                "_wait_for_fpf_service_active",
+                new=AsyncMock(),
+            ),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001"],
+                    "neighbor_hosts": ["twshared1352.03.mwg2"],
+                    "duration_sec": 0,
+                    "churn_service": int(Service.AGENT.value),
+                    "churn_devices": ["gtsw001"],
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "retry_final_cleanup_after_churn": True,
+                    "final_cleanup_service_recovery_timeout_sec": 120,
+                    "final_cleanup_retry_timeout_sec": 120,
+                    "final_up_timeout_sec": 60,
+                }
+            )
+        self.assertEqual(restore.await_count, 2)
+
     def test_factory_rejects_unknown_churn_action(self):
         with self.assertRaisesRegex(ValueError, "Unsupported service churn action"):
             create_fpf_multi_gtsw_rapid_flap_step(
@@ -2174,6 +2397,8 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
             neighbor_pattern="gtsw001*",
             enable=False,
             device_regexes=["stsw001.s001.l202.mwg2"],
+            interface_cache_key="tc36_members",
+            expected_interfaces=["eth1/1/1", "eth1/2/1"],
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         self.assertEqual(list(step.device_regexes), ["stsw001.s001.l202.mwg2"])
@@ -2181,31 +2406,134 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["custom_step_name"], "fpf_lldp_batched_set_interface_admin")
         self.assertEqual(p["neighbor_pattern"], "gtsw001*")
         self.assertFalse(p["is_enable"])
-        # No pre-resolved interface list.
-        self.assertNotIn("interfaces", p)
+        self.assertEqual(p["interface_cache_key"], "tc36_members")
+        self.assertEqual(p["expected_interfaces"], ["eth1/1/1", "eth1/2/1"])
 
     async def test_batched_disable_calls_thrift_once_with_resolved_list(self):
         cs = _make_custom_step()
         cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
-        await cs.fpf_lldp_batched_set_interface_admin(
-            {"neighbor_pattern": "gtsw001*", "is_enable": False}
-        )
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": False,
+            "eth1/2/1": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_disruption_time"
+        ) as set_disruption_time:
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": False,
+                    "interface_cache_key": "tc36_members",
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_disruption_time.assert_called_once()
         # ONE batched thrift call over the resolved set.
         cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
             interface_names=("eth1/1/1", "eth1/2/1"),
             is_enable_port=False,
         )
-
-    async def test_batched_enable_calls_thrift_once(self):
-        cs = _make_custom_step()
-        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
-        await cs.fpf_lldp_batched_set_interface_admin(
-            {"neighbor_pattern": "rtptest*", "is_enable": True}
+        self.assertEqual(
+            cs.parameter_evaluator.jq_vars["fpf_lldp_interface_cache::tc36_members"],
+            ["eth1/1/1", "eth1/2/1"],
         )
+
+    async def test_batched_enable_prefers_cached_disable_scope(self):
+        cs = _make_custom_step()
+        cs.parameter_evaluator.jq_vars["fpf_lldp_interface_cache::tc36_members"] = [
+            "eth1/1/1",
+            "eth1/2/1",
+        ]
+        cs.driver.async_get_lldp_neighbors.return_value = {}
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_start_time"
+            ) as set_recovery_start_time,
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_completion_time"
+            ) as set_recovery_completion_time,
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": True,
+                    "interface_cache_key": "tc36_members",
+                    "use_cached_interfaces": True,
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_recovery_start_time.assert_called_once()
+        set_recovery_completion_time.assert_called_once()
         cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
-            interface_names=("eth1/4/1",),
+            interface_names=("eth1/1/1", "eth1/2/1"),
             is_enable_port=True,
         )
+        cs.driver.async_get_lldp_neighbors.assert_not_awaited()
+
+    async def test_restore_only_uses_explicit_fallback_without_lldp(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = {}
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_start_time"
+            ) as set_recovery_start_time,
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_completion_time"
+            ) as set_recovery_completion_time,
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": True,
+                    "interface_cache_key": "tc36_members",
+                    "use_cached_interfaces": True,
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_recovery_start_time.assert_called_once()
+        set_recovery_completion_time.assert_called_once()
+        cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=("eth1/1/1", "eth1/2/1"),
+            is_enable_port=True,
+        )
+
+    async def test_disable_rejects_lldp_scope_outside_expected_set(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        with self.assertRaisesRegex(RuntimeError, "does not match expected scope"):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": False,
+                    "expected_interfaces": ["eth1/1/1"],
+                }
+            )
+        cs.driver.async_thrift_disable_enable_interfaces.assert_not_awaited()
+
+    async def test_admin_readback_mismatch_fails_closed(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": False,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_disruption_time"
+            ),
+            self.assertRaisesRegex(RuntimeError, "admin read-back failed"),
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {"neighbor_pattern": "gtsw001*", "is_enable": False}
+            )
 
     async def test_no_match_raises(self):
         cs = _make_custom_step()
@@ -2384,15 +2712,20 @@ class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         )
-        self.assertEqual(len(steps), 3)
-        self.assertEqual(list(steps[0].device_regexes or []), [stsw])
-        injections = [_params(step) for step in steps[1:]]
+        self.assertEqual(len(steps), 4)
+        self.assertEqual(_params(steps[0])["target_device"], stsw)
+        self.assertEqual(_params(steps[1])["mode"], "device_drain")
+        self.assertTrue(_params(steps[1])["fail_if_ineffective"])
+        injections = [_params(step) for step in steps[2:]]
         self.assertEqual(
             [params["prefix_base"] for params in injections],
             ["5000:dd::/64", "5000:ee::/64"],
         )
         self.assertTrue(
-            all(params["community_list"] == "stsw 65446:10" for params in injections)
+            all(params["community_list"] == "stsw" for params in injections)
+        )
+        self.assertTrue(
+            all(params["extra_communities"] == ["65446:10"] for params in injections)
         )
         self.assertTrue(all(params["batch_size"] == 252 for params in injections))
 
@@ -2405,13 +2738,12 @@ class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
             community_list="65000:1",
             drain_community="65000:999",
         )
-        self.assertEqual(len(steps), 2)
-        # First step: drain/undrain (LOCAL_DRAINER).
-        self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
-        # Second step: prefix injection with the appended drain community.
-        self.assertEqual(steps[1].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
-        inj = _params(steps[1])
-        self.assertEqual(inj["community_list"], "65000:1 65000:999")
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(_params(steps[0])["custom_step_name"], "fpf_drain_interface")
+        self.assertEqual(_params(steps[1])["custom_step_name"], "fpf_verify_disruption")
+        inj = _params(steps[2])
+        self.assertEqual(inj["community_list"], "65000:1")
+        self.assertEqual(inj["extra_communities"], ["65000:999"])
         self.assertEqual(inj["count"], 20000)
         self.assertEqual(inj["devices"], ["stsw001.s001.c085.ash6"])
 
@@ -2424,10 +2756,12 @@ class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
             community_list="65000:1",
             drain_community="65000:999",
         )
-        self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
-        inj = _params(steps[1])
+        self.assertEqual(_params(steps[0])["is_drain"], False)
+        self.assertEqual(_params(steps[1])["expect_drained"], False)
+        inj = _params(steps[2])
         # Undrain: drain_community is ignored.
         self.assertEqual(inj["community_list"], "65000:1")
+        self.assertNotIn("extra_communities", inj)
 
 
 if __name__ == "__main__":

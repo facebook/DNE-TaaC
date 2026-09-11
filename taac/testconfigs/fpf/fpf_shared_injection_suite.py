@@ -11,11 +11,10 @@ DISRUPTION. This umbrella inverts that: it injects the two VF prefix groups on a
 preserving that single injection via ``skip_injection=True``), then withdraws the
 injection ONCE at teardown.
 
-It folds in only the disruptions that PRESERVE the shared STSW injection — i.e.
-GTSW-side / host-side disruptions whose recovery leaves the STSW advertisements
-intact. It deliberately EXCLUDES the configs that re-advertise, wipe, scale, or
-otherwise mutate the shared injection (tc35/36/54 STSW drains; tc45/46 scale) —
-those remain standalone.
+Most entries preserve the shared injection. TC35/TC54 deliberately replace the
+same two VF-group advertisements during their STSW drain/undrain lifecycle and
+restore the base advertisements before the next playbook. Scale tests tc45/46
+remain standalone.
 
 The setup/teardown and per-playbook builder calls mirror the source configs
 faithfully (same disruption_steps, same flags). Each playbook keeps its source
@@ -38,6 +37,10 @@ Usage:
 
 import os
 
+from taac.health_checks.healthcheck_definitions import (
+    create_drain_state_check,
+    create_fpf_host_spray_check,
+)
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
     create_fpf_disrupt_window_playbook,
@@ -56,6 +59,7 @@ from taac.steps.step_definitions import (
     create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_restart_hrt_step,
     create_fpf_set_interface_admin_step,
+    create_fpf_up_port_baseline_step,
     create_fpf_verify_disruption_step,
     create_longevity_step,
     create_service_convergence_step,
@@ -103,6 +107,15 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
 )
 from taac.testconfigs.fpf.fpf_kill_contract import (
     build_kill_disrupt_postchecks,
+)
+from taac.testconfigs.fpf.fpf_tc35_stsw_undrain_reinject import (
+    create_fpf_tc35_test_config,
+)
+from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
+    create_fpf_tc36_test_config,
+)
+from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
+    create_fpf_tc54_test_config,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
@@ -1525,8 +1538,15 @@ def _tc55(*, spray, skip_ssh) -> list:
     longevity_soak_sec = 300
     longevity_settle_sec = 120
     session_lookback_sec = 1000
+    up_port_baseline_key = "tc55_pre_reboot_up_ports"
 
     disrupt_steps = [
+        create_fpf_up_port_baseline_step(
+            action="capture",
+            devices=[OBSERVER_GTSWS[0]],
+            baseline_key=up_port_baseline_key,
+            device_regexes=[OBSERVER_GTSWS[0]],
+        ),
         create_longevity_step(
             duration=stabilization_delay_sec,
             description=f"Stabilize {stabilization_delay_sec}s before the reboot",
@@ -1544,32 +1564,69 @@ def _tc55(*, spray, skip_ssh) -> list:
             description=f"Wait {reboot_comeup_sec}s for the GTSW to come back up",
         ),
     ]
+    disrupt_postchecks = build_kill_disrupt_postchecks(
+        killed_service="wedge_agent",
+        observer_gtsws=OBSERVER_GTSWS,
+        hrt_memory_hosts=HRT_MEMORY_HOSTS,
+        spray_hosts=spray,
+        kill_duration_sec=reboot_comeup_sec,
+        prefix_count=PREFIX_COUNT,
+        skip_ssh=skip_ssh,
+        expected_fsdb_total=EXPECTED_FSDB_SESSION_COUNT,
+        session_lookback_sec=session_lookback_sec,
+    )
+    disrupt_postchecks.append(
+        create_drain_state_check(
+            expected_drained=True,
+            device_name=OBSERVER_GTSWS[0],
+            check_id="gtsw_reboot_drained_state",
+        )
+    )
+    if spray:
+        disrupt_postchecks.append(
+            create_fpf_host_spray_check(
+                hosts=spray,
+                impacted_lanes_by_host={host: ["beth0"] for host in spray},
+                impacted_max_gbps=10.0,
+                window_from_disruption_time=True,
+                check_id="gtsw_reboot_drained_traffic",
+            )
+        )
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         playbook_name="fpf_tc55_gtsw_device_reboot_disrupt",
         disruption_steps=disrupt_steps,
         spray_hosts=spray,
         ib_traffic_config=_ib_readiness_config(spray),
-        postchecks=build_kill_disrupt_postchecks(
-            killed_service="wedge_agent",
-            observer_gtsws=OBSERVER_GTSWS,
-            hrt_memory_hosts=HRT_MEMORY_HOSTS,
-            spray_hosts=spray,
-            kill_duration_sec=reboot_comeup_sec,
-            prefix_count=PREFIX_COUNT,
-            skip_ssh=skip_ssh,
-            expected_fsdb_total=EXPECTED_FSDB_SESSION_COUNT,
-            session_lookback_sec=session_lookback_sec,
-        ),
+        postchecks=disrupt_postchecks,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
         trigger_stsws=TRIGGER_STSWS,
-        soak_duration_sec=longevity_soak_sec,
+        disruption_steps=[
+            create_fpf_drain_interface_step(
+                interfaces=[],
+                drain=False,
+                target_device=OBSERVER_GTSWS[0],
+                description="Undrain the rebooted GTSW before recovery",
+            ),
+            create_fpf_verify_disruption_step(
+                interfaces=[],
+                mode="device_drain",
+                expect_drained=False,
+                fail_if_ineffective=True,
+                target_device=OBSERVER_GTSWS[0],
+            ),
+            create_longevity_step(
+                duration=longevity_settle_sec,
+                description="Settle after undraining the rebooted GTSW",
+            ),
+        ],
+        soak_duration_sec=0,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc55_gtsw_device_reboot_longevity",
+        playbook_name="fpf_tc55_gtsw_device_reboot_recovery_undrain",
         prod_prefixes=PROD_PREFIXES,
         prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
@@ -1583,6 +1640,19 @@ def _tc55(*, spray, skip_ssh) -> list:
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
         recovered_baseline_qualification_sec=120,
+        ensure_traffic_after_disruption=True,
+        final_validation_steps=[
+            create_longevity_step(
+                duration=longevity_soak_sec,
+                description="Strict stable-state soak after reboot undrain recovery",
+            ),
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=[OBSERVER_GTSWS[0]],
+                baseline_key=up_port_baseline_key,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            ),
+        ],
     )
     return [disrupt_playbook, longevity_playbook]
 
@@ -1646,6 +1716,11 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
         spray=spray,
         skip_ssh=skip_ssh,
     )
+    # STSW lifecycle tests are authored once in their standalone factories and
+    # reused here so regex runs cannot drift onto stale playbook semantics.
+    playbooks += list(create_fpf_tc54_test_config().playbooks)
+    playbooks += list(create_fpf_tc35_test_config().playbooks)
+    playbooks += list(create_fpf_tc36_test_config().playbooks)
     # Coldboot.
     playbooks += _tc27(spray=spray, skip_ssh=skip_ssh)
     # Full device reboot (most destructive) — last.
@@ -1671,6 +1746,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
                 # collectors task — harmless for the playbooks that don't use it.
                 enable_fsdb_session_collector=True,
                 fsdb_session_hosts=GPU_HOSTS,
+                fsdb_session_poll_interval_sec=2.0,
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
                 rf_vf_groups=RF_VF_GROUPS,
             ),

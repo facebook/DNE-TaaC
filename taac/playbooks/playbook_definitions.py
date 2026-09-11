@@ -25827,6 +25827,8 @@ def create_fpf_hardening_playbook_v2(
     fsdb_rib_restart_reconverge: bool = False,
     remote_failure_last_sample: bool = False,
     convergence_blip_mode: str = "strict",
+    bgp_convergence_blip_mode: str | None = None,
+    bgp_require_final_exact: bool = False,
     ods_discard_informational: bool = False,
     out_congestion_last_minute_max: bool = False,
     host_spray_transform_desc: str | None = None,
@@ -25848,6 +25850,7 @@ def create_fpf_hardening_playbook_v2(
     collector_poll_interval_sec: float = 5.0,
     collector_poll_duration_budget_sec: float = 10.0,
     collector_future_timestamp_grace_sec: float = 1.0,
+    final_validation_steps: list | None = None,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25868,6 +25871,12 @@ def create_fpf_hardening_playbook_v2(
     (when ``convergence_blip_mode != "strict"`` the remote-failure direction is
     derived from it: "last_sample"->stable_last_sample, "skip_null_strict"->
     stable_skip_null_strict).
+
+    ``bgp_convergence_blip_mode`` narrows a different policy to BGP RIB
+    collection only. A restore can therefore ignore a null/error thrift poll
+    while keeping every valid count strict. ``bgp_require_final_exact`` also
+    requires the final valid BGP sample to equal ``prefix_count``. Neither
+    option changes a numeric convergence or stability threshold.
 
     ``rf_vf_groups`` (8-STSW split-per-VF injection): list of
     ``{"suffix", "subnet", "lanes"}``. When given, the single broad HRT
@@ -26268,6 +26277,8 @@ def create_fpf_hardening_playbook_v2(
                     description="Stable-state longevity soak — no disruption",
                 ),
             )
+    if final_validation_steps:
+        stage_steps.extend(final_validation_steps)
 
     convergence_postchecks = []
     for lane_id, gtsw in enumerate(gtsws):
@@ -26316,8 +26327,12 @@ def create_fpf_hardening_playbook_v2(
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
                 settle_sec=convergence_settle_sec or None,
                 use_mutation_time=scale_mutation_mode,
-                require_final_exact=scale_mutation_mode,
-                stability_mode=convergence_blip_mode,
+                require_final_exact=(
+                    scale_mutation_mode or bgp_require_final_exact
+                ),
+                stability_mode=(
+                    bgp_convergence_blip_mode or convergence_blip_mode
+                ),
                 check_id=f"fpf_bgp_convergence_lane{lane_id}",
             )
         )
@@ -26667,8 +26682,11 @@ def create_fpf_link_event_disrupt_playbook(
     skip_injection: bool = False,
     rf_vf_groups: list | None = None,
     gtsw_convergence_settle_sec: int = 0,
+    gtsw_rib_unavailable_lanes: list[int] | None = None,
+    prod_prefix_precheck_lookback_sec: int | None = None,
     hrt_device_ids: list[int] | None = None,
     ib_traffic_config: t.Mapping[str, t.Any] | None = None,
+    additional_postchecks: list | None = None,
     cleanup_steps: list | None = None,
     playbook_name: str = "fpf_link_event_disrupt",
 ) -> Playbook:
@@ -26697,6 +26715,11 @@ def create_fpf_link_event_disrupt_playbook(
     the EXPECTED converged count for the per-GTSW ribMap/BGP and per-lane HRT
     bulk checks.
 
+    ``prod_prefix_precheck_lookback_sec`` evaluates the production-prefix
+    baseline from recent collector history instead of requiring a poll after
+    this playbook's test-case start. This avoids a startup race without changing
+    the required healthy prefix state.
+
     Injects stress prefixes, stabilizes, then runs the supplied disruption steps
     (disable+longevity, or port-drain+longevity). Postchecks assert the
     *disrupted* contract over this playbook's own collector window (test case
@@ -26722,7 +26745,9 @@ def create_fpf_link_event_disrupt_playbook(
         transient loss during the disruption window. The two CONGESTION checks
         stay hard (a link event must not cause congestion). This mirrors the
         ``ods_discard_informational`` plumbing on the service-restart playbook.
-      - BGP RIB + FSDB ribMap (GTSW-side): unchanged convergence to threshold.
+      - BGP RIB + FSDB ribMap (GTSW-side): unchanged convergence to threshold,
+        except explicitly unavailable lanes whose withdrawal is already covered
+        by HRT bulk and remote-failure checks.
 
     Generic SSH/device checks are intentionally omitted — this is the no-SSH
     collector/ODS validation path. Pair this with a v2 stable-state restore
@@ -26778,12 +26803,19 @@ def create_fpf_link_event_disrupt_playbook(
         ),
     ]
     if prod_prefixes:
-        prechecks.append(
-            create_fpf_prod_hrt_prefix_stability_check(
+        if prod_prefix_precheck_lookback_sec is not None:
+            prod_prefix_precheck = create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=resolved_prod_prefixes_by_host,
+                lookback_sec=prod_prefix_precheck_lookback_sec,
+                use_test_case_start_time=False,
+                check_id="fpf_prod_hrt_prefix_stability_precheck",
+            )
+        else:
+            prod_prefix_precheck = create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
-        )
+        prechecks.append(prod_prefix_precheck)
     if hrt_memory_hosts:
         prechecks.append(
             create_fpf_hrt_system_memory_check(
@@ -26896,7 +26928,10 @@ def create_fpf_link_event_disrupt_playbook(
     # measures the post-disruption steady state. Default 0 keeps existing callers
     # (in-playbook injection) byte-identical.
     _gtsw_settle = gtsw_convergence_settle_sec or None
+    unavailable_gtsw_rib_lanes = set(gtsw_rib_unavailable_lanes or [])
     for lane_id, gtsw in enumerate(gtsws):
+        if lane_id in unavailable_gtsw_rib_lanes:
+            continue
         lane_map = {str(lane_id): gtsw}
         postchecks.append(
             create_fpf_fsdb_ribmap_convergence_check(
@@ -27303,6 +27338,7 @@ def create_fpf_link_event_disrupt_playbook(
                 check_id="fpf_hrt_driver_disconnect",
             )
         )
+    postchecks.extend(additional_postchecks or [])
 
     # Generic SSH/device-shell postchecks on the DUT GTSWs: services still up,
     # no new core dumps, no unclean exits, memory within bounds after the

@@ -67,6 +67,7 @@ def build_flap_disrupt_postchecks(
     hrt_memory_hosts: list[str],
     prefix_count: int,
     skip_ssh: bool,
+    include_route_convergence: bool = True,
 ) -> list:
     """Return the disrupt-window postchecks for a cont-flap config (see module doc)."""
     checks = []
@@ -104,24 +105,25 @@ def build_flap_disrupt_postchecks(
     )
 
     # BGP RIB + FSDB ribMap convergence — same as stable (uplinks untouched), per GTSW.
-    for lane_id, gtsw in enumerate(observer_gtsws):
-        lane_map = {str(lane_id): gtsw}
-        checks.append(
-            create_fpf_fsdb_ribmap_convergence_check(
-                lane_map=lane_map,
-                expected_matched=prefix_count,
-                use_live_collectors=True,
-                check_id=f"flap_disrupt_fsdb_convergence_lane{lane_id}",
+    if include_route_convergence:
+        for lane_id, gtsw in enumerate(observer_gtsws):
+            lane_map = {str(lane_id): gtsw}
+            checks.append(
+                create_fpf_fsdb_ribmap_convergence_check(
+                    lane_map=lane_map,
+                    expected_matched=prefix_count,
+                    use_live_collectors=True,
+                    check_id=f"flap_disrupt_fsdb_convergence_lane{lane_id}",
+                )
             )
-        )
-        checks.append(
-            create_fpf_bgp_rib_convergence_check(
-                lane_map=lane_map,
-                expected_matched=prefix_count,
-                use_live_collectors=True,
-                check_id=f"flap_disrupt_bgp_convergence_lane{lane_id}",
+            checks.append(
+                create_fpf_bgp_rib_convergence_check(
+                    lane_map=lane_map,
+                    expected_matched=prefix_count,
+                    use_live_collectors=True,
+                    check_id=f"flap_disrupt_bgp_convergence_lane{lane_id}",
+                )
             )
-        )
 
     # ODS: ALL counters informational during the flap window. in_dst_null /
     # in_discard AND in/out_congestion discards are all EXPECTED while downlinks

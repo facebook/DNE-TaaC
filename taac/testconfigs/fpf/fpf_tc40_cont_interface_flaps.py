@@ -13,11 +13,11 @@ stop, a stable-state longevity playbook (same expectations as
 fpf_stress_test_config) validates full recovery.
 
 Two-playbook "longevity-anchored health check" pattern:
-  1. Disruption-only playbook (NO checks): the multi-GTSW parallel flap (900s),
-     then a 300s longevity settle.
-  2. Stable-state v2 hardening playbook (soak 300s): every stable-state health
-     check anchors at LONGEVITY START with the SAME expectations as the stress
-     config; the noisy flap window is excluded.
+  1. Disrupt playbook captures the exact UP-port set across all eight GTSWs,
+     performs the parallel flap for 900s, settles 120s, and evaluates only
+     non-traffic safety signals.
+  2. Longevity playbook restores RDMA if it collapsed, qualifies recovery for
+     120s, soaks for 300s, and requires every captured port to be UP.
 
 Usage:
   TAAC_SSH_VIA_LAB_SSH=1 buck2 run neteng/netcastle:netcastle_taac -- \\
@@ -33,6 +33,7 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.steps.step_definitions import (
     create_fpf_multi_gtsw_rapid_flap_step,
+    create_fpf_up_port_baseline_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -64,6 +65,7 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
+    OBSERVER_GTSWS,
     skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
@@ -91,6 +93,8 @@ FLAP_DURATION_SEC = 900
 FLAP_UP_SEC = 7
 FLAP_DOWN_SEC = 7
 LONGEVITY_SEC = 300
+DISRUPT_SETTLE_SEC = 120
+UP_PORT_BASELINE_KEY = "tc40_family_pre_disruption_up_ports"
 FLAP_HOST = GPU_HOSTS[0]
 FLAP_INTERFACES = fpf_gpu_downlink_interfaces()
 NIC_RECOVERY_BY_GTSW_INTERFACE = {
@@ -116,6 +120,7 @@ def create_fpf_cont_interface_flaps_test_config(
     churn_every_sec: int = 120,
     churn_initial_delay_sec: int = 0,
     churn_recovery_timeout_sec: int = 0,
+    retry_final_cleanup_after_churn: bool = False,
     observe_prod_prefix_on_all_hosts: bool = False,
 ) -> TestConfig:
     """Build TC40's strict contract, optionally with concurrent service churn."""
@@ -138,8 +143,15 @@ def create_fpf_cont_interface_flaps_test_config(
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             prefix_count=PREFIX_COUNT,
             skip_ssh=skip_ssh,
+            include_route_convergence=False,
         ),
         disruption_steps=[
+            create_fpf_up_port_baseline_step(
+                action="capture",
+                devices=ALL_GTSWS,
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            ),
             create_fpf_multi_gtsw_rapid_flap_step(
                 gtsws=ALL_GTSWS,
                 neighbor_hosts=[FLAP_HOST],
@@ -156,6 +168,7 @@ def create_fpf_cont_interface_flaps_test_config(
                 churn_initial_delay_sec=churn_initial_delay_sec,
                 churn_recovery_timeout_sec=churn_recovery_timeout_sec,
                 churn_devices=ALL_GTSWS if churn_service is not None else None,
+                retry_final_cleanup_after_churn=retry_final_cleanup_after_churn,
                 description=(
                     f"Parallel rapid-flap exact links {FLAP_INTERFACES} facing "
                     f"{FLAP_HOST} across "
@@ -175,8 +188,8 @@ def create_fpf_cont_interface_flaps_test_config(
                 ),
             ),
             create_longevity_step(
-                duration=LONGEVITY_SEC,
-                description=f"Settle {LONGEVITY_SEC}s after flaps stop",
+                duration=DISRUPT_SETTLE_SEC,
+                description=f"Settle {DISRUPT_SETTLE_SEC}s after flaps stop",
             ),
         ],
         playbook_name=f"{test_name}_disrupt",
@@ -205,6 +218,14 @@ def create_fpf_cont_interface_flaps_test_config(
         lanes=INJECTED_LANES,
         hrt_device_ids=HRT_DEVICE_IDS,
         recovered_baseline_qualification_sec=120,
+        final_validation_steps=[
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=ALL_GTSWS,
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            )
+        ],
     )
 
     return TestConfig(

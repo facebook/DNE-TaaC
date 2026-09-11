@@ -16,11 +16,13 @@ drain (tc34):
   - The ONLY expected deviation from stable state is on the DATA plane: the
     lane-0 plane that stsw001.s001 serves drains (confirmed on hardware — the
     traffic does NOT reroute), so on BOTH GPU hosts lane 0 (beth0) egress drops
-    to ~0. This is handled two ways: the plane-status DRAIN contract on lane 0
-    (``impacted_planes_by_host``), and EXCLUDING beth0 from the host-spray check
-    (``host_spray_excluded_lanes_by_host``) so its drained egress is not flagged
-    while beth1-3 are still held to the spray floor. Everything else stays
-    strictly stable.
+    to ~0. The lane-0 plane must report DRAINED and beth0 is positively capped
+    at the drained-traffic ceiling while beth1-3 retain the spray floor.
+    Everything else stays strictly stable.
+
+The drain, fail-closed state readback, split-VF drain-community reinjection,
+and 300s settle all run inside the checked playbook, so a standalone or
+regex-selected run cannot pass without executing the mutation.
 
 NOTE: this config is BUILD-validated only; it has NOT been run end-to-end on
 hardware.
@@ -34,7 +36,6 @@ Usage:
 
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
-    create_fpf_disruption_only_playbook,
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
@@ -136,14 +137,6 @@ def create_fpf_tc54_test_config() -> TestConfig:
         ),
     ]
 
-    disrupt_playbook = create_fpf_disruption_only_playbook(
-        gtsws=OBSERVER_GTSWS,
-        hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
-        disruption_steps=disrupt_steps,
-        playbook_name="fpf_tc54_stsw_device_drain_disrupt",
-    )
-
     # STRICT stable-state longevity: the GTSW BGP is untouched, so unlike tc34 we
     # do NOT pass use_bgp_snapshot / skip_fsdb_session_precheck. Only lane 0's
     # DATA plane is allowed to be drained (plane_status DRAIN contract + host-spray
@@ -153,11 +146,12 @@ def create_fpf_tc54_test_config() -> TestConfig:
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
         trigger_stsws=TRIGGER_STSWS,
-        soak_duration_sec=LONGEVITY_SEC,
+        disruption_steps=disrupt_steps,
+        soak_duration_sec=0,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc54_stsw_device_drain_longevity",
+        playbook_name="fpf_tc54_stsw_device_drain_disrupt",
         prod_prefixes=PROD_PREFIXES,
         prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
@@ -227,7 +221,7 @@ def create_fpf_tc54_test_config() -> TestConfig:
             ),
             *ib_teardown,
         ],
-        playbooks=[disrupt_playbook, longevity_playbook],
+        playbooks=[longevity_playbook],
         tags=["fpf"],
     )
 

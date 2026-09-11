@@ -291,18 +291,19 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
         drain = next(
             step
             for step in _steps(tc54.playbooks[0])
-            if step.name == taac_types.StepName.DRAIN_UNDRAIN_STEP
+            if _step_params(step).get("custom_step_name") == "fpf_drain_interface"
+            and _step_params(step).get("is_drain")
         )
         self.assertEqual(
-            list(drain.device_regexes or []),
-            [fpf_tc54_stsw_device_drain.DRAIN_TARGET_STSW],
+            _step_params(drain)["target_device"],
+            fpf_tc54_stsw_device_drain.DRAIN_TARGET_STSW,
         )
-        cleanup = list(tc54.playbooks[1].cleanup_steps or [])
-        self.assertEqual(cleanup[0].name, taac_types.StepName.DRAIN_UNDRAIN_STEP)
+        cleanup = list(tc54.playbooks[0].cleanup_steps or [])
         self.assertEqual(
-            list(cleanup[0].device_regexes or []),
-            [fpf_tc54_stsw_device_drain.DRAIN_TARGET_STSW],
+            _step_params(cleanup[0])["target_device"],
+            fpf_tc54_stsw_device_drain.DRAIN_TARGET_STSW,
         )
+        self.assertFalse(_step_params(cleanup[0])["is_drain"])
         self.assertEqual(
             {
                 _step_params(step)["prefix_base"]

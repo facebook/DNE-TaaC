@@ -26,6 +26,9 @@ import unittest
 from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
     DISRUPT_STSW,
     DUT_GTSW,
+    EXPECTED_MEMBER_INTERFACES,
+    GPU_HOSTS as TC36_GPU_HOSTS,
+    INTERFACE_CACHE_KEY,
     LONGEVITY_SEC as TC36_LONGEVITY_SEC,
     MEMBER_NEIGHBOR_PATTERN,
     TEST_CONFIG as TC36,
@@ -41,6 +44,10 @@ from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
     NDP_CLEAR_EVERY_SEC,
     SETTLE_AFTER_CLEAR_SEC,
     TEST_CONFIG as TC38,
+)
+from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
+    DRAIN_TARGET_STSW,
+    TEST_CONFIG as TC54,
 )
 from taac.test_as_a_config.types import StepName
 
@@ -132,7 +139,10 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         # is GTSW-side now: on gtsw001, resolve uplinks facing stsw001.s001.
         self.assertEqual(params["neighbor_pattern"], MEMBER_NEIGHBOR_PATTERN)
         self.assertEqual(MEMBER_NEIGHBOR_PATTERN, "stsw001.s001*")
-        self.assertNotIn("interfaces", params)
+        self.assertEqual(params["expected_interfaces"], EXPECTED_MEMBER_INTERFACES)
+        self.assertEqual(len(params["expected_interfaces"]), 36)
+        self.assertEqual(params["interface_cache_key"], INTERFACE_CACHE_KEY)
+        self.assertFalse(params.get("use_cached_interfaces", False))
         # Scoped to DUT_GTSW (gtsw001) so the LLDP query/disable runs there.
         self.assertEqual(DUT_GTSW, "gtsw001.l1002.c087.mwg2")
         self.assertEqual(list(disable_steps[0].device_regexes or []), [DUT_GTSW])
@@ -160,6 +170,42 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         self.assertEqual(
             _params(enable_steps[0])["neighbor_pattern"], MEMBER_NEIGHBOR_PATTERN
         )
+        self.assertEqual(
+            _params(enable_steps[0])["expected_interfaces"],
+            EXPECTED_MEMBER_INTERFACES,
+        )
+        self.assertTrue(_params(enable_steps[0])["use_cached_interfaces"])
+        enable_index = steps.index(enable_steps[0])
+        ensure_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.name == StepName.CUSTOM_STEP
+            and _params(step).get("custom_step_name") == "fpf_ensure_traffic"
+        )
+        self.assertLess(enable_index, ensure_index)
+        self.assertTrue(
+            any(
+                step.name == StepName.LONGEVITY_STEP
+                and _params(step)["duration"] >= 120
+                for step in steps[enable_index:ensure_index]
+            )
+        )
+        self.assertNotIn(
+            "fpf_host_spray",
+            _check_ids(TC36.playbooks[0]),
+            "disrupt phase must not fail solely because RDMA died",
+        )
+
+        verify = next(
+            _params(step)
+            for step in steps
+            if _params(step).get("custom_step_name") == "fpf_up_port_baseline"
+        )
+        self.assertEqual(verify["action"], "verify")
+        self.assertEqual(
+            verify["expected_interfaces_by_device"],
+            {DUT_GTSW: EXPECTED_MEMBER_INTERFACES},
+        )
 
     def test_disrupt_stsw_is_plane1_trigger(self):
         self.assertEqual(DISRUPT_STSW, "stsw001.s001.l202.mwg2")
@@ -184,6 +230,13 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         self.assertNotIn("fpf_hrt_fsdb_session_disrupt", ids)
         # flip_discards=False -> NO failing in_discard loss assertion.
         self.assertNotIn("ods_in_discard_loss_expected", ids)
+        # All uplinks on lane 0 are intentionally unavailable, so GTSW-side
+        # RIB checks must not incorrectly require 4032 there. The untouched
+        # observer lane remains strict and the restore playbook checks both.
+        self.assertNotIn("fpf_fsdb_convergence_lane0", ids)
+        self.assertNotIn("fpf_bgp_convergence_lane0", ids)
+        self.assertIn("fpf_fsdb_convergence_lane1", ids)
+        self.assertIn("fpf_bgp_convergence_lane1", ids)
         # ods_discard_informational=True -> transient baseline excess is
         # informational for the two DISCARD checks, but final recovery and both
         # CONGESTION checks remain hard.
@@ -210,6 +263,34 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         self.assertFalse(in_congestion.get("informational", False))
         self.assertFalse(out_congestion.get("informational", False))
 
+        prod_transition = json.loads(
+            by_id["fpf_prod_hrt_prefix_transition"].check_params.json_params
+        )
+        self.assertEqual(
+            prod_transition["impacted_planes_by_host"],
+            {TC36_GPU_HOSTS[1]: [0]},
+        )
+        unaffected = json.loads(
+            by_id["fpf_prod_hrt_prefix_unaffected_stability"].check_params.json_params
+        )
+        self.assertEqual(
+            set(unaffected["prefixes_by_host"]),
+            {TC36_GPU_HOSTS[0]},
+        )
+
+        prod_precheck = next(
+            check
+            for check in TC36.playbooks[0].prechecks or []
+            if check.check_id == "fpf_prod_hrt_prefix_stability_precheck"
+        )
+        prod_precheck_params = json.loads(prod_precheck.check_params.json_params)
+        self.assertFalse(prod_precheck_params["use_test_case_start_time"])
+        self.assertEqual(prod_precheck_params["lookback_sec"], 120)
+        self.assertEqual(
+            set(prod_precheck_params["prefixes_by_host"]),
+            {TC36_GPU_HOSTS[1]},
+        )
+
     def test_disrupt_lldp_step_carries_correct_params(self):
         """tc36 disrupt step: single LLDP-resolved batched disable scoped to
         gtsw001 with the per-plane neighbor pattern."""
@@ -225,8 +306,11 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         self.assertEqual(len(disable_steps), 1)
         params = _params(disable_steps[0])
         self.assertEqual(params["neighbor_pattern"], "stsw001.s001*")
-        # Member set is LLDP-resolved at runtime — no static interfaces list.
-        self.assertNotIn("interfaces", params)
+        self.assertEqual(
+            set(params["expected_interfaces"]), set(EXPECTED_MEMBER_INTERFACES)
+        )
+        self.assertEqual(len(params["expected_interfaces"]), 36)
+        self.assertEqual(params["interface_cache_key"], INTERFACE_CACHE_KEY)
         # The step is scoped to the DUT GTSW only.
         self.assertEqual(list(disable_steps[0].device_regexes or []), [DUT_GTSW])
 
@@ -239,6 +323,30 @@ class TestTc36StswAllConnectionsDown(unittest.TestCase):
         # plane_status_check=True + prod_prefix_recovery=True in tc36 restore.
         self.assertIn("fpf_hrt_plane_status_all_up", ids)
         self.assertIn("fpf_prod_hrt_prefix_recovery", ids)
+        by_id = {c.check_id: c for c in TC36.playbooks[1].postchecks or []}
+        bgp_lane1 = json.loads(
+            by_id["fpf_bgp_convergence_lane1"].check_params.json_params
+        )
+        self.assertEqual(bgp_lane1["stability_mode"], "skip_null_strict")
+        self.assertTrue(bgp_lane1["require_final_exact"])
+        prod_recovery = json.loads(
+            by_id["fpf_prod_hrt_prefix_recovery"].check_params.json_params
+        )
+        self.assertEqual(
+            prod_recovery["impacted_planes_by_host"],
+            {TC36_GPU_HOSTS[1]: [0]},
+        )
+        self.assertEqual(
+            set(prod_recovery["prefixes_by_host"]),
+            {TC36_GPU_HOSTS[1]},
+        )
+        unaffected = json.loads(
+            by_id["fpf_prod_hrt_prefix_unaffected_stability"].check_params.json_params
+        )
+        self.assertEqual(
+            set(unaffected["prefixes_by_host"]),
+            {TC36_GPU_HOSTS[0]},
+        )
 
 
 class TestTc37NicSideLinkFlap(unittest.TestCase):
@@ -424,6 +532,52 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
             if step.name == StepName.LONGEVITY_STEP
         ]
         self.assertEqual(durations, [120, 300])
+
+
+class TestTc54StswDeviceDrain(unittest.TestCase):
+    def test_drain_is_fail_closed_grouped_and_checked_in_same_playbook(self):
+        self.assertEqual(len(TC54.playbooks), 1)
+        playbook = TC54.playbooks[0]
+        self.assertEqual(playbook.name, "fpf_tc54_stsw_device_drain_disrupt")
+        steps = _steps(playbook)
+        custom = [_params(step) for step in steps if step.name == StepName.CUSTOM_STEP]
+        drain = next(
+            params
+            for params in custom
+            if params.get("custom_step_name") == "fpf_drain_interface"
+        )
+        self.assertTrue(drain["is_drain"])
+        self.assertEqual(drain["target_device"], DRAIN_TARGET_STSW)
+        gate = next(
+            params
+            for params in custom
+            if params.get("custom_step_name") == "fpf_verify_disruption"
+        )
+        self.assertTrue(gate["expect_drained"])
+        self.assertTrue(gate["fail_if_ineffective"])
+        injections = [
+            _params(step)
+            for step in steps
+            if step.name == StepName.FPF_BGP_PREFIX_INJECTION_STEP
+        ]
+        self.assertEqual(len(injections), 2)
+        self.assertEqual(
+            {params["prefix_base"] for params in injections},
+            {"5000:dd::/64", "5000:ee::/64"},
+        )
+        self.assertTrue(
+            all(params["extra_communities"] == ["65446:10"] for params in injections)
+        )
+        self.assertTrue(
+            any(
+                step.name == StepName.LONGEVITY_STEP
+                and _params(step)["duration"] >= 300
+                for step in steps
+            )
+        )
+        ids = _check_ids(playbook)
+        self.assertIn("fpf_host_spray", ids)
+        self.assertIn("fpf_hrt_plane_status_drain", ids)
 
 
 if __name__ == "__main__":

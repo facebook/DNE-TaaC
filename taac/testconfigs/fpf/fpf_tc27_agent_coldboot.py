@@ -149,6 +149,7 @@ def create_fpf_tc27_test_config() -> TestConfig:
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=0,
+                fsdb_session_poll_interval_sec=2.0,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 rf_vf_groups=RF_VF_GROUPS,

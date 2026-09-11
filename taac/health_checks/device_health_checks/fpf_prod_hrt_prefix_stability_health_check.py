@@ -618,6 +618,7 @@ def _evaluate_host_transition(
         info = timeline[norm]
         display = info["display"]
         samples = info["samples"]
+        res.n_samples += len(samples)
         baseline_reachable = set(samples[0][2].reachable_planes)
         relevant = sorted(impacted_planes & baseline_reachable)
         if not relevant:
@@ -625,7 +626,6 @@ def _evaluate_host_transition(
             # VF2 prefix when a VF1 lane was disabled) — skip from transition.
             continue
         any_relevant = True
-        res.n_samples += len(samples)
         final_reachable = set(samples[-1][2].reachable_planes)
         for plane in relevant:
             last_reachable_ts: t.Optional[float] = None
@@ -1239,10 +1239,17 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             if host in target_norms_by_host and res.status == "SKIP":
                 res.status = "FAIL"
                 res.s1_ok = False
-                res.compliance_issues.append(
-                    f"required host {host} produced no in-window samples for "
-                    "its configured prefixes"
-                )
+                if res.n_prefixes:
+                    res.compliance_issues.append(
+                        f"required host {host} produced {res.n_samples} "
+                        "configured-prefix sample(s), but no affected plane "
+                        f"scope overlapped {sorted(impacted)}"
+                    )
+                else:
+                    res.compliance_issues.append(
+                        f"required host {host} produced no in-window samples for "
+                        "its configured prefixes"
+                    )
             host_results.append(res)
             self.logger.info(
                 f"  [prod HRT prefix][{host}] mode={mode} VERDICT {res.status} — "

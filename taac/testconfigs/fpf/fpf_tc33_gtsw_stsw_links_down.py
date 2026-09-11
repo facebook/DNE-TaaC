@@ -12,13 +12,11 @@ changing the VF prefix set, so on the GPU/HRT side this should be a non-event
 window (15 min rapid flaps + 5 min longevity) exercises the same churn path as
 the full "36 links down" plan within a normal test slot.
 
-Two-playbook "longevity-anchored health check" pattern (identical shape to
-fpf_tc32_downlink_flaps):
-  1. Disruption-only playbook (NO checks): step1 rapid-flaps the uplinks for
-     900s, step2 settles for a 300s longevity window.
-  2. Stable-state v2 hardening playbook (soak 300s, no disruption steps): every
-     stable-state health check anchors its window at LONGEVITY START with the
-     SAME stable-state expectations as fpf_stress_test_config.
+Two-playbook phase-correct pattern:
+  1. Disrupt playbook captures the exact pre-test UP-port set, rapidly flaps the
+     uplinks for 900s, settles 120s, and checks only non-traffic safety signals.
+  2. Longevity playbook restores RDMA if it collapsed, qualifies the recovered
+     state for 120s, soaks for 300s, and requires every captured port to be UP.
 
 Uplink interface selection (runtime LLDP):
   Uses ``create_fpf_rapid_flap_step_lldp`` so the GTSW->STSW uplink set is
@@ -36,11 +34,12 @@ Usage:
 
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
-    create_fpf_disruption_only_playbook,
+    create_fpf_disrupt_window_playbook,
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
     create_fpf_rapid_flap_step_lldp,
+    create_fpf_up_port_baseline_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -49,6 +48,9 @@ from taac.task_definitions import (
     create_fpf_start_collectors_task,
     create_fpf_stop_collectors_task,
     create_fpf_withdraw_vf_groups_task,
+)
+from taac.testconfigs.fpf.fpf_flap_contract import (
+    build_flap_disrupt_postchecks,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
     ALL_STSWS,
@@ -89,8 +91,10 @@ IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 FLAP_DURATION_SEC = 900
 FLAP_INTERVAL_SEC = 1
 RECOVERED_BASELINE_LOOKBACK_SEC = 120
-# Longevity window after flaps stop; stable-state checks anchor at its start.
+# Strict stable-state soak after the recovered-state qualification.
 LONGEVITY_SEC = 300
+DISRUPT_SETTLE_SEC = 120
+UP_PORT_BASELINE_KEY = "tc33_pre_disruption_up_ports"
 
 DUT_GTSW = OBSERVER_GTSWS[0]
 
@@ -114,11 +118,21 @@ def create_fpf_tc33_test_config() -> TestConfig:
     )
     spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
-    disrupt_playbook = create_fpf_disruption_only_playbook(
-        gtsws=OBSERVER_GTSWS,
-        hosts=GPU_HOSTS,
-        trigger_stsws=ALL_STSWS,
+    disrupt_playbook = create_fpf_disrupt_window_playbook(
+        postchecks=build_flap_disrupt_postchecks(
+            observer_gtsws=OBSERVER_GTSWS,
+            hrt_memory_hosts=HRT_MEMORY_HOSTS,
+            prefix_count=PREFIX_COUNT,
+            skip_ssh=skip_ssh,
+            include_route_convergence=False,
+        ),
         disruption_steps=[
+            create_fpf_up_port_baseline_step(
+                action="capture",
+                devices=[DUT_GTSW],
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[DUT_GTSW],
+            ),
             create_fpf_rapid_flap_step_lldp(
                 # tc33 intentionally flaps ALL gtsw001 STSW uplinks (the
                 # spine-side glob is the desired scope). Now wall-clock bound +
@@ -137,8 +151,8 @@ def create_fpf_tc33_test_config() -> TestConfig:
                 ),
             ),
             create_longevity_step(
-                duration=LONGEVITY_SEC,
-                description=f"Settle {LONGEVITY_SEC}s after uplink flaps stop",
+                duration=DISRUPT_SETTLE_SEC,
+                description=f"Settle {DISRUPT_SETTLE_SEC}s after uplink flaps stop",
             ),
         ],
         playbook_name="fpf_tc33_gtsw_stsw_links_down_disrupt",
@@ -166,6 +180,14 @@ def create_fpf_tc33_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         recovered_baseline_qualification_sec=120,
+        final_validation_steps=[
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=[DUT_GTSW],
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[DUT_GTSW],
+            )
+        ],
     )
 
     return TestConfig(
