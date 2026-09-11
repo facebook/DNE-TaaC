@@ -3111,6 +3111,8 @@ def create_fpf_fsdb_ribmap_convergence_check(
     mode: t.Optional[str] = None,
     reconverge_sla_sec: t.Optional[float] = None,
     use_restart_time: bool = False,
+    use_mutation_time: bool = False,
+    require_final_exact: bool = False,
     stability_mode: str = "strict",
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
@@ -3153,6 +3155,10 @@ def create_fpf_fsdb_ribmap_convergence_check(
         params["reconverge_sla_sec"] = reconverge_sla_sec
     if use_restart_time:
         params["use_restart_time"] = True
+    if use_mutation_time:
+        params["use_mutation_time"] = True
+    if require_final_exact:
+        params["require_final_exact"] = True
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
     return PointInTimeHealthCheck(
@@ -3175,6 +3181,8 @@ def create_fpf_bgp_rib_convergence_check(
     signal3_stability_duration_sec: t.Optional[float] = None,
     mode: t.Optional[str] = None,
     reconverge_sla_sec: t.Optional[float] = None,
+    use_mutation_time: bool = False,
+    require_final_exact: bool = False,
     stability_mode: str = "strict",
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
@@ -3212,6 +3220,10 @@ def create_fpf_bgp_rib_convergence_check(
         params["mode"] = mode
     if reconverge_sla_sec is not None:
         params["reconverge_sla_sec"] = reconverge_sla_sec
+    if use_mutation_time:
+        params["use_mutation_time"] = True
+    if require_final_exact:
+        params["require_final_exact"] = True
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
     return PointInTimeHealthCheck(
@@ -3242,6 +3254,8 @@ def create_fpf_hrt_bulk_convergence_check(
     signal3_stability_duration_sec: t.Optional[float] = None,
     stability_mode: str = "strict",
     restart_tolerant_hosts: t.Optional[t.List[str]] = None,
+    use_mutation_time: bool = False,
+    require_final_exact: bool = False,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_HRT_BULK_CONVERGENCE_CHECK — HRT bulk convergence per lane.
@@ -3303,6 +3317,10 @@ def create_fpf_hrt_bulk_convergence_check(
         params["stability_mode"] = stability_mode
     if restart_tolerant_hosts:
         params["restart_tolerant_hosts"] = restart_tolerant_hosts
+    if use_mutation_time:
+        params["use_mutation_time"] = True
+    if require_final_exact:
+        params["require_final_exact"] = True
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_BULK_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3330,6 +3348,7 @@ def create_fpf_hrt_remote_failure_convergence_check(
         t.Dict[str, t.Dict[str, t.List[int]]]
     ] = None,
     restart_tolerant_hosts: t.Optional[t.List[str]] = None,
+    use_mutation_time: bool = False,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK — HRT negative-route convergence per lane.
@@ -3378,6 +3397,8 @@ def create_fpf_hrt_remote_failure_convergence_check(
         params["window_end"] = window_end
     if restart_tolerant_hosts:
         params["restart_tolerant_hosts"] = restart_tolerant_hosts
+    if use_mutation_time:
+        params["use_mutation_time"] = True
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_HRT_REMOTE_FAILURE_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
@@ -3400,6 +3421,7 @@ def create_fpf_prod_hrt_prefix_stability_check(
     max_drain_sec: t.Optional[float] = None,
     disruption_ts: t.Optional[float] = None,
     lookback_sec: int = 900,
+    use_test_case_start_time: bool = True,
     settle_sec: t.Optional[float] = None,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
@@ -3438,6 +3460,8 @@ def create_fpf_prod_hrt_prefix_stability_check(
     callers may continue using the global ``prefixes``/``local_prefixes`` lists.
     """
     params: t.Dict[str, t.Any] = {"lookback_sec": lookback_sec}
+    if not use_test_case_start_time:
+        params["use_test_case_start_time"] = False
     if mode is not None:
         params["mode"] = mode
     if settle_sec is not None:

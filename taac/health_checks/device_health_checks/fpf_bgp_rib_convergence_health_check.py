@@ -14,10 +14,12 @@ from taac.libs.fpf.fpf_collector_registry import (
     DEFAULT_SIGNAL1_E2E_MAX_SEC,
     DEFAULT_SIGNAL2_LOCAL_MAX_SEC,
     DEFAULT_SIGNAL3_STABILITY_DURATION_SEC,
+    enforce_final_exact,
     evaluate_three_signals,
     everpaste_details_suffix,
     get_collector,
     get_disruption_time,
+    get_mutation_time,
     get_test_case_start_time,
     wait_for_restart_reconverge,
     wait_for_target_rib_rows,
@@ -158,9 +160,16 @@ class FpfBgpRibConvergenceHealthCheck(
         )
         tc_start = get_test_case_start_time()
         lookback_sec = check_params.get("lookback_sec", 900)
-        window_start = check_params.get(
-            "window_start", tc_start if tc_start else window_end - lookback_sec
-        )
+        default_start = tc_start if tc_start else window_end - lookback_sec
+        if check_params.get("use_mutation_time"):
+            mutation_time = get_mutation_time()
+            if mutation_time <= 0:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message="No FPF scale mutation timestamp was recorded",
+                )
+            default_start = max(default_start, mutation_time)
+        window_start = check_params.get("window_start", default_start)
         # settle_sec: skip the first N seconds (restore/recovery phase) so the
         # GTSW RIB re-converge transient on undrain/re-enable isn't measured as
         # post-convergence instability.
@@ -215,6 +224,8 @@ class FpfBgpRibConvergenceHealthCheck(
                 signal3_stability_duration_sec=signal3_duration,
                 stability_mode=stability_mode,
             )
+            if check_params.get("require_final_exact"):
+                per_lane_results[i] = enforce_final_exact(per_lane_results[i], expected)
 
         for r in per_lane_results:
             overall = "PASS" if r.passed else "FAIL"

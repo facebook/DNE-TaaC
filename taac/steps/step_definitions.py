@@ -92,6 +92,7 @@ from taac.driver.driver_constants import (
     OtherSystemctlServiceName,
     Service as DriverService,
 )
+from taac.driver.fboss_switch import FbossSwitch
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
     AbstractIxiaHealthCheck,
@@ -3209,6 +3210,19 @@ def create_fpf_record_disruption_time_step(
         description=description or "Record FPF disruption time",
         step_params=Params(
             json_params=json.dumps({"custom_step_name": "record_fpf_disruption_time"})
+        ),
+    )
+
+
+def create_fpf_record_mutation_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record the wall-clock start of an FPF prefix scale mutation."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF scale mutation time",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "record_fpf_mutation_time"})
         ),
     )
 
@@ -10199,15 +10213,6 @@ class ServiceConvergenceStep(StepBase[taac_types.ServiceConvergenceInput]):
             )
 
 
-class _IntentionalStopDriver(t.Protocol):
-    async def async_stop_service(
-        self,
-        service: DriverService,
-        agents: t.Optional[t.List[str]] = None,
-        accept_failed_if_process_absent: bool = False,
-    ) -> None: ...
-
-
 class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
     STEP_NAME = taac_types.StepName.SERVICE_INTERRUPTION_STEP
 
@@ -10253,10 +10258,12 @@ class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
                         raise ValueError(
                             "intentional_stop does not support per-agent service control"
                         )
-                    driver = t.cast(_IntentionalStopDriver, self.driver)
-                    await driver.async_stop_service(
+                    if not self.is_fboss or not isinstance(self.driver, FbossSwitch):
+                        raise ValueError(
+                            "intentional_stop is supported only by the FBOSS driver"
+                        )
+                    await self.driver.async_stop_service(
                         service,
-                        agents,
                         accept_failed_if_process_absent=True,
                     )
                 else:

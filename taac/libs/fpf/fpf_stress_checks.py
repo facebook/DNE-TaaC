@@ -1579,6 +1579,130 @@ class HrtRemoteFailureCollector(BaseCollector):
             )
         return results
 
+    def evaluate_per_lane_scale_recovery(
+        self,
+        trigger_time: datetime,
+        lanes: List[int],
+        expected_per_lane: Optional[Dict[int, int]] = None,
+        max_convergence_sec: int = 120,
+        device_ids: Optional[List[int]] = None,
+        only_hosts: Optional[List[str]] = None,
+        _single_tuple: bool = False,
+    ) -> List[PerLaneResult]:
+        """Allow scale-time RF transients but require bounded exact recovery.
+
+        Recovery is the first valid expected-valued sample after the final
+        mismatch.  It must occur within ``max_convergence_sec`` of the scale
+        mutation, the final sample must equal the expected count, and any
+        invalid/missing sample fails the tuple.
+        """
+        if not _single_tuple:
+            results: List[PerLaneResult] = []
+            selected_hosts = (
+                only_hosts or self.hosts or sorted({row.host for row in self.rows})
+            )
+            selected_devices = device_ids or self.device_ids
+            saved_rows = self.rows
+            try:
+                for host in sorted(selected_hosts):
+                    for device_id in sorted(selected_devices):
+                        self.rows = [
+                            row
+                            for row in saved_rows
+                            if row.host == host and row.device_id == device_id
+                        ]
+                        tuple_results = self.evaluate_per_lane_scale_recovery(
+                            trigger_time=trigger_time,
+                            lanes=lanes,
+                            expected_per_lane=expected_per_lane,
+                            max_convergence_sec=max_convergence_sec,
+                            _single_tuple=True,
+                        )
+                        for result in tuple_results:
+                            result.host = host
+                            result.device_id = device_id
+                            result.device = f"{host}/dev{device_id}/L{result.lane}"
+                        results.extend(tuple_results)
+                return results
+            finally:
+                self.rows = saved_rows
+
+        expected_per_lane = expected_per_lane or {}
+        trigger_ts = trigger_time.timestamp()
+        results = []
+        for lane_id in sorted(lanes):
+            expected = expected_per_lane.get(lane_id, 0)
+            samples: List[Tuple[float, int]] = []
+            error_count = 0
+            for row in self.rows:
+                if not row.valid or row.notes.startswith("error:"):
+                    error_count += 1
+                    continue
+                if lane_id >= len(row.lane_counts):
+                    error_count += 1
+                    continue
+                try:
+                    row_ts = _parse_ts(row.timestamp).timestamp()
+                except ValueError:
+                    error_count += 1
+                    continue
+                samples.append((row_ts, row.lane_counts[lane_id]))
+
+            last_actual = samples[-1][1] if samples else 0
+            last_mismatch_index = max(
+                (
+                    index
+                    for index, (_, value) in enumerate(samples)
+                    if value != expected
+                ),
+                default=-1,
+            )
+            recovery_index = last_mismatch_index + 1
+            recovered = recovery_index < len(samples)
+            recovery_sec = (
+                round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
+            )
+            passed = (
+                bool(samples)
+                and error_count == 0
+                and recovered
+                and last_actual == expected
+                and recovery_sec is not None
+                and recovery_sec <= max_convergence_sec
+            )
+            if not samples:
+                detail = "no valid samples"
+            elif error_count:
+                detail = f"{error_count} invalid/missing sample(s) in scale window"
+            elif last_actual != expected:
+                detail = f"final={last_actual}, expected exact final={expected}"
+            elif recovery_sec is None:
+                detail = f"never recovered to exact {expected}"
+            elif recovery_sec > max_convergence_sec:
+                detail = (
+                    f"recovered to exact {expected} in {recovery_sec}s "
+                    f"> {max_convergence_sec}s SLA"
+                )
+            else:
+                detail = (
+                    f"recovered to exact {expected} in {recovery_sec}s "
+                    f"(SLA {max_convergence_sec}s); final={last_actual}"
+                )
+            results.append(
+                PerLaneResult(
+                    lane=lane_id,
+                    device=f"HRT neg L{lane_id}",
+                    check_type="HRT remote_failure scale recovery",
+                    passed=passed,
+                    expected=expected,
+                    actual=last_actual,
+                    convergence_sec=recovery_sec,
+                    detail=detail,
+                    error_count=error_count,
+                )
+            )
+        return results
+
     def evaluate_per_lane_window(
         self,
         window_start: float,
@@ -1632,6 +1756,15 @@ class HrtRemoteFailureCollector(BaseCollector):
                     lanes=lanes,
                     expected_per_lane=expected_per_lane,
                     last_n=10,
+                    device_ids=device_ids,
+                    only_hosts=only_hosts,
+                )
+            if direction == "scale_recovery":
+                return self.evaluate_per_lane_scale_recovery(
+                    trigger_time=trigger_time,
+                    lanes=lanes,
+                    expected_per_lane=expected_per_lane,
+                    max_convergence_sec=max_convergence_sec,
                     device_ids=device_ids,
                     only_hosts=only_hosts,
                 )

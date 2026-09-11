@@ -15,9 +15,11 @@ from taac.libs.fpf.fpf_collector_registry import (
     DEFAULT_SIGNAL2_LOCAL_MAX_SEC,
     DEFAULT_SIGNAL3_STABILITY_DURATION_SEC,
     disruption_inconclusive_skip,
+    enforce_final_exact,
     evaluate_three_signals,
     everpaste_details_suffix,
     get_collector,
+    get_mutation_time,
     get_restart_completion_time,
     get_restart_time,
     get_test_case_start_time,
@@ -127,9 +129,16 @@ class FpfHrtBulkConvergenceHealthCheck(
         window_end = check_params.get("window_end", time.time())
         tc_start = get_test_case_start_time()
         lookback_sec = check_params.get("lookback_sec", 900)
-        window_start = check_params.get(
-            "window_start", tc_start if tc_start else window_end - lookback_sec
-        )
+        default_start = tc_start if tc_start else window_end - lookback_sec
+        if check_params.get("use_mutation_time"):
+            mutation_time = get_mutation_time()
+            if mutation_time <= 0:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message="No FPF scale mutation timestamp was recorded",
+                )
+            default_start = max(default_start, mutation_time)
+        window_start = check_params.get("window_start", default_start)
         # settle_sec: skip the first N seconds of the window (restore/recovery
         # phase) so the impacted lane's re-converge transient (converge -> brief
         # withdraw -> re-converge as the link comes back) isn't measured as
@@ -220,6 +229,10 @@ class FpfHrtBulkConvergenceHealthCheck(
                 per_lane_results[
                     i
                 ].detail += f" | FAIL — {r.error_count} explicit error/null sample(s)"
+            if check_params.get("require_final_exact"):
+                per_lane_results[i] = enforce_final_exact(
+                    per_lane_results[i], expected_per_lane.get(r.lane, 0)
+                )
 
         if restart_tolerant_hosts:
             restart_ts = get_restart_time()

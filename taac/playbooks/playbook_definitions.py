@@ -24962,6 +24962,7 @@ def _build_fpf_generic_checks(
     host_spray_transform_desc: str | None = None,
     hrt_device_ids: list[int] | None = None,
     prod_prefixes_by_host: dict[str, list[str]] | None = None,
+    prod_prefix_precheck_lookback_sec: int | None = None,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -25059,6 +25060,10 @@ def _build_fpf_generic_checks(
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=prod_prefixes_by_host,
+                lookback_sec=prod_prefix_precheck_lookback_sec or 900,
+                use_test_case_start_time=(
+                    prod_prefix_precheck_lookback_sec is None
+                ),
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
         )
@@ -25577,6 +25582,8 @@ def create_fpf_hardening_playbook_v2(
     hrt_device_ids: list[int] | None = None,
     cleanup_steps: list | None = None,
     ensure_traffic_after_disruption: bool = False,
+    prod_prefix_precheck_lookback_sec: int | None = None,
+    scale_mutation_mode: bool = False,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25804,6 +25811,7 @@ def create_fpf_hardening_playbook_v2(
         out_congestion_last_minute_max=out_congestion_last_minute_max,
         host_spray_transform_desc=host_spray_transform_desc,
         hrt_device_ids=resolved_hrt_device_ids,
+        prod_prefix_precheck_lookback_sec=prod_prefix_precheck_lookback_sec,
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -25910,6 +25918,8 @@ def create_fpf_hardening_playbook_v2(
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
                 settle_sec=convergence_settle_sec or None,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=scale_mutation_mode,
                 stability_mode=convergence_blip_mode,
                 check_id=f"fpf_fsdb_convergence_lane{lane_id}",
             )
@@ -25929,6 +25939,8 @@ def create_fpf_hardening_playbook_v2(
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
                 settle_sec=convergence_settle_sec or None,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=scale_mutation_mode,
                 stability_mode=convergence_blip_mode,
                 check_id=f"fpf_bgp_convergence_lane{lane_id}",
             )
@@ -25950,6 +25962,8 @@ def create_fpf_hardening_playbook_v2(
                 # settle past the recovery (restore phase) so the impacted lane's
                 # re-converge transient isn't flagged as post-convergence churn.
                 settle_sec=convergence_settle_sec or None,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=scale_mutation_mode,
                 stability_mode=convergence_blip_mode,
                 restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                 check_id=f"fpf_hrt_convergence_lane{lane_id}",
@@ -25965,7 +25979,9 @@ def create_fpf_hardening_playbook_v2(
     #   "skip_null_strict" -> stable_skip_null_strict (MODE B: every non-null == 0)
     #   "strict"/default   -> stable (every sample == 0)
     #   remote_failure_last_n=True -> stable_last_n (last N non-null samples == 0)
-    if remote_failure_last_n:
+    if scale_mutation_mode:
+        _rf_direction = "scale_recovery"
+    elif remote_failure_last_n:
         _rf_direction = "stable_last_n"
     elif convergence_blip_mode == "last_sample":
         _rf_direction = "stable_last_sample"
@@ -25993,6 +26009,7 @@ def create_fpf_hardening_playbook_v2(
                     expected_per_lane=_gexpected,
                     direction=_rf_direction,
                     use_live_collectors=True,
+                    use_mutation_time=scale_mutation_mode,
                     collector_name=f"hrt_remote_failure_{_g['suffix']}",
                     restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
@@ -26007,6 +26024,7 @@ def create_fpf_hardening_playbook_v2(
                     device_ids=resolved_hrt_device_ids,
                     direction=_rf_direction,
                     use_live_collectors=True,
+                    use_mutation_time=scale_mutation_mode,
                     restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id="fpf_remote_failure_stable",
                 )

@@ -227,6 +227,12 @@ def get_check_results() -> t.List[t.Tuple[str, str, str, str]]:
 # set at the START of the playbook (before inject + stabilization).
 _disruption_time: float = 0.0
 
+# Wall-clock epoch of a scale mutation (prefix add/withdraw), recorded at
+# runtime immediately before the mutation begins.  This is deliberately
+# separate from ``_disruption_time``: a scale transition is not a link/service
+# disruption, and sharing the marker would change unrelated link-event windows.
+_mutation_time: float = 0.0
+
 # Wall-clock epoch of a recovery/restart action. This is intentionally separate
 # from ``_disruption_time``: GR-beyond tests use the latter to retain the full
 # service-down observation window while affected-rib recovery SLAs start here.
@@ -260,6 +266,14 @@ DEFAULT_SIGNAL3_STABILITY_DURATION_SEC: float = 60.0
 # before the full duration elapses (gives partial credit so tests don't fail
 # purely because their soak window is short relative to the stability check).
 DEFAULT_STABILITY_PARTIAL_CREDIT_FRACTION: float = 0.8
+
+
+def enforce_final_exact(result: PerLaneResult, expected: int) -> PerLaneResult:
+    """Fail a convergence result whose final valid count is not exact."""
+    if result.actual != expected:
+        result.passed = False
+        result.detail += f" | Final exact count: FAIL — {result.actual} != {expected}"
+    return result
 
 
 async def everpaste_details_suffix(
@@ -319,6 +333,15 @@ def set_disruption_time(ts: float) -> None:
 
 def get_disruption_time() -> float:
     return _disruption_time
+
+
+def set_mutation_time(ts: float) -> None:
+    global _mutation_time
+    _mutation_time = ts
+
+
+def get_mutation_time() -> float:
+    return _mutation_time
 
 
 def set_restart_time(ts: float) -> None:
@@ -428,7 +451,7 @@ def validate_restart_tolerant_tuple(
 
 
 def clear_all() -> None:
-    global _disruption_time, _restart_time, _restart_completion_time
+    global _disruption_time, _mutation_time, _restart_time, _restart_completion_time
     global _recovery_start_time, _recovery_completion_time
     global _disruption_effective, _disruption_effective_detail
     global _baseline_impaired_lanes, _baseline_impaired_tuples
@@ -439,6 +462,7 @@ def clear_all() -> None:
     _artifacts.clear()
     _check_results.clear()
     _disruption_time = 0.0
+    _mutation_time = 0.0
     _restart_time = 0.0
     _restart_completion_time = 0.0
     _recovery_start_time = 0.0

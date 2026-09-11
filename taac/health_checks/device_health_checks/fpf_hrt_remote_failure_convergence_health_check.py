@@ -17,6 +17,7 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_allow_baseline_failures,
     get_collector,
     get_disruption_time,
+    get_mutation_time,
     get_restart_completion_time,
     get_restart_time,
     get_test_case_start_time,
@@ -145,7 +146,15 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         # injection artifact as a drain-time regression. Falls back to tc_start
         # when no disruption time was recorded (disruption_time defaults to 0.0).
         default_start = tc_start if tc_start else window_end - lookback_sec
-        if direction in (
+        if check_params.get("use_mutation_time"):
+            mutation_time = get_mutation_time()
+            if mutation_time <= 0:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message="No FPF scale mutation timestamp was recorded",
+                )
+            default_start = max(default_start, mutation_time)
+        elif direction in (
             "stable",
             "stable_last_sample",
             "stable_skip_null_strict",
@@ -391,6 +400,10 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             "stable_last_n",
         ):
             return self._evaluate_stable_from_rows(lane_id, expected, rows, direction)
+        if direction == "scale_recovery":
+            return self._evaluate_scale_recovery_from_rows(
+                lane_id, expected, rows, trigger_ts, max_convergence_sec
+            )
         if direction == "drain":
             return self._evaluate_drain_from_rows(
                 lane_id, expected, rows, max_convergence_sec
@@ -398,6 +411,71 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         return self._evaluate_recovery_from_rows(
             lane_id, expected, rows, max_convergence_sec
         )
+
+    def _evaluate_scale_recovery_from_rows(
+        self,
+        lane_id: int,
+        expected: int,
+        rows: t.List[t.Dict[str, t.Any]],
+        trigger_ts: float,
+        max_convergence_sec: int,
+    ) -> t.Tuple[int, bool, int, t.Optional[float], str]:
+        samples: t.List[t.Tuple[float, int]] = []
+        error_count = 0
+        for row in rows:
+            lane_counts = row.get("lane_counts", [])
+            if not row.get("valid", True) or str(row.get("notes", "")).startswith(
+                "error:"
+            ):
+                error_count += 1
+                continue
+            if lane_id >= len(lane_counts):
+                error_count += 1
+                continue
+            try:
+                row_ts = _parse_ts(row["timestamp"]).timestamp()
+            except (KeyError, ValueError):
+                error_count += 1
+                continue
+            samples.append((row_ts, int(lane_counts[lane_id])))
+
+        last_actual = samples[-1][1] if samples else 0
+        last_mismatch_index = max(
+            (index for index, (_, value) in enumerate(samples) if value != expected),
+            default=-1,
+        )
+        recovery_index = last_mismatch_index + 1
+        recovered = recovery_index < len(samples)
+        recovery_sec = (
+            round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
+        )
+        passed = (
+            bool(samples)
+            and error_count == 0
+            and recovered
+            and last_actual == expected
+            and recovery_sec is not None
+            and recovery_sec <= max_convergence_sec
+        )
+        if not samples:
+            detail = "no valid samples"
+        elif error_count:
+            detail = f"{error_count} invalid/missing sample(s) in scale window"
+        elif last_actual != expected:
+            detail = f"final={last_actual}, expected exact final={expected}"
+        elif recovery_sec is None:
+            detail = f"never recovered to exact {expected}"
+        elif recovery_sec > max_convergence_sec:
+            detail = (
+                f"recovered to exact {expected} in {recovery_sec}s "
+                f"> {max_convergence_sec}s SLA"
+            )
+        else:
+            detail = (
+                f"recovered to exact {expected} in {recovery_sec}s "
+                f"(SLA {max_convergence_sec}s); final={last_actual}"
+            )
+        return lane_id, passed, last_actual, recovery_sec, detail
 
     def _evaluate_stable_from_rows(
         self,

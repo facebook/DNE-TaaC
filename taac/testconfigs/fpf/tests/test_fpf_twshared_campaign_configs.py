@@ -295,6 +295,79 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             ["5000:dd:fa0::/64", "5000:ee:fa0::/64"],
         )
 
+    def test_tc45_has_exact_4k_checkpoint_before_8k_mutation(self):
+        playbook = fpf_tc45_scale_up_4k_8k.TEST_CONFIG.playbooks[0]
+        steps = _steps(playbook)
+        descriptions = [step.description or "" for step in steps]
+        checkpoint = next(
+            step
+            for step in steps
+            if step.name == taac_types.StepName.VALIDATION_STEP
+            and "exact 4K" in (step.description or "")
+        )
+        checkpoint_index = steps.index(checkpoint)
+        scale_up_index = descriptions.index("Scale up: 8000 prefixes from 5000:dd::/64")
+        marker_index = descriptions.index("Record TC45 4K-to-8K mutation time")
+        self.assertLess(checkpoint_index, marker_index)
+        self.assertEqual(marker_index + 1, scale_up_index)
+
+        rendered = json.loads(checkpoint.input_json)["point_in_time_checks"]
+        by_id = {check["check_id"]: check for check in rendered}
+        count_checks = [
+            check
+            for check_id, check in by_id.items()
+            if check_id.startswith("fpf_tc45_4k_fsdb_")
+            or check_id.startswith("fpf_tc45_4k_bgp_")
+            or check_id.startswith("fpf_tc45_4k_hrt_lane")
+        ]
+        self.assertEqual(len(count_checks), 8)
+        for check in count_checks:
+            params = json.loads(check["check_params"]["json_params"])
+            self.assertTrue(params["use_mutation_time"])
+            self.assertTrue(params["require_final_exact"])
+        session_params = json.loads(
+            by_id["fpf_tc45_4k_hrt_sessions"]["check_params"]["json_params"]
+        )
+        self.assertEqual(session_params["expected_session_count"], 32)
+        self.assertEqual(session_params["device_ids"], list(range(8)))
+        self.assertEqual(session_params["planes_per_device"], 4)
+        traffic_params = json.loads(
+            by_id["fpf_tc45_4k_traffic"]["check_params"]["json_params"]
+        )
+        self.assertEqual(traffic_params["hosts"], [SERVER, CLIENT])
+        self.assertEqual(traffic_params["lookback_sec"], 60)
+
+    def test_scale_playbooks_use_baseline_and_mutation_windows(self):
+        for module in (fpf_tc45_scale_up_4k_8k, fpf_tc46_scale_down_8k_4k):
+            with self.subTest(config=module.TEST_CONFIG.name):
+                ramp = module.TEST_CONFIG.playbooks[0]
+                precheck = next(
+                    check
+                    for check in ramp.prechecks
+                    if check.check_id == "fpf_prod_hrt_prefix_stability_precheck"
+                )
+                precheck_params = json.loads(precheck.check_params.json_params)
+                self.assertEqual(precheck_params["lookback_sec"], 120)
+                self.assertFalse(precheck_params["use_test_case_start_time"])
+
+                convergence = [
+                    check
+                    for check in ramp.postchecks
+                    if check.check_id
+                    and (
+                        "convergence_lane" in check.check_id
+                        or "remote_failure_stable" in check.check_id
+                    )
+                ]
+                self.assertTrue(convergence)
+                for check in convergence:
+                    params = json.loads(check.check_params.json_params)
+                    self.assertTrue(params["use_mutation_time"])
+                    if "remote_failure" in check.check_id:
+                        self.assertEqual(params["direction"], "scale_recovery")
+                    else:
+                        self.assertTrue(params["require_final_exact"])
+
     def test_tc55_reboot_is_explicitly_dut_scoped(self):
         reboot = next(
             step

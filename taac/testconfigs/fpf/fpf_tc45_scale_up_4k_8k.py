@@ -4,13 +4,24 @@
 
 """TC45: scale both VF groups from 4,000 to 8,000 prefixes per plane."""
 
+from taac.health_checks.healthcheck_definitions import (
+    create_fpf_bgp_rib_convergence_check,
+    create_fpf_fsdb_ribmap_convergence_check,
+    create_fpf_host_spray_check,
+    create_fpf_hrt_bulk_convergence_check,
+    create_fpf_hrt_fsdb_session_check,
+    create_fpf_hrt_remote_failure_convergence_check,
+)
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
+from taac.libs.fpf.fpf_thresholds import ACTIVE
 from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
     create_fpf_bgp_prefix_injection_step,
+    create_fpf_record_mutation_time_step,
     create_longevity_step,
+    create_validation_step,
 )
 from taac.task_definitions import (
     create_fpf_restart_service_task,
@@ -97,6 +108,92 @@ def _inject_both_vfs(count: int, label: str) -> list:
     ]
 
 
+def _scale_checkpoint_checks(spray_hosts: list[str] | None) -> list:
+    """Strict 4K boundary checks before TC45 starts the 8K mutation."""
+    checks = []
+    for lane_id, gtsw in enumerate(OBSERVER_GTSWS):
+        lane_map = {str(lane_id): gtsw}
+        checks.extend(
+            [
+                create_fpf_fsdb_ribmap_convergence_check(
+                    lane_map=lane_map,
+                    expected_matched=SCALE_LOW,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    require_final_exact=True,
+                    signal1_e2e_max_sec=ACTIVE.convergence_signal1_e2e_max_sec,
+                    signal2_local_max_sec=ACTIVE.convergence_signal2_local_max_sec,
+                    signal3_stability_duration_sec=(
+                        ACTIVE.convergence_signal3_stability_duration_sec
+                    ),
+                    check_id=f"fpf_tc45_4k_fsdb_lane{lane_id}",
+                ),
+                create_fpf_bgp_rib_convergence_check(
+                    lane_map=lane_map,
+                    expected_matched=SCALE_LOW,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    require_final_exact=True,
+                    signal1_e2e_max_sec=ACTIVE.convergence_signal1_e2e_max_sec,
+                    signal2_local_max_sec=ACTIVE.convergence_signal2_local_max_sec,
+                    signal3_stability_duration_sec=(
+                        ACTIVE.convergence_signal3_stability_duration_sec
+                    ),
+                    check_id=f"fpf_tc45_4k_bgp_lane{lane_id}",
+                ),
+            ]
+        )
+    for lane_id in INJECTED_LANES:
+        checks.append(
+            create_fpf_hrt_bulk_convergence_check(
+                lanes=[lane_id],
+                device_ids=HRT_DEVICE_IDS,
+                expected_per_lane={str(lane_id): SCALE_LOW},
+                use_live_collectors=True,
+                use_mutation_time=True,
+                require_final_exact=True,
+                signal1_e2e_max_sec=ACTIVE.convergence_signal1_e2e_max_sec,
+                signal2_local_max_sec=ACTIVE.convergence_signal2_local_max_sec,
+                signal3_stability_duration_sec=(
+                    ACTIVE.convergence_signal3_stability_duration_sec
+                ),
+                check_id=f"fpf_tc45_4k_hrt_lane{lane_id}",
+            )
+        )
+    for group in RF_VF_GROUPS:
+        group_lanes = [int(lane) for lane in group["lanes"]]
+        checks.append(
+            create_fpf_hrt_remote_failure_convergence_check(
+                lanes=group_lanes,
+                device_ids=group.get("device_ids", [0]),
+                expected_per_lane={str(lane): 0 for lane in group_lanes},
+                direction="scale_recovery",
+                use_live_collectors=True,
+                use_mutation_time=True,
+                collector_name=f"hrt_remote_failure_{group['suffix']}",
+                check_id=f"fpf_tc45_4k_remote_failure_{group['suffix']}",
+            )
+        )
+    checks.append(
+        create_fpf_hrt_fsdb_session_check(
+            hosts=GPU_HOSTS,
+            expected_session_count=EXPECTED_FSDB_SESSION_COUNT,
+            device_ids=HRT_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None,
+            planes_per_device=4 if HRT_DEVICE_IDS != [0] else None,
+            check_id="fpf_tc45_4k_hrt_sessions",
+        )
+    )
+    if spray_hosts:
+        checks.append(
+            create_fpf_host_spray_check(
+                hosts=spray_hosts,
+                lookback_sec=60,
+                check_id="fpf_tc45_4k_traffic",
+            )
+        )
+    return checks
+
+
 def create_fpf_tc45_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
     skip_ib = skip_ib_traffic()
@@ -122,10 +219,23 @@ def create_fpf_tc45_test_config() -> TestConfig:
         spray_hosts=spray,
         ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         disruption_steps=[
+            create_fpf_record_mutation_time_step(
+                description="Record TC45 4K scale-baseline mutation time"
+            ),
             *_inject_both_vfs(SCALE_LOW, "Scale baseline"),
             create_longevity_step(
                 duration=SETTLE_SEC,
                 description=f"Settle {SETTLE_SEC}s at {SCALE_LOW} prefixes",
+            ),
+            create_validation_step(
+                point_in_time_checks=_scale_checkpoint_checks(spray),
+                description=(
+                    "Validate exact 4K device/VF counts, HRT 32/32, RF recovery, "
+                    "and live RDMA traffic"
+                ),
+            ),
+            create_fpf_record_mutation_time_step(
+                description="Record TC45 4K-to-8K mutation time"
             ),
             *_inject_both_vfs(SCALE_HIGH, "Scale up"),
             create_longevity_step(
@@ -138,6 +248,8 @@ def create_fpf_tc45_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
+        scale_mutation_mode=True,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
@@ -160,6 +272,7 @@ def create_fpf_tc45_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
     )
     return TestConfig(
         name="fpf_tc45_scale_up_4k_8k",

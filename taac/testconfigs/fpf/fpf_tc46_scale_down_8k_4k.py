@@ -10,6 +10,7 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.steps.step_definitions import (
     create_fpf_bgp_prefix_injection_step,
+    create_fpf_record_mutation_time_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -149,6 +150,9 @@ def create_fpf_tc46_test_config() -> TestConfig:
                 duration=SETTLE_SEC,
                 description=f"Settle {SETTLE_SEC}s at {SCALE_HIGH} prefixes",
             ),
+            create_fpf_record_mutation_time_step(
+                description="Record TC46 8K-to-4K mutation time"
+            ),
             *_withdraw_upper_halves(),
             create_longevity_step(
                 duration=SETTLE_SEC,
@@ -160,6 +164,8 @@ def create_fpf_tc46_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
+        scale_mutation_mode=True,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
@@ -182,6 +188,7 @@ def create_fpf_tc46_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
     )
     return TestConfig(
         name="fpf_tc46_scale_down_8k_4k",

@@ -3568,6 +3568,8 @@ class FbossSwitch(AbstractSwitch):
 
         async def intentional_stop_complete(
             counters: Optional[Dict[str, str]] = None,
+            *,
+            fail_on_live_process: bool = False,
         ) -> bool:
             if counters is None:
                 counters = await self.async_get_systemd_service_counters(service)
@@ -3581,10 +3583,12 @@ class FbossSwitch(AbstractSwitch):
                 service, "MainPID", counters
             )
             if main_pid != 0:
-                raise RuntimeError(
-                    f"Service {service.value} is {status.name} but process "
-                    f"MainPID={main_pid} is still present"
-                )
+                if fail_on_live_process:
+                    raise RuntimeError(
+                        f"Service {service.value} is {status.name} but process "
+                        f"MainPID={main_pid} is still present"
+                    )
+                return False
             return True
 
         if accept_failed_if_process_absent and await intentional_stop_complete():
@@ -3600,7 +3604,9 @@ class FbossSwitch(AbstractSwitch):
         service_counters = await self.async_get_systemd_service_counters(service)
         status = await self.async_get_service_status(service, service_counters)
         if accept_failed_if_process_absent:
-            if not await intentional_stop_complete(service_counters):
+            if not await intentional_stop_complete(
+                service_counters, fail_on_live_process=True
+            ):
                 raise RuntimeError(
                     f"Intentional stop of {service.value} left service in "
                     f"{status.name}; expected INACTIVE, or FAILED with MainPID=0"

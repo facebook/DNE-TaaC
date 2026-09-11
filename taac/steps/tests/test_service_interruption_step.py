@@ -10,6 +10,7 @@ from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* ro
     TestTopology,
 )
 from taac.driver.driver_constants import FbossSystemctlServiceName
+from taac.driver.fboss_switch import FbossSwitch
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.steps.step_definitions import (
     create_service_interruption_step,
@@ -52,7 +53,7 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
             step=self.step_mock,
         )
 
-        self.driver_mock = AsyncMock()
+        self.driver_mock = AsyncMock(spec=FbossSwitch)
         self.si_step.driver = self.driver_mock
 
     async def test_run_systemctl_restart(self):
@@ -82,9 +83,18 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
 
         self.driver_mock.async_stop_service.assert_awaited_once_with(
             FbossSystemctlServiceName.FSDB,
-            None,
             accept_failed_if_process_absent=True,
         )
+
+    async def test_intentional_stop_rejects_non_fboss_driver(self):
+        input_data = taac_types.ServiceInterruptionInput(
+            name=taac_types.Service.FSDB,
+            trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP,
+        )
+        self.si_step.driver = AsyncMock()
+
+        with self.assertRaisesRegex(ValueError, "only by the FBOSS driver"):
+            await self.si_step.run(input_data, {"intentional_stop": True})
 
     async def test_run_systemctl_start(self):
         """Test that SYSTEMCTL_START trigger calls async_start_service."""

@@ -40,15 +40,23 @@ from taac.health_checks.device_health_checks.fpf_hrt_session_stat_health_check i
     FpfHrtSessionStatHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_prod_hrt_prefix_stability_health_check import (
+    _resolve_window,
     FpfProdHrtPrefixStabilityHealthCheck,
 )
 from taac.health_checks.device_health_checks.generic_ods_health_check import (
     GenericOdsHealthCheck,
 )
+from taac.libs.fpf.fpf_collector_registry import (
+    clear_all,
+    enforce_final_exact,
+    set_test_case_start_time,
+)
 from taac.libs.fpf.fpf_prod_hrt_prefix import PrefixReachability
 from taac.libs.fpf.fpf_stress_checks import (
     FsdbSessionWindowResult,
     HrtBulkRow,
+    HrtRemoteFailureCollector,
+    HrtRemoteFailureRow,
     PerLaneResult,
     ProdHrtPrefixRow,
 )
@@ -90,6 +98,84 @@ def _ts_str(epoch: float) -> str:
 # A fixed window the synthetic rows live inside.
 WINDOW_START = 1_700_000_000.0
 WINDOW_END = WINDOW_START + 300.0
+
+
+class FpfScaleWindowPolicyTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        clear_all()
+
+    def test_prod_precheck_uses_recent_baseline_instead_of_playbook_start(self):
+        set_test_case_start_time(WINDOW_END - 5)
+        with patch(f"{PROD_MODULE}.time.time", return_value=WINDOW_END):
+            self.assertEqual(
+                _resolve_window(
+                    {"lookback_sec": 120, "use_test_case_start_time": False}
+                ),
+                (WINDOW_END - 120, WINDOW_END),
+            )
+            self.assertEqual(
+                _resolve_window({"lookback_sec": 900}),
+                (WINDOW_END - 5, WINDOW_END),
+            )
+
+    def test_final_exact_rejects_under_and_over_count(self):
+        for actual in (3999, 4001):
+            with self.subTest(actual=actual):
+                result = PerLaneResult(
+                    lane=0,
+                    device="gtsw001",
+                    check_type="scale checkpoint",
+                    passed=True,
+                    expected=4000,
+                    actual=actual,
+                    detail="three signals passed",
+                )
+                self.assertFalse(enforce_final_exact(result, 4000).passed)
+        exact = PerLaneResult(
+            lane=0,
+            device="gtsw001",
+            check_type="scale checkpoint",
+            passed=True,
+            expected=4000,
+            actual=4000,
+        )
+        self.assertTrue(enforce_final_exact(exact, 4000).passed)
+
+    def _rf_result(
+        self, counts: list[int], offsets: list[int], *, invalid_index: int | None = None
+    ) -> PerLaneResult:
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[count, 0, 0, 0],
+                valid=index != invalid_index,
+                notes="error: timeout" if index == invalid_index else "",
+            )
+            for index, (count, offset) in enumerate(zip(counts, offsets))
+        ]
+        return collector.evaluate_per_lane_window(
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            lanes=[0],
+            expected_per_lane={0: 0},
+            direction="scale_recovery",
+            max_convergence_sec=120,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+
+    def test_scale_rf_allows_bounded_transient_and_requires_exact_final(self):
+        self.assertTrue(self._rf_result([0, 152, 0, 0], [5, 30, 60, 90]).passed)
+        self.assertFalse(self._rf_result([0, 152, 152], [5, 30, 60]).passed)
+        self.assertFalse(self._rf_result([0, 152, 0], [5, 30, 150]).passed)
+        self.assertFalse(
+            self._rf_result([0, 152, 0], [5, 30, 60], invalid_index=1).passed
+        )
 
 
 # ---------------------------------------------------------------------------
