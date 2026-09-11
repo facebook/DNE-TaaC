@@ -1012,7 +1012,9 @@ def _tc38(*, spray, skip_ssh) -> list:
         create_fpf_ods_counter_check,
     )
 
-    ndp_clear_every_sec = 1
+    # Capacity-calibrated from live direct-RPC measurements: one sequential
+    # clear must complete before the next four-second slot.
+    ndp_clear_every_sec = 4
     ndp_clear_duration_sec = 120
     ndp_clear_target_interface = fpf_link_drain_interface(GPU_HOSTS)
     settle_after_clear_sec = 120

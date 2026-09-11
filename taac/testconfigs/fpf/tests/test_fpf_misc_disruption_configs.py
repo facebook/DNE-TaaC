@@ -368,8 +368,9 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
         )
         self.assertEqual(loop_params["neighbor_host"], NDP_CLEAR_CIRCUIT.z_end_device)
         self.assertEqual(NDP_CLEAR_DURATION_SEC, 120)
-        # Per the config docstring, every_sec is 1 (rapid clear).
-        self.assertEqual(NDP_CLEAR_EVERY_SEC, 1)
+        # Capacity-calibrated persistent trigger: 30 exact slots over 120s.
+        self.assertEqual(NDP_CLEAR_EVERY_SEC, 4)
+        self.assertEqual(NDP_CLEAR_DURATION_SEC // NDP_CLEAR_EVERY_SEC, 30)
         # Scoped to the observer GTSW.
         from taac.testconfigs.fpf.fpf_hardening_common import (
             OBSERVER_GTSWS,

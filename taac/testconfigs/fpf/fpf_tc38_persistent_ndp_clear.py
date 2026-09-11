@@ -8,9 +8,11 @@ Repeatedly flushes the exact GPU-facing GTSW circuit's NDP entries while every
 port stays UP, so neighbor resolution is forced to re-converge continuously
 under sustained clearing — the "the link is fine but the neighbor cache keeps
 getting wiped" failure. The disruption is a 120s loop of circuit-scoped
-sw-agent ``flushNeighborEntries`` Thrift calls (every 1s) on the observer GTSW,
+sw-agent ``flushNeighborEntries`` Thrift calls (every 4s) on the observer GTSW,
 followed by a 120s settle, then a recovered-state qualification and stable-state
-v2 longevity playbook whose health checks anchor after exact recovery.
+v2 longevity playbook whose health checks anchor after exact recovery. The 4s
+cadence is capacity-calibrated from live direct-RPC measurements (worst observed
+just under 3s); each clear must finish before the next slot.
 
 CHARACTERIZED EXPECTATIONS (per the test owner):
   A persistent NDP clear DOES perturb the DATA plane on the cleared GTSW's lane
@@ -104,7 +106,7 @@ RF_VF_GROUPS = fpf_rf_vf_groups(
 )
 IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 300
-NDP_CLEAR_EVERY_SEC = 1
+NDP_CLEAR_EVERY_SEC = 4
 NDP_CLEAR_DURATION_SEC = 120
 SETTLE_AFTER_CLEAR_SEC = 120
 LONGEVITY_SEC = 300

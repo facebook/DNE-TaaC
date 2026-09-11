@@ -224,7 +224,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                 "custom_step_name": "fpf_ndp_clear_loop",
                 "target_interface": "eth1/41/5",
                 "neighbor_host": SERVER,
-                "every_sec": 1,
+                "every_sec": 4,
                 "duration_sec": 120,
             },
         )
