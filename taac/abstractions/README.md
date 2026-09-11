@@ -83,13 +83,51 @@ builders supply typed DICE specifications and action-stage factories:
 
 ```python
 create_dice_unified_churn_playbook(spec=attribute_churn_spec(...))
-create_dice_unified_churn_playbook(spec=session_churn_spec(...))
 create_dice_unified_churn_playbook(spec=route_churn_spec(...))
+create_dice_unified_churn_playbook(spec=session_churn_spec(...))
+create_dice_unified_churn_playbook(spec=igp_churn_spec(...))
+create_dice_unified_churn_playbook(spec=multipath_churn_spec(...))
+create_dice_unified_churn_playbook(spec=longevity_churn_spec(...))
 ```
 
-The unified renderer owns only common `Playbook` assembly. Attribute, session,
-and route implementations retain their own target selection, stage parameters,
-verification, and recovery behavior.
+The unified renderer owns only common `Playbook` assembly. Each family retains
+its own target selection, stage parameters, verification, and recovery
+behavior. Typed Step and Stage adapters lower the intent to the existing
+`CustomStep` payload; the runtime handler and its IXIA or DUT operations remain
+unchanged.
+
+#### Churn target authority
+
+The Playbook and TestConfig factory inputs are the source of authored churn
+intent. Live device or IXIA state is observation evidence, not an alternate
+configuration source. Current EBB factories supply Open/R route starts, link
+definitions, peer expressions, pool names, counts, and timing values to the
+typed contracts. Those contracts reject invalid geometry before lowering.
+
+Target ownership differs by family:
+
+- Attribute and route churn use explicit topology-authored prefix pools and
+  half-open route windows.
+- Session churn uses explicit peer expressions, session counts, per-cycle
+  widths, and a schedule. The runtime resolves those expressions to IXIA
+  sessions and verifies the requested width.
+- IGP metric churn uses the configured dual-stack plane starts and link
+  definitions. Its runtime captures the live Open/R adjacency and route
+  baseline, applies metric states, and restores and verifies that captured
+  baseline.
+- IGP unresolvable churn uses `start_ipv4s` and `start_ipv6s` as the removal
+  subset. `restore_start_ipv4s` and `restore_start_ipv6s` define the complete
+  reinjection set; the typed contract requires the removal subset to be
+  contained in that restore set. Runtime observations verify the selected
+  FibAgent, hardware, and BGP nexthop state before deletion and after restore.
+- Multipath churn discovers the live installed-path cohort because the exact
+  active next hops are runtime state. The typed contract bounds peer matching,
+  session capacity, cycle geometry, and the minimum acceptable width.
+- Longevity churn fixes the topology-owned Plane-4 pool selection and bounds
+  the wall-clock duration, cadence, and community count.
+
+This split ensures restoration uses the same declared target set that produced
+the mutation while still requiring independent live-state acknowledgement.
 
 ### Baseline lifecycle and failure ownership
 

@@ -22,6 +22,14 @@ from dataclasses import dataclass
 
 import paramiko
 from taac.abstractions.churn.attribute import AttributeChurn
+from taac.abstractions.churn.route import RouteChurn
+from taac.abstractions.churn.session import SessionChurn
+from taac.abstractions.churn.workloads import (
+    IgpMetricChurn,
+    IgpUnresolvableChurn,
+    LongevityCommunityChurn,
+    MultipathChurn,
+)
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -1156,6 +1164,21 @@ def create_bgp_longevity_community_churn_step(
     )
 
 
+def create_longevity_community_churn_step(
+    churn: LongevityCommunityChurn,
+    *,
+    description: str | None = None,
+) -> Step:
+    """Lower typed longevity-community intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_longevity_community_churn",
+            **churn.to_step_params(),
+        },
+        description=description or "Run wall-clock bounded longevity community churn",
+    )
+
+
 def create_bgp_route_storm_step(
     *,
     hostname: str,
@@ -1301,6 +1324,21 @@ def create_bgp_multipath_oscillation_step(
         params["cycle_count"] = cycle_count
     return create_custom_step(
         params_dict=params,
+        description=description or "Run path-aware dual-stack multipath oscillation",
+    )
+
+
+def create_multipath_churn_step(
+    churn: MultipathChurn,
+    *,
+    description: str | None = None,
+) -> Step:
+    """Lower typed multipath churn intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_multipath_oscillation",
+            **churn.to_step_params(),
+        },
         description=description or "Run path-aware dual-stack multipath oscillation",
     )
 
@@ -6211,6 +6249,25 @@ def create_validated_bgp_session_oscillation_step(
     )
 
 
+def create_session_churn_step(
+    *,
+    hostname: str,
+    session_churn: SessionChurn,
+    description: str | None = None,
+) -> Step:
+    """Lower typed session-churn intent to the established CustomStep boundary."""
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_session_oscillation",
+            "hostname": hostname,
+            **session_churn.to_step_params(),
+        },
+        description=description or "Run validated BGP session oscillations",
+    )
+
+
 def create_stop_bgp_keepalive_step(
     peer_regex: str,
     session_index: t.Optional[int] = None,
@@ -6489,6 +6546,25 @@ def create_validated_bgp_route_oscillation_step(
     )
 
 
+def create_route_churn_step(
+    *,
+    hostname: str,
+    route_churn: RouteChurn,
+    description: str | None = None,
+) -> Step:
+    """Lower a typed route-churn specification to the CustomStep boundary."""
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_route_oscillation",
+            "hostname": hostname,
+            **route_churn.to_step_params(),
+        },
+        description=description or "Run validated dual-stack BGP route oscillations",
+    )
+
+
 def create_validated_igp_pnh_metric_oscillation_step(
     device_name: str,
     start_ipv4s: t.Sequence[str],
@@ -6513,6 +6589,17 @@ def create_validated_igp_pnh_metric_oscillation_step(
             "step": step,
             "duration": duration,
             "frequency": frequency,
+        },
+        description="Run acknowledged Open/R PNH metric oscillations",
+    )
+
+
+def create_igp_metric_churn_step(churn: IgpMetricChurn) -> Step:
+    """Lower typed IGP metric-churn intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_pnh_metric_oscillation",
+            **churn.to_step_params(),
         },
         description="Run acknowledged Open/R PNH metric oscillations",
     )
@@ -6566,6 +6653,17 @@ def create_validated_igp_unresolvable_pnh_step(
             "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
             "convergence_stability_polls": convergence_stability_polls,
             "convergence_stability_max_seconds": (convergence_stability_max_seconds),
+        },
+        description="Run validated unresolvable Open/R PNH workflow",
+    )
+
+
+def create_igp_unresolvable_churn_step(churn: IgpUnresolvableChurn) -> Step:
+    """Lower typed unresolvable-PNH intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_unresolvable_pnh",
+            **churn.to_step_params(),
         },
         description="Run validated unresolvable Open/R PNH workflow",
     )

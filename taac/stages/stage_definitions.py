@@ -36,6 +36,13 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from taac.abstractions.churn.attribute import AttributeChurn
+from taac.abstractions.churn.route import RouteChurn
+from taac.abstractions.churn.session import SessionChurn
+from taac.abstractions.churn.workloads import (
+    IgpUnresolvableChurn,
+    LongevityCommunityChurn,
+    MultipathChurn,
+)
 from taac.constants import (
     DEFAULT_LOCAL_LINK,
     DEFAULT_OTHER_LINK,
@@ -50,8 +57,6 @@ from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
     create_bgp_attribute_churn_step,
     create_bgp_lifecycle_convergence_step,
-    create_bgp_longevity_community_churn_step,
-    create_bgp_multipath_oscillation_step,
     create_bgp_prefixes_med_value_step,
     create_bgp_restoration_baseline_step,
     create_bgp_restoration_probe_step,
@@ -70,13 +75,16 @@ from taac.steps.step_definitions import (
     create_cpu_percentile_stop_step,
     create_daemon_control_step,
     create_drain_convergence_verification_step,
+    create_igp_unresolvable_churn_step,
     create_interface_flap_step,
     create_interface_permanent_flap_step,
     create_ixia_device_group_toggle_step,
     create_ixia_packet_capture_step,
+    create_longevity_community_churn_step,
     create_longevity_step,
     create_mark_bgp_update_trigger_step,
     create_modify_bgp_prefixes_origin_value_step,
+    create_multipath_churn_step,
     create_multipath_nexthop_count_health_check_step,
     create_openr_route_action_step,
     create_randomize_prefix_local_preference_step,
@@ -86,11 +94,13 @@ from taac.steps.step_definitions import (
     create_register_speed_flip_patcher_step_v2,
     create_restore_bgp_peer_ranges_step,
     create_revert_route_storm_attributes_step,
+    create_route_churn_step,
     create_route_convergence_health_check_step,
     create_rss_start_step,
     create_rss_stop_step,
     create_service_convergence_step,
     create_service_interruption_step,
+    create_session_churn_step,
     create_set_bgp_prefixes_local_preference_step,
     create_set_peer_groups_policy_step,
     create_set_route_filter_step,
@@ -105,7 +115,6 @@ from taac.steps.step_definitions import (
     create_update_prefix_count_step,
     create_validated_bgp_route_oscillation_step,
     create_validated_bgp_session_oscillation_step,
-    create_validated_igp_unresolvable_pnh_step,
     create_validation_step,
     create_verify_bgp_update_send_quiet_step,
     create_verify_bgp_withdraw_send_quiet_step,
@@ -1037,6 +1046,24 @@ def create_validated_ebgp_session_oscillation_stage(
     )
 
 
+def create_session_churn_stage(
+    *,
+    hostname: str,
+    session_churn: SessionChurn,
+    description: str = "Run validated BGP session oscillations",
+) -> Stage:
+    """Create one Stage from a reusable typed session-churn specification."""
+    return Stage(
+        steps=[
+            create_session_churn_step(
+                hostname=hostname,
+                session_churn=session_churn,
+                description=description,
+            )
+        ]
+    )
+
+
 def create_plane_based_session_disruption_stage(
     plane_definitions: list[dict[str, Any]],
     test_duration_seconds: int,
@@ -1815,23 +1842,27 @@ def create_validated_bgp_igp_instability_unresolvable_pnhs_stage(
     """
     return Stage(
         steps=[
-            create_validated_igp_unresolvable_pnh_step(
-                device_name=device_name,
-                start_ipv4s=start_ipv4s,
-                start_ipv6s=start_ipv6s,
-                restore_start_ipv4s=restore_start_ipv4s,
-                restore_start_ipv6s=restore_start_ipv6s,
-                local_link=local_link,
-                other_link=other_link,
-                count=count,
-                step=step,
-                delete_count=delete_count,
-                update_timeout_seconds=update_timeout_seconds,
-                stability_duration_seconds=stability_duration_seconds,
-                expected_in_scope_sessions=expected_in_scope_sessions,
-                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-                convergence_stability_polls=convergence_stability_polls,
-                convergence_stability_max_seconds=(convergence_stability_max_seconds),
+            create_igp_unresolvable_churn_step(
+                IgpUnresolvableChurn.create(
+                    hostname=device_name,
+                    start_ipv4s=start_ipv4s,
+                    start_ipv6s=start_ipv6s,
+                    restore_start_ipv4s=restore_start_ipv4s,
+                    restore_start_ipv6s=restore_start_ipv6s,
+                    local_link=local_link,
+                    other_link=other_link,
+                    count=count,
+                    step=step,
+                    delete_count=delete_count,
+                    update_timeout_seconds=update_timeout_seconds,
+                    stability_duration_seconds=stability_duration_seconds,
+                    expected_in_scope_sessions=expected_in_scope_sessions,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                    convergence_stability_polls=convergence_stability_polls,
+                    convergence_stability_max_seconds=(
+                        convergence_stability_max_seconds
+                    ),
+                )
             )
         ]
     )
@@ -2074,6 +2105,24 @@ def create_validated_bgp_route_oscillations_stage(
                 parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 transition_soft_threshold_seconds=transition_soft_threshold_seconds,
                 fail_on_session_flap=fail_on_session_flap,
+                description=description,
+            )
+        ]
+    )
+
+
+def create_route_churn_stage(
+    *,
+    hostname: str,
+    route_churn: RouteChurn,
+    description: str = "Run validated dual-stack BGP route oscillations",
+) -> Stage:
+    """Create one Stage from a reusable typed route-churn specification."""
+    return Stage(
+        steps=[
+            create_route_churn_step(
+                hostname=hostname,
+                route_churn=route_churn,
                 description=description,
             )
         ]
@@ -3735,21 +3784,23 @@ def create_multipath_group_oscillation_stage(
                     "Baseline: Discover live multipath group width from eBGP RIB"
                 ),
             ),
-            create_bgp_multipath_oscillation_step(
-                hostname=hostname,
-                ipv4_peer_regex=ipv4_peer_regex,
-                ipv6_peer_regex=ipv6_peer_regex,
-                ipv4_session_count=ipv4_session_count,
-                ipv6_session_count=ipv6_session_count,
-                test_duration_seconds=test_duration_seconds,
-                oscillation_interval_seconds=oscillation_interval_seconds,
-                min_peers_to_stop=min_peers_to_stop,
-                max_peers_to_stop=max_peers_to_stop,
-                cycle_count=cycle_count,
-                expected_min_baseline_width=expected_min_baseline_width,
-                expected_max_baseline_width=expected_max_baseline_width,
-                min_multipath_width=min_multipath_width,
-                prefix_subnets=prefix_subnets,
+            create_multipath_churn_step(
+                MultipathChurn.create(
+                    hostname=hostname,
+                    ipv4_peer_regex=ipv4_peer_regex,
+                    ipv6_peer_regex=ipv6_peer_regex,
+                    ipv4_session_count=ipv4_session_count,
+                    ipv6_session_count=ipv6_session_count,
+                    test_duration_seconds=test_duration_seconds,
+                    oscillation_interval_seconds=oscillation_interval_seconds,
+                    min_peers_to_stop=min_peers_to_stop,
+                    max_peers_to_stop=max_peers_to_stop,
+                    cycle_count=cycle_count,
+                    expected_min_baseline_width=expected_min_baseline_width,
+                    expected_max_baseline_width=expected_max_baseline_width,
+                    min_multipath_width=min_multipath_width,
+                    prefix_subnets=prefix_subnets or (),
+                )
             ),
         ]
     )
@@ -5225,11 +5276,13 @@ def create_longevity_churn_stage(
     """Create wall-clock churn followed by quiescence and postchecks."""
     return create_steps_stage(
         steps=[
-            create_bgp_longevity_community_churn_step(
-                duration_seconds=test_duration_seconds,
-                cadence_seconds=churn_interval_seconds,
-                prefix_pool_regex=community_prefix_regex,
-                community_count=community_count,
+            create_longevity_community_churn_step(
+                LongevityCommunityChurn.create(
+                    duration_seconds=test_duration_seconds,
+                    cadence_seconds=churn_interval_seconds,
+                    prefix_pool_regex=community_prefix_regex,
+                    community_count=community_count,
+                )
             ),
             create_longevity_step(
                 duration=quiesce_seconds,

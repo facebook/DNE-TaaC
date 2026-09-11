@@ -4,9 +4,14 @@
 import json
 import unittest
 
+from taac.abstractions.churn.workloads import IgpUnresolvableChurn
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_igp_unresolvable_pnh_playbook,
+)
+from taac.steps.step_definitions import (
+    create_igp_unresolvable_churn_step,
+    create_validated_igp_unresolvable_pnh_step,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -19,6 +24,58 @@ def _step_payload(step: taac_types.Step) -> dict:
 
 
 class BgpIgpUnresolvablePnhPlaybookTest(unittest.TestCase):
+    def test_typed_step_matches_legacy_payload(self) -> None:
+        selected_ipv4 = ["20.164.28.10"]
+        selected_ipv6 = ["2401:db00:e80d:11:9::10"]
+        restore_ipv4 = ["20.164.28.10", "20.165.28.10"]
+        restore_ipv6 = [
+            "2401:db00:e80d:11:9::10",
+            "2401:db00:e80d:11:10::10",
+        ]
+        local_link = {"ifName": "po1", "metric": 10}
+        other_link = {"ifName": "po1", "metric": 20}
+        legacy = create_validated_igp_unresolvable_pnh_step(
+            device_name="dut.example.com",
+            start_ipv4s=selected_ipv4,
+            start_ipv6s=selected_ipv6,
+            restore_start_ipv4s=restore_ipv4,
+            restore_start_ipv6s=restore_ipv6,
+            local_link=local_link,
+            other_link=other_link,
+            count=63,
+            step=2,
+            delete_count=20,
+            update_timeout_seconds=60,
+            stability_duration_seconds=1800,
+            expected_in_scope_sessions=1272,
+            parent_prefixes_to_ignore=["2401:db00:e50d:22:a::/80"],
+            convergence_stability_polls=3,
+            convergence_stability_max_seconds=300,
+        )
+        typed = create_igp_unresolvable_churn_step(
+            IgpUnresolvableChurn.create(
+                hostname="dut.example.com",
+                start_ipv4s=selected_ipv4,
+                start_ipv6s=selected_ipv6,
+                restore_start_ipv4s=restore_ipv4,
+                restore_start_ipv6s=restore_ipv6,
+                local_link=local_link,
+                other_link=other_link,
+                count=63,
+                step=2,
+                delete_count=20,
+                update_timeout_seconds=60,
+                stability_duration_seconds=1800,
+                expected_in_scope_sessions=1272,
+                parent_prefixes_to_ignore=["2401:db00:e50d:22:a::/80"],
+                convergence_stability_polls=3,
+                convergence_stability_max_seconds=300,
+            )
+        )
+
+        self.assertEqual(_step_payload(legacy), _step_payload(typed))
+        self.assertEqual(legacy.description, typed.description)
+
     def test_playbook_wires_geometry_full_restore_and_fallback_cleanup(self) -> None:
         local_link = {
             "ifName": "po1",

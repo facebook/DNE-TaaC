@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import later.unittest
+from taac.abstractions.churn.workloads import (
+    LongevityCommunityChurn,
+)
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_longevity_playbook,
 )
@@ -15,6 +18,7 @@ from taac.stages.stage_definitions import (
 )
 from taac.steps.step_definitions import (
     create_bgp_longevity_community_churn_step,
+    create_longevity_community_churn_step,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -27,6 +31,21 @@ def _payload(step: taac_types.Step) -> dict:
 
 
 class BgpLongevityPlaybookTest(later.unittest.TestCase):
+    def test_typed_step_matches_legacy_payload(self) -> None:
+        legacy = create_bgp_longevity_community_churn_step(
+            duration_seconds=14_400,
+            cadence_seconds=60,
+        )
+        typed = create_longevity_community_churn_step(
+            LongevityCommunityChurn.create(
+                duration_seconds=14_400,
+                cadence_seconds=60,
+            )
+        )
+
+        self.assertEqual(_payload(legacy), _payload(typed))
+        self.assertEqual(legacy.description, typed.description)
+
     def test_step_factory_serializes_wall_clock_contract(self) -> None:
         step = create_bgp_longevity_community_churn_step(
             duration_seconds=14_400,
