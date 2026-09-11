@@ -19,6 +19,8 @@ from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_tc32_downlink_flaps,
     fpf_tc40_cont_interface_flaps,
+    fpf_tc56_cont_flaps_qsfp_restart,
+    fpf_tc57_cont_flaps_qsfp_crash,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import GPU_HOSTS
 from taac.testconfigs.fpf.fpf_tc32_downlink_flaps import (
@@ -36,7 +38,7 @@ from taac.testconfigs.fpf.fpf_tc35_stsw_undrain_reinject import (
     LONGEVITY_SEC as TC35_LONGEVITY_SEC,
     TEST_CONFIG as TC35,
 )
-from taac.test_as_a_config.types import StepName
+from taac.test_as_a_config.types import Service, StepName
 
 
 def _steps(playbook):
@@ -346,6 +348,74 @@ class TestRapidFlapConfigs(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "breakout channel 1 or 5"):
                 fpf_hardening_common.fpf_gpu_downlink_interfaces()
+
+    def test_tc56_tc57_reuse_tc40_contract_with_qsfp_churn(self):
+        tc40 = fpf_tc40_cont_interface_flaps.TEST_CONFIG
+        cases = (
+            (
+                fpf_tc56_cont_flaps_qsfp_restart,
+                "fpf_tc56_cont_flaps_qsfp_restart",
+                "restart",
+            ),
+            (
+                fpf_tc57_cont_flaps_qsfp_crash,
+                "fpf_tc57_cont_flaps_qsfp_crash",
+                "crash",
+            ),
+        )
+        for module, name, action in cases:
+            with self.subTest(name=name):
+                config = module.TEST_CONFIG
+                self.assertEqual(config.name, name)
+                self.assertEqual(config.setup_tasks, tc40.setup_tasks)
+                self.assertEqual(config.teardown_tasks, tc40.teardown_tasks)
+                self.assertEqual(
+                    config.playbooks[0].postchecks,
+                    tc40.playbooks[0].postchecks,
+                )
+                self.assertEqual(
+                    config.playbooks[1].postchecks,
+                    tc40.playbooks[1].postchecks,
+                )
+                _longevity_carries_v2_stable_check_set(
+                    config,
+                    self,
+                    vf_grouped=True,
+                )
+
+                steps = _steps(config.playbooks[0])
+                self.assertEqual(len(steps), 2)
+                flap = _params(steps[0])
+                self.assertEqual(flap["duration_sec"], 1800)
+                self.assertEqual(flap["down_time_sec"], 7.0)
+                self.assertEqual(flap["up_time_sec"], 7.0)
+                self.assertTrue(flap["fail_closed"])
+                self.assertEqual(
+                    flap["expected_interfaces"],
+                    fpf_tc40_cont_interface_flaps.FLAP_INTERFACES,
+                )
+                self.assertEqual(
+                    set(flap["nic_recovery_by_gtsw_interface"]),
+                    set(fpf_tc40_cont_interface_flaps.ALL_GTSWS),
+                )
+                self.assertEqual(
+                    flap["churn_service"],
+                    int(Service.QSFP_SERVICE.value),
+                )
+                self.assertEqual(flap["churn_action"], action)
+                self.assertEqual(flap["churn_every_sec"], 600)
+                self.assertEqual(flap["churn_initial_delay_sec"], 600)
+                self.assertEqual(flap["churn_recovery_timeout_sec"], 120)
+                self.assertEqual(
+                    flap["churn_devices"],
+                    fpf_tc40_cont_interface_flaps.ALL_GTSWS,
+                )
+                self.assertGreaterEqual(
+                    (flap["duration_sec"] - flap["churn_initial_delay_sec"])
+                    // flap["churn_every_sec"],
+                    2,
+                )
+                self.assertEqual(_params(steps[1])["duration"], 300)
 
     def test_tc33_uplink_flaps(self):
         self._assert_flap_config(

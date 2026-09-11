@@ -143,6 +143,12 @@ from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
 from taac.testconfigs.fpf.fpf_tc55_gtsw_device_reboot import (
     TEST_CONFIG as FPF_TC55_GTSW_DEVICE_REBOOT,
 )
+from taac.testconfigs.fpf.fpf_tc56_cont_flaps_qsfp_restart import (
+    TEST_CONFIG as FPF_TC56_CONT_FLAPS_QSFP_RESTART,
+)
+from taac.testconfigs.fpf.fpf_tc57_cont_flaps_qsfp_crash import (
+    TEST_CONFIG as FPF_TC57_CONT_FLAPS_QSFP_CRASH,
+)
 
 __all__ = [
     "FPF_GAR_CLASS_A",
@@ -192,4 +198,6 @@ __all__ = [
     "FPF_TC52_HRT_RESTART",
     "FPF_TC54_STSW_DEVICE_DRAIN",
     "FPF_TC55_GTSW_DEVICE_REBOOT",
+    "FPF_TC56_CONT_FLAPS_QSFP_RESTART",
+    "FPF_TC57_CONT_FLAPS_QSFP_CRASH",
 ]

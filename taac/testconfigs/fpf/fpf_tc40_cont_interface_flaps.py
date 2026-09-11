@@ -70,6 +70,7 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     VF_COLLECTOR_SUBNET,
     VF_GROUP_PREFIX_COUNT,
 )
+from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
 # The setup advertises both VF groups across all eight STSWs exactly once. With
@@ -106,7 +107,17 @@ PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 
 
-def create_fpf_tc40_test_config() -> TestConfig:
+def create_fpf_cont_interface_flaps_test_config(
+    *,
+    test_name: str,
+    flap_duration_sec: int = FLAP_DURATION_SEC,
+    churn_service: taac_types.Service | None = None,
+    churn_action: str = "restart",
+    churn_every_sec: int = 120,
+    churn_initial_delay_sec: int = 0,
+    churn_recovery_timeout_sec: int = 0,
+) -> TestConfig:
+    """Build TC40's strict contract, optionally with concurrent service churn."""
     skip_ssh = skip_ssh_dependencies()
     skip_ib = skip_ib_traffic()
     ib_setup, ib_teardown = fpf_ib_traffic_tasks(
@@ -126,18 +137,35 @@ def create_fpf_tc40_test_config() -> TestConfig:
             create_fpf_multi_gtsw_rapid_flap_step(
                 gtsws=ALL_GTSWS,
                 neighbor_hosts=[FLAP_HOST],
-                duration_sec=FLAP_DURATION_SEC,
+                duration_sec=flap_duration_sec,
                 flap_up_time_sec=FLAP_UP_SEC,
                 flap_down_time_sec=FLAP_DOWN_SEC,
                 fail_closed=True,
                 expected_interfaces=FLAP_INTERFACES,
                 require_exact_neighbor_hosts=True,
                 nic_recovery_by_gtsw_interface=NIC_RECOVERY_BY_GTSW_INTERFACE,
+                churn_service=churn_service,
+                churn_action=churn_action,
+                churn_every_sec=churn_every_sec,
+                churn_initial_delay_sec=churn_initial_delay_sec,
+                churn_recovery_timeout_sec=churn_recovery_timeout_sec,
+                churn_devices=ALL_GTSWS if churn_service is not None else None,
                 description=(
                     f"Parallel rapid-flap exact links {FLAP_INTERFACES} facing "
                     f"{FLAP_HOST} across "
-                    f"{len(ALL_GTSWS)} GTSWs for {FLAP_DURATION_SEC}s "
+                    f"{len(ALL_GTSWS)} GTSWs for {flap_duration_sec}s "
                     f"(up={FLAP_UP_SEC}s/down={FLAP_DOWN_SEC}s)"
+                    + (
+                        f" + {churn_action} {churn_service.name} every "
+                        f"{churn_every_sec}s"
+                        + (
+                            f" after an initial {churn_initial_delay_sec}s"
+                            if churn_initial_delay_sec > 0
+                            else ""
+                        )
+                        if churn_service is not None
+                        else ""
+                    )
                 ),
             ),
             create_longevity_step(
@@ -145,7 +173,7 @@ def create_fpf_tc40_test_config() -> TestConfig:
                 description=f"Settle {LONGEVITY_SEC}s after flaps stop",
             ),
         ],
-        playbook_name="fpf_tc40_cont_interface_flaps_disrupt",
+        playbook_name=f"{test_name}_disrupt",
     )
 
     longevity_playbook = create_fpf_hardening_playbook_v2(
@@ -156,7 +184,7 @@ def create_fpf_tc40_test_config() -> TestConfig:
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc40_cont_interface_flaps_longevity",
+        playbook_name=f"{test_name}_longevity",
         prod_prefixes=PROD_PREFIXES,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
@@ -171,7 +199,7 @@ def create_fpf_tc40_test_config() -> TestConfig:
     )
 
     return TestConfig(
-        name="fpf_tc40_cont_interface_flaps",
+        name=test_name,
         endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
@@ -205,6 +233,12 @@ def create_fpf_tc40_test_config() -> TestConfig:
         ],
         playbooks=[disrupt_playbook, longevity_playbook],
         tags=["fpf"],
+    )
+
+
+def create_fpf_tc40_test_config() -> TestConfig:
+    return create_fpf_cont_interface_flaps_test_config(
+        test_name="fpf_tc40_cont_interface_flaps"
     )
 
 

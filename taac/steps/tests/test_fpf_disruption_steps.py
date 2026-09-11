@@ -13,7 +13,10 @@ from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* ro
     TestDevice,
     TestTopology,
 )
-from taac.driver.driver_constants import SwitchLldpData
+from taac.driver.driver_constants import (
+    SwitchLldpData,
+    SystemctlServiceStatus,
+)
 from taac.internal.steps.custom_step import (
     _nic_mstreg_bdf,
     CustomStep,
@@ -922,6 +925,127 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(params["fail_closed"])
         self.assertEqual(params["expected_interfaces"], interfaces)
         self.assertEqual(params["nic_recovery_by_gtsw_interface"], recovery)
+
+    def test_factory_serializes_delayed_strict_qsfp_churn(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=1800,
+            churn_service=Service.QSFP_SERVICE,
+            churn_action="crash",
+            churn_every_sec=600,
+            churn_initial_delay_sec=600,
+            churn_recovery_timeout_sec=120,
+            fail_closed=True,
+            expected_interfaces=["eth1/41/5"],
+        )
+        params = _params(step)
+        self.assertEqual(params["churn_service"], int(Service.QSFP_SERVICE.value))
+        self.assertEqual(params["churn_action"], "crash")
+        self.assertEqual(params["churn_every_sec"], 600)
+        self.assertEqual(params["churn_initial_delay_sec"], 600)
+        self.assertEqual(params["churn_recovery_timeout_sec"], 120)
+        self.assertEqual(params["churn_recovery_poll_interval_sec"], 5)
+
+    def test_factory_rejects_unknown_churn_action(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported service churn action"):
+            create_fpf_multi_gtsw_rapid_flap_step(
+                gtsws=["gtsw001"],
+                duration_sec=1800,
+                churn_service=Service.QSFP_SERVICE,
+                churn_action="stop",
+            )
+
+    def test_factory_preserves_poll_interval_without_recovery_timeout(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            duration_sec=1800,
+            churn_service=Service.QSFP_SERVICE,
+            churn_recovery_poll_interval_sec=7,
+        )
+
+        self.assertEqual(_params(step)["churn_recovery_poll_interval_sec"], 7)
+
+    async def test_qsfp_crash_recovery_waits_until_service_is_active(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.side_effect = [
+            SystemctlServiceStatus.FAILED,
+            SystemctlServiceStatus.TRANSITIONING,
+            SystemctlServiceStatus.ACTIVE,
+        ]
+        with (
+            patch("time.monotonic", side_effect=[0.0, 1.0, 2.0]),
+            patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await cs._wait_for_fpf_service_active(
+                driver=driver,
+                device="gtsw001",
+                service=cs._resolve_driver_service(Service.QSFP_SERVICE),
+                timeout_sec=120,
+                poll_interval_sec=5,
+            )
+        self.assertEqual(driver.async_get_service_status.await_count, 3)
+        self.assertEqual([call.args for call in sleep.await_args_list], [(5,), (5,)])
+
+    async def test_qsfp_crash_recovery_timeout_is_strict(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.return_value = (
+            SystemctlServiceStatus.TRANSITIONING
+        )
+        with (
+            self.assertRaisesRegex(RuntimeError, "did not recover ACTIVE within 120s"),
+            patch("time.monotonic", side_effect=[0.0, 120.0]),
+        ):
+            await cs._wait_for_fpf_service_active(
+                driver=driver,
+                device="gtsw001",
+                service=cs._resolve_driver_service(Service.QSFP_SERVICE),
+                timeout_sec=120,
+                poll_interval_sec=5,
+            )
+
+    async def test_fail_closed_crash_path_uses_sigkill_and_verifies_recovery(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        qsfp_service = cs._resolve_driver_service(Service.QSFP_SERVICE)
+        errors = await cs._run_fpf_service_churn_action(
+            driver=driver,
+            device="gtsw001",
+            service=Service.QSFP_SERVICE,
+            driver_service=qsfp_service,
+            action="crash",
+            recovery_timeout_sec=120,
+            recovery_poll_interval_sec=5,
+        )
+        self.assertEqual(errors, [])
+        driver.async_crash_service.assert_awaited_once_with(qsfp_service)
+        driver.async_restart_service.assert_not_awaited()
+        driver.async_get_service_status.assert_awaited_once_with(qsfp_service)
+
+    async def test_churn_action_failure_does_not_attempt_recovery(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_crash_service.side_effect = RuntimeError("boom")
+        qsfp_service = cs._resolve_driver_service(Service.QSFP_SERVICE)
+
+        errors = await cs._run_fpf_service_churn_action(
+            driver=driver,
+            device="gtsw001",
+            service=Service.QSFP_SERVICE,
+            driver_service=qsfp_service,
+            action="crash",
+            recovery_timeout_sec=120,
+            recovery_poll_interval_sec=5,
+        )
+
+        self.assertEqual(
+            errors,
+            ["gtsw001: crash QSFP_SERVICE failed: boom"],
+        )
+        driver.async_get_service_status.assert_not_awaited()
 
     async def test_fail_closed_propagates_gtsw_failure_after_cleanup(self):
         cs = _make_custom_step()

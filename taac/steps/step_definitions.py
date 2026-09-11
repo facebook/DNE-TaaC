@@ -3569,6 +3569,9 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     churn_service: t.Optional[taac_types.Service] = None,
     churn_action: str = "restart",
     churn_every_sec: int = 120,
+    churn_initial_delay_sec: int = 0,
+    churn_recovery_timeout_sec: int = 0,
+    churn_recovery_poll_interval_sec: int = 5,
     churn_devices: t.Optional[t.List[str]] = None,
     uniform_interface_discovery: bool = False,
     final_up_timeout_sec: int = 60,
@@ -3607,6 +3610,11 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         churn_service: optional service to churn in parallel; omit for pure flap.
         churn_action: "restart" (default) or "crash".
         churn_every_sec: seconds between churn rounds (default 120 = 2 min).
+        churn_initial_delay_sec: seconds of active flapping before the first
+            churn round. Zero preserves the legacy immediate-first-round mode.
+        churn_recovery_timeout_sec: when positive, require the churned service
+            to return ACTIVE within this timeout after every action.
+        churn_recovery_poll_interval_sec: service recovery polling interval.
         churn_devices: devices to churn (defaults to ``gtsws``).
         final_up_timeout_sec: maximum wait for every touched interface to be
             admin-enabled and operationally UP after cleanup (default 60).
@@ -3624,6 +3632,11 @@ def create_fpf_multi_gtsw_rapid_flap_step(
             "fail_closed multi-GTSW rapid flap requires a non-empty exact "
             "expected_interfaces scope"
         )
+    if churn_service is not None and churn_action not in ("restart", "crash"):
+        raise ValueError(
+            f"Unsupported service churn action {churn_action!r}; expected "
+            "'restart' or 'crash'"
+        )
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "fpf_multi_gtsw_rapid_flap",
@@ -3639,6 +3652,10 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         "churn_devices": churn_devices,
         "uniform_interface_discovery": uniform_interface_discovery,
     }
+    if churn_initial_delay_sec:
+        params["churn_initial_delay_sec"] = churn_initial_delay_sec
+    if churn_recovery_timeout_sec:
+        params["churn_recovery_timeout_sec"] = churn_recovery_timeout_sec
     if fail_closed:
         params.update(
             {
@@ -3652,6 +3669,7 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         )
     if churn_service is not None:
         params["churn_service"] = int(churn_service.value)
+        params["churn_recovery_poll_interval_sec"] = churn_recovery_poll_interval_sec
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
