@@ -339,12 +339,14 @@ class TestFpfTc29bRemotePrefixWithdraw(unittest.TestCase):
         self.assertNotIn("fpf_stop_ib_traffic", task_names)
 
     def test_exact_a_and_b_injection_and_named_collectors(self):
-        inject = next(
+        injections = [
             task
             for task in self.cfg.setup_tasks
             if task.task_name == "fpf_inject_bgp_prefixes"
-        )
-        groups = _task_params(inject)["groups"]
+        ]
+        groups = [
+            group for task in injections for group in _task_params(task)["groups"]
+        ]
         remote_b = next(g for g in groups if g["prefix_base"] == "4000:dd::/64")
         self.assertEqual(remote_b["devices"], [self.module.REMOTE_GTSW])
         self.assertEqual(remote_b["count"], 1000)
@@ -400,6 +402,60 @@ class TestFpfTc29bRemotePrefixWithdraw(unittest.TestCase):
             "b_hrt_remote_failure_expected",
         ):
             self.assertEqual(list(lifecycle[key]), expected)
+
+    def test_scale_injection_is_252_batched_and_serially_bounded(self):
+        injection_tasks = [
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_inject_bgp_prefixes"
+        ]
+        self.assertEqual(
+            len(injection_tasks),
+            9,
+            "eight A origins plus one B origin must be separate setup tasks",
+        )
+        all_groups = []
+        for task in injection_tasks:
+            params = _task_params(task)
+            self.assertEqual(len(params["groups"]), 1)
+            group = params["groups"][0]
+            self.assertEqual(len(group["devices"]), 1)
+            all_groups.append(group)
+
+        a_groups = [g for g in all_groups if g["prefix_base"].startswith("5000:")]
+        self.assertEqual(len(a_groups), 8)
+        for group in a_groups:
+            self.assertEqual(group["count"], 4032)
+            self.assertEqual(group["batch_size"], 252)
+            self.assertEqual(group["count"] // group["batch_size"], 16)
+
+        self.assertEqual(_task_params(injection_tasks[-1])["settle_sec"], 120)
+        self.assertTrue(
+            all(_task_params(task)["settle_sec"] == 0 for task in injection_tasks[:-1])
+        )
+
+        present = _check_params(
+            _prechecks_by_id(self.cfg.playbooks[0])["fpf_tc29b_remote_prefix_present"]
+        )
+        self.assertIn(
+            ["fib_local_a", self.module.LOCAL_GTSW, 4032],
+            present["scalar_expectations"],
+        )
+        for host_map in present["a_hrt_positive_expected"].values():
+            for counts in host_map.values():
+                self.assertEqual(counts, [4032, 4032, 4032, 4032])
+
+        withdrawal_tasks = [
+            task
+            for task in self.cfg.teardown_tasks
+            if task.task_name == "fpf_inject_bgp_prefixes"
+        ]
+        self.assertEqual(len(withdrawal_tasks), 9)
+        for task in withdrawal_tasks:
+            params = _task_params(task)
+            self.assertTrue(params["withdraw"])
+            self.assertEqual(len(params["groups"]), 1)
+            self.assertEqual(len(params["groups"][0]["devices"]), 1)
 
     def test_disruption_sequence_and_absence_contract(self):
         disrupt = self.cfg.playbooks[0]

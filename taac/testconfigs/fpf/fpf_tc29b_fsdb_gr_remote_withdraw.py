@@ -68,7 +68,17 @@ B_INJECTION_GROUP = {
     "community_list": "gtsw",
     "batch_size": 100,
 }
-INJECTION_GROUPS = [*A_INJECTION_GROUPS, B_INJECTION_GROUP]
+# TC29b deliberately serializes every origin. A single setup task fans all
+# (device, group) pairs out with asyncio.gather(); at 4K scale that produced
+# eight simultaneous 4,032-route addNetworks calls and repeatable SR timeouts.
+# Each A origin instead performs 16 bounded 252-prefix RPCs before the next
+# origin starts. B keeps its already-proven 100-prefix batches.
+SERIAL_INJECTION_GROUPS = [
+    {**group, "devices": [device], "batch_size": 252}
+    for group in A_INJECTION_GROUPS
+    for device in group["devices"]
+]
+SERIAL_INJECTION_GROUPS.append(B_INJECTION_GROUP)
 
 
 def _all(value: int):
@@ -273,10 +283,15 @@ def create_fpf_tc29b_test_config() -> TestConfig:
                     },
                 ],
             ),
-            create_fpf_inject_vf_groups_task(
-                groups=INJECTION_GROUPS,
-                settle_sec=120,
-            ),
+            *[
+                create_fpf_inject_vf_groups_task(
+                    groups=[group],
+                    settle_sec=(
+                        120 if index == len(SERIAL_INJECTION_GROUPS) - 1 else 0
+                    ),
+                )
+                for index, group in enumerate(SERIAL_INJECTION_GROUPS)
+            ],
         ],
         teardown_tasks=[
             create_fpf_restart_service_task(
@@ -287,7 +302,10 @@ def create_fpf_tc29b_test_config() -> TestConfig:
                 devices=[LOCAL_GTSW],
                 service="FSDB",
             ),
-            create_fpf_withdraw_vf_groups_task(groups=INJECTION_GROUPS),
+            *[
+                create_fpf_withdraw_vf_groups_task(groups=[group])
+                for group in reversed(SERIAL_INJECTION_GROUPS)
+            ],
             create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(
                 trigger_stsws=ALL_STSWS,
