@@ -41,7 +41,6 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     EXPECTED_FSDB_SESSION_COUNT,
     fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
-    GPU_HOSTS,
     OBSERVER_GTSWS,
     VF_COLLECTOR_SUBNET,
 )
@@ -50,6 +49,11 @@ from taac.test_as_a_config.types import TestConfig
 
 LOCAL_GTSW = OBSERVER_GTSWS[0]
 REMOTE_GTSW = OBSERVER_GTSWS[1]
+# This case was characterized against the twshared pair and its exact
+# dev0-dev7 topology. Do not inherit the suite-wide FPF_GPU_HOSTS override or
+# its legacy rtptest defaults: either would silently change every HRT endpoint
+# and invalidate the phase-specific device/plane expectations below.
+GPU_HOSTS = ["twshared1352.03.mwg2", "twshared1388.03.mwg2"]
 HRT_DEVICE_IDS = list(range(8))
 HRT_PLANES = list(range(4))
 A_COUNT = 4032

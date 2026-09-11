@@ -369,6 +369,38 @@ class TestFpfTc29bRemotePrefixWithdraw(unittest.TestCase):
         self.assertEqual(groups["remote_b"]["fib_gtsws"], [self.module.LOCAL_GTSW])
         self.assertEqual(groups["local_a"]["fib_gtsws"], [self.module.LOCAL_GTSW])
 
+    def test_collectors_pin_the_characterized_twshared_hosts(self):
+        expected = ["twshared1352.03.mwg2", "twshared1388.03.mwg2"]
+        stale = {"rtptest1555.mwg2", "rtptest1599.mwg2"}
+        collector_task = next(
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        params = _task_params(collector_task)
+        remote_b = next(
+            group
+            for group in params["additional_namespaces"]
+            if group["name"] == "remote_b"
+        )
+
+        self.assertEqual(self.module.GPU_HOSTS, expected)
+        self.assertEqual(params["hosts"], expected)
+        self.assertEqual(params["fsdb_session_hosts"], expected)
+        self.assertEqual(remote_b["hosts"], expected)
+        self.assertTrue(stale.isdisjoint(params["hosts"]))
+
+        lifecycle = _check_params(
+            _checks_by_id(self.cfg.playbooks[0])["fpf_tc29b_remote_prefix_withdrawn"]
+        )
+        for key in (
+            "a_hrt_positive_expected",
+            "a_hrt_remote_failure_expected",
+            "b_hrt_positive_expected",
+            "b_hrt_remote_failure_expected",
+        ):
+            self.assertEqual(list(lifecycle[key]), expected)
+
     def test_disruption_sequence_and_absence_contract(self):
         disrupt = self.cfg.playbooks[0]
         custom = [
