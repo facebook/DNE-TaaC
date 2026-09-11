@@ -124,11 +124,20 @@ class FpfBgpRibConvergenceHealthCheck(
             )
 
         if use_live:
-            return await self._evaluate_from_live_collector(
+            result = await self._evaluate_from_live_collector(
                 lane_map, expected, check_params
             )
+        else:
+            result = self._evaluate_from_jsonl(lane_map, expected, check_params)
 
-        return self._evaluate_from_jsonl(lane_map, expected, check_params)
+        if check_params.get("informational") and (
+            result.status == hc_types.HealthCheckStatus.FAIL
+        ):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=f"[INFORMATIONAL] {result.message or ''}",
+            )
+        return result
 
     async def _evaluate_from_live_collector(
         self,

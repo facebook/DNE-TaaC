@@ -1,12 +1,13 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
 # pyre-unsafe
-"""Unit tests for the FPF flap + STSW disruption test configs (TC32, TC33, TC35).
+"""Unit tests for the FPF flap + STSW disruption test configs.
 
 These configs build at import time with no device access, so the tests assert
 the static TestConfig structure: the two-playbook (disruption-only +
-longevity) shape, the rapid-flap window (900s), longevity settle (300s), the
-STSW drain/undrain step ordering + reinject community, and the ``["fpf"]`` tag.
+longevity) shape, case-specific rapid-flap windows, longevity settle (300s),
+the STSW drain/undrain step ordering + reinject community, and the ``["fpf"]``
+tag.
 """
 
 import importlib
@@ -56,6 +57,10 @@ def _steps(playbook):
 
 def _params(step) -> dict:
     return json.loads(step.step_params.json_params)
+
+
+def _check_params(check) -> dict:
+    return json.loads(check.check_params.json_params)
 
 
 def _check_ids(playbook) -> set[str]:
@@ -534,6 +539,10 @@ class TestRapidFlapConfigs(unittest.TestCase):
                 )
                 self.assertEqual(len(flap["gtsws"]), 8)
                 self.assertEqual(len(flap["expected_interfaces"]), 4)
+                self.assertEqual(flap["duration_sec"], 300)
+                self.assertEqual(flap["down_time_sec"], 7.0)
+                self.assertEqual(flap["up_time_sec"], 7.0)
+                self.assertEqual(flap["churn_every_sec"], 120)
                 self.assertEqual(params[-1]["duration"], 120)
 
                 names = {check.name for check in disrupt.postchecks or []}
@@ -541,6 +550,16 @@ class TestRapidFlapConfigs(unittest.TestCase):
                 self.assertIn(CheckName.UNCLEAN_EXIT_CHECK, names)
                 self.assertIn(CheckName.DEVICE_CORE_DUMPS_CHECK, names)
                 self.assertNotIn(CheckName.FPF_HOST_SPRAY_CHECK, names)
+
+                disrupt_bgp = [
+                    check
+                    for check in disrupt.postchecks or []
+                    if check.name == CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK
+                ]
+                self.assertEqual(len(disrupt_bgp), 8)
+                self.assertTrue(
+                    all(_check_params(check)["informational"] for check in disrupt_bgp)
+                )
 
                 longevity_params = [_params(step) for step in _steps(longevity)]
                 longevity_names = [p.get("custom_step_name") for p in longevity_params]
@@ -550,6 +569,29 @@ class TestRapidFlapConfigs(unittest.TestCase):
                     longevity_params[-1]["devices"],
                     fpf_tc40_cont_interface_flaps.ALL_GTSWS,
                 )
+                recovered_anchor = longevity_names.index(
+                    "record_fpf_recovered_baseline_time"
+                )
+                self.assertGreater(recovered_anchor, 0)
+                self.assertEqual(
+                    longevity_params[recovered_anchor + 1]["duration"], 120
+                )
+                self.assertEqual(
+                    longevity_params[recovered_anchor + 2]["duration"], 300
+                )
+                longevity_bgp = [
+                    check
+                    for check in longevity.postchecks or []
+                    if check.name == CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK
+                ]
+                self.assertEqual(len(longevity_bgp), 8)
+                for check in longevity_bgp:
+                    check_params = _check_params(check)
+                    self.assertNotIn("informational", check_params)
+                    self.assertEqual(
+                        check_params.get("stability_mode", "strict"), "strict"
+                    )
+                    self.assertTrue(check_params["require_final_exact"])
 
     def test_tc42_retries_final_cleanup_after_wedge_agent_readiness(self):
         params = next(

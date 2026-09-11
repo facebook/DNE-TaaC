@@ -18,13 +18,18 @@ Contract for the flap DISRUPT playbook (per test owner):
     - DEVICE_CORE_DUMPS
     - MEMORY_UTILIZATION
     - FPF_HRT_SYSTEM_MEMORY / FPF_HRT_DRIVER_DISCONNECT
-    - FPF_BGP_RIB_CONVERGENCE / FPF_FSDB_RIBMAP_CONVERGENCE (per observed GTSW)
+    - FPF_BGP_RIB_CONVERGENCE / FPF_FSDB_RIBMAP_CONVERGENCE (per observed GTSW,
+      for TC40 without service churn)
   SKIPPED in the disrupt window (churn during flaps; judged in longevity):
     - PORT_STATE              (downlinks are being flapped)
     - FPF_HRT_FSDB_SESSION    (sessions churn as downlinks flap)
     - FPF_PROD_HRT_PREFIX_STABILITY
     - FPF_HRT_BULK_CONVERGENCE / FPF_HRT_REMOTE_FAILURE
     - FPF_HOST_SPRAY          (per-lane egress churns as downlinks flap)
+  DIAGNOSTIC ONLY for TC42/43/44 combined flap + service-restart windows:
+    - FPF_BGP_RIB_CONVERGENCE (full artifact retained; partial/null/rebuild
+      samples do not gate the disrupt result). The separate longevity window
+      re-anchors after recovery and evaluates this signal strictly.
   ODS (ALL informational during the flap window):
     - in/out CONGESTION discards: EXPECTED during parallel flaps (egress
       microbursts) -> captured informationally, never fails. Stays HARD ==0 in
@@ -68,6 +73,7 @@ def build_flap_disrupt_postchecks(
     prefix_count: int,
     skip_ssh: bool,
     include_route_convergence: bool = True,
+    bgp_route_diagnostic_only: bool = False,
 ) -> list:
     """Return the disrupt-window postchecks for a cont-flap config (see module doc)."""
     checks = []
@@ -105,22 +111,28 @@ def build_flap_disrupt_postchecks(
     )
 
     # BGP RIB + FSDB ribMap convergence — same as stable (uplinks untouched), per GTSW.
-    if include_route_convergence:
+    # Combined rapid-flap + service-restart cases retain BGP evidence during the
+    # intentionally unstable window, but make it diagnostic-only: nulls and a
+    # gradual 0/partial->expected rebuild are useful artifacts, not a disrupt
+    # verdict. Their subsequent longevity playbook remains strict.
+    if include_route_convergence or bgp_route_diagnostic_only:
         for lane_id, gtsw in enumerate(observer_gtsws):
             lane_map = {str(lane_id): gtsw}
-            checks.append(
-                create_fpf_fsdb_ribmap_convergence_check(
-                    lane_map=lane_map,
-                    expected_matched=prefix_count,
-                    use_live_collectors=True,
-                    check_id=f"flap_disrupt_fsdb_convergence_lane{lane_id}",
+            if include_route_convergence:
+                checks.append(
+                    create_fpf_fsdb_ribmap_convergence_check(
+                        lane_map=lane_map,
+                        expected_matched=prefix_count,
+                        use_live_collectors=True,
+                        check_id=f"flap_disrupt_fsdb_convergence_lane{lane_id}",
+                    )
                 )
-            )
             checks.append(
                 create_fpf_bgp_rib_convergence_check(
                     lane_map=lane_map,
                     expected_matched=prefix_count,
                     use_live_collectors=True,
+                    informational=bgp_route_diagnostic_only,
                     check_id=f"flap_disrupt_bgp_convergence_lane{lane_id}",
                 )
             )

@@ -159,7 +159,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     params["expected_interfaces"],
                     ["eth1/41/5", "eth1/41/6", "eth1/41/7", "eth1/41/8"],
                 )
-                self.assertEqual(params["duration_sec"], 900)
+                self.assertEqual(params["duration_sec"], 300)
                 self.assertEqual(params["down_time_sec"], 7.0)
                 self.assertEqual(params["up_time_sec"], 7.0)
                 self.assertEqual(params["churn_every_sec"], 120)

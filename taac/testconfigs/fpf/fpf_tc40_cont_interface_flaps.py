@@ -137,6 +137,11 @@ def create_fpf_cont_interface_flaps_test_config(
         if observe_prod_prefix_on_all_hosts
         else None
     )
+    restart_flap_case = churn_service in {
+        taac_types.Service.AGENT,
+        taac_types.Service.BGP,
+        taac_types.Service.FSDB,
+    }
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         postchecks=build_flap_disrupt_postchecks(
             observer_gtsws=ALL_GTSWS,
@@ -144,6 +149,7 @@ def create_fpf_cont_interface_flaps_test_config(
             prefix_count=PREFIX_COUNT,
             skip_ssh=skip_ssh,
             include_route_convergence=False,
+            bgp_route_diagnostic_only=restart_flap_case,
         ),
         disruption_steps=[
             create_fpf_up_port_baseline_step(
@@ -218,6 +224,10 @@ def create_fpf_cont_interface_flaps_test_config(
         lanes=INJECTED_LANES,
         hrt_device_ids=HRT_DEVICE_IDS,
         recovered_baseline_qualification_sec=120,
+        # The recovered-baseline step re-anchors test_case_start_time after the
+        # exact gate. Keep every valid longevity sample strict and independently
+        # require the final BGP sample at the configured prefix count.
+        bgp_require_final_exact=restart_flap_case,
         final_validation_steps=[
             create_fpf_up_port_baseline_step(
                 action="verify",

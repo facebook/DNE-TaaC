@@ -52,6 +52,7 @@ class BgpSkipNullTargetScopeTest(unittest.IsolatedAsyncioTestCase):
         rows: list[BgpRibRow],
         *,
         stability_mode: str = "skip_null_strict",
+        informational: bool = False,
         timeout_timestamps: list[float] | None = None,
         host_timeout_timestamps: dict[str, list[float]] | None = None,
     ) -> hc_types.HealthCheckResult:
@@ -69,16 +70,20 @@ class BgpSkipNullTargetScopeTest(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=""),
             ),
         ):
-            return await self.health_check._evaluate_from_live_collector(
-                lane_map={0: TARGET},
-                expected=EXPECTED,
-                check_params={
+            return await self.health_check._run(
+                self.device,
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "lane_map": {"0": TARGET},
+                    "expected_matched": EXPECTED,
+                    "use_live_collectors": True,
                     "window_start": WINDOW_START,
                     "window_end": WINDOW_START + 80,
                     "signal1_e2e_max_sec": 60.0,
                     "signal2_local_max_sec": 60.0,
                     "signal3_stability_duration_sec": 60.0,
                     "stability_mode": stability_mode,
+                    "informational": informational,
                 },
             )
 
@@ -155,6 +160,39 @@ class BgpSkipNullTargetScopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("1 target/global poll timeout", result.message)
         self.assertIn("charged", result.message)
+
+    async def test_disrupt_diagnostic_preserves_partial_and_null_as_non_gating(self):
+        rows = [
+            BgpRibRow(_ts(10), TARGET, 0, 0),
+            BgpRibRow(_ts(20), TARGET, EXPECTED // 2, EXPECTED // 2),
+            BgpRibRow(
+                _ts(45),
+                TARGET,
+                0,
+                0,
+                notes="error: poll timeout (30s)",
+                request_start_epoch=WINDOW_START + 15,
+                request_end_epoch=WINDOW_START + 45,
+                duration_sec=30.0,
+            ),
+            BgpRibRow(_ts(70), TARGET, EXPECTED, EXPECTED),
+        ]
+        diagnostic = await self._run(
+            rows,
+            stability_mode="strict",
+            informational=True,
+            host_timeout_timestamps={TARGET: [WINDOW_START + 45]},
+        )
+        strict = await self._run(
+            rows,
+            stability_mode="strict",
+            informational=False,
+            host_timeout_timestamps={TARGET: [WINDOW_START + 45]},
+        )
+
+        self.assertEqual(diagnostic.status, hc_types.HealthCheckStatus.PASS)
+        self.assertIn("[INFORMATIONAL]", diagnostic.message)
+        self.assertEqual(strict.status, hc_types.HealthCheckStatus.FAIL)
 
     async def test_strict_timeout_started_before_window_is_excluded(self):
         result = await self._run(

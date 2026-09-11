@@ -3189,6 +3189,7 @@ def create_fpf_bgp_rib_convergence_check(
     use_mutation_time: bool = False,
     require_final_exact: bool = False,
     stability_mode: str = "strict",
+    informational: bool = False,
     check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """FPF_BGP_RIB_CONVERGENCE_CHECK — BGP RIB convergence per lane.
@@ -3202,6 +3203,10 @@ def create_fpf_bgp_rib_convergence_check(
     (MODE A — only the last sample must equal expected), or "skip_null_strict"
     (MODE B — tolerate null samples; every non-null sample, and the last, must
     equal expected).
+
+    ``informational`` preserves the complete collector evaluation and artifact,
+    but reports a failed evaluation as non-gating. Use only for a deliberate
+    disruption window; recovered/stable-state checks must remain strict.
     """
     params: t.Dict[str, t.Any] = {
         "lane_map": lane_map or {},
@@ -3231,6 +3236,8 @@ def create_fpf_bgp_rib_convergence_check(
         params["require_final_exact"] = True
     if stability_mode != "strict":
         params["stability_mode"] = stability_mode
+    if informational:
+        params["informational"] = True
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK,
         check_params=Params(json_params=json.dumps(params)),
