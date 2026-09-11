@@ -8,9 +8,9 @@ Repeatedly flushes the exact GPU-facing GTSW circuit's NDP entries while every
 port stays UP, so neighbor resolution is forced to re-converge continuously
 under sustained clearing — the "the link is fine but the neighbor cache keeps
 getting wiped" failure. The disruption is a 120s loop of circuit-scoped
-``fboss2 clear ndp <ipv6>/128 ...`` calls (every 1s) on the observer GTSW,
-followed by a 120s longevity, then a stable-state v2 longevity playbook whose
-health checks anchor at LONGEVITY START.
+sw-agent ``flushNeighborEntries`` Thrift calls (every 1s) on the observer GTSW,
+followed by a 120s settle, then a recovered-state qualification and stable-state
+v2 longevity playbook whose health checks anchor after exact recovery.
 
 CHARACTERIZED EXPECTATIONS (per the test owner):
   A persistent NDP clear DOES perturb the DATA plane on the cleared GTSW's lane
@@ -106,8 +106,7 @@ IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 300
 NDP_CLEAR_EVERY_SEC = 1
 NDP_CLEAR_DURATION_SEC = 120
-NDP_CLEAR_REMOTE_TIMEOUT_SEC = 0.8
-NDP_CLEAR_LOCAL_TIMEOUT_SEC = 1.0
+NDP_CLEAR_RPC_TIMEOUT_SEC = 0.8
 SETTLE_AFTER_CLEAR_SEC = 120
 LONGEVITY_SEC = 300
 
@@ -242,8 +241,7 @@ def create_fpf_tc38_test_config() -> TestConfig:
                 neighbor_host=NDP_CLEAR_CIRCUIT.z_end_device,
                 every_sec=NDP_CLEAR_EVERY_SEC,
                 duration_sec=NDP_CLEAR_DURATION_SEC,
-                remote_timeout_sec=NDP_CLEAR_REMOTE_TIMEOUT_SEC,
-                local_timeout_sec=NDP_CLEAR_LOCAL_TIMEOUT_SEC,
+                rpc_timeout_sec=NDP_CLEAR_RPC_TIMEOUT_SEC,
                 device_regexes=[OBSERVER_GTSWS[0]],
                 description=(
                     f"Persistent NDP clear every {NDP_CLEAR_EVERY_SEC}s for "
@@ -289,6 +287,7 @@ def create_fpf_tc38_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         hrt_device_ids=HRT_DEVICE_IDS,
+        recovered_baseline_qualification_sec=120,
     )
 
     setup_tasks = [*ib_setup]

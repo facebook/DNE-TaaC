@@ -39,8 +39,7 @@ from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
     NDP_CLEAR_CIRCUIT,
     NDP_CLEAR_DURATION_SEC,
     NDP_CLEAR_EVERY_SEC,
-    NDP_CLEAR_LOCAL_TIMEOUT_SEC,
-    NDP_CLEAR_REMOTE_TIMEOUT_SEC,
+    NDP_CLEAR_RPC_TIMEOUT_SEC,
     SETTLE_AFTER_CLEAR_SEC,
     TEST_CONFIG as TC38,
 )
@@ -369,15 +368,11 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
             loop_params["target_interface"], NDP_CLEAR_CIRCUIT.a_end_interface
         )
         self.assertEqual(loop_params["neighbor_host"], NDP_CLEAR_CIRCUIT.z_end_device)
-        self.assertEqual(
-            loop_params["remote_timeout_sec"], NDP_CLEAR_REMOTE_TIMEOUT_SEC
-        )
-        self.assertEqual(loop_params["local_timeout_sec"], NDP_CLEAR_LOCAL_TIMEOUT_SEC)
+        self.assertEqual(loop_params["rpc_timeout_sec"], NDP_CLEAR_RPC_TIMEOUT_SEC)
         self.assertEqual(NDP_CLEAR_DURATION_SEC, 120)
         # Per the config docstring, every_sec is 1 (rapid clear).
         self.assertEqual(NDP_CLEAR_EVERY_SEC, 1)
-        self.assertLess(NDP_CLEAR_REMOTE_TIMEOUT_SEC, NDP_CLEAR_LOCAL_TIMEOUT_SEC)
-        self.assertLessEqual(NDP_CLEAR_LOCAL_TIMEOUT_SEC, NDP_CLEAR_EVERY_SEC)
+        self.assertLess(NDP_CLEAR_RPC_TIMEOUT_SEC, NDP_CLEAR_EVERY_SEC)
         # Scoped to the observer GTSW.
         from taac.testconfigs.fpf.fpf_hardening_common import (
             OBSERVER_GTSWS,
@@ -400,6 +395,37 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
         # behavior is being characterized — no disruption-mode HCs.
         self.assertNotIn("fpf_hrt_bulk_disrupt", ids)
         self.assertNotIn("fpf_hrt_fsdb_session_disrupt", ids)
+
+        historical_ids = {
+            "fpf_prod_hrt_prefix_stability_precheck",
+            "fpf_hrt_system_memory_precheck",
+            "fpf_hrt_driver_disconnect_precheck",
+        }
+        precheck_ids = {
+            check.check_id
+            for check in (TC38.playbooks[1].prechecks or [])
+            if check.check_id
+        }
+        self.assertTrue(historical_ids.isdisjoint(precheck_ids))
+
+        stable_steps = _steps(TC38.playbooks[1])
+        custom_names = [
+            _params(step).get("custom_step_name")
+            for step in stable_steps
+            if step.name == StepName.CUSTOM_STEP
+        ]
+        self.assertIn("fpf_verify_recovered_state", custom_names)
+        self.assertIn("record_fpf_recovered_baseline_time", custom_names)
+        self.assertLess(
+            custom_names.index("fpf_verify_recovered_state"),
+            custom_names.index("record_fpf_recovered_baseline_time"),
+        )
+        durations = [
+            _params(step)["duration"]
+            for step in stable_steps
+            if step.name == StepName.LONGEVITY_STEP
+        ]
+        self.assertEqual(durations, [120, 300])
 
 
 if __name__ == "__main__":

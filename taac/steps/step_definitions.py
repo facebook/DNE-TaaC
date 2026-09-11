@@ -3398,37 +3398,32 @@ def create_fpf_ndp_clear_loop_step(
     neighbor_host: str,
     every_sec: int = 1,
     duration_sec: int = 120,
-    remote_timeout_sec: float = 0.8,
-    local_timeout_sec: float = 1.0,
+    rpc_timeout_sec: float = 0.8,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Repeatedly clear the NDP table over a window on the target GTSW.
 
-    Runs ``fboss2 clear ndp`` every ``every_sec`` for ``duration_sec`` — a
-    persistent NDP flush that exercises neighbor re-resolution under sustained
-    clearing during a NIC-side link-flap FPF test. Implemented as a CUSTOM_STEP
-    (no new StepName enum).
+    Calls the sw-agent bulk neighbor-flush Thrift API every ``every_sec`` for
+    ``duration_sec`` — a persistent NDP flush that exercises neighbor
+    re-resolution under sustained clearing during a NIC-side link-flap FPF
+    test. Implemented as a CUSTOM_STEP (no new StepName enum).
 
     Args:
         target_interface: Exact local interface whose NDP entries are cleared.
         neighbor_host: Exact LLDP neighbor expected on ``target_interface``.
         every_sec: Seconds between successive clears (default 1).
         duration_sec: Total clearing window in seconds (default 120).
-        remote_timeout_sec: On-device timeout for one clear (default 0.8).
-        local_timeout_sec: TAAC-side timeout for one clear (default 1.0).
+        rpc_timeout_sec: TAAC-side timeout for one sw-agent RPC (default 0.8).
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
     if not target_interface or not neighbor_host:
         raise ValueError("NDP clear requires target_interface and neighbor_host")
-    if not (
-        0 < remote_timeout_sec < local_timeout_sec <= 1.0
-        and local_timeout_sec <= every_sec
-    ):
+    if not (0 < rpc_timeout_sec <= 1.0 and rpc_timeout_sec < every_sec):
         raise ValueError(
-            "NDP clear requires 0 < remote_timeout_sec < "
-            "local_timeout_sec <= 1s and local_timeout_sec <= every_sec"
+            "NDP clear requires 0 < rpc_timeout_sec <= 1s and "
+            "rpc_timeout_sec < every_sec"
         )
     return Step(
         name=StepName.CUSTOM_STEP,
@@ -3441,8 +3436,7 @@ def create_fpf_ndp_clear_loop_step(
                     "neighbor_host": neighbor_host,
                     "every_sec": every_sec,
                     "duration_sec": duration_sec,
-                    "remote_timeout_sec": remote_timeout_sec,
-                    "local_timeout_sec": local_timeout_sec,
+                    "rpc_timeout_sec": rpc_timeout_sec,
                 }
             )
         ),

@@ -15,6 +15,7 @@ from taac.libs.fpf.fpf_stress_checks import (
 )
 from taac.testconfigs.fpf import (
     fpf_hardening_common,
+    fpf_shared_injection_suite,
     fpf_tc27_agent_coldboot,
     fpf_tc29_fsdb_gr_stop30_reenable,
     fpf_tc30_fsdb_gr_stop180_no_reenable,
@@ -225,10 +226,35 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                 "neighbor_host": SERVER,
                 "every_sec": 1,
                 "duration_sec": 120,
-                "remote_timeout_sec": 0.8,
-                "local_timeout_sec": 1.0,
+                "rpc_timeout_sec": 0.8,
             },
         )
+        tc38_stable = next(
+            playbook
+            for playbook in fpf_shared_injection_suite.TEST_CONFIG.playbooks
+            if playbook.name == "fpf_tc38_persistent_ndp_clear_stable"
+        )
+        historical_ids = {
+            "fpf_prod_hrt_prefix_stability_precheck",
+            "fpf_hrt_system_memory_precheck",
+            "fpf_hrt_driver_disconnect_precheck",
+        }
+        self.assertTrue(
+            historical_ids.isdisjoint(
+                {
+                    check.check_id
+                    for check in (tc38_stable.prechecks or [])
+                    if check.check_id
+                }
+            )
+        )
+        tc38_stable_custom_names = [
+            _step_params(step).get("custom_step_name")
+            for step in _steps(tc38_stable)
+            if step.name == taac_types.StepName.CUSTOM_STEP
+        ]
+        self.assertIn("fpf_verify_recovered_state", tc38_stable_custom_names)
+        self.assertIn("record_fpf_recovered_baseline_time", tc38_stable_custom_names)
 
     def test_fsdb_stop_and_recovery_remain_an_ordered_pair(self):
         tc30_steps = _steps(
