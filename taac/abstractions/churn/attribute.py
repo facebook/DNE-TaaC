@@ -64,13 +64,26 @@ class AttributeChurn:
     selector: AttributeTargetSelector
     baseline_expectation: BaselineExpectation
 
+    def __post_init__(self) -> None:
+        self._attribute_families()
+
+    def _attribute_families(self) -> tuple[AttributeFamily, ...]:
+        families: list[AttributeFamily] = []
+        for family in self.scenario.workload.families:
+            if not isinstance(family, AttributeFamily):
+                raise ValueError(
+                    "attribute churn workloads require AttributeFamily entries"
+                )
+            families.append(family)
+        return tuple(families)
+
     def to_step_params(self) -> dict[str, t.Any]:
         prefix_pool_names: dict[str, dict[str, str]] = {}
         for pool in self.selector.prefix_pools:
             prefix_pool_names.setdefault(pool.afi, {})[str(pool.plane)] = pool.name
         attribute_matrix = {
             family.name: {phase.name: phase.value for phase in family.phases}
-            for family in self.scenario.workload.families
+            for family in self._attribute_families()
         }
         geometry = self.baseline_expectation.block_geometry
         return {
