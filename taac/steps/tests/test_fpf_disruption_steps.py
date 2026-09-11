@@ -719,6 +719,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         every_sec: float = 1,
     ) -> tuple[float, int]:
         real_sleep = asyncio.sleep
+        real_wait = asyncio.wait
         clock = 0.0
         server_available = 0.0
         call_index = 0
@@ -733,9 +734,10 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         def advance_to(target: float) -> None:
             nonlocal clock
             clock = max(clock, target)
-            for due, event in pending:
-                if due <= clock:
-                    event.set()
+            ready = [(due, event) for due, event in pending if due <= clock]
+            pending[:] = [(due, event) for due, event in pending if due > clock]
+            for _due, event in ready:
+                event.set()
 
         async def fake_sleep(delay: float) -> None:
             advance_to(clock + max(0.0, delay))
@@ -744,19 +746,27 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
 
         async def fake_wait(awaitables, timeout=None, return_when=None):
             tasks = set(awaitables)
+            await real_sleep(0)
             done = {task for task in tasks if task.done()}
             if done:
                 return done, tasks - done
             assert timeout is not None
             timeout_at = clock + timeout
-            next_due = min(
-                (due for due, event in pending if not event.is_set()),
-                default=timeout_at,
-            )
+            next_due = min((due for due, _event in pending), default=None)
+            released_completion = next_due is not None and next_due <= timeout_at
+            if next_due is None:
+                next_due = timeout_at
             advance_to(min(timeout_at, next_due))
-            await real_sleep(0)
-            await real_sleep(0)
-            done = {task for task in tasks if task.done()}
+            if released_completion:
+                done, _pending = await real_wait(
+                    tasks,
+                    timeout=0.1,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                self.assertTrue(done, "released virtual RPC did not complete")
+            else:
+                await real_sleep(0)
+                done = {task for task in tasks if task.done()}
             return done, tasks - done
 
         def make_flush(client_index: int):
@@ -815,6 +825,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
             await cs.fpf_ndp_clear_loop(
                 self._params(every_sec=every_sec, duration_sec=duration_sec)
             )
+        self.assertEqual(pending, [])
         return clock, max_active
 
     def test_factory_shape(self):
@@ -901,7 +912,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(clock, 121.936)
         self.assertTrue(
             any(
-                '"slot": 1' in str(call) and '"start_lag_sec": 0.0' in str(call)
+                '"slot": 1' in str(call) and '"rpc_start_lag_sec": 0.0' in str(call)
                 for call in t.cast(MagicMock, cs.logger.info).call_args_list
             )
         )
@@ -1021,7 +1032,59 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         _driver, clients, contexts = self._configure_live_shape(cs)
         clients[1].getStatus.side_effect = RuntimeError("not ready")
 
-        with self.assertRaisesRegex(RuntimeError, "failed to open/warm"):
+        with self.assertRaisesRegex(
+            RuntimeError, r"client\[1\] phase=getStatus: not ready"
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
+
+        for client in clients:
+            client.flushNeighborEntries.assert_not_awaited()
+        for client_context in contexts:
+            client_context.__aexit__.assert_awaited_once()
+
+    async def test_all_clients_open_concurrently_before_first_slot(self):
+        cs = _make_custom_step()
+        _driver, clients, contexts = self._configure_live_shape(cs)
+        all_entered = asyncio.Event()
+        entered = 0
+
+        def make_enter(index: int):
+            async def enter(*_args) -> AsyncMock:
+                nonlocal entered
+                entered += 1
+                if entered == len(contexts):
+                    all_entered.set()
+                await asyncio.wait_for(all_entered.wait(), timeout=0.5)
+                return clients[index]
+
+            return enter
+
+        for index, client_context in enumerate(contexts):
+            client_context.__aenter__.side_effect = make_enter(index)
+        for client in clients:
+            client.flushNeighborEntries.return_value = 1
+
+        await cs.fpf_ndp_clear_loop(self._params(every_sec=0.01, duration_sec=0.01))
+
+        self.assertEqual(entered, 16)
+        for client in clients:
+            client.getStatus.assert_awaited_once()
+        clients[0].flushNeighborEntries.assert_awaited_once()
+
+    async def test_aggregate_warmup_timeout_reports_index_and_cleans_up(self):
+        cs = _make_custom_step()
+        _driver, clients, contexts = self._configure_live_shape(cs)
+        never = asyncio.Event()
+        clients[15].getStatus.side_effect = never.wait
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_FPF_NDP_CLIENT_WARMUP_TIMEOUT_SEC",
+                0.02,
+            ),
+            self.assertRaisesRegex(RuntimeError, r"client\[15\] phase=getStatus"),
+        ):
             await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
 
         for client in clients:
@@ -1280,7 +1343,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         for client_context in contexts:
             client_context.__aexit__.assert_awaited_once()
 
-    async def test_late_slot_uses_only_remaining_deadline_budget(self):
+    async def test_each_slot_gets_its_own_absolute_deadline_budget(self):
         cs = _make_custom_step()
         _driver, clients, _contexts = self._configure_live_shape(cs)
         clock = 0.0
@@ -1325,7 +1388,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         rpc_budgets = [budget for budget in budgets if budget > 5.0]
         self.assertEqual(len(rpc_budgets), 2)
         self.assertAlmostEqual(rpc_budgets[0], 20.0)
-        self.assertAlmostEqual(rpc_budgets[1], 19.9)
+        self.assertAlmostEqual(rpc_budgets[1], 20.0)
 
     async def test_invalid_rpc_count_fails_closed(self):
         for result in (-1, True, "2"):
@@ -1340,6 +1403,105 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
                 for client_context in contexts:
                     client_context.__aexit__.assert_awaited_once()
 
+    async def test_delayed_worker_dispatch_within_slot_starts_rpc(self):
+        cs = _make_custom_step()
+        _driver, clients, contexts = self._configure_live_shape(cs)
+        real_sleep = asyncio.sleep
+        real_wait = asyncio.wait
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+            await real_sleep(0)
+
+        async def delayed_wait(awaitables, timeout=None, return_when=None):
+            nonlocal clock
+            assert timeout is not None
+            clock += timeout
+            return await real_wait(
+                set(awaitables),
+                timeout=0.1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+        clients[0].flushNeighborEntries.return_value = 1
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.wait",
+                side_effect=delayed_wait,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_FPF_NDP_HEARTBEAT_INTERVAL_SEC",
+                0.5,
+            ),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
+
+        clients[0].flushNeighborEntries.assert_awaited_once()
+        self.assertTrue(
+            any(
+                '"enqueue_to_dispatch_sec": 0.5' in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
+        for client_context in contexts:
+            client_context.__aexit__.assert_awaited_once()
+
+    async def test_worker_dispatch_at_next_boundary_fails_before_rpc(self):
+        cs = _make_custom_step()
+        _driver, clients, contexts = self._configure_live_shape(cs)
+        real_wait = asyncio.wait
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def boundary_wait(awaitables, timeout=None, return_when=None):
+            nonlocal clock
+            assert timeout is not None
+            clock += timeout
+            return await real_wait(
+                set(awaitables),
+                timeout=0.1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.wait",
+                side_effect=boundary_wait,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_FPF_NDP_HEARTBEAT_INTERVAL_SEC",
+                1.0,
+            ),
+            self.assertRaisesRegex(RuntimeError, "worker dispatch.*crossed"),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
+
+        for client in clients:
+            client.flushNeighborEntries.assert_not_awaited()
+        for client_context in contexts:
+            client_context.__aexit__.assert_awaited_once()
+
     async def test_missed_slot_fails_without_starting_rpc(self):
         cs = _make_custom_step()
         _driver, clients, contexts = self._configure_live_shape(cs)
@@ -1353,7 +1515,7 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
             nonlocal clock, overslept
             clock += delay
             if delay > 0 and not overslept:
-                clock += 1.0
+                clock += 2.0
                 overslept = True
 
         async def fake_wait_for(awaitable, *args, **kwargs):
@@ -1374,11 +1536,17 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
                 "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.wait_for",
                 side_effect=fake_wait_for,
             ),
-            self.assertRaisesRegex(RuntimeError, "slot 2/2 could not start"),
+            self.assertRaisesRegex(RuntimeError, "controller missed slot 2/2"),
         ):
             await cs.fpf_ndp_clear_loop(self._params(duration_sec=2))
 
         clients[0].flushNeighborEntries.assert_awaited_once()
+        self.assertTrue(
+            any(
+                '"heartbeat_max_lag_sec"' in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
         for client_context in contexts:
             client_context.__aexit__.assert_awaited_once()
 
