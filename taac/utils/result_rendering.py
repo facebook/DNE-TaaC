@@ -319,6 +319,14 @@ def investigation_artifacts_section(
     )
 
 
+def format_infra_error_message(run_result: trr_types.RunResult) -> str:
+    """Render the concise gate error; detailed investigations live in its report."""
+    message = f"Infra error for tictaac run: {run_result.error_message}"
+    if run_result.investigation_artifacts:
+        return f"{message}\nSee Test Report for investigation details."
+    return message
+
+
 def _failing_check_lines(
     playbooks: t.Sequence[trr_types.PlaybookResult],
 ) -> t.List[str]:
