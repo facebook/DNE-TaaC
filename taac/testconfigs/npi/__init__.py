@@ -11,6 +11,10 @@ Allows callers to use the package-level path:
 instead of the deeper module path.
 """
 
+from taac.testconfigs.npi.ac100t_npi_test_config import (
+    AC100T_CPU_QUEUE_TEST_CONFIG,
+    AC100T_TEST_CONFIGS,
+)
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_dctypef_npi_cpu_queue_test_config,
     create_npi_cpu_queue_test_config,
@@ -64,6 +68,8 @@ from taac.testconfigs.npi.wedge800_npi_test_config import (
 )
 
 __all__ = [
+    "AC100T_CPU_QUEUE_TEST_CONFIG",
+    "AC100T_TEST_CONFIGS",
     "ICEPACK_GTSW_STSW_FLAP_PORTS",
     "NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG",
     "NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG",
