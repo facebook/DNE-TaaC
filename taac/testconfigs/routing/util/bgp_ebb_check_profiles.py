@@ -237,8 +237,8 @@ class ProfileContext:
     postcheck_thresholds: t.Optional[t.Any] = None
     # Default matches the standard-shape playbook entry points (8.0), which are
     # the only profiles that thread this into create_standard_prechecks. NOT
-    # create_standard_prechecks' own 4.0 default — drain/churn want the factory
-    # 4.0 and get it by not passing cpu_baseline at all, so this default is only
+    # create_standard_prechecks' own 5.0 default: drain/churn want the factory
+    # 5.0 and get it by not passing cpu_baseline at all, so this default is only
     # ever read by the 8.0 consumers. Keeping it 8.0 means a direct
     # get_profile_checks(DAEMON_RESTART, ProfileContext()) matches the playbook.
     cpu_baseline: float = 8.0
