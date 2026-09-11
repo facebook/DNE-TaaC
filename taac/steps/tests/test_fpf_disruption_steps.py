@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from facebook.network.Address.types import BinaryAddress
+from neteng.fboss.ctrl.types import NdpEntryThrift
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     TestCaseFailure,
     TestDevice,
@@ -626,8 +627,8 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         interface_id: int = 2093,
         vlan_name: str = "downlink_93",
         state: str = "REACHABLE",
-    ) -> SimpleNamespace:
-        return SimpleNamespace(
+    ) -> NdpEntryThrift:
+        return NdpEntryThrift(
             ip=BinaryAddress(addr=ipaddress.IPv6Address(address).packed),
             mac=mac,
             port=port,
@@ -636,13 +637,12 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
             vlanName=vlan_name,
         )
 
-    def _params(self, *, duration_sec: int = 120) -> dict:
+    def _params(self, *, every_sec: float = 1, duration_sec: float = 120) -> dict:
         return {
             "target_interface": self.TARGET_INTERFACE,
             "neighbor_host": self.NEIGHBOR_HOST,
-            "every_sec": 1,
+            "every_sec": every_sec,
             "duration_sec": duration_sec,
-            "rpc_timeout_sec": 0.8,
         }
 
     def _configure_live_shape(
@@ -678,26 +678,25 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         step = create_fpf_ndp_clear_loop_step(
             target_interface=self.TARGET_INTERFACE,
             neighbor_host=self.NEIGHBOR_HOST,
-            every_sec=1,
-            duration_sec=120,
-            rpc_timeout_sec=0.8,
+            every_sec=0.1,
+            duration_sec=0.3,
             device_regexes=["gtsw001.*"],
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         p = _params(step)
         self.assertEqual(p["custom_step_name"], "fpf_ndp_clear_loop")
-        self.assertEqual(p["every_sec"], 1)
-        self.assertEqual(p["duration_sec"], 120)
+        self.assertEqual(p["every_sec"], 0.1)
+        self.assertEqual(p["duration_sec"], 0.3)
         self.assertEqual(p["target_interface"], self.TARGET_INTERFACE)
         self.assertEqual(p["neighbor_host"], self.NEIGHBOR_HOST)
-        self.assertEqual(p["rpc_timeout_sec"], 0.8)
+        self.assertNotIn("rpc_timeout_sec", p)
 
-        with self.assertRaisesRegex(ValueError, "rpc_timeout_sec < every_sec"):
+        with self.assertRaisesRegex(ValueError, "exact multiple"):
             create_fpf_ndp_clear_loop_step(
                 target_interface=self.TARGET_INTERFACE,
                 neighbor_host=self.NEIGHBOR_HOST,
-                every_sec=1,
-                rpc_timeout_sec=1,
+                every_sec=0.1,
+                duration_sec=0.31,
             )
 
     async def test_scoped_fixed_rate_completes_exactly_120_slots(self):
@@ -711,18 +710,25 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         def fake_monotonic() -> float:
             return clock
 
+        async def enter_client() -> AsyncMock:
+            nonlocal clock
+            clock += 0.242
+            return client
+
         async def fake_sleep(delay: float) -> None:
             nonlocal clock
             clock += delay
 
         async def flush(entries: list) -> int:
-            nonlocal active, clear_calls, max_active
+            nonlocal active, clear_calls, clock, max_active
             active += 1
             max_active = max(max_active, active)
             clear_calls += 1
+            clock += 0.95
             active -= 1
             return 2 if clear_calls == 1 else 0
 
+        client_context.__aenter__.side_effect = enter_client
         client.flushNeighborEntries.side_effect = flush
 
         with (
@@ -739,7 +745,13 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.flushNeighborEntries.await_count, 120)
         self.assertEqual(max_active, 1)
-        self.assertEqual(clock, 120.0)
+        self.assertAlmostEqual(clock, 120.242)
+        self.assertTrue(
+            any(
+                '"slot": 1' in str(call) and '"start_lag_sec": 0.0' in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
         first_payload = client.flushNeighborEntries.await_args_list[0].args[0]
         self.assertEqual(
             {str(ipaddress.IPv6Address(entry.ip.addr)) for entry in first_payload},
@@ -786,16 +798,82 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "no flushable IPv6 NDP entries"):
             await cs.fpf_ndp_clear_loop(self._params())
 
-    async def test_interface_id_mismatch_fails_before_rpc(self):
+    async def test_entry_interface_id_drives_rpc_not_port_vlan(self):
         cs = _make_custom_step()
-        driver, _client, _client_context = self._configure_live_shape(cs)
+        driver, client, _client_context = self._configure_live_shape(cs)
         driver.async_get_ndp_table.return_value = [
             self._ndp_entry("2401:db00:292a:8154:bace::b", interface_id=9999)
         ]
-        with self.assertRaisesRegex(RuntimeError, "interfaceID=9999, expected 2093"):
+        client.flushNeighborEntries.return_value = 1
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+        ):
             await cs.fpf_ndp_clear_loop(self._params())
 
-        driver.get_sw_agent_client.assert_not_awaited()
+        payload = client.flushNeighborEntries.await_args_list[0].args[0]
+        self.assertEqual([entry.interfaceID for entry in payload], [9999])
+
+    async def test_missing_port_vlan_is_diagnostic_only(self):
+        cs = _make_custom_step()
+        driver, client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_interface_name_to_port_id_and_vlan_id.return_value = (
+            SimpleNamespace(port_id=205)
+        )
+        client.flushNeighborEntries.return_value = 1
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
+
+        client.flushNeighborEntries.assert_awaited_once()
+
+    async def test_invalid_state_and_interface_id_fail_before_rpc(self):
+        for entry, expected in (
+            (self._ndp_entry("2401:db00::1", state=""), "invalid state"),
+            (
+                self._ndp_entry("2401:db00::1", interface_id=-1),
+                "invalid interfaceID=-1",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                cs = _make_custom_step()
+                driver, _client, _client_context = self._configure_live_shape(cs)
+                driver.async_get_ndp_table.return_value = [entry]
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    await cs.fpf_ndp_clear_loop(self._params())
+                driver.get_sw_agent_client.assert_not_awaited()
 
     async def test_timeout_is_fail_closed_and_closes_client(self):
         cs = _make_custom_step()
@@ -805,11 +883,81 @@ class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         client.flushNeighborEntries.side_effect = flush
-        with self.assertRaisesRegex(RuntimeError, "exceeded Thrift timeout 0.8s"):
-            await cs.fpf_ndp_clear_loop(self._params())
+        with self.assertRaisesRegex(RuntimeError, "cadence boundary"):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
 
         client.flushNeighborEntries.assert_awaited_once()
         client_context.__aexit__.assert_awaited_once()
+
+    async def test_completion_at_slot_deadline_fails(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        clock = 0.0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def flush(_entries: list) -> int:
+            nonlocal clock
+            clock += 1.0
+            return 2
+
+        client.flushNeighborEntries.side_effect = flush
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            self.assertRaisesRegex(RuntimeError, "completed at/after"),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=1))
+
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_late_slot_uses_only_remaining_deadline_budget(self):
+        cs = _make_custom_step()
+        _driver, client, _client_context = self._configure_live_shape(cs)
+        clock = 0.0
+        budgets: list[float] = []
+        sleep_calls = 0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock, sleep_calls
+            sleep_calls += 1
+            clock += delay + (0.1 if sleep_calls == 1 else 0.0)
+
+        async def fake_wait_for(awaitable, timeout: float):
+            budgets.append(timeout)
+            return await awaitable
+
+        async def flush(_entries: list) -> int:
+            nonlocal clock
+            clock += 0.5
+            return 1
+
+        client.flushNeighborEntries.side_effect = flush
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=2))
+
+        self.assertEqual(len(budgets), 2)
+        self.assertAlmostEqual(budgets[0], 1.0)
+        self.assertAlmostEqual(budgets[1], 0.9)
 
     async def test_invalid_rpc_count_fails_closed(self):
         for result in (-1, True, "2"):

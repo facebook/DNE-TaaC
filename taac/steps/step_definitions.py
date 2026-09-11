@@ -3398,7 +3398,6 @@ def create_fpf_ndp_clear_loop_step(
     neighbor_host: str,
     every_sec: int = 1,
     duration_sec: int = 120,
-    rpc_timeout_sec: float = 0.8,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3414,16 +3413,28 @@ def create_fpf_ndp_clear_loop_step(
         neighbor_host: Exact LLDP neighbor expected on ``target_interface``.
         every_sec: Seconds between successive clears (default 1).
         duration_sec: Total clearing window in seconds (default 120).
-        rpc_timeout_sec: TAAC-side timeout for one sw-agent RPC (default 0.8).
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
     if not target_interface or not neighbor_host:
         raise ValueError("NDP clear requires target_interface and neighbor_host")
-    if not (0 < rpc_timeout_sec <= 1.0 and rpc_timeout_sec < every_sec):
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in (every_sec, duration_sec)
+    ) or not all(
+        math.isfinite(float(value)) and float(value) > 0
+        for value in (every_sec, duration_sec)
+    ):
+        raise ValueError("NDP clear duration and cadence must be finite and > 0")
+    slot_ratio = float(duration_sec) / float(every_sec)
+    if not math.isclose(
+        slot_ratio,
+        round(slot_ratio),
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
         raise ValueError(
-            "NDP clear requires 0 < rpc_timeout_sec <= 1s and "
-            "rpc_timeout_sec < every_sec"
+            "NDP clear duration_sec must be an exact multiple of every_sec"
         )
     return Step(
         name=StepName.CUSTOM_STEP,
@@ -3436,7 +3447,6 @@ def create_fpf_ndp_clear_loop_step(
                     "neighbor_host": neighbor_host,
                     "every_sec": every_sec,
                     "duration_sec": duration_sec,
-                    "rpc_timeout_sec": rpc_timeout_sec,
                 }
             )
         ),

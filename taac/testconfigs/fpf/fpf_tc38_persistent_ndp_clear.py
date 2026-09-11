@@ -106,7 +106,6 @@ IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 300
 NDP_CLEAR_EVERY_SEC = 1
 NDP_CLEAR_DURATION_SEC = 120
-NDP_CLEAR_RPC_TIMEOUT_SEC = 0.8
 SETTLE_AFTER_CLEAR_SEC = 120
 LONGEVITY_SEC = 300
 
@@ -241,7 +240,6 @@ def create_fpf_tc38_test_config() -> TestConfig:
                 neighbor_host=NDP_CLEAR_CIRCUIT.z_end_device,
                 every_sec=NDP_CLEAR_EVERY_SEC,
                 duration_sec=NDP_CLEAR_DURATION_SEC,
-                rpc_timeout_sec=NDP_CLEAR_RPC_TIMEOUT_SEC,
                 device_regexes=[OBSERVER_GTSWS[0]],
                 description=(
                     f"Persistent NDP clear every {NDP_CLEAR_EVERY_SEC}s for "

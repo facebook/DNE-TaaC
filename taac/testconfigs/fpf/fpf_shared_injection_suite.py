@@ -1014,7 +1014,6 @@ def _tc38(*, spray, skip_ssh) -> list:
 
     ndp_clear_every_sec = 1
     ndp_clear_duration_sec = 120
-    ndp_clear_rpc_timeout_sec = 0.8
     ndp_clear_target_interface = fpf_link_drain_interface(GPU_HOSTS)
     settle_after_clear_sec = 120
     longevity_sec = 300
@@ -1101,7 +1100,6 @@ def _tc38(*, spray, skip_ssh) -> list:
                 neighbor_host=GPU_HOSTS[0],
                 every_sec=ndp_clear_every_sec,
                 duration_sec=ndp_clear_duration_sec,
-                rpc_timeout_sec=ndp_clear_rpc_timeout_sec,
                 device_regexes=[OBSERVER_GTSWS[0]],
                 description=(
                     f"Persistent NDP clear every {ndp_clear_every_sec}s for "

@@ -226,7 +226,6 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                 "neighbor_host": SERVER,
                 "every_sec": 1,
                 "duration_sec": 120,
-                "rpc_timeout_sec": 0.8,
             },
         )
         tc38_stable = next(
