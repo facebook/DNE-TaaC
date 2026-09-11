@@ -23,6 +23,7 @@ from taac.driver.driver_constants import (
     SwitchLldpData,
     SystemctlServiceStatus,
 )
+from neteng.test_infra.dne.taac.internal.steps import custom_step as custom_step_module
 from taac.internal.steps.custom_step import (
     _nic_mstreg_bdf,
     CustomStep,
@@ -2548,6 +2549,26 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
+    def test_service_hostname_strips_only_facebook_suffix(self):
+        normalize = getattr(
+            custom_step_module,
+            "_fpf_service_ssh_host",
+            None,
+        )
+        self.assertIsNotNone(normalize)
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2.facebook.com"),
+            "gtsw001.l1002.c087.mwg2",
+        )
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2"),
+            "gtsw001.l1002.c087.mwg2",
+        )
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2.tfbnw.net"),
+            "gtsw001.l1002.c087.mwg2.tfbnw.net",
+        )
+
     async def test_sequence_confirms_states_and_records_boundaries(self):
         factory = getattr(
             fpf_step_definitions,
@@ -2556,8 +2577,8 @@ class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(factory)
         step = factory(
-            local_gtsw="gtsw001.l1002.c087.mwg2",
-            remote_gtsw="gtsw001.l1001.c087.mwg2",
+            local_gtsw="gtsw001.l1002.c087.mwg2.facebook.com",
+            remote_gtsw="gtsw001.l1001.c087.mwg2.facebook.com",
             between_stops_sec=30,
             before_local_restart_sec=30,
             max_fsdb_outage_sec=120,
@@ -2566,11 +2587,16 @@ class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["custom_step_name"], "fpf_remote_prefix_gr_sequence")
 
         cs = _make_custom_step()
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[str, str, bool]] = []
         service_states = {"fsdb": "active", "bgpd": "active"}
 
-        async def fake_ssh(host, command, timeout_sec=30):
-            calls.append((host, command))
+        async def fake_ssh(
+            host,
+            command,
+            timeout_sec=30,
+            preserve_lab_ssh_hostname=False,
+        ):
+            calls.append((host, command, preserve_lab_ssh_hostname))
             if command == "systemctl stop fsdb":
                 service_states["fsdb"] = "inactive"
                 return (0, "", "")
@@ -2599,12 +2625,12 @@ class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("gtsw001.l1002.c087.mwg2", "systemctl stop fsdb"),
-                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb"),
-                ("gtsw001.l1001.c087.mwg2", "systemctl stop bgpd"),
-                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd"),
-                ("gtsw001.l1002.c087.mwg2", "systemctl start fsdb"),
-                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb"),
+                ("gtsw001.l1002.c087.mwg2", "systemctl stop fsdb", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl stop bgpd", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl start fsdb", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb", True),
             ],
         )
         self.assertEqual(fpf_collector_registry.get_disruption_time(), 100.0)
@@ -2618,12 +2644,17 @@ class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
             None,
         )
         self.assertIsNotNone(factory)
-        params = _params(factory(remote_gtsw="gtsw001.l1001.c087.mwg2"))
+        params = _params(factory(remote_gtsw="gtsw001.l1001.c087.mwg2.facebook.com"))
         cs = _make_custom_step()
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[str, str, bool]] = []
 
-        async def fake_ssh(host, command, timeout_sec=30):
-            calls.append((host, command))
+        async def fake_ssh(
+            host,
+            command,
+            timeout_sec=30,
+            preserve_lab_ssh_hostname=False,
+        ):
+            calls.append((host, command, preserve_lab_ssh_hostname))
             return (0, "active\n" if "is-active" in command else "", "")
 
         cs._ssh_run_host = fake_ssh
@@ -2638,8 +2669,8 @@ class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("gtsw001.l1001.c087.mwg2", "systemctl start bgpd"),
-                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd"),
+                ("gtsw001.l1001.c087.mwg2", "systemctl start bgpd", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd", True),
             ],
         )
         self.assertEqual(fpf_collector_registry.get_recovery_start_time(), 200.0)

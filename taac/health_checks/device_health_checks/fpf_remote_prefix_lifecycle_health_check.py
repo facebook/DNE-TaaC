@@ -4,6 +4,7 @@
 
 """Exact, phase-aware lifecycle validation for a filtered FPF prefix set."""
 
+import asyncio
 import time
 import typing as t
 
@@ -19,6 +20,7 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_recovery_completion_time,
     get_recovery_start_time,
     get_restart_completion_time,
+    get_test_case_start_time,
 )
 from taac.libs.fpf.fpf_stress_checks import (
     _parse_ts,
@@ -61,6 +63,60 @@ def _allowed_error_interval(
     return ((outage_start, first_success),)
 
 
+def _is_fresh_valid_row(
+    row: t.Any,
+    *,
+    anchor_ts: float,
+    matcher: t.Callable[[t.Any], bool],
+) -> bool:
+    """Return whether ``row`` is fresh, successful, and in the requested scope."""
+    try:
+        epoch = _row_epoch(row)
+        return (
+            matcher(row)
+            and epoch is not None
+            and epoch >= anchor_ts
+            and bool(getattr(row, "valid", True))
+            and not str(getattr(row, "notes", "") or "").startswith("error:")
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+async def wait_for_fresh_lifecycle_samples(
+    requirements: t.Sequence[t.Tuple[str, t.Any, t.Callable[[t.Any], bool]]],
+    *,
+    anchor_ts: float,
+    timeout_sec: float,
+    poll_interval_sec: float,
+) -> t.Tuple[bool, t.List[str]]:
+    """Wait for one fresh successful row for every lifecycle endpoint.
+
+    This is a collector synchronization barrier, not a verdict relaxation.
+    Exact values are evaluated only after the barrier, and a requirement that
+    never produces a fresh valid row remains a fail-closed no-data failure.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    while True:
+        missing = [
+            label
+            for label, collector, matcher in requirements
+            if not any(
+                _is_fresh_valid_row(
+                    row,
+                    anchor_ts=anchor_ts,
+                    matcher=matcher,
+                )
+                for row in list(getattr(collector, "rows", []))
+            )
+        ]
+        if not missing:
+            return True, []
+        if time.monotonic() >= deadline:
+            return False, missing
+        await asyncio.sleep(max(0.001, poll_interval_sec))
+
+
 class FpfRemotePrefixLifecycleHealthCheck(
     AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
 ):
@@ -92,9 +148,12 @@ class FpfRemotePrefixLifecycleHealthCheck(
 
         mode = str(check_params.get("mode", "present"))
         deadline_sec = float(check_params.get("deadline_sec", 120.0))
-        now = time.time()
+        check_started = time.time()
         if mode == "present":
-            anchor = now - float(check_params.get("baseline_window_sec", 20.0))
+            playbook_start = get_test_case_start_time()
+            anchor = playbook_start or (
+                check_started - float(check_params.get("baseline_window_sec", 20.0))
+            )
             transition = False
         elif mode == "withdrawn":
             anchor = get_restart_completion_time()
@@ -164,6 +223,80 @@ class FpfRemotePrefixLifecycleHealthCheck(
             if not result.passed:
                 failures.append(line)
 
+        hrt_expectations = list(check_params.get("hrt_expectations", []))
+        # Named fields keep config artifacts self-describing and preserve the
+        # exact manual-characterization contract.
+        for key, collector_name in (
+            ("a_hrt_positive_expected", "hrt"),
+            ("a_hrt_remote_failure_expected", "hrt_remote_failure"),
+            ("b_hrt_positive_expected", "hrt_remote_b"),
+            ("b_hrt_remote_failure_expected", "hrt_remote_failure_remote_b"),
+        ):
+            if check_params.get(key):
+                hrt_expectations.append(
+                    {"collector": collector_name, "expected": check_params[key]}
+                )
+
+        if mode == "present":
+            requirements: t.List[t.Tuple[str, t.Any, t.Callable[[t.Any], bool]]] = []
+            for collector_name, device, _expected in check_params.get(
+                "scalar_expectations", []
+            ):
+                collector = _collector(collector_name)
+                if collector is not None:
+                    requirements.append(
+                        (
+                            f"{collector_name}@{device}",
+                            collector,
+                            lambda row, device=device: _short_name(
+                                str(getattr(row, "gtsw", ""))
+                            )
+                            == _short_name(str(device)),
+                        )
+                    )
+            for expectation in hrt_expectations:
+                collector_name = expectation["collector"]
+                collector = _collector(collector_name)
+                if collector is None:
+                    continue
+                for host, devices in expectation["expected"].items():
+                    for device_id in devices:
+                        requirements.append(
+                            (
+                                f"{collector_name}@{host}/dev{device_id}",
+                                collector,
+                                lambda row, host=host, device_id=device_id: (
+                                    _short_name(str(getattr(row, "host", "")))
+                                    == _short_name(str(host))
+                                    and int(getattr(row, "device_id", -1))
+                                    == int(device_id)
+                                ),
+                            )
+                        )
+            fresh, missing = await wait_for_fresh_lifecycle_samples(
+                requirements,
+                anchor_ts=check_started,
+                timeout_sec=float(check_params.get("fresh_sample_timeout_sec", 30.0)),
+                poll_interval_sec=float(
+                    check_params.get("fresh_sample_poll_interval_sec", 0.25)
+                ),
+            )
+            if not fresh:
+                preview = ", ".join(missing[:12])
+                if len(missing) > 12:
+                    preview += f", ... (+{len(missing) - 12} more)"
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        "Collector synchronization timed out waiting for fresh "
+                        f"valid lifecycle samples: {preview}"
+                    ),
+                )
+
+        # Capture the evaluation window end only after the baseline barrier so
+        # rows published while slower scalar checks run are not excluded.
+        now = time.time()
+
         for collector_name, device, expected in check_params.get(
             "scalar_expectations", []
         ):
@@ -185,20 +318,6 @@ class FpfRemotePrefixLifecycleHealthCheck(
                 int(expected),
                 lambda row: getattr(row, "matched", None),
             )
-
-        hrt_expectations = list(check_params.get("hrt_expectations", []))
-        # Named fields keep config artifacts self-describing and preserve the
-        # exact manual-characterization contract.
-        for key, collector_name in (
-            ("a_hrt_positive_expected", "hrt"),
-            ("a_hrt_remote_failure_expected", "hrt_remote_failure"),
-            ("b_hrt_positive_expected", "hrt_remote_b"),
-            ("b_hrt_remote_failure_expected", "hrt_remote_failure_remote_b"),
-        ):
-            if check_params.get(key):
-                hrt_expectations.append(
-                    {"collector": collector_name, "expected": check_params[key]}
-                )
 
         for expectation in hrt_expectations:
             collector_name = expectation["collector"]

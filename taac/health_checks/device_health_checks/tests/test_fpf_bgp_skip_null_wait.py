@@ -4,12 +4,16 @@
 
 """Tests for target-scoped BGP skip-null and RF window boundaries."""
 
+import asyncio
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import TestDevice
+from taac.health_checks.device_health_checks import (
+    fpf_remote_prefix_lifecycle_health_check as lifecycle_health_check,
+)
 from taac.health_checks.device_health_checks.fpf_bgp_rib_convergence_health_check import (
     FpfBgpRibConvergenceHealthCheck,
 )
@@ -121,6 +125,82 @@ class RemotePrefixLifecycleSeriesTest(unittest.TestCase):
         )
 
         self.assertFalse(result.passed)
+
+
+class RemotePrefixLifecycleBarrierTest(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_fresh_sample_after_phase_boundary(self):
+        wait_for_fresh = getattr(
+            lifecycle_health_check,
+            "wait_for_fresh_lifecycle_samples",
+            None,
+        )
+        self.assertIsNotNone(wait_for_fresh)
+        collector = SimpleNamespace(
+            rows=[
+                SimpleNamespace(
+                    timestamp=_ts(-1),
+                    request_end_epoch=WINDOW_START - 1,
+                    valid=True,
+                    notes="",
+                    host="twshared1352.03.mwg2",
+                )
+            ]
+        )
+
+        async def publish_fresh_sample():
+            await asyncio.sleep(0.01)
+            collector.rows.append(
+                SimpleNamespace(
+                    timestamp=_ts(1),
+                    request_end_epoch=WINDOW_START + 1,
+                    valid=True,
+                    notes="",
+                    host="twshared1352.03.mwg2",
+                )
+            )
+
+        publisher = asyncio.create_task(publish_fresh_sample())
+        passed, missing = await wait_for_fresh(
+            [
+                (
+                    "hrt@1352/dev0",
+                    collector,
+                    lambda row: row.host == "twshared1352.03.mwg2",
+                )
+            ],
+            anchor_ts=WINDOW_START,
+            timeout_sec=0.2,
+            poll_interval_sec=0.005,
+        )
+        await publisher
+        self.assertTrue(passed)
+        self.assertEqual(missing, [])
+
+    async def test_no_fresh_sample_remains_fail_closed(self):
+        wait_for_fresh = getattr(
+            lifecycle_health_check,
+            "wait_for_fresh_lifecycle_samples",
+            None,
+        )
+        self.assertIsNotNone(wait_for_fresh)
+        collector = SimpleNamespace(
+            rows=[
+                SimpleNamespace(
+                    timestamp=_ts(-1),
+                    request_end_epoch=WINDOW_START - 1,
+                    valid=True,
+                    notes="",
+                )
+            ]
+        )
+        passed, missing = await wait_for_fresh(
+            [("hrt@1352/dev0", collector, lambda _row: True)],
+            anchor_ts=WINDOW_START,
+            timeout_sec=0.01,
+            poll_interval_sec=0.001,
+        )
+        self.assertFalse(passed)
+        self.assertEqual(missing, ["hrt@1352/dev0"])
 
 
 class BgpSkipNullTargetScopeTest(unittest.IsolatedAsyncioTestCase):

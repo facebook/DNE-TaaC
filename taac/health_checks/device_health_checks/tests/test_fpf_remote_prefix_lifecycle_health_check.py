@@ -41,8 +41,12 @@ class FpfRemotePrefixLifecycleHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         collector: object | None = None,
     ) -> hc_types.HealthCheckResult:
         with (
-            patch(f"{HC_MODULE}.time.time", return_value=WINDOW_START + 20),
+            patch(
+                f"{HC_MODULE}.time.time",
+                side_effect=[WINDOW_START + 20, WINDOW_START + 30],
+            ),
             patch(f"{HC_MODULE}.get_collector", return_value=collector),
+            patch(f"{HC_MODULE}.get_test_case_start_time", return_value=0.0),
             patch(
                 f"{HC_MODULE}.everpaste_details_suffix",
                 new=AsyncMock(return_value=""),
@@ -89,10 +93,14 @@ class FpfRemotePrefixLifecycleHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         collector = SimpleNamespace(
             rows=[
                 SimpleNamespace(
-                    timestamp=_ts(5), gtsw=RUNNER, matched=1000, valid=True, notes=""
+                    timestamp=_ts(25),
+                    gtsw=RUNNER,
+                    matched=1000,
+                    valid=True,
+                    notes="",
                 ),
                 SimpleNamespace(
-                    timestamp=_ts(6),
+                    timestamp=_ts(26),
                     gtsw="gtsw009.l1002.c087.mwg2",
                     matched=0,
                     valid=True,
@@ -115,7 +123,7 @@ class FpfRemotePrefixLifecycleHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         collector = SimpleNamespace(
             rows=[
                 SimpleNamespace(
-                    timestamp=_ts(5),
+                    timestamp=_ts(25),
                     host="rtptest1544.mwg2",
                     device_id=0,
                     plane_ids=[0],

@@ -381,7 +381,10 @@ _SSH_OPTS = [
 
 
 async def async_ssh_run(
-    host: str, cmd: str, timeout_sec: int = 30
+    host: str,
+    cmd: str,
+    timeout_sec: int = 30,
+    preserve_lab_ssh_hostname: bool = False,
 ) -> t.Tuple[int, str, str]:
     """Run ``cmd`` on ``host`` as root. Returns (rc, out, err).
 
@@ -394,13 +397,17 @@ async def async_ssh_run(
         asyncssh keyfile path the driver falls back to does NOT carry that cert
         and fails as root on these GPU hosts — see the SSH_USER note above).
 
+    ``preserve_lab_ssh_hostname`` is reserved for allowlisted lab-ssh service
+    targets whose short hostname must not be rewritten. The CLI fallback keeps
+    its existing FQDN behavior.
+
     Module-level (not a method) so it is an easy monkeypatch seam for tests.
     """
     _validate_hostname(host)
     if lab_ssh_transport_enabled():
         try:
             res = await lab_ssh_async_exec(
-                host=to_fqdn(host),
+                host=host if preserve_lab_ssh_hostname else to_fqdn(host),
                 command=cmd,
                 timeout_sec=timeout_sec,
                 username=SSH_USER,
