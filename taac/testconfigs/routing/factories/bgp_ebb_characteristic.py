@@ -80,13 +80,14 @@ from taac.playbooks.playbook_definitions import (
     build_case8_playbook,
     create_test_computational_load_for_bgp_plus_plus_playbook,
     create_test_constant_attribute_storage_playbook,
-    create_transient_memory_ingress_peer_scale_playbook,
-    get_bgp_ebb_bounded_ecmp_sc9_playbook,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
+    get_bgp_ebb_bounded_ecmp_sc9_playbook,
     get_bgp_ebb_bounded_ecmp_sets_playbook,
     get_bgp_ebb_constant_attribute_storage_playbook,
     get_bgp_ebb_queue_memory_monitoring_playbook,
+    get_bgp_ebb_transient_memory_peer_scale_playbook,
+    get_bgp_ebb_transient_memory_route_scale_playbook,
     get_bgp_ebb_update_packing_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.attribute_pool_generator import (
@@ -688,8 +689,7 @@ def test_config_sc3_transient_memory_route_scale_on_eos(
             ),
         ],
         playbooks=[
-            build_case2_playbook(
-                name="bgp_plus_plus_sc3_transient_memory_route_scale_test",
+            get_bgp_ebb_transient_memory_route_scale_playbook(
                 description=(
                     "Test BGP++ SC3 transient memory while ingress routes scale"
                 ),
@@ -1811,11 +1811,10 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
 
     The SC2 "scale & characteristics" test (char-2). Reuses the BAG012
     varying-combinations engine but made INGRESS-ONLY and non-vacuous on bag010:
-    8 eBGP peers advertise 100K prefixes each (800K paths); routes are ACCEPTED
-    into the RIB (route_registry cleared + acceptance community) but the nexthop
-    is left UNRESOLVABLE (the interface-state nexthop gflag is deliberately NOT
-    enabled) so they are received+accepted but never best-path/advertised. NO
-    iBGP egress is configured.
+    8 eBGP peers advertise 100K prefixes each (800K paths); routes are accepted
+    into the RIB with resolvable directly connected nexthops. No iBGP egress is
+    configured, so the workload remains ingress-only without weakening the
+    stored-route state.
 
     FIXED across the whole sweep: 800K paths, and the three attribute pools --
     100 complete AS paths + 100 complete community sets + 100 complete
@@ -1832,9 +1831,9 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     Gates: an acceptance gate (RECEIVED = TRibSummary.total_prefixes >=
     prefixes/peer -- the anti-vacuousness guard, default blocking) and the
     memory-growth gate (stable memory <= k^0.5, blocking -- a loose backstop
-    pending recalibration, see _SC2_MEMORY_SCALING_EXPONENT). The nexthop is
-    unresolvable, so the acceptance gate deliberately counts RECEIVED, not
-    selected.
+    pending recalibration, see _SC2_MEMORY_SCALING_EXPONENT). The acceptance
+    gate deliberately counts RECEIVED routes and a separate blocking gate
+    requires zero unresolved nexthops.
 
     All SC tests run with update-group enabled; only the ``_UPDATE_GROUP``
     variant is registered.
@@ -1933,8 +1932,8 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         constant_acceptance_communities=_CONSTANT_ATTR_ACCEPTANCE_COMMUNITIES,
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
-        # Acceptance gate (anti-vacuousness): routes must REACH the RIB. Nexthops
-        # are unresolvable, so this counts RECEIVED (total_prefixes), not selected.
+        # Acceptance gate (anti-vacuousness): routes must reach the RIB. Count
+        # RECEIVED routes here; a separate gate requires every nexthop to resolve.
         verify_received_prefixes=True,
         acceptance_gate_mode="blocking",
         memory_growth_gate_mode="blocking",
@@ -2262,7 +2261,7 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         # eBGP device group per point), so there are no per-Stage setup steps and
         # therefore no per-Stage Bgp restart.
         per_iteration_setup_steps_factory=None,
-        sweep_playbook=create_transient_memory_ingress_peer_scale_playbook(
+        sweep_playbook=get_bgp_ebb_transient_memory_peer_scale_playbook(
             device_name=device_name,
             ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
             ingress_peer_counts=_SC4_INGRESS_EBGP_PEER_COUNTS,

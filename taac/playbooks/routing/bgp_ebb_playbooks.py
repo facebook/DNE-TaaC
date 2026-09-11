@@ -2,11 +2,12 @@
 # pyre-unsafe
 """BGP++-on-EBB playbook factories (one factory = one test case).
 
-Naming: ``Playbook.name = bgp_ebb_<case>_playbook`` and each public factory is
-exactly ``get_{playbook_name}``. See README.md for the routing suite contract.
+New factories use ``Playbook.name = bgp_ebb_<case>_playbook`` and
+``get_{playbook_name}``. Catalog-facing wrappers for established
+scale-characteristic Playbook names preserve their runtime identities.
 
-The ordered ``__all__`` below is the stable CI/CD catalog order, not
-alphabetical export order.
+The ordered ``__all__`` keeps the original CI/CD exports stable and appends
+durable characteristic factories.
 """
 
 import typing as t
@@ -58,6 +59,14 @@ from taac.constants import (
 )
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_snapshot_check,
+)
+from taac.playbooks.playbook_definitions import (
+    build_case2_playbook,
+    build_case6_playbook,
+    create_performance_scaling_egress_peer_sweep_playbook,
+    create_transient_memory_ingress_peer_scale_playbook,
+    get_bgp_ebb_bounded_ecmp_sc9_playbook,
+    PerIterationSetupStepsFactory,
 )
 from taac.playbooks.routing.dice_churn import (
     create_dice_unified_churn_playbook,
@@ -126,7 +135,13 @@ from taac.utils.hardware_capacity_utils import (
     get_precheck_thresholds,
     HardwareCapacityThresholds,
 )
-from taac.test_as_a_config.types import Playbook, Stage
+from taac.test_as_a_config.types import (
+    PeriodicTask,
+    Playbook,
+    PointInTimeHealthCheck,
+    SnapshotHealthCheck,
+    Stage,
+)
 
 
 __all__ = [
@@ -150,6 +165,11 @@ __all__ = [
     "get_bgp_ebb_update_packing_playbook",
     "get_bgp_ebb_constant_attribute_storage_playbook",
     "get_bgp_ebb_bounded_ecmp_sets_playbook",
+    "get_bgp_ebb_related_peer_compute_playbook",
+    "get_bgp_ebb_transient_memory_route_scale_playbook",
+    "get_bgp_ebb_transient_memory_peer_scale_playbook",
+    "get_bgp_ebb_churn_processing_playbook",
+    "get_bgp_ebb_bounded_ecmp_sc9_playbook",
 ]
 
 
@@ -2335,6 +2355,100 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     )
 
 
+def get_bgp_ebb_related_peer_compute_playbook(
+    *,
+    device_name: str,
+    egress_peer_counts: list[int],
+    prefix_count: int,
+    ebgp_peer_count: int,
+    per_iteration_setup_steps_factory: PerIterationSetupStepsFactory | None = None,
+) -> Playbook:
+    """Build CICD-EBB-17: Comp Scale Session Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
+    return create_performance_scaling_egress_peer_sweep_playbook(
+        device_name=device_name,
+        egress_peer_counts=egress_peer_counts,
+        prefix_count=prefix_count,
+        ebgp_peer_count=ebgp_peer_count,
+        per_iteration_setup_steps_factory=per_iteration_setup_steps_factory,
+    )
+
+
+def get_bgp_ebb_transient_memory_route_scale_playbook(
+    *,
+    description: str,
+    stages: list[Stage],
+) -> Playbook:
+    """Build CICD-EBB-19: Memory Scale Route Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
+    return build_case2_playbook(
+        name="bgp_plus_plus_sc3_transient_memory_route_scale_test",
+        description=description,
+        stages=stages,
+    )
+
+
+def get_bgp_ebb_transient_memory_peer_scale_playbook(
+    *,
+    device_name: str,
+    ixia_interface_mimic_ebgp: str,
+    ingress_peer_counts: list[int],
+    prefix_count_per_peer: int,
+    ibgp_peer_count: int,
+    address_families: list[str],
+    soak_seconds: int,
+    convergence_wait_seconds: int,
+    acceptance_gate_mode: str | None = None,
+    transient_gate_mode: str | None = None,
+    transient_ratio_tolerance: float = 2.0,
+) -> Playbook:
+    """Build CICD-EBB-20: Memory Scale eBGP Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
+    return create_transient_memory_ingress_peer_scale_playbook(
+        device_name=device_name,
+        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+        ingress_peer_counts=ingress_peer_counts,
+        prefix_count_per_peer=prefix_count_per_peer,
+        ibgp_peer_count=ibgp_peer_count,
+        address_families=address_families,
+        soak_seconds=soak_seconds,
+        convergence_wait_seconds=convergence_wait_seconds,
+        acceptance_gate_mode=acceptance_gate_mode,
+        transient_gate_mode=transient_gate_mode,
+        transient_ratio_tolerance=transient_ratio_tolerance,
+    )
+
+
+def get_bgp_ebb_churn_processing_playbook(
+    *,
+    description: str,
+    snapshot_checks: list[SnapshotHealthCheck],
+    periodic_tasks: list[PeriodicTask],
+    prechecks: list[PointInTimeHealthCheck],
+    postchecks: list[PointInTimeHealthCheck],
+    stages: list[Stage],
+) -> Playbook:
+    """Build CICD-EBB-22: Fixed Batch Route Churn Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
+    return build_case6_playbook(
+        name="bgp_plus_plus_route_churn_prefix_scaling_test",
+        description=description,
+        snapshot_checks=snapshot_checks,
+        periodic_tasks=periodic_tasks,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        stages=stages,
+    )
+
+
 def get_bgp_ebb_update_packing_playbook(
     *,
     device_name: str,
@@ -2354,7 +2468,10 @@ def get_bgp_ebb_update_packing_playbook(
     min_advertised_nlri: int = 0,
     restart_bgp_for_complete_view: bool,
 ) -> Playbook:
-    """Build the deferred UPDATE-packing playbook."""
+    """Build CICD-EBB-21: Update Packing.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
     return Playbook(
         name="bgp_ebb_update_packing_playbook",
         description="Validate BGP++ UPDATE message packing efficiency",
@@ -2428,7 +2545,10 @@ def get_bgp_ebb_constant_attribute_storage_playbook(
     peergroup_ibgp_v4: str | None,
     ssh_password: str,
 ) -> Playbook:
-    """Build the deferred constant-attribute-storage playbook."""
+    """Build CICD-EBB-18: Storage Scale Attribute Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
     return Playbook(
         name="bgp_ebb_constant_attribute_storage_playbook",
         description="Test BGP++ constant attribute storage with varying unique combination counts",

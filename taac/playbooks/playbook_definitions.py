@@ -27795,10 +27795,8 @@ def create_fpf_gar_playbook(
 # that the peak stays inside the hardware table and the structure collapses
 # back afterwards.
 #
-# NOT in playbooks/routing/bgp_ebb_playbooks.py on purpose: a catalog
-# governance test pins that module's __all__ to exactly twenty names in order,
-# so an addition there forces editing the test. SC1-SC6 set the precedent of
-# living here instead.
+# Re-exported from playbooks/routing/bgp_ebb_playbooks.py for catalog ownership;
+# the implementation remains here with the other characteristic builders.
 
 # The device's own EcmpLevel2 (Routing) capacity on bag013.ash6, read from
 # `show hardware capacity`. Used as the raw-count ceiling so the periodic task
@@ -28043,7 +28041,9 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     cycles: int = 5,
     soak_duration_seconds: int = 300,
 ) -> Playbook:
-    """Build the SC9 bounded-ECMP-sets characteristic playbook.
+    """Build CICD-EBB-24: Bound ECMP.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
 
     Gates, and why each sits where it does:
 
