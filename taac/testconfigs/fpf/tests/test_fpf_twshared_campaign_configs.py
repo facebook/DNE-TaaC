@@ -173,20 +173,22 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             [c.a_end_interface for c in fpf_tc36_stsw_all_connections_down.CIRCUITS],
             ["eth1/41/5", "eth1/41/6", "eth1/41/7", "eth1/41/8"],
         )
-        nic_flap = next(
+        nic_down = next(
             step
             for step in _steps(fpf_tc37_nic_side_link_flap.TEST_CONFIG.playbooks[0])
-            if _step_params(step).get("custom_step_name") == "fpf_nic_mstreg_flap"
+            if _step_params(step).get("custom_step_name") == "fpf_nic_mstreg_paos"
         )
         self.assertEqual(
-            _step_params(nic_flap),
+            _step_params(nic_down),
             {
-                "custom_step_name": "fpf_nic_mstreg_flap",
+                "custom_step_name": "fpf_nic_mstreg_paos",
                 "host": SERVER,
                 "dev": 0,
                 "lane": 0,
-                "iterations": 5,
-                "interval_sec": 2.0,
+                "admin_up": False,
+                "state_timeout_sec": 30.0,
+                "state_poll_interval_sec": 1.0,
+                "verify_link_health": False,
             },
         )
 

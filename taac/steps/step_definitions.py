@@ -3935,29 +3935,96 @@ def create_fpf_gar_validate_step(
     )
 
 
+def create_fpf_nic_mstreg_paos_step(
+    host: str,
+    dev: int,
+    lane: int,
+    admin_up: bool,
+    state_timeout_sec: float = 30.0,
+    state_poll_interval_sec: float = 1.0,
+    verify_link_health: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Set one NIC PAOS admin state and fail unless readback reaches it."""
+    action = "UP" if admin_up else "DOWN"
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"NIC-side mstreg PAOS {action} on {host}: dev={dev} lane={lane}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_nic_mstreg_paos",
+                    "host": host,
+                    "dev": int(dev),
+                    "lane": int(lane),
+                    "admin_up": bool(admin_up),
+                    "state_timeout_sec": float(state_timeout_sec),
+                    "state_poll_interval_sec": float(state_poll_interval_sec),
+                    "verify_link_health": bool(verify_link_health),
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_nic_mstreg_verify_link_step(
+    host: str,
+    dev: int,
+    lane: int,
+    timeout_sec: float = 120.0,
+    poll_interval_sec: float = 2.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Require PAOS UP plus an Active mlxlink state with status opcode zero."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"Verify NIC link health on {host}: dev={dev} lane={lane}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_nic_mstreg_verify_link",
+                    "host": host,
+                    "dev": int(dev),
+                    "lane": int(lane),
+                    "timeout_sec": float(timeout_sec),
+                    "poll_interval_sec": float(poll_interval_sec),
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_nic_mstreg_flap_step(
     host: str,
     dev: int,
     lane: int,
-    iterations: int = 5,
-    interval_sec: float = 2.0,
+    duration_sec: float = 900.0,
+    down_time_sec: float = 2.0,
+    up_time_sec: float = 2.0,
+    state_timeout_sec: float = 30.0,
+    state_poll_interval_sec: float = 1.0,
+    final_cleanup_timeout_sec: float = 120.0,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Real NIC-side mstreg PAOS flap of a single beth lane on a GPU host.
+    """Deadline-bounded NIC-side mstreg PAOS flap of one GPU-host lane.
 
     Issues the same admin_status DOWN/UP sequence that
     ``scripts/pavanpatil/fpf_host_signal_test.py --flap-dev/--flap-lane`` runs
     against the GPU NIC. The handler computes the PCIe BDF deterministically
-    from ``dev`` + ``lane`` (no ethtool probe), then loops ``iterations`` times,
-    each round running
+    from ``dev`` + ``lane`` (no ethtool probe), then loops until the monotonic
+    ``duration_sec`` deadline, each round running
 
       DOWN: mstreg -d <BDF> --reg_name PAOS \\
               --set "admin_status=2,ase=1,fd=1" -i "local_port=1"
       UP:   mstreg -d <BDF> --reg_name PAOS \\
               --set "admin_status=1,ase=1,fd=1" -i "local_port=1"
 
-    with ``interval_sec`` between the DOWN and the UP (and after the UP before
-    the next round). This is a real link-down event on the NIC side (the GTSW
+    with ``down_time_sec`` after DOWN and ``up_time_sec`` after UP. Every state
+    transition is read back. A bounded ``finally`` cleanup always commands and
+    verifies UP, including on command failure or cancellation. This is a real
+    link-down event on the NIC side (the GTSW
     sees NDP go away on the peer port and withdraws the VF on that lane), so it
     is the genuine trigger for the tc37 NIC-side link-flap test rather than the
     thrift-admin placeholder previously used there.
@@ -3979,9 +4046,12 @@ def create_fpf_nic_mstreg_flap_step(
         host: GPU host (e.g. ``"rtptest1555.mwg2"``) to flap a beth lane on.
         dev: GPU device index (0..3). Maps to the PCIe DEV_BLOCK.
         lane: Lane within the GPU device (0..7). Maps to the PCIe function.
-        iterations: Number of DOWN/UP cycles (default 5).
-        interval_sec: Seconds between DOWN and UP, and between successive
-            cycles (default 2.0).
+        duration_sec: Wall-clock flap duration (default 900 seconds).
+        down_time_sec: Hold time after verified DOWN (default 2 seconds).
+        up_time_sec: Hold time after verified UP (default 2 seconds).
+        state_timeout_sec: Per-transition PAOS/oper readback timeout.
+        state_poll_interval_sec: PAOS readback poll interval.
+        final_cleanup_timeout_sec: Bound for the mandatory final UP cleanup.
         description: Custom step description.
     """
     return Step(
@@ -3989,7 +4059,8 @@ def create_fpf_nic_mstreg_flap_step(
         description=description
         or (
             f"NIC-side mstreg PAOS flap on {host}: dev={dev} lane={lane}, "
-            f"{iterations} iteration(s) every {interval_sec}s"
+            f"{duration_sec:g}s with {down_time_sec:g}s DOWN/"
+            f"{up_time_sec:g}s UP"
         ),
         step_params=Params(
             json_params=json.dumps(
@@ -3998,8 +4069,12 @@ def create_fpf_nic_mstreg_flap_step(
                     "host": host,
                     "dev": int(dev),
                     "lane": int(lane),
-                    "iterations": int(iterations),
-                    "interval_sec": float(interval_sec),
+                    "duration_sec": float(duration_sec),
+                    "down_time_sec": float(down_time_sec),
+                    "up_time_sec": float(up_time_sec),
+                    "state_timeout_sec": float(state_timeout_sec),
+                    "state_poll_interval_sec": float(state_poll_interval_sec),
+                    "final_cleanup_timeout_sec": float(final_cleanup_timeout_sec),
                 }
             )
         ),

@@ -38,6 +38,9 @@ from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
     LONGEVITY_SEC as TC37_LONGEVITY_SEC,
     TEST_CONFIG as TC37,
 )
+from taac.testconfigs.fpf.fpf_tc37b_nic_side_continuous_flap import (
+    TEST_CONFIG as TC37B,
+)
 from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
     NDP_CLEAR_CIRCUIT,
     NDP_CLEAR_DURATION_SEC,
@@ -50,6 +53,7 @@ from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
     GPU_HOSTS as TC54_GPU_HOSTS,
     TEST_CONFIG as TC54,
 )
+from taac.health_check.health_check.types import CheckName
 from taac.test_as_a_config.types import StepName
 
 
@@ -358,32 +362,41 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         self.assertEqual(TC37.playbooks[0].name, "fpf_tc37_nic_side_link_flap_disrupt")
         self.assertEqual(TC37.playbooks[1].name, "fpf_tc37_nic_side_link_flap_restore")
 
-    def test_nic_side_flap_over_impacted_beth(self):
-        steps = _steps(TC37.playbooks[0])
-        # tc37 now drives a REAL mstreg PAOS flap (no longer the thrift-admin
-        # placeholder). One ``fpf_nic_mstreg_flap`` step on host rtptest, dev=0
-        # / lane=0 with the configured iteration/interval
-        # defaults. The BDF is computed deterministically by the handler — the
-        # config only carries host/dev/lane.
-        flap_steps = [
-            s
-            for s in steps
-            if s.name == StepName.CUSTOM_STEP
-            and _params(s).get("custom_step_name") == "fpf_nic_mstreg_flap"
+    def test_single_flap_holds_down_until_explicit_restore(self):
+        disrupt_steps = _steps(TC37.playbooks[0])
+        restore_steps = _steps(TC37.playbooks[1])
+
+        down = [
+            _params(step)
+            for step in disrupt_steps
+            if _params(step).get("custom_step_name") == "fpf_nic_mstreg_paos"
         ]
-        self.assertEqual(len(flap_steps), 1)
-        p = _params(flap_steps[0])
-        self.assertEqual(p["dev"], 0)
-        self.assertEqual(p["lane"], 0)
-        self.assertEqual(p["host"], TC37_CIRCUITS[0].z_end_device)
-        # Defaults wired from the test config.
-        self.assertEqual(p["iterations"], 5)
-        self.assertEqual(p["interval_sec"], 2.0)
+        up = [
+            _params(step)
+            for step in restore_steps
+            if _params(step).get("custom_step_name") == "fpf_nic_mstreg_paos"
+        ]
+        self.assertEqual(len(down), 1)
+        self.assertEqual(len(up), 1)
+        target = TC37_CIRCUITS[0]
+        self.assertEqual(
+            (down[0]["host"], down[0]["dev"], down[0]["lane"]),
+            (target.z_end_device, target.z_end_gpu_id, target.lane),
+        )
+        self.assertFalse(down[0]["admin_up"])
+        self.assertTrue(up[0]["admin_up"])
+        self.assertTrue(up[0]["verify_link_health"])
+        self.assertFalse(
+            any(
+                _params(step).get("custom_step_name") == "fpf_nic_mstreg_flap"
+                for step in disrupt_steps
+            )
+        )
 
         # The old thrift-admin disable placeholder is GONE.
         admin_steps = [
             s
-            for s in steps
+            for s in disrupt_steps
             if s.name == StepName.CUSTOM_STEP
             and _params(s).get("custom_step_name") == "fpf_set_interface_admin"
         ]
@@ -393,7 +406,9 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         # longevity before the config's settle, so assert the config's settle
         # window is PRESENT among the longevity steps rather than by position.
         longevity_durations = [
-            _params(s)["duration"] for s in steps if s.name == StepName.LONGEVITY_STEP
+            _params(s)["duration"]
+            for s in disrupt_steps
+            if s.name == StepName.LONGEVITY_STEP
         ]
         self.assertIn(TC37_LONGEVITY_SEC, longevity_durations)
 
@@ -432,6 +447,81 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         # tc37 restore is plane_status + recovery (same as tc36).
         self.assertIn("fpf_hrt_plane_status_all_up", ids)
         self.assertIn("fpf_prod_hrt_prefix_recovery", ids)
+
+
+class TestTc37bNicSideContinuousFlap(unittest.TestCase):
+    def test_continuous_config_shape_and_scope(self):
+        config = TC37B
+        self.assertEqual(config.name, "fpf_tc37b_nic_side_continuous_flap")
+        self.assertEqual(
+            [playbook.name for playbook in config.playbooks],
+            [
+                "fpf_tc37b_nic_side_continuous_flap_disrupt",
+                "fpf_tc37b_nic_side_continuous_flap_longevity",
+            ],
+        )
+
+        disrupt_steps = _steps(config.playbooks[0])
+        flap = next(
+            _params(step)
+            for step in disrupt_steps
+            if _params(step).get("custom_step_name") == "fpf_nic_mstreg_flap"
+        )
+        target = TC37_CIRCUITS[0]
+        self.assertEqual(
+            (flap["host"], flap["dev"], flap["lane"]),
+            (target.z_end_device, target.z_end_gpu_id, target.lane),
+        )
+        self.assertEqual(flap["duration_sec"], 900)
+        self.assertEqual(flap["down_time_sec"], 2.0)
+        self.assertEqual(flap["up_time_sec"], 2.0)
+        self.assertEqual(flap["final_cleanup_timeout_sec"], 120.0)
+
+    def test_continuous_disrupt_is_diagnostic_and_longevity_is_strict(self):
+        config = TC37B
+        disrupt, longevity = config.playbooks
+        disrupt_names = {check.name for check in disrupt.postchecks or []}
+        self.assertIn(CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK, disrupt_names)
+        self.assertIn(CheckName.UNCLEAN_EXIT_CHECK, disrupt_names)
+        self.assertIn(CheckName.DEVICE_CORE_DUMPS_CHECK, disrupt_names)
+        self.assertNotIn(CheckName.FPF_HOST_SPRAY_CHECK, disrupt_names)
+        disrupt_bgp = [
+            check
+            for check in disrupt.postchecks or []
+            if check.name == CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK
+        ]
+        self.assertTrue(disrupt_bgp)
+        self.assertTrue(
+            all(
+                json.loads(check.check_params.json_params)["informational"]
+                for check in disrupt_bgp
+            )
+        )
+
+        longevity_ids = _check_ids(longevity)
+        self.assertFalse(
+            _V2_STABLE_REQUIRED_IDS - longevity_ids,
+            "continuous-flap longevity must carry the complete strict state",
+        )
+        longevity_steps = [_params(step) for step in _steps(longevity)]
+        names = [params.get("custom_step_name") for params in longevity_steps]
+        self.assertIn("fpf_ensure_traffic", names)
+        anchor = names.index("record_fpf_recovered_baseline_time")
+        self.assertEqual(longevity_steps[anchor + 1]["duration"], 120)
+        self.assertEqual(longevity_steps[anchor + 2]["duration"], 300)
+        self.assertIn("fpf_nic_mstreg_verify_link", names)
+        self.assertIn("fpf_up_port_baseline", names)
+
+        bgp_checks = [
+            check
+            for check in longevity.postchecks or []
+            if check.name == CheckName.FPF_BGP_RIB_CONVERGENCE_CHECK
+        ]
+        self.assertTrue(bgp_checks)
+        for check in bgp_checks:
+            params = json.loads(check.check_params.json_params)
+            self.assertEqual(params.get("stability_mode", "strict"), "strict")
+            self.assertTrue(params["require_final_exact"])
 
 
 class TestTc38PersistentNdpClear(unittest.TestCase):

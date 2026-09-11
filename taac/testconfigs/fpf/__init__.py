@@ -92,6 +92,9 @@ from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
 from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
     TEST_CONFIG as FPF_TC37_NIC_SIDE_LINK_FLAP,
 )
+from taac.testconfigs.fpf.fpf_tc37b_nic_side_continuous_flap import (
+    TEST_CONFIG as FPF_TC37B_NIC_SIDE_CONTINUOUS_FLAP,
+)
 from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
     TEST_CONFIG as FPF_TC38_PERSISTENT_NDP_CLEAR,
 )
@@ -184,6 +187,7 @@ __all__ = [
     "FPF_TC35_STSW_UNDRAIN_REINJECT",
     "FPF_TC36_STSW_ALL_CONNECTIONS_DOWN",
     "FPF_TC37_NIC_SIDE_LINK_FLAP",
+    "FPF_TC37B_NIC_SIDE_CONTINUOUS_FLAP",
     "FPF_TC38_PERSISTENT_NDP_CLEAR",
     "FPF_TC39_FSDB_KILL_5MIN",
     "FPF_TC40_CONT_INTERFACE_FLAPS",

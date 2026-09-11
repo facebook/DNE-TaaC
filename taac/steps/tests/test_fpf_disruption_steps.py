@@ -33,6 +33,7 @@ from taac.libs.fpf.fpf_collector_registry import (
     mark_drain_mutation,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
+from neteng.test_infra.dne.taac.steps import step_definitions as fpf_step_definitions
 from taac.steps.step_definitions import (
     create_fpf_conditional_undrain_step,
     create_fpf_drain_interface_step,
@@ -2546,13 +2547,22 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
 
 
 class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _paos_output(admin_status: int, oper_status: int) -> str:
+        return (
+            f"admin_status             | 0x{admin_status:08x}\n"
+            f"oper_status              | 0x{oper_status:08x}\n"
+        )
+
     def test_factory_shape(self):
         step = create_fpf_nic_mstreg_flap_step(
             host="rtptest1555.mwg2",
             dev=0,
             lane=0,
-            iterations=5,
-            interval_sec=2.0,
+            duration_sec=900,
+            down_time_sec=2.0,
+            up_time_sec=2.0,
+            final_cleanup_timeout_sec=120.0,
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         # Host-side step — no device_regexes (GPU hosts aren't FBOSS DUTs).
@@ -2562,8 +2572,33 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["host"], "rtptest1555.mwg2")
         self.assertEqual(p["dev"], 0)
         self.assertEqual(p["lane"], 0)
-        self.assertEqual(p["iterations"], 5)
-        self.assertEqual(p["interval_sec"], 2.0)
+        self.assertEqual(p["duration_sec"], 900)
+        self.assertEqual(p["down_time_sec"], 2.0)
+        self.assertEqual(p["up_time_sec"], 2.0)
+        self.assertEqual(p["final_cleanup_timeout_sec"], 120.0)
+
+    def test_single_paos_factory_shape(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_nic_mstreg_paos_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        step = factory(
+            host="twshared1352.03.mwg2",
+            dev=0,
+            lane=0,
+            admin_up=False,
+            verify_link_health=False,
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_nic_mstreg_paos")
+        self.assertEqual(params["host"], "twshared1352.03.mwg2")
+        self.assertEqual(params["dev"], 0)
+        self.assertEqual(params["lane"], 0)
+        self.assertFalse(params["admin_up"])
+        self.assertFalse(params["verify_link_health"])
 
     def test_bdf_mapping_for_several_dev_lane_pairs(self):
         # The handler computes the BDF deterministically (no ethtool) via
@@ -2583,96 +2618,201 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             _nic_mstreg_bdf(0, -1)  # lane < 0
 
-    async def test_handler_runs_mstreg_cycles_with_deterministic_bdf(self):
+    def test_paos_readback_parser_accepts_native_equals_format(self):
         cs = _make_custom_step()
-        # Capture every ssh-run call (host, cmd): alternating mstreg DOWN/UP.
-        # No ethtool probe — the BDF is computed deterministically.
-        calls: list[tuple[str, str]] = []
+        self.assertEqual(cs._nic_paos_field("admin_status=0x1", "admin_status"), 1)
+        self.assertEqual(cs._nic_paos_field("oper_status = 0x2", "oper_status"), 2)
+
+    async def test_single_handler_uses_noninteractive_command_and_readback(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+        calls: list[str] = []
 
         async def fake_ssh(host, cmd, timeout_sec=30):
-            calls.append((host, cmd))
-            return (0, "", "")
-
-        sleeps: list[float] = []
-
-        async def fake_sleep(d):
-            sleeps.append(d)
+            calls.append(cmd)
+            if "--get" in cmd:
+                return (0, self._paos_output(2, 2), "")
+            return (0, "set ok", "")
 
         cs._ssh_run_host = fake_ssh
+        await handler(
+            {
+                "host": "twshared1352.03.mwg2",
+                "dev": 0,
+                "lane": 0,
+                "admin_up": False,
+                "state_timeout_sec": 0.0,
+                "state_poll_interval_sec": 0.0,
+                "verify_link_health": False,
+            }
+        )
 
-        with patch("asyncio.sleep", side_effect=fake_sleep):
+        self.assertEqual(
+            calls[0],
+            "mstreg --yes -d 0000:03:00.0 --reg_name PAOS "
+            '--set "admin_status=2,ase=1,fd=1" -i "local_port=1"',
+        )
+        self.assertEqual(
+            calls[1],
+            'mstreg --yes -d 0000:03:00.0 --reg_name PAOS --get -i "local_port=1"',
+        )
+
+    async def test_single_handler_nonzero_rc_is_hard_failure(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+        cs._ssh_run_host = AsyncMock(return_value=(7, "", "permission denied"))
+
+        with self.assertRaisesRegex(TestCaseFailure, "PAOS-DOWN.*rc=7"):
+            await handler(
+                {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "admin_up": False,
+                }
+            )
+
+    async def test_single_handler_rejects_failed_state_transition(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+
+        async def fake_ssh(host, cmd, timeout_sec=30):
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            return (0, "set ok", "")
+
+        cs._ssh_run_host = fake_ssh
+        with self.assertRaisesRegex(TestCaseFailure, "did not reach DOWN"):
+            await handler(
+                {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "admin_up": False,
+                    "state_timeout_sec": 0.0,
+                    "state_poll_interval_sec": 0.0,
+                }
+            )
+
+    async def test_continuous_handler_is_deadline_bounded_and_finishes_up(self):
+        cs = _make_custom_step()
+        transitions: list[tuple[bool, bool]] = []
+
+        async def fake_transition(*, admin_up, require_link_health, **kwargs):
+            transitions.append((admin_up, require_link_health))
+
+        cs._set_and_verify_nic_paos = fake_transition
+        cs._ssh_run_host = AsyncMock(return_value=(0, "", ""))
+        # A zero-second deadline still completes one full DOWN/UP cycle before
+        # checking the wall clock, then performs the unconditional final-UP
+        # cleanup. Avoid mocking time.monotonic globally because asyncio's own
+        # bounded-cleanup timer uses the same clock.
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
             await cs.fpf_nic_mstreg_flap(
                 {
                     "host": "rtptest1555.mwg2",
                     "dev": 0,
-                    "lane": 1,
-                    "iterations": 3,
-                    "interval_sec": 2.0,
+                    "lane": 0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 2.0,
+                    "up_time_sec": 2.0,
+                    "final_cleanup_timeout_sec": 120.0,
                 }
             )
-
-        # No ethtool: 6 mstreg (3 DOWN + 3 UP) = 6 total ssh calls.
-        self.assertEqual(len(calls), 6)
-        self.assertFalse(any("ethtool" in cmd for _, cmd in calls))
-
-        # dev=0 lane=1 -> BDF 0000:03:00.1; calls alternate DOWN then UP.
-        expected_bdf = "0000:03:00.1"
-        expected_down = (
-            f"mstreg -d {expected_bdf} --reg_name PAOS "
-            f'--set "admin_status=2,ase=1,fd=1" -i "local_port=1"'
+        self.assertEqual(
+            transitions,
+            [(False, False), (True, False), (True, True)],
         )
-        expected_up = (
-            f"mstreg -d {expected_bdf} --reg_name PAOS "
-            f'--set "admin_status=1,ase=1,fd=1" -i "local_port=1"'
-        )
-        self.assertEqual(calls[0], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[1], ("rtptest1555.mwg2", expected_up))
-        self.assertEqual(calls[2], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[3], ("rtptest1555.mwg2", expected_up))
-        self.assertEqual(calls[4], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[5], ("rtptest1555.mwg2", expected_up))
+        self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0] * 2)
 
-        # One sleep after every DOWN and after every UP -> 6 sleeps of 2.0s.
-        self.assertEqual(sleeps, [2.0] * 6)
-
-    async def test_handler_uses_bdf_for_dev2_lane7(self):
+    async def test_continuous_handler_restores_up_after_cancellation(self):
         cs = _make_custom_step()
-        seen_cmds = []
+        transitions: list[tuple[bool, bool]] = []
+
+        async def fake_transition(*, admin_up, require_link_health, **kwargs):
+            transitions.append((admin_up, require_link_health))
+
+        cs._set_and_verify_nic_paos = fake_transition
+        cs._ssh_run_host = AsyncMock(return_value=(0, "", ""))
+        with (
+            patch("time.monotonic", return_value=0.0),
+            patch("asyncio.sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await cs.fpf_nic_mstreg_flap(
+                    {
+                        "host": "twshared1352.03.mwg2",
+                        "dev": 0,
+                        "lane": 0,
+                        "duration_sec": 900.0,
+                        "down_time_sec": 2.0,
+                        "up_time_sec": 2.0,
+                        "final_cleanup_timeout_sec": 120.0,
+                    }
+                )
+        self.assertEqual(transitions, [(False, False), (True, True)])
+
+    async def test_link_verifier_requires_active_and_status_opcode_zero(self):
+        cs = _make_custom_step()
+        calls: list[str] = []
 
         async def fake_ssh(host, cmd, timeout_sec=30):
-            seen_cmds.append(cmd)
-            return (0, "", "")
+            calls.append(cmd)
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            if cmd.startswith("mlxlink"):
+                return (0, "State : Active\nStatus Opcode : 0\n", "")
+            return (0, "set ok", "")
 
         cs._ssh_run_host = fake_ssh
-        with patch("asyncio.sleep", new=AsyncMock()):
-            await cs.fpf_nic_mstreg_flap(
+        await cs.fpf_nic_mstreg_verify_link(
+            {
+                "host": "twshared1352.03.mwg2",
+                "dev": 0,
+                "lane": 0,
+                "timeout_sec": 0.0,
+                "poll_interval_sec": 0.0,
+            }
+        )
+        self.assertIn("mlxlink -d 0000:03:00.0 -m", calls)
+
+    async def test_link_verifier_rejects_nonzero_status_opcode(self):
+        cs = _make_custom_step()
+
+        async def fake_ssh(host, cmd, timeout_sec=30):
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            if cmd.startswith("mlxlink"):
+                return (0, "State : Active\nStatus Opcode : 57\n", "")
+            return (0, "set ok", "")
+
+        cs._ssh_run_host = fake_ssh
+        with self.assertRaisesRegex(TestCaseFailure, "opcode_zero=False"):
+            await cs.fpf_nic_mstreg_verify_link(
                 {
-                    "host": "rtptest1555.mwg2",
-                    "dev": 2,
-                    "lane": 7,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "timeout_sec": 0.0,
+                    "poll_interval_sec": 0.0,
                 }
             )
-        # dev=2 lane=7 -> BDF 0010:03:00.7; every mstreg cmd carries it.
-        self.assertTrue(seen_cmds)
-        self.assertTrue(all("-d 0010:03:00.7 " in cmd for cmd in seen_cmds))
 
     async def test_handler_raises_on_out_of_range_dev_or_lane(self):
         cs = _make_custom_step()
 
-        async def fake_ssh(host, cmd, timeout_sec=30):
-            return (0, "", "")
-
-        cs._ssh_run_host = fake_ssh
         with self.assertRaises(ValueError):
             await cs.fpf_nic_mstreg_flap(
                 {
                     "host": "rtptest1555.mwg2",
                     "dev": 4,
                     "lane": 0,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 0.0,
+                    "up_time_sec": 0.0,
                 }
             )
         with self.assertRaises(ValueError):
@@ -2681,8 +2821,9 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
                     "host": "rtptest1555.mwg2",
                     "dev": 0,
                     "lane": 8,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 0.0,
+                    "up_time_sec": 0.0,
                 }
             )
 
