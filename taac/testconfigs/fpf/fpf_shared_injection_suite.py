@@ -1657,6 +1657,21 @@ def _tc55(*, spray, skip_ssh) -> list:
     return [disrupt_playbook, longevity_playbook]
 
 
+def _tc54_tc35_stsw_drain_undrain_pair() -> list:
+    """Return the fail-closed STSW drain then strict undrain lifecycle.
+
+    Keep these playbooks adjacent in the umbrella suite.  TC54 owns the drain,
+    drain-community reinjection, drained-plane checks, and its safety cleanup;
+    TC35 establishes a known drained state again before performing the live-
+    community undrain.  That makes both an ordered campaign pair and safe,
+    independently regex-selectable cases.
+    """
+    return [
+        *create_fpf_tc54_test_config().playbooks,
+        *create_fpf_tc35_test_config().playbooks,
+    ]
+
+
 def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
     skip_ib = skip_ib_traffic()
@@ -1717,9 +1732,10 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
         skip_ssh=skip_ssh,
     )
     # STSW lifecycle tests are authored once in their standalone factories and
-    # reused here so regex runs cannot drift onto stale playbook semantics.
-    playbooks += list(create_fpf_tc54_test_config().playbooks)
-    playbooks += list(create_fpf_tc35_test_config().playbooks)
+    # reused as an explicit ordered drain -> undrain pair. Both cases remain
+    # independently safe when selected by regex: TC54 has an undrain cleanup,
+    # and TC35 first establishes a fail-closed drained baseline.
+    playbooks += _tc54_tc35_stsw_drain_undrain_pair()
     playbooks += list(create_fpf_tc36_test_config().playbooks)
     # Coldboot.
     playbooks += _tc27(spray=spray, skip_ssh=skip_ssh)

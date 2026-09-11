@@ -107,6 +107,73 @@ class TestCampaignExecutionContracts(unittest.TestCase):
         self.assertIn("fpf_tc55_gtsw_device_reboot_disrupt", names)
         self.assertIn("fpf_tc55_gtsw_device_reboot_recovery_undrain", names)
 
+    def test_shared_suite_keeps_tc54_tc35_as_an_ordered_drain_undrain_pair(
+        self,
+    ) -> None:
+        pair = fpf_shared_injection_suite._tc54_tc35_stsw_drain_undrain_pair()
+        pair_names = [playbook.name for playbook in pair]
+        self.assertEqual(
+            pair_names,
+            [
+                "fpf_tc54_stsw_device_drain_disrupt",
+                "fpf_tc35_stsw_undrain_reinject_longevity",
+            ],
+        )
+
+        config_names = [
+            playbook.name
+            for playbook in (
+                fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config().playbooks
+            )
+        ]
+        first = config_names.index(pair_names[0])
+        self.assertEqual(config_names[first : first + len(pair_names)], pair_names)
+
+        drain_steps = [
+            _step_params(step) for stage in pair[0].stages for step in stage.steps
+        ]
+        drain_mutation = next(
+            step
+            for step in drain_steps
+            if step.get("custom_step_name") == "fpf_drain_interface"
+        )
+        self.assertTrue(drain_mutation["is_drain"])
+        drain_injections = [
+            step for step in drain_steps if "prefix_base" in step and "count" in step
+        ]
+        self.assertEqual(len(drain_injections), 2)
+        self.assertTrue(
+            all(
+                step["count"] == fpf_shared_injection_suite.PREFIX_COUNT
+                and step["extra_communities"] == ["65446:10"]
+                for step in drain_injections
+            )
+        )
+        self.assertTrue(any(step.get("duration", 0) >= 300 for step in drain_steps))
+        drain_checks = {check.check_id for check in pair[0].postchecks or []}
+        self.assertIn("fpf_host_spray", drain_checks)
+        self.assertIn("fpf_hrt_plane_status_drain", drain_checks)
+
+        recovery_steps = [
+            _step_params(step) for stage in pair[1].stages for step in stage.steps
+        ]
+        drain_actions = [
+            step["is_drain"]
+            for step in recovery_steps
+            if step.get("custom_step_name") == "fpf_drain_interface"
+        ]
+        self.assertEqual(drain_actions, [True, False])
+        self.assertTrue(
+            any(
+                step.get("custom_step_name") == "fpf_ensure_traffic"
+                for step in recovery_steps
+            )
+        )
+        self.assertGreaterEqual(
+            sum(step.get("duration", 0) >= 300 for step in recovery_steps),
+            3,
+        )
+
 
 def _assert_restart_contract(test, playbook) -> None:
     bgp_checks = [
