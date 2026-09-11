@@ -8,6 +8,7 @@ from importlib import resources
 from pydantic import BaseModel, Field
 
 _PROMPT_RESOURCE_NAME: str = "investigation_prompt.xml"
+_LIFECYCLE_PROMPT_RESOURCE_NAME: str = "lifecycle_investigation_prompt.xml"
 
 _BLOCK_HEADER: str = "===== INVESTIGATION REPORT ====="
 _NO_REPORT: str = "The investigation agent produced no structured report."
@@ -20,7 +21,9 @@ _FIELD_INDENT: str = "     "
 class Reproduce(BaseModel):
     """A recipe for a human or a later job. The harness never runs it."""
 
-    host: str = Field(description="The reserved device the command runs on.")
+    host: str = Field(
+        description="The lab device or infrastructure endpoint the command runs on."
+    )
     command: str = Field(
         description="The command, exactly as an engineer would paste it."
     )
@@ -83,9 +86,8 @@ class InvestigationReport(BaseModel):
     )
     appendix: str = Field(
         description=(
-            "The full narrative: the reasoning, the axis comparison, the "
-            "control groups, and the timestamped sequence over the "
-            "disruptive-operation window."
+            "The full narrative: the reasoning, relevant comparisons and "
+            "control groups, and the timestamped sequence around the failure."
         )
     )
 
@@ -99,6 +101,15 @@ def investigation_task() -> str:
     """
     package = __name__.rpartition(".")[0]
     return resources.files(package).joinpath(_PROMPT_RESOURCE_NAME).read_text()
+
+
+@functools.cache
+def lifecycle_investigation_task() -> str:
+    """The task for setup and teardown failures, loaded from the package."""
+    package = __name__.rpartition(".")[0]
+    return (
+        resources.files(package).joinpath(_LIFECYCLE_PROMPT_RESOURCE_NAME).read_text()
+    )
 
 
 def render_report_lines(report: InvestigationReport | None) -> list[str]:

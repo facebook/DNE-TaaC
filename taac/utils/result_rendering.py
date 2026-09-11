@@ -247,6 +247,46 @@ def playbook_table(playbooks: t.Sequence[trr_types.PlaybookResult]) -> str:
     return "\n".join(lines)
 
 
+def investigation_artifact_lines(
+    artifacts: t.Sequence[trr_types.InvestigationArtifact],
+) -> t.List[str]:
+    """Render durable investigation transcripts with their execution scope."""
+    lines: t.List[str] = []
+    for artifact in artifacts:
+        scope = (
+            "Phase unknown"
+            if artifact.phase == trr_types.InvestigationPhase.UNKNOWN
+            else artifact.phase.name.replace("_", " ").title()
+        )
+        identity = " | ".join(
+            value for value in (artifact.playbook_name, artifact.dut) if value
+        )
+        if identity:
+            scope = f"{scope} | {identity}"
+        lines.append(f"  {scope}")
+        if artifact.headline:
+            lines.append(f"    {artifact.headline}")
+        lines.append(f"    Transcript: {artifact.transcript_url}")
+    return lines
+
+
+def investigation_artifacts_section(
+    artifacts: t.Sequence[trr_types.InvestigationArtifact],
+) -> str:
+    """Render the compact investigation block shown beside failure details."""
+    if not artifacts:
+        return ""
+    return "\n".join(
+        [
+            "=" * 100,
+            f"{'INVESTIGATION SUMMARY':^100}",
+            "=" * 100,
+            "",
+            *investigation_artifact_lines(artifacts),
+        ]
+    )
+
+
 def _failing_check_lines(
     playbooks: t.Sequence[trr_types.PlaybookResult],
 ) -> t.List[str]:
@@ -291,6 +331,11 @@ def format_run_report(run_result: trr_types.RunResult) -> str:
         lines.append(f"Error: {_collapse_and_truncate(run_result.error_message)}")
     if run_result.sections:
         lines.extend(["", "EXECUTION SECTIONS", section_table(run_result.sections)])
+    investigation_summary = investigation_artifacts_section(
+        run_result.investigation_artifacts
+    )
+    if investigation_summary:
+        lines.extend(["", investigation_summary])
     if run_result.playbooks:
         lines.extend(["", "PLAYBOOKS", playbook_table(run_result.playbooks)])
     for playbook in run_result.playbooks:

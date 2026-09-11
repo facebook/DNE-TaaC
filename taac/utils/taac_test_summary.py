@@ -16,6 +16,7 @@ from taac.utils.investigation_log_marker import (
 )
 from taac.utils.result_rendering import (
     failure_detail_lines,
+    investigation_artifacts_section,
     section_failed,
     section_row_lines,
     section_status_string,
@@ -250,7 +251,10 @@ class TaacTestSummary:
     ) -> t.List[str]:
         return failure_detail_lines([_to_thrift(s) for s in failed_sections])
 
-    async def async_generate_summary(self) -> str:
+    async def async_generate_summary(
+        self,
+        investigation_artifacts: t.Sequence[trr_types.InvestigationArtifact] = (),
+    ) -> str:
         """
         Generate a summary table of all tracked sections and upload per-section logs.
         Returns the formatted summary text.
@@ -274,22 +278,32 @@ class TaacTestSummary:
                 and not section.everpaste_url
             ):
                 await self.async_upload_section_logs(section)
-        return self.render_summary()
+        return self.render_summary(investigation_artifacts)
 
-    def render_summary(self) -> str:
-        """Render the section table without uploading anything."""
-        return section_table(self.build_section_results())
+    def render_summary(
+        self,
+        investigation_artifacts: t.Sequence[trr_types.InvestigationArtifact] = (),
+    ) -> str:
+        """Render execution sections followed by any investigation artifacts."""
+        summary = section_table(self.build_section_results())
+        investigation_summary = investigation_artifacts_section(investigation_artifacts)
+        if not investigation_summary:
+            return summary
+        return f"{summary}\n{investigation_summary}"
 
     def build_section_results(self) -> t.List[trr_types.SectionResult]:
         """Project the tracked sections into their serializable thrift form."""
         return [_to_thrift(section) for section in self.sections]
 
-    async def async_upload_and_log_summary(self) -> str:
+    async def async_upload_and_log_summary(
+        self,
+        investigation_artifacts: t.Sequence[trr_types.InvestigationArtifact] = (),
+    ) -> str:
         """
         Generate the summary, upload full logs to everpaste, log everything,
         and return the summary everpaste URL.
         """
-        summary_text = await self.async_generate_summary()
+        summary_text = await self.async_generate_summary(investigation_artifacts)
 
         all_logs = self.get_all_logs()
         full_logs_url = ""

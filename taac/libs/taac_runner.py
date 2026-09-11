@@ -3,12 +3,14 @@
 # pyre-unsafe
 import asyncio
 import copy
+import ipaddress
 import json
 import logging
 import os
 import re
 import sys
 import time
+import traceback
 import typing as t
 import uuid
 from dataclasses import dataclass
@@ -224,6 +226,28 @@ DEFAULT_POST_SNAPSHOT_CHECKPOINT_ID: str = "test_case_end"
 # tool-calling loop, because a timeout in the synthesis and report passes
 # discards an investigation that already gathered its evidence.
 INVESTIGATION_TIMEOUT_SEC: float = 19000.0
+# TicTAAC's child process has a 55-minute deadline. Lifecycle investigations
+# share that budget with setup and teardown, so keep their bound substantially
+# smaller than the deep per-test-case investigation budget above.
+LIFECYCLE_INVESTIGATION_TIMEOUT_SEC: float = 1200.0
+
+_IXIA_HOST_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"\bixia[0-9][0-9A-Za-z.-]*\b", re.IGNORECASE
+)
+_IPV4_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])"
+)
+
+
+def _chassis_hosts_in_message(message: str) -> t.Set[str]:
+    """Extract complete IXIA hostnames and valid IPv4 addresses."""
+    hosts = {host.casefold() for host in _IXIA_HOST_TOKEN_RE.findall(message)}
+    for candidate in _IPV4_TOKEN_RE.findall(message):
+        try:
+            hosts.add(str(ipaddress.ip_address(candidate)))
+        except ValueError:
+            pass
+    return hosts
 
 
 class HostLog(t.NamedTuple):
@@ -375,7 +399,7 @@ class TaacRunner:
         npi_status: str = "",
         # Trigger Confucius triage agent on failures
         call_triage_minion: bool = False,
-        # Run the in-process investigation agent on each failed test case
+        # Run the in-process investigation agent on lifecycle and test-case errors
         call_investigation_agent: bool = False,
         # Continue executing playbook stages even if prechecks fail (dev only)
         continue_on_precheck_failure: bool = False,
@@ -425,7 +449,7 @@ class TaacRunner:
         self._npi_iteration_outcomes: t.List[t.Tuple[str, t.Optional[str]]] = []
         # Trigger Confucius triage agent on failures
         self.call_triage_minion = call_triage_minion
-        # Run the in-process investigation agent on each failed test case
+        # Run the in-process investigation agent on lifecycle and test-case errors
         self.call_investigation_agent = call_investigation_agent
         self.continue_on_precheck_failure = continue_on_precheck_failure
         self.skip_prechecks = skip_prechecks
@@ -493,10 +517,12 @@ class TaacRunner:
         # This allows tasks to share information (e.g., backup filenames) across execution
         self.shared_task_data: t.Dict[t.Any, t.Any] = {}
         self.test_summary = TaacTestSummary(self.logger)
-        # The investigation of the test case currently running, if it failed and
-        # was investigated. Reset per test case: one runner spans the whole test
-        # config, so anything kept here longer rides along on later test cases.
+        # The latest investigation, retained for the legacy Netcastle test-case
+        # link integration. Reset per test case so a prior result is not reused.
         self.investigation_link: t.Optional[InvestigationLink] = None
+        # Durable records for every investigation in this TestConfig lifecycle.
+        # Unlike `investigation_link`, this is not reset between test cases.
+        self.investigation_artifacts: t.List[trr_types.InvestigationArtifact] = []
         self._current_playbook_section: t.Optional[SectionResult] = None
         self._last_completed_playbook_section: t.Optional[SectionResult] = None
         self._baseline_lifecycle = BaselineLifecycle(
@@ -629,15 +655,22 @@ class TaacRunner:
             }
 
     async def async_test_setUp(self) -> None:
+        setup_start_time = int(time.time())
         try:
             await self._async_run_test_setup()
-        except BaseException:
+        except BaseException as error:
             # The setup slice is the only record of what the chassis was
             # asked to do before it refused, and a setup that raises may
             # never reach `async_test_tearDown`. Publish it here so the
             # evidence survives; the seen-counter makes a later teardown
             # publish a no-op rather than a duplicate upload.
             await self._async_publish_ixia_api_trace(final=True)
+            if isinstance(error, Exception):
+                await self._async_run_lifecycle_investigation_if_enabled(
+                    phase=trr_types.InvestigationPhase.TEST_CONFIG_SETUP,
+                    error=error,
+                    start_time=setup_start_time,
+                )
             raise
 
     async def _async_run_test_setup(self) -> None:
@@ -2886,39 +2919,100 @@ class TaacRunner:
         if not self.call_investigation_agent or TAAC_OSS:
             return None
         try:
-            # Lazy: the agent pulls the whole confucius dependency tree.
-            from taac.agent.agent import run_agent
             from taac.libs.investigation_report import (
                 investigation_task,
             )
 
-            with _console_visible(self.logger):
-                self._log_investigation_event("  Running TAAC investigation agent...")
-                report, transcript = await run_agent(
-                    task=investigation_task(),
-                    prompt=self._build_investigation_prompt(
-                        playbook,
-                        test_device,
-                        test_case_results,
-                        test_case_start_time,
-                        collected_logs,
-                    ),
-                    tools=self._build_investigation_tools(
-                        test_case_start_time, ixia_config_snapshot
-                    ),
-                    output_format=InvestigationReport,
-                    on_event=self._log_investigation_event,
-                    timeout_sec=INVESTIGATION_TIMEOUT_SEC,
-                )
-                self._log_investigation_report(report)
-            transcript_url = await async_everpaste_str(transcript.text)
-            self._record_investigation_link(
-                playbook, test_device, transcript_url, report
+            return await self._async_run_investigation(
+                task=investigation_task(),
+                prompt=self._build_investigation_prompt(
+                    playbook,
+                    test_device,
+                    test_case_results,
+                    test_case_start_time,
+                    collected_logs,
+                ),
+                tools=self._build_investigation_tools(
+                    test_case_start_time, ixia_config_snapshot
+                ),
+                phase=trr_types.InvestigationPhase.TEST_CASE,
+                label=f"TAAC investigation: {playbook.name} | {test_device.name}",
+                timeout_sec=INVESTIGATION_TIMEOUT_SEC,
+                playbook_name=playbook.name,
+                dut=test_device.name,
             )
-            return transcript_url
         except Exception as e:
             self.logger.warning(f"Investigation agent failed (non-fatal): {e}")
             return None
+
+    async def _async_run_lifecycle_investigation_if_enabled(
+        self,
+        phase: trr_types.InvestigationPhase,
+        error: BaseException,
+        start_time: int,
+    ) -> t.Optional[str]:
+        """Investigate a setup or teardown error without masking that error."""
+        if not self.call_investigation_agent or TAAC_OSS:
+            return None
+        try:
+            from taac.libs.investigation_report import (
+                lifecycle_investigation_task,
+            )
+
+            phase_label = phase.name.replace("_", " ").lower()
+            return await self._async_run_investigation(
+                task=lifecycle_investigation_task(),
+                prompt=self._build_lifecycle_investigation_prompt(
+                    phase, error, start_time
+                ),
+                tools=self._build_lifecycle_investigation_tools(start_time, error),
+                phase=phase,
+                label=f"TAAC investigation: {phase_label} | {self.test_config.name}",
+                timeout_sec=LIFECYCLE_INVESTIGATION_TIMEOUT_SEC,
+            )
+        except Exception as investigation_error:
+            self.logger.warning(
+                f"Investigation agent failed (non-fatal): {investigation_error}"
+            )
+            return None
+
+    async def _async_run_investigation(
+        self,
+        *,
+        task: str,
+        prompt: str,
+        tools: t.List["Function[str]"],
+        phase: trr_types.InvestigationPhase,
+        label: str,
+        timeout_sec: float,
+        playbook_name: t.Optional[str] = None,
+        dut: t.Optional[str] = None,
+    ) -> t.Optional[str]:
+        """Run the shared agent loop and retain its durable transcript."""
+        # Lazy: the agent pulls the whole confucius dependency tree.
+        from taac.agent.agent import run_agent
+
+        with _console_visible(self.logger):
+            self._log_investigation_event(f"  Running {label}...")
+            report, transcript = await run_agent(
+                task=task,
+                prompt=prompt,
+                tools=tools,
+                output_format=InvestigationReport,
+                on_event=self._log_investigation_event,
+                timeout_sec=timeout_sec,
+            )
+            self._log_investigation_report(report)
+        transcript_url = await async_everpaste_str(transcript.text)
+        self._record_investigation_artifact(
+            phase=phase,
+            label=label,
+            transcript_url=transcript_url,
+            report=report,
+            playbook_name=playbook_name,
+            dut=dut,
+        )
+        return transcript_url
 
     def _log_investigation_event(self, event: str) -> None:
         """Tag the agent's live events so the log-capture handler can exclude them.
@@ -2977,6 +3071,99 @@ class TaacRunner:
         ]
         return "\n\n".join(f"## {title}\n{body}" for title, body in sections if body)
 
+    def _build_lifecycle_investigation_prompt(
+        self,
+        phase: trr_types.InvestigationPhase,
+        error: BaseException,
+        start_time: int,
+    ) -> str:
+        """Compose setup/teardown evidence without assuming a test case ran."""
+        sections = [
+            (
+                "Failure identity",
+                self._render_lifecycle_investigation_identity(phase),
+            ),
+            (
+                "Exception chain",
+                "".join(traceback.format_exception(error)).rstrip(),
+            ),
+            ("Test execution summary", self.test_summary.render_summary()),
+            ("Lifecycle state", self._render_lifecycle_state()),
+            (
+                "Timing window",
+                f"- Phase start (unix): {start_time}\n"
+                f"- Failure observed (unix): {int(time.time())}\n"
+                "Scope time-ranged diagnostics to this window.",
+            ),
+            (
+                "Pre-collected evidence",
+                _render_host_log_evidence((), self._failed_section_names()),
+            ),
+            (
+                "Full test execution log (all sections, in order)",
+                self.test_summary.get_all_logs(),
+            ),
+        ]
+        return "\n\n".join(f"## {title}\n{body}" for title, body in sections if body)
+
+    def _render_lifecycle_investigation_identity(
+        self, phase: trr_types.InvestigationPhase
+    ) -> str:
+        lines = [
+            f"- Test config: {self.test_config.name}",
+            f"- Failure phase: {phase.name}",
+            f"- Configured DUTs: {', '.join(self.duts) or '(none)'}",
+        ]
+        sandcastle_id = os.environ.get("SANDCASTLE_INSTANCE_ID")
+        if sandcastle_id:
+            lines.append(f"- Sandcastle instance: {sandcastle_id}")
+        netcastle_run_id = os.environ.get("NETCASTLE_RUN_ID")
+        if netcastle_run_id:
+            lines.append(f"- Netcastle run: {netcastle_run_id}")
+        topology = self._available_topology()
+        if topology is None:
+            lines.append("- Discovered topology: unavailable")
+        else:
+            lines.append("- Discovered devices:")
+            for device in topology.devices:
+                lines.append(f"    - {device.name} (role={device.attributes.role})")
+        return "\n".join(lines)
+
+    def _render_lifecycle_state(self) -> str:
+        orchestrator = self.test_setup_orchestrator
+        selected_candidate = self.selected_ixia_candidate or getattr(
+            orchestrator, "selected_ixia_candidate", None
+        )
+        candidate_lines = [
+            f"    - {candidate.name}: api_server="
+            f"{candidate.api_server_ip or 'auto-discover'}"
+            for candidate in getattr(orchestrator, "ixia_candidates_to_try", ())
+        ]
+        traffic_generator = getattr(orchestrator, "traffic_generator", None)
+        partial_ixia = (
+            self.ixia
+            or getattr(orchestrator, "ixia", None)
+            or getattr(traffic_generator, "ixia", None)
+        )
+        lines = [
+            f"- Topology discovered: {self._available_topology() is not None}",
+            "- IXIA candidates:",
+            *(candidate_lines or ["    - (none)"]),
+            "- Selected IXIA candidate: "
+            + (selected_candidate.name if selected_candidate is not None else "none"),
+            f"- Traffic-generator wrapper constructed: {traffic_generator is not None}",
+            f"- IXIA session object established: {partial_ixia is not None}",
+        ]
+        if self._published_ixia_trace_slices:
+            lines.append("- Published IXIA REST traces:")
+            lines.extend(
+                f"    - {trace_slice.phase}: {trace_slice.location}"
+                for trace_slice in self._published_ixia_trace_slices
+            )
+        else:
+            lines.append("- Published IXIA REST traces: none")
+        return "\n".join(lines)
+
     def _render_investigation_identity(
         self,
         playbook: taac_types.Playbook,
@@ -3009,6 +3196,7 @@ class TaacRunner:
         self,
         test_case_start_time: int,
         ixia_config_snapshot: t.Optional[str],
+        allow_missing_topology: bool = False,
     ) -> t.List["Function[str]"]:
         """The agent's tool set, as closures over this runner's live state.
 
@@ -3016,7 +3204,10 @@ class TaacRunner:
         and JSON schema from its ``__name__``/``__doc__``/signature, so the
         runner must stay captured by closure and never appear as a parameter.
         """
-        topology = self._reserved_topology()
+        topology = self._available_topology()
+        if topology is None and not allow_missing_topology:
+            raise RuntimeError("topology has not been discovered yet")
+        tool_topology = t.cast(TestTopology, topology)
 
         async def run_command(hostname: str, command: str) -> str:
             """Run any shell command on a reserved lab device and return its output.
@@ -3034,14 +3225,14 @@ class TaacRunner:
             SSH call times out, so a command that follows a stream (`tail -f`,
             `journalctl -f`) comes back with nothing.
             """
-            _require_known_host(topology, hostname)
+            _require_known_host(tool_topology, hostname)
             driver = await async_get_device_driver(hostname)
             output = await driver.async_run_cmd_on_shell(command)
             return output
 
         async def list_coredumps(hostname: str) -> str:
-            """List core dumps generated on a device since this test case started."""
-            _require_known_host(topology, hostname)
+            """List core dumps generated on a device since this phase started."""
+            _require_known_host(tool_topology, hostname)
             driver = await async_get_device_driver(hostname)
             core_dumps = await driver.async_check_for_core_dump(
                 float(test_case_start_time)
@@ -3078,11 +3269,11 @@ class TaacRunner:
                 source: "auto" (default; swagent + every NPU on mNPU), "sw_agent"
                     (:5909 only), or "hw_agent" (per-NPU hwagent ports).
             """
-            _require_known_host(topology, hostname)
+            _require_known_host(tool_topology, hostname)
             return await async_query_counters(hostname, regex, source)
 
         async def get_ixia_config() -> str:
-            """Return the traffic generator's configuration for this test case.
+            """Return the available traffic-generator configuration snapshot.
 
             The IXIA is half the test, and the configuration the test gave it is a
             first-class suspect: a port's PFC priority-to-queue map, a flow's
@@ -3103,7 +3294,7 @@ class TaacRunner:
             attributing the failure to the device.
             """
             if ixia_config_snapshot is None:
-                return "(no traffic generator configured for this test case)"
+                return "(no traffic-generator configuration snapshot is available)"
             return ixia_config_snapshot
 
         async def upload_to_everpaste(text: str) -> str:
@@ -3117,18 +3308,86 @@ class TaacRunner:
             """
             return await self._everpaste_evidence(text)
 
-        return [
-            run_command,
-            list_coredumps,
-            query_counters,
-            get_ixia_config,
-            upload_to_everpaste,
-        ]
+        tools: t.List["Function[str]"] = [get_ixia_config, upload_to_everpaste]
+        if topology is not None:
+            tools[0:0] = [run_command, list_coredumps, query_counters]
+        return tools
+
+    def _build_lifecycle_investigation_tools(
+        self, start_time: int, error: BaseException
+    ) -> t.List["Function[str]"]:
+        tools = self._build_investigation_tools(
+            start_time,
+            ixia_config_snapshot=None,
+            allow_missing_topology=True,
+        )
+        failure_message = str(error)
+        candidate_hosts = {
+            candidate.api_server_ip.casefold()
+            for candidate in getattr(
+                self.test_setup_orchestrator, "ixia_candidates_to_try", ()
+            )
+            if candidate.api_server_ip
+        }
+        failure_hosts = _chassis_hosts_in_message(failure_message)
+
+        async def inspect_ixia_chassis(chassis_hostname: str) -> str:
+            """Return the model and resource groups for an implicated IXIA chassis.
+
+            This is a read-only platform API query. The chassis must either be
+            explicitly configured as an IXIA candidate or occur as a complete
+            host token in the failure message. This prevents diagnostics from
+            escaping this run's scope. Resource-group state exposes the active
+            ports and speed mode needed to resolve a physical chassis port to
+            its logical port.
+            """
+            normalized_hostname = chassis_hostname.casefold()
+            if (
+                normalized_hostname not in candidate_hosts
+                and normalized_hostname not in failure_hosts
+            ):
+                raise ValueError(
+                    f"IXIA chassis {chassis_hostname!r} is not part of this failure"
+                )
+            from neteng.netcastle.utils.ixia_utils import (
+                async_get_ixia_model,
+                async_get_ixia_resource_groups,
+            )
+
+            model, resource_groups = await asyncio.gather(
+                async_get_ixia_model(chassis_hostname),
+                async_get_ixia_resource_groups(chassis_hostname),
+            )
+            return json.dumps(
+                {
+                    "chassis": chassis_hostname,
+                    "model": getattr(model, "name", None),
+                    "resource_groups": resource_groups,
+                },
+                indent=2,
+                default=str,
+            )
+
+        tools.append(inspect_ixia_chassis)
+        return tools
+
+    def _available_topology(self) -> t.Optional[TestTopology]:
+        topology = self.topology
+        if isinstance(topology, TestTopology):
+            return topology
+        orchestrator_topology = getattr(
+            self.test_setup_orchestrator, "test_topology", None
+        )
+        return (
+            orchestrator_topology
+            if isinstance(orchestrator_topology, TestTopology)
+            else None
+        )
 
     def _reserved_topology(self) -> TestTopology:
-        """``self.topology`` is only populated once orchestrator setup has run."""
-        topology = self.topology
-        if not isinstance(topology, TestTopology):
+        """Return available complete or partial topology, or raise if absent."""
+        topology = self._available_topology()
+        if topology is None:
             raise RuntimeError("topology has not been discovered yet")
         return topology
 
@@ -3251,14 +3510,44 @@ class TaacRunner:
         report: t.Optional[InvestigationReport],
     ) -> None:
         """Hold this test case's transcript for its own netcastle test result."""
+        label = f"TAAC investigation: {playbook.name} | {test_device.name}"
+        self._record_investigation_artifact(
+            phase=trr_types.InvestigationPhase.TEST_CASE,
+            label=label,
+            transcript_url=transcript_url,
+            report=report,
+            playbook_name=playbook.name,
+            dut=test_device.name,
+        )
+
+    def _record_investigation_artifact(
+        self,
+        *,
+        phase: trr_types.InvestigationPhase,
+        label: str,
+        transcript_url: str,
+        report: t.Optional[InvestigationReport],
+        playbook_name: t.Optional[str] = None,
+        dut: t.Optional[str] = None,
+    ) -> None:
+        """Retain one transcript for result serialization and Netcastle links."""
         if not transcript_url:
             return
         headline = render_headline(report)
-        label = f"TAAC investigation: {playbook.name} | {test_device.name}"
-        self.investigation_link = InvestigationLink(
-            text=f"{label} | {headline}" if headline else label,
-            url=transcript_url,
+        self.investigation_artifacts.append(
+            trr_types.InvestigationArtifact(
+                phase=phase,
+                headline=headline or None,
+                transcript_url=transcript_url,
+                playbook_name=playbook_name,
+                dut=dut,
+            )
         )
+        if phase == trr_types.InvestigationPhase.TEST_CASE:
+            self.investigation_link = InvestigationLink(
+                text=f"{label} | {headline}" if headline else label,
+                url=transcript_url,
+            )
 
     async def _async_trigger_triage_minion(self) -> None:
         """Trigger the DNE PIT CI Triage Agent via Confucius Thrift API."""
@@ -3595,9 +3884,17 @@ class TaacRunner:
                 )
             else:
                 self.test_summary.end_section(teardown_section, SectionStatus.PASS)
+            if _teardown_error:
+                await self._async_run_lifecycle_investigation_if_enabled(
+                    phase=trr_types.InvestigationPhase.TEST_CONFIG_TEARDOWN,
+                    error=_teardown_error,
+                    start_time=int(teardown_start),
+                )
             # Generate and upload test execution summary - always print even on errors
             try:
-                await self.test_summary.async_upload_and_log_summary()
+                await self.test_summary.async_upload_and_log_summary(
+                    self.investigation_artifacts
+                )
             except Exception as e:
                 self.logger.error(f"Failed to generate test summary: {e}")
             # Trigger triage minion if enabled and there were failures

@@ -32,6 +32,13 @@ enum SectionStatus {
   IN_PROGRESS = 5,
 }
 
+enum InvestigationPhase {
+  UNKNOWN = 0,
+  TEST_CONFIG_SETUP = 1,
+  TEST_CASE = 2,
+  TEST_CONFIG_TEARDOWN = 3,
+}
+
 struct CheckResult {
   1: string check_name;
   2: optional test_as_a_config.ValidationStage check_stage;
@@ -77,6 +84,16 @@ struct SectionResult {
   8: i64 end_time_epoch_s;
 }
 
+struct InvestigationArtifact {
+  1: InvestigationPhase phase;
+  // The decision line produced by the investigation. It is absent when the
+  // transcript exists but the agent could not produce a structured report.
+  2: optional string headline;
+  3: string transcript_url;
+  4: optional string playbook_name;
+  5: optional string dut;
+}
+
 struct RunResult {
   // The tictaac CLI ships as an fbpkg independently of whatever deserializes
   // this, so producer and consumer can be arbitrarily far apart in version.
@@ -84,6 +101,8 @@ struct RunResult {
   // against rather than deserialize it: under SimpleJSON a field whose type
   // they do not expect is skipped and lands at its intrinsic default, so
   // reading a newer payload succeeds while quietly reporting the wrong thing.
+  // Preserve the original IDL default for compatibility. Producers set their
+  // current schema version explicitly.
   1: i32 schema_version = 1;
   2: string test_config;
   3: RunOutcome outcome;
@@ -95,4 +114,5 @@ struct RunResult {
   9: list<SectionResult> sections;
   10: optional string error_message;
   11: optional string log_file;
+  12: list<InvestigationArtifact> investigation_artifacts;
 }
