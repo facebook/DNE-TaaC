@@ -35,6 +35,7 @@ from taac.libs.fpf.fpf_stress_checks import (
 from taac.testconfigs.fpf import (
     fpf_tc28_fsdb_kill,
     fpf_tc29_fsdb_gr_stop30_reenable,
+    fpf_tc29b_fsdb_gr_remote_withdraw,
     fpf_tc30_fsdb_gr_stop180_no_reenable,
     fpf_tc31_fsdb_enable_recover,
 )
@@ -87,6 +88,12 @@ def _step_params(step) -> dict:
     if step.step_params is None:
         return {}
     return json.loads(step.step_params.json_params)
+
+
+def _task_params(task) -> dict:
+    if task.params is None:
+        return {}
+    return json.loads(task.params.json_params)
 
 
 def _checks_by_id(playbook) -> dict:
@@ -311,6 +318,153 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
             _checks_by_id(playbook)["fpf_prod_hrt_prefix_stability"]
         )
         self.assertNotIn("use_test_case_start_time", postcheck)
+
+
+class TestFpfTc29bRemotePrefixWithdraw(unittest.TestCase):
+    def setUp(self):
+        self.module = fpf_tc29b_fsdb_gr_remote_withdraw
+        self.cfg = self.module.TEST_CONFIG
+
+    def test_two_phase_shape_without_ib_traffic(self):
+        self.assertEqual(self.cfg.name, "fpf_tc29b_fsdb_gr_remote_withdraw")
+        self.assertEqual(
+            [playbook.name for playbook in self.cfg.playbooks],
+            [
+                "fpf_tc29b_fsdb_gr_remote_withdraw_disrupt",
+                "fpf_tc29b_fsdb_gr_remote_withdraw_recovery",
+            ],
+        )
+        task_names = [task.task_name for task in self.cfg.setup_tasks]
+        self.assertNotIn("fpf_start_ib_traffic", task_names)
+        self.assertNotIn("fpf_stop_ib_traffic", task_names)
+
+    def test_exact_a_and_b_injection_and_named_collectors(self):
+        inject = next(
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_inject_bgp_prefixes"
+        )
+        groups = _task_params(inject)["groups"]
+        remote_b = next(g for g in groups if g["prefix_base"] == "4000:dd::/64")
+        self.assertEqual(remote_b["devices"], [self.module.REMOTE_GTSW])
+        self.assertEqual(remote_b["count"], 1000)
+        self.assertEqual(remote_b["increment_step"], "0:0:1::")
+        self.assertEqual(remote_b["community_list"], "gtsw")
+        self.assertEqual(remote_b["batch_size"], 100)
+
+        collector_task = next(
+            task
+            for task in self.cfg.setup_tasks
+            if task.task_name == "fpf_start_collectors"
+        )
+        params = _task_params(collector_task)
+        self.assertEqual(params["poll_interval_sec"], 2.0)
+        groups = {g["name"]: g for g in params["additional_namespaces"]}
+        self.assertEqual(groups["remote_b"]["subnet_prefix"], "4000:dd::/32")
+        self.assertEqual(
+            groups["remote_b"]["bgp_gtsws"],
+            [self.module.REMOTE_GTSW, self.module.LOCAL_GTSW],
+        )
+        self.assertEqual(groups["remote_b"]["fsdb_gtsws"], [self.module.LOCAL_GTSW])
+        self.assertEqual(groups["remote_b"]["fib_gtsws"], [self.module.LOCAL_GTSW])
+        self.assertEqual(groups["local_a"]["fib_gtsws"], [self.module.LOCAL_GTSW])
+
+    def test_disruption_sequence_and_absence_contract(self):
+        disrupt = self.cfg.playbooks[0]
+        custom = [
+            _step_params(step)
+            for step in _all_steps(disrupt)
+            if step.name == taac_types.StepName.CUSTOM_STEP
+        ]
+        sequence = next(
+            params
+            for params in custom
+            if params.get("custom_step_name") == "fpf_remote_prefix_gr_sequence"
+        )
+        self.assertEqual(sequence["local_gtsw"], self.module.LOCAL_GTSW)
+        self.assertEqual(sequence["remote_gtsw"], self.module.REMOTE_GTSW)
+        self.assertEqual(sequence["between_stops_sec"], 30)
+        self.assertEqual(sequence["before_local_restart_sec"], 30)
+        self.assertEqual(sequence["max_fsdb_outage_sec"], 120)
+
+        lifecycle = _check_params(
+            _checks_by_id(disrupt)["fpf_tc29b_remote_prefix_withdrawn"]
+        )
+        self.assertEqual(lifecycle["mode"], "withdrawn")
+        self.assertEqual(lifecycle["deadline_sec"], 120)
+        self.assertEqual(
+            set(lifecycle["outage_tolerant_collectors"]),
+            {
+                f"fsdb_remote_b@{self.module.LOCAL_GTSW}",
+                f"hrt_remote_b@{self.module.GPU_HOSTS[0]}",
+                f"hrt@{self.module.GPU_HOSTS[0]}",
+            },
+        )
+        self.assertEqual(
+            lifecycle["scalar_expectations"],
+            [
+                ["bgp_remote_b", self.module.LOCAL_GTSW, 0],
+                ["fib_remote_b", self.module.LOCAL_GTSW, 0],
+                ["fsdb_remote_b", self.module.LOCAL_GTSW, 0],
+                ["fib_local_a", self.module.LOCAL_GTSW, 4032],
+            ],
+        )
+        remote_host = self.module.GPU_HOSTS[1]
+        local_host = self.module.GPU_HOSTS[0]
+        a_positive = lifecycle["a_hrt_positive_expected"]
+        self.assertEqual(a_positive[local_host]["0"], [4032, 4032, 4032, 4032])
+        self.assertEqual(a_positive[remote_host]["0"], [0, 4032, 4032, 4032])
+        self.assertEqual(a_positive[remote_host]["1"], [4032, 4032, 4032, 4032])
+        a_rf = lifecycle["a_hrt_remote_failure_expected"]
+        self.assertEqual(a_rf[remote_host]["0"], [4032, 0, 0, 0])
+        self.assertEqual(a_rf[remote_host]["1"], [0, 0, 0, 0])
+
+    def test_recovery_starts_only_remote_bgp_and_b_remains_absent(self):
+        recovery = self.cfg.playbooks[1]
+        custom = [
+            _step_params(step)
+            for step in _all_steps(recovery)
+            if step.name == taac_types.StepName.CUSTOM_STEP
+        ]
+        start = next(
+            params
+            for params in custom
+            if params.get("custom_step_name") == "fpf_remote_prefix_start_origin_bgp"
+        )
+        self.assertEqual(start["remote_gtsw"], self.module.REMOTE_GTSW)
+        self.assertFalse(
+            any(
+                step.name == taac_types.StepName.FPF_BGP_PREFIX_INJECTION_STEP
+                for step in _all_steps(recovery)
+            ),
+            "recovery must not recreate the runtime-only B namespace",
+        )
+        lifecycle = _check_params(
+            _checks_by_id(recovery)["fpf_tc29b_remote_prefix_stays_absent"]
+        )
+        self.assertEqual(lifecycle["mode"], "recovery")
+        self.assertEqual(lifecycle["deadline_sec"], 60)
+        self.assertEqual(
+            lifecycle["outage_tolerant_collectors"],
+            [f"bgp_remote_b@{self.module.REMOTE_GTSW}"],
+        )
+        b_scalars = [
+            expected
+            for collector, _device, expected in lifecycle["scalar_expectations"]
+            if collector.endswith("remote_b")
+        ]
+        self.assertTrue(b_scalars)
+        self.assertTrue(all(expected == 0 for expected in b_scalars))
+        self.assertIn(
+            ["fib_local_a", self.module.LOCAL_GTSW, 4032],
+            lifecycle["scalar_expectations"],
+        )
+        for host_map in lifecycle["b_hrt_positive_expected"].values():
+            for counts in host_map.values():
+                self.assertEqual(counts, [0, 0, 0, 0])
+        for host_map in lifecycle["b_hrt_remote_failure_expected"].values():
+            for counts in host_map.values():
+                self.assertEqual(counts, [0, 0, 0, 0])
 
 
 class TestFpfTc30FsdbGrStop180(unittest.TestCase):

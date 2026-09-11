@@ -71,6 +71,9 @@ from taac.testconfigs.fpf.fpf_tc28_fsdb_kill import (
 from taac.testconfigs.fpf.fpf_tc29_fsdb_gr_stop30_reenable import (
     TEST_CONFIG as FPF_TC29_FSDB_GR_STOP30_REENABLE,
 )
+from taac.testconfigs.fpf.fpf_tc29b_fsdb_gr_remote_withdraw import (
+    TEST_CONFIG as FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW,
+)
 from taac.testconfigs.fpf.fpf_tc30_fsdb_gr_stop180_no_reenable import (
     TEST_CONFIG as FPF_TC30_FSDB_GR_STOP180_NO_REENABLE,
 )
@@ -180,6 +183,7 @@ __all__ = [
     "FPF_TC27_AGENT_COLDBOOT",
     "FPF_TC28_FSDB_KILL",
     "FPF_TC29_FSDB_GR_STOP30_REENABLE",
+    "FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW",
     "FPF_TC30_FSDB_GR_STOP180_NO_REENABLE",
     "FPF_TC31_FSDB_ENABLE_RECOVER",
     "FPF_TC32_DOWNLINK_FLAPS",

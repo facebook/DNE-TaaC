@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from neteng.netcastle.logger import get_root_logger
 from taac.internal.driver.fboss_switch_internal import (
@@ -364,6 +364,175 @@ class BgpRibRow:
     request_start_epoch: float = 0.0
     request_end_epoch: float = 0.0
     duration_sec: float = 0.0
+
+
+@dataclass
+class FibRouteRow:
+    timestamp: str
+    gtsw: str
+    matched: int
+    total: int
+    notes: str = ""
+    request_start_epoch: float = 0.0
+    request_end_epoch: float = 0.0
+    duration_sec: float = 0.0
+
+
+@dataclass(frozen=True)
+class ExactLifecycleSeriesResult:
+    """Verdict for one exact-count signal in a lifecycle phase."""
+
+    passed: bool
+    final: Optional[int]
+    first_exact_sec: Optional[float]
+    valid_count: int
+    error_count: int
+    ignored_error_count: int
+    detail: str
+
+
+def evaluate_exact_lifecycle_series(
+    rows: Sequence[Any],
+    *,
+    expected: int,
+    anchor_ts: float,
+    deadline_sec: float,
+    value_getter: Callable[[Any], Optional[int]],
+    transition: bool,
+    window_end_ts: Optional[float] = None,
+    allowed_error_intervals: Sequence[Tuple[float, float]] = (),
+) -> ExactLifecycleSeriesResult:
+    """Evaluate exact present/absent state without treating error-zero as data.
+
+    ``transition=True`` allows pre-convergence values, but requires the first
+    exact value by ``deadline_sec`` and rejects every later regression.
+    ``transition=False`` is a strict stable-state check: every valid sample must
+    be exact. Error rows are never values, even when their numeric field is zero;
+    only errors whose request began inside an explicitly confirmed outage
+    interval are ignored and counted for diagnostics.
+    """
+    valid: List[Tuple[float, int]] = []
+    error_count = 0
+    ignored_error_count = 0
+    end = float("inf") if window_end_ts is None else window_end_ts
+    for row in rows:
+        try:
+            sample_ts = float(getattr(row, "request_end_epoch", 0.0) or 0.0)
+            if sample_ts <= 0:
+                sample_ts = _parse_ts(str(row.timestamp)).timestamp()
+        except (TypeError, ValueError):
+            error_count += 1
+            continue
+        if sample_ts < anchor_ts or sample_ts > end:
+            continue
+        notes = str(getattr(row, "notes", "") or "")
+        is_error = not bool(getattr(row, "valid", True)) or notes.startswith("error:")
+        if is_error:
+            request_start = float(getattr(row, "request_start_epoch", 0.0) or sample_ts)
+            if any(
+                start <= request_start <= stop
+                for start, stop in allowed_error_intervals
+            ):
+                ignored_error_count += 1
+            else:
+                error_count += 1
+            continue
+        value = value_getter(row)
+        if value is None:
+            error_count += 1
+            continue
+        valid.append((sample_ts, int(value)))
+
+    if error_count:
+        return ExactLifecycleSeriesResult(
+            False,
+            valid[-1][1] if valid else None,
+            None,
+            len(valid),
+            error_count,
+            ignored_error_count,
+            f"{error_count} unexpected error/null sample(s)",
+        )
+    if not valid:
+        return ExactLifecycleSeriesResult(
+            False,
+            None,
+            None,
+            0,
+            0,
+            ignored_error_count,
+            "no valid samples in phase window",
+        )
+
+    exact_index = next(
+        (i for i, (_ts, value) in enumerate(valid) if value == expected), None
+    )
+    first_exact_sec = (
+        round(valid[exact_index][0] - anchor_ts, 3) if exact_index is not None else None
+    )
+    final = valid[-1][1]
+    if not transition:
+        wrong = [(ts, value) for ts, value in valid if value != expected]
+        passed = not wrong and final == expected
+        detail = (
+            f"all {len(valid)} valid sample(s) exact {expected}"
+            if passed
+            else f"{len(wrong)}/{len(valid)} valid sample(s) not exact {expected}; final={final}"
+        )
+        return ExactLifecycleSeriesResult(
+            passed,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            detail,
+        )
+
+    if exact_index is None:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            None,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"never reached exact {expected}; final={final}",
+        )
+    if first_exact_sec is None or first_exact_sec > deadline_sec:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"first exact {expected} at +{first_exact_sec}s exceeds {deadline_sec:g}s",
+        )
+    regression = next(
+        ((ts, value) for ts, value in valid[exact_index + 1 :] if value != expected),
+        None,
+    )
+    if regression is not None:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"regressed to {regression[1]} after first exact {expected}",
+        )
+    passed = final == expected
+    return ExactLifecycleSeriesResult(
+        passed,
+        final,
+        first_exact_sec,
+        len(valid),
+        0,
+        ignored_error_count,
+        f"first exact {expected} at +{first_exact_sec}s; final={final}",
+    )
 
 
 @dataclass
@@ -1092,6 +1261,93 @@ class HrtBulkCollector(BaseCollector):
             )
         finally:
             self.rows = saved_rows
+
+
+# ---------------------------------------------------------------------------
+# Filtered FBOSS FIB Collector
+# ---------------------------------------------------------------------------
+
+
+class FibRouteCollector(BaseCollector):
+    """Poll exact FBOSS FIB counts for one IPv6 namespace per GTSW."""
+
+    def __init__(
+        self,
+        gtsws: List[str],
+        subnet_prefix: str,
+        tmp_path: str = "/tmp/fpf_stress_fib.log",
+        interval_sec: float = 2.0,
+    ) -> None:
+        super().__init__(tmp_path, interval_sec)
+        self.gtsws = gtsws
+        self.subnet = ipaddress.IPv6Network(subnet_prefix, strict=False)
+        self.rows: List[FibRouteRow] = []
+
+    def _write_header(self, f) -> None:
+        f.write(
+            f"{'timestamp':<34}  {'gtsw':<34}  {'matched':>8}  {'total':>8}  "
+            f"{'req_start':>14}  {'req_end':>14}  {'duration_s':>10}  notes\n"
+        )
+
+    async def _poll_once(self) -> None:
+        async def _one_gtsw(gtsw: str) -> FibRouteRow:
+            notes = ""
+            request_start_epoch = time.time()
+            try:
+                driver = FbossSwitchInternal(gtsw, logger)
+                routes = await asyncio.wait_for(
+                    driver.async_get_desired_unicast_routes_in_network(
+                        str(self.subnet)
+                    ),
+                    timeout=max(0.1, self.POLL_TIMEOUT_SEC - 1.0),
+                )
+                matched = len(routes)
+                total = matched
+            except asyncio.TimeoutError:
+                self._record_host_timeout(gtsw, max(0.1, self.POLL_TIMEOUT_SEC - 1.0))
+                notes = "error: poll timeout"
+                matched = 0
+                total = 0
+            except Exception as error:
+                notes = f"error: {error}"
+                matched = 0
+                total = 0
+            request_end_epoch = time.time()
+            return FibRouteRow(
+                timestamp=_now_str(),
+                gtsw=gtsw,
+                matched=matched,
+                total=total,
+                notes=notes,
+                request_start_epoch=request_start_epoch,
+                request_end_epoch=request_end_epoch,
+                duration_sec=round(request_end_epoch - request_start_epoch, 3),
+            )
+
+        rows = await asyncio.gather(*(_one_gtsw(gtsw) for gtsw in self.gtsws))
+        for row in rows:
+            self.rows.append(row)
+            self._file.write(
+                f"{row.timestamp:<34}  {row.gtsw:<34}  {row.matched:>8}  "
+                f"{row.total:>8}  {row.request_start_epoch:>14.3f}  "
+                f"{row.request_end_epoch:>14.3f}  {row.duration_sec:>10.3f}  "
+                f"{row.notes}\n"
+            )
+            self._write_json_row(
+                {
+                    "collector": "fib",
+                    "timestamp": row.timestamp,
+                    "gtsw": row.gtsw,
+                    "matched": row.matched,
+                    "total": row.total,
+                    "request_start_epoch": row.request_start_epoch,
+                    "request_end_epoch": row.request_end_epoch,
+                    "duration_sec": row.duration_sec,
+                    "valid": not row.notes.startswith("error:"),
+                    "notes": row.notes,
+                }
+            )
+        self._file.flush()
 
 
 # ---------------------------------------------------------------------------

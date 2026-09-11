@@ -32,6 +32,49 @@ from taac.test_as_a_config.types import (
 _PV = ParamValue
 
 
+def create_fpf_remote_prefix_lifecycle_check(
+    *,
+    mode: str = "present",
+    runner_device: str = "",
+    scalar_expectations: t.Optional[t.List[t.List[t.Any]]] = None,
+    a_hrt_positive_expected: t.Optional[t.Dict[str, t.Dict[str, t.List[int]]]] = None,
+    a_hrt_remote_failure_expected: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
+    b_hrt_positive_expected: t.Optional[t.Dict[str, t.Dict[str, t.List[int]]]] = None,
+    b_hrt_remote_failure_expected: t.Optional[
+        t.Dict[str, t.Dict[str, t.List[int]]]
+    ] = None,
+    deadline_sec: int = 120,
+    outage_tolerant_collectors: t.Optional[t.List[str]] = None,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Build the exact A/B remote-prefix lifecycle check."""
+    return PointInTimeHealthCheck(
+        name=hc_types.CheckName.FPF_REMOTE_PREFIX_LIFECYCLE_CHECK,
+        check_params=Params(
+            json_params=json.dumps(
+                {
+                    "mode": mode,
+                    "runner_device": runner_device,
+                    "scalar_expectations": scalar_expectations or [],
+                    "a_hrt_positive_expected": a_hrt_positive_expected or {},
+                    "a_hrt_remote_failure_expected": (
+                        a_hrt_remote_failure_expected or {}
+                    ),
+                    "b_hrt_positive_expected": b_hrt_positive_expected or {},
+                    "b_hrt_remote_failure_expected": (
+                        b_hrt_remote_failure_expected or {}
+                    ),
+                    "deadline_sec": deadline_sec,
+                    "outage_tolerant_collectors": (outage_tolerant_collectors or []),
+                }
+            )
+        ),
+        check_id=check_id,
+    )
+
+
 def _is_same_device_name(left: str, right: str) -> bool:
     def normalize(device_name: str) -> str:
         normalized = device_name.rstrip(".").casefold()

@@ -27379,6 +27379,23 @@ def create_fpf_link_event_disrupt_playbook(
     return Playbook(**playbook_kwargs)
 
 
+def create_fpf_lifecycle_phase_playbook(
+    *,
+    playbook_name: str,
+    stage_id: str,
+    steps: list[Step],
+    prechecks: list[PointInTimeHealthCheck],
+    postchecks: list[PointInTimeHealthCheck],
+) -> Playbook:
+    return Playbook(
+        name=playbook_name,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=[],
+        stages=[create_steps_stage(stage_id=stage_id, steps=steps)],
+    )
+
+
 def create_fpf_disruption_only_playbook(
     *,
     gtsws: list[str],

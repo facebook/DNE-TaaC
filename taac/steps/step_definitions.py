@@ -3311,6 +3311,57 @@ def create_fpf_record_restart_completion_time_step(
     )
 
 
+def create_fpf_remote_prefix_gr_sequence_step(
+    local_gtsw: str,
+    remote_gtsw: str,
+    between_stops_sec: int = 30,
+    before_local_restart_sec: int = 30,
+    max_fsdb_outage_sec: int = 120,
+    service_state_timeout_sec: int = 30,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Stop local FSDB, stop remote BGP, then restore only local FSDB."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or "Create one-way remote-prefix withdrawal inside local FSDB GR",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_remote_prefix_gr_sequence",
+                    "local_gtsw": local_gtsw,
+                    "remote_gtsw": remote_gtsw,
+                    "between_stops_sec": int(between_stops_sec),
+                    "before_local_restart_sec": int(before_local_restart_sec),
+                    "max_fsdb_outage_sec": int(max_fsdb_outage_sec),
+                    "service_state_timeout_sec": int(service_state_timeout_sec),
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_remote_prefix_start_origin_bgp_step(
+    remote_gtsw: str,
+    service_state_timeout_sec: int = 30,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Restore the remote origin BGP service without reinjecting its routes."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Start remote bgpd on {remote_gtsw}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_remote_prefix_start_origin_bgp",
+                    "remote_gtsw": remote_gtsw,
+                    "service_state_timeout_sec": int(service_state_timeout_sec),
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_repeated_service_crash_step(
     service: taac_types.Service,
     every_sec: int = 1,

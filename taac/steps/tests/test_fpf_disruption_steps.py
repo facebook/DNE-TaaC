@@ -27,6 +27,7 @@ from taac.internal.steps.custom_step import (
     _nic_mstreg_bdf,
     CustomStep,
 )
+from taac.libs.fpf import fpf_collector_registry
 from taac.libs.fpf.fpf_collector_registry import (
     clear_drain_mutations,
     get_drain_mutation,
@@ -2544,6 +2545,108 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
                 {"neighbor_pattern": "nomatch*", "is_enable": False}
             )
         cs.driver.async_thrift_disable_enable_interfaces.assert_not_awaited()
+
+
+class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
+    async def test_sequence_confirms_states_and_records_boundaries(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_remote_prefix_gr_sequence_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        step = factory(
+            local_gtsw="gtsw001.l1002.c087.mwg2",
+            remote_gtsw="gtsw001.l1001.c087.mwg2",
+            between_stops_sec=30,
+            before_local_restart_sec=30,
+            max_fsdb_outage_sec=120,
+        )
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_remote_prefix_gr_sequence")
+
+        cs = _make_custom_step()
+        calls: list[tuple[str, str]] = []
+        service_states = {"fsdb": "active", "bgpd": "active"}
+
+        async def fake_ssh(host, command, timeout_sec=30):
+            calls.append((host, command))
+            if command == "systemctl stop fsdb":
+                service_states["fsdb"] = "inactive"
+                return (0, "", "")
+            if command == "systemctl stop bgpd":
+                service_states["bgpd"] = "inactive"
+                return (0, "", "")
+            if command == "systemctl start fsdb":
+                service_states["fsdb"] = "active"
+                return (0, "", "")
+            if command.startswith("systemctl is-active "):
+                return (0, service_states[command.rsplit(" ", 1)[-1]], "")
+            return (1, "", "unexpected command")
+
+        cs._ssh_run_host = fake_ssh
+        fpf_collector_registry.clear_all()
+        with (
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch.object(
+                fpf_collector_registry.time,
+                "time",
+                side_effect=[100.0, 130.0, 160.0],
+            ),
+        ):
+            await cs.fpf_remote_prefix_gr_sequence(params)
+
+        self.assertEqual(
+            calls,
+            [
+                ("gtsw001.l1002.c087.mwg2", "systemctl stop fsdb"),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb"),
+                ("gtsw001.l1001.c087.mwg2", "systemctl stop bgpd"),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd"),
+                ("gtsw001.l1002.c087.mwg2", "systemctl start fsdb"),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb"),
+            ],
+        )
+        self.assertEqual(fpf_collector_registry.get_disruption_time(), 100.0)
+        self.assertEqual(fpf_collector_registry.get_mutation_time(), 130.0)
+        self.assertEqual(fpf_collector_registry.get_restart_completion_time(), 160.0)
+
+    async def test_recovery_starts_only_origin_bgp_and_records_completion(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_remote_prefix_start_origin_bgp_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        params = _params(factory(remote_gtsw="gtsw001.l1001.c087.mwg2"))
+        cs = _make_custom_step()
+        calls: list[tuple[str, str]] = []
+
+        async def fake_ssh(host, command, timeout_sec=30):
+            calls.append((host, command))
+            return (0, "active\n" if "is-active" in command else "", "")
+
+        cs._ssh_run_host = fake_ssh
+        fpf_collector_registry.clear_all()
+        with patch.object(
+            fpf_collector_registry.time,
+            "time",
+            side_effect=[200.0, 201.0],
+        ):
+            await cs.fpf_remote_prefix_start_origin_bgp(params)
+
+        self.assertEqual(
+            calls,
+            [
+                ("gtsw001.l1001.c087.mwg2", "systemctl start bgpd"),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd"),
+            ],
+        )
+        self.assertEqual(fpf_collector_registry.get_recovery_start_time(), 200.0)
+        self.assertEqual(
+            fpf_collector_registry.get_recovery_completion_time(),
+            201.0,
+        )
 
 
 class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):

@@ -6,6 +6,7 @@
 
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import TestDevice
@@ -15,6 +16,7 @@ from taac.health_checks.device_health_checks.fpf_bgp_rib_convergence_health_chec
 from taac.health_checks.device_health_checks.fpf_hrt_remote_failure_convergence_health_check import (
     FpfHrtRemoteFailureConvergenceHealthCheck,
 )
+from taac.libs.fpf import fpf_stress_checks
 from taac.libs.fpf.fpf_stress_checks import (
     BgpRibCollector,
     BgpRibRow,
@@ -40,6 +42,85 @@ def _ts(offset_sec: float) -> str:
     return datetime.fromtimestamp(WINDOW_START + offset_sec, tz=timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S.%f%z"
     )
+
+
+class RemotePrefixLifecycleSeriesTest(unittest.TestCase):
+    def _evaluate(self, rows, *, expected=0, transition=True):
+        evaluator = getattr(
+            fpf_stress_checks,
+            "evaluate_exact_lifecycle_series",
+            None,
+        )
+        self.assertIsNotNone(
+            evaluator,
+            "remote-prefix lifecycle evaluator must exist",
+        )
+        return evaluator(
+            rows,
+            expected=expected,
+            anchor_ts=WINDOW_START,
+            deadline_sec=120.0,
+            value_getter=lambda row: row.matched,
+            transition=transition,
+        )
+
+    def test_error_row_numeric_zero_never_counts_as_absence(self):
+        result = self._evaluate(
+            [
+                SimpleNamespace(
+                    timestamp=_ts(5),
+                    matched=0,
+                    notes="error: PUBLISHER_NOT_READY",
+                    valid=True,
+                ),
+                SimpleNamespace(
+                    timestamp=_ts(10),
+                    matched=1000,
+                    notes="",
+                    valid=True,
+                ),
+            ]
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIsNone(result.first_exact_sec)
+        self.assertEqual(result.error_count, 1)
+
+    def test_transition_requires_exact_by_deadline_and_exact_final(self):
+        result = self._evaluate(
+            [
+                SimpleNamespace(timestamp=_ts(10), matched=1000, notes="", valid=True),
+                SimpleNamespace(timestamp=_ts(30), matched=0, notes="", valid=True),
+                SimpleNamespace(timestamp=_ts(60), matched=0, notes="", valid=True),
+            ]
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.first_exact_sec, 30.0)
+        self.assertEqual(result.final, 0)
+
+    def test_valid_regression_after_exact_is_never_ignored(self):
+        result = self._evaluate(
+            [
+                SimpleNamespace(timestamp=_ts(20), matched=0, notes="", valid=True),
+                SimpleNamespace(timestamp=_ts(40), matched=7, notes="", valid=True),
+            ]
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("regressed", result.detail)
+
+    def test_present_mode_requires_every_valid_sample_exact(self):
+        result = self._evaluate(
+            [
+                SimpleNamespace(timestamp=_ts(5), matched=999, notes="", valid=True),
+                SimpleNamespace(timestamp=_ts(10), matched=1000, notes="", valid=True),
+            ],
+            expected=1000,
+            transition=False,
+        )
+
+        self.assertFalse(result.passed)
 
 
 class BgpSkipNullTargetScopeTest(unittest.IsolatedAsyncioTestCase):
