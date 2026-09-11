@@ -3556,15 +3556,62 @@ class FbossSwitch(AbstractSwitch):
         self,
         service: Service,
         agents: Optional[List[str]] = None,
+        accept_failed_if_process_absent: bool = False,
     ) -> None:
+        """Stop a service and verify the resulting systemd state.
+
+        Intentional outage tests may opt in to accepting ``FAILED`` because
+        some services retain that unit state after their process exits. The
+        opt-in remains fail-closed: both ``INACTIVE`` and ``FAILED`` require
+        systemd ``MainPID=0`` before the stop is considered complete.
+        """
+
+        async def intentional_stop_complete(
+            counters: Optional[Dict[str, str]] = None,
+        ) -> bool:
+            if counters is None:
+                counters = await self.async_get_systemd_service_counters(service)
+            status = await self.async_get_service_status(service, counters)
+            if status not in {
+                SystemctlServiceStatus.INACTIVE,
+                SystemctlServiceStatus.FAILED,
+            }:
+                return False
+            main_pid = await self.async_get_single_systemd_service_counter_as_int(
+                service, "MainPID", counters
+            )
+            if main_pid != 0:
+                raise RuntimeError(
+                    f"Service {service.value} is {status.name} but process "
+                    f"MainPID={main_pid} is still present"
+                )
+            return True
+
+        if accept_failed_if_process_absent and await intentional_stop_complete():
+            self.logger.info(
+                f"Service {service.value} is already non-active with no live "
+                "process; not issuing a duplicate stop"
+            )
+            return
+
         cmd: str = f"systemctl stop {service.value}"
         self.logger.info(f"Attempting to stop {service.value} on {self.hostname}...")
         await self.async_run_cmd_on_shell(cmd)
-        # verifying if the service is now inactive
-        status = await self.async_get_service_status(service)
-        assert status == SystemctlServiceStatus.INACTIVE
+        service_counters = await self.async_get_systemd_service_counters(service)
+        status = await self.async_get_service_status(service, service_counters)
+        if accept_failed_if_process_absent:
+            if not await intentional_stop_complete(service_counters):
+                raise RuntimeError(
+                    f"Intentional stop of {service.value} left service in "
+                    f"{status.name}; expected INACTIVE, or FAILED with MainPID=0"
+                )
+        elif status != SystemctlServiceStatus.INACTIVE:
+            raise RuntimeError(
+                f"Service {service.value} did not reach INACTIVE after stop; "
+                f"observed {status.name}"
+            )
         self.logger.info(
-            f"Successfully verified that the {service.name} is now inactive on {self.hostname}"
+            f"Successfully verified that {service.name} is stopped on {self.hostname}"
         )
 
     @is_dne_test_device

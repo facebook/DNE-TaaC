@@ -4586,6 +4586,7 @@ def create_service_interruption_step(
     service: taac_types.Service,
     trigger: taac_types.ServiceInterruptionTrigger = taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
     create_cold_boot_file: bool = False,
+    intentional_stop: bool = False,
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
@@ -4598,6 +4599,9 @@ def create_service_interruption_step(
         service: The service to interrupt (e.g., Service.AGENT, Service.BGP)
         trigger: The trigger type (SYSTEMCTL_RESTART, CRASH, etc.)
         create_cold_boot_file: Whether to create a cold boot file
+        intentional_stop: For an explicit SYSTEMCTL_STOP, accept systemd's
+            FAILED state only when MainPID proves that the process is absent.
+            This bypasses the generic driver's INACTIVE-only retry behavior.
         description: Custom description for the step
         step_id: Optional step ID
         start_traffic: Whether the generic step pre-hook should start IXIA.
@@ -4605,11 +4609,21 @@ def create_service_interruption_step(
     Returns:
         Step object for service interruption
     """
+    if (
+        intentional_stop
+        and trigger != taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP
+    ):
+        raise ValueError("intentional_stop is valid only for SYSTEMCTL_STOP")
+
     input_obj = taac_types.ServiceInterruptionInput(
         name=service,
         trigger=trigger,
         create_cold_boot_file=create_cold_boot_file,
     )
+    step_params_dict: t.Dict[str, t.Any] = {}
+    if intentional_stop:
+        step_params_dict["intentional_stop"] = True
+    _add_skip_start_traffic_param(step_params_dict, start_traffic)
 
     return Step(
         name=StepName.SERVICE_INTERRUPTION_STEP,
@@ -4617,7 +4631,11 @@ def create_service_interruption_step(
         description=description,
         id=step_id,
         device_regexes=device_regexes,
-        step_params=_skip_start_traffic_step_params(start_traffic),
+        step_params=(
+            Params(json_params=json.dumps(step_params_dict))
+            if step_params_dict
+            else None
+        ),
     )
 
 
@@ -10181,6 +10199,15 @@ class ServiceConvergenceStep(StepBase[taac_types.ServiceConvergenceInput]):
             )
 
 
+class _IntentionalStopDriver(t.Protocol):
+    async def async_stop_service(
+        self,
+        service: DriverService,
+        agents: t.Optional[t.List[str]] = None,
+        accept_failed_if_process_absent: bool = False,
+    ) -> None: ...
+
+
 class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
     STEP_NAME = taac_types.StepName.SERVICE_INTERRUPTION_STEP
 
@@ -10221,7 +10248,19 @@ class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
             )
         match input.trigger:
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP:
-                await self.driver.async_stop_service(service, agents)
+                if params.get("intentional_stop", False):
+                    if agents is not None:
+                        raise ValueError(
+                            "intentional_stop does not support per-agent service control"
+                        )
+                    driver = t.cast(_IntentionalStopDriver, self.driver)
+                    await driver.async_stop_service(
+                        service,
+                        agents,
+                        accept_failed_if_process_absent=True,
+                    )
+                else:
+                    await self.driver.async_stop_service(service, agents)
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START:
                 await self.driver.async_start_service(service, agents)
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART:

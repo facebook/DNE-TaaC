@@ -210,6 +210,7 @@ def create_fpf_tc30_test_config() -> TestConfig:
         create_service_interruption_step(
             service=taac_types.Service.FSDB,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP,
+            intentional_stop=True,
             device_regexes=[DUT_GTSW],
             description=f"systemctl stop fsdb on {DUT_GTSW} (NOT re-enabled)",
         ),

@@ -83,6 +83,12 @@ def _step_names(playbook):
     return [s.name for s in _all_steps(playbook)]
 
 
+def _step_params(step) -> dict:
+    if step.step_params is None:
+        return {}
+    return json.loads(step.step_params.json_params)
+
+
 def _checks_by_id(playbook) -> dict:
     return {c.check_id: c for c in (playbook.postchecks or []) if c.check_id}
 
@@ -209,6 +215,15 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
             1 for n in names if n == taac_types.StepName.SERVICE_INTERRUPTION_STEP
         )
         self.assertEqual(si_count, 2)
+        interruption_steps = [
+            step
+            for step in _all_steps(self.cfg.playbooks[0])
+            if step.name == taac_types.StepName.SERVICE_INTERRUPTION_STEP
+        ]
+        self.assertEqual(
+            _step_params(interruption_steps[0]), {"intentional_stop": True}
+        )
+        self.assertEqual(_step_params(interruption_steps[1]), {})
 
     def test_session_stat_disruption_recovery_60(self):
         checks = _session_stat_checks(self.cfg.playbooks[0])
@@ -268,6 +283,12 @@ class TestFpfTc30FsdbGrStop180(unittest.TestCase):
         )
         # Exactly one service-interruption step (the stop); fsdb is NOT re-enabled.
         self.assertEqual(si_count, 1)
+        stop_step = next(
+            step
+            for step in _all_steps(self.cfg.playbooks[0])
+            if step.name == taac_types.StepName.SERVICE_INTERRUPTION_STEP
+        )
+        self.assertEqual(_step_params(stop_step), {"intentional_stop": True})
 
     def test_stays_down_playbook_has_no_postchecks(self):
         # tc30's stays_down (Playbook[1]) is empty — the stays-down checks live

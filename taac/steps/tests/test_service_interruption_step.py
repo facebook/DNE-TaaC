@@ -11,7 +11,10 @@ from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* ro
 )
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.libs.parameter_evaluator import ParameterEvaluator
-from taac.steps.step_definitions import ServiceInterruptionStep
+from taac.steps.step_definitions import (
+    create_service_interruption_step,
+    ServiceInterruptionStep,
+)
 from taac.test_as_a_config import types as taac_types
 
 
@@ -70,6 +73,19 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
         await self.si_step.run(input_data, {})
         self.driver_mock.async_stop_service.assert_called_once()
 
+    async def test_intentional_stop_requests_driver_contract(self):
+        input_data = taac_types.ServiceInterruptionInput(
+            name=taac_types.Service.FSDB,
+            trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP,
+        )
+        await self.si_step.run(input_data, {"intentional_stop": True})
+
+        self.driver_mock.async_stop_service.assert_awaited_once_with(
+            FbossSystemctlServiceName.FSDB,
+            None,
+            accept_failed_if_process_absent=True,
+        )
+
     async def test_run_systemctl_start(self):
         """Test that SYSTEMCTL_START trigger calls async_start_service."""
         input_data = taac_types.ServiceInterruptionInput(
@@ -78,6 +94,26 @@ class TestServiceInterruptionStep(unittest.IsolatedAsyncioTestCase):
         )
         await self.si_step.run(input_data, {})
         self.driver_mock.async_start_service.assert_called_once()
+
+    async def test_systemctl_start_retains_strict_active_requirement(self):
+        input_data = taac_types.ServiceInterruptionInput(
+            name=taac_types.Service.FSDB,
+            trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
+        )
+        self.driver_mock.async_start_service.side_effect = RuntimeError(
+            "service did not reach ACTIVE"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not reach ACTIVE"):
+            await self.si_step.run(input_data, {"intentional_stop": True})
+
+    def test_factory_rejects_intentional_stop_for_start(self):
+        with self.assertRaisesRegex(ValueError, "only for SYSTEMCTL_STOP"):
+            create_service_interruption_step(
+                service=taac_types.Service.FSDB,
+                trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START,
+                intentional_stop=True,
+            )
 
     async def test_run_crash(self):
         """Test that CRASH trigger calls async_crash_service."""
