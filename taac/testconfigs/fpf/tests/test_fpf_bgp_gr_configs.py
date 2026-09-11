@@ -152,7 +152,7 @@ class TestCampaignExecutionContracts(unittest.TestCase):
         self.assertTrue(any(step.get("duration", 0) >= 300 for step in drain_steps))
         drain_checks = {check.check_id for check in pair[0].postchecks or []}
         self.assertIn("fpf_host_spray", drain_checks)
-        self.assertIn("fpf_hrt_plane_status_drain", drain_checks)
+        self.assertIn("fpf_hrt_plane_status_stsw_control_up", drain_checks)
 
         recovery_steps = [
             _step_params(step) for stage in pair[1].stages for step in stage.steps

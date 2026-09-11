@@ -47,6 +47,7 @@ from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
 )
 from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
     DRAIN_TARGET_STSW,
+    GPU_HOSTS as TC54_GPU_HOSTS,
     TEST_CONFIG as TC54,
 )
 from taac.test_as_a_config.types import StepName
@@ -577,7 +578,35 @@ class TestTc54StswDeviceDrain(unittest.TestCase):
         )
         ids = _check_ids(playbook)
         self.assertIn("fpf_host_spray", ids)
-        self.assertIn("fpf_hrt_plane_status_drain", ids)
+        self.assertNotIn("fpf_hrt_plane_status_drain", ids)
+        self.assertIn("fpf_hrt_plane_status_stsw_control_up", ids)
+        plane_check = next(
+            check
+            for check in playbook.postchecks or []
+            if check.check_id == "fpf_hrt_plane_status_stsw_control_up"
+        )
+        self.assertEqual(
+            json.loads(plane_check.check_params.json_params)["mode"], "all_up"
+        )
+
+        # An STSW route drain does not drain the host-to-GTSW FSDB transport.
+        # Keep sessions and every other product signal strict: only the old
+        # plane-status=DRAINED expectation is corrected.
+        self.assertIn("fpf_hrt_postcheck", ids)
+        self.assertIn("fpf_remote_failure_stable_vf1", ids)
+        self.assertIn("fpf_remote_failure_stable_vf2", ids)
+        self.assertIn("fpf_prod_hrt_prefix_stability", ids)
+        spray_check = next(
+            check
+            for check in playbook.postchecks or []
+            if check.check_id == "fpf_host_spray"
+        )
+        spray_params = json.loads(spray_check.check_params.json_params)
+        self.assertEqual(
+            spray_params["impacted_lanes_by_host"],
+            {host: ["beth0"] for host in TC54_GPU_HOSTS},
+        )
+        self.assertEqual(spray_params["impacted_max_gbps"], 10.0)
 
 
 if __name__ == "__main__":
