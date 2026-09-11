@@ -57,28 +57,48 @@ from taac.steps.step_definitions import (
     create_service_interruption_step,
 )
 from taac.task_definitions import (
+    create_fpf_inject_vf_groups_task,
+    create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
     create_fpf_stop_collectors_task,
+    create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
+    ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
-    DEFAULT_SUBNET_PREFIX,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
+    fpf_rf_vf_groups,
+    fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
-    TRIGGER_STSWS,
+    VF_COLLECTOR_SUBNET,
+    VF_GROUP_PREFIX_COUNT,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
-PREFIX_COUNT = 1000
+PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
+INJECTION_GROUPS = fpf_vf_injection_groups()
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 ENABLE_SETTLE_SEC = 120
 LONGEVITY_SOAK_SEC = 300
 
@@ -87,18 +107,22 @@ DUT_GTSW = OBSERVER_GTSWS[0]
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 
 
 def create_fpf_tc31_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    spray = None if skip_ssh else SPRAY_HOSTS
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
+    skip_ib = skip_ib_traffic()
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
 
     # --- Playbook 1: disruption-only — enable fsdb + settle, NO checks. ---
     disrupt_playbook = create_fpf_disruption_only_playbook(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         disruption_steps=[
             create_service_interruption_step(
                 service=taac_types.Service.FSDB,
@@ -122,13 +146,14 @@ def create_fpf_tc31_test_config() -> TestConfig:
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         soak_duration_sec=LONGEVITY_SOAK_SEC,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc31_fsdb_enable_recover_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         # All 32 sessions must be back after the enable; assert as a single census
         # signal in STABLE mode (steady 32, no churn).
@@ -143,31 +168,41 @@ def create_fpf_tc31_test_config() -> TestConfig:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
+        lanes=INJECTED_LANES,
+        hrt_device_ids=HRT_DEVICE_IDS,
+        skip_injection=True,
+        rf_vf_groups=RF_VF_GROUPS,
     )
 
     return TestConfig(
         name="fpf_tc31_fsdb_enable_recover",
-        endpoints=create_fpf_endpoints(),
+        endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
-                subnet_prefix=DEFAULT_SUBNET_PREFIX,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
+                subnet_prefix=VF_COLLECTOR_SUBNET,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 enable_fsdb_session_collector=True,
                 fsdb_session_host=GPU_HOSTS[0],
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
+                rf_vf_groups=RF_VF_GROUPS,
             ),
+            create_fpf_inject_vf_groups_task(groups=INJECTION_GROUPS, settle_sec=120),
         ],
         teardown_tasks=[
+            create_fpf_withdraw_vf_groups_task(groups=INJECTION_GROUPS),
+            create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(
-                trigger_stsws=TRIGGER_STSWS,
-                prefix_count=PREFIX_COUNT,
+                trigger_stsws=ALL_STSWS,
+                withdraw=False,
                 community_list=DEFAULT_COMMUNITY_LIST,
             ),
             *ib_teardown,

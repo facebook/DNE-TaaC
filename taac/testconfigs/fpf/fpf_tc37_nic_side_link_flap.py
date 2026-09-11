@@ -75,27 +75,33 @@ from taac.task_definitions import (
     create_fpf_inject_vf_groups_task,
     create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
-    create_fpf_start_ib_traffic_task,
     create_fpf_stop_collectors_task,
-    create_fpf_stop_ib_traffic_task,
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     Circuit,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
+    fpf_ib_traffic_tasks,
+    fpf_link_drain_interface,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
+    HRT_MEMORY_HOSTS,
     impacted_lanes_by_host_gpu,
     num_disrupted_circuits,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
+    SPRAY_HOSTS,
     TRIGGER_STSWS,
     VF_COLLECTOR_SUBNET,
     VF_GROUP_PREFIX_COUNT,
@@ -106,10 +112,16 @@ from taac.test_as_a_config.types import TestConfig
 # on s005-s008 = planes 4-7); injected once by the setup task, withdrawn in
 # teardown, so the playbooks pass skip_injection=True.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
 INJECT_SETTLE_SEC = 300
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 300
 LONGEVITY_SEC = 120
 
@@ -118,8 +130,8 @@ LONGEVITY_SEC = 120
 CIRCUITS = [
     Circuit(
         a_end_device=OBSERVER_GTSWS[0],  # gtsw001.l1002 -> lane 0
-        a_end_interface="eth1/41/5",
-        z_end_device=GPU_HOSTS[0],  # rtptest1544.mwg2, GPU0 beth0 (NIC-side flap)
+        a_end_interface=fpf_link_drain_interface(GPU_HOSTS),
+        z_end_device=GPU_HOSTS[0],
         z_end_gpu_id=0,
     ),
 ]
@@ -127,10 +139,7 @@ CIRCUITS = [
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
-HRT_MEMORY_HOSTS = ["rtptest1544.mwg2", "rtptest1575.mwg2"]
-IB_TRAFFIC_SERVER = GPU_HOSTS[0]
-IB_TRAFFIC_CLIENTS = [GPU_HOSTS[1]]
-SPRAY_HOSTS = [IB_TRAFFIC_SERVER, *IB_TRAFFIC_CLIENTS]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 
 
 def _impacted_beths_by_host(circuits: list[Circuit]) -> dict[str, list[str]]:
@@ -156,33 +165,35 @@ NIC_FLAP_INTERVAL_SEC = 2.0
 
 
 def _nic_flap_step():
-    """Real mstreg PAOS NIC-side flap of dev=0 lane=1 on the z_end GPU host.
+    """Real mstreg PAOS NIC-side flap of the selected end-to-end circuit.
 
     Drives ``create_fpf_nic_mstreg_flap_step`` — the headless TAAC equivalent
-    of ``scripts/pavanpatil/fpf_host_signal_test.py --flap-dev 0 --flap-lane 1``:
-    SSHes to the GPU host as root and loops 5 DOWN/UP cycles (every 2.0s) using
-    the mstreg PAOS register at the DETERMINISTIC PCIe BDF ``0000:03:00.1``
-    (dev0=DEV_BLOCK 0000, lane1=function 00.1) — no ethtool probe. The cycle
-    finishes with the lane UP so no separate restore flap is needed.
-
-    dev=0/lane=1 models the lane-0/VF1 impacted scenario for this host.
+    The physical GPU and global lane are derived from the same Circuit that
+    drives beth/plane expectations, so the PAOS BDF cannot drift from the
+    GTSW-side adjacency.
     """
+    circuit = CIRCUITS[0]
     return create_fpf_nic_mstreg_flap_step(
-        host=GPU_HOSTS[0],
-        dev=0,
-        lane=1,
+        host=circuit.z_end_device,
+        dev=circuit.z_end_gpu_id,
+        lane=circuit.lane,
         iterations=NIC_FLAP_ITERATIONS,
         interval_sec=NIC_FLAP_INTERVAL_SEC,
         description=(
-            f"NIC-side mstreg flap: dev=0 lane=1 (bdf 0000:03:00.1) on rtptest, "
-            f"{NIC_FLAP_ITERATIONS} iterations"
+            f"NIC-side mstreg flap: dev={circuit.z_end_gpu_id} "
+            f"lane={circuit.lane} ({circuit.nic_interface}) on "
+            f"{circuit.z_end_device}, {NIC_FLAP_ITERATIONS} iterations"
         ),
     )
 
 
 def create_fpf_tc37_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
     impacted_lanes = sorted({c.lane for c in CIRCUITS})
     n = num_disrupted_circuits(CIRCUITS)
 
@@ -217,9 +228,11 @@ def create_fpf_tc37_test_config() -> TestConfig:
         impacted_beths_by_host=_impacted_beths_by_host(CIRCUITS),
         impacted_planes_by_host=_impacted_planes_by_host(CIRCUITS),
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         # NIC-side flap is a hard link-down (same as the GTSW interface-disable):
         # the impacted lane's HRT FSDB session drops (32 - N) and frames are lost.
         flip_fsdb_session=True,
@@ -229,6 +242,7 @@ def create_fpf_tc37_test_config() -> TestConfig:
         # Prefixes injected once by the setup task (8-STSW split-per-VF).
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
         playbook_name="fpf_tc37_nic_side_link_flap_disrupt",
     )
 
@@ -251,6 +265,7 @@ def create_fpf_tc37_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc37_nic_side_link_flap_restore",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         use_bgp_snapshot=True,
         prod_prefix_settle_sec=120,
@@ -260,6 +275,7 @@ def create_fpf_tc37_test_config() -> TestConfig:
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         plane_status_check=True,
         prod_prefix_recovery=True,
         local_prod_prefixes=PROD_PREFIXES,
@@ -269,28 +285,19 @@ def create_fpf_tc37_test_config() -> TestConfig:
         # Prefixes injected once by the setup task; do not re-inject on restore.
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
     )
 
-    setup_tasks = []
-    teardown_tasks = []
-    if not skip_ssh:
-        setup_tasks.append(
-            create_fpf_start_ib_traffic_task(
-                server=IB_TRAFFIC_SERVER, clients=IB_TRAFFIC_CLIENTS
-            )
-        )
-        teardown_tasks.append(
-            create_fpf_stop_ib_traffic_task(
-                server=IB_TRAFFIC_SERVER, clients=IB_TRAFFIC_CLIENTS
-            )
-        )
+    setup_tasks = [*ib_setup]
+    teardown_tasks = [*ib_teardown]
     setup_tasks.append(
         create_fpf_start_collectors_task(
             gtsws=OBSERVER_GTSWS,
             hosts=GPU_HOSTS,
+            hrt_device_ids=HRT_DEVICE_IDS,
+            hrt_plane_ids=INJECTED_LANES,
             subnet_prefix=VF_COLLECTOR_SUBNET,
-            prod_prefixes=PROD_PREFIXES,
-            prod_prefix_host=PROD_PREFIX_HOST,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
             fsdb_mode=FSDB_COLLECTOR_MODE,
             allow_baseline_failures=ALLOW_BASELINE_FAILURES,

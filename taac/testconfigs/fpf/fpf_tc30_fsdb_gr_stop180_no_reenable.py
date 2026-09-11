@@ -95,32 +95,53 @@ from taac.playbooks.playbook_definitions import (
     create_fpf_stays_down_assertion_playbook,
 )
 from taac.steps.step_definitions import (
-    create_fpf_bgp_prefix_injection_step,
     create_fpf_record_disruption_time_step,
     create_longevity_step,
     create_service_interruption_step,
 )
 from taac.task_definitions import (
+    create_fpf_inject_vf_groups_task,
+    create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
     create_fpf_stop_collectors_task,
+    create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
+    ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
+    Circuit,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
-    DEFAULT_SUBNET_PREFIX,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
+    fpf_link_drain_interface,
+    fpf_rf_vf_groups,
+    fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
-    TRIGGER_STSWS,
+    VF_COLLECTOR_SUBNET,
+    VF_GROUP_PREFIX_COUNT,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
-PREFIX_COUNT = 1000
+PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
+INJECTION_GROUPS = fpf_vf_injection_groups()
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 120
 # 5min (300s) hold >> GR window (~120s): the data-plane route purge (~120s) fully
 # settles, so the lane-0 drained reading is taken well after the transition.
@@ -139,12 +160,18 @@ HOST_SPRAY_TRANSFORM_DESC = "formula(/ $1 125000000),avg(30s),latest"
 DUT_GTSW = OBSERVER_GTSWS[0]
 # Only the GPU host whose lane-0 (beth0) uplink is physically cabled to DUT_GTSW
 # (gtsw001) sees its beth0 drain when gtsw001's fsdb is stopped — confirmed by
-# LLDP on gtsw001 (rtptest1544/beth0 -> gtsw001 eth1/41/5). The OTHER GPU host
+# the environment-selected circuit. The OTHER GPU host
 # (GPU_HOSTS[1]) lands its beth0 on a different plane-0 GTSW, so it is UNAFFECTED
 # and keeps spraying on all 4 lanes — it serves as the blast-radius-containment
 # control. GPU_HOSTS[0] is the config's primary host (also the prod-prefix and
 # fsdb-session host), so it is the one cabled to DUT_GTSW.
-DUT_HOST = GPU_HOSTS[0]
+DUT_CIRCUIT = Circuit(
+    a_end_device=DUT_GTSW,
+    a_end_interface=fpf_link_drain_interface(GPU_HOSTS),
+    z_end_device=GPU_HOSTS[0],
+    z_end_gpu_id=0,
+)
+DUT_HOST = DUT_CIRCUIT.z_end_device
 IMPACTED_LANES = [0]
 # Steady impaired census after GR expiry on lane 0 of all 4 GPUs: 32 - 4 = 28.
 CONNECTED_STAYS_AT = EXPECTED_FSDB_SESSION_COUNT - 4  # 28
@@ -152,20 +179,27 @@ CONNECTED_STAYS_AT = EXPECTED_FSDB_SESSION_COUNT - 4  # 28
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
+IMPACTED_TUPLES = (
+    {
+        DUT_HOST: {
+            str(device_id): [DUT_CIRCUIT.lane] for device_id in HRT_VF_DEVICE_IDS[0]
+        }
+    }
+    if HRT_DEVICE_IDS != [0]
+    else None
+)
 
 
 def create_fpf_tc30_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
 
     # --- Playbook 1: disruption-only (inject/stabilize/stop/hold), NO checks. ---
     disrupt_steps = [
-        create_fpf_bgp_prefix_injection_step(
-            devices=TRIGGER_STSWS,
-            count=PREFIX_COUNT,
-            community_list=DEFAULT_COMMUNITY_LIST,
-            description=f"Inject {PREFIX_COUNT} test prefixes on the trigger STSWs",
-        ),
         create_longevity_step(
             duration=STABILIZATION_DELAY_SEC,
             description=f"Stabilize {STABILIZATION_DELAY_SEC}s before the FSDB stop",
@@ -204,6 +238,7 @@ def create_fpf_tc30_test_config() -> TestConfig:
                 mode="stable",
                 expected_connected=CONNECTED_STAYS_AT,
                 impacted_lanes=IMPACTED_LANES,
+                impacted_tuples_by_host_device=IMPACTED_TUPLES,
                 window_from_disruption_time=True,
                 window_offset_sec=SESSION_WINDOW_OFFSET_SEC,
                 window_duration_sec=STOP_DURATION_SEC,
@@ -217,7 +252,7 @@ def create_fpf_tc30_test_config() -> TestConfig:
             # > 75 Gbps; this doubles as a blast-radius-containment control.
             create_fpf_host_spray_check(
                 hosts=GPU_HOSTS,
-                impacted_lanes_by_host={DUT_HOST: ["beth0"]},
+                impacted_lanes_by_host={DUT_HOST: [DUT_CIRCUIT.nic_interface]},
                 impacted_max_gbps=10.0,
                 min_egress_gbps=75.0,
                 transform_desc=HOST_SPRAY_TRANSFORM_DESC,
@@ -231,6 +266,8 @@ def create_fpf_tc30_test_config() -> TestConfig:
                 check_id="fpf_tc30_fsdb_gr_stop180_host_spray",
             ),
         ],
+        spray_hosts=(None if skip_ssh or skip_ib else GPU_HOSTS),
+        ib_traffic_config=(None if skip_ssh or skip_ib else IB_TRAFFIC_CONFIG),
     )
 
     # --- Playbook 2: no steps — the 180s hold above is the observation window.
@@ -243,27 +280,32 @@ def create_fpf_tc30_test_config() -> TestConfig:
 
     return TestConfig(
         name="fpf_tc30_fsdb_gr_stop180_no_reenable",
-        endpoints=create_fpf_endpoints(),
+        endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
-                subnet_prefix=DEFAULT_SUBNET_PREFIX,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
+                subnet_prefix=VF_COLLECTOR_SUBNET,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 enable_fsdb_session_collector=True,
                 fsdb_session_host=GPU_HOSTS[0],
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
+                rf_vf_groups=RF_VF_GROUPS,
             ),
+            create_fpf_inject_vf_groups_task(groups=INJECTION_GROUPS, settle_sec=120),
         ],
         teardown_tasks=[
+            create_fpf_withdraw_vf_groups_task(groups=INJECTION_GROUPS),
+            create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(
-                trigger_stsws=TRIGGER_STSWS,
-                prefix_count=PREFIX_COUNT,
+                trigger_stsws=ALL_STSWS,
+                withdraw=False,
                 community_list=DEFAULT_COMMUNITY_LIST,
             ),
             *ib_teardown,

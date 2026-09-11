@@ -424,6 +424,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
             TC33_FLAP_SEC,
             TC33_LONGEVITY_SEC,
             UPLINK_NEIGHBOR_PATTERN,
+            vf_grouped=True,
         )
         # tc33 intentionally flaps ALL gtsw001 STSW uplinks via the spine glob —
         # no exact host scoping.
@@ -451,17 +452,23 @@ class TestStswDrainReinjectConfigs(unittest.TestCase):
         self.assertEqual(TC35_LONGEVITY_SEC, 300)
 
         steps = _steps(TC35.playbooks[0])
-        # undrain, reinject, longevity.
-        self.assertEqual(len(steps), 3)
+        # undrain, one re-injection per VF group, longevity.
+        self.assertEqual(len(steps), 4)
         self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
         self.assertEqual(steps[1].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
-        self.assertEqual(steps[2].name, StepName.LONGEVITY_STEP)
+        self.assertEqual(steps[2].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
+        self.assertEqual(steps[3].name, StepName.LONGEVITY_STEP)
 
         # Undrain always re-injects, but with the BASE community only (the
         # drain-marker community "65446:10" must not appear).
-        inj = _params(steps[1])
-        self.assertNotIn("65446:10", inj["community_list"])
-        self.assertEqual(inj["count"], 1000)
+        injections = [_params(step) for step in steps[1:3]]
+        self.assertEqual(
+            {params["prefix_base"] for params in injections},
+            {"5000:dd::/64", "5000:ee::/64"},
+        )
+        for params in injections:
+            self.assertNotIn("65446:10", params["community_list"])
+            self.assertEqual(params["count"], 1000)
 
 
 if __name__ == "__main__":

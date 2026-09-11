@@ -242,8 +242,7 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
 
     def test_longevity_playbook_has_v2_stable_check_set(self):
         ids = set(_checks_by_id(self.cfg.playbooks[1]).keys())
-        # tc29/tc31 use the single broad remote-failure stable check.
-        required = _required_v2_ids(vf_grouped=False)
+        required = _required_v2_ids(vf_grouped=True)
         self.assertTrue(
             required.issubset(ids),
             f"missing stable check IDs: {required - ids}",
@@ -322,8 +321,7 @@ class TestFpfTc31FsdbEnableRecover(unittest.TestCase):
 
     def test_longevity_playbook_has_v2_stable_check_set(self):
         ids = set(_checks_by_id(self.cfg.playbooks[1]).keys())
-        # tc29/tc31 use the single broad remote-failure stable check.
-        required = _required_v2_ids(vf_grouped=False)
+        required = _required_v2_ids(vf_grouped=True)
         self.assertTrue(
             required.issubset(ids),
             f"missing stable check IDs: {required - ids}",

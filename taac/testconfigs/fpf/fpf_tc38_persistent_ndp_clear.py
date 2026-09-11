@@ -58,23 +58,29 @@ from taac.task_definitions import (
     create_fpf_inject_vf_groups_task,
     create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
-    create_fpf_start_ib_traffic_task,
     create_fpf_stop_collectors_task,
-    create_fpf_stop_ib_traffic_task,
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
+    Circuit,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
+    fpf_ib_traffic_tasks,
+    fpf_link_drain_interface,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
+    HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     TRIGGER_STSWS,
     VF_COLLECTOR_SUBNET,
@@ -86,10 +92,16 @@ from taac.test_as_a_config.types import TestConfig
 # on s005-s008 = planes 4-7); injected once by the setup task, withdrawn in
 # teardown, so the stable-state playbook passes skip_injection=True.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
 INJECT_SETTLE_SEC = 300
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 STABILIZATION_DELAY_SEC = 300
 NDP_CLEAR_EVERY_SEC = 1
 NDP_CLEAR_DURATION_SEC = 120
@@ -99,10 +111,13 @@ LONGEVITY_SEC = 300
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
-HRT_MEMORY_HOSTS = ["rtptest1544.mwg2", "rtptest1575.mwg2"]
-IB_TRAFFIC_SERVER = GPU_HOSTS[0]
-IB_TRAFFIC_CLIENTS = [GPU_HOSTS[1]]
-SPRAY_HOSTS = [IB_TRAFFIC_SERVER, *IB_TRAFFIC_CLIENTS]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
+NDP_CLEAR_CIRCUIT = Circuit(
+    a_end_device=OBSERVER_GTSWS[0],
+    a_end_interface=fpf_link_drain_interface(GPU_HOSTS),
+    z_end_device=GPU_HOSTS[0],
+    z_end_gpu_id=0,
+)
 
 # Characterized data-plane impact of a persistent NDP clear on the DUT GTSW
 # (gtsw001 = lane 0): the neighbor cache is wiped continuously, so lane 0 (beth0)
@@ -181,7 +196,9 @@ def _ndp_clear_disrupt_postchecks(spray_hosts, skip_ssh):
                 # immaterial during the disrupt window, so EXCLUDE it entirely
                 # (no floor/spread/drain assertion). Only beth1-3 are held to the
                 # >75G spray floor. Lane 0 is verified in the longevity playbook.
-                excluded_lanes_by_host={h: ["beth0"] for h in spray_hosts},
+                excluded_lanes_by_host={
+                    NDP_CLEAR_CIRCUIT.z_end_device: [NDP_CLEAR_CIRCUIT.nic_interface]
+                },
                 window_from_disruption_time=True,
                 window_duration_sec=NDP_CLEAR_DURATION_SEC,
                 label=(
@@ -196,7 +213,15 @@ def _ndp_clear_disrupt_postchecks(spray_hosts, skip_ssh):
 
 def create_fpf_tc38_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
+    spray = (
+        None
+        if skip_ssh or skip_ib
+        else [IB_TRAFFIC_CONFIG["server"], *IB_TRAFFIC_CONFIG["clients"]]
+    )
 
     # Disrupt-window playbook: record the disruption moment, run the sustained
     # NDP clear on the observer GTSW, settle, then assert the CHARACTERIZED
@@ -228,6 +253,8 @@ def create_fpf_tc38_test_config() -> TestConfig:
             ),
         ],
         postchecks=_ndp_clear_disrupt_postchecks(spray, skip_ssh),
+        spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
     )
 
     # Stable-state v2 longevity: PROVISIONAL — all HCs assert the converged
@@ -242,38 +269,31 @@ def create_fpf_tc38_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc38_persistent_ndp_clear_stable",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         # Check all 8 injected lanes (not just the default [0,1]).
         lanes=INJECTED_LANES,
         # Prefixes injected once by the setup task (8-STSW split-per-VF).
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
     )
 
-    setup_tasks = []
-    teardown_tasks = []
-    if not skip_ssh:
-        setup_tasks.append(
-            create_fpf_start_ib_traffic_task(
-                server=IB_TRAFFIC_SERVER, clients=IB_TRAFFIC_CLIENTS
-            )
-        )
-        teardown_tasks.append(
-            create_fpf_stop_ib_traffic_task(
-                server=IB_TRAFFIC_SERVER, clients=IB_TRAFFIC_CLIENTS
-            )
-        )
+    setup_tasks = [*ib_setup]
+    teardown_tasks = [*ib_teardown]
     setup_tasks.append(
         create_fpf_start_collectors_task(
             gtsws=OBSERVER_GTSWS,
             hosts=GPU_HOSTS,
+            hrt_device_ids=HRT_DEVICE_IDS,
+            hrt_plane_ids=INJECTED_LANES,
             subnet_prefix=VF_COLLECTOR_SUBNET,
-            prod_prefixes=PROD_PREFIXES,
-            prod_prefix_host=PROD_PREFIX_HOST,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
             prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
             fsdb_mode=FSDB_COLLECTOR_MODE,
             allow_baseline_failures=ALLOW_BASELINE_FAILURES,

@@ -4099,6 +4099,7 @@ def create_fpf_stsw_drain_and_reinject_steps(
     prefix_count: int,
     community_list: str,
     drain_community: t.Optional[str] = None,
+    injection_groups: t.Optional[t.Sequence[t.Mapping[str, object]]] = None,
 ) -> t.List[Step]:
     """Drain (or undrain) an STSW plane, then re-inject the FPF prefixes.
 
@@ -4119,6 +4120,9 @@ def create_fpf_stsw_drain_and_reinject_steps(
         community_list: Base community list string for the injection.
         drain_community: Optional extra community appended to ``community_list``
             when draining (ignored on undrain).
+        injection_groups: Optional split-VF group definitions. When supplied,
+            each group's devices, prefix base, and count are re-injected
+            independently instead of advertising one prefix base on every STSW.
 
     Returns:
         Ordered [drain/undrain step, prefix-injection step].
@@ -4129,12 +4133,48 @@ def create_fpf_stsw_drain_and_reinject_steps(
         injected_communities = community_list
 
     action = "Drain" if drained else "Undrain"
+    drain_step = create_drain_undrain_step(
+        drain=drained,
+        drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
+        device_regexes=[stsw],
+        description=f"{action} STSW {stsw} (local drainer)",
+    )
+    if injection_groups is not None:
+        if not injection_groups:
+            raise ValueError("injection_groups must not be empty")
+        injection_steps = []
+        for group in injection_groups:
+            devices = group.get("devices")
+            prefix_base = group.get("prefix_base")
+            count = group.get("count")
+            batch_size = group.get("batch_size")
+            if (
+                not isinstance(devices, list)
+                or not devices
+                or not all(isinstance(device, str) for device in devices)
+                or not isinstance(prefix_base, str)
+                or not isinstance(count, int)
+                or count <= 0
+                or (batch_size is not None and not isinstance(batch_size, int))
+            ):
+                raise ValueError(f"Invalid FPF VF injection group: {group!r}")
+            injection_steps.append(
+                create_fpf_bgp_prefix_injection_step(
+                    devices=devices,
+                    prefix_base=prefix_base,
+                    count=count,
+                    batch_size=batch_size,
+                    community_list=injected_communities,
+                    description=(
+                        f"Re-inject {count} prefixes from {prefix_base} on "
+                        f"{', '.join(devices)} after {action.lower()} of {stsw}"
+                    ),
+                )
+            )
+        return [drain_step, *injection_steps]
+
     return [
-        create_drain_undrain_step(
-            drain=drained,
-            drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
-            description=f"{action} STSW {stsw} (local drainer)",
-        ),
+        drain_step,
         create_fpf_bgp_prefix_injection_step(
             devices=trigger_stsws,
             count=prefix_count,
@@ -4690,6 +4730,7 @@ def create_system_reboot_step(
     trigger: taac_types.SystemRebootTrigger,
     description: t.Optional[str] = None,
     use_ipv6: bool = True,
+    device_regexes: t.Optional[t.List[str]] = None,
 ) -> Step:
     """
     Create a step to reboot the system.
@@ -4698,6 +4739,7 @@ def create_system_reboot_step(
         trigger: The reboot trigger type (FULL_SYSTEM_REBOOT, BMC_POWER_RESET, etc.)
         description: Custom description for the step
         use_ipv6: Use IPv6 for post-reboot ping reachability check
+        device_regexes: Optional exact device scope for the reboot
 
     Returns:
         Step object for system reboot
@@ -4708,6 +4750,7 @@ def create_system_reboot_step(
         input_json=thrift_to_json(taac_types.SystemRebootInput(trigger=trigger)),
         description=description,
         step_params=Params(json_params=json.dumps(params_dict)),
+        device_regexes=device_regexes,
     )
 
 
@@ -4996,6 +5039,7 @@ def create_drain_undrain_step(
     drain_handler: t.Optional[taac_types.DrainHandler] = None,
     interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
     hard_drain_interfaces: bool = False,
     start_traffic: bool = True,
 ) -> Step:
@@ -5011,6 +5055,7 @@ def create_drain_undrain_step(
             up); with NDS the interface list is passed through to the NDS drain.
             When omitted, the whole device is drained.
         description: Custom description for the step
+        device_regexes: Optional exact device scope for the drain operation
         hard_drain_interfaces: For a LOCAL_DRAINER interface drain, use the
             bulk hard ``drain_interfaces`` API instead of the bulk
             ``softdrain_interfaces`` API. Set this on its paired undrain as
@@ -5050,6 +5095,7 @@ def create_drain_undrain_step(
         description=description,
         input_json=thrift_to_json(taac_types.DrainUndrainInput(**input_kwargs)),
         step_params=step_params,
+        device_regexes=device_regexes,
     )
 
 

@@ -34,18 +34,23 @@ from taac.task_definitions import (
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
+    HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     VF_COLLECTOR_SUBNET,
@@ -61,14 +66,20 @@ from taac.test_as_a_config.types import TestConfig
 # own VF group's count: PREFIX_COUNT = VF_GROUP_PREFIX_COUNT. Collector subnet is
 # 5000::/16 to count both groups.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
 INJECT_SETTLE_SEC = 120
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 TRIGGER_STSWS = ALL_STSWS
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, 0)]
-HRT_MEMORY_HOSTS = ["rtptest1544.mwg2", "rtptest1575.mwg2"]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 DUT_GTSW = OBSERVER_GTSWS[0]
 
 # Cold boot is disruptive: wait >= 5 min for recovery, and skip the recovery
@@ -80,7 +91,10 @@ COLDBOOT_BGP_RECONVERGE_SLA_SEC = 300.0
 
 def create_fpf_tc27_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
     playbook = create_fpf_service_restart_playbook(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
@@ -93,6 +107,7 @@ def create_fpf_tc27_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         injected_lanes=INJECTED_LANES,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
@@ -101,10 +116,12 @@ def create_fpf_tc27_test_config() -> TestConfig:
         stable_settle_sec=COLDBOOT_STABLE_SETTLE_SEC,
         bgp_reconverge_sla_sec=COLDBOOT_BGP_RECONVERGE_SLA_SEC,
         skip_ssh_dependent_checks=skip_ssh,
-        spray_hosts=None if skip_ssh else SPRAY_HOSTS,
+        spray_hosts=None if skip_ssh or skip_ib else SPRAY_HOSTS,
+        ib_traffic_config=(None if skip_ssh or skip_ib else IB_TRAFFIC_CONFIG),
         # Prefixes injected once by the setup task (8-STSW split-per-VF).
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
         # Coldboot fully restarts wedge_agent; assert every pre-established peer
         # re-establishes within the (larger) coldboot SLA, DUT-scoped and anchored
         # on wedge_agent's systemd unit.
@@ -127,9 +144,10 @@ def create_fpf_tc27_test_config() -> TestConfig:
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=0,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,

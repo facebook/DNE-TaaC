@@ -31,6 +31,7 @@ from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
     TEST_CONFIG as TC36,
 )
 from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
+    CIRCUITS as TC37_CIRCUITS,
     LONGEVITY_SEC as TC37_LONGEVITY_SEC,
     TEST_CONFIG as TC37,
 )
@@ -251,7 +252,7 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         steps = _steps(TC37.playbooks[0])
         # tc37 now drives a REAL mstreg PAOS flap (no longer the thrift-admin
         # placeholder). One ``fpf_nic_mstreg_flap`` step on host rtptest, dev=0
-        # / lane=1 (BDF 0000:03:00.1) with the configured iteration/interval
+        # / lane=0 with the configured iteration/interval
         # defaults. The BDF is computed deterministically by the handler — the
         # config only carries host/dev/lane.
         flap_steps = [
@@ -263,8 +264,8 @@ class TestTc37NicSideLinkFlap(unittest.TestCase):
         self.assertEqual(len(flap_steps), 1)
         p = _params(flap_steps[0])
         self.assertEqual(p["dev"], 0)
-        self.assertEqual(p["lane"], 1)
-        self.assertTrue(p["host"].startswith("rtptest"))
+        self.assertEqual(p["lane"], 0)
+        self.assertEqual(p["host"], TC37_CIRCUITS[0].z_end_device)
         # Defaults wired from the test config.
         self.assertEqual(p["iterations"], 5)
         self.assertEqual(p["interval_sec"], 2.0)
@@ -350,7 +351,7 @@ class TestTc38PersistentNdpClear(unittest.TestCase):
     def test_ndp_clear_loop_120s_then_settle(self):
         steps = _steps(TC38.playbooks[0])
         # record-disruption-time -> ndp-clear loop -> settle longevity.
-        self.assertEqual(len(steps), 3)
+        self.assertEqual(len(steps), 4)
         # Locate the ndp-clear loop step (robust to step ordering).
         loop = next(
             s

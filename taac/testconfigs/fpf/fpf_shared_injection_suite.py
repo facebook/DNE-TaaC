@@ -1527,6 +1527,7 @@ def _tc55(*, spray, skip_ssh) -> list:
         create_system_reboot_step(
             trigger=taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT,
             description="FULL_SYSTEM_REBOOT of the DUT GTSW",
+            device_regexes=[DUT_GTSW],
         ),
         create_longevity_step(
             duration=reboot_comeup_sec,

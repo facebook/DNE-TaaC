@@ -116,6 +116,7 @@ def create_fpf_cont_interface_flaps_test_config(
     churn_every_sec: int = 120,
     churn_initial_delay_sec: int = 0,
     churn_recovery_timeout_sec: int = 0,
+    observe_prod_prefix_on_all_hosts: bool = False,
 ) -> TestConfig:
     """Build TC40's strict contract, optionally with concurrent service churn."""
     skip_ssh = skip_ssh_dependencies()
@@ -126,6 +127,11 @@ def create_fpf_cont_interface_flaps_test_config(
         traffic_config=IB_TRAFFIC_CONFIG,
     )
     spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
+    prod_prefixes_by_host = (
+        {host: PROD_PREFIXES for host in GPU_HOSTS}
+        if observe_prod_prefix_on_all_hosts
+        else None
+    )
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         postchecks=build_flap_disrupt_postchecks(
             observer_gtsws=ALL_GTSWS,
@@ -186,6 +192,7 @@ def create_fpf_cont_interface_flaps_test_config(
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name=f"{test_name}_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=prod_prefixes_by_host,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -209,8 +216,13 @@ def create_fpf_cont_interface_flaps_test_config(
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes=(
+                    None if observe_prod_prefix_on_all_hosts else PROD_PREFIXES
+                ),
+                prod_prefixes_by_host=prod_prefixes_by_host,
+                prod_prefix_host=(
+                    None if observe_prod_prefix_on_all_hosts else PROD_PREFIX_HOST
+                ),
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,

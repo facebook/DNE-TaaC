@@ -2,29 +2,7 @@
 
 # pyre-unsafe
 
-"""TC45: STSW prefix scale-UP 4k -> 8k (then teardown to nothing).
-
-Ramps the injected BGP++ scale on the trigger STSWs from 4,000 -> 8,000
-prefixes, then validates the 8k steady state with the SAME stable-state signals
-as fpf_stress_test_config. Teardown withdraws all 8k ("to nothing").
-
-Two-playbook structure:
-  1. Disruption-only playbook (NO checks): inject 4,000 prefixes, settle, then
-     inject up to 8,000 prefixes (the 4k->8k ramp), settle.
-  2. Stable-state v2 hardening playbook @ prefix_count=8,000: re-asserts the 8k
-     injection (idempotent) and validates the full stable-state contract
-     (convergence, HRT bulk/remote-failure/prod-prefix, FSDB session, host-spray,
-     HRT mem/driver) at the 8k steady state.
-
-ASSUMPTION: "to nothing" = the teardown withdrawal of all 8k prefixes; the
-stable-state signals are validated at the 8k peak.
-
-Usage:
-  TAAC_SSH_VIA_LAB_SSH=1 buck2 run neteng/netcastle:netcastle_taac -- \\
-    --team taac --test-config fpf_tc45_scale_up_4k_8k \\
-    --dev --skip-basset-reservation --skip-testbed-isolation \\
-    --debug --continue-on-precheck-failure --skip-fboss-rsyslog
-"""
+"""TC45: scale both VF groups from 4,000 to 8,000 prefixes per plane."""
 
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
@@ -35,127 +13,184 @@ from taac.steps.step_definitions import (
     create_longevity_step,
 )
 from taac.task_definitions import (
+    create_fpf_restart_service_task,
     create_fpf_start_collectors_task,
     create_fpf_stop_collectors_task,
+    create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
+    ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
-    DEFAULT_SUBNET_PREFIX,
     EXPECTED_FSDB_SESSION_COUNT,
-    fpf_clean_slate_setup_task,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
+    fpf_rf_vf_groups,
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
-    TRIGGER_STSWS,
+    VF1_PREFIX_BASE,
+    VF1_STSWS,
+    VF2_PREFIX_BASE,
+    VF2_STSWS,
+    VF_COLLECTOR_SUBNET,
 )
 from taac.test_as_a_config.types import TestConfig
 
 SCALE_LOW = 4000
 SCALE_HIGH = 8000
+SCALE_BATCH_SIZE = 252
 SETTLE_SEC = 120
 LONGEVITY_SEC = 300
-
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
+HIGH_GROUPS = [
+    {
+        "devices": VF1_STSWS,
+        "prefix_base": VF1_PREFIX_BASE,
+        "count": SCALE_HIGH,
+        "community_list": DEFAULT_COMMUNITY_LIST,
+        "batch_size": SCALE_BATCH_SIZE,
+    },
+    {
+        "devices": VF2_STSWS,
+        "prefix_base": VF2_PREFIX_BASE,
+        "count": SCALE_HIGH,
+        "community_list": DEFAULT_COMMUNITY_LIST,
+        "batch_size": SCALE_BATCH_SIZE,
+    },
+]
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
+
+
+def _inject_both_vfs(count: int, label: str) -> list:
+    return [
+        create_fpf_bgp_prefix_injection_step(
+            devices=devices,
+            prefix_base=prefix_base,
+            count=count,
+            batch_size=SCALE_BATCH_SIZE,
+            community_list=DEFAULT_COMMUNITY_LIST,
+            description=f"{label}: {count} prefixes from {prefix_base}",
+        )
+        for devices, prefix_base in (
+            (VF1_STSWS, VF1_PREFIX_BASE),
+            (VF2_STSWS, VF2_PREFIX_BASE),
+        )
+    ]
 
 
 def create_fpf_tc45_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
-    # Scale bump is expected to be EXACTLY stable-state throughout — so playbook 1
-    # runs the full stable-state v2 contract with the 4k->8k ramp as its
-    # disruption steps (no disruption-specific relaxations).
-    disrupt_playbook = create_fpf_hardening_playbook_v2(
+    ramp_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         soak_duration_sec=0,
-        stabilization_delay_sec=SETTLE_SEC,
+        stabilization_delay_sec=0,
         prefix_count=SCALE_HIGH,
         community_list=DEFAULT_COMMUNITY_LIST,
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         disruption_steps=[
-            create_fpf_bgp_prefix_injection_step(
-                devices=TRIGGER_STSWS,
-                count=SCALE_LOW,
-                community_list=DEFAULT_COMMUNITY_LIST,
-                description=f"Inject {SCALE_LOW} prefixes on the trigger STSWs",
-            ),
+            *_inject_both_vfs(SCALE_LOW, "Scale baseline"),
             create_longevity_step(
                 duration=SETTLE_SEC,
                 description=f"Settle {SETTLE_SEC}s at {SCALE_LOW} prefixes",
             ),
-            create_fpf_bgp_prefix_injection_step(
-                devices=TRIGGER_STSWS,
-                count=SCALE_HIGH,
-                community_list=DEFAULT_COMMUNITY_LIST,
-                description=f"Scale up to {SCALE_HIGH} prefixes on the trigger STSWs",
-            ),
+            *_inject_both_vfs(SCALE_HIGH, "Scale up"),
             create_longevity_step(
                 duration=SETTLE_SEC,
                 description=f"Settle {SETTLE_SEC}s at {SCALE_HIGH} prefixes",
             ),
         ],
         playbook_name="fpf_tc45_scale_up_4k_8k_disrupt",
+        lanes=INJECTED_LANES,
+        hrt_device_ids=HRT_DEVICE_IDS,
+        skip_injection=True,
+        rf_vf_groups=RF_VF_GROUPS,
     )
-
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
+        trigger_stsws=ALL_STSWS,
         soak_duration_sec=LONGEVITY_SEC,
         stabilization_delay_sec=SETTLE_SEC,
         prefix_count=SCALE_HIGH,
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc45_scale_up_4k_8k_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
+        lanes=INJECTED_LANES,
+        hrt_device_ids=HRT_DEVICE_IDS,
+        skip_injection=True,
+        rf_vf_groups=RF_VF_GROUPS,
     )
-
     return TestConfig(
         name="fpf_tc45_scale_up_4k_8k",
-        endpoints=create_fpf_endpoints(),
+        endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
-            fpf_clean_slate_setup_task(),
+            create_fpf_withdraw_vf_groups_task(groups=HIGH_GROUPS),
             *ib_setup,
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
-                subnet_prefix=DEFAULT_SUBNET_PREFIX,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
+                subnet_prefix=VF_COLLECTOR_SUBNET,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
+                rf_vf_groups=RF_VF_GROUPS,
             ),
         ],
         teardown_tasks=[
+            create_fpf_withdraw_vf_groups_task(groups=HIGH_GROUPS),
+            create_fpf_restart_service_task(devices=ALL_STSWS, service="BGP"),
             create_fpf_stop_collectors_task(
-                trigger_stsws=TRIGGER_STSWS,
-                prefix_count=SCALE_HIGH,
+                trigger_stsws=ALL_STSWS,
+                withdraw=False,
                 community_list=DEFAULT_COMMUNITY_LIST,
             ),
             *ib_teardown,
         ],
-        playbooks=[disrupt_playbook, longevity_playbook],
+        playbooks=[ramp_playbook, longevity_playbook],
         tags=["fpf"],
     )
 

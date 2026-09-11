@@ -1584,6 +1584,42 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
 
 
 class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
+    def test_split_vf_groups_keep_prefix_bases_and_target_scope(self):
+        stsw = "stsw001.s001.c085.ash6"
+        steps = create_fpf_stsw_drain_and_reinject_steps(
+            stsw=stsw,
+            drained=True,
+            trigger_stsws=[stsw],
+            prefix_count=1000,
+            community_list="stsw",
+            drain_community="65446:10",
+            injection_groups=[
+                {
+                    "devices": ["stsw001.s001.c085.ash6"],
+                    "prefix_base": "5000:dd::/64",
+                    "count": 4032,
+                    "batch_size": 252,
+                },
+                {
+                    "devices": ["stsw001.s005.c085.ash6"],
+                    "prefix_base": "5000:ee::/64",
+                    "count": 4032,
+                    "batch_size": 252,
+                },
+            ],
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(list(steps[0].device_regexes or []), [stsw])
+        injections = [_params(step) for step in steps[1:]]
+        self.assertEqual(
+            [params["prefix_base"] for params in injections],
+            ["5000:dd::/64", "5000:ee::/64"],
+        )
+        self.assertTrue(
+            all(params["community_list"] == "stsw 65446:10" for params in injections)
+        )
+        self.assertTrue(all(params["batch_size"] == 252 for params in injections))
+
     def test_drain_appends_drain_community_and_orders_steps(self):
         steps = create_fpf_stsw_drain_and_reinject_steps(
             stsw="stsw001.s001.c085.ash6",
