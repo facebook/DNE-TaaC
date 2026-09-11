@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
+    TestCaseFailure,
     TestDevice,
     TestTopology,
 )
@@ -39,6 +40,7 @@ from taac.steps.step_definitions import (
     create_fpf_rapid_flap_step,
     create_fpf_rapid_flap_step_lldp,
     create_fpf_repeated_service_crash_step,
+    create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_stsw_drain_and_reinject_steps,
 )
 from taac.test_as_a_config.types import Service, Step, StepName, TestConfig
@@ -134,6 +136,85 @@ class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):
         # The driver service resolved from FSDB has the fsdb systemctl value.
         called_service = cs.driver.async_crash_service.await_args_list[0].args[0]
         self.assertEqual(called_service.value, "fsdb")
+
+
+class TestRepeatedSwHwAgentCrashStep(unittest.IsolatedAsyncioTestCase):
+    def test_factory_has_exact_narrow_scope_and_actual_timing(self):
+        step = create_fpf_repeated_sw_hw_agent_crash_step(
+            device_regexes=["gtsw001"],
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        self.assertEqual(list(step.device_regexes), ["gtsw001"])
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_repeated_sw_hw_agent_crash")
+        self.assertEqual(params["process_names"], ["fboss_sw_agent", "fboss_hw_agent"])
+        self.assertEqual(
+            params["recovery_services"],
+            [
+                int(Service.FBOSS_SW_AGENT.value),
+                int(Service.FBOSS_HW_AGENT_0.value),
+            ],
+        )
+        self.assertEqual(params["every_sec"], 15)
+        self.assertEqual(params["duration_sec"], 300)
+        self.assertEqual(params["recovery_timeout_sec"], 120)
+
+    async def test_attempts_both_exact_kills_and_collects_first_error(self):
+        cs = _make_custom_step()
+        cs.driver.async_run_cmd_on_shell.side_effect = [
+            RuntimeError("sw kill failed"),
+            "",
+        ]
+        cs.driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        with (
+            self.assertRaisesRegex(
+                TestCaseFailure,
+                "failed after attempting both targets.*sw kill failed",
+            ),
+            patch("time.time", side_effect=[0.0, 1.0]),
+        ):
+            await cs.fpf_repeated_sw_hw_agent_crash(
+                _params(create_fpf_repeated_sw_hw_agent_crash_step())
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in cs.driver.async_run_cmd_on_shell.await_args_list],
+            ["pkill -9 fboss_sw_agent", "pkill -9 fboss_hw_agent"],
+        )
+        recovered = [
+            call.args[0] for call in cs.driver.async_get_service_status.await_args_list
+        ]
+        self.assertEqual(
+            [service.value for service in recovered],
+            ["fboss_sw_agent", "fboss_hw_agent@0"],
+        )
+
+    async def test_successful_cycle_never_uses_broad_or_qsfp_match(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        sleeps = []
+
+        async def fake_sleep(duration):
+            sleeps.append(duration)
+
+        with (
+            patch("time.time", side_effect=[0.0, 1.0, 1000.0]),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await cs.fpf_repeated_sw_hw_agent_crash(
+                _params(create_fpf_repeated_sw_hw_agent_crash_step())
+            )
+
+        commands = [
+            call.args[0] for call in cs.driver.async_run_cmd_on_shell.await_args_list
+        ]
+        self.assertEqual(
+            commands,
+            ["pkill -9 fboss_sw_agent", "pkill -9 fboss_hw_agent"],
+        )
+        self.assertFalse(any("-f" in command for command in commands))
+        self.assertFalse(any("qsfp" in command for command in commands))
+        self.assertEqual(sleeps, [15])
 
 
 class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):

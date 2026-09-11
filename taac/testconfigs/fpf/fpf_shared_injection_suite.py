@@ -27,7 +27,7 @@ inject task (matches the per-config value — needed for the first few playbooks
 not trip BGP_SESSION_ESTABLISH on an under-settled fabric), and the collectors
 task enables the FSDB-session collector (a superset) because the kill / reboot /
 hrt playbooks
-(tc28/39/49/50/51/52/55) assert against it.
+(tc28/39/49/50/51/52/55/58) assert against it.
 
 Usage:
   TAAC_SSH_VIA_LAB_SSH=1 buck2 run neteng/netcastle:netcastle_taac -- \\
@@ -53,6 +53,7 @@ from taac.steps.step_definitions import (
     create_fpf_record_restart_completion_time_step,
     create_fpf_record_restart_time_step,
     create_fpf_repeated_service_crash_step,
+    create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_restart_hrt_step,
     create_fpf_set_interface_admin_step,
     create_fpf_verify_disruption_step,
@@ -613,8 +614,9 @@ def _kill_playbooks(
     kill_every_sec: int,
     kill_duration_sec: int,
     longevity_settle_sec: int,
+    explicit_sw_hw_agent_pair: bool = False,
 ) -> list:
-    """tc49/50/51: graceful loop-kill (disrupt + longevity v2)."""
+    """tc49/50/51/58: repeated process kills (disrupt + longevity v2)."""
     stabilization_delay_sec = 120
     stable_after_kill_sec = 120
     longevity_soak_sec = 300
@@ -623,15 +625,21 @@ def _kill_playbooks(
     is_agent_kill = killed_service == "wedge_agent"
     is_fsdb_kill = killed_service == "fsdb"
 
-    disrupt_steps = [
-        create_longevity_step(
-            duration=stabilization_delay_sec,
-            description=f"Stabilize {stabilization_delay_sec}s before the kill loop",
-        ),
-        create_fpf_record_disruption_time_step(
-            description=f"Record {killed_service}-kill disruption time"
-        ),
-        create_fpf_repeated_service_crash_step(
+    if explicit_sw_hw_agent_pair:
+        kill_label = "fboss_sw_agent+fboss_hw_agent"
+        kill_step = create_fpf_repeated_sw_hw_agent_crash_step(
+            every_sec=kill_every_sec,
+            duration_sec=kill_duration_sec,
+            recovery_timeout_sec=120,
+            device_regexes=[DUT_GTSW],
+            description=(
+                "SIGKILL fboss_sw_agent then fboss_hw_agent every "
+                f"{kill_every_sec}s for {kill_duration_sec}s on {DUT_GTSW}"
+            ),
+        )
+    else:
+        kill_label = killed_service
+        kill_step = create_fpf_repeated_service_crash_step(
             service=kill_service,
             every_sec=kill_every_sec,
             duration_sec=kill_duration_sec,
@@ -640,7 +648,17 @@ def _kill_playbooks(
                 f"SIGKILL {kill_service.name} every {kill_every_sec}s for "
                 f"{kill_duration_sec}s on {DUT_GTSW}"
             ),
+        )
+
+    disrupt_steps = [
+        create_longevity_step(
+            duration=stabilization_delay_sec,
+            description=f"Stabilize {stabilization_delay_sec}s before the kill loop",
         ),
+        create_fpf_record_disruption_time_step(
+            description=f"Record {kill_label}-kill disruption time"
+        ),
+        kill_step,
         create_longevity_step(
             duration=stable_after_kill_sec,
             description=f"Stable {stable_after_kill_sec}s after the kill loop stops",
@@ -867,6 +885,7 @@ def _tc50(*, spray, skip_ssh) -> list:
         kill_every_sec=15,
         kill_duration_sec=300,
         longevity_settle_sec=60,
+        explicit_sw_hw_agent_pair=True,
     )
 
 
@@ -878,6 +897,20 @@ def _tc51(*, spray, skip_ssh) -> list:
         kill_service=taac_types.Service.FSDB,
         disrupt_name="fpf_tc51_fsdb_kill_5s_10min_disrupt",
         longevity_name="fpf_tc51_fsdb_kill_5s_10min_longevity",
+        kill_every_sec=15,
+        kill_duration_sec=300,
+        longevity_settle_sec=60,
+    )
+
+
+def _tc58(*, spray, skip_ssh) -> list:
+    return _kill_playbooks(
+        spray=spray,
+        skip_ssh=skip_ssh,
+        killed_service="wedge_agent",
+        kill_service=taac_types.Service.AGENT,
+        disrupt_name="fpf_tc58_multi_fboss_process_kill_15s_5min_disrupt",
+        longevity_name="fpf_tc58_multi_fboss_process_kill_15s_5min_longevity",
         kill_every_sec=15,
         kill_duration_sec=300,
         longevity_settle_sec=60,
@@ -1574,6 +1607,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     playbooks += _tc49(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc50(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc51(spray=spray, skip_ssh=skip_ssh)
+    playbooks += _tc58(spray=spray, skip_ssh=skip_ssh)
     # HRT restart.
     playbooks += _tc52(spray=spray, skip_ssh=skip_ssh)
     # NDP clear.

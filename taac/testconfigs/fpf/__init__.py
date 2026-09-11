@@ -149,6 +149,9 @@ from taac.testconfigs.fpf.fpf_tc56_cont_flaps_qsfp_restart import (
 from taac.testconfigs.fpf.fpf_tc57_cont_flaps_qsfp_crash import (
     TEST_CONFIG as FPF_TC57_CONT_FLAPS_QSFP_CRASH,
 )
+from taac.testconfigs.fpf.fpf_tc58_multi_fboss_process_kill_15s_5min import (
+    TEST_CONFIG as FPF_TC58_MULTI_FBOSS_PROCESS_KILL_15S_5MIN,
+)
 
 __all__ = [
     "FPF_GAR_CLASS_A",
@@ -200,4 +203,5 @@ __all__ = [
     "FPF_TC55_GTSW_DEVICE_REBOOT",
     "FPF_TC56_CONT_FLAPS_QSFP_RESTART",
     "FPF_TC57_CONT_FLAPS_QSFP_CRASH",
+    "FPF_TC58_MULTI_FBOSS_PROCESS_KILL_15S_5MIN",
 ]

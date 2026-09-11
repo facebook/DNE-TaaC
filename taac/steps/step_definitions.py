@@ -3286,6 +3286,48 @@ def create_fpf_repeated_service_crash_step(
     )
 
 
+def create_fpf_repeated_sw_hw_agent_crash_step(
+    every_sec: int = 15,
+    duration_sec: int = 300,
+    recovery_timeout_sec: int = 120,
+    recovery_poll_interval_sec: int = 5,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Repeatedly SIGKILL only fboss_sw_agent and fboss_hw_agent.
+
+    Unlike ``Service.AGENT`` on a multi-switch FBOSS platform, this deliberately
+    avoids the broad ``pkill -f fboss_`` driver path. The custom handler issues
+    both exact process-name kills every cycle, collects errors independently,
+    and requires the corresponding systemd services to recover ACTIVE.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or (
+            "SIGKILL fboss_sw_agent then fboss_hw_agent every "
+            f"{every_sec}s for {duration_sec}s"
+        ),
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_repeated_sw_hw_agent_crash",
+                    "process_names": ["fboss_sw_agent", "fboss_hw_agent"],
+                    "recovery_services": [
+                        int(taac_types.Service.FBOSS_SW_AGENT.value),
+                        int(taac_types.Service.FBOSS_HW_AGENT_0.value),
+                    ],
+                    "every_sec": every_sec,
+                    "duration_sec": duration_sec,
+                    "recovery_timeout_sec": recovery_timeout_sec,
+                    "recovery_poll_interval_sec": recovery_poll_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
 def create_fpf_ndp_clear_loop_step(
     every_sec: int = 1,
     duration_sec: int = 120,

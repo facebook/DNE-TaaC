@@ -2,27 +2,24 @@
 
 # pyre-unsafe
 
-"""TC50: SIGKILL wedge_agent every 15s for 10 minutes on the DUT GTSW.
+"""TC50: explicitly SIGKILL split sw+hw agents every 15s for 5 minutes.
 
-gtsw001 owns lane 0. Killing wedge_agent is the heaviest disruption: the agent
-(and bgpd, which is BindsTo the agent) bounces, gtsw001's ports/forwarding flap,
-and lane-0 routes churn (packet loss on lane 0 during the kill). fsdb stays up so
-the HRT FSDB sessions stay CONNECTED (32).
+The legacy test/config identity is retained for callers, but the trigger is now
+narrow and explicit: ``pkill -9 fboss_sw_agent`` followed by
+``pkill -9 fboss_hw_agent``. It does not use the multi-switch ``Service.AGENT``
+driver path because that expands to the broad ``pkill -9 -f fboss_`` match.
 
 Two-playbook structure:
   Playbook 1 (disrupt-window): inject + stabilize + record + kill loop + settle,
     then assert the DISRUPTED-STATE CONTRACT via
-    ``build_kill_disrupt_postchecks(killed_service="wedge_agent")`` — systemctl/
-    unclean-exit minus wedge_agent AND bgpd (BindsTo cascade), HRT FSDB sessions
-    stable 32 (fsdb up), HRT mem/driver healthy, in_dst_null/in_discard spike
-    >=10k while congestion==0, beth1-3 keep spraying while beth0 (lane 0) is exempt.
-    BGP establish/RIB and port-state are NOT asserted (agent + bgpd are down /
-    ports flap). See fpf_kill_contract.py.
+    the same established TC50 disrupted-state health contract, thresholds, and
+    traffic expectations. Both targeted kills are attempted per cycle and both
+    systemd units must recover ACTIVE.
   Playbook 2 (stable-state longevity, 5 min): full stable-state contract,
     convergence_settle_sec excludes the kill→recovery transient.
 
-Headless run kills wedge_agent via the driver crash path — kick off from a
-Kerberos-ticketed terminal (or set TAAC_SSH_VIA_LAB_SSH=1).
+Headless execution uses SSH shell commands; kick off from a Kerberos-ticketed
+terminal (or set TAAC_SSH_VIA_LAB_SSH=1).
 
 Usage:
   TAAC_SSH_VIA_LAB_SSH=1 buck2 run neteng/netcastle:netcastle_taac -- \\
@@ -39,6 +36,7 @@ from taac.playbooks.playbook_definitions import (
 from taac.steps.step_definitions import (
     create_fpf_record_disruption_time_step,
     create_fpf_repeated_service_crash_step,
+    create_fpf_repeated_sw_hw_agent_crash_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -91,39 +89,59 @@ LONGEVITY_SETTLE_SEC = 60
 SESSION_LOOKBACK_SEC = 1000
 
 DUT_GTSW = OBSERVER_GTSWS[0]
-KILLED_SERVICE = "wedge_agent"
-KILL_SERVICE = taac_types.Service.AGENT
+KILL_HEALTH_CONTRACT = "wedge_agent"
+SW_HW_AGENT_RECOVERY_TIMEOUT_SEC = 120
 
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 
 
-def create_fpf_tc50_test_config() -> TestConfig:
+def create_fpf_agent_kill_test_config(
+    *,
+    test_name: str,
+    broad_multi_fboss_process_kill: bool,
+) -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
     ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
     spray = None if skip_ssh else SPRAY_HOSTS
 
     # Prefixes are injected once by the setup task (8-plane VF groups), so the
     # disrupt window only stabilizes/records/kills/settles.
+    if broad_multi_fboss_process_kill:
+        kill_label = "broad multi-FBOSS-process"
+        kill_step = create_fpf_repeated_service_crash_step(
+            service=taac_types.Service.AGENT,
+            every_sec=KILL_EVERY_SEC,
+            duration_sec=KILL_DURATION_SEC,
+            device_regexes=[DUT_GTSW],
+            description=(
+                "Broad SIGKILL '-f fboss_' match every "
+                f"{KILL_EVERY_SEC}s for {KILL_DURATION_SEC}s on {DUT_GTSW}"
+            ),
+        )
+    else:
+        kill_label = "fboss_sw_agent+fboss_hw_agent"
+        kill_step = create_fpf_repeated_sw_hw_agent_crash_step(
+            every_sec=KILL_EVERY_SEC,
+            duration_sec=KILL_DURATION_SEC,
+            recovery_timeout_sec=SW_HW_AGENT_RECOVERY_TIMEOUT_SEC,
+            device_regexes=[DUT_GTSW],
+            description=(
+                "SIGKILL fboss_sw_agent then fboss_hw_agent every "
+                f"{KILL_EVERY_SEC}s for {KILL_DURATION_SEC}s on {DUT_GTSW}"
+            ),
+        )
+
     disrupt_steps = [
         create_longevity_step(
             duration=STABILIZATION_DELAY_SEC,
             description=f"Stabilize {STABILIZATION_DELAY_SEC}s before the kill loop",
         ),
         create_fpf_record_disruption_time_step(
-            description="Record wedge_agent-kill disruption time"
+            description=f"Record {kill_label}-kill disruption time"
         ),
-        create_fpf_repeated_service_crash_step(
-            service=KILL_SERVICE,
-            every_sec=KILL_EVERY_SEC,
-            duration_sec=KILL_DURATION_SEC,
-            device_regexes=[DUT_GTSW],
-            description=(
-                f"SIGKILL {KILL_SERVICE.name} every {KILL_EVERY_SEC}s for "
-                f"{KILL_DURATION_SEC}s on {DUT_GTSW}"
-            ),
-        ),
+        kill_step,
         create_longevity_step(
             duration=STABLE_AFTER_KILL_SEC,
             description=f"Stable {STABLE_AFTER_KILL_SEC}s after the kill loop stops",
@@ -131,11 +149,11 @@ def create_fpf_tc50_test_config() -> TestConfig:
     ]
 
     disrupt_playbook = create_fpf_disrupt_window_playbook(
-        playbook_name="fpf_tc50_wedge_agent_kill_5s_10min_disrupt",
+        playbook_name=f"{test_name}_disrupt",
         disruption_steps=disrupt_steps,
         spray_hosts=spray,
         postchecks=build_kill_disrupt_postchecks(
-            killed_service=KILLED_SERVICE,
+            killed_service=KILL_HEALTH_CONTRACT,
             observer_gtsws=OBSERVER_GTSWS,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             spray_hosts=spray,
@@ -155,7 +173,7 @@ def create_fpf_tc50_test_config() -> TestConfig:
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc50_wedge_agent_kill_5s_10min_longevity",
+        playbook_name=f"{test_name}_longevity",
         prod_prefixes=PROD_PREFIXES,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
@@ -177,7 +195,7 @@ def create_fpf_tc50_test_config() -> TestConfig:
     )
 
     return TestConfig(
-        name="fpf_tc50_wedge_agent_kill_5s_10min",
+        name=test_name,
         endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
@@ -212,6 +230,13 @@ def create_fpf_tc50_test_config() -> TestConfig:
         ],
         playbooks=[disrupt_playbook, longevity_playbook],
         tags=["fpf"],
+    )
+
+
+def create_fpf_tc50_test_config() -> TestConfig:
+    return create_fpf_agent_kill_test_config(
+        test_name="fpf_tc50_wedge_agent_kill_5s_10min",
+        broad_multi_fboss_process_kill=False,
     )
 
 
