@@ -46,6 +46,7 @@ from taac.libs.collectors.base_collector import (  # noqa: F401
 )
 
 SCALE_RECOVERY_POLL_GRACE_INTERVALS: float = 2.0
+DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC: float = 10.0
 from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
     _count_matching,
     get_bgp_rib,
@@ -348,6 +349,9 @@ class HrtRemoteFailureRow:
     valid: bool = True
     notes: str = ""
     plane_ids: List[int] = field(default_factory=lambda: list(range(NUM_LANES)))
+    request_start_epoch: float = 0.0
+    request_end_epoch: float = 0.0
+    duration_sec: float = 0.0
 
 
 @dataclass
@@ -443,40 +447,40 @@ class ScaleRecoveryEvaluation:
 
 
 def derive_scale_recovery_poll_grace_sec(
-    samples: Sequence[Tuple[float, int]] = (),
     *,
     poll_interval_sec: Optional[float] = None,
 ) -> Optional[float]:
-    """Return two polling intervals of tolerance for live or offline data."""
-    interval = poll_interval_sec
-    if interval is None:
-        timestamps = sorted({timestamp for timestamp, _value in samples})
-        deltas = [
-            current - previous
-            for previous, current in zip(timestamps, timestamps[1:])
-            if current > previous
-        ]
-        if not deltas:
-            return None
-        deltas.sort()
-        interval = deltas[len(deltas) // 2]
-    if interval <= 0:
+    """Return deterministic scheduling grace from a declared poll interval.
+
+    Never infer cadence from observed gaps: a missing poll is precisely what the
+    continuity check is intended to detect, so using those gaps would let the
+    failure enlarge its own allowance.
+    """
+    if poll_interval_sec is None or poll_interval_sec <= 0:
         return None
-    return interval * SCALE_RECOVERY_POLL_GRACE_INTERVALS
+    return poll_interval_sec * SCALE_RECOVERY_POLL_GRACE_INTERVALS
 
 
 def scale_recovery_observation_sec(
     max_convergence_sec: float,
     recovery_stability_sec: float,
     poll_interval_sec: float,
+    poll_duration_budget_sec: float = DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
 ) -> int:
-    """Observation horizon covering recovery, stability, and polling grace."""
+    """Observation horizon covering recovery, stability, cadence, and RPC time."""
     poll_grace_sec = derive_scale_recovery_poll_grace_sec(
         poll_interval_sec=poll_interval_sec
     )
     if poll_grace_sec is None:
         raise ValueError("poll_interval_sec must be positive")
-    return math.ceil(max_convergence_sec + recovery_stability_sec + poll_grace_sec)
+    if poll_duration_budget_sec < 0:
+        raise ValueError("poll_duration_budget_sec must be non-negative")
+    return math.ceil(
+        max_convergence_sec
+        + recovery_stability_sec
+        + poll_grace_sec
+        + poll_duration_budget_sec
+    )
 
 
 def evaluate_scale_recovery_samples(
@@ -489,6 +493,9 @@ def evaluate_scale_recovery_samples(
     max_convergence_sec: float,
     recovery_stability_sec: float,
     poll_grace_sec: Optional[float],
+    poll_duration_budget_sec: float = 0.0,
+    sample_durations_sec: Optional[Dict[float, float]] = None,
+    unscoped_timestamp_count: int = 0,
 ) -> ScaleRecoveryEvaluation:
     """Require bounded recovery plus complete, fresh exact-state evidence.
 
@@ -541,10 +548,21 @@ def evaluate_scale_recovery_samples(
             )
     else:
         recovery_index = next(
-            index
-            for index in range(first_mismatch_index + 1, len(ordered))
-            if ordered[index][1] == expected
+            (
+                index
+                for index in range(first_mismatch_index + 1, len(ordered))
+                if ordered[index][1] == expected
+            ),
+            None,
         )
+        if recovery_index is None:
+            return ScaleRecoveryEvaluation(
+                False,
+                False,
+                last_actual,
+                None,
+                f"never recovered to exact {expected}",
+            )
         regression = next(
             (
                 (ts, value)
@@ -577,11 +595,12 @@ def evaluate_scale_recovery_samples(
         )
 
     stable_tail_sec = round(last_ts - recovery_ts, 1)
+    total_coverage_grace_sec = (poll_grace_sec or 0.0) + poll_duration_budget_sec
     required_observation_end = (
         trigger_ts
         + max_convergence_sec
         + recovery_stability_sec
-        + (poll_grace_sec or 0.0)
+        + total_coverage_grace_sec
     )
     coverage_gaps = []
     if poll_grace_sec is None:
@@ -589,7 +608,10 @@ def evaluate_scale_recovery_samples(
     if observation_end_ts < required_observation_end:
         coverage_gaps.append(
             f"window ended at mutation+{observation_end_ts - trigger_ts:.1f}s "
-            f"before required {max_convergence_sec + recovery_stability_sec:g}s"
+            f"before required {max_convergence_sec + recovery_stability_sec + total_coverage_grace_sec:g}s "
+            f"({max_convergence_sec:g}s recovery + {recovery_stability_sec:g}s "
+            f"stable tail + {poll_grace_sec or 0.0:g}s cadence grace + "
+            f"{poll_duration_budget_sec:g}s RPC budget)"
         )
     if poll_grace_sec is not None and observation_end_ts - last_ts > poll_grace_sec:
         coverage_gaps.append(
@@ -603,17 +625,24 @@ def evaluate_scale_recovery_samples(
         )
     if poll_grace_sec is not None:
         tail = ordered[recovery_index:]
+        durations = sample_durations_sec or {}
         discontinuities = [
-            (previous[0], current[0])
+            (previous[0], current[0], durations.get(current[0], 0.0))
             for previous, current in zip(tail, tail[1:])
-            if current[0] - previous[0] > poll_grace_sec
+            if current[0] - previous[0]
+            > poll_grace_sec + durations.get(current[0], 0.0)
         ]
         if discontinuities:
-            largest_gap = max(end - start for start, end in discontinuities)
+            largest_gap = max(end - start for start, end, _duration in discontinuities)
             coverage_gaps.append(
                 f"stable tail contains a {largest_gap:.1f}s sample gap "
-                f"(continuity limit {poll_grace_sec:g}s)"
+                f"(cadence grace {poll_grace_sec:g}s plus measured RPC duration)"
             )
+    if unscoped_timestamp_count:
+        coverage_gaps.append(
+            f"{unscoped_timestamp_count} row(s) had unparseable timestamps and "
+            "could not be scoped before/after the mutation"
+        )
     if coverage_gaps:
         return ScaleRecoveryEvaluation(
             False,
@@ -1346,11 +1375,13 @@ class HrtRemoteFailureCollector(BaseCollector):
 
     async def _poll_once(self) -> None:
         async def _one_host(host: str) -> List[HrtRemoteFailureRow]:
-            timestamp = _now_str()
+            request_start_epoch = time.time()
             try:
                 client_ctx = await get_hrt_client(host)
                 async with client_ctx as client:
                     remote_failures = await client.getRemoteFailures()
+                request_end_epoch = time.time()
+                timestamp = _now_str()
                 return [
                     HrtRemoteFailureRow(
                         timestamp=timestamp,
@@ -1359,6 +1390,9 @@ class HrtRemoteFailureCollector(BaseCollector):
                         lane_counts=counts,
                         unique=total_unique,
                         plane_ids=self.plane_ids,
+                        request_start_epoch=request_start_epoch,
+                        request_end_epoch=request_end_epoch,
+                        duration_sec=round(request_end_epoch - request_start_epoch, 3),
                     )
                     for dev_id in self.device_ids
                     for counts, total_unique in [
@@ -1368,6 +1402,8 @@ class HrtRemoteFailureCollector(BaseCollector):
                     ]
                 ]
             except Exception as e:
+                request_end_epoch = time.time()
+                timestamp = _now_str()
                 notes = f"error: {e}"
                 logger.error(f"[HrtRemoteFailureCollector] {host}: {e}")
                 return [
@@ -1380,6 +1416,9 @@ class HrtRemoteFailureCollector(BaseCollector):
                         valid=False,
                         notes=notes,
                         plane_ids=self.plane_ids,
+                        request_start_epoch=request_start_epoch,
+                        request_end_epoch=request_end_epoch,
+                        duration_sec=round(request_end_epoch - request_start_epoch, 3),
                     )
                     for dev_id in self.device_ids
                 ]
@@ -1410,6 +1449,10 @@ class HrtRemoteFailureCollector(BaseCollector):
                         "unique": row.unique,
                         "valid": row.valid,
                         "notes": row.notes,
+                        "poll_interval_sec": self.interval_sec,
+                        "request_start_epoch": row.request_start_epoch,
+                        "request_end_epoch": row.request_end_epoch,
+                        "duration_sec": row.duration_sec,
                     }
                 )
         self._file.flush()
@@ -1797,6 +1840,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         max_convergence_sec: int = 120,
         recovery_stability_sec: float = 60.0,
         poll_grace_sec: Optional[float] = None,
+        poll_duration_budget_sec: float = 0.0,
         observation_end_ts: Optional[float] = None,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
@@ -1832,6 +1876,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
                             poll_grace_sec=poll_grace_sec,
+                            poll_duration_budget_sec=poll_duration_budget_sec,
                             observation_end_ts=observation_end_ts,
                             _single_tuple=True,
                         )
@@ -1850,12 +1895,14 @@ class HrtRemoteFailureCollector(BaseCollector):
         for lane_id in sorted(lanes):
             expected = expected_per_lane.get(lane_id, 0)
             samples: List[Tuple[float, int]] = []
+            sample_durations_sec: Dict[float, float] = {}
             error_count = 0
+            unscoped_timestamp_count = 0
             for row in self.rows:
                 try:
                     row_ts = _parse_ts(row.timestamp).timestamp()
-                except ValueError:
-                    error_count += 1
+                except (TypeError, ValueError):
+                    unscoped_timestamp_count += 1
                     continue
                 if row_ts < trigger_ts:
                     continue
@@ -1866,6 +1913,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     error_count += 1
                     continue
                 samples.append((row_ts, row.lane_counts[lane_id]))
+                sample_durations_sec[row_ts] = max(0.0, row.duration_sec)
 
             evaluation = evaluate_scale_recovery_samples(
                 samples,
@@ -1879,11 +1927,10 @@ class HrtRemoteFailureCollector(BaseCollector):
                 ),
                 max_convergence_sec=max_convergence_sec,
                 recovery_stability_sec=recovery_stability_sec,
-                poll_grace_sec=(
-                    poll_grace_sec
-                    if poll_grace_sec is not None
-                    else derive_scale_recovery_poll_grace_sec(samples)
-                ),
+                poll_grace_sec=poll_grace_sec,
+                poll_duration_budget_sec=poll_duration_budget_sec,
+                sample_durations_sec=sample_durations_sec,
+                unscoped_timestamp_count=unscoped_timestamp_count,
             )
             results.append(
                 PerLaneResult(
@@ -1911,6 +1958,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         max_convergence_sec: int = 120,
         recovery_stability_sec: float = 60.0,
         poll_grace_sec: Optional[float] = None,
+        poll_duration_budget_sec: float = 0.0,
         only_hosts: Optional[List[str]] = None,
         device_ids: Optional[List[int]] = None,
     ) -> List[PerLaneResult]:
@@ -1967,6 +2015,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     max_convergence_sec=max_convergence_sec,
                     recovery_stability_sec=recovery_stability_sec,
                     poll_grace_sec=poll_grace_sec,
+                    poll_duration_budget_sec=poll_duration_budget_sec,
                     observation_end_ts=window_end,
                     device_ids=device_ids,
                     only_hosts=only_hosts,

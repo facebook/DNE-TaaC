@@ -24931,6 +24931,9 @@ def create_fpf_prefix_injection_stress_playbook(
     )
 
 
+FPF_RECOVERED_BASELINE_QUALIFICATION_SEC: int = 120
+
+
 def _build_fpf_generic_checks(
     *,
     hosts: list[str],
@@ -24963,6 +24966,7 @@ def _build_fpf_generic_checks(
     hrt_device_ids: list[int] | None = None,
     prod_prefixes_by_host: dict[str, list[str]] | None = None,
     collector_precheck_lookback_sec: int | None = None,
+    skip_collector_history_prechecks: bool = False,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -25055,38 +25059,37 @@ def _build_fpf_generic_checks(
             ),
         ]
     )
-    # ODS/collector baseline prechecks (no SSH needed): kept in both modes.
-    if prod_prefixes:
+    # Historical collector prechecks are intentionally absent in recovered-
+    # longevity mode. A rolling window here would include the outage just repaired
+    # (TC31's concrete false failure). The stage performs a fresh point-in-time
+    # exact gate, records its common anchor, and then qualifies 120 strict seconds.
+    collector_precheck_lookback = collector_precheck_lookback_sec or 900
+    collector_precheck_uses_test_start = collector_precheck_lookback_sec is None
+    if prod_prefixes and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=prod_prefixes_by_host,
-                lookback_sec=collector_precheck_lookback_sec or 900,
-                use_test_case_start_time=(
-                    collector_precheck_lookback_sec is None
-                ),
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
         )
-    if hrt_memory_hosts:
+    if hrt_memory_hosts and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_hrt_system_memory_check(
                 hosts=hrt_memory_hosts,
                 threshold_gib=FPF_ACTIVE_THRESHOLDS.hrt_system_memory_max_gib,
-                lookback_sec=collector_precheck_lookback_sec or 900,
-                use_test_case_start_time=(
-                    collector_precheck_lookback_sec is None
-                ),
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_hrt_system_memory_precheck",
             )
         )
-    if hrt_driver_hosts:
+    if hrt_driver_hosts and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_hrt_driver_disconnect_check(
                 hosts=hrt_driver_hosts,
-                lookback_sec=collector_precheck_lookback_sec or 900,
-                use_test_case_start_time=(
-                    collector_precheck_lookback_sec is None
-                ),
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_hrt_driver_disconnect_precheck",
             )
         )
@@ -25545,6 +25548,7 @@ def create_fpf_scale_checkpoint_checks(
     scale_recovery_sla_sec: float = 120.0,
     scale_recovery_stability_sec: float = 60.0,
     collector_poll_interval_sec: float = 5.0,
+    collector_poll_duration_budget_sec: float = 10.0,
 ) -> list:
     """Build the strict point-in-time gate between two scale mutations."""
     from taac.health_checks.healthcheck_definitions import (
@@ -25624,6 +25628,8 @@ def create_fpf_scale_checkpoint_checks(
                 max_convergence_sec=int(scale_recovery_sla_sec),
                 recovery_stability_sec=scale_recovery_stability_sec,
                 poll_grace_sec=poll_grace_sec,
+                poll_interval_sec=collector_poll_interval_sec,
+                poll_duration_budget_sec=collector_poll_duration_budget_sec,
                 use_live_collectors=True,
                 use_mutation_time=True,
                 collector_name=f"hrt_remote_failure_{group['suffix']}",
@@ -25710,10 +25716,12 @@ def create_fpf_hardening_playbook_v2(
     cleanup_steps: list | None = None,
     ensure_traffic_after_disruption: bool = False,
     collector_precheck_lookback_sec: int | None = None,
+    recovered_baseline_qualification_sec: int | None = None,
     scale_mutation_mode: bool = False,
     scale_recovery_sla_sec: float = 120.0,
     scale_recovery_stability_sec: float = 60.0,
     collector_poll_interval_sec: float = 5.0,
+    collector_poll_duration_budget_sec: float = 10.0,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25807,6 +25815,15 @@ def create_fpf_hardening_playbook_v2(
     whose disruption steps first repair a link and wait for convergence; the
     default remains the existing fail-fast check at the head of the stage.
 
+    ``recovered_baseline_qualification_sec`` is an explicit recovered-longevity
+    opt-in. Historical collector prechecks are omitted, a strict current-state
+    gate runs after traffic readiness, then a common evidence anchor begins the
+    requested qualification window before the unchanged longevity soak.
+    Postchecks cover qualification plus longevity, so a null or regression cannot
+    be hidden by the earlier intentional outage. This policy is deliberately
+    separate from ``collector_precheck_lookback_sec``, which remains a generic
+    historical precheck window for non-recovery callers such as scale tests.
+
     ``impacted_lanes_drained`` (default None) marks the given fabric lanes as
     DRAINED/impacted for a drain-longevity config where the drain STAYS in effect
     through the whole soak (e.g. tc34/tc54: stsw001.s001 -> lane 0). When set
@@ -25850,6 +25867,8 @@ def create_fpf_hardening_playbook_v2(
     from taac.steps.step_definitions import (
         create_fpf_bgp_prefix_injection_step,
         create_fpf_ensure_traffic_step,
+        create_fpf_record_recovered_baseline_time_step,
+        create_fpf_verify_recovered_state_step,
         create_longevity_step,
     )
 
@@ -25863,6 +25882,15 @@ def create_fpf_hardening_playbook_v2(
     scale_poll_grace_sec = derive_scale_recovery_poll_grace_sec(
         poll_interval_sec=collector_poll_interval_sec
     )
+    if (
+        recovered_baseline_qualification_sec is not None
+        and recovered_baseline_qualification_sec
+        != FPF_RECOVERED_BASELINE_QUALIFICATION_SEC
+    ):
+        raise ValueError(
+            "recovered_baseline_qualification_sec must use the canonical "
+            f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}s qualification"
+        )
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
     resolved_lanes = lanes if lanes is not None else [0, 1]
@@ -25949,6 +25977,9 @@ def create_fpf_hardening_playbook_v2(
         host_spray_transform_desc=host_spray_transform_desc,
         hrt_device_ids=resolved_hrt_device_ids,
         collector_precheck_lookback_sec=collector_precheck_lookback_sec,
+        skip_collector_history_prechecks=(
+            recovered_baseline_qualification_sec is not None
+        ),
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -26020,15 +26051,48 @@ def create_fpf_hardening_playbook_v2(
         stage_steps.append(traffic_readiness_step)
     if disruption_steps:
         stage_steps.extend(disruption_steps)
-    elif soak_duration_sec > 0:
-        stage_steps.append(
-            create_longevity_step(
-                duration=soak_duration_sec,
-                description="Stable-state soak — no disruption",
-            ),
-        )
     if traffic_readiness_step is not None and ensure_traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
+    if not disruption_steps:
+        if recovered_baseline_qualification_sec is not None:
+            stage_steps.extend(
+                [
+                    create_fpf_verify_recovered_state_step(
+                        hosts=hosts,
+                        device_ids=resolved_hrt_device_ids,
+                        planes=resolved_lanes,
+                        expected_count=prefix_count,
+                        expected_sessions=fsdb_sessions_per_host,
+                        prefixes_by_host=resolved_prod_prefixes_by_host or {},
+                        rf_vf_groups=rf_vf_groups or [],
+                        description=(
+                            "Fail-closed current recovery gate: exact sessions, "
+                            "both-host prod-prefix, HRT/RF tuples, and planes"
+                        ),
+                    ),
+                    create_fpf_record_recovered_baseline_time_step(
+                        description=(
+                            "Anchor recovered baseline after exact current-state "
+                            "and traffic gates"
+                        )
+                    ),
+                    create_longevity_step(
+                        duration=FPF_RECOVERED_BASELINE_QUALIFICATION_SEC,
+                        description=(
+                            "Recovered-state qualification — require exact healthy "
+                            "state continuously for "
+                            f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}s"
+                        ),
+                    ),
+                ]
+            )
+        if soak_duration_sec > 0:
+            stage_steps.append(
+                create_longevity_step(
+                    duration=soak_duration_sec,
+                    description="Stable-state longevity soak — no disruption",
+                ),
+            )
 
     convergence_postchecks = []
     for lane_id, gtsw in enumerate(gtsws):
@@ -26139,51 +26203,73 @@ def create_fpf_hardening_playbook_v2(
             )
             if not _glanes:
                 continue
-            convergence_postchecks.append(
-                create_fpf_hrt_remote_failure_convergence_check(
-                    lanes=_glanes,
-                    device_ids=_g.get("device_ids", [0]),
-                    expected_per_lane=_gexpected,
-                    direction=_rf_direction,
-                    max_convergence_sec=int(scale_recovery_sla_sec),
-                    recovery_stability_sec=(
-                        scale_recovery_stability_sec
-                        if scale_mutation_mode
-                        else None
-                    ),
-                    poll_grace_sec=(
-                        scale_poll_grace_sec if scale_mutation_mode else None
-                    ),
-                    use_live_collectors=True,
-                    use_mutation_time=scale_mutation_mode,
-                    collector_name=f"hrt_remote_failure_{_g['suffix']}",
-                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                    check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
+            if scale_mutation_mode:
+                remote_failure_check = (
+                    create_fpf_hrt_remote_failure_convergence_check(
+                        lanes=_glanes,
+                        device_ids=_g.get("device_ids", [0]),
+                        expected_per_lane=_gexpected,
+                        direction=_rf_direction,
+                        max_convergence_sec=int(scale_recovery_sla_sec),
+                        recovery_stability_sec=scale_recovery_stability_sec,
+                        poll_grace_sec=scale_poll_grace_sec,
+                        poll_interval_sec=collector_poll_interval_sec,
+                        poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                        use_live_collectors=True,
+                        use_mutation_time=True,
+                        collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                        check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
+                    )
                 )
-            )
+            else:
+                remote_failure_check = (
+                    create_fpf_hrt_remote_failure_convergence_check(
+                        lanes=_glanes,
+                        device_ids=_g.get("device_ids", [0]),
+                        expected_per_lane=_gexpected,
+                        direction=_rf_direction,
+                        use_live_collectors=True,
+                        use_mutation_time=False,
+                        collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                        check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
+                    )
+                )
+            convergence_postchecks.append(remote_failure_check)
     else:
         _stable_lanes = [lane for lane in resolved_lanes if lane not in drained_lanes]
         if _stable_lanes:
-            convergence_postchecks.append(
-                create_fpf_hrt_remote_failure_convergence_check(
-                    lanes=_stable_lanes,
-                    device_ids=resolved_hrt_device_ids,
-                    direction=_rf_direction,
-                    max_convergence_sec=int(scale_recovery_sla_sec),
-                    recovery_stability_sec=(
-                        scale_recovery_stability_sec
-                        if scale_mutation_mode
-                        else None
-                    ),
-                    poll_grace_sec=(
-                        scale_poll_grace_sec if scale_mutation_mode else None
-                    ),
-                    use_live_collectors=True,
-                    use_mutation_time=scale_mutation_mode,
-                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
-                    check_id="fpf_remote_failure_stable",
+            if scale_mutation_mode:
+                remote_failure_check = (
+                    create_fpf_hrt_remote_failure_convergence_check(
+                        lanes=_stable_lanes,
+                        device_ids=resolved_hrt_device_ids,
+                        direction=_rf_direction,
+                        max_convergence_sec=int(scale_recovery_sla_sec),
+                        recovery_stability_sec=scale_recovery_stability_sec,
+                        poll_grace_sec=scale_poll_grace_sec,
+                        poll_interval_sec=collector_poll_interval_sec,
+                        poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                        use_live_collectors=True,
+                        use_mutation_time=True,
+                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                        check_id="fpf_remote_failure_stable",
+                    )
                 )
-            )
+            else:
+                remote_failure_check = (
+                    create_fpf_hrt_remote_failure_convergence_check(
+                        lanes=_stable_lanes,
+                        device_ids=resolved_hrt_device_ids,
+                        direction=_rf_direction,
+                        use_live_collectors=True,
+                        use_mutation_time=False,
+                        restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                        check_id="fpf_remote_failure_stable",
+                    )
+                )
+            convergence_postchecks.append(remote_failure_check)
     # Fifth collector ↔ fifth validating check: production HRT prefix
     # reachability stability. Only added when the prod_hrt_prefix collector
     # was started (prod_prefixes supplied to FpfStartCollectorsTask).

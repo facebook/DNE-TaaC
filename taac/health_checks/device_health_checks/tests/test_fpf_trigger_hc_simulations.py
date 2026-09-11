@@ -144,7 +144,7 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         )
         self.assertTrue(enforce_final_exact(exact, 4000).passed)
 
-    def test_jsonl_window_end_is_lazy_and_offline_grace_is_derived(self):
+    def test_jsonl_window_end_is_lazy_and_grace_requires_declared_cadence(self):
         self.assertEqual(
             _resolve_jsonl_observation_end(
                 [{"timestamp": "not parsed when explicitly configured"}],
@@ -153,11 +153,10 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
             WINDOW_END,
         )
         self.assertEqual(
-            derive_scale_recovery_poll_grace_sec(
-                [(WINDOW_START, 0), (WINDOW_START + 5, 0), (WINDOW_START + 10, 0)]
-            ),
+            derive_scale_recovery_poll_grace_sec(poll_interval_sec=5),
             10,
         )
+        self.assertIsNone(derive_scale_recovery_poll_grace_sec())
 
     def _rf_result(
         self,
@@ -290,6 +289,66 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         )[0]
         self.assertTrue(no_post_trigger.inconclusive)
         self.assertIn("no valid post-mutation", no_post_trigger.detail)
+
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=None,
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[0, 0, 0, 0],
+            ),
+            *[
+                HrtRemoteFailureRow(
+                    timestamp=_ts_str(WINDOW_START + offset),
+                    host=GPU_HOST,
+                    device_id=0,
+                    lane_counts=[count, 0, 0, 0],
+                )
+                for count, offset in zip([152, *([0] * 13)], [30, *range(120, 181, 5)])
+            ],
+        ]
+        unscoped = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertFalse(unscoped.passed)
+        self.assertTrue(unscoped.inconclusive)
+        self.assertIn("could not be scoped", unscoped.detail)
+
+    def test_scale_rf_continuity_accounts_for_measured_rpc_duration(self):
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        offsets = [30, 120, 135, *range(140, 181, 5)]
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[152 if offset == 30 else 0, 0, 0, 0],
+                duration_sec=5.0 if offset == 135 else 0.0,
+            )
+            for offset in offsets
+        ]
+        result = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(result.passed)
 
     def test_exact_lane_map_is_complete_and_well_typed(self):
         self.assertEqual(

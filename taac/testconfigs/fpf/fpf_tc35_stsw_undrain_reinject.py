@@ -158,7 +158,7 @@ def create_fpf_tc35_test_config() -> TestConfig:
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
         hrt_device_ids=HRT_DEVICE_IDS,
-        collector_precheck_lookback_sec=RECOVERED_BASELINE_LOOKBACK_SEC,
+        recovered_baseline_qualification_sec=RECOVERED_BASELINE_LOOKBACK_SEC,
     )
 
     return TestConfig(

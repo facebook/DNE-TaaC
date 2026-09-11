@@ -25,10 +25,11 @@ Two-playbook "longevity-anchored health check" structure:
     rtptest hosts across the window (sustained per-lane egress floor + fairness;
     the data plane should stay clean since GR holds forwarding state).
 
-  Playbook 2 (stable-state longevity, 5 min): full stable-state hardening
-    contract. Collector-backed prechecks use the recovered rolling 120s baseline
-    because they execute before the runner re-stamps the new playbook start;
-    postchecks remain strictly anchored to the longevity playbook.
+  Playbook 2 (recovery qualification + stable-state longevity): current exact
+    state and traffic are gated first, then a fresh common anchor starts a strict
+    120s recovered baseline before the unchanged 5-minute soak. Historical
+    collector prechecks are omitted so the intentional outage cannot poison the
+    new baseline; postchecks cover qualification plus longevity.
 
 ASSUMPTIONS:
   - GR grace-period behavior: within the grace window forwarding state is held, so
@@ -38,8 +39,8 @@ ASSUMPTIONS:
   - recovery_min_sec=60 — the post-re-enable 120s settle inside the disrupt
     playbook gives the collector ample window to observe a full 60s of held
     recovery after the sessions return to 32.
-  - The longevity collector prechecks use the recovered 120s rolling baseline;
-    the intentional Playbook-1 outage is not stable-state history.
+  - The recovered-baseline qualification is a distinct 120s health policy, not
+    the fixed post-enable settle. The intentional outage is not baseline history.
   - host-spray all_samples=True is the per-sample sustained-fairness assertion the
     spec calls for (track all samples for all beths of both hosts).
 
@@ -228,7 +229,7 @@ def create_fpf_tc29_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
-        collector_precheck_lookback_sec=REENABLE_SETTLE_SEC,
+        recovered_baseline_qualification_sec=120,
     )
 
     return TestConfig(

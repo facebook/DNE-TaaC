@@ -26,6 +26,7 @@ from taac.libs.fpf.fpf_collector_registry import (
 )
 from taac.libs.fpf.fpf_stress_checks import (
     _parse_ts,
+    DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
     derive_scale_recovery_poll_grace_sec,
     evaluate_scale_recovery_samples,
 )
@@ -155,6 +156,12 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 message=f"No live HRT remote-failure collector '{collector_name}' in registry",
             )
         poll_grace_sec = check_params.get("poll_grace_sec")
+        poll_duration_budget_sec = float(
+            check_params.get(
+                "poll_duration_budget_sec",
+                DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+            )
+        )
         if direction == "scale_recovery" and poll_grace_sec is None:
             poll_grace_sec = derive_scale_recovery_poll_grace_sec(
                 poll_interval_sec=getattr(collector, "interval_sec", None)
@@ -237,6 +244,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
                             poll_grace_sec=poll_grace_sec,
+                            poll_duration_budget_sec=poll_duration_budget_sec,
                             only_hosts=[host],
                         )
                     )
@@ -255,6 +263,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
                             poll_grace_sec=poll_grace_sec,
+                            poll_duration_budget_sec=poll_duration_budget_sec,
                             only_hosts=[host],
                         )
                     )
@@ -278,6 +287,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             max_convergence_sec=max_convergence_sec,
                             recovery_stability_sec=recovery_stability_sec,
                             poll_grace_sec=poll_grace_sec,
+                            poll_duration_budget_sec=poll_duration_budget_sec,
                             only_hosts=[host],
                         )
                     )
@@ -292,6 +302,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 max_convergence_sec=max_convergence_sec,
                 recovery_stability_sec=recovery_stability_sec,
                 poll_grace_sec=poll_grace_sec,
+                poll_duration_budget_sec=poll_duration_budget_sec,
                 only_hosts=only_hosts,
             )
 
@@ -408,7 +419,16 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 message="JSONL file is empty",
             )
 
-        first_ts = _parse_ts(rows[0]["timestamp"]).timestamp()
+        try:
+            first_ts = _parse_ts(rows[0]["timestamp"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.SKIP,
+                message=(
+                    "INCONCLUSIVE — JSONL trigger anchor has a missing or "
+                    "unparseable timestamp"
+                ),
+            )
         trigger_ts = first_ts + trigger_delay_sec
         observation_end_ts = _resolve_jsonl_observation_end(
             rows, check_params.get("window_end")
@@ -419,6 +439,17 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 message="INCONCLUSIVE — JSONL has no parseable observation timestamp",
             )
         poll_grace_sec = check_params.get("poll_grace_sec")
+        poll_interval_sec = check_params.get("poll_interval_sec")
+        if poll_grace_sec is None and poll_interval_sec is not None:
+            poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+                poll_interval_sec=float(poll_interval_sec)
+            )
+        poll_duration_budget_sec = float(
+            check_params.get(
+                "poll_duration_budget_sec",
+                DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+            )
+        )
 
         results = [
             self._evaluate_lane_from_rows(
@@ -431,6 +462,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 recovery_stability_sec,
                 observation_end_ts,
                 float(poll_grace_sec) if poll_grace_sec is not None else None,
+                poll_duration_budget_sec,
             )
             for lane_id in sorted(lanes)
         ]
@@ -472,6 +504,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         recovery_stability_sec: float,
         observation_end_ts: float,
         poll_grace_sec: t.Optional[float],
+        poll_duration_budget_sec: float,
     ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         if direction in (
             "stable",
@@ -491,6 +524,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 recovery_stability_sec,
                 observation_end_ts,
                 poll_grace_sec,
+                poll_duration_budget_sec,
             )
         if direction == "drain":
             result = self._evaluate_drain_from_rows(
@@ -512,14 +546,17 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         recovery_stability_sec: float,
         observation_end_ts: float,
         poll_grace_sec: t.Optional[float],
+        poll_duration_budget_sec: float,
     ) -> t.Tuple[int, bool, int, t.Optional[float], str, bool]:
         samples: t.List[t.Tuple[float, int]] = []
+        sample_durations_sec: t.Dict[float, float] = {}
         error_count = 0
+        unscoped_timestamp_count = 0
         for row in rows:
             try:
                 row_ts = _parse_ts(row["timestamp"]).timestamp()
-            except (KeyError, ValueError):
-                error_count += 1
+            except (KeyError, TypeError, ValueError):
+                unscoped_timestamp_count += 1
                 continue
             if row_ts < trigger_ts:
                 continue
@@ -533,6 +570,12 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 error_count += 1
                 continue
             samples.append((row_ts, int(lane_counts[lane_id])))
+            try:
+                sample_durations_sec[row_ts] = max(
+                    0.0, float(row.get("duration_sec", 0.0))
+                )
+            except (TypeError, ValueError):
+                unscoped_timestamp_count += 1
 
         evaluation = evaluate_scale_recovery_samples(
             samples,
@@ -542,11 +585,10 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             observation_end_ts=observation_end_ts,
             max_convergence_sec=max_convergence_sec,
             recovery_stability_sec=recovery_stability_sec,
-            poll_grace_sec=(
-                poll_grace_sec
-                if poll_grace_sec is not None
-                else derive_scale_recovery_poll_grace_sec(samples)
-            ),
+            poll_grace_sec=poll_grace_sec,
+            poll_duration_budget_sec=poll_duration_budget_sec,
+            sample_durations_sec=sample_durations_sec,
+            unscoped_timestamp_count=unscoped_timestamp_count,
         )
         return (
             lane_id,

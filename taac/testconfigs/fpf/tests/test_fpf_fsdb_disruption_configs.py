@@ -267,7 +267,7 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
             f"missing stable check IDs: {required - ids}",
         )
 
-    def test_longevity_collector_prechecks_use_recovered_120s_baseline(self):
+    def test_longevity_qualifies_recovered_baseline_before_soak(self):
         playbook = self.cfg.playbooks[1]
         prechecks = _prechecks_by_id(playbook)
         for check_id in (
@@ -275,9 +275,23 @@ class TestFpfTc29FsdbGrStop30(unittest.TestCase):
             "fpf_hrt_system_memory_precheck",
             "fpf_hrt_driver_disconnect_precheck",
         ):
-            params = _check_params(prechecks[check_id])
-            self.assertEqual(params["lookback_sec"], 120)
-            self.assertFalse(params["use_test_case_start_time"])
+            self.assertNotIn(check_id, prechecks)
+        steps = [step for stage in playbook.stages for step in stage.steps or []]
+        gate = next(
+            index
+            for index, step in enumerate(steps)
+            if _step_params(step).get("custom_step_name")
+            == "fpf_verify_recovered_state"
+        )
+        anchor = next(
+            index
+            for index, step in enumerate(steps)
+            if _step_params(step).get("custom_step_name")
+            == "record_fpf_recovered_baseline_time"
+        )
+        self.assertLess(gate, anchor)
+        self.assertEqual(_step_params(steps[anchor + 1])["duration"], 120)
+        self.assertEqual(_step_params(steps[anchor + 2])["duration"], 300)
         postcheck = _check_params(
             _checks_by_id(playbook)["fpf_prod_hrt_prefix_stability"]
         )
@@ -368,16 +382,32 @@ class TestFpfTc31FsdbEnableRecover(unittest.TestCase):
             f"missing stable check IDs: {required - ids}",
         )
 
-    def test_longevity_collector_prechecks_use_recovered_120s_baseline(self):
+    def test_longevity_qualifies_recovered_baseline_before_soak(self):
         prechecks = _prechecks_by_id(self.cfg.playbooks[1])
         for check_id in (
             "fpf_prod_hrt_prefix_stability_precheck",
             "fpf_hrt_system_memory_precheck",
             "fpf_hrt_driver_disconnect_precheck",
         ):
-            params = _check_params(prechecks[check_id])
-            self.assertEqual(params["lookback_sec"], 120)
-            self.assertFalse(params["use_test_case_start_time"])
+            self.assertNotIn(check_id, prechecks)
+        steps = [
+            step for stage in self.cfg.playbooks[1].stages for step in stage.steps or []
+        ]
+        gate = next(
+            index
+            for index, step in enumerate(steps)
+            if _step_params(step).get("custom_step_name")
+            == "fpf_verify_recovered_state"
+        )
+        anchor = next(
+            index
+            for index, step in enumerate(steps)
+            if _step_params(step).get("custom_step_name")
+            == "record_fpf_recovered_baseline_time"
+        )
+        self.assertLess(gate, anchor)
+        self.assertEqual(_step_params(steps[anchor + 1])["duration"], 120)
+        self.assertEqual(_step_params(steps[anchor + 2])["duration"], 300)
 
 
 class _SessionStatHCExpectationsBase(unittest.IsolatedAsyncioTestCase):

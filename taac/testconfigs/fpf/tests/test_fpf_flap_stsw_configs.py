@@ -67,7 +67,7 @@ def _longevity_playbook_has_checks(tc, test):
     test.assertTrue(longevity.postchecks, "longevity playbook should have postchecks")
 
 
-def _assert_recovered_collector_prechecks(tc, test):
+def _assert_recovered_baseline_qualification(tc, test):
     prechecks = {
         check.check_id: check
         for check in tc.playbooks[1].prechecks or []
@@ -78,9 +78,23 @@ def _assert_recovered_collector_prechecks(tc, test):
         "fpf_hrt_system_memory_precheck",
         "fpf_hrt_driver_disconnect_precheck",
     ):
-        params = json.loads(prechecks[check_id].check_params.json_params)
-        test.assertEqual(params["lookback_sec"], 120)
-        test.assertFalse(params["use_test_case_start_time"])
+        test.assertNotIn(check_id, prechecks)
+    steps = [step for stage in tc.playbooks[1].stages for step in stage.steps or []]
+    gate_index = next(
+        index
+        for index, step in enumerate(steps)
+        if _params(step).get("custom_step_name") == "fpf_verify_recovered_state"
+    )
+    anchor_index = next(
+        index
+        for index, step in enumerate(steps)
+        if _params(step).get("custom_step_name") == "record_fpf_recovered_baseline_time"
+    )
+    test.assertLess(gate_index, anchor_index)
+    qualification = _params(steps[anchor_index + 1])
+    longevity = _params(steps[anchor_index + 2])
+    test.assertEqual(qualification["duration"], 120)
+    test.assertEqual(longevity["duration"], 300)
 
 
 # Stable-state hardening v2 check IDs that every tc32-tc35 longevity playbook
@@ -147,7 +161,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
         _disrupt_playbook_has_no_checks(tc, self)
         _longevity_playbook_has_checks(tc, self)
         _longevity_carries_v2_stable_check_set(tc, self, vf_grouped=vf_grouped)
-        _assert_recovered_collector_prechecks(tc, self)
+        _assert_recovered_baseline_qualification(tc, self)
 
         # Scaled window: 15 min flaps, 5 min longevity.
         self.assertEqual(flap_sec, 900)
@@ -320,7 +334,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
 
     def test_tc40_opts_into_fail_closed_multi_gtsw_safety(self):
         config = fpf_tc40_cont_interface_flaps.TEST_CONFIG
-        _assert_recovered_collector_prechecks(config, self)
+        _assert_recovered_baseline_qualification(config, self)
         flap = _params(_steps(config.playbooks[0])[0])
         self.assertTrue(flap["fail_closed"])
         self.assertTrue(flap["require_exact_neighbor_hosts"])
@@ -400,7 +414,7 @@ class TestRapidFlapConfigs(unittest.TestCase):
                     self,
                     vf_grouped=True,
                 )
-                _assert_recovered_collector_prechecks(config, self)
+                _assert_recovered_baseline_qualification(config, self)
 
                 steps = _steps(config.playbooks[0])
                 self.assertEqual(len(steps), 2)
@@ -468,7 +482,7 @@ class TestStswDrainReinjectConfigs(unittest.TestCase):
         _disrupt_playbook_has_no_checks(TC35, self)
         _longevity_playbook_has_checks(TC35, self)
         _longevity_carries_v2_stable_check_set(TC35, self, vf_grouped=True)
-        _assert_recovered_collector_prechecks(TC35, self)
+        _assert_recovered_baseline_qualification(TC35, self)
         self.assertEqual(TC35_LONGEVITY_SEC, 300)
 
         steps = _steps(TC35.playbooks[0])

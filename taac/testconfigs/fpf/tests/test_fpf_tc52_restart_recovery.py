@@ -115,7 +115,7 @@ class TestFpfTc52RestartRecovery(unittest.TestCase):
             _playbook(config, "fpf_tc52_hrt_restart_longevity"),
         )
 
-    def test_shared_recovered_longevity_prechecks_use_rolling_baseline(self):
+    def test_shared_recovered_longevity_has_gate_and_qualification(self):
         config = (
             fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
         )
@@ -143,9 +143,29 @@ class TestFpfTc52RestartRecovery(unittest.TestCase):
                     "fpf_hrt_system_memory_precheck",
                     "fpf_hrt_driver_disconnect_precheck",
                 ):
-                    params = _params(prechecks[check_id].check_params)
-                    self.assertEqual(params["lookback_sec"], 120)
-                    self.assertFalse(params["use_test_case_start_time"])
+                    self.assertNotIn(check_id, prechecks)
+                steps = [
+                    step for stage in playbook.stages for step in stage.steps or []
+                ]
+                gate = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _params(step.step_params).get("custom_step_name")
+                    == "fpf_verify_recovered_state"
+                )
+                anchor = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _params(step.step_params).get("custom_step_name")
+                    == "record_fpf_recovered_baseline_time"
+                )
+                self.assertLess(gate, anchor)
+                self.assertEqual(
+                    _params(steps[anchor + 1].step_params)["duration"], 120
+                )
+                self.assertEqual(
+                    _params(steps[anchor + 2].step_params)["duration"], 300
+                )
 
 
 if __name__ == "__main__":

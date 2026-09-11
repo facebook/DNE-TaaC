@@ -251,6 +251,12 @@ _restart_completion_time: float = 0.0
 _recovery_start_time: float = 0.0
 _recovery_completion_time: float = 0.0
 
+# Effective start of a recovered-state qualification window. It is recorded
+# only after every current-state recovery gate (including traffic readiness)
+# succeeds, so subsequent strict collector checks cannot accidentally include
+# the intentional outage or an incomplete recovery.
+_recovered_baseline_time: float = 0.0
+
 # Signal 1: end-to-end convergence ceiling. Includes any stimulus push
 # duration. 180s allows ~110s for 10k-prefix injection + ~70s propagation.
 DEFAULT_SIGNAL1_E2E_MAX_SEC: float = 180.0
@@ -403,6 +409,19 @@ def get_recovery_completion_time() -> float:
     return _recovery_completion_time
 
 
+def set_recovered_baseline_time(ts: float) -> None:
+    global _recovered_baseline_time
+    _recovered_baseline_time = ts
+    # Existing collector checks already use test_case_start_time as their common
+    # window anchor. Move that anchor only for the explicit recovered-baseline
+    # opt-in after every current-state gate has passed.
+    set_test_case_start_time(ts)
+
+
+def get_recovered_baseline_time() -> float:
+    return _recovered_baseline_time
+
+
 def validate_restart_tolerant_tuple(
     rows: t.Iterable[t.Any],
     host: str,
@@ -473,7 +492,7 @@ def validate_restart_tolerant_tuple(
 
 def clear_all() -> None:
     global _disruption_time, _mutation_time, _restart_time, _restart_completion_time
-    global _recovery_start_time, _recovery_completion_time
+    global _recovery_start_time, _recovery_completion_time, _recovered_baseline_time
     global _disruption_effective, _disruption_effective_detail
     global _baseline_impaired_lanes, _baseline_impaired_tuples
     global _allow_baseline_failures
@@ -488,6 +507,7 @@ def clear_all() -> None:
     _restart_completion_time = 0.0
     _recovery_start_time = 0.0
     _recovery_completion_time = 0.0
+    _recovered_baseline_time = 0.0
     _disruption_effective = None
     _disruption_effective_detail = ""
     _baseline_impaired_lanes = {}

@@ -10,6 +10,9 @@ import os
 import unittest
 from unittest.mock import patch
 
+from taac.libs.fpf.fpf_stress_checks import (
+    DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+)
 from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_tc27_agent_coldboot,
@@ -371,6 +374,11 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     if "remote_failure" in check.check_id:
                         self.assertEqual(params["direction"], "scale_recovery")
                         self.assertEqual(params["poll_grace_sec"], 10.0)
+                        self.assertEqual(params["poll_interval_sec"], 5.0)
+                        self.assertEqual(
+                            params["poll_duration_budget_sec"],
+                            DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+                        )
                     else:
                         self.assertTrue(params["require_final_exact"])
 
@@ -385,6 +393,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     module.SCALE_RECOVERY_SLA_SEC
                     + module.SCALE_RECOVERY_STABILITY_SEC
                     + 2 * module.COLLECTOR_POLL_INTERVAL_SEC
+                    + DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC
                 )
                 self.assertEqual(module.SCALE_OBSERVATION_SEC, expected_observation)
                 self.assertTrue(
@@ -403,7 +412,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     module.COLLECTOR_POLL_INTERVAL_SEC,
                 )
 
-    def test_recovered_disruption_longevity_uses_rolling_prechecks(self):
+    def test_recovered_disruption_longevity_qualifies_before_soak(self):
         recovered = (
             fpf_tc29_fsdb_gr_stop30_reenable,
             fpf_tc31_fsdb_enable_recover,
@@ -427,12 +436,34 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     "fpf_hrt_system_memory_precheck",
                     "fpf_hrt_driver_disconnect_precheck",
                 ):
-                    params = json.loads(prechecks[check_id].check_params.json_params)
-                    self.assertEqual(params["lookback_sec"], 120)
-                    self.assertFalse(params["use_test_case_start_time"])
+                    self.assertNotIn(check_id, prechecks)
+
+                steps = _steps(longevity)
+                gate = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _step_params(step).get("custom_step_name")
+                    == "fpf_verify_recovered_state"
+                )
+                anchor = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _step_params(step).get("custom_step_name")
+                    == "record_fpf_recovered_baseline_time"
+                )
+                self.assertLess(gate, anchor)
+                self.assertEqual(_step_params(steps[anchor + 1])["duration"], 120)
+                self.assertEqual(_step_params(steps[anchor + 2])["duration"], 300)
 
         tc30_longevity = fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[-1]
         self.assertEqual(list(tc30_longevity.prechecks or []), [])
+        self.assertNotIn(
+            "record_fpf_recovered_baseline_time",
+            {
+                _step_params(step).get("custom_step_name")
+                for step in _steps(tc30_longevity)
+            },
+        )
 
     def test_tc46_has_exact_8k_checkpoint_before_withdrawal(self):
         playbook = fpf_tc46_scale_down_8k_4k.TEST_CONFIG.playbooks[0]
@@ -489,6 +520,11 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             self.assertEqual(params["max_convergence_sec"], 120)
             self.assertEqual(params["recovery_stability_sec"], 60.0)
             self.assertEqual(params["poll_grace_sec"], 10.0)
+            self.assertEqual(params["poll_interval_sec"], 5.0)
+            self.assertEqual(
+                params["poll_duration_budget_sec"],
+                DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+            )
         session_params = json.loads(
             by_id["fpf_tc46_8k_hrt_sessions"]["check_params"]["json_params"]
         )

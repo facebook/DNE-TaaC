@@ -42,6 +42,7 @@ from taac.steps.step_definitions import (
     create_fpf_repeated_service_crash_step,
     create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_stsw_drain_and_reinject_steps,
+    create_fpf_verify_recovered_state_step,
 )
 from taac.test_as_a_config.types import Service, Step, StepName, TestConfig
 
@@ -87,6 +88,101 @@ def _params(step: Step) -> dict:
     assert step.step_params is not None
     assert step.step_params.json_params is not None
     return json.loads(step.step_params.json_params)
+
+
+class TestFpfRecoveredStateGate(unittest.TestCase):
+    def _collectors(self) -> dict[str, MagicMock]:
+        now = time.strftime("%Y-%m-%d %H:%M:%S.000%z")
+        hosts = ["server", "client"]
+
+        def rows(**kwargs):
+            return [SimpleNamespace(timestamp=now, valid=True, notes="", **kwargs)]
+
+        bulk = MagicMock()
+        bulk.rows = [
+            row
+            for host in hosts
+            for row in rows(
+                host=host, device_id=0, lane_counts=[4032, 4032, 4032, 4032]
+            )
+        ]
+        plane = MagicMock()
+        plane.rows = [
+            row
+            for host in hosts
+            for row in rows(
+                host=host,
+                device_id=0,
+                plane_states={0: "UP", 1: "UP", 2: "UP", 3: "UP"},
+            )
+        ]
+        sessions = MagicMock()
+        sessions.rows = [row for host in hosts for row in rows(host=host, connected=32)]
+        remote = MagicMock()
+        remote.rows = [
+            row
+            for host in hosts
+            for row in rows(host=host, device_id=0, lane_counts=[0, 0, 0, 0])
+        ]
+        reachability = SimpleNamespace(
+            reachable_planes=[0, 1, 2, 3],
+            drained_planes=[],
+            unreachable_planes=[4, 5, 6, 7],
+            plane_up=list(range(8)),
+        )
+        prod = MagicMock()
+        prod.rows = [
+            row
+            for host in hosts
+            for row in rows(host=host, prefixes={"2401:db00::/64": reachability})
+        ]
+        return {
+            "hrt": bulk,
+            "hrt_plane_status": plane,
+            "hrt_fsdb_session": sessions,
+            "hrt_remote_failure_vf1": remote,
+            "prod_hrt_prefix": prod,
+        }
+
+    def _params(self) -> dict:
+        return {
+            "hosts": ["server", "client"],
+            "device_ids": [0],
+            "planes": [0, 1, 2, 3],
+            "expected_count": 4032,
+            "expected_sessions": 32,
+            "prefixes_by_host": {
+                "server": ["2401:db00::/64"],
+                "client": ["2401:db00::/64"],
+            },
+            "rf_vf_groups": [
+                {"suffix": "vf1", "device_ids": [0], "lanes": [0, 1, 2, 3]}
+            ],
+            "max_age_sec": 30,
+        }
+
+    def test_factory_and_exact_both_host_gate(self):
+        params = self._params()
+        step = create_fpf_verify_recovered_state_step(**params)
+        self.assertEqual(
+            _params(step)["custom_step_name"], "fpf_verify_recovered_state"
+        )
+        collectors = self._collectors()
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            _make_custom_step().fpf_verify_recovered_state(params)
+
+    def test_missing_control_prefix_fails_closed(self):
+        collectors = self._collectors()
+        collectors["prod_hrt_prefix"].rows = collectors["prod_hrt_prefix"].rows[:1]
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+            side_effect=collectors.get,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no row for client"):
+                _make_custom_step().fpf_verify_recovered_state(self._params())
 
 
 class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):

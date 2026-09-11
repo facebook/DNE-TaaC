@@ -3227,6 +3227,55 @@ def create_fpf_record_mutation_time_step(
     )
 
 
+def create_fpf_record_recovered_baseline_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Anchor strict collector windows after all current recovery gates pass."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record recovered-baseline qualification start",
+        step_params=Params(
+            json_params=json.dumps(
+                {"custom_step_name": "record_fpf_recovered_baseline_time"}
+            )
+        ),
+    )
+
+
+def create_fpf_verify_recovered_state_step(
+    *,
+    hosts: t.List[str],
+    device_ids: t.List[int],
+    planes: t.List[int],
+    expected_count: int,
+    expected_sessions: int,
+    prefixes_by_host: t.Dict[str, t.List[str]],
+    rf_vf_groups: t.List[t.Dict[str, t.Any]],
+    max_age_sec: float = 30.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Point gate for fresh exact recovered state before baseline qualification."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Verify current recovered FPF state",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_verify_recovered_state",
+                    "hosts": hosts,
+                    "device_ids": device_ids,
+                    "planes": planes,
+                    "expected_count": expected_count,
+                    "expected_sessions": expected_sessions,
+                    "prefixes_by_host": prefixes_by_host,
+                    "rf_vf_groups": rf_vf_groups,
+                    "max_age_sec": max_age_sec,
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_record_restart_time_step(
     description: t.Optional[str] = None,
 ) -> Step:
