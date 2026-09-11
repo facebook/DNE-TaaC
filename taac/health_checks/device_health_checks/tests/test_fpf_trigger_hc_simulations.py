@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import TestDevice
 from taac.health_checks.device_health_checks.fpf_hrt_bulk_convergence_health_check import (
+    _normalize_expected_per_lane,
     FpfHrtBulkConvergenceHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_hrt_remote_failure_convergence_health_check import (
@@ -40,7 +41,6 @@ from taac.health_checks.device_health_checks.fpf_hrt_session_stat_health_check i
     FpfHrtSessionStatHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_prod_hrt_prefix_stability_health_check import (
-    _resolve_window,
     FpfProdHrtPrefixStabilityHealthCheck,
 )
 from taac.health_checks.device_health_checks.generic_ods_health_check import (
@@ -49,6 +49,7 @@ from taac.health_checks.device_health_checks.generic_ods_health_check import (
 from taac.libs.fpf.fpf_collector_registry import (
     clear_all,
     enforce_final_exact,
+    resolve_observation_window,
     set_test_case_start_time,
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import PrefixReachability
@@ -78,6 +79,7 @@ PROD_MODULE = (
     "neteng.test_infra.dne.taac.health_checks.device_health_checks"
     ".fpf_prod_hrt_prefix_stability_health_check"
 )
+REGISTRY_MODULE = "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry"
 ODS_MODULE = (
     "neteng.test_infra.dne.taac.health_checks.device_health_checks."
     "generic_ods_health_check"
@@ -106,15 +108,15 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
 
     def test_prod_precheck_uses_recent_baseline_instead_of_playbook_start(self):
         set_test_case_start_time(WINDOW_END - 5)
-        with patch(f"{PROD_MODULE}.time.time", return_value=WINDOW_END):
+        with patch(f"{REGISTRY_MODULE}.time.time", return_value=WINDOW_END):
             self.assertEqual(
-                _resolve_window(
+                resolve_observation_window(
                     {"lookback_sec": 120, "use_test_case_start_time": False}
                 ),
                 (WINDOW_END - 120, WINDOW_END),
             )
             self.assertEqual(
-                _resolve_window({"lookback_sec": 900}),
+                resolve_observation_window({"lookback_sec": 900}),
                 (WINDOW_END - 5, WINDOW_END),
             )
 
@@ -170,12 +172,28 @@ class FpfScaleWindowPolicyTest(unittest.TestCase):
         )[0]
 
     def test_scale_rf_allows_bounded_transient_and_requires_exact_final(self):
-        self.assertTrue(self._rf_result([0, 152, 0, 0], [5, 30, 60, 90]).passed)
+        self.assertTrue(self._rf_result([0, 152, 0, 0], [5, 30, 60, 120]).passed)
+        self.assertFalse(self._rf_result([0, 152, 0], [5, 30, 60]).passed)
         self.assertFalse(self._rf_result([0, 152, 152], [5, 30, 60]).passed)
-        self.assertFalse(self._rf_result([0, 152, 0], [5, 30, 150]).passed)
+        self.assertFalse(self._rf_result([0, 152, 0, 0], [5, 30, 150, 220]).passed)
         self.assertFalse(
-            self._rf_result([0, 152, 0], [5, 30, 60], invalid_index=1).passed
+            self._rf_result([0, 152, 0, 0], [5, 30, 60, 120], invalid_index=1).passed
         )
+
+    def test_exact_lane_map_is_complete_and_well_typed(self):
+        self.assertEqual(
+            _normalize_expected_per_lane([0, 1], {"0": 4000, "1": 4000}, True),
+            ({0: 4000, 1: 4000}, None),
+        )
+        for raw in (
+            {"0": 4000},
+            {"0": 4000, "1": 4000, "2": 4000},
+            {"lane0": 4000, "1": 4000},
+            {"0": "4000", "1": 4000},
+        ):
+            with self.subTest(raw=raw):
+                _expected, error = _normalize_expected_per_lane([0, 1], raw, True)
+                self.assertIsNotNone(error)
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +696,10 @@ class Tc36Tc37ProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTestCas
                 {"new": AsyncMock(return_value="")},
             ),
             (f"{PROD_MODULE}.disruption_inconclusive_skip", {"return_value": None}),
-            (f"{PROD_MODULE}.get_test_case_start_time", {"return_value": WINDOW_START}),
+            (
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
+                {"return_value": WINDOW_START},
+            ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": 0.0}),
         ):
             p = patch(target, **kw)
@@ -747,7 +768,10 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
                 {"new": AsyncMock(return_value="")},
             ),
             (f"{PROD_MODULE}.disruption_inconclusive_skip", {"return_value": None}),
-            (f"{PROD_MODULE}.get_test_case_start_time", {"return_value": WINDOW_START}),
+            (
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
+                {"return_value": WINDOW_START},
+            ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": 0.0}),
         ):
             p = patch(target, **kw)
@@ -908,7 +932,7 @@ class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTest
                 {"new": AsyncMock(return_value="")},
             ),
             (
-                f"{PROD_MODULE}.get_test_case_start_time",
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
                 {"return_value": WINDOW_START + 200.0},
             ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": WINDOW_START}),

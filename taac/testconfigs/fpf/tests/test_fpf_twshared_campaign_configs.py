@@ -341,14 +341,19 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
         for module in (fpf_tc45_scale_up_4k_8k, fpf_tc46_scale_down_8k_4k):
             with self.subTest(config=module.TEST_CONFIG.name):
                 ramp = module.TEST_CONFIG.playbooks[0]
-                precheck = next(
-                    check
-                    for check in ramp.prechecks
-                    if check.check_id == "fpf_prod_hrt_prefix_stability_precheck"
-                )
-                precheck_params = json.loads(precheck.check_params.json_params)
-                self.assertEqual(precheck_params["lookback_sec"], 120)
-                self.assertFalse(precheck_params["use_test_case_start_time"])
+                prechecks = {
+                    check.check_id: check for check in ramp.prechecks if check.check_id
+                }
+                for check_id in (
+                    "fpf_prod_hrt_prefix_stability_precheck",
+                    "fpf_hrt_system_memory_precheck",
+                    "fpf_hrt_driver_disconnect_precheck",
+                ):
+                    precheck_params = json.loads(
+                        prechecks[check_id].check_params.json_params
+                    )
+                    self.assertEqual(precheck_params["lookback_sec"], 120)
+                    self.assertFalse(precheck_params["use_test_case_start_time"])
 
                 convergence = [
                     check
@@ -367,6 +372,71 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                         self.assertEqual(params["direction"], "scale_recovery")
                     else:
                         self.assertTrue(params["require_final_exact"])
+
+    def test_tc46_has_exact_8k_checkpoint_before_withdrawal(self):
+        playbook = fpf_tc46_scale_down_8k_4k.TEST_CONFIG.playbooks[0]
+        steps = _steps(playbook)
+        descriptions = [step.description or "" for step in steps]
+        checkpoint = next(
+            step
+            for step in steps
+            if step.name == taac_types.StepName.VALIDATION_STEP
+            and "exact 8K" in (step.description or "")
+        )
+        baseline_marker = descriptions.index(
+            "Record TC46 8K scale-baseline mutation time"
+        )
+        checkpoint_index = steps.index(checkpoint)
+        withdrawal_marker = descriptions.index("Record TC46 8K-to-4K mutation time")
+        first_withdrawal = next(
+            index
+            for index, step in enumerate(steps)
+            if step.name == taac_types.StepName.FPF_BGP_PREFIX_INJECTION_STEP
+            and _step_params(step)["withdraw_only"]
+        )
+        self.assertLess(baseline_marker, checkpoint_index)
+        self.assertLess(checkpoint_index, withdrawal_marker)
+        self.assertEqual(withdrawal_marker + 1, first_withdrawal)
+
+        rendered = json.loads(checkpoint.input_json)["point_in_time_checks"]
+        by_id = {check["check_id"]: check for check in rendered}
+        count_checks = [
+            check
+            for check_id, check in by_id.items()
+            if check_id.startswith("fpf_tc46_8k_fsdb_")
+            or check_id.startswith("fpf_tc46_8k_bgp_")
+            or check_id.startswith("fpf_tc46_8k_hrt_lane")
+        ]
+        self.assertEqual(len(count_checks), 8)
+        for check in count_checks:
+            params = json.loads(check["check_params"]["json_params"])
+            expected = params.get("expected_matched") or next(
+                iter(params["expected_per_lane"].values())
+            )
+            self.assertEqual(expected, 8000)
+            self.assertTrue(params["use_mutation_time"])
+            self.assertTrue(params["require_final_exact"])
+        rf_checks = [
+            check
+            for check_id, check in by_id.items()
+            if check_id.startswith("fpf_tc46_8k_remote_failure_")
+        ]
+        self.assertEqual(len(rf_checks), 2)
+        for check in rf_checks:
+            params = json.loads(check["check_params"]["json_params"])
+            self.assertEqual(params["direction"], "scale_recovery")
+            self.assertEqual(params["max_convergence_sec"], 120)
+            self.assertEqual(params["recovery_stability_sec"], 60.0)
+        session_params = json.loads(
+            by_id["fpf_tc46_8k_hrt_sessions"]["check_params"]["json_params"]
+        )
+        self.assertEqual(session_params["expected_session_count"], 32)
+        self.assertEqual(session_params["device_ids"], list(range(8)))
+        traffic_params = json.loads(
+            by_id["fpf_tc46_8k_traffic"]["check_params"]["json_params"]
+        )
+        self.assertEqual(traffic_params["hosts"], [SERVER, CLIENT])
+        self.assertEqual(traffic_params["lookback_sec"], 60)
 
     def test_tc55_reboot_is_explicitly_dut_scoped(self):
         reboot = next(

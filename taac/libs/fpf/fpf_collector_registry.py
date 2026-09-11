@@ -268,6 +268,27 @@ DEFAULT_SIGNAL3_STABILITY_DURATION_SEC: float = 60.0
 DEFAULT_STABILITY_PARTIAL_CREDIT_FRACTION: float = 0.8
 
 
+def resolve_observation_window(
+    check_params: t.Mapping[str, t.Any],
+    default_lookback_sec: float = 900.0,
+) -> t.Tuple[float, float]:
+    """Resolve a collector/ODS observation window.
+
+    Existing checks remain anchored at the current playbook start. Prechecks
+    that run immediately after collector setup may explicitly select the recent
+    lookback window so they inspect the setup baseline instead of an empty
+    post-playbook-start interval.
+    """
+    window_end = float(check_params.get("window_end", time.time()))
+    lookback_sec = float(check_params.get("lookback_sec", default_lookback_sec))
+    tc_start = get_test_case_start_time()
+    use_test_case_start = bool(check_params.get("use_test_case_start_time", True))
+    default_start = (
+        tc_start if use_test_case_start and tc_start else window_end - lookback_sec
+    )
+    return float(check_params.get("window_start", default_start)), window_end
+
+
 def enforce_final_exact(result: PerLaneResult, expected: int) -> PerLaneResult:
     """Fail a convergence result whose final valid count is not exact."""
     if result.actual != expected:

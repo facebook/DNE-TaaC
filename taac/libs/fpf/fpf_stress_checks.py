@@ -1212,6 +1212,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         lanes: List[int],
         expected_per_lane: Optional[Dict[int, int]] = None,
         max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
         _single_tuple: bool = False,
@@ -1237,6 +1238,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             lanes=lanes,
                             expected_per_lane=expected_per_lane,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             _single_tuple=True,
                         )
                         for result in tuple_results:
@@ -1585,6 +1587,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         lanes: List[int],
         expected_per_lane: Optional[Dict[int, int]] = None,
         max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
         _single_tuple: bool = False,
@@ -1616,6 +1619,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             lanes=lanes,
                             expected_per_lane=expected_per_lane,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             _single_tuple=True,
                         )
                         for result in tuple_results:
@@ -1662,6 +1666,11 @@ class HrtRemoteFailureCollector(BaseCollector):
             recovery_sec = (
                 round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
             )
+            stable_tail_sec = (
+                round(samples[-1][0] - samples[recovery_index][0], 1)
+                if recovered
+                else 0.0
+            )
             passed = (
                 bool(samples)
                 and error_count == 0
@@ -1669,6 +1678,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                 and last_actual == expected
                 and recovery_sec is not None
                 and recovery_sec <= max_convergence_sec
+                and stable_tail_sec >= recovery_stability_sec
             )
             if not samples:
                 detail = "no valid samples"
@@ -1683,10 +1693,17 @@ class HrtRemoteFailureCollector(BaseCollector):
                     f"recovered to exact {expected} in {recovery_sec}s "
                     f"> {max_convergence_sec}s SLA"
                 )
+            elif stable_tail_sec < recovery_stability_sec:
+                detail = (
+                    f"recovered to exact {expected} in {recovery_sec}s, but only "
+                    f"{stable_tail_sec}s of stable zero tail was observed "
+                    f"(need {recovery_stability_sec}s)"
+                )
             else:
                 detail = (
                     f"recovered to exact {expected} in {recovery_sec}s "
-                    f"(SLA {max_convergence_sec}s); final={last_actual}"
+                    f"(SLA {max_convergence_sec}s), held for {stable_tail_sec}s; "
+                    f"final={last_actual}"
                 )
             results.append(
                 PerLaneResult(
@@ -1711,6 +1728,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         expected_per_lane: Optional[Dict[int, int]] = None,
         direction: str = "drain",
         max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
         only_hosts: Optional[List[str]] = None,
         device_ids: Optional[List[int]] = None,
     ) -> List[PerLaneResult]:
@@ -1765,6 +1783,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                     lanes=lanes,
                     expected_per_lane=expected_per_lane,
                     max_convergence_sec=max_convergence_sec,
+                    recovery_stability_sec=recovery_stability_sec,
                     device_ids=device_ids,
                     only_hosts=only_hosts,
                 )

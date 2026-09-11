@@ -3334,6 +3334,7 @@ def create_fpf_hrt_remote_failure_convergence_check(
     expected_per_lane: t.Optional[t.Dict[str, int]] = None,
     direction: str = "drain",
     max_convergence_sec: int = 120,
+    recovery_stability_sec: t.Optional[float] = None,
     trigger_delay_sec: int = 120,
     use_live_collectors: bool = False,
     lane_labels: t.Optional[t.Dict[str, str]] = None,
@@ -3377,6 +3378,8 @@ def create_fpf_hrt_remote_failure_convergence_check(
         "trigger_delay_sec": trigger_delay_sec,
         "use_live_collectors": use_live_collectors,
     }
+    if recovery_stability_sec is not None:
+        params["recovery_stability_sec"] = recovery_stability_sec
     if collector_name:
         params["collector_name"] = collector_name
     if tuple_lanes_by_host_device:
@@ -3688,6 +3691,7 @@ def create_fpf_hrt_system_memory_check(
     threshold_bytes: t.Optional[int] = None,
     transform_desc: t.Optional[str] = None,
     lookback_sec: int = 900,
+    use_test_case_start_time: bool = True,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
@@ -3705,6 +3709,8 @@ def create_fpf_hrt_system_memory_check(
         "threshold_gib": threshold_gib,
         "lookback_sec": lookback_sec,
     }
+    if not use_test_case_start_time:
+        params["use_test_case_start_time"] = False
     if hosts is not None:
         params["hosts"] = hosts
     if entity_desc is not None:
@@ -3733,6 +3739,7 @@ def create_fpf_hrt_driver_disconnect_check(
     transform_desc: t.Optional[str] = None,
     expected_value: t.Optional[float] = None,
     lookback_sec: int = 900,
+    use_test_case_start_time: bool = True,
     window_start: t.Optional[float] = None,
     window_end: t.Optional[float] = None,
     check_id: t.Optional[str] = None,
@@ -3749,6 +3756,8 @@ def create_fpf_hrt_driver_disconnect_check(
     params: t.Dict[str, t.Any] = {
         "lookback_sec": lookback_sec,
     }
+    if not use_test_case_start_time:
+        params["use_test_case_start_time"] = False
     if hosts is not None:
         params["hosts"] = hosts
     if entity_desc is not None:

@@ -247,6 +247,7 @@ class RemoteFailureWindowBoundaryTest(unittest.IsolatedAsyncioTestCase):
                 expected_per_lane={0: 0},
                 direction="stable_skip_null_strict",
                 max_convergence_sec=120,
+                recovery_stability_sec=60.0,
                 check_params={
                     "window_end": WINDOW_START + 200,
                     "only_hosts": ["host"],

@@ -7,11 +7,13 @@
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
     create_fpf_hardening_playbook_v2,
+    create_fpf_scale_checkpoint_checks,
 )
 from taac.steps.step_definitions import (
     create_fpf_bgp_prefix_injection_step,
     create_fpf_record_mutation_time_step,
     create_longevity_step,
+    create_validation_step,
 )
 from taac.task_definitions import (
     create_fpf_restart_service_task,
@@ -145,10 +147,30 @@ def create_fpf_tc46_test_config() -> TestConfig:
         spray_hosts=spray,
         ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         disruption_steps=[
+            create_fpf_record_mutation_time_step(
+                description="Record TC46 8K scale-baseline mutation time"
+            ),
             *_inject_both_vfs(SCALE_HIGH),
             create_longevity_step(
                 duration=SETTLE_SEC,
                 description=f"Settle {SETTLE_SEC}s at {SCALE_HIGH} prefixes",
+            ),
+            create_validation_step(
+                point_in_time_checks=create_fpf_scale_checkpoint_checks(
+                    gtsws=OBSERVER_GTSWS,
+                    hosts=GPU_HOSTS,
+                    spray_hosts=spray,
+                    lanes=INJECTED_LANES,
+                    hrt_device_ids=HRT_DEVICE_IDS,
+                    rf_vf_groups=RF_VF_GROUPS,
+                    expected_count=SCALE_HIGH,
+                    expected_session_count=EXPECTED_FSDB_SESSION_COUNT,
+                    check_id_prefix="fpf_tc46_8k",
+                ),
+                description=(
+                    "Validate exact 8K device/VF counts, HRT 32/32, RF recovery, "
+                    "and live RDMA traffic"
+                ),
             ),
             create_fpf_record_mutation_time_step(
                 description="Record TC46 8K-to-4K mutation time"
@@ -164,7 +186,7 @@ def create_fpf_tc46_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
-        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
+        collector_precheck_lookback_sec=SETTLE_SEC,
         scale_mutation_mode=True,
     )
     longevity_playbook = create_fpf_hardening_playbook_v2(
@@ -188,7 +210,7 @@ def create_fpf_tc46_test_config() -> TestConfig:
         hrt_device_ids=HRT_DEVICE_IDS,
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
-        prod_prefix_precheck_lookback_sec=SETTLE_SEC,
+        collector_precheck_lookback_sec=SETTLE_SEC,
     )
     return TestConfig(
         name="fpf_tc46_scale_down_8k_4k",

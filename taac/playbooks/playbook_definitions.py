@@ -24962,7 +24962,7 @@ def _build_fpf_generic_checks(
     host_spray_transform_desc: str | None = None,
     hrt_device_ids: list[int] | None = None,
     prod_prefixes_by_host: dict[str, list[str]] | None = None,
-    prod_prefix_precheck_lookback_sec: int | None = None,
+    collector_precheck_lookback_sec: int | None = None,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -25060,9 +25060,9 @@ def _build_fpf_generic_checks(
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=prod_prefixes_by_host,
-                lookback_sec=prod_prefix_precheck_lookback_sec or 900,
+                lookback_sec=collector_precheck_lookback_sec or 900,
                 use_test_case_start_time=(
-                    prod_prefix_precheck_lookback_sec is None
+                    collector_precheck_lookback_sec is None
                 ),
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
@@ -25072,6 +25072,10 @@ def _build_fpf_generic_checks(
             create_fpf_hrt_system_memory_check(
                 hosts=hrt_memory_hosts,
                 threshold_gib=FPF_ACTIVE_THRESHOLDS.hrt_system_memory_max_gib,
+                lookback_sec=collector_precheck_lookback_sec or 900,
+                use_test_case_start_time=(
+                    collector_precheck_lookback_sec is None
+                ),
                 check_id="fpf_hrt_system_memory_precheck",
             )
         )
@@ -25079,6 +25083,10 @@ def _build_fpf_generic_checks(
         prechecks.append(
             create_fpf_hrt_driver_disconnect_check(
                 hosts=hrt_driver_hosts,
+                lookback_sec=collector_precheck_lookback_sec or 900,
+                use_test_case_start_time=(
+                    collector_precheck_lookback_sec is None
+                ),
                 check_id="fpf_hrt_driver_disconnect_precheck",
             )
         )
@@ -25523,6 +25531,116 @@ def _fpf_global_lanes_to_hrt_tuples(
     return per_host
 
 
+def create_fpf_scale_checkpoint_checks(
+    *,
+    gtsws: list[str],
+    hosts: list[str],
+    spray_hosts: list[str] | None,
+    lanes: list[int],
+    hrt_device_ids: list[int],
+    rf_vf_groups: list,
+    expected_count: int,
+    expected_session_count: int,
+    check_id_prefix: str,
+) -> list:
+    """Build the strict point-in-time gate between two scale mutations."""
+    from taac.health_checks.healthcheck_definitions import (
+        create_fpf_bgp_rib_convergence_check,
+        create_fpf_fsdb_ribmap_convergence_check,
+        create_fpf_host_spray_check,
+        create_fpf_hrt_bulk_convergence_check,
+        create_fpf_hrt_fsdb_session_check,
+        create_fpf_hrt_remote_failure_convergence_check,
+    )
+    from taac.libs.fpf.fpf_thresholds import (
+        ACTIVE as FPF_ACTIVE_THRESHOLDS,
+    )
+
+    checks = []
+    for lane_id, gtsw in enumerate(gtsws):
+        lane_map = {str(lane_id): gtsw}
+        for factory, label in (
+            (create_fpf_fsdb_ribmap_convergence_check, "fsdb"),
+            (create_fpf_bgp_rib_convergence_check, "bgp"),
+        ):
+            checks.append(
+                factory(
+                    lane_map=lane_map,
+                    expected_matched=expected_count,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    require_final_exact=True,
+                    signal1_e2e_max_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
+                    ),
+                    signal2_local_max_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
+                    ),
+                    signal3_stability_duration_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                    ),
+                    check_id=f"{check_id_prefix}_{label}_lane{lane_id}",
+                )
+            )
+    for lane_id in lanes:
+        checks.append(
+            create_fpf_hrt_bulk_convergence_check(
+                lanes=[lane_id],
+                device_ids=hrt_device_ids,
+                expected_per_lane={str(lane_id): expected_count},
+                use_live_collectors=True,
+                use_mutation_time=True,
+                require_final_exact=True,
+                signal1_e2e_max_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
+                ),
+                signal2_local_max_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
+                ),
+                signal3_stability_duration_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                ),
+                check_id=f"{check_id_prefix}_hrt_lane{lane_id}",
+            )
+        )
+    for group in rf_vf_groups:
+        group_lanes = [int(lane) for lane in group["lanes"]]
+        checks.append(
+            create_fpf_hrt_remote_failure_convergence_check(
+                lanes=group_lanes,
+                device_ids=group.get("device_ids", [0]),
+                expected_per_lane={str(lane): 0 for lane in group_lanes},
+                direction="scale_recovery",
+                max_convergence_sec=120,
+                recovery_stability_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                ),
+                use_live_collectors=True,
+                use_mutation_time=True,
+                collector_name=f"hrt_remote_failure_{group['suffix']}",
+                check_id=f"{check_id_prefix}_remote_failure_{group['suffix']}",
+            )
+        )
+    checks.append(
+        create_fpf_hrt_fsdb_session_check(
+            hosts=hosts,
+            expected_session_count=expected_session_count,
+            device_ids=hrt_device_ids if hrt_device_ids != [0] else None,
+            planes_per_device=4 if hrt_device_ids != [0] else None,
+            check_id=f"{check_id_prefix}_hrt_sessions",
+        )
+    )
+    if spray_hosts:
+        checks.append(
+            create_fpf_host_spray_check(
+                hosts=spray_hosts,
+                lookback_sec=60,
+                check_id=f"{check_id_prefix}_traffic",
+            )
+        )
+    return checks
+
+
 def create_fpf_hardening_playbook_v2(
     gtsws: list[str],
     hosts: list[str],
@@ -25582,7 +25700,7 @@ def create_fpf_hardening_playbook_v2(
     hrt_device_ids: list[int] | None = None,
     cleanup_steps: list | None = None,
     ensure_traffic_after_disruption: bool = False,
-    prod_prefix_precheck_lookback_sec: int | None = None,
+    collector_precheck_lookback_sec: int | None = None,
     scale_mutation_mode: bool = False,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
@@ -25811,7 +25929,7 @@ def create_fpf_hardening_playbook_v2(
         out_congestion_last_minute_max=out_congestion_last_minute_max,
         host_spray_transform_desc=host_spray_transform_desc,
         hrt_device_ids=resolved_hrt_device_ids,
-        prod_prefix_precheck_lookback_sec=prod_prefix_precheck_lookback_sec,
+        collector_precheck_lookback_sec=collector_precheck_lookback_sec,
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -26008,6 +26126,11 @@ def create_fpf_hardening_playbook_v2(
                     device_ids=_g.get("device_ids", [0]),
                     expected_per_lane=_gexpected,
                     direction=_rf_direction,
+                    recovery_stability_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                        if scale_mutation_mode
+                        else None
+                    ),
                     use_live_collectors=True,
                     use_mutation_time=scale_mutation_mode,
                     collector_name=f"hrt_remote_failure_{_g['suffix']}",
@@ -26023,6 +26146,11 @@ def create_fpf_hardening_playbook_v2(
                     lanes=_stable_lanes,
                     device_ids=resolved_hrt_device_ids,
                     direction=_rf_direction,
+                    recovery_stability_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                        if scale_mutation_mode
+                        else None
+                    ),
                     use_live_collectors=True,
                     use_mutation_time=scale_mutation_mode,
                     restart_tolerant_hosts=hrt_restart_tolerant_hosts,

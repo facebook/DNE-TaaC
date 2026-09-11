@@ -34,6 +34,50 @@ from taac.health_check.health_check import types as hc_types
 JSONL_PATH = "/tmp/fpf_stress_hrt_bulk.jsonl"
 
 
+def _normalize_expected_per_lane(
+    lanes: t.List[int],
+    raw_expected: t.Mapping[t.Any, t.Any],
+    require_final_exact: bool,
+) -> t.Tuple[t.Dict[int, int], t.Optional[str]]:
+    """Normalize JSON lane keys and validate the opt-in exact-count contract."""
+    expected: t.Dict[int, int] = {}
+    try:
+        for raw_lane, raw_count in raw_expected.items():
+            lane = int(raw_lane)
+            if require_final_exact and (
+                isinstance(raw_lane, bool)
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+            ):
+                return {}, (
+                    "Invalid exact expected_per_lane entry "
+                    f"{raw_lane!r}: {raw_count!r}; lane/count must be integers"
+                )
+            expected[lane] = int(raw_count)
+    except (TypeError, ValueError) as error:
+        return {}, f"Invalid expected_per_lane mapping: {error}"
+
+    if require_final_exact:
+        requested = set(lanes)
+        supplied = set(expected)
+        missing = sorted(requested - supplied)
+        unexpected = sorted(supplied - requested)
+        if missing or unexpected:
+            return {}, (
+                "Exact expected_per_lane keys must match requested lanes; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        negative = {lane: count for lane, count in expected.items() if count < 0}
+        if negative:
+            return (
+                {},
+                f"Exact expected_per_lane counts must be non-negative: {negative}",
+            )
+    elif not expected:
+        expected = dict.fromkeys(lanes, 20000)
+    return expected, None
+
+
 class FpfHrtBulkConvergenceHealthCheck(
     AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]
 ):
@@ -66,11 +110,16 @@ class FpfHrtBulkConvergenceHealthCheck(
     ) -> hc_types.HealthCheckResult:
         lanes: t.List[int] = check_params.get("lanes", [0, 1])
         device_ids: t.List[int] = check_params.get("device_ids", [0])
-        expected_per_lane: t.Dict[int, int] = {
-            int(k): v for k, v in check_params.get("expected_per_lane", {}).items()
-        }
-        if not expected_per_lane:
-            expected_per_lane = {lane: int(20000) for lane in lanes}
+        expected_per_lane, expected_error = _normalize_expected_per_lane(
+            lanes,
+            check_params.get("expected_per_lane", {}),
+            bool(check_params.get("require_final_exact")),
+        )
+        if expected_error:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=expected_error,
+            )
         impacted_lanes: t.List[int] = [
             int(x) for x in check_params.get("impacted_lanes", [])
         ]

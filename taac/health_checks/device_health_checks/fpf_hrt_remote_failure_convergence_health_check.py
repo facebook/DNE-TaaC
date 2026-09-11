@@ -12,6 +12,7 @@ from taac.health_checks.abstract_health_check import (
 )
 from taac.libs.fpf.fpf_collector_registry import (
     baseline_impaired_lane_union,
+    DEFAULT_SIGNAL3_STABILITY_DURATION_SEC,
     disruption_inconclusive_skip,
     everpaste_details_suffix,
     get_allow_baseline_failures,
@@ -60,6 +61,11 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         }
         direction: str = check_params.get("direction", "drain")
         max_convergence_sec: int = check_params.get("max_convergence_sec", 120)
+        recovery_stability_sec = float(
+            check_params.get(
+                "recovery_stability_sec", DEFAULT_SIGNAL3_STABILITY_DURATION_SEC
+            )
+        )
         use_live = check_params.get("use_live_collectors", False)
         if direction == "drain":
             _skip = disruption_inconclusive_skip()
@@ -100,11 +106,17 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 expected_per_lane,
                 direction,
                 max_convergence_sec,
+                recovery_stability_sec,
                 check_params,
             )
 
         return self._evaluate_from_jsonl(
-            lanes, expected_per_lane, direction, max_convergence_sec, check_params
+            lanes,
+            expected_per_lane,
+            direction,
+            max_convergence_sec,
+            recovery_stability_sec,
+            check_params,
         )
 
     async def _evaluate_from_live_collector(
@@ -114,6 +126,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         expected_per_lane: t.Dict[int, int],
         direction: str,
         max_convergence_sec: int,
+        recovery_stability_sec: float,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         collector_name: str = check_params.get("collector_name", "hrt_remote_failure")
@@ -199,6 +212,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             expected_per_lane=expected_per_lane,
                             direction=host_direction,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             only_hosts=[host],
                         )
                     )
@@ -215,6 +229,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             expected_per_lane=expected_per_lane,
                             direction=direction,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             only_hosts=[host],
                         )
                     )
@@ -236,6 +251,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                             expected_per_lane=expected_per_lane,
                             direction=direction,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             only_hosts=[host],
                         )
                     )
@@ -248,6 +264,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 expected_per_lane=expected_per_lane,
                 direction=direction,
                 max_convergence_sec=max_convergence_sec,
+                recovery_stability_sec=recovery_stability_sec,
                 only_hosts=only_hosts,
             )
 
@@ -330,6 +347,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         expected_per_lane: t.Dict[int, int],
         direction: str,
         max_convergence_sec: int,
+        recovery_stability_sec: float,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         jsonl_path = check_params.get("jsonl_path", JSONL_PATH)
@@ -361,6 +379,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 trigger_ts,
                 direction,
                 max_convergence_sec,
+                recovery_stability_sec,
             )
             for lane_id in sorted(lanes)
         ]
@@ -392,6 +411,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         trigger_ts: float,
         direction: str,
         max_convergence_sec: int,
+        recovery_stability_sec: float,
     ) -> t.Tuple[int, bool, int, t.Optional[float], str]:
         if direction in (
             "stable",
@@ -402,7 +422,12 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             return self._evaluate_stable_from_rows(lane_id, expected, rows, direction)
         if direction == "scale_recovery":
             return self._evaluate_scale_recovery_from_rows(
-                lane_id, expected, rows, trigger_ts, max_convergence_sec
+                lane_id,
+                expected,
+                rows,
+                trigger_ts,
+                max_convergence_sec,
+                recovery_stability_sec,
             )
         if direction == "drain":
             return self._evaluate_drain_from_rows(
@@ -419,6 +444,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         rows: t.List[t.Dict[str, t.Any]],
         trigger_ts: float,
         max_convergence_sec: int,
+        recovery_stability_sec: float,
     ) -> t.Tuple[int, bool, int, t.Optional[float], str]:
         samples: t.List[t.Tuple[float, int]] = []
         error_count = 0
@@ -449,6 +475,9 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
         recovery_sec = (
             round(samples[recovery_index][0] - trigger_ts, 1) if recovered else None
         )
+        stable_tail_sec = (
+            round(samples[-1][0] - samples[recovery_index][0], 1) if recovered else 0.0
+        )
         passed = (
             bool(samples)
             and error_count == 0
@@ -456,6 +485,7 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
             and last_actual == expected
             and recovery_sec is not None
             and recovery_sec <= max_convergence_sec
+            and stable_tail_sec >= recovery_stability_sec
         )
         if not samples:
             detail = "no valid samples"
@@ -470,10 +500,17 @@ class FpfHrtRemoteFailureConvergenceHealthCheck(
                 f"recovered to exact {expected} in {recovery_sec}s "
                 f"> {max_convergence_sec}s SLA"
             )
+        elif stable_tail_sec < recovery_stability_sec:
+            detail = (
+                f"recovered to exact {expected} in {recovery_sec}s, but only "
+                f"{stable_tail_sec}s of stable zero tail was observed "
+                f"(need {recovery_stability_sec}s)"
+            )
         else:
             detail = (
                 f"recovered to exact {expected} in {recovery_sec}s "
-                f"(SLA {max_convergence_sec}s); final={last_actual}"
+                f"(SLA {max_convergence_sec}s), held for {stable_tail_sec}s; "
+                f"final={last_actual}"
             )
         return lane_id, passed, last_actual, recovery_sec, detail
 

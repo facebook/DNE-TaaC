@@ -3,7 +3,6 @@
 # pyre-unsafe
 
 import logging
-import time
 import typing as t
 
 from taac.constants import TestDevice
@@ -19,7 +18,7 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_recovery_start_time,
     get_restart_completion_time,
     get_restart_time,
-    get_test_case_start_time,
+    resolve_observation_window,
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import normalize_prefix
 from taac.libs.fpf.fpf_stress_checks import (
@@ -50,23 +49,6 @@ _LIST_FIELDS = (
     "unreachable_planes",
     "plane_up",
 )
-
-
-def _resolve_window(check_params: t.Dict[str, t.Any]) -> t.Tuple[float, float]:
-    """Resolve the collector window without conflating baseline and playbook time.
-
-    Existing callers remain anchored at the current playbook start.  A precheck
-    may opt out and inspect only its explicit recent lookback, which is the
-    collector baseline gathered before the playbook timestamp is installed.
-    """
-    window_end = float(check_params.get("window_end", time.time()))
-    lookback_sec = float(check_params.get("lookback_sec", 900))
-    tc_start = get_test_case_start_time()
-    use_test_case_start = bool(check_params.get("use_test_case_start_time", True))
-    default_start = (
-        tc_start if use_test_case_start and tc_start else window_end - lookback_sec
-    )
-    return float(check_params.get("window_start", default_start)), window_end
 
 
 def _row_ts(row: t.Any) -> t.Optional[float]:
@@ -117,7 +99,7 @@ def discover_prod_collectors(
     hosts: t.List[str] = []
     hiw = getattr(c, "hosts_in_window", None)
     if callable(hiw):
-        window_start, window_end = _resolve_window(check_params)
+        window_start, window_end = resolve_observation_window(check_params)
         hosts = t.cast(t.List[str], hiw(window_start, window_end) or [])
     if not hosts:
         hosts = list(getattr(c, "hosts", []) or [])
@@ -989,7 +971,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                 message="No prod_hrt_prefix collector(s) in registry",
             )
 
-        window_start, window_end = _resolve_window(check_params)
+        window_start, window_end = resolve_observation_window(check_params)
 
         mode = check_params.get("mode", "stability")
         # Blip-handling contract for the stability assertion (mode="stability"):
