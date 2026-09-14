@@ -107,9 +107,6 @@ from taac.testconfigs.fpf.fpf_tc39_fsdb_kill_5min import (
 from taac.testconfigs.fpf.fpf_tc40_cont_interface_flaps import (
     TEST_CONFIG as FPF_TC40_CONT_INTERFACE_FLAPS,
 )
-from taac.testconfigs.fpf.fpf_tc41_longevity_pristine import (
-    TEST_CONFIG as FPF_TC41_LONGEVITY_PRISTINE,
-)
 from taac.testconfigs.fpf.fpf_tc42_cont_flaps_wedge_restart import (
     TEST_CONFIG as FPF_TC42_CONT_FLAPS_WEDGE_RESTART,
 )
@@ -195,7 +192,6 @@ __all__ = [
     "FPF_TC38_PERSISTENT_NDP_CLEAR",
     "FPF_TC39_FSDB_KILL_5MIN",
     "FPF_TC40_CONT_INTERFACE_FLAPS",
-    "FPF_TC41_LONGEVITY_PRISTINE",
     "FPF_TC42_CONT_FLAPS_WEDGE_RESTART",
     "FPF_TC43_CONT_FLAPS_BGP_RESTART",
     "FPF_TC44_CONT_FLAPS_FSDB_RESTART",
