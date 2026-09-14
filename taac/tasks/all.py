@@ -1177,6 +1177,14 @@ class AllocateCgroupSliceMemory(BaseTask):
     NAME = "allocate_cgroup_slice_memory"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            # /opt/memory_pressure and the ODS memory query are Meta-only.
+            self.logger.warning(
+                "Skipping allocate_cgroup_slice_memory under TAAC_OSS=1: "
+                "/opt/memory_pressure and the ODS memory query are not "
+                "available, so no cgroup memory stress is applied."
+            )
+            return
         hostname = params["hostname"]
         executable_path = params.get("executable_path", "/opt/memory_pressure")
         slice_name = params["slice_name"]
@@ -2418,7 +2426,10 @@ class AssertThriftRateLimitEnabledTask(BaseTask):
 
     NAME = "assert_thrift_rate_limit_enabled"
     THRIFT_RATE_LIMIT_KEY = "thriftApiToRateLimitInQps"
-    AGENT_CONFIG_PATH = "/etc/coop/agent/current"
+    # OSS DUTs have no COOP; the agent loads /etc/coop/agent.conf directly.
+    @classmethod
+    def agent_config_path(cls) -> str:
+        return "/etc/coop/agent.conf" if TAAC_OSS else "/etc/coop/agent/current"
 
     # Multi-line python script run on the DUT. Sent base64-encoded so we
     # don't have to escape quotes/newlines in the shell command. Catches
@@ -2478,7 +2489,7 @@ except Exception as e:
         level failure (python3-not-found, base64-not-found) surfaces in
         the captured output instead of disappearing."""
         script = cls._PROBE_SCRIPT.format(
-            path=cls.AGENT_CONFIG_PATH, key=cls.THRIFT_RATE_LIMIT_KEY
+            path=cls.agent_config_path(), key=cls.THRIFT_RATE_LIMIT_KEY
         )
         b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
         return f"echo {b64} | base64 -d | python3 - 2>&1"
@@ -2516,7 +2527,7 @@ except Exception as e:
         if result == "MISSING":
             raise RuntimeError(
                 f"{hostname}: `{self.THRIFT_RATE_LIMIT_KEY}` not found at "
-                f"top level of {self.AGENT_CONFIG_PATH}. Thrift API rate "
+                f"top level of {self.agent_config_path()}. Thrift API rate "
                 f"limiting is NOT enabled — refusing to start a THFT "
                 f"(thrift-hardening) run because the storm will overload "
                 f"`fboss_sw_agent`. See D108220182 (enables defaults for "
@@ -2527,7 +2538,7 @@ except Exception as e:
         if result.startswith("WRONG_TYPE "):
             raise RuntimeError(
                 f"{hostname}: `{self.THRIFT_RATE_LIMIT_KEY}` is present in "
-                f"{self.AGENT_CONFIG_PATH} but is NOT a dict ({result}). "
+                f"{self.agent_config_path()} but is NOT a dict ({result}). "
                 f"Expected mapping of API-name → qps int. The COOP-side "
                 f"schema may have changed; inspect the config and the "
                 f"`agent_thrift_api_to_rate_limit.mcconf` materialization "
@@ -2536,13 +2547,13 @@ except Exception as e:
         if result == "EMPTY":
             raise RuntimeError(
                 f"{hostname}: `{self.THRIFT_RATE_LIMIT_KEY}` is present "
-                f"and is a dict but empty in {self.AGENT_CONFIG_PATH}. "
+                f"and is a dict but empty in {self.agent_config_path()}. "
                 f"Thrift API rate limiting is effectively disabled — "
                 f"refusing to start THFT run. See D108220182."
             )
         if result.startswith("NOT_DICT "):
             raise RuntimeError(
-                f"{hostname}: root of {self.AGENT_CONFIG_PATH} is not a "
+                f"{hostname}: root of {self.agent_config_path()} is not a "
                 f"dict ({result}). The COOP-materialized config schema "
                 f"may have changed; cannot probe for "
                 f"`{self.THRIFT_RATE_LIMIT_KEY}`."
@@ -2553,11 +2564,11 @@ except Exception as e:
                 f"exist on the DUT ({result}). COOP may not have applied "
                 f"the agent config yet — try `systemctl restart coop` and "
                 f"wait for the file to materialize at "
-                f"{self.AGENT_CONFIG_PATH}."
+                f"{self.agent_config_path()}."
             )
         if result.startswith("INVALID_JSON "):
             raise RuntimeError(
-                f"{hostname}: {self.AGENT_CONFIG_PATH} exists but is not "
+                f"{hostname}: {self.agent_config_path()} exists but is not "
                 f"valid JSON ({result}). The file may have been truncated "
                 f"by a partial COOP write — re-fetch via `coop` CLI."
             )
