@@ -183,6 +183,7 @@ def build_bgp_dc_test_config(
     v4_downlink_prefix="101",
     v6_downlink_prefix="3000",
     ecmp_member_limit=11500,
+    stress_static_routes=True,
     additional_setup_tasks=None,
     allow_all_v4_policies=False,
     uplink_bgp_peer_type=None,
@@ -526,13 +527,22 @@ def build_bgp_dc_test_config(
                     ),
                 ]
             ),
-            create_add_stress_static_routes_task(
-                hostname=device_name,
-                max_ecmp_group=ecmp_group_limit,
-                max_ecmp_members=ecmp_member_limit,
-                nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
-                lb_prefix_agg="6000:ab::/32",
-                device_group_count=good_ndp_entries_uplink,
+            # generate_prefix_nh_list_map caps each group at
+            # device_group_count // 4 members, so a platform with few uplink
+            # NDP nexthops cannot reach ecmp_member_limit; let it opt out.
+            *(
+                [
+                    create_add_stress_static_routes_task(
+                        hostname=device_name,
+                        max_ecmp_group=ecmp_group_limit,
+                        max_ecmp_members=ecmp_member_limit,
+                        nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
+                        lb_prefix_agg="6000:ab::/32",
+                        device_group_count=good_ndp_entries_uplink,
+                    )
+                ]
+                if stress_static_routes
+                else []
             ),
             create_configure_parallel_bgp_peers_task(
                 hostname=device_name,
