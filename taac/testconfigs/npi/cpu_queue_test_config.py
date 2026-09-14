@@ -1405,6 +1405,21 @@ def create_npi_cpu_queue_test_config(
                     type=ixia_types.FrameSizeType.FIXED,
                     fixed_size=1700,
                 ),
+                # RAW traffic items get NO tracking by default: ixia.py's
+                # default_tracking_types_raw is deliberately empty when
+                # traffic_type is RAW, so TrackBy ends up [] and the traffic-item
+                # statistics view is never initialised. That makes npi_cpu_039
+                # undiagnosable -- when it fails with "No output packet increase
+                # detected on queue 0" there is no way to tell whether IXIA
+                # transmitted at all or whether the DUT declined to punt, because
+                # get_latest_stats_traffic() raises "IXIA traffic-item statistics
+                # view is not initialized" (taac_ixia.py gates the view on
+                # TRAFFIC_ITEM being present in TrackBy).
+                # Asking for TRAFFIC_ITEM explicitly bypasses the RAW default and
+                # gives the tx/rx frame counts needed to tell those two apart.
+                tracking_types=[
+                    ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                ],
             ),
             # CPU_046: martian SIP=switch's default gateway IPv4 address —
             # MUST NOT punt (negative test). Hardware silicon should drop the
