@@ -96,20 +96,21 @@ from taac.packet_headers import (
     TC2_PFC_PAUSE_PACKET_HEADERS,
 )
 from taac.testconfigs.routing.util.bgp_dc_healthchecks import (
+    BGP_RESTART_STEPS,
     BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
     get_ixia_healthcheck_ignore_cpu_and_v4_directional_traffic,
     get_ixia_healthcheck_stable_state,
 )
 from taac.testconfigs.routing.util.bgp_dc_stages import (
+    BGP_RESTART_STAGE,
     DISABLE_PREFIX_FLAPS_STAGE,
     DISABLE_SESSION_FLAPS_STAGE,
-    FREQUENT_BEST_PATH_COMPUTATION_STAGE,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.stages.stage_definitions import (
-    create_route_oscillations_stage,
+    create_attribute_churn_stage,
     create_validated_bgp_route_oscillations_stage,
     create_longevity_stage,
     create_periodic_service_restart_stage,
@@ -126,8 +127,6 @@ from taac.stages.stage_definitions import (
 from taac.steps.step_definitions import (
     create_bgp_instability_setup_steps,
     create_multipath_nexthop_count_health_check_step,
-    COLD_START_PREFIX_OSCILLATIONS,
-    CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES,
     create_allocate_cgroup_memory_step,
     create_clear_port_stats_step,
     create_clear_traffic_stats_step,
@@ -166,7 +165,6 @@ from taac.steps.step_definitions import (
     duration_only_rogue_session_prefix_flaps_s,
     REVERT_LOCAL_PREFERENCE_STEPS,
     ROGUE_PREFIX_SESSION_FLAP_STEPS,
-    TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY,
     wait_time_after_disable_churn_s,
 )
 from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
@@ -226,6 +224,60 @@ def create_stable_state_validation_playbook(
     )
 
 
+def create_hatch_chaos_soak_playbook(
+    *,
+    name: str,
+    device_regexes: t.List[str],
+    traffic_items_to_start: t.List[str],
+    stages: t.List[Stage],
+    prechecks: t.List[PointInTimeHealthCheck],
+    postchecks: t.List[PointInTimeHealthCheck],
+    snapshot_checks: t.List[SnapshotHealthCheck],
+) -> Playbook:
+    """Create the QZD1 Hatch access-policy chaos-soak playbook."""
+    return Playbook(
+        name=name,
+        description=(
+            "Overnight chaos soak: agent warmboot every 2.5 min overlapped with "
+            "R/C access-policy transitions and 6s port flaps on 4 non-IXIA "
+            "ports, while the 3 IXIA ports hold a static policy so the traffic "
+            "matrix stays a fixed 5-blocked / 12-allowed expectation."
+        ),
+        device_regexes=device_regexes,
+        traffic_items_to_start=traffic_items_to_start,
+        stages=stages,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+    )
+
+
+def create_access_policy_playbook(
+    *,
+    name: str,
+    description: str,
+    device_regexes: t.List[str],
+    stages: t.List[Stage],
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
+    prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    cleanup_steps: t.Optional[t.List[Step]] = None,
+) -> Playbook:
+    """Create one access-policy transition or resilience playbook."""
+    return Playbook(
+        name=name,
+        description=description,
+        device_regexes=device_regexes,
+        stages=stages,
+        traffic_items_to_start=traffic_items_to_start,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        cleanup_steps=cleanup_steps,
+    )
+
+
 def create_agent_restart_playbook(
     wedge_agent_restart_no_of_interations: int = 10,
 ) -> Playbook:
@@ -266,10 +318,6 @@ def create_bgp_restart_playbook() -> Playbook:
     from taac.health_checks.constants import (
         SERVICES_TO_MONITOR_DURING_BGP_RESTART,
     )
-    from taac.testconfigs.routing.util.bgp_dc_stages import (
-        BGP_RESTART_STAGE,
-    )
-
     return Playbook(
         name="test_bgp_restart",
         postchecks=[
@@ -7522,6 +7570,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
     uptime_s: int = 900,
     downtime_s: int = 120,
     total_duration_s: int = 3600,
+    cycles: int | None = None,
     prechecks: list[PointInTimeHealthCheck] | None = None,
     postchecks: list[PointInTimeHealthCheck] | None = None,
     snapshot_checks: list[SnapshotHealthCheck] | None = None,
@@ -7544,7 +7593,10 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
             (IXIA names groups ``D<device_group_index + 1>``).
         uptime_s: Seconds the group stays enabled per cycle.
         downtime_s: Seconds the group stays shut per cycle.
-        total_duration_s: Target wall-clock for the whole playbook.
+        total_duration_s: Target wall-clock used to derive cycles when
+            ``cycles`` is not supplied.
+        cycles: Explicit number of up/down cycles. This is preferred for
+            execution profiles whose duty-cycle timing differs from NPI.
         prechecks / postchecks / snapshot_checks: Playbook-level checks.
         traffic_items_to_start: IXIA traffic items to run for this playbook.
         playbook_name: Test-case id used by ``--regex`` selection.
@@ -7557,7 +7609,7 @@ def create_bgp_longevity_ndp_device_group_toggle_playbook(
             would yield zero cycles and a playbook that does nothing.
     """
     cycle_s = uptime_s + downtime_s
-    cycles = total_duration_s // cycle_s
+    cycles = cycles if cycles is not None else total_duration_s // cycle_s
     if cycles < 1:
         raise ValueError(
             f"uptime_s + downtime_s ({cycle_s}s) exceeds total_duration_s "
@@ -8861,8 +8913,18 @@ def create_hardening_of_ndp_overload_entries_playbook(
     good_ndp_entries_uplink: int,
     rogue_ndp_entries: int,
     ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    sleep_time_between_toggle_s: t.Optional[int] = None,
 ) -> Playbook:
     """Platform hardening playbook: NDP overload table test."""
+    # None keeps configure_ipv*_entries' default toggle sleeps. On
+    # testbeds where the toggles are known no-ops (see
+    # docs/rsw_new_playbooks_failure_analysis.md) a small value cuts
+    # ~2min of dead wait per toggled device group per step.
+    toggle_kwargs = (
+        {"sleep_time_between_toggle_s": sleep_time_between_toggle_s}
+        if sleep_time_between_toggle_s is not None
+        else {}
+    )
     return Playbook(
         name="test_hardening_of_ndp_overload_entries",
         cleanup_steps=[
@@ -8872,6 +8934,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": good_ndp_entries_downlink,
                     "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                 },
             ),
         ],
@@ -8884,6 +8947,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": good_ndp_entries_downlink,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8892,6 +8956,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_ndp_entries_uplink,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8900,6 +8965,7 @@ def create_hardening_of_ndp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_ndp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_longevity_step(duration=600),
@@ -8924,8 +8990,18 @@ def create_hardening_of_arp_overload_entries_playbook(
     good_arp_entries: int,
     rogue_arp_entries: int,
     arp_entry_limit: int = ARP_SOFT_LIMIT,
+    sleep_time_between_toggle_s: t.Optional[int] = None,
 ) -> Playbook:
     """Platform hardening playbook: ARP overload table test."""
+    # None keeps configure_ipv*_entries' default toggle sleeps. On
+    # testbeds where the toggles are known no-ops (see
+    # docs/rsw_new_playbooks_failure_analysis.md) a small value cuts
+    # ~2min of dead wait per toggled device group per step.
+    toggle_kwargs = (
+        {"sleep_time_between_toggle_s": sleep_time_between_toggle_s}
+        if sleep_time_between_toggle_s is not None
+        else {}
+    )
     return Playbook(
         name="test_hardening_of_arp_overload_entries",
         cleanup_steps=[
@@ -8935,6 +9011,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": 1,
                     "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                 },
             ),
         ],
@@ -8947,6 +9024,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": 1,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8955,6 +9033,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_arp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_ixia_api_step(
@@ -8963,6 +9042,7 @@ def create_hardening_of_arp_overload_entries_playbook(
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_arp_entries,
                             "toggle_all_ipv6_ipv4_only_protocol": True,
+                    **toggle_kwargs,
                         },
                     ),
                     create_longevity_step(duration=600),
@@ -9543,8 +9623,19 @@ def create_hardening_of_mac_overload_with_agent_churn_playbook(
     )
 
 
-def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
-    """Platform hardening playbook: BGP malformed packet handling test."""
+def create_bgp_malformed_packet_test_playbook(
+    device_name,
+    network_group_regex: str = "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+) -> Playbook:
+    """Platform hardening playbook: BGP malformed packet handling test.
+
+    ``network_group_regex``: which IXIA network groups get their routes'
+    NEXT_HOP attribute withheld (the malformed UPDATE under test). The
+    default matches the Meta factory's tag-derived group names; configs
+    whose groups are named differently (e.g. the OSS single-DUT RSW config's
+    ``BGP_PREFIX_V6_*`` groups) must pass a matching regex or every step
+    silently no-ops.
+    """
     return Playbook(
         name="test_bgp_malformed_packet_test",
         iteration=1,
@@ -9559,14 +9650,14 @@ def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": False,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_ixia_api_step(
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": False,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_longevity_step(duration=1000),
@@ -9574,14 +9665,14 @@ def create_bgp_malformed_packet_test_playbook(device_name) -> Playbook:
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": True,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_ixia_api_step(
                         api_name="bounce_bgp_next_hop_attribute",
                         args_dict={
                             "enable": True,
-                            "network_group_regex": "NO_PACKET_LOSS_EXPECTED|ECMP_1",
+                            "network_group_regex": network_group_regex,
                         },
                     ),
                     create_longevity_step(duration=200),
@@ -9702,24 +9793,41 @@ def create_ecmp_group_overload_limit_playbook() -> Playbook:
 def create_cpu_high_priority_queue_overload_playbook(
     ixia_rogue_ic_parent_network_v6,
     ixia_rogue_ic_parent_network_v4,
+    bgp_cp_traffic_regex: str = "HIGH_QUEUE_BGP_CP_TRAFFIC",
+    background_traffic_regex: t.Optional[str] = None,
 ) -> Playbook:
-    """Platform hardening playbook: CPU high-priority queue overload test."""
+    """Platform hardening playbook: CPU high-priority queue overload test.
+
+    ``bgp_cp_traffic_regex``: the traffic item flooding the CPU high queue.
+    NOTE ``enable_traffic(enable=True, regexes=...)`` also DISABLES every
+    non-matching item, so a regex that matches nothing doesn't just no-op —
+    it switches off all running traffic for the overload window. Configs
+    whose BGP-CP item is named differently (e.g. the OSS single-DUT RSW
+    config's ``TEST_RAW_BGP_CP_TRAFFIC``) must pass their own regex.
+
+    The rogue-network args feed the snapshot check's ignore list (Meta's
+    churn peers, expected to flap); pass ``None`` for both on configs with
+    no rogue peers and the ignore list is omitted.
+    """
+    # Build each entry from its own arg: formatting both off "either is set"
+    # would emit the literal "None.0/16" / "None::/80" into the ignore list
+    # whenever a caller supplies only one family.
+    rogue_prefixes = []
+    if ixia_rogue_ic_parent_network_v6:
+        rogue_prefixes.append(f"{ixia_rogue_ic_parent_network_v6}::/80")
+    if ixia_rogue_ic_parent_network_v4:
+        rogue_prefixes.append(f"{ixia_rogue_ic_parent_network_v4}.0/16")
+    parent_prefixes_to_ignore = rogue_prefixes or None
     return Playbook(
         name="test_cpu_high_priority_queue_overload",
         snapshot_checks=[
             create_bgp_session_snapshot_check(
-                parent_prefixes_to_ignore=[
-                    f"{ixia_rogue_ic_parent_network_v6}::/80",
-                    f"{ixia_rogue_ic_parent_network_v4}.0/16",
-                ],
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 pre_snapshot_checkpoint_id="stage.test_cpu_high_priority_queue_overload.step.sleep_120_secs_after_disabling_bgp_cp_traffic.end",
             ),
             create_bgp_session_snapshot_check(
                 skip_flap_check=True,
-                parent_prefixes_to_ignore=[
-                    f"{ixia_rogue_ic_parent_network_v6}::/80",
-                    f"{ixia_rogue_ic_parent_network_v4}.0/16",
-                ],
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 post_snapshot_checkpoint_id="stage.test_cpu_high_priority_queue_overload.step.sleep_120_secs_after_disabling_bgp_cp_traffic.end",
             ),
         ],
@@ -9730,17 +9838,34 @@ def create_cpu_high_priority_queue_overload_playbook(
                     create_ixia_api_step(
                         api_name="enable_traffic",
                         args_dict={
-                            "regexes": ["HIGH_QUEUE_BGP_CP_TRAFFIC"],
+                            "regexes": [bgp_cp_traffic_regex],
                             "enable": True,
                         },
                     ),
                     create_longevity_step(duration=150),
-                    create_ixia_api_step(
-                        api_name="enable_traffic",
-                        args_dict={
-                            "regexes": ["HIGH_QUEUE_BGP_CP_TRAFFIC"],
-                            "enable": False,
-                        },
+                    # Turn the CP flood off. With ``background_traffic_regex``
+                    # set this is done by switching TO the background item
+                    # (enable=True enables it and disables everything else,
+                    # incl. the CP item) — a plain disable would leave ZERO
+                    # enabled traffic items, dropping IXIA's traffic module to
+                    # kUnapplied and failing the following hold on configs
+                    # where the CP item was the only one running.
+                    (
+                        create_ixia_api_step(
+                            api_name="enable_traffic",
+                            args_dict={
+                                "regexes": [background_traffic_regex],
+                                "enable": True,
+                            },
+                        )
+                        if background_traffic_regex
+                        else create_ixia_api_step(
+                            api_name="enable_traffic",
+                            args_dict={
+                                "regexes": [bgp_cp_traffic_regex],
+                                "enable": False,
+                            },
+                        )
                     ),
                     create_longevity_step(
                         duration=120,
@@ -9753,6 +9878,98 @@ def create_cpu_high_priority_queue_overload_playbook(
                     create_longevity_step(duration=30),
                 ],
             )
+        ],
+    )
+
+
+def create_cpu_punt_playbook(
+    name: str,
+    traffic_item_name: str,
+    active_queues: t.List[int],
+    no_discard_queues: t.List[int],
+    min_out_pps: int,
+    duration: int = 60,
+) -> Playbook:
+    """CPU control-plane punt playbook: assert one protocol lands on the right CPU queue.
+
+    Starts a single RAW control-plane traffic item, holds for ``duration``,
+    then snapshots the CPU queues and asserts the target queue(s) saw the
+    punted traffic with no drops on ``no_discard_queues``.
+
+    Args:
+        name: Playbook name (also the key configs use for per-platform
+            threshold overrides).
+        traffic_item_name: The RAW traffic item this playbook starts. Only this
+            item runs, so it never disturbs a config's other traffic.
+        active_queues: CPU queue(s) the DUT's CoPP is expected to punt this
+            protocol to. Empty for a NEGATIVE test (traffic must NOT punt).
+        no_discard_queues: Queues that must show no discards. The LOW queue is
+            rate-capped and legitimately discards under load, so low-queue punt
+            tests should pass MID/HIGH only.
+        min_out_pps: Minimum egress pps each active queue must show. ``0`` still
+            asserts the queue saw traffic (the check fails a queue with no
+            packet increase) but drops the pps floor — for platforms whose CoPP
+            has no high-rate policer for the protocol under test.
+        duration: Seconds of traffic before the snapshot.
+
+    Returns:
+        A `Playbook` named ``name`` carrying a single CPU_QUEUE_CHECK snapshot.
+    """
+    return Playbook(
+        name=name,
+        enabled=True,
+        traffic_items_to_start=[traffic_item_name],
+        stages=[
+            create_steps_stage(steps=[create_longevity_step(duration=duration)]),
+        ],
+        snapshot_checks=[
+            create_cpu_queue_snapshot_check(
+                active_queues=active_queues,
+                no_discard_queues=no_discard_queues,
+                active_min_out_pps_per_queue={q: min_out_pps for q in active_queues},
+            ),
+        ],
+    )
+
+
+def create_cpu_queue_prioritization_playbook(
+    traffic_item_names: t.List[str],
+    active_queues: t.List[int],
+    no_discard_queues: t.List[int],
+    name: str = "test_queue_prioritization_high_queue_no_drops",
+    duration: int = 60,
+) -> Playbook:
+    """CPU queue prioritization: the HIGH queue takes no drops while others congest.
+
+    Runs several RAW punt items concurrently so the LOW and MID queues are
+    driven into congestion alongside the HIGH queue, then asserts every queue
+    in ``active_queues`` saw traffic while ``no_discard_queues`` took no drops.
+    The multi-item shape is why this is separate from
+    `create_cpu_punt_playbook`.
+
+    Args:
+        traffic_item_names: RAW items to start together (e.g. a low-queue, a
+            mid-queue and a high-queue punt item).
+        active_queues: Queues that must all see traffic.
+        no_discard_queues: Queues that must take no drops (typically HIGH only).
+        name: Playbook name.
+        duration: Seconds of traffic before the snapshot.
+
+    Returns:
+        A `Playbook` carrying a single CPU_QUEUE_CHECK snapshot.
+    """
+    return Playbook(
+        name=name,
+        enabled=True,
+        traffic_items_to_start=list(traffic_item_names),
+        stages=[
+            create_steps_stage(steps=[create_longevity_step(duration=duration)]),
+        ],
+        snapshot_checks=[
+            create_cpu_queue_snapshot_check(
+                active_queues=active_queues,
+                no_discard_queues=no_discard_queues,
+            ),
         ],
     )
 
@@ -9951,8 +10168,68 @@ def get_platform_hardening_playbooks(
 #  in Phase 4 v2)
 # =============================================================================
 
+# One authoritative view of BGP-hardening execution timing. NPI remains the
+# default profile; CI/CD deliberately shortens only the cases called out by the
+# qualification plan while leaving all health checks intact.
+BGP_HARDENING_TIMING_PROFILES: dict[str, dict[str, int]] = {
+    "npi": {
+        "prefix_flap_duration_s": 1000,
+        "activate_deactivate_cycles": 2,
+        "activate_deactivate_hold_s": 120,
+        "session_flap_duration_s": 3600,
+        "bgp_restart_iterations": 25,
+        "rogue_churn_duration_s": 1000,
+        "steady_state_duration_s": 1000,
+        "device_group_toggle_cycles": 12,
+        "device_group_toggle_state_s": 120,
+        "best_path_changes": 360,
+        "best_path_change_interval_s": 10,
+        "cold_start_oscillation_cycles": 9,
+        "cold_start_protocol_hold_s": 120,
+        "cold_start_oscillation_hold_s": 120,
+        "local_pref_cycles": 30,
+        "local_pref_churn_interval_s": 60,
+        "bgpd_crash_iterations": 5,
+        "bgpd_crash_recovery_wait_s": 120,
+        "ndp_toggle_cycles": 3,
+        "ndp_uptime_s": 900,
+        "ndp_downtime_s": 120,
+    },
+    "cicd": {
+        "prefix_flap_duration_s": 300,
+        "activate_deactivate_cycles": 2,
+        "activate_deactivate_hold_s": 120,
+        "session_flap_duration_s": 600,
+        "bgp_restart_iterations": 5,
+        "rogue_churn_duration_s": 300,
+        "steady_state_duration_s": 300,
+        "device_group_toggle_cycles": 2,
+        "device_group_toggle_state_s": 120,
+        "best_path_changes": 5,
+        "best_path_change_interval_s": 10,
+        "cold_start_oscillation_cycles": 2,
+        "cold_start_protocol_hold_s": 120,
+        "cold_start_oscillation_hold_s": 120,
+        "local_pref_cycles": 5,
+        "local_pref_churn_interval_s": 60,
+        "bgpd_crash_iterations": 2,
+        "bgpd_crash_recovery_wait_s": 120,
+        "ndp_toggle_cycles": 2,
+        "ndp_uptime_s": 60,
+        "ndp_downtime_s": 60,
+    },
+}
 
-def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
+
+def _repeat_bgp_hardening_steps(steps: list[Step], cycles: int) -> list[Step]:
+    if cycles < 1:
+        raise ValueError(f"BGP hardening cycles must be positive, got {cycles}")
+    return [step for _ in range(cycles) for step in steps]
+
+
+def create_longevity_prefix_flap_all_prefixes_playbook(
+    duration_s: int = duration_all_prefix_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: sustained prefix-flap across all prefix groups."""
     return Playbook(
         name="test_longevity_prefix_flap_all_prefixes",
@@ -9965,7 +10242,7 @@ def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
                         churn_mode="prefix_flap",
                         enable_prefix_flap=True,
                         is_all_prefix_groups=True,
-                        churn_duration_s=duration_all_prefix_flaps_s,
+                        churn_duration_s=duration_s,
                     ),
                 ]
             ),
@@ -9974,20 +10251,45 @@ def create_longevity_prefix_flap_all_prefixes_playbook() -> Playbook:
     )
 
 
-def create_longevity_activate_deactivate_all_prefixes_playbook() -> Playbook:
+def create_longevity_activate_deactivate_all_prefixes_playbook(
+    cycles: int = 2,
+    hold_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: continuously activate/deactivate all prefixes."""
     return Playbook(
         name="test_longevity_activate_deactivate_all_prefixes",
         cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS,
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
-            create_steps_stage(steps=CONTINUOUSLY_ACTIVATE_DEACTIVATE_ALL_PREFIXES),
+            create_steps_stage(
+                steps=_repeat_bgp_hardening_steps(
+                    [
+                        create_toggle_ixia_prefix_session_flap_churn_step(
+                            churn_mode="activate_deactivate_prefix",
+                            enable_prefix_flap=False,
+                            is_all_prefix_groups=True,
+                            churn_duration_s=wait_time_after_disable_churn_s,
+                        ),
+                        create_longevity_step(duration=hold_s),
+                        create_toggle_ixia_prefix_session_flap_churn_step(
+                            churn_mode="activate_deactivate_prefix",
+                            enable_prefix_flap=True,
+                            is_all_prefix_groups=True,
+                            churn_duration_s=wait_time_after_disable_churn_s,
+                        ),
+                        create_longevity_step(duration=hold_s),
+                    ],
+                    cycles,
+                )
+            ),
             DISABLE_PREFIX_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
+def create_longevity_session_flap_all_prefixes_playbook(
+    duration_s: int = duration_all_session_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: sustained session-flap across all session groups."""
     return Playbook(
         name="test_longevity_session_flap_all_prefixes",
@@ -10003,7 +10305,7 @@ def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
                         churn_mode="session_flap",
                         enable_session_flap=True,
                         is_all_session_groups=True,
-                        churn_duration_s=duration_all_session_flaps_s,
+                        churn_duration_s=duration_s,
                     ),
                 ]
             ),
@@ -10012,7 +10314,9 @@ def create_longevity_session_flap_all_prefixes_playbook() -> Playbook:
     )
 
 
-def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook() -> Playbook:
+def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(
+    bgp_restart_iterations: int = 25,
+) -> Playbook:
     """BGP_DC longevity playbook: prefix-flap combined with BGP daemon restart."""
     return Playbook(
         name="test_longevity_prefix_flap_all_prefixes_plus_bgp_restart",
@@ -10032,12 +10336,18 @@ def create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook() -> Pla
                     ),
                 ]
             ),
+            create_steps_stage(
+                iteration=bgp_restart_iterations,
+                steps=BGP_RESTART_STEPS,
+            ),
             DISABLE_PREFIX_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook() -> Playbook:
+def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(
+    bgp_restart_iterations: int = 25,
+) -> Playbook:
     """BGP_DC longevity playbook: session-flap combined with BGP daemon restart."""
     return Playbook(
         name="test_longevity_session_flap_all_prefixes_plus_bgp_restart",
@@ -10058,12 +10368,18 @@ def create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook() -> Pl
                     ),
                 ]
             ),
+            create_steps_stage(
+                iteration=bgp_restart_iterations,
+                steps=BGP_RESTART_STEPS,
+            ),
             DISABLE_SESSION_FLAPS_STAGE,
         ],
     )
 
 
-def create_longevity_rogue_prefix_session_enable_playbook() -> Playbook:
+def create_longevity_rogue_prefix_session_enable_playbook(
+    duration_s: int = duration_only_rogue_session_prefix_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: enable rogue prefix + session and hold."""
     return Playbook(
         name="test_longevity_rogue_prefix_session_enable",
@@ -10071,16 +10387,16 @@ def create_longevity_rogue_prefix_session_enable_playbook() -> Playbook:
         stages=[
             create_steps_stage(
                 steps=[
-                    create_longevity_step(
-                        duration=duration_only_rogue_session_prefix_flaps_s
-                    ),
+                    create_longevity_step(duration=duration_s),
                 ]
             )
         ],
     )
 
 
-def create_longevity_no_prefix_no_session_flap_playbook() -> Playbook:
+def create_longevity_no_prefix_no_session_flap_playbook(
+    duration_s: int = duration_no_prefix_session_flaps_s,
+) -> Playbook:
     """BGP_DC longevity playbook: baseline hold with no churn."""
     return Playbook(
         name="test_longevity_no_prefix_no_session_flap",
@@ -10090,14 +10406,17 @@ def create_longevity_no_prefix_no_session_flap_playbook() -> Playbook:
             DISABLE_PREFIX_FLAPS_STAGE,
             create_steps_stage(
                 steps=[
-                    create_longevity_step(duration=duration_no_prefix_session_flaps_s),
+                    create_longevity_step(duration=duration_s),
                 ]
             ),
         ],
     )
 
 
-def create_longevity_continuous_toggle_device_group_playbook() -> Playbook:
+def create_longevity_continuous_toggle_device_group_playbook(
+    cycles: int = 12,
+    state_duration_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: continuously toggle rogue device groups."""
     return Playbook(
         name="test_longevity_continuous_toggle_device_group",
@@ -10117,12 +10436,37 @@ def create_longevity_continuous_toggle_device_group_playbook() -> Playbook:
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
             DISABLE_PREFIX_FLAPS_STAGE,
-            create_steps_stage(steps=TOGGLE_ROGUE_DEVICE_GROUP_STEPS_CONTIUOUSLY),
+            create_steps_stage(
+                steps=_repeat_bgp_hardening_steps(
+                    [
+                        create_ixia_api_step(
+                            api_name="toggle_device_groups",
+                            args_dict={
+                                "enable": True,
+                                "device_group_name_regex": "ROGUE|NO_PACKET_LOSS_EXPECTED|ECMP_1|ARP|NDP",
+                            },
+                        ),
+                        create_longevity_step(duration=state_duration_s),
+                        create_ixia_api_step(
+                            api_name="toggle_device_groups",
+                            args_dict={
+                                "enable": False,
+                                "device_group_name_regex": "ROGUE|NO_PACKET_LOSS_EXPECTED|ECMP_1|ARP|NDP",
+                            },
+                        ),
+                        create_longevity_step(duration=state_duration_s),
+                    ],
+                    cycles,
+                )
+            ),
         ],
     )
 
 
-def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
+def create_longevity_frequent_best_path_computation_playbook(
+    changes: int = 360,
+    interval_s: int = 10,
+) -> Playbook:
     """BGP_DC longevity playbook: frequent best-path computation via LOCAL_PREF churn."""
     return Playbook(
         name="test_longevity_frequent_best_path_computation",
@@ -10130,20 +10474,28 @@ def create_longevity_frequent_best_path_computation_playbook() -> Playbook:
         stages=[
             DISABLE_SESSION_FLAPS_STAGE,
             DISABLE_PREFIX_FLAPS_STAGE,
-            FREQUENT_BEST_PATH_COMPUTATION_STAGE,
+            create_attribute_churn_stage(
+                prefix_pool_regex=".*",
+                prefix_pool_regex_as_path=".*",
+                prefix_start_index=0,
+                churn_time=interval_s,
+                local_pref_iters=changes,
+                med_iters=0,
+                origin_iters=0,
+                as_path_iters=0,
+            ),
         ],
     )
 
 
-def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() -> (
-    Playbook
-):
+def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
+    oscillation_cycles: int = 9,
+    protocol_hold_s: int = 120,
+    oscillation_hold_s: int = 120,
+) -> Playbook:
     """BGP_DC longevity playbook: cold-start with prefix + session oscillations."""
     return Playbook(
         name="test_longevity_cold_start_with_prefix_and_session_oscillations",
-        postchecks_to_skip=[
-            hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK,
-        ],
         cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS
         + [
             create_ixia_api_step(
@@ -10167,6 +10519,28 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() 
             create_steps_stage(
                 steps=[
                     create_ixia_api_step(
+                        api_name="stop_protocols",
+                        args_dict={"sleep_timer": wait_time_after_disable_churn_s},
+                        description="Cold start: stop all IXIA protocols",
+                    ),
+                    create_longevity_step(
+                        duration=protocol_hold_s,
+                        description="Hold all IXIA protocols down for cold start",
+                    ),
+                    create_ixia_api_step(
+                        api_name="start_protocols",
+                        args_dict={"sleep_timer": wait_time_after_disable_churn_s},
+                        description="Cold start: restart all IXIA protocols",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        description="Wait for agent and BGP convergence after cold start",
+                    ),
+                ]
+            ),
+            create_steps_stage(
+                steps=[
+                    create_ixia_api_step(
                         api_name="rename_device_groups",
                         args_dict={
                             "device_group_name_regex": "NO_PACKET_LOSS_EXPECTED",
@@ -10184,7 +10558,55 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook() 
                     ),
                 ]
             ),
-            create_steps_stage(steps=COLD_START_PREFIX_OSCILLATIONS),
+            create_steps_stage(
+                steps=[
+                    step
+                    for cycle in range(oscillation_cycles)
+                    for step in (
+                        [
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="activate_deactivate_prefix",
+                                enable_prefix_flap=False,
+                                prefix_flap_tag_names=[
+                                    "PREFIX_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="activate_deactivate_prefix",
+                                enable_prefix_flap=True,
+                                prefix_flap_tag_names=[
+                                    "PREFIX_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                        ]
+                        if cycle % 2 == 0
+                        else [
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="session_flap",
+                                enable_session_flap=False,
+                                session_flap_tag_names=[
+                                    "SESSION_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                            create_toggle_ixia_prefix_session_flap_churn_step(
+                                churn_mode="session_flap",
+                                enable_session_flap=True,
+                                session_flap_tag_names=[
+                                    "SESSION_FLAP_TRAFFIC_LOSS_EXPECTED"
+                                ],
+                                churn_duration_s=wait_time_after_disable_churn_s,
+                            ),
+                            create_longevity_step(duration=oscillation_hold_s),
+                        ]
+                    )
+                ]
+            ),
         ],
     )
 
@@ -10198,18 +10620,89 @@ def get_longevity_playbooks(device_name: str, **kwargs):
     pattern in ``factories/bgp_dc_chronos_node.py``.
     """
     del device_name  # unused after dropping IXIA traffic checks
-    return [
-        create_longevity_prefix_flap_all_prefixes_playbook(),
-        create_longevity_activate_deactivate_all_prefixes_playbook(),
-        create_longevity_session_flap_all_prefixes_playbook(),
-        create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(),
-        create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(),
-        create_longevity_rogue_prefix_session_enable_playbook(),
-        create_longevity_no_prefix_no_session_flap_playbook(),
-        create_longevity_continuous_toggle_device_group_playbook(),
-        create_longevity_frequent_best_path_computation_playbook(),
-        create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(),
+    profile = kwargs.get("bgp_hardening_timing_profile") or (
+        BGP_HARDENING_TIMING_PROFILES["npi"]
+    )
+    chronos_playbooks = [
+        create_longevity_prefix_flap_all_prefixes_playbook(
+            duration_s=profile["prefix_flap_duration_s"]
+        ),
+        create_longevity_activate_deactivate_all_prefixes_playbook(
+            cycles=profile["activate_deactivate_cycles"],
+            hold_s=profile["activate_deactivate_hold_s"],
+        ),
+        create_longevity_session_flap_all_prefixes_playbook(
+            duration_s=profile["session_flap_duration_s"]
+        ),
+        create_longevity_prefix_flap_all_prefixes_plus_bgp_restart_playbook(
+            bgp_restart_iterations=profile["bgp_restart_iterations"]
+        ),
+        create_longevity_session_flap_all_prefixes_plus_bgp_restart_playbook(
+            bgp_restart_iterations=profile["bgp_restart_iterations"]
+        ),
+        create_longevity_rogue_prefix_session_enable_playbook(
+            duration_s=profile["rogue_churn_duration_s"]
+        ),
+        create_longevity_no_prefix_no_session_flap_playbook(
+            duration_s=profile["steady_state_duration_s"]
+        ),
+        create_longevity_continuous_toggle_device_group_playbook(
+            cycles=profile["device_group_toggle_cycles"],
+            state_duration_s=profile["device_group_toggle_state_s"],
+        ),
+        create_longevity_frequent_best_path_computation_playbook(
+            changes=profile["best_path_changes"],
+            interval_s=profile["best_path_change_interval_s"],
+        ),
+        create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
+            oscillation_cycles=profile["cold_start_oscillation_cycles"],
+            protocol_hold_s=profile["cold_start_protocol_hold_s"],
+            oscillation_hold_s=profile["cold_start_oscillation_hold_s"],
+        ),
     ]
+    if not kwargs.get("include_extended_bgp_hardening_playbooks", False):
+        return chronos_playbooks
+
+    by_name = {playbook.name: playbook for playbook in chronos_playbooks}
+    by_name.update(
+        {
+            "test_bgp_longevity_local_pref_churn": create_bgp_longevity_local_pref_churn_playbook(
+                prefix_pool_regex=kwargs.get(
+                    "bgp_longevity_prefix_pool_regex", ".*"
+                ),
+                cycles=profile["local_pref_cycles"],
+                churn_interval_s=profile["local_pref_churn_interval_s"],
+            ),
+            "test_bgp_longevity_bgpd_crash": create_bgp_longevity_bgpd_crash_playbook(
+                iterations=profile["bgpd_crash_iterations"],
+                recovery_wait_s=profile["bgpd_crash_recovery_wait_s"],
+            ),
+            "test_bgp_longevity_ndp_device_group_toggle": create_bgp_longevity_ndp_device_group_toggle_playbook(
+                device_group_name_regex=kwargs.get(
+                    "bgp_longevity_ndp_device_group_regex", "D3"
+                ),
+                cycles=profile["ndp_toggle_cycles"],
+                uptime_s=profile["ndp_uptime_s"],
+                downtime_s=profile["ndp_downtime_s"],
+            ),
+        }
+    )
+    ordered_names = [
+        "test_longevity_prefix_flap_all_prefixes",
+        "test_longevity_activate_deactivate_all_prefixes",
+        "test_bgp_longevity_local_pref_churn",
+        "test_longevity_session_flap_all_prefixes",
+        "test_longevity_prefix_flap_all_prefixes_plus_bgp_restart",
+        "test_longevity_session_flap_all_prefixes_plus_bgp_restart",
+        "test_longevity_rogue_prefix_session_enable",
+        "test_longevity_no_prefix_no_session_flap",
+        "test_longevity_continuous_toggle_device_group",
+        "test_longevity_frequent_best_path_computation",
+        "test_longevity_cold_start_with_prefix_and_session_oscillations",
+        "test_bgp_longevity_bgpd_crash",
+        "test_bgp_longevity_ndp_device_group_toggle",
+    ]
+    return [by_name[name] for name in ordered_names]
 
 
 def transform_to_endurance_playbook(
@@ -19683,6 +20176,7 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
     post_warmboot_wait_seconds: int = 300,
     tx_down_seconds: int = 30,
     post_flap_settle_seconds: int = 300,
+    interfaces: t.Optional[t.List[str]] = None,
 ) -> Playbook:
     """Build the `test_qsfp_service_warmboot_and_tx_flap` Playbook.
 
@@ -19700,10 +20194,29 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
         post_warmboot_wait_seconds: Hold between the warmboot and the flap.
         tx_down_seconds: How long the lasers stay disabled.
         post_flap_settle_seconds: Hold after re-enabling TX for links to recover.
+        interfaces: Explicit interface list to flap. Default ``None`` resolves
+            the DUT's interfaces at runtime via jq over the topology's
+            per-device data — which is empty on OSS topologies (the flap step
+            then crashes on a ``None`` interface list), so OSS callers must
+            pass the list explicitly.
 
     Returns:
         A `Playbook` named `test_qsfp_service_warmboot_and_tx_flap`.
     """
+    # `is not None`, not truthiness: an explicitly-passed empty list is a
+    # caller bug, and silently falling back to the jq resolution would route
+    # it straight into the known-crashing OSS path documented above.
+    if interfaces is not None and not interfaces:
+        raise ValueError(
+            "create_qsfp_service_warmboot_and_tx_flap_playbook: `interfaces` "
+            "was passed as an empty list; pass the interfaces to flap, or "
+            "omit the argument to resolve them from the topology."
+        )
+    flap_kwargs: t.Dict[str, t.Any] = (
+        {"interfaces": list(interfaces)}
+        if interfaces is not None
+        else {"jq_params": {"interfaces": '."{dut}".interfaces'}}
+    )
     return Playbook(
         name="test_qsfp_service_warmboot_and_tx_flap",
         postchecks=[
@@ -19732,22 +20245,22 @@ def create_qsfp_service_warmboot_and_tx_flap_playbook(
                             taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
                         ),
                         delay=tx_down_seconds,
-                        jq_params={"interfaces": '."{dut}".interfaces'},
                         description=(
                             "Disable TX on all transceivers in one "
                             "`wedge_qsfp_util --tx_disable` invocation"
                         ),
+                        **flap_kwargs,
                     ),
                     create_interface_flap_step(
                         enable=True,
                         interface_flap_method=int(
                             taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX
                         ),
-                        jq_params={"interfaces": '."{dut}".interfaces'},
                         description=(
                             "Re-enable TX on all transceivers in one "
                             "`wedge_qsfp_util --tx_enable` invocation"
                         ),
+                        **flap_kwargs,
                     ),
                     create_longevity_step(
                         duration=post_flap_settle_seconds,
@@ -24418,6 +24931,131 @@ def create_fpf_prefix_injection_stress_playbook(
     )
 
 
+FPF_RECOVERED_BASELINE_QUALIFICATION_SEC: int = 120
+
+
+def _fpf_recovered_state_contract(
+    *,
+    hosts: list[str],
+    device_ids: list[int],
+    local_planes: list[int],
+    prefixes_by_host: dict[str, list[str]],
+    prod_prefix_device_id: int,
+    prod_prefix_vf_suffix: str,
+    rf_vf_groups: list[dict[str, t.Any]],
+) -> tuple[
+    dict[str, dict[str, list[int]]],
+    dict[str, dict[str, dict[str, list[int]]]],
+]:
+    """Build an exact serialized HRT topology and prod-prefix contract.
+
+    The same device can expose both VF halves as distinct plane ranges (legacy
+    dev0/planes0..7), or each VF can be a separate device with local planes
+    0..3.  Deriving the producer's plane universe from the declared RF groups
+    preserves both layouts without treating local plane IDs as global lanes.
+    """
+    if not hosts or len(hosts) != len(set(hosts)):
+        raise ValueError("recovered-state hosts must be nonempty and unique")
+    if not device_ids or len(device_ids) != len(set(device_ids)):
+        raise ValueError("recovered-state device_ids must be nonempty and unique")
+    if not local_planes or len(local_planes) != len(set(local_planes)):
+        raise ValueError("recovered-state local planes must be nonempty and unique")
+    if any(device_id < 0 for device_id in device_ids) or any(
+        plane < 0 for plane in local_planes
+    ):
+        raise ValueError("recovered-state device and local-plane IDs must be >= 0")
+    unknown_prefix_hosts = sorted(set(prefixes_by_host) - set(hosts))
+    if unknown_prefix_hosts:
+        raise ValueError(
+            f"prod-prefix expectations contain unknown hosts: {unknown_prefix_hosts}"
+        )
+    if prod_prefix_device_id not in device_ids:
+        raise ValueError(
+            f"prod-prefix device {prod_prefix_device_id} is not collected: "
+            f"{device_ids}"
+        )
+
+    declared_devices = set(device_ids)
+    declared_planes = set(local_planes)
+    producer_planes: set[int] | None = None
+    producer_plane_universe: set[int] = set()
+    rf_planes_by_device = {device_id: set() for device_id in device_ids}
+    for group in rf_vf_groups:
+        suffix = str(group.get("suffix", ""))
+        group_devices = [int(value) for value in group.get("device_ids", [0])]
+        group_planes = [int(value) for value in group.get("lanes", [])]
+        # A lane-filtered legacy topology can leave one VF half empty. It is an
+        # inactive group, not a malformed recovery contract. Active groups still
+        # have to cover every declared device/local-plane tuple below.
+        if not group_devices or not group_planes:
+            continue
+        if not suffix:
+            raise ValueError("every recovered RF VF group needs a suffix and lanes")
+        if len(group_devices) != len(set(group_devices)) or len(group_planes) != len(
+            set(group_planes)
+        ):
+            raise ValueError(f"RF group {suffix} has duplicate device or plane IDs")
+        if not set(group_devices).issubset(declared_devices):
+            raise ValueError(
+                f"RF group {suffix} has devices outside collected topology: "
+                f"{group_devices} vs {device_ids}"
+            )
+        if not set(group_planes).issubset(declared_planes):
+            raise ValueError(
+                f"RF group {suffix} has planes outside collected topology: "
+                f"{group_planes} vs {local_planes}"
+            )
+        for device_id in group_devices:
+            rf_planes_by_device[device_id].update(group_planes)
+        if prod_prefix_device_id in group_devices:
+            producer_plane_universe.update(group_planes)
+            if suffix == prod_prefix_vf_suffix:
+                if producer_planes is not None:
+                    raise ValueError(
+                        f"duplicate prod-prefix VF group {prod_prefix_vf_suffix!r}"
+                    )
+                producer_planes = set(group_planes)
+
+    incomplete_devices = {
+        device_id: sorted(declared_planes - covered_planes)
+        for device_id, covered_planes in rf_planes_by_device.items()
+        if covered_planes != declared_planes
+    }
+    if incomplete_devices:
+        raise ValueError(
+            "RF VF groups do not cover every declared device/local-plane tuple: "
+            f"{incomplete_devices}"
+        )
+
+    if prefixes_by_host and producer_planes is None:
+        raise ValueError(
+            f"prod-prefix VF group {prod_prefix_vf_suffix!r} does not contain "
+            f"device {prod_prefix_device_id}"
+        )
+
+    device_planes_by_host = {
+        host: {str(device_id): sorted(local_planes) for device_id in device_ids}
+        for host in hosts
+    }
+    prod_prefix_expectations_by_host = {
+        host: {
+            prefix: {
+                "device_ids": [prod_prefix_device_id],
+                "reachable_planes": sorted(producer_planes or set()),
+                "drained_planes": [],
+                "unreachable_planes": sorted(
+                    producer_plane_universe - (producer_planes or set())
+                ),
+                "plane_up": sorted(producer_plane_universe),
+                "plane_down": [],
+            }
+            for prefix in prefixes
+        }
+        for host, prefixes in prefixes_by_host.items()
+    }
+    return device_planes_by_host, prod_prefix_expectations_by_host
+
+
 def _build_fpf_generic_checks(
     *,
     hosts: list[str],
@@ -24449,6 +25087,8 @@ def _build_fpf_generic_checks(
     host_spray_transform_desc: str | None = None,
     hrt_device_ids: list[int] | None = None,
     prod_prefixes_by_host: dict[str, list[str]] | None = None,
+    collector_precheck_lookback_sec: int | None = None,
+    skip_collector_history_prechecks: bool = False,
 ) -> tuple[list, list, list]:
     """Build the generic (non-convergence) FPF check lists shared by the
     hardening / service-restart playbooks.
@@ -24541,26 +25181,37 @@ def _build_fpf_generic_checks(
             ),
         ]
     )
-    # ODS/collector baseline prechecks (no SSH needed): kept in both modes.
-    if prod_prefixes:
+    # Historical collector prechecks are intentionally absent in recovered-
+    # longevity mode. A rolling window here would include the outage just repaired
+    # (TC31's concrete false failure). The stage performs a fresh point-in-time
+    # exact gate, records its common anchor, and then qualifies 120 strict seconds.
+    collector_precheck_lookback = collector_precheck_lookback_sec or 900
+    collector_precheck_uses_test_start = collector_precheck_lookback_sec is None
+    if prod_prefixes and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=prod_prefixes_by_host,
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
         )
-    if hrt_memory_hosts:
+    if hrt_memory_hosts and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_hrt_system_memory_check(
                 hosts=hrt_memory_hosts,
                 threshold_gib=FPF_ACTIVE_THRESHOLDS.hrt_system_memory_max_gib,
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_hrt_system_memory_precheck",
             )
         )
-    if hrt_driver_hosts:
+    if hrt_driver_hosts and not skip_collector_history_prechecks:
         prechecks.append(
             create_fpf_hrt_driver_disconnect_check(
                 hosts=hrt_driver_hosts,
+                lookback_sec=collector_precheck_lookback,
+                use_test_case_start_time=collector_precheck_uses_test_start,
                 check_id="fpf_hrt_driver_disconnect_precheck",
             )
         )
@@ -25005,6 +25656,128 @@ def _fpf_global_lanes_to_hrt_tuples(
     return per_host
 
 
+def create_fpf_scale_checkpoint_checks(
+    *,
+    gtsws: list[str],
+    hosts: list[str],
+    spray_hosts: list[str] | None,
+    lanes: list[int],
+    hrt_device_ids: list[int],
+    rf_vf_groups: list,
+    expected_count: int,
+    expected_session_count: int,
+    check_id_prefix: str,
+    scale_recovery_sla_sec: float = 120.0,
+    scale_recovery_stability_sec: float = 60.0,
+    collector_poll_interval_sec: float = 5.0,
+    collector_poll_duration_budget_sec: float = 10.0,
+) -> list:
+    """Build the strict point-in-time gate between two scale mutations."""
+    from taac.health_checks.healthcheck_definitions import (
+        create_fpf_bgp_rib_convergence_check,
+        create_fpf_fsdb_ribmap_convergence_check,
+        create_fpf_host_spray_check,
+        create_fpf_hrt_bulk_convergence_check,
+        create_fpf_hrt_fsdb_session_check,
+        create_fpf_hrt_remote_failure_convergence_check,
+    )
+    from taac.libs.fpf.fpf_thresholds import (
+        ACTIVE as FPF_ACTIVE_THRESHOLDS,
+    )
+    from taac.libs.fpf.fpf_stress_checks import (
+        derive_scale_recovery_poll_grace_sec,
+    )
+
+    poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=collector_poll_interval_sec
+    )
+
+    checks = []
+    for lane_id, gtsw in enumerate(gtsws):
+        lane_map = {str(lane_id): gtsw}
+        for factory, label in (
+            (create_fpf_fsdb_ribmap_convergence_check, "fsdb"),
+            (create_fpf_bgp_rib_convergence_check, "bgp"),
+        ):
+            checks.append(
+                factory(
+                    lane_map=lane_map,
+                    expected_matched=expected_count,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    require_final_exact=True,
+                    signal1_e2e_max_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
+                    ),
+                    signal2_local_max_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
+                    ),
+                    signal3_stability_duration_sec=(
+                        FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                    ),
+                    check_id=f"{check_id_prefix}_{label}_lane{lane_id}",
+                )
+            )
+    for lane_id in lanes:
+        checks.append(
+            create_fpf_hrt_bulk_convergence_check(
+                lanes=[lane_id],
+                device_ids=hrt_device_ids,
+                expected_per_lane={str(lane_id): expected_count},
+                use_live_collectors=True,
+                use_mutation_time=True,
+                require_final_exact=True,
+                signal1_e2e_max_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal1_e2e_max_sec
+                ),
+                signal2_local_max_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec
+                ),
+                signal3_stability_duration_sec=(
+                    FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec
+                ),
+                check_id=f"{check_id_prefix}_hrt_lane{lane_id}",
+            )
+        )
+    for group in rf_vf_groups:
+        group_lanes = [int(lane) for lane in group["lanes"]]
+        checks.append(
+            create_fpf_hrt_remote_failure_convergence_check(
+                lanes=group_lanes,
+                device_ids=group.get("device_ids", [0]),
+                expected_per_lane={str(lane): 0 for lane in group_lanes},
+                direction="scale_recovery",
+                max_convergence_sec=int(scale_recovery_sla_sec),
+                recovery_stability_sec=scale_recovery_stability_sec,
+                poll_grace_sec=poll_grace_sec,
+                poll_interval_sec=collector_poll_interval_sec,
+                poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                use_live_collectors=True,
+                use_mutation_time=True,
+                collector_name=f"hrt_remote_failure_{group['suffix']}",
+                check_id=f"{check_id_prefix}_remote_failure_{group['suffix']}",
+            )
+        )
+    checks.append(
+        create_fpf_hrt_fsdb_session_check(
+            hosts=hosts,
+            expected_session_count=expected_session_count,
+            device_ids=hrt_device_ids if hrt_device_ids != [0] else None,
+            planes_per_device=4 if hrt_device_ids != [0] else None,
+            check_id=f"{check_id_prefix}_hrt_sessions",
+        )
+    )
+    if spray_hosts:
+        checks.append(
+            create_fpf_host_spray_check(
+                hosts=spray_hosts,
+                lookback_sec=60,
+                check_id=f"{check_id_prefix}_traffic",
+            )
+        )
+    return checks
+
+
 def create_fpf_hardening_playbook_v2(
     gtsws: list[str],
     hosts: list[str],
@@ -25054,6 +25827,8 @@ def create_fpf_hardening_playbook_v2(
     fsdb_rib_restart_reconverge: bool = False,
     remote_failure_last_sample: bool = False,
     convergence_blip_mode: str = "strict",
+    bgp_convergence_blip_mode: str | None = None,
+    bgp_require_final_exact: bool = False,
     ods_discard_informational: bool = False,
     out_congestion_last_minute_max: bool = False,
     host_spray_transform_desc: str | None = None,
@@ -25064,6 +25839,18 @@ def create_fpf_hardening_playbook_v2(
     hrt_device_ids: list[int] | None = None,
     cleanup_steps: list | None = None,
     ensure_traffic_after_disruption: bool = False,
+    collector_precheck_lookback_sec: int | None = None,
+    recovered_baseline_qualification_sec: int | None = None,
+    prod_prefix_device_id: int = 0,
+    prod_prefix_vf_suffix: str = "vf1",
+    prod_prefix_host: str | None = None,
+    scale_mutation_mode: bool = False,
+    scale_recovery_sla_sec: float = 120.0,
+    scale_recovery_stability_sec: float = 60.0,
+    collector_poll_interval_sec: float = 5.0,
+    collector_poll_duration_budget_sec: float = 10.0,
+    collector_future_timestamp_grace_sec: float = 1.0,
+    final_validation_steps: list | None = None,
 ) -> Playbook:
     """FPF hardening playbook for use with long-lived collectors.
 
@@ -25084,6 +25871,12 @@ def create_fpf_hardening_playbook_v2(
     (when ``convergence_blip_mode != "strict"`` the remote-failure direction is
     derived from it: "last_sample"->stable_last_sample, "skip_null_strict"->
     stable_skip_null_strict).
+
+    ``bgp_convergence_blip_mode`` narrows a different policy to BGP RIB
+    collection only. A restore can therefore ignore a null/error thrift poll
+    while keeping every valid count strict. ``bgp_require_final_exact`` also
+    requires the final valid BGP sample to equal ``prefix_count``. Neither
+    option changes a numeric convergence or stability threshold.
 
     ``rf_vf_groups`` (8-STSW split-per-VF injection): list of
     ``{"suffix", "subnet", "lanes"}``. When given, the single broad HRT
@@ -25157,6 +25950,21 @@ def create_fpf_hardening_playbook_v2(
     whose disruption steps first repair a link and wait for convergence; the
     default remains the existing fail-fast check at the head of the stage.
 
+    ``recovered_baseline_qualification_sec`` is an explicit recovered-longevity
+    opt-in. Historical collector prechecks are omitted, a strict current-state
+    gate runs after traffic readiness, then a common evidence anchor begins the
+    requested qualification window before the unchanged longevity soak.
+    Postchecks cover qualification plus longevity, so a null or regression cannot
+    be hidden by the earlier intentional outage. This policy is deliberately
+    separate from ``collector_precheck_lookback_sec``, which remains a generic
+    historical precheck window for non-recovery callers such as scale tests.
+    ``prod_prefix_host`` identifies the host used by the legacy singular
+    production-prefix collector when ``prod_prefixes_by_host`` is absent, so the
+    recovered gate observes the same host as collector setup. The recovered
+    point gate snapshots collector rows before taking one common timestamp and
+    accepts only ``collector_future_timestamp_grace_sec`` of bounded future
+    skew; larger future timestamps fail closed.
+
     ``impacted_lanes_drained`` (default None) marks the given fabric lanes as
     DRAINED/impacted for a drain-longevity config where the drain STAYS in effect
     through the whole soak (e.g. tc34/tc54: stsw001.s001 -> lane 0). When set
@@ -25200,12 +26008,41 @@ def create_fpf_hardening_playbook_v2(
     from taac.steps.step_definitions import (
         create_fpf_bgp_prefix_injection_step,
         create_fpf_ensure_traffic_step,
+        create_fpf_record_recovered_baseline_time_step,
+        create_fpf_verify_recovered_state_step,
         create_longevity_step,
     )
 
     from taac.libs.fpf.fpf_thresholds import (
         ACTIVE as FPF_ACTIVE_THRESHOLDS,
     )
+    from taac.libs.fpf.fpf_stress_checks import (
+        derive_scale_recovery_poll_grace_sec,
+    )
+
+    scale_poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=collector_poll_interval_sec
+    )
+    if recovered_baseline_qualification_sec is not None:
+        if not isinstance(recovered_baseline_qualification_sec, int) or isinstance(
+            recovered_baseline_qualification_sec, bool
+        ) or (
+            recovered_baseline_qualification_sec
+            < FPF_RECOVERED_BASELINE_QUALIFICATION_SEC
+        ):
+            raise ValueError(
+                "recovered_baseline_qualification_sec must be an integer >= "
+                f"{FPF_RECOVERED_BASELINE_QUALIFICATION_SEC}"
+            )
+    if (
+        isinstance(collector_future_timestamp_grace_sec, bool)
+        or not isinstance(collector_future_timestamp_grace_sec, (int, float))
+        or not math.isfinite(collector_future_timestamp_grace_sec)
+        or collector_future_timestamp_grace_sec < 0
+    ):
+        raise ValueError(
+            "collector_future_timestamp_grace_sec must be a finite non-negative number"
+        )
 
     services = services_to_check or ["bgpd", "fsdb", "wedge_agent", "qsfp_service"]
     resolved_lanes = lanes if lanes is not None else [0, 1]
@@ -25216,7 +26053,33 @@ def create_fpf_hardening_playbook_v2(
             for device_id in group.get("device_ids", [0])
         }
     ) or [0]
-    resolved_prod_prefixes_by_host = prod_prefixes_by_host
+    if prod_prefix_host is not None and prod_prefix_host not in hosts:
+        raise ValueError(
+            f"prod_prefix_host {prod_prefix_host!r} is not in collector hosts {hosts}"
+        )
+    resolved_prod_prefix_host = prod_prefix_host or (hosts[0] if hosts else None)
+    resolved_prod_prefixes_by_host = prod_prefixes_by_host or (
+        {resolved_prod_prefix_host: list(prod_prefixes)}
+        if resolved_prod_prefix_host and prod_prefixes
+        else None
+    )
+    recovered_device_planes_by_host: dict[str, dict[str, list[int]]] = {}
+    recovered_prod_expectations_by_host: dict[
+        str, dict[str, dict[str, list[int]]]
+    ] = {}
+    if recovered_baseline_qualification_sec is not None:
+        (
+            recovered_device_planes_by_host,
+            recovered_prod_expectations_by_host,
+        ) = _fpf_recovered_state_contract(
+            hosts=hosts,
+            device_ids=resolved_hrt_device_ids,
+            local_planes=resolved_lanes,
+            prefixes_by_host=resolved_prod_prefixes_by_host or {},
+            prod_prefix_device_id=prod_prefix_device_id,
+            prod_prefix_vf_suffix=prod_prefix_vf_suffix,
+            rf_vf_groups=rf_vf_groups or [],
+        )
     # Default the expected HRT FSDB session count to 32 — the per-BE-node count
     # is FIXED at 32 (every one of the 4 GPUs subscribes to all 8 GTSWs:
     # 4 x 8 = 32) regardless of how many GTSWs we observe. The previous
@@ -25291,6 +26154,10 @@ def create_fpf_hardening_playbook_v2(
         out_congestion_last_minute_max=out_congestion_last_minute_max,
         host_spray_transform_desc=host_spray_transform_desc,
         hrt_device_ids=resolved_hrt_device_ids,
+        collector_precheck_lookback_sec=collector_precheck_lookback_sec,
+        skip_collector_history_prechecks=(
+            recovered_baseline_qualification_sec is not None
+        ),
     )
 
     # Stage steps: inject → stabilize → disruption (or soak). When
@@ -25330,6 +26197,9 @@ def create_fpf_hardening_playbook_v2(
     if _ib_server is None and spray_hosts and len(spray_hosts) >= 2:
         _ib_server = spray_hosts[0]
         _ib_clients = list(spray_hosts[1:])
+    traffic_after_disruption = ensure_traffic_after_disruption or (
+        recovered_baseline_qualification_sec is not None and bool(disruption_steps)
+    )
     traffic_readiness_step = None
     if ib_traffic_config:
         traffic_readiness_step = create_fpf_ensure_traffic_step(
@@ -25337,7 +26207,7 @@ def create_fpf_hardening_playbook_v2(
             description=(
                 "Strict post-restore traffic readiness: validate the canonical "
                 "process and egress contract after repair and convergence"
-                if ensure_traffic_after_disruption
+                if traffic_after_disruption
                 else (
                     "Strict traffic readiness: validate the canonical process "
                     "and egress contract; recover only after the prior verdict"
@@ -25351,26 +26221,64 @@ def create_fpf_hardening_playbook_v2(
             description=(
                 "Strict post-restore traffic readiness: ensure all 4 planes carry "
                 "traffic after repair and convergence"
-                if ensure_traffic_after_disruption
+                if traffic_after_disruption
                 else (
                     "Strict traffic precheck: ensure all 4 planes carry traffic "
                     "(restart ib_write_bw if collapsed; fail hard on a plane wedge)"
                 )
             ),
         )
-    if traffic_readiness_step is not None and not ensure_traffic_after_disruption:
+    if traffic_readiness_step is not None and not traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
     if disruption_steps:
         stage_steps.extend(disruption_steps)
-    elif soak_duration_sec > 0:
-        stage_steps.append(
-            create_longevity_step(
-                duration=soak_duration_sec,
-                description="Stable-state soak — no disruption",
-            ),
-        )
-    if traffic_readiness_step is not None and ensure_traffic_after_disruption:
+    if traffic_readiness_step is not None and traffic_after_disruption:
         stage_steps.append(traffic_readiness_step)
+    if recovered_baseline_qualification_sec is not None:
+        stage_steps.extend(
+            [
+                create_fpf_verify_recovered_state_step(
+                    device_planes_by_host=recovered_device_planes_by_host,
+                    expected_count=prefix_count,
+                    expected_sessions=fsdb_sessions_per_host,
+                    prod_prefix_expectations_by_host=(
+                        recovered_prod_expectations_by_host
+                    ),
+                    rf_vf_groups=rf_vf_groups or [],
+                    future_timestamp_grace_sec=(
+                        collector_future_timestamp_grace_sec
+                    ),
+                    description=(
+                        "Fail-closed current recovery gate: exact sessions, "
+                        "prod-prefix, HRT/RF tuples, and planes"
+                    ),
+                ),
+                create_fpf_record_recovered_baseline_time_step(
+                    description=(
+                        "Anchor recovered baseline after exact current-state "
+                        "and traffic gates"
+                    )
+                ),
+                create_longevity_step(
+                    duration=recovered_baseline_qualification_sec,
+                    description=(
+                        "Recovered-state qualification — require exact healthy "
+                        "state continuously for "
+                        f"{recovered_baseline_qualification_sec}s"
+                    ),
+                ),
+            ]
+        )
+    if not disruption_steps:
+        if soak_duration_sec > 0:
+            stage_steps.append(
+                create_longevity_step(
+                    duration=soak_duration_sec,
+                    description="Stable-state longevity soak — no disruption",
+                ),
+            )
+    if final_validation_steps:
+        stage_steps.extend(final_validation_steps)
 
     convergence_postchecks = []
     for lane_id, gtsw in enumerate(gtsws):
@@ -25397,6 +26305,8 @@ def create_fpf_hardening_playbook_v2(
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
                 settle_sec=convergence_settle_sec or None,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=scale_mutation_mode,
                 stability_mode=convergence_blip_mode,
                 check_id=f"fpf_fsdb_convergence_lane{lane_id}",
             )
@@ -25416,7 +26326,13 @@ def create_fpf_hardening_playbook_v2(
                 signal2_local_max_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal2_local_max_sec,
                 signal3_stability_duration_sec=FPF_ACTIVE_THRESHOLDS.convergence_signal3_stability_duration_sec,
                 settle_sec=convergence_settle_sec or None,
-                stability_mode=convergence_blip_mode,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=(
+                    scale_mutation_mode or bgp_require_final_exact
+                ),
+                stability_mode=(
+                    bgp_convergence_blip_mode or convergence_blip_mode
+                ),
                 check_id=f"fpf_bgp_convergence_lane{lane_id}",
             )
         )
@@ -25437,6 +26353,8 @@ def create_fpf_hardening_playbook_v2(
                 # settle past the recovery (restore phase) so the impacted lane's
                 # re-converge transient isn't flagged as post-convergence churn.
                 settle_sec=convergence_settle_sec or None,
+                use_mutation_time=scale_mutation_mode,
+                require_final_exact=scale_mutation_mode,
                 stability_mode=convergence_blip_mode,
                 restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                 check_id=f"fpf_hrt_convergence_lane{lane_id}",
@@ -25452,7 +26370,9 @@ def create_fpf_hardening_playbook_v2(
     #   "skip_null_strict" -> stable_skip_null_strict (MODE B: every non-null == 0)
     #   "strict"/default   -> stable (every sample == 0)
     #   remote_failure_last_n=True -> stable_last_n (last N non-null samples == 0)
-    if remote_failure_last_n:
+    if scale_mutation_mode:
+        _rf_direction = "scale_recovery"
+    elif remote_failure_last_n:
         _rf_direction = "stable_last_n"
     elif convergence_blip_mode == "last_sample":
         _rf_direction = "stable_last_sample"
@@ -25473,8 +26393,25 @@ def create_fpf_hardening_playbook_v2(
             )
             if not _glanes:
                 continue
-            convergence_postchecks.append(
-                create_fpf_hrt_remote_failure_convergence_check(
+            if scale_mutation_mode:
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_glanes,
+                    device_ids=_g.get("device_ids", [0]),
+                    expected_per_lane=_gexpected,
+                    direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
+                    recovery_stability_sec=scale_recovery_stability_sec,
+                    poll_grace_sec=scale_poll_grace_sec,
+                    poll_interval_sec=collector_poll_interval_sec,
+                    poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    collector_name=f"hrt_remote_failure_{_g['suffix']}",
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
+                )
+            else:
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
                     lanes=_glanes,
                     device_ids=_g.get("device_ids", [0]),
                     expected_per_lane=_gexpected,
@@ -25484,12 +26421,27 @@ def create_fpf_hardening_playbook_v2(
                     restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id=f"fpf_remote_failure_stable_{_g['suffix']}",
                 )
-            )
+            convergence_postchecks.append(rf_check)
     else:
         _stable_lanes = [lane for lane in resolved_lanes if lane not in drained_lanes]
         if _stable_lanes:
-            convergence_postchecks.append(
-                create_fpf_hrt_remote_failure_convergence_check(
+            if scale_mutation_mode:
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
+                    lanes=_stable_lanes,
+                    device_ids=resolved_hrt_device_ids,
+                    direction=_rf_direction,
+                    max_convergence_sec=int(scale_recovery_sla_sec),
+                    recovery_stability_sec=scale_recovery_stability_sec,
+                    poll_grace_sec=scale_poll_grace_sec,
+                    poll_interval_sec=collector_poll_interval_sec,
+                    poll_duration_budget_sec=collector_poll_duration_budget_sec,
+                    use_live_collectors=True,
+                    use_mutation_time=True,
+                    restart_tolerant_hosts=hrt_restart_tolerant_hosts,
+                    check_id="fpf_remote_failure_stable",
+                )
+            else:
+                rf_check = create_fpf_hrt_remote_failure_convergence_check(
                     lanes=_stable_lanes,
                     device_ids=resolved_hrt_device_ids,
                     direction=_rf_direction,
@@ -25497,7 +26449,7 @@ def create_fpf_hardening_playbook_v2(
                     restart_tolerant_hosts=hrt_restart_tolerant_hosts,
                     check_id="fpf_remote_failure_stable",
                 )
-            )
+            convergence_postchecks.append(rf_check)
     # Fifth collector ↔ fifth validating check: production HRT prefix
     # reachability stability. Only added when the prod_hrt_prefix collector
     # was started (prod_prefixes supplied to FpfStartCollectorsTask).
@@ -25730,8 +26682,11 @@ def create_fpf_link_event_disrupt_playbook(
     skip_injection: bool = False,
     rf_vf_groups: list | None = None,
     gtsw_convergence_settle_sec: int = 0,
+    gtsw_rib_unavailable_lanes: list[int] | None = None,
+    prod_prefix_precheck_lookback_sec: int | None = None,
     hrt_device_ids: list[int] | None = None,
     ib_traffic_config: t.Mapping[str, t.Any] | None = None,
+    additional_postchecks: list | None = None,
     cleanup_steps: list | None = None,
     playbook_name: str = "fpf_link_event_disrupt",
 ) -> Playbook:
@@ -25760,6 +26715,11 @@ def create_fpf_link_event_disrupt_playbook(
     the EXPECTED converged count for the per-GTSW ribMap/BGP and per-lane HRT
     bulk checks.
 
+    ``prod_prefix_precheck_lookback_sec`` evaluates the production-prefix
+    baseline from recent collector history instead of requiring a poll after
+    this playbook's test-case start. This avoids a startup race without changing
+    the required healthy prefix state.
+
     Injects stress prefixes, stabilizes, then runs the supplied disruption steps
     (disable+longevity, or port-drain+longevity). Postchecks assert the
     *disrupted* contract over this playbook's own collector window (test case
@@ -25785,7 +26745,9 @@ def create_fpf_link_event_disrupt_playbook(
         transient loss during the disruption window. The two CONGESTION checks
         stay hard (a link event must not cause congestion). This mirrors the
         ``ods_discard_informational`` plumbing on the service-restart playbook.
-      - BGP RIB + FSDB ribMap (GTSW-side): unchanged convergence to threshold.
+      - BGP RIB + FSDB ribMap (GTSW-side): unchanged convergence to threshold,
+        except explicitly unavailable lanes whose withdrawal is already covered
+        by HRT bulk and remote-failure checks.
 
     Generic SSH/device checks are intentionally omitted — this is the no-SSH
     collector/ODS validation path. Pair this with a v2 stable-state restore
@@ -25841,12 +26803,19 @@ def create_fpf_link_event_disrupt_playbook(
         ),
     ]
     if prod_prefixes:
-        prechecks.append(
-            create_fpf_prod_hrt_prefix_stability_check(
+        if prod_prefix_precheck_lookback_sec is not None:
+            prod_prefix_precheck = create_fpf_prod_hrt_prefix_stability_check(
+                prefixes_by_host=resolved_prod_prefixes_by_host,
+                lookback_sec=prod_prefix_precheck_lookback_sec,
+                use_test_case_start_time=False,
+                check_id="fpf_prod_hrt_prefix_stability_precheck",
+            )
+        else:
+            prod_prefix_precheck = create_fpf_prod_hrt_prefix_stability_check(
                 prefixes_by_host=resolved_prod_prefixes_by_host,
                 check_id="fpf_prod_hrt_prefix_stability_precheck",
             )
-        )
+        prechecks.append(prod_prefix_precheck)
     if hrt_memory_hosts:
         prechecks.append(
             create_fpf_hrt_system_memory_check(
@@ -25959,7 +26928,10 @@ def create_fpf_link_event_disrupt_playbook(
     # measures the post-disruption steady state. Default 0 keeps existing callers
     # (in-playbook injection) byte-identical.
     _gtsw_settle = gtsw_convergence_settle_sec or None
+    unavailable_gtsw_rib_lanes = set(gtsw_rib_unavailable_lanes or [])
     for lane_id, gtsw in enumerate(gtsws):
+        if lane_id in unavailable_gtsw_rib_lanes:
+            continue
         lane_map = {str(lane_id): gtsw}
         postchecks.append(
             create_fpf_fsdb_ribmap_convergence_check(
@@ -26366,6 +27338,7 @@ def create_fpf_link_event_disrupt_playbook(
                 check_id="fpf_hrt_driver_disconnect",
             )
         )
+    postchecks.extend(additional_postchecks or [])
 
     # Generic SSH/device-shell postchecks on the DUT GTSWs: services still up,
     # no new core dumps, no unclean exits, memory within bounds after the
@@ -26404,6 +27377,23 @@ def create_fpf_link_event_disrupt_playbook(
     if cleanup_steps is not None:
         playbook_kwargs["cleanup_steps"] = cleanup_steps
     return Playbook(**playbook_kwargs)
+
+
+def create_fpf_lifecycle_phase_playbook(
+    *,
+    playbook_name: str,
+    stage_id: str,
+    steps: list[Step],
+    prechecks: list[PointInTimeHealthCheck],
+    postchecks: list[PointInTimeHealthCheck],
+) -> Playbook:
+    return Playbook(
+        name=playbook_name,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=[],
+        stages=[create_steps_stage(stage_id=stage_id, steps=steps)],
+    )
 
 
 def create_fpf_disruption_only_playbook(
@@ -27282,10 +28272,8 @@ def create_fpf_gar_playbook(
 # that the peak stays inside the hardware table and the structure collapses
 # back afterwards.
 #
-# NOT in playbooks/routing/bgp_ebb_playbooks.py on purpose: a catalog
-# governance test pins that module's __all__ to exactly twenty names in order,
-# so an addition there forces editing the test. SC1-SC6 set the precedent of
-# living here instead.
+# Re-exported from playbooks/routing/bgp_ebb_playbooks.py for catalog ownership;
+# the implementation remains here with the other characteristic builders.
 
 # The device's own EcmpLevel2 (Routing) capacity on bag013.ash6, read from
 # `show hardware capacity`. Used as the raw-count ceiling so the periodic task
@@ -27530,7 +28518,9 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
     cycles: int = 5,
     soak_duration_seconds: int = 300,
 ) -> Playbook:
-    """Build the SC9 bounded-ECMP-sets characteristic playbook.
+    """Build CICD-EBB-24: Bound ECMP.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
 
     Gates, and why each sits where it does:
 

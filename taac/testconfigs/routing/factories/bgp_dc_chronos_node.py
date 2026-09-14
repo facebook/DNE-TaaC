@@ -196,6 +196,8 @@ def build_bgp_dc_test_config(
     wedge_agent_restart_no_of_interations=None,
     convergence_wait_timeout=None,
     convergence_wait_interval=None,
+    bgp_hardening_timing_profile=None,
+    include_extended_bgp_hardening_playbooks=False,
 ):
     """Build the full conveyor test configuration for a BGP++ Chronos node.
 

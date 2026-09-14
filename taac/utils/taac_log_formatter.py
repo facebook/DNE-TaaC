@@ -11,6 +11,11 @@ from taac.utils.oss_taac_lib_utils import (
     get_root_logger,
 )
 
+# Re-exported for the callers that have always imported it from here. It lives
+# in result_rendering so that module can stay a leaf the bastion spec server
+# can import without the taac runtime.
+from taac.utils.result_rendering import format_duration
+
 
 SECTION_WIDTH: int = 80
 SECTION_CHAR: str = "="
@@ -216,19 +221,6 @@ def log_health_check_info(
     _logger = logger or get_root_logger()
     device_part = f" | Device: {device_name}" if device_name else ""
     _logger.info(f"  [HC] {check_name}: {status}{device_part}")
-
-
-def format_duration(seconds: float) -> str:
-    """Format seconds into a human-readable duration string."""
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes = int(seconds // 60)
-    remaining_secs = seconds % 60
-    if minutes < 60:
-        return f"{minutes}m {remaining_secs:.0f}s"
-    hours = int(minutes // 60)
-    remaining_mins = minutes % 60
-    return f"{hours}h {remaining_mins}m {remaining_secs:.0f}s"
 
 
 @contextmanager

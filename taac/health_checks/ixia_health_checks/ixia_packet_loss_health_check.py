@@ -17,6 +17,10 @@ from taac.utils.json_thrift_utils import try_thrift_to_dict
 from taac.health_check.health_check import types as hc_types
 from tabulate import tabulate
 
+_IXIA_SNAPSHOT_BUSY_ERROR = "Snapshot DefaultSnapshotSettings already in progress"
+_IXIA_SNAPSHOT_RETRY_ATTEMPTS = 6
+_IXIA_SNAPSHOT_RETRY_DELAY_SECONDS = 5
+
 
 class IxiaPacketLossHealthCheck(
     AbstractIxiaHealthCheck[hc_types.IxiaPacketLossHealthCheckIn]
@@ -51,8 +55,9 @@ class IxiaPacketLossHealthCheck(
         # this is necessary to allow in-flight traffic to arrive at the destination
         obj.stop_traffic()
         await asyncio.sleep(input.sleep_time)
-        latest_stats = obj.get_latest_stats(since_time=since_time)
-        violations = []
+        latest_stats = await self._get_latest_stats(obj, since_time)
+        violations: t.List[hc_types.PacketLossViolation] = []
+        missing_identifiers: t.List[str] = []
         all_identifiers = {stat["identifier"] for stat in latest_stats}
         specified_identifiers = set().union(
             *(set(t.names) if t.names else all_identifiers for t in input.thresholds)
@@ -65,37 +70,26 @@ class IxiaPacketLossHealthCheck(
             # Add a default threshold with 0 packet loss expected for any identifiers not explicitly specified
             all_thresholds = list(input.thresholds) + [
                 hc_types.PacketLossThreshold(
-                    names=list(remaining_identifiers), str_value="0"
+                    names=sorted(remaining_identifiers), str_value="0"
                 ),
             ]
         else:
             all_thresholds = list(input.thresholds)
+        if not latest_stats and any(
+            not threshold.names for threshold in all_thresholds
+        ):
+            missing_identifiers.append("<all traffic items>")
         for threshold in all_thresholds:
+            if threshold.names:
+                missing_identifiers.extend(
+                    sorted(set(threshold.names) - all_identifiers - skip_items)
+                )
             violations.extend(
                 self.verify_packet_loss_threshold(latest_stats, threshold)
             )
-        # pyrefly: ignore [bad-argument-type]
         violations_dict = [try_thrift_to_dict(violation) for violation in violations]
-        if violations:
-            # Use the Everpaste URL directly; it is already a clickable internalfb.com
-            # link, so the throttled fburl tier (createFBUrl) is unnecessary here.
-            everpaste_url = await async_everpaste_str(
-                tabulate(violations_dict, headers="keys", tablefmt="simple_grid")
-            )
-            inline_summary = [
-                f"{v.get('name', 'unknown')}: observed={v.get('str_value', '?')}"
-                for v in violations_dict[:5]
-            ]
-            suffix = (
-                f" (+{len(violations_dict) - 5} more)"
-                if len(violations_dict) > 5
-                else ""
-            )
-            result = hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.FAIL,
-                message=f"Packet loss violated the defined threshold(s): "
-                f"{inline_summary}{suffix}. Full details: {everpaste_url}",
-            )
+        if violations or missing_identifiers:
+            result = await self._failure_result(violations_dict, missing_identifiers)
         else:
             result = hc_types.HealthCheckResult(status=hc_types.HealthCheckStatus.PASS)
         # Only clear traffic stats if not explicitly disabled.
@@ -103,12 +97,80 @@ class IxiaPacketLossHealthCheck(
             obj.clear_traffic_stats()
         return result
 
+    async def _failure_result(
+        self,
+        violations: t.List[t.Dict[str, t.Any]],
+        missing_identifiers: t.List[str],
+    ) -> hc_types.HealthCheckResult:
+        unique_missing = sorted(set(missing_identifiers))
+        details = ""
+        if unique_missing:
+            details += (
+                "Missing traffic items from IXIA statistics: "
+                + ", ".join(unique_missing)
+                + "\n"
+            )
+        if violations:
+            details += tabulate(violations, headers="keys", tablefmt="simple_grid")
+        # Everpaste URLs are already clickable; avoid the throttled fburl tier.
+        everpaste_url = await async_everpaste_str(details)
+
+        rendered: t.List[str] = []
+        if unique_missing:
+            rendered.extend(f"missing={item}" for item in unique_missing[:5])
+        remaining_slots = max(0, 5 - len(rendered))
+        rendered.extend(
+            f"{violation.get('name', 'unknown')}: "
+            f"observed={violation.get('str_value', '?')}"
+            for violation in violations[:remaining_slots]
+        )
+        total_count = len(unique_missing) + len(violations)
+        suffix = (
+            f" (+{total_count - len(rendered)} more)"
+            if total_count > len(rendered)
+            else ""
+        )
+        if violations and unique_missing:
+            prefix = "Packet-loss violations and missing traffic items"
+        elif violations:
+            prefix = "Packet loss violated the defined threshold(s)"
+        else:
+            prefix = "Expected traffic items were missing from IXIA statistics"
+        return hc_types.HealthCheckResult(
+            status=hc_types.HealthCheckStatus.FAIL,
+            message=f"{prefix}: {rendered}{suffix}. Full details: {everpaste_url}",
+        )
+
+    async def _get_latest_stats(
+        self, obj: Ixia, since_time: float
+    ) -> t.List[t.Dict[str, t.Any]]:
+        """Read IXIA stats while tolerating transient chassis snapshot contention."""
+        for attempt in range(1, _IXIA_SNAPSHOT_RETRY_ATTEMPTS + 1):
+            try:
+                return obj.get_latest_stats(since_time=since_time)
+            except Exception as error:
+                # RESTPy surfaces snapshot contention through multiple exception
+                # classes across releases. Retry only this exact chassis error
+                # and immediately re-raise every other exception.
+                if (
+                    _IXIA_SNAPSHOT_BUSY_ERROR not in str(error)
+                    or attempt == _IXIA_SNAPSHOT_RETRY_ATTEMPTS
+                ):
+                    raise
+                self.logger.warning(
+                    "IXIA statistics snapshot is busy; retrying in "
+                    f"{_IXIA_SNAPSHOT_RETRY_DELAY_SECONDS}s "
+                    f"({attempt}/{_IXIA_SNAPSHOT_RETRY_ATTEMPTS})"
+                )
+                await asyncio.sleep(_IXIA_SNAPSHOT_RETRY_DELAY_SECONDS)
+        raise AssertionError("unreachable")
+
     def verify_packet_loss_threshold(
         self,
         latest_stats: t.List[t.Dict[str, t.Any]],
         threshold: hc_types.PacketLossThreshold,
-    ) -> t.List[t.Dict[str, t.Any]]:
-        violations = []
+    ) -> t.List[hc_types.PacketLossViolation]:
+        violations: t.List[hc_types.PacketLossViolation] = []
         for statistic in latest_stats:
             entity_id = statistic["identifier"]
             if not threshold.names or entity_id in threshold.names:
@@ -150,8 +212,6 @@ class IxiaPacketLossHealthCheck(
                             threshold=threshold,
                         )
                     )
-
-        # pyrefly: ignore [bad-return]
         return violations
 
     def _default_input(self, obj: Ixia) -> hc_types.IxiaPacketLossHealthCheckIn:

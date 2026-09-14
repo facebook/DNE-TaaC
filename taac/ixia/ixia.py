@@ -55,6 +55,9 @@ from ixnetwork_restpy.assistants.statistics.statviewassistant import (
 )
 from ixnetwork_restpy.errors import IxNetworkError as IxnIxNetworkError
 from ixnetwork_restpy.files import Files
+from taac.abstractions.ixia_semantics import (
+    validate_ixia_bgp_tcp_window_size_bytes,
+)
 from taac.ixia.ixia_tracer import (
     build_trace_path,
     extract_request_body,
@@ -125,17 +128,47 @@ else:
         DESIRED_V6_BGP_PREFIX_NAME,
         DESIRED_VPORT_NAME,
     )
-from uhd_restpy.assistants.sessions.sessionassistant import (
-    SessionAssistant as UhdSessionAssistant,
-)
-from uhd_restpy.assistants.statistics.statviewassistant import (
-    StatViewAssistant as UhdStatViewAssistant,
-)
-from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
+if TAAC_OSS:
+    # uhd_restpy is Meta-only and was removed from the OSS dependency surface
+    # in D96670156. UHD chassis are not supported in OSS mode, so keep the
+    # shared implementation type-correct without importing that package.
+    UhdSessionAssistant = IxnSessionAssistant
+    UhdStatViewAssistant = IxnStatViewAssistant
+    UhdIxNetworkError = IxnIxNetworkError
+else:
+    from uhd_restpy.assistants.sessions.sessionassistant import (
+        SessionAssistant as UhdSessionAssistant,
+    )
+    from uhd_restpy.assistants.statistics.statviewassistant import (
+        StatViewAssistant as UhdStatViewAssistant,
+    )
+    from uhd_restpy.errors import IxNetworkError as UhdIxNetworkError
 
 
 warnings.filterwarnings(action="ignore", category=ResourceWarning)
 warnings.filterwarnings(action="ignore", category=DeprecationWarning)
+
+# Retry for 1.75 seconds before the outer setup retry rebuilds the IXIA session.
+_BGP_TCP_WINDOW_READBACK_ATTEMPTS = 4
+_BGP_TCP_WINDOW_READBACK_RETRY_SECONDS = 0.25
+# The imperative API uses a short delay because it runs during route storms.
+_BGP_TCP_WINDOW_IMPERATIVE_READBACK_ATTEMPTS = 3
+_BGP_TCP_WINDOW_IMPERATIVE_READBACK_RETRY_SECONDS = 0.05
+
+
+class _BgpPeerTcpWindowUnsupportedError(RuntimeError):
+    """The IXIA BGP peer does not expose TCP-window configuration."""
+
+
+class _BgpPeerTcpWindowOperationError(RuntimeError):
+    """An expected IXIA operation failed while setting a TCP window."""
+
+
+@dataclass(frozen=True)
+class _BgpPeerTcpWindowWriteResult:
+    matched: int
+    unsupported: int
+    verified: int
 
 
 def _filter_bgp_stats_by_port(
@@ -984,12 +1017,15 @@ def _ixia_value_equals(current: t.Any, desired: t.Any) -> bool:
     return str(current) == str(desired)
 
 
-def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
+def _set_multivalue_if_changed(
+    multivalue: t.Any,
+    desired: t.Any,
+) -> bool:
     """Set an IxNetwork Multivalue to `desired` only if its current value differs.
 
-    Reads `multivalue.Values[0]` first, compares against `desired` via
-    `_ixia_value_equals`. If unchanged, skip the write and return False.
-    Otherwise issue `multivalue.Single(value=desired)` and return True.
+    Compare `multivalue.Values[0]` against `desired`. If unchanged, skip the
+    write and return False. Otherwise issue `multivalue.Single(value=desired)`
+    and return True.
 
     On ANY exception during the Values read (multivalue in a non-Single
     pattern, network blip, missing attribute), falls through to the write
@@ -1002,7 +1038,8 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
     """
     try:
         current_values = multivalue.Values
-        if current_values and _ixia_value_equals(current_values[0], desired):
+        values_match = current_values and _ixia_value_equals(current_values[0], desired)
+        if values_match:
             return False  # already converged, no PATCH issued
     except Exception:
         # Conservative fallback — when the read path is unreliable, prefer
@@ -1011,6 +1048,48 @@ def _set_multivalue_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
         pass
     multivalue.Single(value=desired)
     return True
+
+
+def _set_single_pattern_if_changed(multivalue: t.Any, desired: t.Any) -> bool:
+    """Set a Single multivalue only when its compact pattern differs."""
+    try:
+        pattern_type = str(multivalue.PatternType).strip().lower()
+        if pattern_type in {"single", "singlevalue"} and _ixia_value_equals(
+            multivalue.Pattern, desired
+        ):
+            return False
+    except (
+        IxnIxNetworkError,
+        UhdIxNetworkError,
+        RequestException,
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        pass
+    multivalue.Single(value=desired)
+    return True
+
+
+def _read_ixia_single_pattern(
+    multivalue: t.Any,
+) -> tuple[t.Any | None, Exception | None]:
+    """Return the Single-pattern value or retain a read failure for retries."""
+    try:
+        return multivalue.Pattern, None
+    except (
+        IxnIxNetworkError,
+        UhdIxNetworkError,
+        RequestException,
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        return None, error
 
 
 class Ixia:
@@ -3728,6 +3807,190 @@ class Ixia:
             f"collision with main pool"
         )
 
+    def _verify_bgp_tcp_window_readback(
+        self,
+        *,
+        tcp_window_multivalue: t.Any,
+        tcp_window_size_bytes: int,
+        scope_label: str,
+        desired_bgp_name: str,
+        attempts: int = _BGP_TCP_WINDOW_READBACK_ATTEMPTS,
+        retry_seconds: float = _BGP_TCP_WINDOW_READBACK_RETRY_SECONDS,
+    ) -> t.Any:
+        last_observed_value: t.Any | None = None
+        last_readback_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            current_value, readback_error = _read_ixia_single_pattern(
+                tcp_window_multivalue
+            )
+            if readback_error is not None:
+                last_readback_error = readback_error
+            elif current_value is not None:
+                last_observed_value = current_value
+                if _ixia_value_equals(current_value, tcp_window_size_bytes):
+                    return current_value
+            if attempt < attempts and retry_seconds > 0:
+                time.sleep(retry_seconds * 2 ** (attempt - 1))
+
+        if last_observed_value is not None:
+            error_suffix = (
+                f"; last read error={last_readback_error!s}"
+                if last_readback_error is not None
+                else ""
+            )
+            self._raise_bgp_tcp_window_readback_error(
+                f"[{scope_label}] BGP peer {desired_bgp_name!r} TCP window "
+                f"readback mismatch after {attempts} attempt(s): "
+                f"expected={tcp_window_size_bytes}, last observed="
+                f"{last_observed_value!r}{error_suffix}",
+                last_readback_error,
+            )
+
+        readback_detail = (
+            str(last_readback_error)
+            if last_readback_error is not None
+            else "empty Pattern value"
+        )
+        self._raise_bgp_tcp_window_readback_error(
+            f"[{scope_label}] Requested TcpWindowSizeInBytes="
+            f"{tcp_window_size_bytes} on BGP peer {desired_bgp_name!r}, "
+            f"but could not verify the readback after {attempts} attempt(s): "
+            f"{readback_detail}",
+            last_readback_error,
+        )
+
+    @staticmethod
+    def _raise_bgp_tcp_window_readback_error(
+        message: str,
+        cause: Exception | None,
+    ) -> t.NoReturn:
+        if cause is None:
+            raise _BgpPeerTcpWindowOperationError(message)
+        raise _BgpPeerTcpWindowOperationError(message) from cause
+
+    @staticmethod
+    def _get_bgp_peer_tcp_window_multivalue(
+        *,
+        bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"],
+        scope_label: str,
+        desired_bgp_name: str,
+    ) -> t.Any:
+        attribute_is_declared = True
+        try:
+            inspect.getattr_static(bgp_peer_obj, "TcpWindowSizeInBytes")
+        except AttributeError:
+            attribute_is_declared = False
+        try:
+            return bgp_peer_obj.TcpWindowSizeInBytes
+        except AttributeError as error:
+            if not attribute_is_declared:
+                raise _BgpPeerTcpWindowUnsupportedError(
+                    f"[{scope_label}] BGP peer {desired_bgp_name!r} does not "
+                    "support TcpWindowSizeInBytes"
+                ) from error
+            raise _BgpPeerTcpWindowOperationError(
+                f"[{scope_label}] Could not read TcpWindowSizeInBytes on BGP "
+                f"peer {desired_bgp_name!r}: {error!s}"
+            ) from error
+        except (
+            IxnIxNetworkError,
+            UhdIxNetworkError,
+            RequestException,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise _BgpPeerTcpWindowOperationError(
+                f"[{scope_label}] Could not read TcpWindowSizeInBytes on BGP "
+                f"peer {desired_bgp_name!r}: {error!s}"
+            ) from error
+
+    def _set_and_verify_bgp_peer_tcp_window(
+        self,
+        *,
+        bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"],
+        tcp_window_size_bytes: int,
+        scope_label: str,
+        desired_bgp_name: str,
+        readback_attempts: int = _BGP_TCP_WINDOW_READBACK_ATTEMPTS,
+        readback_retry_seconds: float = _BGP_TCP_WINDOW_READBACK_RETRY_SECONDS,
+    ) -> None:
+        try:
+            validate_ixia_bgp_tcp_window_size_bytes(tcp_window_size_bytes)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"[{scope_label}] BGP peer {desired_bgp_name!r} has an invalid "
+                f"TcpWindowSizeInBytes value: {error}"
+            ) from error
+        tcp_window_multivalue = self._get_bgp_peer_tcp_window_multivalue(
+            bgp_peer_obj=bgp_peer_obj,
+            scope_label=scope_label,
+            desired_bgp_name=desired_bgp_name,
+        )
+        try:
+            changed = _set_single_pattern_if_changed(
+                tcp_window_multivalue, tcp_window_size_bytes
+            )
+        except (
+            IxnIxNetworkError,
+            UhdIxNetworkError,
+            RequestException,
+            AttributeError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise _BgpPeerTcpWindowOperationError(
+                f"[{scope_label}] Could not set TcpWindowSizeInBytes="
+                f"{tcp_window_size_bytes} on BGP peer {desired_bgp_name!r}: "
+                f"{error!s}"
+            ) from error
+        if not changed:
+            self.logger.info(
+                f"[{scope_label}] Preserved TcpWindowSizeInBytes="
+                f"{tcp_window_size_bytes} on BGP peer {desired_bgp_name!r}"
+            )
+            return
+        observed_value = self._verify_bgp_tcp_window_readback(
+            tcp_window_multivalue=tcp_window_multivalue,
+            tcp_window_size_bytes=tcp_window_size_bytes,
+            scope_label=scope_label,
+            desired_bgp_name=desired_bgp_name,
+            attempts=readback_attempts,
+            retry_seconds=readback_retry_seconds,
+        )
+        self.logger.info(
+            f"[{scope_label}] Set and verified TcpWindowSizeInBytes="
+            f"{tcp_window_size_bytes} on BGP peer {desired_bgp_name!r}; "
+            f"readback={observed_value!r}"
+        )
+
+    def _apply_bgp_peer_tcp_window(
+        self,
+        *,
+        bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"],
+        tcp_window_size_bytes: int | None,
+        scope_label: str,
+        desired_bgp_name: str,
+    ) -> None:
+        """Apply a declared TCP window and preserve IXIA state when unset.
+
+        An unset value preserves IXIA state. The declarative cache hash includes
+        this field, so a changed declaration cannot reuse stale cached state.
+        The imperative mutation API also requires session teardown. A declared
+        value must apply and verify, or topology setup fails.
+        """
+        if tcp_window_size_bytes is None:
+            return
+        self._set_and_verify_bgp_peer_tcp_window(
+            bgp_peer_obj=bgp_peer_obj,
+            tcp_window_size_bytes=tcp_window_size_bytes,
+            scope_label=scope_label,
+            desired_bgp_name=desired_bgp_name,
+        )
+
     def create_bgp_peer(
         self,
         port_identifier: str,
@@ -3755,6 +4018,11 @@ class Ixia:
 
         Returns:
             An object of type either BgpIpv4Peer or BgpIpv6Peer.
+
+        Raises:
+            RuntimeError: If a declared TCP window cannot be set and verified
+                on either a new peer or an existing peer. This fail-closed
+                behavior prevents false slow-peer test coverage.
         """
         if ip_address_family == ixia_types.IpAddressFamily.IPV4:
             desired_bgp_name: str = (
@@ -3770,6 +4038,8 @@ class Ixia:
             )
             bgp_peer_cls = ip_addr_obj.BgpIpv6Peer  # pyre-ignore
 
+        # This module and BgpPeerConfig use the same generated Thrift target.
+        tcp_window_size_bytes = bgp_peer_config.tcp_window_size_bytes
         bgp_peer_obj: t.Union["BgpIpv4Peer", "BgpIpv6Peer"] = bgp_peer_cls.find(
             Name=desired_bgp_name
         )
@@ -3778,6 +4048,12 @@ class Ixia:
                 f"[{port_identifier}] There is already an existing IPv6 "
                 f"instance of the BGP prefix {desired_bgp_name}. Hence "
                 "not creating a new one!"
+            )
+            self._apply_bgp_peer_tcp_window(
+                bgp_peer_obj=bgp_peer_obj,
+                tcp_window_size_bytes=tcp_window_size_bytes,
+                scope_label=port_identifier,
+                desired_bgp_name=desired_bgp_name,
             )
             return bgp_peer_obj
 
@@ -3834,6 +4110,13 @@ class Ixia:
         if bgp_peer_config.keepalive_timer is not None:
             bgp_peer_obj.ConfigureKeepaliveTimer.Single(True)
             bgp_peer_obj.KeepaliveTimer.Single(bgp_peer_config.keepalive_timer)
+
+        self._apply_bgp_peer_tcp_window(
+            bgp_peer_obj=bgp_peer_obj,
+            tcp_window_size_bytes=tcp_window_size_bytes,
+            scope_label=port_identifier,
+            desired_bgp_name=desired_bgp_name,
+        )
 
         if bgp_peer_config.capabilities:
             self.modify_bgp_capabilities(bgp_peer_obj, bgp_peer_config.capabilities)
@@ -5020,7 +5303,12 @@ class Ixia:
     ) -> None:
         """API to configure IPv6 entries"""
         if device_group_regex:
-            device_groups = self.find_device_groups(device_group_regex)
+            # ignore_case: same trap as configure_ipv4_entries — callers pass
+            # DUT interface names but device groups are named with upper-cased
+            # port identifiers, so a case-sensitive match silently no-ops.
+            device_groups = self.find_device_groups(
+                device_group_regex, ignore_case=True
+            )
             for device_group in device_groups:
                 for ethernet in device_group.Ethernet.find():
                     for ipv6 in ethernet.Ipv6.find():
@@ -5052,7 +5340,11 @@ class Ixia:
         sleep_time_between_toggle_s: int = 30,
     ) -> None:
         """API to configure IPv6 entries"""
-        device_groups = self.find_device_groups(device_group_regex)
+        # ignore_case: callers pass DUT interface names (e.g. "eth1/31/1")
+        # but device groups are named with upper-cased port identifiers
+        # ("DEVICE_GROUP_D1_<DUT>:ETH1/31/1") — a case-sensitive match makes
+        # the whole call a silent no-op.
+        device_groups = self.find_device_groups(device_group_regex, ignore_case=True)
         for device_group in device_groups:
             for ethernet in device_group.Ethernet.find():
                 for ipv4 in ethernet.Ipv4.find():
@@ -5073,7 +5365,9 @@ class Ixia:
         self.apply_changes()
         if not toggle_all_ipv6_ipv4_only_protocol:
             return
-        all_device_groups = self.find_device_groups(device_group_regex)
+        all_device_groups = self.find_device_groups(
+            device_group_regex, ignore_case=True
+        )
         bgp_device_group_name = self.get_bgp_device_group_name(all_device_groups)
         for device_group in all_device_groups:
             if device_group.Name not in bgp_device_group_name:
@@ -6291,8 +6585,15 @@ class Ixia:
 
     @staticmethod
     def fetch_ixia_credentials(secret_name: str, secret_group: str) -> t.Optional[str]:
-        """Fetches Ixia credentials. In OSS mode, reads from env/CSV. Internal uses keychain."""
+        """Fetch IXIA credentials through the environment-selected provider."""
         if TAAC_OSS:
+            from taac.utils.meta_internal_bridge_client import (
+                bridge_enabled,
+                fetch_ixia_password,
+            )
+
+            if bridge_enabled():
+                return fetch_ixia_password(secret_name, secret_group)
             from taac.utils.oss_ixia_utils import (
                 get_oss_ixia_password,
             )
@@ -6304,7 +6605,7 @@ class Ixia:
             fetch_ixia_password_internal,
         )
 
-        return fetch_ixia_password_internal()
+        return fetch_ixia_password_internal(secret_name, secret_group)
 
     def configure_l1_settings(
         self,
@@ -6583,6 +6884,110 @@ class Ixia:
         )
         return device_groups
 
+    def _remove_orphaned_session(
+        self, orphan_id
+    ) -> t.Tuple[bool, t.Optional[Exception]]:
+        """Best-effort ``Sessions.remove()`` of ``orphan_id``, verified server-side.
+
+        ``Sessions.remove()`` has a failure mode that makes a naive
+        retry-on-the-same-object a FALSE SUCCESS: on a non-transient server
+        error it clears the local object's property list first and then raises
+        a plain string (surfacing as TypeError), so a second ``remove()``
+        iterates an empty list, issues no HTTP call, and returns cleanly.
+        Therefore re-find the session by id on a fresh handle each attempt, and
+        trust only the server's word (absence from ``find``) as success.
+
+        Returns ``(destroyed, last_exception)``.
+        """
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                stale = self.session.TestPlatform.Sessions.find(Id=orphan_id)
+                if len(stale) == 0:
+                    return True, last_exc
+                stale.remove()
+            except Exception as exc:
+                last_exc = exc
+            try:
+                if len(self.session.TestPlatform.Sessions.find(Id=orphan_id)) == 0:
+                    return True, last_exc
+            except Exception as exc:
+                last_exc = exc
+            if attempt == 1:
+                self.logger.warning(
+                    f"{_YELLOW}[IXIA]{_RESET} Session {orphan_id} still present "
+                    f"after remove attempt"
+                    + (f" ({type(last_exc).__name__})" if last_exc else "")
+                    + " — retrying in 5s"
+                )
+                time.sleep(5)
+        return False, last_exc
+
+    def _tombstone_orphaned_session(self, orphan_id) -> t.Optional[str]:
+        """Rename an undestroyable session so it self-identifies in the session list.
+
+        The rename is a platform-metadata PATCH (linux API server only —
+        elsewhere the setter just warns), so verify by reading the name back
+        rather than trusting the setter. Returns the applied name, or ``None``
+        if the rename failed or is unsupported.
+        """
+        tombstone = (
+            f"STALE-ORPHANED-{self.session_name or 'unnamed'}-{int(time.time())}"
+        )
+        try:
+            test_platform = self.session.TestPlatform
+            if test_platform.Platform != "linux":
+                return None
+            stale = test_platform.Sessions.find(Id=orphan_id)
+            if not len(stale):
+                return None
+            stale.Name = tombstone
+            if test_platform.Sessions.find(Id=orphan_id).Name == tombstone:
+                return tombstone
+        except Exception:
+            return None
+        return None
+
+    def _destroy_orphaned_session(self, orphan_id) -> None:
+        """Destroy the session a previous failed setup attempt left behind.
+
+        Orphaned "Active" sessions cost API-server memory and count against the
+        API server's concurrent-session cap; enough of them and NEW session
+        creation starts 5xx-ing, which feeds the very retry path that calls
+        this — so a destroy failure must never be silent.
+        """
+        # `session_id` can come from the constructor while `session` is still
+        # None: there is then no handle to reach the API server with, and this
+        # object never created a session of its own to orphan.
+        if self.session is None:
+            return
+        # Use warning level so messages pass through suppress_console_logs
+        self.logger.warning(
+            f"{_YELLOW}[IXIA]{_RESET} Destroying session "
+            f"{_YELLOW}{orphan_id}{_RESET} from previous failed attempt "
+            f"before retry"
+        )
+        destroyed, last_exc = self._remove_orphaned_session(orphan_id)
+        if destroyed:
+            return
+        tombstone = self._tombstone_orphaned_session(orphan_id)
+        self.logger.error(
+            f"[IXIA] Could not destroy session {orphan_id} from the previous "
+            f"failed attempt"
+            + (
+                f" (last error {type(last_exc).__name__}: {last_exc})"
+                if last_exc
+                else ""
+            )
+            + ". It is now ORPHANED on the API server"
+            + (
+                f" (tombstone-renamed to {tombstone!r})"
+                if tombstone
+                else " (tombstone rename also failed/unsupported)"
+            )
+            + f" — clean up manually via /api/v1/sessions/{orphan_id}."
+        )
+
     @timeit
     @retryable(num_tries=3, sleep_time=30, print_ex=True)
     def _create_basic_setup(
@@ -6613,16 +7018,7 @@ class Ixia:
         # still be committing server-side when NewConfig() wipes the SDM
         # registry, leading to NullReferenceException in IxNetwork.
         if self.session_id and not self.is_existing_session:
-            _log(
-                f"{_YELLOW}[IXIA]{_RESET} Destroying session "
-                f"{_YELLOW}{self.session_id}{_RESET} from previous failed "
-                f"attempt before retry"
-            )
-            try:
-                if self.session:
-                    self.session.Session.remove()
-            except Exception:
-                pass
+            self._destroy_orphaned_session(self.session_id)
             self.session_id = None
             self.vport_indices = {}
             self.tag_name_to_device_group_name_list = defaultdict(list)
@@ -9276,6 +9672,49 @@ class Ixia:
                 f"restored_sample={restored_sample}"
             )
 
+    def _write_tcp_window_on_device_group(
+        self,
+        device_group: t.Any,
+        tcp_window_size_bytes: int,
+    ) -> _BgpPeerTcpWindowWriteResult:
+        matched_peers = 0
+        unsupported_peers = 0
+        verified_peers = 0
+        for ethernet in device_group.Ethernet.find():
+            peer_sets = (
+                (
+                    "v6",
+                    (
+                        peer
+                        for ipv6 in ethernet.Ipv6.find()
+                        for peer in ipv6.BgpIpv6Peer.find()
+                    ),
+                ),
+                (
+                    "v4",
+                    (
+                        peer
+                        for ipv4 in ethernet.Ipv4.find()
+                        for peer in ipv4.BgpIpv4Peer.find()
+                    ),
+                ),
+            )
+            for ip_family, peers in peer_sets:
+                result = self._write_tcp_window_on_peers(
+                    peers=peers,
+                    dg_name=device_group.Name,
+                    ip_family=ip_family,
+                    tcp_window_size_bytes=tcp_window_size_bytes,
+                )
+                matched_peers += result.matched
+                unsupported_peers += result.unsupported
+                verified_peers += result.verified
+        return _BgpPeerTcpWindowWriteResult(
+            matched=matched_peers,
+            unsupported=unsupported_peers,
+            verified=verified_peers,
+        )
+
     @external_api
     def configure_bgp_peer_tcp_window_size(
         self,
@@ -9298,6 +9737,16 @@ class Ixia:
         ``stop_protocols()`` nor ``apply_changes()`` and is safe to run mid-
         storm; callers issue ``apply_changes`` themselves.
 
+        This API changes live state outside the declarative cache key. It
+        requires normal IXIA session teardown so the changed value cannot leak
+        into a later test. The current backpressure test also disables IXIA
+        caching.
+
+        The operation is not atomic. If one peer fails after another peer is
+        verified, the verified value remains applied. Retry the operation after
+        a transient failure. Rebuild or restore the IXIA session when abandoning
+        the operation.
+
         Args:
             device_group_regex: Regex matching DGs whose peers should be
                 throttled (e.g. r"^DEVICE_GROUP_IPV6_EBGP_SLOW$").
@@ -9305,56 +9754,104 @@ class Ixia:
                 force flow-control on every UPDATE.
 
         Returns:
-            Number of peers on which the write succeeded.
+            Number of peers whose requested window was verified.
 
         Raises:
-            RuntimeError: If ``device_group_regex`` matched at least one DG
-                but the write did not succeed on any peer (framework failure
-                or malformed IxNetwork tree). Silently returning 0 would let
-                the downstream storm phase proceed unthrottled and produce
-                trivially-passing fast/slow-asymmetry gates.
+            RuntimeError: If the requested value is invalid, the regex matches
+                no DG, a matched DG has no BGP peers, any matched peer lacks
+                TCP-window support, or any supported peer does not verify the
+                value. A partial write would leave an intended peer unthrottled.
         """
+        try:
+            validate_ixia_bgp_tcp_window_size_bytes(tcp_window_size_bytes)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                "[configure_bgp_peer_tcp_window_size] invalid "
+                f"TcpWindowSizeInBytes value: {error}"
+            ) from error
+        if not self.teardown_session:
+            raise RuntimeError(
+                "[configure_bgp_peer_tcp_window_size] requires IXIA session "
+                "teardown because it changes live state outside the "
+                "declarative cache; set teardown_session=True"
+            )
         device_groups = self.find_device_groups(regex=device_group_regex)
         if not device_groups:
-            self.logger.warning(
+            raise RuntimeError(
                 f"[configure_bgp_peer_tcp_window_size] no DGs match "
                 f"regex={device_group_regex!r}"
             )
-            return 0
-        touched = 0
+        matched_peers = 0
+        unsupported_peers = 0
+        verified_peers = 0
         for dg in device_groups:
-            for ethernet in dg.Ethernet.find():
-                touched += self._write_tcp_window_on_peers(
-                    peers=(
-                        peer
-                        for ipv6 in ethernet.Ipv6.find()
-                        for peer in ipv6.BgpIpv6Peer.find()
-                    ),
-                    dg_name=dg.Name,
-                    ip_family="v6",
-                    tcp_window_size_bytes=tcp_window_size_bytes,
-                )
-                touched += self._write_tcp_window_on_peers(
-                    peers=(
-                        peer
-                        for ipv4 in ethernet.Ipv4.find()
-                        for peer in ipv4.BgpIpv4Peer.find()
-                    ),
-                    dg_name=dg.Name,
-                    ip_family="v4",
-                    tcp_window_size_bytes=tcp_window_size_bytes,
-                )
-        if touched == 0:
+            result = self._write_tcp_window_on_device_group(dg, tcp_window_size_bytes)
+            matched_peers += result.matched
+            unsupported_peers += result.unsupported
+            verified_peers += result.verified
+        self._assert_bgp_peer_tcp_window_outcome(
+            device_group_regex=device_group_regex,
+            device_group_count=len(device_groups),
+            tcp_window_size_bytes=tcp_window_size_bytes,
+            matched_peers=matched_peers,
+            unsupported_peers=unsupported_peers,
+            verified_peers=verified_peers,
+        )
+        return verified_peers
+
+    def _assert_bgp_peer_tcp_window_outcome(
+        self,
+        *,
+        device_group_regex: str,
+        device_group_count: int,
+        tcp_window_size_bytes: int,
+        matched_peers: int,
+        unsupported_peers: int,
+        verified_peers: int,
+    ) -> None:
+        supported_peers = matched_peers - unsupported_peers
+        if matched_peers == 0:
             raise RuntimeError(
                 f"[configure_bgp_peer_tcp_window_size] regex="
-                f"{device_group_regex!r} matched {len(device_groups)} DG(s) "
-                f"but no peer accepted the TcpWindowSizeInBytes="
-                f"{tcp_window_size_bytes} write -- either the IxNetwork tree "
-                f"has no BgpIpv6Peer/BgpIpv4Peer children under the matched "
-                f"DGs, or every write raised. Downstream fast/slow-asymmetry "
-                f"gates would trivially pass without throttling."
+                f"{device_group_regex!r} matched {device_group_count} DG(s), "
+                "but their IxNetwork trees contain no BGP peers"
             )
-        return touched
+        if supported_peers == 0:
+            raise RuntimeError(
+                f"[configure_bgp_peer_tcp_window_size] regex="
+                f"{device_group_regex!r} matched {device_group_count} DG(s), "
+                "but none of their BGP peers support TcpWindowSizeInBytes. "
+                "The downstream fast/slow-asymmetry gates require at least "
+                "one throttled peer."
+            )
+        unverified_supported_peers = supported_peers - verified_peers
+        if unsupported_peers:
+            unverified_detail = (
+                f" and {unverified_supported_peers} supported peer(s) did not verify"
+                if unverified_supported_peers
+                else ""
+            )
+            raise RuntimeError(
+                f"[configure_bgp_peer_tcp_window_size] regex="
+                f"{device_group_regex!r} matched {matched_peers} BGP peer(s), "
+                f"but {unsupported_peers} peer(s) do not support "
+                f"TcpWindowSizeInBytes{unverified_detail}. Every matched peer "
+                "must be throttled. "
+                "Successful peer writes remain applied; retry this operation "
+                "or rebuild or restore the IXIA session."
+            )
+        if verified_peers != supported_peers:
+            raise RuntimeError(
+                f"[configure_bgp_peer_tcp_window_size] regex="
+                f"{device_group_regex!r} matched {device_group_count} DG(s) "
+                f"and {supported_peers} supported peer(s), but only "
+                f"{verified_peers} peer(s) accepted and verified "
+                "TcpWindowSizeInBytes="
+                f"{tcp_window_size_bytes}. Downstream fast/slow-asymmetry "
+                "gates require every supported matched peer to be throttled. "
+                "Successful peer writes remain applied; retry this operation "
+                "or rebuild or restore the IXIA session."
+            )
 
     def _write_tcp_window_on_peers(
         self,
@@ -9363,27 +9860,52 @@ class Ixia:
         dg_name: str,
         ip_family: str,
         tcp_window_size_bytes: int,
-    ) -> int:
-        """Write ``TcpWindowSizeInBytes`` on each peer, logging (but tolerating)
-        per-peer failures. Returns the number of successful writes.
+    ) -> _BgpPeerTcpWindowWriteResult:
+        """Set and verify ``TcpWindowSizeInBytes`` on each peer.
+
+        Return labeled matched, unsupported, and verified peer counts.
         """
-        touched = 0
+        matched = 0
+        unsupported = 0
+        verified = 0
         for peer in peers:
+            matched += 1
+            peer_name = "<unnamed>"
             try:
-                peer.TcpWindowSizeInBytes.Single(tcp_window_size_bytes)
-                touched += 1
-                self.logger.info(
-                    f"[configure_bgp_peer_tcp_window_size] set "
-                    f"TcpWindowSizeInBytes={tcp_window_size_bytes} on "
-                    f"DG={dg_name!r} {ip_family} Peer={peer.Name!r}"
+                peer_name = str(getattr(peer, "Name", peer_name))
+                self._set_and_verify_bgp_peer_tcp_window(
+                    bgp_peer_obj=peer,
+                    tcp_window_size_bytes=tcp_window_size_bytes,
+                    scope_label=f"DG={dg_name!r} {ip_family}",
+                    desired_bgp_name=peer_name,
+                    readback_attempts=_BGP_TCP_WINDOW_IMPERATIVE_READBACK_ATTEMPTS,
+                    readback_retry_seconds=(
+                        _BGP_TCP_WINDOW_IMPERATIVE_READBACK_RETRY_SECONDS
+                    ),
                 )
-            except AttributeError as inner:
+                verified += 1
+            except _BgpPeerTcpWindowUnsupportedError as error:
+                unsupported += 1
                 self.logger.warning(
-                    f"[configure_bgp_peer_tcp_window_size] "
-                    f"TcpWindowSizeInBytes not present on DG={dg_name!r} "
-                    f"{ip_family} Peer={peer.Name!r}: {inner!s}"
+                    "[configure_bgp_peer_tcp_window_size] skipped unsupported "
+                    f"DG={dg_name!r} {ip_family} Peer={peer_name!r}: {error!s}"
                 )
-        return touched
+            except (
+                _BgpPeerTcpWindowOperationError,
+                IxnIxNetworkError,
+                UhdIxNetworkError,
+                RequestException,
+            ) as error:
+                self.logger.warning(
+                    "[configure_bgp_peer_tcp_window_size] could not set and "
+                    f"verify TcpWindowSizeInBytes={tcp_window_size_bytes} on "
+                    f"DG={dg_name!r} {ip_family} Peer={peer_name!r}: {error!s}"
+                )
+        return _BgpPeerTcpWindowWriteResult(
+            matched=matched,
+            unsupported=unsupported,
+            verified=verified,
+        )
 
     @external_api
     def configure_community_pool(

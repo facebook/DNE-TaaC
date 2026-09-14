@@ -83,13 +83,51 @@ builders supply typed DICE specifications and action-stage factories:
 
 ```python
 create_dice_unified_churn_playbook(spec=attribute_churn_spec(...))
-create_dice_unified_churn_playbook(spec=session_churn_spec(...))
 create_dice_unified_churn_playbook(spec=route_churn_spec(...))
+create_dice_unified_churn_playbook(spec=session_churn_spec(...))
+create_dice_unified_churn_playbook(spec=igp_churn_spec(...))
+create_dice_unified_churn_playbook(spec=multipath_churn_spec(...))
+create_dice_unified_churn_playbook(spec=longevity_churn_spec(...))
 ```
 
-The unified renderer owns only common `Playbook` assembly. Attribute, session,
-and route implementations retain their own target selection, stage parameters,
-verification, and recovery behavior.
+The unified renderer owns only common `Playbook` assembly. Each family retains
+its own target selection, stage parameters, verification, and recovery
+behavior. Typed Step and Stage adapters lower the intent to the existing
+`CustomStep` payload; the runtime handler and its IXIA or DUT operations remain
+unchanged.
+
+#### Churn target authority
+
+The Playbook and TestConfig factory inputs are the source of authored churn
+intent. Live device or IXIA state is observation evidence, not an alternate
+configuration source. Current EBB factories supply Open/R route starts, link
+definitions, peer expressions, pool names, counts, and timing values to the
+typed contracts. Those contracts reject invalid geometry before lowering.
+
+Target ownership differs by family:
+
+- Attribute and route churn use explicit topology-authored prefix pools and
+  half-open route windows.
+- Session churn uses explicit peer expressions, session counts, per-cycle
+  widths, and a schedule. The runtime resolves those expressions to IXIA
+  sessions and verifies the requested width.
+- IGP metric churn uses the configured dual-stack plane starts and link
+  definitions. Its runtime captures the live Open/R adjacency and route
+  baseline, applies metric states, and restores and verifies that captured
+  baseline.
+- IGP unresolvable churn uses `start_ipv4s` and `start_ipv6s` as the removal
+  subset. `restore_start_ipv4s` and `restore_start_ipv6s` define the complete
+  reinjection set; the typed contract requires the removal subset to be
+  contained in that restore set. Runtime observations verify the selected
+  FibAgent, hardware, and BGP nexthop state before deletion and after restore.
+- Multipath churn discovers the live installed-path cohort because the exact
+  active next hops are runtime state. The typed contract bounds peer matching,
+  session capacity, cycle geometry, and the minimum acceptable width.
+- Longevity churn fixes the topology-owned Plane-4 pool selection and bounds
+  the wall-clock duration, cadence, and community count.
+
+This split ensures restoration uses the same declared target set that produced
+the mutation while still requiring independent live-state acknowledgement.
 
 ### Baseline lifecycle and failure ownership
 
@@ -105,6 +143,21 @@ DICE distinguishes two nested restoration boundaries:
   attributes. The churn implementation owns this boundary and restores it
   after its mutations. For attribute churn, this is an exact restoration of
   the captured IXIA backing vectors rather than a second full-config import.
+
+Implementation note: `BaselineLifecycle` defines a `PLAYBOOK` scope for nested
+restoration boundaries, but `TaacRunner` does not currently capture or restore
+that scope. In CICD-EBB-10, "Playbook baseline" refers to the attribute-churn
+implementation's own `baseline_snapshot` and cleanup phases. Only the outer
+topology baseline is currently managed by `TaacRunner` through
+`BaselineScope.TOPOLOGY` and `IxiaTopologyBaselineParticipant`.
+
+Successful restoration is reported at each ownership boundary with explicit
+messages:
+
+```text
+[DONE]  Playbook baseline restored and verified | participant=attribute_churn
+[DONE]  Topology baseline restored and verified | participant=ixia_topology | invocation=<id>
+```
 
 The intended lifecycle is:
 
@@ -175,6 +228,28 @@ from taac.abstractions.topologies.ebb_full_scale import (
 Do not add an `abstractions/routing/` layer. Routing-specific behavior belongs
 in concrete topology or compiler names, such as `ebb_full_scale.py` and
 `EosBgpCppCompiler`.
+
+### BGP slow-peer control
+
+An IXIA BGP device group can opt in to slow-peer behavior:
+
+```python
+DeviceGroupSpec(
+    name="dg_ibgp_v4_dc_p1",
+    ...,
+    slow_peer=BgpSlowPeerConfig(),
+)
+```
+
+`BgpSlowPeerConfig()` uses a 1,500-byte TCP receive window. Set
+`tcp_window_size_bytes` from 1 through 65,535 bytes to use a different value.
+The setting applies to all BGP peers in the device group. DICE does not support
+a peer-level override inside one device group.
+
+Leave `slow_peer` unset for normal IXIA behavior. DICE does not write a TCP
+window for a normal device group because the NGPF default is not a stable
+contract. The setting is independent of DUT Update Group configuration and
+can be used by any DICE logical topology.
 
 ---
 

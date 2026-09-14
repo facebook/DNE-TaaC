@@ -239,19 +239,6 @@ class TestTopology:
 
 
 @dataclass
-class TestResult:
-    hostnames: str
-    test_case_name: str
-    start_time: str
-    end_time: str
-    platforms: t.Optional[str] = None
-    check_name: t.Optional[str] = None
-    check_stage: t.Optional[str] = None
-    test_status: t.Optional[str] = None
-    message: t.Optional[str] = None
-
-
-@dataclass
 class PeriodicCheckResult:
     name: str
     status: hc_types.HealthCheckStatus

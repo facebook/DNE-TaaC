@@ -23,6 +23,10 @@ from taac.testconfigs.fpf import (
     fpf_tc15_interface_disable,
     fpf_tc23_bgp_restart,
     fpf_tc25_wedge_agent_restart,
+    fpf_tc27_agent_coldboot,
+    fpf_tc35_stsw_undrain_reinject,
+    fpf_tc36_stsw_all_connections_down,
+    fpf_tc54_stsw_device_drain,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
     fpf_rf_vf_groups,
@@ -47,6 +51,12 @@ def _step_params(step) -> dict:
     return json.loads(step.step_params.json_params)
 
 
+def _task_params(task) -> dict:
+    if task.params is None or task.params.json_params is None:
+        return {}
+    return json.loads(task.params.json_params)
+
+
 def _all_checks(config):
     for playbook in config.playbooks:
         yield from playbook.prechecks or []
@@ -58,6 +68,111 @@ def _all_steps(config):
     for playbook in config.playbooks:
         for stage in playbook.stages:
             yield from stage.steps or []
+
+
+def _reload_shared_suite_modules():
+    """Reload environment-derived standalone factories before their umbrella."""
+    importlib.reload(fpf_hardening_common)
+    importlib.reload(fpf_tc35_stsw_undrain_reinject)
+    importlib.reload(fpf_tc36_stsw_all_connections_down)
+    importlib.reload(fpf_tc54_stsw_device_drain)
+    return importlib.reload(fpf_shared_injection_suite)
+
+
+class TestCampaignExecutionContracts(unittest.TestCase):
+    def test_tc27_collects_fsdb_session_timeline_every_two_seconds(self) -> None:
+        for config in (
+            fpf_tc27_agent_coldboot.TEST_CONFIG,
+            fpf_shared_injection_suite.TEST_CONFIG,
+        ):
+            collector = next(
+                task
+                for task in config.setup_tasks or []
+                if task.task_name == "fpf_start_collectors"
+            )
+            params = _task_params(collector)
+            self.assertEqual(params["fsdb_session_poll_interval_sec"], 2.0)
+
+    def test_shared_suite_contains_phase_correct_stsw_and_reboot_playbooks(
+        self,
+    ) -> None:
+        names = {
+            playbook.name
+            for playbook in fpf_shared_injection_suite.TEST_CONFIG.playbooks
+        }
+        self.assertIn("fpf_tc35_stsw_undrain_reinject_longevity", names)
+        self.assertIn("fpf_tc36_stsw_all_connections_down_disrupt", names)
+        self.assertIn("fpf_tc36_stsw_all_connections_down_restore", names)
+        self.assertIn("fpf_tc54_stsw_device_drain_disrupt", names)
+        self.assertIn("fpf_tc55_gtsw_device_reboot_disrupt", names)
+        self.assertIn("fpf_tc55_gtsw_device_reboot_recovery_undrain", names)
+
+    def test_shared_suite_keeps_tc54_tc35_as_an_ordered_drain_undrain_pair(
+        self,
+    ) -> None:
+        pair = fpf_shared_injection_suite._tc54_tc35_stsw_drain_undrain_pair()
+        pair_names = [playbook.name for playbook in pair]
+        self.assertEqual(
+            pair_names,
+            [
+                "fpf_tc54_stsw_device_drain_disrupt",
+                "fpf_tc35_stsw_undrain_reinject_longevity",
+            ],
+        )
+
+        config_names = [
+            playbook.name
+            for playbook in (
+                fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config().playbooks
+            )
+        ]
+        first = config_names.index(pair_names[0])
+        self.assertEqual(config_names[first : first + len(pair_names)], pair_names)
+
+        drain_steps = [
+            _step_params(step) for stage in pair[0].stages for step in stage.steps
+        ]
+        drain_mutation = next(
+            step
+            for step in drain_steps
+            if step.get("custom_step_name") == "fpf_drain_interface"
+        )
+        self.assertTrue(drain_mutation["is_drain"])
+        drain_injections = [
+            step for step in drain_steps if "prefix_base" in step and "count" in step
+        ]
+        self.assertEqual(len(drain_injections), 2)
+        self.assertTrue(
+            all(
+                step["count"] == fpf_shared_injection_suite.PREFIX_COUNT
+                and step["extra_communities"] == ["65446:10"]
+                for step in drain_injections
+            )
+        )
+        self.assertTrue(any(step.get("duration", 0) >= 300 for step in drain_steps))
+        drain_checks = {check.check_id for check in pair[0].postchecks or []}
+        self.assertIn("fpf_host_spray", drain_checks)
+        self.assertIn("fpf_hrt_plane_status_stsw_control_up", drain_checks)
+
+        recovery_steps = [
+            _step_params(step) for stage in pair[1].stages for step in stage.steps
+        ]
+        drain_actions = [
+            step["is_drain"]
+            for step in recovery_steps
+            if step.get("custom_step_name") == "fpf_drain_interface"
+        ]
+        self.assertEqual(drain_actions, [True, False])
+        self.assertTrue(
+            any(
+                step.get("custom_step_name") == "fpf_ensure_traffic"
+                for step in recovery_steps
+            )
+        )
+        self.assertGreaterEqual(
+            sum(step.get("duration", 0) >= 300 for step in recovery_steps),
+            3,
+        )
 
 
 def _assert_restart_contract(test, playbook) -> None:
@@ -376,8 +491,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             ):
                 os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)
                 os.environ.pop("TAAC_FPF_SKIP_IB_TRAFFIC", None)
-                importlib.reload(fpf_hardening_common)
-                importlib.reload(fpf_shared_injection_suite)
+                _reload_shared_suite_modules()
                 config = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
 
                 start = next(
@@ -470,8 +584,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                     {check.check_id for check in baseline.postchecks or []},
                 )
         finally:
-            importlib.reload(fpf_hardening_common)
-            importlib.reload(fpf_shared_injection_suite)
+            _reload_shared_suite_modules()
 
     def test_standalone_tc25_honors_twshared_hosts_topology_and_no_ib_mode(self):
         hosts = ["twshared1352.03.mwg2", "twshared1388.03.mwg2"]
@@ -578,8 +691,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"TAAC_FPF_SKIP_IB_TRAFFIC": "1"}):
                 os.environ.pop("TAAC_FPF_SKIP_SSH_DEPS", None)
-                importlib.reload(fpf_hardening_common)
-                importlib.reload(fpf_shared_injection_suite)
+                _reload_shared_suite_modules()
                 config = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
 
                 task_names = {
@@ -601,8 +713,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
                 ]
                 self.assertEqual(ensure_steps, [])
         finally:
-            importlib.reload(fpf_hardening_common)
-            importlib.reload(fpf_shared_injection_suite)
+            _reload_shared_suite_modules()
 
     def test_standalone_tc25_retains_legacy_single_device_defaults(self):
         topology_vars = (
@@ -938,6 +1049,12 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         hosts = ["twshared1352.03.mwg2", "twshared1375.03.mwg2"]
         with (
             patch.object(fpf_shared_injection_suite, "GPU_HOSTS", hosts),
+            patch.object(fpf_shared_injection_suite, "PROD_PREFIX_HOST", hosts[0]),
+            patch.object(
+                fpf_shared_injection_suite,
+                "PROD_PREFIXES_BY_HOST",
+                {hosts[0]: [fpf_shared_injection_suite.PROD_TARGET_PREFIX]},
+            ),
             patch.dict(
                 os.environ,
                 {"TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5"},
@@ -1076,11 +1193,7 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
         for check in baseline_prod_checks:
             self.assertEqual(
                 _check_params(check)["prefixes_by_host"],
-                {
-                    fpf_shared_injection_suite.PROD_PREFIX_HOST: [
-                        fpf_shared_injection_suite.PROD_TARGET_PREFIX
-                    ]
-                },
+                {hosts[0]: [fpf_shared_injection_suite.PROD_TARGET_PREFIX]},
             )
 
         expected_conditional_route_impacts = {host: [0] for host in hosts}

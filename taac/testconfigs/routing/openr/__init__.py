@@ -40,7 +40,11 @@ References
 from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
     OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG,
 )
+from taac.testconfigs.routing.openr.openr_scale_test_config import (
+    OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG,
+)
 
 __all__ = [
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
+    "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
 ]

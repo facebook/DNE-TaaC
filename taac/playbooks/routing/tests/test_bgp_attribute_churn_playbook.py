@@ -1062,7 +1062,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
         inventory.openr_standalone_link.owner = "owner"
         inventory.openr_standalone_link.helper = "helper"
-        inventory.openr_standalone_link.kv_link.return_value = {}
+        inventory.openr_standalone_link.kv_link.return_value = {"ifName": "Ethernet1"}
         target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
             "bgp_ebb_full_scale.get_bgp_ebb_attribute_churn_playbook"
@@ -1141,7 +1141,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
         inventory.openr_standalone_link.owner = "owner"
         inventory.openr_standalone_link.helper = "helper"
-        inventory.openr_standalone_link.kv_link.return_value = {}
+        inventory.openr_standalone_link.kv_link.return_value = {"ifName": "Ethernet1"}
         target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
             "bgp_ebb_full_scale.get_bgp_ebb_nexthop_group_count_threshold_playbook"
@@ -1178,7 +1178,9 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             inventory.ixia_ports = [[port] for port in ports]
             inventory.openr_standalone_link.owner = "owner"
             inventory.openr_standalone_link.helper = "helper"
-            inventory.openr_standalone_link.kv_link.return_value = {}
+            inventory.openr_standalone_link.kv_link.return_value = {
+                "ifName": "Ethernet1"
+            }
             with (
                 self.subTest(port_count=len(ports)),
                 patch(fauu_target, return_value=MagicMock()) as fauu_factory,

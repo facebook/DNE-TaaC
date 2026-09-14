@@ -20,14 +20,18 @@ class AttributePhase:
 
 
 @dataclasses.dataclass(frozen=True)
-class AttributeFamily:
+class ChurnFamily:
     name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class AttributeFamily(ChurnFamily):
     phases: tuple[AttributePhase, ...]
 
 
 @dataclasses.dataclass(frozen=True)
 class ChurnWorkload:
-    families: tuple[AttributeFamily, ...]
+    families: tuple[ChurnFamily, ...]
 
     def __post_init__(self) -> None:
         if not self.families:

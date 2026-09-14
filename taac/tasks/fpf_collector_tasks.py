@@ -21,6 +21,7 @@ Usage in TestConfig:
 """
 
 import asyncio
+import re
 import typing as t
 
 from taac.internal.driver.fboss_switch_internal import (
@@ -36,6 +37,7 @@ from taac.libs.fpf.fpf_collector_registry import (
 from taac.libs.fpf.fpf_hrt_bulk_tracker import NUM_LANES
 from taac.libs.fpf.fpf_stress_checks import (
     BgpRibCollector,
+    FibRouteCollector,
     FsdbRibmapCollector,
     HrtBulkCollector,
     HrtFsdbSessionCollector,
@@ -199,6 +201,93 @@ class FpfStartCollectorsTask(BaseTask):
                 f"[FpfStartCollectors] Per-VF-group remote-failure collector "
                 f"'hrt_remote_failure_{suffix}' started (subnet {group_subnet}, "
                 f"devices {group.get('device_ids', [0])})"
+            )
+
+        # Optional additional filtered namespaces. These collectors retain the
+        # existing row/JSONL schemas but use distinct registry keys and files,
+        # allowing one test to observe its canonical A routes and an independent
+        # remote B namespace without either count masking the other.
+        additional_namespaces: t.List[t.Dict[str, t.Any]] = (
+            params.get("additional_namespaces", []) or []
+        )
+        for namespace in additional_namespaces:
+            name = str(namespace["name"])
+            if re.fullmatch(r"[a-z0-9_]+", name) is None:
+                raise ValueError(
+                    f"additional collector namespace has unsafe name {name!r}"
+                )
+            subnet = str(namespace["subnet_prefix"])
+            ns_interval = float(namespace.get("poll_interval_sec", poll_interval_sec))
+
+            def _start_named(key: str, collector: t.Any) -> None:
+                collector.set_append_mode(True)
+                collector.start()
+                register_collector(key, collector)
+
+            fsdb_targets = list(namespace.get("fsdb_gtsws", []))
+            if fsdb_targets:
+                _start_named(
+                    f"fsdb_{name}",
+                    FsdbRibmapCollector(
+                        gtsws=fsdb_targets,
+                        subnet_prefix=subnet,
+                        tmp_path=f"/tmp/fpf_{name}_fsdb_ribmap.log",
+                        interval_sec=ns_interval,
+                        fsdb_mode=str(namespace.get("fsdb_mode", fsdb_mode)),
+                    ),
+                )
+            bgp_targets = list(namespace.get("bgp_gtsws", []))
+            if bgp_targets:
+                _start_named(
+                    f"bgp_{name}",
+                    BgpRibCollector(
+                        gtsws=bgp_targets,
+                        subnet_prefix=subnet,
+                        tmp_path=f"/tmp/fpf_{name}_bgp_rib.log",
+                        interval_sec=ns_interval,
+                    ),
+                )
+            fib_targets = list(namespace.get("fib_gtsws", []))
+            if fib_targets:
+                _start_named(
+                    f"fib_{name}",
+                    FibRouteCollector(
+                        gtsws=fib_targets,
+                        subnet_prefix=subnet,
+                        tmp_path=f"/tmp/fpf_{name}_fib.log",
+                        interval_sec=ns_interval,
+                    ),
+                )
+            ns_hosts = list(namespace.get("hosts", []))
+            if ns_hosts:
+                ns_device_ids = list(namespace.get("device_ids", hrt_device_ids))
+                ns_plane_ids = list(namespace.get("plane_ids", hrt_plane_ids))
+                _start_named(
+                    f"hrt_{name}",
+                    HrtBulkCollector(
+                        hosts=ns_hosts,
+                        device_ids=ns_device_ids,
+                        plane_ids=ns_plane_ids,
+                        supernet=subnet,
+                        tmp_path=f"/tmp/fpf_{name}_hrt_bulk.log",
+                        interval_sec=ns_interval,
+                    ),
+                )
+                if bool(namespace.get("include_remote_failure", False)):
+                    _start_named(
+                        f"hrt_remote_failure_{name}",
+                        HrtRemoteFailureCollector(
+                            hosts=ns_hosts,
+                            device_ids=ns_device_ids,
+                            plane_ids=ns_plane_ids,
+                            supernet=subnet,
+                            tmp_path=f"/tmp/fpf_{name}_hrt_remote_failure.log",
+                            interval_sec=ns_interval,
+                        ),
+                    )
+            logger.info(
+                f"[FpfStartCollectors] Additional namespace {name!r} started "
+                f"for {subnet}"
             )
 
         # HRT FSDB-session-count collector (getFsdbSessions CONNECTED census):

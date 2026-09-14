@@ -19,6 +19,9 @@ StepT = t.TypeVar("StepT")
 
 class ChurnImplementation(enum.StrEnum):
     ATTRIBUTE = "attribute"
+    IGP = "igp"
+    LONGEVITY = "longevity"
+    MULTIPATH = "multipath"
     SESSION = "session"
     ROUTE = "route"
 
@@ -134,6 +137,84 @@ def route_churn_spec(
         playbook_name=playbook_name,
         device=device,
         implementation=ChurnImplementation.ROUTE,
+        action_factory=action_factory,
+        setup_steps=setup_steps,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        periodic_tasks=periodic_tasks,
+        cleanup_steps=cleanup_steps,
+    )
+
+
+def igp_churn_spec(
+    *,
+    playbook_name: str,
+    device: str,
+    action_factory: t.Callable[[], t.Sequence[ActionT]],
+    setup_steps: t.Sequence[StepT],
+    prechecks: t.Sequence[CheckT],
+    postchecks: t.Sequence[CheckT],
+    snapshot_checks: t.Sequence[SnapshotCheckT],
+    periodic_tasks: t.Sequence[PeriodicTaskT],
+    cleanup_steps: t.Sequence[StepT] = (),
+) -> ChurnPlaybookSpec[ActionT, CheckT, PeriodicTaskT, SnapshotCheckT, StepT]:
+    return _churn_playbook_spec(
+        playbook_name=playbook_name,
+        device=device,
+        implementation=ChurnImplementation.IGP,
+        action_factory=action_factory,
+        setup_steps=setup_steps,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        periodic_tasks=periodic_tasks,
+        cleanup_steps=cleanup_steps,
+    )
+
+
+def longevity_churn_spec(
+    *,
+    playbook_name: str,
+    device: str,
+    action_factory: t.Callable[[], t.Sequence[ActionT]],
+    setup_steps: t.Sequence[StepT],
+    prechecks: t.Sequence[CheckT],
+    postchecks: t.Sequence[CheckT],
+    snapshot_checks: t.Sequence[SnapshotCheckT],
+    periodic_tasks: t.Sequence[PeriodicTaskT],
+    cleanup_steps: t.Sequence[StepT] = (),
+) -> ChurnPlaybookSpec[ActionT, CheckT, PeriodicTaskT, SnapshotCheckT, StepT]:
+    return _churn_playbook_spec(
+        playbook_name=playbook_name,
+        device=device,
+        implementation=ChurnImplementation.LONGEVITY,
+        action_factory=action_factory,
+        setup_steps=setup_steps,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        periodic_tasks=periodic_tasks,
+        cleanup_steps=cleanup_steps,
+    )
+
+
+def multipath_churn_spec(
+    *,
+    playbook_name: str,
+    device: str,
+    action_factory: t.Callable[[], t.Sequence[ActionT]],
+    setup_steps: t.Sequence[StepT],
+    prechecks: t.Sequence[CheckT],
+    postchecks: t.Sequence[CheckT],
+    snapshot_checks: t.Sequence[SnapshotCheckT],
+    periodic_tasks: t.Sequence[PeriodicTaskT],
+    cleanup_steps: t.Sequence[StepT] = (),
+) -> ChurnPlaybookSpec[ActionT, CheckT, PeriodicTaskT, SnapshotCheckT, StepT]:
+    return _churn_playbook_spec(
+        playbook_name=playbook_name,
+        device=device,
+        implementation=ChurnImplementation.MULTIPATH,
         action_factory=action_factory,
         setup_steps=setup_steps,
         prechecks=prechecks,

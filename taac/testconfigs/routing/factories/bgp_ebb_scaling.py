@@ -48,12 +48,13 @@ from taac.playbooks.playbook_definitions import (
     build_case6_playbook,
     create_bgp_plus_plus_transient_memory_peer_scale_playbook,
     create_bgp_plus_plus_transient_memory_route_scale_playbook,
-    create_performance_scaling_egress_peer_sweep_playbook,
     create_performance_scaling_ingress_peer_sweep_playbook,
     PerIterationSetupStepsFactory,
 )
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_bounded_ecmp_sets_playbook,
+    get_bgp_ebb_churn_processing_playbook,
+    get_bgp_ebb_related_peer_compute_playbook,
 )
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.ixia_configs_for_tests import (
     create_ebb_performance_scale_basic_port_configs,
@@ -285,7 +286,7 @@ def create_bgp_ebb_scaling_performance_test_config(
             ebgp_fixed_communities=[_EB_FA_TRANSITED_COMMUNITY],
         ),
         playbooks=[
-            create_performance_scaling_egress_peer_sweep_playbook(
+            get_bgp_ebb_related_peer_compute_playbook(
                 device_name=device_name,
                 egress_peer_counts=egress_peer_counts,
                 prefix_count=prefix_count,
@@ -1161,8 +1162,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
             ixia_ibgp_ic_parent_network_v6=ixia_ibgp_ic_parent_network_v6,
         ),
         playbooks=[
-            build_case6_playbook(
-                name="bgp_plus_plus_route_churn_prefix_scaling_test",
+            get_bgp_ebb_churn_processing_playbook(
                 description="Test BGP++ route churn convergence across multiple prefix scales",
                 snapshot_checks=[
                     create_core_dumps_snapshot_check(),

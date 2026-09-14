@@ -150,6 +150,7 @@ def create_fpf_tc28_test_config() -> TestConfig:
         postchecks=[
             create_fpf_hrt_session_stat_check(
                 mode="disruption",
+                only_hosts=[GPU_HOSTS[0]],
                 expected_connected=EXPECTED_FSDB_SESSION_COUNT,
                 expected_connected_during=CONNECTED_DURING,
                 impacted_lanes=IMPACTED_LANES,
@@ -204,7 +205,7 @@ def create_fpf_tc28_test_config() -> TestConfig:
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 enable_fsdb_session_collector=True,
-                fsdb_session_host=GPU_HOSTS[0],
+                fsdb_session_hosts=GPU_HOSTS,
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
                 rf_vf_groups=RF_VF_GROUPS,
             ),

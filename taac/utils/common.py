@@ -9,9 +9,7 @@ import socket
 import threading
 import time
 import typing as t
-from dataclasses import asdict, is_dataclass
 from datetime import datetime
-from textwrap import wrap
 from typing import Type
 
 # pyjq is optional — the package is incompatible with Python 3.12+ and
@@ -27,7 +25,6 @@ except ImportError:
 
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     TestDevice,
-    TestResult,
 )
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
@@ -35,14 +32,19 @@ from taac.utils.oss_taac_lib_utils import (
     memoize_forever,
     wraps,
 )
+from taac.utils.result_rendering import check_results_table
 from taac.utils.taac_log_formatter import log_section
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
-from tabulate import tabulate
+from taac.test_run_result import types as trr_types
 
 LOGGER: ConsoleFileLogger = get_root_logger()
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 _EVERPASTE_HANDLE_URL = "https://www.internalfb.com/intern/everpaste/?handle={handle}"
+# Past this many characters a check message is uploaded and this much of it is
+# kept inline. Chosen to leave the JSON payload readable when a playbook runs
+# dozens of checks that each dump a route table into their message.
+MESSAGE_INLINE_LIMIT_CHARS: int = 1000
 
 
 def get_fburl(url: str) -> str:
@@ -226,6 +228,20 @@ async def async_everpaste_file(
     return resolved_path
 
 
+async def async_split_long_message(message: str) -> t.Tuple[str, t.Optional[str]]:
+    """Split a check message into the text to inline and the URL of the full text.
+
+    The upload is what decides the split, so a truncated ``message`` always
+    comes back with a URL that reaches the rest of it. Inferring the split
+    afterwards, by comparing the returned string to the input, cannot tell an
+    upload apart from a message that happened to survive unchanged.
+    """
+    if len(message) <= MESSAGE_INLINE_LIMIT_CHARS:
+        return message, None
+    url = await async_everpaste_str(message)
+    return f"{message[:MESSAGE_INLINE_LIMIT_CHARS]}...", url
+
+
 async def async_write_test_result(
     test_case_name: str,
     devices: t.List[TestDevice],
@@ -235,36 +251,24 @@ async def async_write_test_result(
     check_name: t.Optional[str] = None,
     check_stage: t.Optional[taac_types.ValidationStage] = None,
     test_status: hc_types.HealthCheckStatus = hc_types.HealthCheckStatus.UNKNOWN,
-) -> TestResult:
-    start_time_str = datetime.fromtimestamp(start_time).strftime("%m/%d/%Y-%H:%M:%S")
-    end_time_str = (
-        datetime.fromtimestamp(end_time).strftime("%m/%d/%Y-%H:%M:%S")
-        if end_time
-        else datetime.now().strftime("%m/%d/%Y-%H:%M:%S")
+) -> trr_types.CheckResult:
+    inline_message, message_url = (
+        await async_split_long_message(message) if message else ("", None)
     )
-    formatted_message = None
-    if message:
-        if not TAAC_OSS:
-            from taac.utils.common import (
-                # pyrefly: ignore [missing-module-attribute]
-                async_everpaste_if_needed as _everpaste_if_needed,
-            )
 
-            message = await _everpaste_if_needed(message, thres=1000)
-        formatted_message = "\n".join(wrap(message))
-
-    return TestResult(
-        start_time=start_time_str,
-        end_time=end_time_str,
-        test_case_name="\n".join(wrap(test_case_name, width=50)),
-        hostnames="\n".join(device.name for device in devices),
-        platforms="\n".join(
-            f"{device.name}: {device.attributes.hardware}" for device in devices
-        ),
-        check_name=check_name,
-        check_stage=check_stage.name if check_stage else None,
-        test_status=test_status.name,
-        message=formatted_message,
+    return trr_types.CheckResult(
+        check_name=check_name or "",
+        check_stage=check_stage,
+        status=test_status,
+        hostnames=[device.name for device in devices],
+        hardware_by_hostname={
+            device.name: device.attributes.hardware for device in devices
+        },
+        start_time_epoch_s=int(start_time),
+        end_time_epoch_s=int(end_time) if end_time else int(time.time()),
+        message=inline_message or None,
+        message_url=message_url,
+        test_case_name=test_case_name,
     )
 
 
@@ -479,26 +483,9 @@ def transpose(matrix: list) -> list:
     return [list(row) for row in zip(*matrix)]
 
 
-def _get_test_case_header(test_results: t.List) -> t.List[str]:
-    if not is_dataclass(test_results) and not len(test_results):
-        raise ValueError(
-            "Given test results is not of the type of dataclass. Please check!"
-        )
-    # pyre-fixme[16]: Item `DataclassInstance` of `List[Any] | DataclassInstance`
-    #  has no attribute `__getitem__`.
-    return [field_name.upper() for field_name in asdict(test_results[0])]
-
-
 def tabulate_test_results(
-    test_results: t.List,
+    test_results: t.List[trr_types.CheckResult],
     no_header: bool = False,
 ) -> str:
-    """Tabulate test results from a list of dataclasses."""
-    test_result_header: t.List[str] = _get_test_case_header(test_results)
-    test_result_data: t.List[t.List] = [
-        [value or "" for value in asdict(test_result).values()]
-        for test_result in test_results
-    ]
-    if no_header:
-        return tabulate(test_result_data, tablefmt="grid")
-    return tabulate(test_result_data, headers=test_result_header, tablefmt="grid")
+    """Tabulate check results into a grid table."""
+    return check_results_table(test_results, no_header=no_header)

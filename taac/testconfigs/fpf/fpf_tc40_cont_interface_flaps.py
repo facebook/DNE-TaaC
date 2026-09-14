@@ -13,11 +13,11 @@ stop, a stable-state longevity playbook (same expectations as
 fpf_stress_test_config) validates full recovery.
 
 Two-playbook "longevity-anchored health check" pattern:
-  1. Disruption-only playbook (NO checks): the multi-GTSW parallel flap (900s),
-     then a 300s longevity settle.
-  2. Stable-state v2 hardening playbook (soak 300s): every stable-state health
-     check anchors at LONGEVITY START with the SAME expectations as the stress
-     config; the noisy flap window is excluded.
+  1. Disrupt playbook captures the exact UP-port set across all eight GTSWs,
+     performs the parallel flap for 900s, settles 120s, and evaluates only
+     non-traffic safety signals.
+  2. Longevity playbook restores RDMA if it collapsed, qualifies recovery for
+     120s, soaks for 300s, and requires every captured port to be UP.
 
 Usage:
   TAAC_SSH_VIA_LAB_SSH=1 buck2 run neteng/netcastle:netcastle_taac -- \\
@@ -33,6 +33,7 @@ from taac.playbooks.playbook_definitions import (
 )
 from taac.steps.step_definitions import (
     create_fpf_multi_gtsw_rapid_flap_step,
+    create_fpf_up_port_baseline_step,
     create_longevity_step,
 )
 from taac.task_definitions import (
@@ -64,12 +65,14 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     FSDB_COLLECTOR_MODE,
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
+    OBSERVER_GTSWS,
     skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     VF_COLLECTOR_SUBNET,
     VF_GROUP_PREFIX_COUNT,
 )
+from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
 # The setup advertises both VF groups across all eight STSWs exactly once. With
@@ -90,6 +93,8 @@ FLAP_DURATION_SEC = 900
 FLAP_UP_SEC = 7
 FLAP_DOWN_SEC = 7
 LONGEVITY_SEC = 300
+DISRUPT_SETTLE_SEC = 120
+UP_PORT_BASELINE_KEY = "tc40_family_pre_disruption_up_ports"
 FLAP_HOST = GPU_HOSTS[0]
 FLAP_INTERFACES = fpf_gpu_downlink_interfaces()
 NIC_RECOVERY_BY_GTSW_INTERFACE = {
@@ -106,7 +111,19 @@ PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
 
 
-def create_fpf_tc40_test_config() -> TestConfig:
+def create_fpf_cont_interface_flaps_test_config(
+    *,
+    test_name: str,
+    flap_duration_sec: int = FLAP_DURATION_SEC,
+    churn_service: taac_types.Service | None = None,
+    churn_action: str = "restart",
+    churn_every_sec: int = 120,
+    churn_initial_delay_sec: int = 0,
+    churn_recovery_timeout_sec: int = 0,
+    retry_final_cleanup_after_churn: bool = False,
+    observe_prod_prefix_on_all_hosts: bool = False,
+) -> TestConfig:
+    """Build TC40's strict contract, optionally with concurrent service churn."""
     skip_ssh = skip_ssh_dependencies()
     skip_ib = skip_ib_traffic()
     ib_setup, ib_teardown = fpf_ib_traffic_tasks(
@@ -115,37 +132,73 @@ def create_fpf_tc40_test_config() -> TestConfig:
         traffic_config=IB_TRAFFIC_CONFIG,
     )
     spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
+    prod_prefixes_by_host = (
+        {host: PROD_PREFIXES for host in GPU_HOSTS}
+        if observe_prod_prefix_on_all_hosts
+        else None
+    )
+    restart_flap_case = churn_service in {
+        taac_types.Service.AGENT,
+        taac_types.Service.BGP,
+        taac_types.Service.FSDB,
+    }
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         postchecks=build_flap_disrupt_postchecks(
             observer_gtsws=ALL_GTSWS,
             hrt_memory_hosts=HRT_MEMORY_HOSTS,
             prefix_count=PREFIX_COUNT,
             skip_ssh=skip_ssh,
+            include_route_convergence=False,
+            bgp_route_diagnostic_only=restart_flap_case,
         ),
         disruption_steps=[
+            create_fpf_up_port_baseline_step(
+                action="capture",
+                devices=ALL_GTSWS,
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            ),
             create_fpf_multi_gtsw_rapid_flap_step(
                 gtsws=ALL_GTSWS,
                 neighbor_hosts=[FLAP_HOST],
-                duration_sec=FLAP_DURATION_SEC,
+                duration_sec=flap_duration_sec,
                 flap_up_time_sec=FLAP_UP_SEC,
                 flap_down_time_sec=FLAP_DOWN_SEC,
                 fail_closed=True,
                 expected_interfaces=FLAP_INTERFACES,
                 require_exact_neighbor_hosts=True,
                 nic_recovery_by_gtsw_interface=NIC_RECOVERY_BY_GTSW_INTERFACE,
+                churn_service=churn_service,
+                churn_action=churn_action,
+                churn_every_sec=churn_every_sec,
+                churn_initial_delay_sec=churn_initial_delay_sec,
+                churn_recovery_timeout_sec=churn_recovery_timeout_sec,
+                churn_devices=ALL_GTSWS if churn_service is not None else None,
+                retry_final_cleanup_after_churn=retry_final_cleanup_after_churn,
                 description=(
                     f"Parallel rapid-flap exact links {FLAP_INTERFACES} facing "
                     f"{FLAP_HOST} across "
-                    f"{len(ALL_GTSWS)} GTSWs for {FLAP_DURATION_SEC}s "
+                    f"{len(ALL_GTSWS)} GTSWs for {flap_duration_sec}s "
                     f"(up={FLAP_UP_SEC}s/down={FLAP_DOWN_SEC}s)"
+                    + (
+                        f" + {churn_action} {churn_service.name} every "
+                        f"{churn_every_sec}s"
+                        + (
+                            f" after an initial {churn_initial_delay_sec}s"
+                            if churn_initial_delay_sec > 0
+                            else ""
+                        )
+                        if churn_service is not None
+                        else ""
+                    )
                 ),
             ),
             create_longevity_step(
-                duration=LONGEVITY_SEC,
-                description=f"Settle {LONGEVITY_SEC}s after flaps stop",
+                duration=DISRUPT_SETTLE_SEC,
+                description=f"Settle {DISRUPT_SETTLE_SEC}s after flaps stop",
             ),
         ],
-        playbook_name="fpf_tc40_cont_interface_flaps_disrupt",
+        playbook_name=f"{test_name}_disrupt",
     )
 
     longevity_playbook = create_fpf_hardening_playbook_v2(
@@ -156,8 +209,10 @@ def create_fpf_tc40_test_config() -> TestConfig:
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc40_cont_interface_flaps_longevity",
+        playbook_name=f"{test_name}_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefix_host=PROD_PREFIX_HOST,
+        prod_prefixes_by_host=prod_prefixes_by_host,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -168,10 +223,23 @@ def create_fpf_tc40_test_config() -> TestConfig:
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
         hrt_device_ids=HRT_DEVICE_IDS,
+        recovered_baseline_qualification_sec=120,
+        # The recovered-baseline step re-anchors test_case_start_time after the
+        # exact gate. Keep every valid longevity sample strict and independently
+        # require the final BGP sample at the configured prefix count.
+        bgp_require_final_exact=restart_flap_case,
+        final_validation_steps=[
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=ALL_GTSWS,
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            )
+        ],
     )
 
     return TestConfig(
-        name="fpf_tc40_cont_interface_flaps",
+        name=test_name,
         endpoints=create_fpf_endpoints(stsws=ALL_STSWS),
         setup_tasks=[
             *ib_setup,
@@ -180,9 +248,15 @@ def create_fpf_tc40_test_config() -> TestConfig:
                 hosts=GPU_HOSTS,
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes=(
+                    None if observe_prod_prefix_on_all_hosts else PROD_PREFIXES
+                ),
+                prod_prefixes_by_host=prod_prefixes_by_host,
+                prod_prefix_host=(
+                    None if observe_prod_prefix_on_all_hosts else PROD_PREFIX_HOST
+                ),
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
@@ -205,6 +279,12 @@ def create_fpf_tc40_test_config() -> TestConfig:
         ],
         playbooks=[disrupt_playbook, longevity_playbook],
         tags=["fpf"],
+    )
+
+
+def create_fpf_tc40_test_config() -> TestConfig:
+    return create_fpf_cont_interface_flaps_test_config(
+        test_name="fpf_tc40_cont_interface_flaps"
     )
 
 

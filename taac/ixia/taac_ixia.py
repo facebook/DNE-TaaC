@@ -28,9 +28,14 @@ from taac.utils.oss_taac_lib_utils import (  # oss-rewrite (force ShipIt re-expo
     none_throws,
     retryable,
 )
-from uhd_restpy.assistants.statistics.statviewassistant import (
-    StatViewAssistant as UhdStatViewAssistant,
-)
+
+if TAAC_OSS:
+    # UHD is unsupported in OSS mode and uhd_restpy is not distributed there.
+    UhdStatViewAssistant = IxnStatViewAssistant
+else:
+    from uhd_restpy.assistants.statistics.statviewassistant import (
+        StatViewAssistant as UhdStatViewAssistant,
+    )
 
 StatViewAssistant = t.Union[IxnStatViewAssistant, UhdStatViewAssistant]
 
@@ -298,20 +303,35 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         stats = []
         view_name = view._ViewName
         for row in view.Rows:
-            stat = {}
-            stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
-            if "Packet Loss Duration (ms)" in row.Columns:
-                raw = row["Packet Loss Duration (ms)"]
-                stat["packet_loss_duration"] = float(raw) if raw != "" else 0.0
-            if "Loss %" in row.Columns:
-                raw = row["Loss %"]
-                stat["packet_loss_percentage"] = float(raw) if raw != "" else 0.0
-            if "Frames Delta" in row.Columns:
-                raw = row["Frames Delta"]
-                stat["frame_delta"] = float(raw) if raw != "" else 0.0
-            stat["view"] = view_name
-            stats.append(stat)
+            stats.append(
+                self._packet_loss_stat(
+                    view_name,
+                    row,
+                )
+            )
         return stats
+
+    @staticmethod
+    def _packet_loss_stat(
+        view_name: str,
+        row: t.Any,
+    ) -> t.Dict[str, object]:
+        column_names = set(row.Columns)
+        identifier_column = VIEW_TO_IDENTIFIER[view_name]
+        stat: t.Dict[str, object] = {
+            "identifier": row[identifier_column],
+            "view": view_name,
+        }
+        numeric_columns = {
+            "Packet Loss Duration (ms)": "packet_loss_duration",
+            "Loss %": "packet_loss_percentage",
+            "Frames Delta": "frame_delta",
+        }
+        for column, key in numeric_columns.items():
+            if column in column_names:
+                raw = row[column]
+                stat[key] = float(t.cast(t.Any, raw)) if raw != "" else 0.0
+        return stat
 
     # No retry — sampler-only; the next tick is the retry. See
     # `get_packet_loss_statistics`.

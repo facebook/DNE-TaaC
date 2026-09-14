@@ -1653,6 +1653,7 @@ def _device_group_config(
                 ],
                 hold_timer=session.hold_timer_s,
                 keepalive_timer=session.keepalive_timer_s,
+                tcp_window_size_bytes=session.tcp_window_size_bytes,
                 route_scales=route_scales,
                 enable_graceful_restart=session.enable_graceful_restart,
             ),
@@ -1679,6 +1680,7 @@ def _device_group_config(
             ],
             hold_timer=session.hold_timer_s,
             keepalive_timer=session.keepalive_timer_s,
+            tcp_window_size_bytes=session.tcp_window_size_bytes,
             route_scales=[
                 _route_scale(request.legacy_identity, group, advertisement)
                 for advertisement in request.plan.advertisements
@@ -1811,6 +1813,7 @@ def _partitioned_bgp_config(
             _BGP_CAPABILITIES[capability] for capability in session.capabilities
         ],
         "bgp_peer_type": _BGP_PEER_TYPES[session.relationship],
+        "tcp_window_size_bytes": session.tcp_window_size_bytes,
     }
     if advertisements:
         bgp_params["route_scales"] = [

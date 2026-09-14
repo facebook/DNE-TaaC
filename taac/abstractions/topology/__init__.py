@@ -19,6 +19,7 @@ from taac.abstractions.topology.attributes import (
 from taac.abstractions.topology.model import (
     BgpPeerGroup,
     BgpPolicy,
+    BgpSlowPeerConfig,
     BoundDeviceGroup,
     BoundIxiaDeviceGroupChild,
     BoundRoutingConfig,
@@ -78,6 +79,7 @@ __all__ = (
     "AsPathSequence",
     "BgpPeerGroup",
     "BgpPolicy",
+    "BgpSlowPeerConfig",
     "BoundDeviceGroup",
     "BoundIxiaDeviceGroupChild",
     "BoundRoutingConfig",

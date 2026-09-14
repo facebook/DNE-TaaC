@@ -8,6 +8,7 @@ from importlib import resources
 from pydantic import BaseModel, Field
 
 _PROMPT_RESOURCE_NAME: str = "investigation_prompt.xml"
+_LIFECYCLE_PROMPT_RESOURCE_NAME: str = "lifecycle_investigation_prompt.xml"
 
 _BLOCK_HEADER: str = "===== INVESTIGATION REPORT ====="
 _NO_REPORT: str = "The investigation agent produced no structured report."
@@ -20,7 +21,9 @@ _FIELD_INDENT: str = "     "
 class Reproduce(BaseModel):
     """A recipe for a human or a later job. The harness never runs it."""
 
-    host: str = Field(description="The reserved device the command runs on.")
+    host: str = Field(
+        description="The lab device or infrastructure endpoint the command runs on."
+    )
     command: str = Field(
         description="The command, exactly as an engineer would paste it."
     )
@@ -52,12 +55,17 @@ class InvestigationReport(BaseModel):
 
     headline: str = Field(
         description=(
-            "One imperative line naming the artifact to act on. It has to "
-            "stand alone, without the appendix."
+            "One concise imperative line naming the artifact to act on. Keep it "
+            "on one line, without Markdown, and make it stand alone without the "
+            "appendix."
         )
     )
     recommended_action: str = Field(
-        description="What to do next, naming a concrete artifact."
+        description=(
+            "One concise paragraph stating what to do next, naming the concrete "
+            "artifact, target, and owner when known. Use at most three ordered "
+            "steps and no Markdown code fences."
+        )
     )
     prior_art: list[str] = Field(
         default_factory=list,
@@ -78,14 +86,13 @@ class InvestigationReport(BaseModel):
         default_factory=list,
         description=(
             "What no referent could be produced for, each with the diagnostic "
-            "that would close it."
+            "that would close it. Prioritize the three most consequential leads."
         ),
     )
     appendix: str = Field(
         description=(
-            "The full narrative: the reasoning, the axis comparison, the "
-            "control groups, and the timestamped sequence over the "
-            "disruptive-operation window."
+            "The full narrative: the reasoning, relevant comparisons and "
+            "control groups, and the timestamped sequence around the failure."
         )
     )
 
@@ -99,6 +106,15 @@ def investigation_task() -> str:
     """
     package = __name__.rpartition(".")[0]
     return resources.files(package).joinpath(_PROMPT_RESOURCE_NAME).read_text()
+
+
+@functools.cache
+def lifecycle_investigation_task() -> str:
+    """The task for setup and teardown failures, loaded from the package."""
+    package = __name__.rpartition(".")[0]
+    return (
+        resources.files(package).joinpath(_LIFECYCLE_PROMPT_RESOURCE_NAME).read_text()
+    )
 
 
 def render_report_lines(report: InvestigationReport | None) -> list[str]:

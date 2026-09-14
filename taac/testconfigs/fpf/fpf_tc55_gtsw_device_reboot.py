@@ -20,9 +20,9 @@ Two-playbook structure (per design):
     port-state, bgp-RIB convergence, and unclean-exit are NOT asserted in this
     churn window; only the service-agnostic safety signals (systemctl minus the
     bounced services, core dumps, HRT mem/driver, ODS congestion) are checked.
-  Playbook 2 (LONGEVITY, strict): full stable-state contract — once the box has
-    settled, EVERYTHING (bgp, ports, sessions, all lanes incl. lane 0) must be
-    fully recovered. This is where recovery is verified at full strength.
+  Playbook 2 (RECOVERY UNDRAIN, strict): explicitly undrains the rebooted GTSW,
+    verifies the readback, settles, restores RDMA if it collapsed, then requires
+    full sessions/routes/traffic and every port that was UP before reboot.
 
 DESIGN NOTES (to validate/tune on the first hardware run):
   - ``create_system_reboot_step`` does not carry an explicit device target; the
@@ -38,13 +38,20 @@ Usage:
     --debug --continue-on-precheck-failure --skip-fboss-rsyslog
 """
 
+from taac.health_checks.healthcheck_definitions import (
+    create_drain_state_check,
+    create_fpf_host_spray_check,
+)
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
     create_fpf_disrupt_window_playbook,
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
+    create_fpf_drain_interface_step,
     create_fpf_record_disruption_time_step,
+    create_fpf_up_port_baseline_step,
+    create_fpf_verify_disruption_step,
     create_longevity_step,
     create_system_reboot_step,
 )
@@ -56,12 +63,15 @@ from taac.task_definitions import (
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
@@ -69,6 +79,7 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     TRIGGER_STSWS,
@@ -85,14 +96,22 @@ from taac.test_as_a_config.types import TestConfig
 # on s005-s008 = planes 4-7); injected once by the setup task, withdrawn in
 # teardown, so the longevity playbook passes skip_injection=True.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
-INJECTED_LANES = ALL_LANES
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 INJECT_SETTLE_SEC = 300
 STABILIZATION_DELAY_SEC = 120
 REBOOT_COMEUP_SEC = 300  # 5 min for the box to reboot + rejoin the fabric
 LONGEVITY_SOAK_SEC = 300
 LONGEVITY_SETTLE_SEC = 120
+RECOVERED_BASELINE_QUALIFICATION_SEC = 120
+UP_PORT_BASELINE_KEY = "tc55_pre_reboot_up_ports"
 SESSION_LOOKBACK_SEC = 1000
 
 # A full reboot takes bgp + ports + every service DOWN with an unclean teardown,
@@ -104,16 +123,26 @@ REBOOT_CONTRACT_SERVICE = "wedge_agent"
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 
 
 def create_fpf_tc55_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
     # Prefixes are injected once by the setup task (8-plane VF groups), so the
     # disrupt window only stabilizes/records/reboots/comes-up.
     disrupt_steps = [
+        create_fpf_up_port_baseline_step(
+            action="capture",
+            devices=[OBSERVER_GTSWS[0]],
+            baseline_key=UP_PORT_BASELINE_KEY,
+            device_regexes=[OBSERVER_GTSWS[0]],
+        ),
         create_longevity_step(
             duration=STABILIZATION_DELAY_SEC,
             description=f"Stabilize {STABILIZATION_DELAY_SEC}s before the reboot",
@@ -124,6 +153,7 @@ def create_fpf_tc55_test_config() -> TestConfig:
         create_system_reboot_step(
             trigger=taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT,
             description="FULL_SYSTEM_REBOOT of the DUT GTSW",
+            device_regexes=[OBSERVER_GTSWS[0]],
         ),
         create_longevity_step(
             duration=REBOOT_COMEUP_SEC,
@@ -131,33 +161,74 @@ def create_fpf_tc55_test_config() -> TestConfig:
         ),
     ]
 
+    disrupt_postchecks = build_kill_disrupt_postchecks(
+        killed_service=REBOOT_CONTRACT_SERVICE,
+        observer_gtsws=OBSERVER_GTSWS,
+        hrt_memory_hosts=HRT_MEMORY_HOSTS,
+        spray_hosts=spray,
+        kill_duration_sec=REBOOT_COMEUP_SEC,
+        prefix_count=PREFIX_COUNT,
+        skip_ssh=skip_ssh,
+        expected_fsdb_total=EXPECTED_FSDB_SESSION_COUNT,
+        session_lookback_sec=SESSION_LOOKBACK_SEC,
+    )
+    disrupt_postchecks.append(
+        create_drain_state_check(
+            expected_drained=True,
+            device_name=OBSERVER_GTSWS[0],
+            check_id="gtsw_reboot_drained_state",
+        )
+    )
+    if spray:
+        disrupt_postchecks.append(
+            create_fpf_host_spray_check(
+                hosts=spray,
+                impacted_lanes_by_host={host: ["beth0"] for host in spray},
+                impacted_max_gbps=10.0,
+                window_from_disruption_time=True,
+                check_id="gtsw_reboot_drained_traffic",
+            )
+        )
+
     disrupt_playbook = create_fpf_disrupt_window_playbook(
         playbook_name="fpf_tc55_gtsw_device_reboot_disrupt",
         disruption_steps=disrupt_steps,
         spray_hosts=spray,
-        postchecks=build_kill_disrupt_postchecks(
-            killed_service=REBOOT_CONTRACT_SERVICE,
-            observer_gtsws=OBSERVER_GTSWS,
-            hrt_memory_hosts=HRT_MEMORY_HOSTS,
-            spray_hosts=spray,
-            kill_duration_sec=REBOOT_COMEUP_SEC,
-            prefix_count=PREFIX_COUNT,
-            skip_ssh=skip_ssh,
-            expected_fsdb_total=EXPECTED_FSDB_SESSION_COUNT,
-            session_lookback_sec=SESSION_LOOKBACK_SEC,
-        ),
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
+        postchecks=disrupt_postchecks,
     )
 
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
         trigger_stsws=TRIGGER_STSWS,
-        soak_duration_sec=LONGEVITY_SOAK_SEC,
+        disruption_steps=[
+            create_fpf_drain_interface_step(
+                interfaces=[],
+                drain=False,
+                target_device=OBSERVER_GTSWS[0],
+                description="Undrain the rebooted GTSW before recovery",
+            ),
+            create_fpf_verify_disruption_step(
+                interfaces=[],
+                mode="device_drain",
+                expect_drained=False,
+                fail_if_ineffective=True,
+                target_device=OBSERVER_GTSWS[0],
+                description="Fail-closed readback: rebooted GTSW is undrained",
+            ),
+            create_longevity_step(
+                duration=LONGEVITY_SETTLE_SEC,
+                description="Settle after undraining the rebooted GTSW",
+            ),
+        ],
+        soak_duration_sec=0,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
-        playbook_name="fpf_tc55_gtsw_device_reboot_longevity",
+        playbook_name="fpf_tc55_gtsw_device_reboot_recovery_undrain",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -167,14 +238,22 @@ def create_fpf_tc55_test_config() -> TestConfig:
         # 8-plane: prefixes injected once by the setup task; check all 8 lanes.
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         lanes=INJECTED_LANES,
-        # GTSW device reboot is DISRUPTIVE: metrics blip mid-window and reconverge
-        # by end. MODE A (last_sample) asserts only the last in-window sample holds
-        # golden.
-        convergence_blip_mode="last_sample",
-        # Expected mid-disruption STSW packet loss to purged lane-0 dests —
-        # informational, not a hard fail (user-confirmed).
-        ods_discard_informational=True,
+        recovered_baseline_qualification_sec=RECOVERED_BASELINE_QUALIFICATION_SEC,
+        final_validation_steps=[
+            create_longevity_step(
+                duration=LONGEVITY_SOAK_SEC,
+                description="Strict stable-state soak after reboot undrain recovery",
+            ),
+            create_fpf_up_port_baseline_step(
+                action="verify",
+                devices=[OBSERVER_GTSWS[0]],
+                baseline_key=UP_PORT_BASELINE_KEY,
+                device_regexes=[OBSERVER_GTSWS[0]],
+            ),
+        ],
     )
 
     return TestConfig(
@@ -185,14 +264,15 @@ def create_fpf_tc55_test_config() -> TestConfig:
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
                 enable_fsdb_session_collector=True,
-                fsdb_session_host=GPU_HOSTS[0],
+                fsdb_session_hosts=GPU_HOSTS,
                 fsdb_session_expected=EXPECTED_FSDB_SESSION_COUNT,
                 rf_vf_groups=RF_VF_GROUPS,
             ),

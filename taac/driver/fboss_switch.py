@@ -71,37 +71,6 @@ if not TAAC_OSS:
     from fboss.fb_thrift_clients import FbossAgentClient
 
 
-try:
-    from neteng.fboss.bgp.client.canonical_rib_py3 import (
-        get_rib_entries,
-        get_rib_subprefixes,
-    )
-except ModuleNotFoundError as exc:
-    _canonical_rib_module = "neteng.fboss.bgp.client.canonical_rib_py3"
-    # Only tolerate the known OSS omission. A missing transitive dependency
-    # inside a present canonical_rib module is a broken build and must surface.
-    if not TAAC_OSS or not (
-        exc.name == _canonical_rib_module
-        or _canonical_rib_module.startswith(f"{exc.name}.")
-    ):
-        raise
-    # The neteng.fboss.bgp subpackage (canonical_rib_py3) is generated only
-    # in Meta-internal builds; the OSS thrift build does not produce it. Keep
-    # the driver module importable in OSS by deferring the failure to call
-    # time — only the RIB-dump helpers below actually need it.
-    async def get_rib_entries(*_args, **_kwargs):  # noqa: F811
-        raise NotImplementedError(
-            "neteng.fboss.bgp.client.canonical_rib_py3 is unavailable in this "
-            "build; get_rib_entries is not supported."
-        )
-
-    async def get_rib_subprefixes(*_args, **_kwargs):  # noqa: F811
-        raise NotImplementedError(
-            "neteng.fboss.bgp.client.canonical_rib_py3 is unavailable in this "
-            "build; get_rib_subprefixes is not supported."
-        )
-
-
 from neteng.fboss.bgp_attr.types import TBgpAfi, TIpPrefix
 from neteng.fboss.bgp_route_types.types import TBgpPath, TRibEntry
 from neteng.fboss.bgp_thrift.clients import TBgpService
@@ -158,6 +127,30 @@ from neteng.fboss.switch_config.thrift_types import SwitchDrainState
 from neteng.fboss.switch_config.types import DsfNode
 from neteng.fboss.transceiver import thrift_types as transceiver_types
 from neteng.fboss.transceiver.thrift_types import ReadRequest, TransceiverIOParameters
+
+if not TAAC_OSS:
+    from neteng.fboss.bgp.client.canonical_rib_py3 import (
+        get_rib_entries,
+        get_rib_subprefixes,
+    )
+    from neteng.fboss.bgp_thrift.types import TGetUpdateGroupSummariesResponse
+else:
+
+    async def get_rib_entries(
+        client: TBgpService,
+        afi: TBgpAfi,
+        *,
+        rpc_options: t.Any = None,
+    ) -> t.List[TRibEntry]:
+        return list(await client.getRibEntries(afi, rpc_options=rpc_options))
+
+    async def get_rib_subprefixes(
+        client: TBgpService,
+        prefix: str,
+        *,
+        rpc_options: t.Any = None,
+    ) -> t.List[TRibEntry]:
+        return list(await client.getRibSubprefixes(prefix, rpc_options=rpc_options))
 
 # =============================================================================
 # TAAC / DNE (OSS-compatible)
@@ -224,6 +217,7 @@ from taac.utils.common import (
     async_everpaste_str,
     create_everpaste_fburl,
 )
+from taac.utils import meta_internal_bridge_client
 from taac.utils.oss_driver_utils import AsyncSSHClient
 from taac.utils.oss_taac_lib_utils import (
     async_memoize_timed,
@@ -2086,7 +2080,7 @@ class FbossSwitch(AbstractSwitch):
         return interface_bgp_session_state_map
 
     async def async_create_cold_boot_file(self) -> None:
-        cmd: str = "touch /dev/shm/fboss/warm_boot/cold_boot_once_0 && "
+        cmd: str = "touch /dev/shm/fboss/warm_boot/cold_boot_once_0"
         await self.async_run_cmd_on_shell(cmd)
 
     async def _async_get_port_id_from_interface_name(self, interface_name: str) -> int:
@@ -3264,6 +3258,8 @@ class FbossSwitch(AbstractSwitch):
         block: bool = True,
         return_on_msg: t.Optional[str] = None,
         *args,
+        ssh_port: int = 22,
+        username: t.Optional[str] = None,
         **kwargs,
     ) -> str:
         """
@@ -3272,24 +3268,35 @@ class FbossSwitch(AbstractSwitch):
         OSS implementation uses asyncssh from oss_driver_utils.
         The internal mixin overrides this with Meta's AsyncSSHClient/ParamikoClient.
         """
-        ssh_port = 22
-
         self.logger.debug(f"Running cmd {cmd} on {self.hostname}")
 
-        # Pass username=None so AsyncSSHClient falls back to TAAC_SSH_USER
-        # (default "root"); password is similarly picked up from
-        # TAAC_SSH_PASSWORD when set. See oss_driver_utils for the
-        # supported env vars.
-        async with AsyncSSHClient(
-            self.hostname, port=ssh_port, username=None
-        ) as client:
-            result = await client.async_run(
-                cmd=cmd,
+        if TAAC_OSS and meta_internal_bridge_client.bridge_enabled():
+            result = await meta_internal_bridge_client.ssh_exec(
+                hostname=self.hostname,
+                command=cmd,
                 timeout_sec=timeout,
-                print_stdout=print_stdout,
                 block=block,
                 return_on_msg=return_on_msg,
+                port=ssh_port,
+                username=username,
             )
+            if print_stdout and result.stdout:
+                self.logger.info(result.stdout)
+        else:
+            # Pass username=None so AsyncSSHClient falls back to TAAC_SSH_USER
+            # (default "root"); password is similarly picked up from
+            # TAAC_SSH_PASSWORD when set. See oss_driver_utils for the
+            # supported env vars.
+            async with AsyncSSHClient(
+                self.hostname, port=ssh_port, username=username
+            ) as client:
+                result = await client.async_run(
+                    cmd=cmd,
+                    timeout_sec=timeout,
+                    print_stdout=print_stdout,
+                    block=block,
+                    return_on_msg=return_on_msg,
+                )
 
         # pyrefly: ignore [bad-return]
         return result.stdout if result else None
@@ -3570,15 +3577,68 @@ class FbossSwitch(AbstractSwitch):
         self,
         service: Service,
         agents: Optional[List[str]] = None,
+        accept_failed_if_process_absent: bool = False,
     ) -> None:
+        """Stop a service and verify the resulting systemd state.
+
+        Intentional outage tests may opt in to accepting ``FAILED`` because
+        some services retain that unit state after their process exits. The
+        opt-in remains fail-closed: both ``INACTIVE`` and ``FAILED`` require
+        systemd ``MainPID=0`` before the stop is considered complete.
+        """
+
+        async def intentional_stop_complete(
+            counters: Optional[Dict[str, str]] = None,
+            *,
+            fail_on_live_process: bool = False,
+        ) -> bool:
+            if counters is None:
+                counters = await self.async_get_systemd_service_counters(service)
+            status = await self.async_get_service_status(service, counters)
+            if status not in {
+                SystemctlServiceStatus.INACTIVE,
+                SystemctlServiceStatus.FAILED,
+            }:
+                return False
+            main_pid = await self.async_get_single_systemd_service_counter_as_int(
+                service, "MainPID", counters
+            )
+            if main_pid != 0:
+                if fail_on_live_process:
+                    raise RuntimeError(
+                        f"Service {service.value} is {status.name} but process "
+                        f"MainPID={main_pid} is still present"
+                    )
+                return False
+            return True
+
+        if accept_failed_if_process_absent and await intentional_stop_complete():
+            self.logger.info(
+                f"Service {service.value} is already non-active with no live "
+                "process; not issuing a duplicate stop"
+            )
+            return
+
         cmd: str = f"systemctl stop {service.value}"
         self.logger.info(f"Attempting to stop {service.value} on {self.hostname}...")
         await self.async_run_cmd_on_shell(cmd)
-        # verifying if the service is now inactive
-        status = await self.async_get_service_status(service)
-        assert status == SystemctlServiceStatus.INACTIVE
+        service_counters = await self.async_get_systemd_service_counters(service)
+        status = await self.async_get_service_status(service, service_counters)
+        if accept_failed_if_process_absent:
+            if not await intentional_stop_complete(
+                service_counters, fail_on_live_process=True
+            ):
+                raise RuntimeError(
+                    f"Intentional stop of {service.value} left service in "
+                    f"{status.name}; expected INACTIVE, or FAILED with MainPID=0"
+                )
+        elif status != SystemctlServiceStatus.INACTIVE:
+            raise RuntimeError(
+                f"Service {service.value} did not reach INACTIVE after stop; "
+                f"observed {status.name}"
+            )
         self.logger.info(
-            f"Successfully verified that the {service.name} is now inactive on {self.hostname}"
+            f"Successfully verified that {service.name} is stopped on {self.hostname}"
         )
 
     @is_dne_test_device
@@ -3768,6 +3828,20 @@ class FbossSwitch(AbstractSwitch):
             await client.softdrain_interface(interface, task_id)
         self.logger.info(
             f"Softdrain of interface '{interface}' on {self.hostname} completed"
+        )
+
+    async def async_drain_interfaces(
+        self, interfaces: List[str], task_id: int = 0
+    ) -> None:
+        """Hard-drain several interfaces in one local-drainer request."""
+        self.logger.info(
+            f"Draining interfaces {interfaces} on {self.hostname} "
+            f"(task_id={task_id})"
+        )
+        async with self.get_async_local_drainer_client() as client:
+            await client.drain_interfaces(interfaces, task_id)
+        self.logger.info(
+            f"Drain of interfaces {interfaces} on {self.hostname} completed"
         )
 
     async def async_softdrain_interfaces(
@@ -5313,6 +5387,38 @@ class FbossSwitch(AbstractSwitch):
         )
         return result
 
+    async def async_get_openr_kvstore_keys(self) -> Dict[str, List[str]]:
+        """
+        Returns every Open/R KvStore key name, grouped by area.
+        Thrift equivalent of ``breeze kvstore keys``.
+
+        Uses ``getKvStoreHashFilteredArea``, which returns key metadata without
+        the serialized values. That matters at scale: a 4k-key BBF topology is
+        ~25 MB of values but only ~200 KB of key names, and the large
+        ``adj:`` databases are ~51 KB each.
+
+        Returns a dict mapping area -> sorted list of key names.
+        """
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        result: Dict[str, List[str]] = {}
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            config = await client.getRunningConfigThrift()
+            areas: Set[str] = {a.area_id for a in config.areas}
+            for area in areas:
+                publication = await client.getKvStoreHashFilteredArea(
+                    KeyDumpParams(), area
+                )
+                result[area] = sorted(publication.keyVals.keys())
+        self.logger.info(
+            f"{self.hostname}: kvstore key counts per area: "
+            f"{ {area: len(keys) for area, keys in result.items()} }"
+        )
+        return result
+
     async def async_get_openr_kvstore_kv_signature(self) -> Dict[str, str]:
         """
         Returns a SHA-256 hash of the KvStore per area.  All switches in
@@ -5532,10 +5638,11 @@ class FbossSwitch(AbstractSwitch):
             "links": links,
         }
 
-    async def async_get_openr_monitor_counters(self) -> Mapping[str, int]:
+    async def async_get_openr_monitor_counters(
+        self, counter_names: Optional[Sequence[str]] = None
+    ) -> Mapping[str, int]:
         """
-        Returns Open/R runtime counters (memory, CPU, SPF time, flood
-        rate, etc.) via fb303.
+        Returns Open/R runtime counters, narrowed to ``counter_names`` when given.
         Thrift equivalent of ``breeze monitor counters``.
         """
         if TAAC_OSS:
@@ -5544,7 +5651,10 @@ class FbossSwitch(AbstractSwitch):
                 "Not available in OSS mode."
             )
         async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
-            counters = await client.getCounters()
+            if counter_names is None:
+                counters = await client.getCounters()
+            else:
+                counters = await client.getSelectedCounters(list(counter_names))
         self.logger.info(
             f"{self.hostname}: retrieved {len(counters)} monitor counter(s)"
         )

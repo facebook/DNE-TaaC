@@ -26,9 +26,7 @@ W800_DEVICE_NAME = "wedge800001.TODO.example"
 # TODO(w800): local MAC for the DUT side of IXIA peering (placeholder = locally
 # administered address). Read from the real DUT when it arrives.
 W800_LOCAL_MAC_ADDRESS = "02:00:00:00:00:0c"
-# Basset device pool. NOTE: create_npi_cpu_queue_test_config currently hardcodes
-# basset_pool="dne.test" internally, so this is informational until that param
-# is honored. TODO(w800): confirm the w800 lab pool.
+# Basset device pool. TODO(w800): confirm the w800 lab pool.
 W800_BASSET_POOL = "dne.test"
 
 # ---------------------------------------------------------------------------

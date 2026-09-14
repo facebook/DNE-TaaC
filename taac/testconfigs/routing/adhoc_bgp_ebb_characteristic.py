@@ -76,17 +76,18 @@ BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 #
 # BAG012 varying-combinations engine, made ingress-only + non-vacuous. eBGP
 # peers advertise a fixed 800K paths, ACCEPTED into the RIB (route_registry
-# cleared + acceptance community) but with an UNRESOLVABLE nexthop — received +
-# accepted yet NEVER advertised (no iBGP egress). Steady-state memory must stay
-# ~constant regardless of how many distinct attribute sets back those 800K paths.
+# cleared + acceptance community) with directly connected, RESOLVABLE nexthops.
+# The scenario remains ingress-only because no iBGP egress is configured.
+# Steady-state memory must stay ~constant regardless of how many distinct
+# attribute sets back those 800K paths.
 #
-#   IXIA eBGP ×8 ══▶ bag010 (DUT) accept→RIB ──╳ nexthop unresolvable
-#     800K paths      route_registry cleared   └─▶ never advertised
+#   IXIA eBGP ×8 ══▶ bag010 (DUT) accept→RIB; no iBGP egress peers
+#     800K paths      route_registry cleared; nexthops resolve on-link
 #
 #   ┌─ FIXED ──────────────────────────┬─ DYNAMIC (swept) ───────────────┐
 #   │ eBGP peers  = 8                  │ N = distinct attribute-SETS     │
 #   │ total paths = 800K               │ (triples from the pools, spread │
-#   │ nexthop     = unresolvable       │  round-robin over the paths):   │
+#   │ nexthop     = resolvable         │  round-robin over the paths):   │
 #   │ iBGP egress = none               │      100K → 800K                │
 #   │ ATTRIBUTE POOLS (the 300):       │                                 │
 #   │   100 complete AS paths          │ 100³ = 1M ≥ 800K, so N is swept │
@@ -95,8 +96,9 @@ BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 #   └──────────────────────────────────┴─────────────────────────────────┘
 #   The 300 pool entries are the ONLY attribute payloads the DUT stores at any
 #   sweep point; only the per-combination attribute bundle scales with N.
-#   GATES : acceptance (RECEIVED)=BLOCKING · mem-growth (≤ k^0.5)=BLOCKING
-#           (k^0.5 is a loose backstop — uncalibrated, see the step constant)
+#   GATES : acceptance + resolved nexthops + fixed pools + deduplicated paths
+#           + mem-growth (≤ k^0.5), all BLOCKING. The memory exponent is a
+#           loose backstop pending clean-run recalibration.
 #   name  : BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP
 BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
@@ -222,8 +224,10 @@ BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
 #   │ inject       = iBGP v6   │     5K → 50K                    │
 #   │ nexthop      = iface-st. │                                 │
 #   └──────────────────────────┴─────────────────────────────────┘
-#   GATES : per-scale convergence (observe-first, 700s budget) + egress-queue
-#           backpressure task (permissive default, observe until calibrated)
+#   GATES : route scale + real measurement BLOCKING; 30s convergence,
+#           scale-independence, and egress-queue backpressure PERMISSIVE until
+#           calibrated. Queue sampling exists, but the named gate is not yet
+#           applied to the workload verdict.
 #   name  : BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP
 BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_route_churn_processing_test_config(

@@ -11,6 +11,10 @@ Allows callers to use the package-level path:
 instead of the deeper module path.
 """
 
+from taac.testconfigs.npi.ac100t_npi_test_config import (
+    AC100T_CPU_QUEUE_TEST_CONFIG,
+    AC100T_TEST_CONFIGS,
+)
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_dctypef_npi_cpu_queue_test_config,
     create_npi_cpu_queue_test_config,
@@ -30,6 +34,9 @@ from taac.testconfigs.npi.icepack_ecmp_resource_testing_config import (
 )
 from taac.testconfigs.npi.icepack_gtsw_warmboot_troubleshooting_config import (
     NPI_ICEPACK_GTSW007_WARMBOOT_TROUBLESHOOTING_TEST_CONFIG,
+)
+from taac.testconfigs.npi.minipack_fsw004_p003_qzd1_cpu_queue_test_config import (
+    MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG,
 )
 from taac.testconfigs.npi.multinode_pfc_test_config import (
     NPI_DVT_ICEPACK_GTSW__MULTI_NODE_PFC_TEST_CONFIG,
@@ -61,6 +68,8 @@ from taac.testconfigs.npi.wedge800_npi_test_config import (
 )
 
 __all__ = [
+    "AC100T_CPU_QUEUE_TEST_CONFIG",
+    "AC100T_TEST_CONFIGS",
     "ICEPACK_GTSW_STSW_FLAP_PORTS",
     "NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG",
     "NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG",
@@ -86,6 +95,7 @@ __all__ = [
     "NPI_ICEPACK_GTSW007_WARMBOOT_TROUBLESHOOTING_TEST_CONFIG",
     "W800_BGP_HARDENING_TEST_CONFIG",
     "W800_CPU_QUEUE_TEST_CONFIG",
+    "MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG",
     "W800_LONGEVITY_TEST_CONFIG",
     "W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG",
     "W800_THRIFT_HARDENING_TEST_CONFIG",

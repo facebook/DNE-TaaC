@@ -170,6 +170,7 @@ def create_fpf_tc32_test_config() -> TestConfig:
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc32_downlink_flaps_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefix_host=PROD_PREFIX_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
@@ -180,6 +181,7 @@ def create_fpf_tc32_test_config() -> TestConfig:
         rf_vf_groups=RF_VF_GROUPS,
         lanes=INJECTED_LANES,
         hrt_device_ids=HRT_DEVICE_IDS,
+        recovered_baseline_qualification_sec=120,
     )
 
     return TestConfig(
@@ -192,6 +194,7 @@ def create_fpf_tc32_test_config() -> TestConfig:
                 hosts=GPU_HOSTS,
                 hrt_device_ids=HRT_DEVICE_IDS,
                 hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
                 prod_prefixes=PROD_PREFIXES,
                 prod_prefix_host=PROD_PREFIX_HOST,

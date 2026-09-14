@@ -71,6 +71,9 @@ from taac.testconfigs.fpf.fpf_tc28_fsdb_kill import (
 from taac.testconfigs.fpf.fpf_tc29_fsdb_gr_stop30_reenable import (
     TEST_CONFIG as FPF_TC29_FSDB_GR_STOP30_REENABLE,
 )
+from taac.testconfigs.fpf.fpf_tc29b_fsdb_gr_remote_withdraw import (
+    TEST_CONFIG as FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW,
+)
 from taac.testconfigs.fpf.fpf_tc30_fsdb_gr_stop180_no_reenable import (
     TEST_CONFIG as FPF_TC30_FSDB_GR_STOP180_NO_REENABLE,
 )
@@ -91,6 +94,9 @@ from taac.testconfigs.fpf.fpf_tc36_stsw_all_connections_down import (
 )
 from taac.testconfigs.fpf.fpf_tc37_nic_side_link_flap import (
     TEST_CONFIG as FPF_TC37_NIC_SIDE_LINK_FLAP,
+)
+from taac.testconfigs.fpf.fpf_tc37b_nic_side_continuous_flap import (
+    TEST_CONFIG as FPF_TC37B_NIC_SIDE_CONTINUOUS_FLAP,
 )
 from taac.testconfigs.fpf.fpf_tc38_persistent_ndp_clear import (
     TEST_CONFIG as FPF_TC38_PERSISTENT_NDP_CLEAR,
@@ -143,6 +149,15 @@ from taac.testconfigs.fpf.fpf_tc54_stsw_device_drain import (
 from taac.testconfigs.fpf.fpf_tc55_gtsw_device_reboot import (
     TEST_CONFIG as FPF_TC55_GTSW_DEVICE_REBOOT,
 )
+from taac.testconfigs.fpf.fpf_tc56_cont_flaps_qsfp_restart import (
+    TEST_CONFIG as FPF_TC56_CONT_FLAPS_QSFP_RESTART,
+)
+from taac.testconfigs.fpf.fpf_tc57_cont_flaps_qsfp_crash import (
+    TEST_CONFIG as FPF_TC57_CONT_FLAPS_QSFP_CRASH,
+)
+from taac.testconfigs.fpf.fpf_tc58_multi_fboss_process_kill_15s_5min import (
+    TEST_CONFIG as FPF_TC58_MULTI_FBOSS_PROCESS_KILL_15S_5MIN,
+)
 
 __all__ = [
     "FPF_GAR_CLASS_A",
@@ -168,6 +183,7 @@ __all__ = [
     "FPF_TC27_AGENT_COLDBOOT",
     "FPF_TC28_FSDB_KILL",
     "FPF_TC29_FSDB_GR_STOP30_REENABLE",
+    "FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW",
     "FPF_TC30_FSDB_GR_STOP180_NO_REENABLE",
     "FPF_TC31_FSDB_ENABLE_RECOVER",
     "FPF_TC32_DOWNLINK_FLAPS",
@@ -175,6 +191,7 @@ __all__ = [
     "FPF_TC35_STSW_UNDRAIN_REINJECT",
     "FPF_TC36_STSW_ALL_CONNECTIONS_DOWN",
     "FPF_TC37_NIC_SIDE_LINK_FLAP",
+    "FPF_TC37B_NIC_SIDE_CONTINUOUS_FLAP",
     "FPF_TC38_PERSISTENT_NDP_CLEAR",
     "FPF_TC39_FSDB_KILL_5MIN",
     "FPF_TC40_CONT_INTERFACE_FLAPS",
@@ -192,4 +209,7 @@ __all__ = [
     "FPF_TC52_HRT_RESTART",
     "FPF_TC54_STSW_DEVICE_DRAIN",
     "FPF_TC55_GTSW_DEVICE_REBOOT",
+    "FPF_TC56_CONT_FLAPS_QSFP_RESTART",
+    "FPF_TC57_CONT_FLAPS_QSFP_CRASH",
+    "FPF_TC58_MULTI_FBOSS_PROCESS_KILL_15S_5MIN",
 ]

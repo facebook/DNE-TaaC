@@ -22,6 +22,14 @@ from dataclasses import dataclass
 
 import paramiko
 from taac.abstractions.churn.attribute import AttributeChurn
+from taac.abstractions.churn.route import RouteChurn
+from taac.abstractions.churn.session import SessionChurn
+from taac.abstractions.churn.workloads import (
+    IgpMetricChurn,
+    IgpUnresolvableChurn,
+    LongevityCommunityChurn,
+    MultipathChurn,
+)
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -84,6 +92,7 @@ from taac.driver.driver_constants import (
     OtherSystemctlServiceName,
     Service as DriverService,
 )
+from taac.driver.fboss_switch import FbossSwitch
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
     AbstractIxiaHealthCheck,
@@ -1156,6 +1165,21 @@ def create_bgp_longevity_community_churn_step(
     )
 
 
+def create_longevity_community_churn_step(
+    churn: LongevityCommunityChurn,
+    *,
+    description: str | None = None,
+) -> Step:
+    """Lower typed longevity-community intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_longevity_community_churn",
+            **churn.to_step_params(),
+        },
+        description=description or "Run wall-clock bounded longevity community churn",
+    )
+
+
 def create_bgp_route_storm_step(
     *,
     hostname: str,
@@ -1302,6 +1326,174 @@ def create_bgp_multipath_oscillation_step(
     return create_custom_step(
         params_dict=params,
         description=description or "Run path-aware dual-stack multipath oscillation",
+    )
+
+
+def create_multipath_churn_step(
+    churn: MultipathChurn,
+    *,
+    description: str | None = None,
+) -> Step:
+    """Lower typed multipath churn intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_multipath_oscillation",
+            **churn.to_step_params(),
+        },
+        description=description or "Run path-aware dual-stack multipath oscillation",
+    )
+
+
+def create_openr_scale_injection_step(
+    helper_name: str,
+    dut_name: str,
+    dut_host: str,
+    num_spines: int,
+    num_leaves: int,
+    dut_role: str = "leaf",
+    dut_port: int = 2018,
+    simulate_neighbors: bool = False,
+    verify_routes: bool = False,
+    remote_path: str = "/mnt/flash/scale_test_server",
+    forbidden_dut_hosts: t.Optional[t.List[str]] = None,
+    topology_type: t.Optional[str] = None,
+    num_prefixes_per_node: t.Optional[int] = None,
+    num_sites: t.Optional[int] = None,
+    num_super_spines: t.Optional[int] = None,
+    extra_flags: t.Optional[t.List[str]] = None,
+    run_duration_sec: t.Optional[int] = None,
+    run_timeout_sec: int = 240,
+    require_reachable: bool = True,
+    require_binary_present: bool = True,
+    restart_openr: bool = False,
+    openr_ready_timeout_sec: t.Optional[int] = None,
+    jq_var_prefix: str = "openr_scale",
+    area: t.Optional[str] = None,
+    areas: t.Optional[str] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Run the Open/R ``scale_test_server`` injector on ``helper_name``.
+
+    Injects a synthetic fabric into ``dut_name``'s KvStore and fails when the
+    DUT received fewer key-values than the fabric should have sent.
+    ``kvstore.received_key_vals`` is sampled from the DUT's own Open/R over
+    Thrift immediately before and after the injector runs; the injector's own
+    report of what it sent is exactly the number a policed path invalidates, so
+    it is never the source. ``kvstore.updated_key_vals`` is logged over the same
+    window as a diagnostic -- gating on the merged subset belongs to the
+    KvStore-merge test, which carries a clean-store precondition.
+
+    Also publishes what was injected, as jq variables for
+    ``create_openr_kvstore_keys_check``:
+
+    * ``<jq_var_prefix>_expected_nodes`` -- the synthetic node names the
+      injector builds, derived from the same topology flags this step passes to
+      it. The DUT replaces index 0 of its own role, so that name is excluded.
+    * ``<jq_var_prefix>_prefixes_per_node`` -- how many ``prefix:`` keys each of
+      those nodes must have.
+    * ``<jq_var_prefix>_expected_keys_sent``,
+      ``<jq_var_prefix>_expected_node_count`` and
+      ``<jq_var_prefix>_pre_injection_counts`` -- diagnostics for the run log.
+
+    The expectation is derived from the command line rather than read out of the
+    injector's output. The only count the binary reports before injecting is its
+    *generated* topology, logged before the DUT replaces a node, so it is high
+    by ``1 + num_prefixes_per_node`` and can never be the expectation.
+
+    Args:
+        helper_name: device running the injector. The binary is expected to be
+            pre-staged at ``remote_path``; this step never builds, copies or
+            removes it.
+        dut_name: device running real Open/R, whose KvStore is measured.
+        dut_host: address the injector connects to. MUST be the DUT's inband
+            address -- the mgmt path is control-plane policed and resets the
+            large ``adj:`` requests mid-flight.
+        forbidden_dut_hosts: addresses that must never be used as ``dut_host``.
+            List the DUT's mgmt address here to make that mistake fail loudly.
+        num_spines / num_leaves: fabric size. 64/40 is the BBF-representative
+            point: the target fabric is 99 nodes (64 spines + 31 data leaves +
+            4 control leaves), and per-leaf adjacency count is driven by spine
+            count x links-per-spine, so 64 spines makes a leaf DUT exactly
+            representative while leaf count only scales fabric size.
+        dut_role: ``leaf`` (neighbors are spines) or ``spine``.
+        simulate_neighbors: run SparkFaker as well as KvStore injection.
+            Defaults to False: Spark simulation needs a VLAN trunk between the
+            helper and the DUT.
+        verify_routes: have the injector wait for the DUT to compute routes.
+            Defaults to False -- this test gates on key-values reaching the
+            DUT's KvStore, not on route computation or FIB programming.
+        run_duration_sec: how long the injector serves the fabric before
+            exiting. The injected keys outlive it, so this only has to cover the
+            injection itself.
+        run_timeout_sec: cap on the foreground command; must exceed
+            ``run_duration_sec``. The device command channel gives up near 300s.
+        require_binary_present: verify ``test -x remote_path`` on the helper
+            before injecting, so a missing pre-staged binary fails as a setup
+            problem rather than as an empty injector run.
+        restart_openr: cycle Open/R on the DUT before injecting. Defaults to
+            False. The gate measures key-values received across the injection,
+            which is independent of what the store already holds, and a
+            restart's full sync from the peer inflates that same counter. Open/R
+            on EOS is a configured daemon, so this is ``daemon Openr`` /
+            ``shutdown`` then ``no shutdown``, verified from both sides via
+            Open/R's own Thrift interface.
+        openr_ready_timeout_sec: budget for Open/R to serve Thrift again after
+            the restart. Observed cost to INITIALIZED is ~26s.
+        area: restrict key accounting to one KvStore area. Read side only --
+            it scopes what the step counts, and does not reach the injector.
+        areas: comma-separated area names for the injector's ``--areas``. Two or
+            more replicate the topology into each area and patch the DUT in as an
+            ABR; the binary treats one name as single-area. Distinct from
+            ``area``, which only scopes counting.
+    """
+    if num_spines <= 0 or num_leaves <= 0:
+        raise ValueError(
+            f"num_spines and num_leaves must be positive, got "
+            f"{num_spines} and {num_leaves}"
+        )
+    if dut_role not in ("leaf", "spine"):
+        raise ValueError(f"dut_role must be 'leaf' or 'spine', got {dut_role!r}")
+
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "openr_scale_injection",
+        "helper_name": helper_name,
+        "dut_name": dut_name,
+        "dut_host": dut_host,
+        "dut_port": dut_port,
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "dut_role": dut_role,
+        "simulate_neighbors": simulate_neighbors,
+        "verify_routes": verify_routes,
+        "remote_path": remote_path,
+        "run_timeout_sec": run_timeout_sec,
+        "require_reachable": require_reachable,
+        "require_binary_present": require_binary_present,
+        "restart_openr": restart_openr,
+        "jq_var_prefix": jq_var_prefix,
+    }
+    for key, value in (
+        ("forbidden_dut_hosts", forbidden_dut_hosts),
+        ("topology_type", topology_type),
+        ("num_prefixes_per_node", num_prefixes_per_node),
+        ("num_sites", num_sites),
+        ("num_super_spines", num_super_spines),
+        ("extra_flags", extra_flags),
+        ("run_duration_sec", run_duration_sec),
+        ("openr_ready_timeout_sec", openr_ready_timeout_sec),
+        ("area", area),
+        ("areas", areas),
+    ):
+        if value is not None:
+            params[key] = value
+
+    return create_custom_step(
+        params_dict=params,
+        description=description
+        or (
+            f"Inject {num_spines}-spine/{num_leaves}-leaf Open/R topology into "
+            f"{dut_name} KvStore from {helper_name}"
+        ),
     )
 
 
@@ -2896,20 +3088,14 @@ def create_fpf_drain_interface_step(
     mutation_token: t.Optional[str] = None,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Soft-drain / undrain via the on-box LOCAL_DRAINER, calling the driver
-    directly. With ``interfaces`` -> per-port (``async_softdrain_interface`` /
-    ``async_undrain_interface``); with EMPTY/None ``interfaces`` -> device-level
-    soft-drain of the whole DUT (``async_onbox_softdrain_device`` /
-    ``async_onbox_undrain_device``).
+    """Soft-drain / undrain through the on-box LOCAL_DRAINER FPF custom task.
 
-    Unlike ``create_drain_undrain_step(interfaces=...)`` (whose LOCAL_DRAINER path
-    resolves the interface against the discovered fabric topology and raises
-    "Interface not found" for the GPU-facing GTSW port), the per-port path here
-    passes the name straight to the drainer — the GPU-facing port is a real agent
-    port but is not in the fabric-discovered interface list. And unlike the
-    generic device path (which HARD-drains via ``async_onbox_drain_device``), the
-    device path here SOFT-drains for the control-up/data-drains contract. Use for
-    FPF link drain/undrain (per-port) and device drain/undrain (no interfaces).
+    Interface targets are passed directly to the FPF custom task, which applies
+    them through the singular local-drainer interface API. GPU-facing agent
+    ports therefore need not appear in testbed topology. With no interfaces,
+    this performs a whole-device soft drain or undrain. This FPF helper also
+    supports remote-device selection and mutation tokens; use the generic
+    drain/undrain factory for the bulk local/NDS workflow.
     """
     intfs = interfaces or []
     if intfs:
@@ -3028,6 +3214,70 @@ def create_fpf_record_disruption_time_step(
     )
 
 
+def create_fpf_record_mutation_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Record the wall-clock start of an FPF prefix scale mutation."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record FPF scale mutation time",
+        step_params=Params(
+            json_params=json.dumps({"custom_step_name": "record_fpf_mutation_time"})
+        ),
+    )
+
+
+def create_fpf_record_recovered_baseline_time_step(
+    description: t.Optional[str] = None,
+) -> Step:
+    """Anchor strict collector windows after all current recovery gates pass."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Record recovered-baseline qualification start",
+        step_params=Params(
+            json_params=json.dumps(
+                {"custom_step_name": "record_fpf_recovered_baseline_time"}
+            )
+        ),
+    )
+
+
+def create_fpf_verify_recovered_state_step(
+    *,
+    device_planes_by_host: t.Dict[str, t.Dict[str, t.List[int]]],
+    expected_count: int,
+    expected_sessions: int,
+    prod_prefix_expectations_by_host: t.Dict[
+        str, t.Dict[str, t.Dict[str, t.List[int]]]
+    ],
+    rf_vf_groups: t.List[t.Dict[str, t.Any]],
+    max_age_sec: float = 30.0,
+    future_timestamp_grace_sec: float = 1.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Point gate for fresh exact recovered state before baseline qualification."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or "Verify current recovered FPF state",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_verify_recovered_state",
+                    "device_planes_by_host": device_planes_by_host,
+                    "expected_count": expected_count,
+                    "expected_sessions": expected_sessions,
+                    "prod_prefix_expectations_by_host": (
+                        prod_prefix_expectations_by_host
+                    ),
+                    "rf_vf_groups": rf_vf_groups,
+                    "max_age_sec": max_age_sec,
+                    "future_timestamp_grace_sec": future_timestamp_grace_sec,
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_record_restart_time_step(
     description: t.Optional[str] = None,
 ) -> Step:
@@ -3056,6 +3306,57 @@ def create_fpf_record_restart_completion_time_step(
         step_params=Params(
             json_params=json.dumps(
                 {"custom_step_name": "record_fpf_restart_completion_time"}
+            )
+        ),
+    )
+
+
+def create_fpf_remote_prefix_gr_sequence_step(
+    local_gtsw: str,
+    remote_gtsw: str,
+    between_stops_sec: int = 30,
+    before_local_restart_sec: int = 30,
+    max_fsdb_outage_sec: int = 120,
+    service_state_timeout_sec: int = 30,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Stop local FSDB, stop remote BGP, then restore only local FSDB."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or "Create one-way remote-prefix withdrawal inside local FSDB GR",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_remote_prefix_gr_sequence",
+                    "local_gtsw": local_gtsw,
+                    "remote_gtsw": remote_gtsw,
+                    "between_stops_sec": int(between_stops_sec),
+                    "before_local_restart_sec": int(before_local_restart_sec),
+                    "max_fsdb_outage_sec": int(max_fsdb_outage_sec),
+                    "service_state_timeout_sec": int(service_state_timeout_sec),
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_remote_prefix_start_origin_bgp_step(
+    remote_gtsw: str,
+    service_state_timeout_sec: int = 30,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Restore the remote origin BGP service without reinjecting its routes."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description or f"Start remote bgpd on {remote_gtsw}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_remote_prefix_start_origin_bgp",
+                    "remote_gtsw": remote_gtsw,
+                    "service_state_timeout_sec": int(service_state_timeout_sec),
+                }
             )
         ),
     )
@@ -3101,7 +3402,51 @@ def create_fpf_repeated_service_crash_step(
     )
 
 
+def create_fpf_repeated_sw_hw_agent_crash_step(
+    every_sec: int = 15,
+    duration_sec: int = 300,
+    recovery_timeout_sec: int = 120,
+    recovery_poll_interval_sec: int = 5,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Repeatedly SIGKILL only fboss_sw_agent and fboss_hw_agent.
+
+    Unlike ``Service.AGENT`` on a multi-switch FBOSS platform, this deliberately
+    avoids the broad ``pkill -f fboss_`` driver path. The custom handler issues
+    both exact process-name kills every cycle, collects errors independently,
+    and requires the corresponding systemd services to recover ACTIVE.
+    """
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or (
+            "SIGKILL fboss_sw_agent then fboss_hw_agent every "
+            f"{every_sec}s for {duration_sec}s"
+        ),
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_repeated_sw_hw_agent_crash",
+                    "process_names": ["fboss_sw_agent", "fboss_hw_agent"],
+                    "recovery_services": [
+                        int(taac_types.Service.FBOSS_SW_AGENT.value),
+                        int(taac_types.Service.FBOSS_HW_AGENT_0.value),
+                    ],
+                    "every_sec": every_sec,
+                    "duration_sec": duration_sec,
+                    "recovery_timeout_sec": recovery_timeout_sec,
+                    "recovery_poll_interval_sec": recovery_poll_interval_sec,
+                }
+            )
+        ),
+        device_regexes=device_regexes,
+    )
+
+
 def create_fpf_ndp_clear_loop_step(
+    target_interface: str,
+    neighbor_host: str,
     every_sec: int = 1,
     duration_sec: int = 120,
     device_regexes: t.Optional[t.List[str]] = None,
@@ -3109,17 +3454,39 @@ def create_fpf_ndp_clear_loop_step(
 ) -> Step:
     """Repeatedly clear the NDP table over a window on the target GTSW.
 
-    Runs ``fboss2 clear ndp`` every ``every_sec`` for ``duration_sec`` — a
-    persistent NDP flush that exercises neighbor re-resolution under sustained
-    clearing during a NIC-side link-flap FPF test. Implemented as a CUSTOM_STEP
-    (no new StepName enum).
+    Calls the sw-agent bulk neighbor-flush Thrift API every ``every_sec`` for
+    ``duration_sec`` — a persistent NDP flush that exercises neighbor
+    re-resolution under sustained clearing during a NIC-side link-flap FPF
+    test. Implemented as a CUSTOM_STEP (no new StepName enum).
 
     Args:
+        target_interface: Exact local interface whose NDP entries are cleared.
+        neighbor_host: Exact LLDP neighbor expected on ``target_interface``.
         every_sec: Seconds between successive clears (default 1).
         duration_sec: Total clearing window in seconds (default 120).
         device_regexes: Optional device-regex scope (e.g. the DUT GTSW).
         description: Custom step description.
     """
+    if not target_interface or not neighbor_host:
+        raise ValueError("NDP clear requires target_interface and neighbor_host")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in (every_sec, duration_sec)
+    ) or not all(
+        math.isfinite(float(value)) and float(value) > 0
+        for value in (every_sec, duration_sec)
+    ):
+        raise ValueError("NDP clear duration and cadence must be finite and > 0")
+    slot_ratio = float(duration_sec) / float(every_sec)
+    if not math.isclose(
+        slot_ratio,
+        round(slot_ratio),
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(
+            "NDP clear duration_sec must be an exact multiple of every_sec"
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description or f"Clear NDP every {every_sec}s for {duration_sec}s",
@@ -3127,6 +3494,8 @@ def create_fpf_ndp_clear_loop_step(
             json_params=json.dumps(
                 {
                     "custom_step_name": "fpf_ndp_clear_loop",
+                    "target_interface": target_interface,
+                    "neighbor_host": neighbor_host,
                     "every_sec": every_sec,
                     "duration_sec": duration_sec,
                 }
@@ -3136,12 +3505,26 @@ def create_fpf_ndp_clear_loop_step(
     )
 
 
+def _add_skip_start_traffic_param(
+    params: t.Dict[str, t.Any], start_traffic: bool
+) -> None:
+    if not start_traffic:
+        params["skip_start_traffic"] = True
+
+
+def _skip_start_traffic_step_params(start_traffic: bool) -> t.Optional[Params]:
+    params: t.Dict[str, t.Any] = {}
+    _add_skip_start_traffic_param(params, start_traffic)
+    return Params(json_params=json.dumps(params)) if params else None
+
+
 def create_fpf_rapid_flap_step(
     interfaces_by_device: t.Dict[str, t.List[str]],
     duration_sec: int,
     flap_interval_sec: int = 1,
     device_regexes: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """Rapidly flap per-device interfaces over a window.
 
@@ -3159,22 +3542,21 @@ def create_fpf_rapid_flap_step(
             the per-flap cost used to derive the flap count (default 1).
         device_regexes: Optional device-regex scope.
         description: Custom step description.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
     """
+    params_dict = {
+        "custom_step_name": "fpf_rapid_flap",
+        "interfaces_by_device": interfaces_by_device,
+        "duration_sec": duration_sec,
+        "flap_interval_sec": flap_interval_sec,
+    }
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
         or f"Rapid-flap interfaces for {duration_sec}s "
         f"({', '.join(interfaces_by_device.keys())})",
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "custom_step_name": "fpf_rapid_flap",
-                    "interfaces_by_device": interfaces_by_device,
-                    "duration_sec": duration_sec,
-                    "flap_interval_sec": flap_interval_sec,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params_dict)),
         device_regexes=device_regexes,
     )
 
@@ -3371,10 +3753,16 @@ def create_fpf_multi_gtsw_rapid_flap_step(
     churn_service: t.Optional[taac_types.Service] = None,
     churn_action: str = "restart",
     churn_every_sec: int = 120,
+    churn_initial_delay_sec: int = 0,
+    churn_recovery_timeout_sec: int = 0,
+    churn_recovery_poll_interval_sec: int = 5,
     churn_devices: t.Optional[t.List[str]] = None,
     uniform_interface_discovery: bool = False,
     final_up_timeout_sec: int = 60,
     final_up_poll_interval_sec: int = 5,
+    retry_final_cleanup_after_churn: bool = False,
+    final_cleanup_service_recovery_timeout_sec: int = 120,
+    final_cleanup_retry_timeout_sec: int = 120,
     fail_closed: bool = False,
     expected_interfaces: t.Optional[t.List[str]] = None,
     require_exact_neighbor_hosts: bool = False,
@@ -3409,6 +3797,11 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         churn_service: optional service to churn in parallel; omit for pure flap.
         churn_action: "restart" (default) or "crash".
         churn_every_sec: seconds between churn rounds (default 120 = 2 min).
+        churn_initial_delay_sec: seconds of active flapping before the first
+            churn round. Zero preserves the legacy immediate-first-round mode.
+        churn_recovery_timeout_sec: when positive, require the churned service
+            to return ACTIVE within this timeout after every action.
+        churn_recovery_poll_interval_sec: service recovery polling interval.
         churn_devices: devices to churn (defaults to ``gtsws``).
         final_up_timeout_sec: maximum wait for every touched interface to be
             admin-enabled and operationally UP after cleanup (default 60).
@@ -3426,6 +3819,13 @@ def create_fpf_multi_gtsw_rapid_flap_step(
             "fail_closed multi-GTSW rapid flap requires a non-empty exact "
             "expected_interfaces scope"
         )
+    if churn_service is not None and churn_action not in ("restart", "crash"):
+        raise ValueError(
+            f"Unsupported service churn action {churn_action!r}; expected "
+            "'restart' or 'crash'"
+        )
+    if retry_final_cleanup_after_churn and churn_service is None:
+        raise ValueError("retry_final_cleanup_after_churn requires churn_service")
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "fpf_multi_gtsw_rapid_flap",
@@ -3441,6 +3841,10 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         "churn_devices": churn_devices,
         "uniform_interface_discovery": uniform_interface_discovery,
     }
+    if churn_initial_delay_sec:
+        params["churn_initial_delay_sec"] = churn_initial_delay_sec
+    if churn_recovery_timeout_sec:
+        params["churn_recovery_timeout_sec"] = churn_recovery_timeout_sec
     if fail_closed:
         params.update(
             {
@@ -3454,6 +3858,17 @@ def create_fpf_multi_gtsw_rapid_flap_step(
         )
     if churn_service is not None:
         params["churn_service"] = int(churn_service.value)
+        params["churn_recovery_poll_interval_sec"] = churn_recovery_poll_interval_sec
+    if retry_final_cleanup_after_churn:
+        params.update(
+            {
+                "retry_final_cleanup_after_churn": True,
+                "final_cleanup_service_recovery_timeout_sec": (
+                    final_cleanup_service_recovery_timeout_sec
+                ),
+                "final_cleanup_retry_timeout_sec": final_cleanup_retry_timeout_sec,
+            }
+        )
     return Step(
         name=StepName.CUSTOM_STEP,
         description=description
@@ -3571,29 +3986,96 @@ def create_fpf_gar_validate_step(
     )
 
 
+def create_fpf_nic_mstreg_paos_step(
+    host: str,
+    dev: int,
+    lane: int,
+    admin_up: bool,
+    state_timeout_sec: float = 30.0,
+    state_poll_interval_sec: float = 1.0,
+    verify_link_health: bool = False,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Set one NIC PAOS admin state and fail unless readback reaches it."""
+    action = "UP" if admin_up else "DOWN"
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"NIC-side mstreg PAOS {action} on {host}: dev={dev} lane={lane}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_nic_mstreg_paos",
+                    "host": host,
+                    "dev": int(dev),
+                    "lane": int(lane),
+                    "admin_up": bool(admin_up),
+                    "state_timeout_sec": float(state_timeout_sec),
+                    "state_poll_interval_sec": float(state_poll_interval_sec),
+                    "verify_link_health": bool(verify_link_health),
+                }
+            )
+        ),
+    )
+
+
+def create_fpf_nic_mstreg_verify_link_step(
+    host: str,
+    dev: int,
+    lane: int,
+    timeout_sec: float = 120.0,
+    poll_interval_sec: float = 2.0,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Require PAOS UP plus an Active mlxlink state with status opcode zero."""
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"Verify NIC link health on {host}: dev={dev} lane={lane}",
+        step_params=Params(
+            json_params=json.dumps(
+                {
+                    "custom_step_name": "fpf_nic_mstreg_verify_link",
+                    "host": host,
+                    "dev": int(dev),
+                    "lane": int(lane),
+                    "timeout_sec": float(timeout_sec),
+                    "poll_interval_sec": float(poll_interval_sec),
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_nic_mstreg_flap_step(
     host: str,
     dev: int,
     lane: int,
-    iterations: int = 5,
-    interval_sec: float = 2.0,
+    duration_sec: float = 900.0,
+    down_time_sec: float = 2.0,
+    up_time_sec: float = 2.0,
+    state_timeout_sec: float = 30.0,
+    state_poll_interval_sec: float = 1.0,
+    final_cleanup_timeout_sec: float = 120.0,
     description: t.Optional[str] = None,
 ) -> Step:
-    """Real NIC-side mstreg PAOS flap of a single beth lane on a GPU host.
+    """Deadline-bounded NIC-side mstreg PAOS flap of one GPU-host lane.
 
     Issues the same admin_status DOWN/UP sequence that
     ``scripts/pavanpatil/fpf_host_signal_test.py --flap-dev/--flap-lane`` runs
     against the GPU NIC. The handler computes the PCIe BDF deterministically
-    from ``dev`` + ``lane`` (no ethtool probe), then loops ``iterations`` times,
-    each round running
+    from ``dev`` + ``lane`` (no ethtool probe), then loops until the monotonic
+    ``duration_sec`` deadline, each round running
 
       DOWN: mstreg -d <BDF> --reg_name PAOS \\
               --set "admin_status=2,ase=1,fd=1" -i "local_port=1"
       UP:   mstreg -d <BDF> --reg_name PAOS \\
               --set "admin_status=1,ase=1,fd=1" -i "local_port=1"
 
-    with ``interval_sec`` between the DOWN and the UP (and after the UP before
-    the next round). This is a real link-down event on the NIC side (the GTSW
+    with ``down_time_sec`` after DOWN and ``up_time_sec`` after UP. Every state
+    transition is read back. A bounded ``finally`` cleanup always commands and
+    verifies UP, including on command failure or cancellation. This is a real
+    link-down event on the NIC side (the GTSW
     sees NDP go away on the peer port and withdraws the VF on that lane), so it
     is the genuine trigger for the tc37 NIC-side link-flap test rather than the
     thrift-admin placeholder previously used there.
@@ -3615,9 +4097,12 @@ def create_fpf_nic_mstreg_flap_step(
         host: GPU host (e.g. ``"rtptest1555.mwg2"``) to flap a beth lane on.
         dev: GPU device index (0..3). Maps to the PCIe DEV_BLOCK.
         lane: Lane within the GPU device (0..7). Maps to the PCIe function.
-        iterations: Number of DOWN/UP cycles (default 5).
-        interval_sec: Seconds between DOWN and UP, and between successive
-            cycles (default 2.0).
+        duration_sec: Wall-clock flap duration (default 900 seconds).
+        down_time_sec: Hold time after verified DOWN (default 2 seconds).
+        up_time_sec: Hold time after verified UP (default 2 seconds).
+        state_timeout_sec: Per-transition PAOS/oper readback timeout.
+        state_poll_interval_sec: PAOS readback poll interval.
+        final_cleanup_timeout_sec: Bound for the mandatory final UP cleanup.
         description: Custom step description.
     """
     return Step(
@@ -3625,7 +4110,8 @@ def create_fpf_nic_mstreg_flap_step(
         description=description
         or (
             f"NIC-side mstreg PAOS flap on {host}: dev={dev} lane={lane}, "
-            f"{iterations} iteration(s) every {interval_sec}s"
+            f"{duration_sec:g}s with {down_time_sec:g}s DOWN/"
+            f"{up_time_sec:g}s UP"
         ),
         step_params=Params(
             json_params=json.dumps(
@@ -3634,8 +4120,12 @@ def create_fpf_nic_mstreg_flap_step(
                     "host": host,
                     "dev": int(dev),
                     "lane": int(lane),
-                    "iterations": int(iterations),
-                    "interval_sec": float(interval_sec),
+                    "duration_sec": float(duration_sec),
+                    "down_time_sec": float(down_time_sec),
+                    "up_time_sec": float(up_time_sec),
+                    "state_timeout_sec": float(state_timeout_sec),
+                    "state_poll_interval_sec": float(state_poll_interval_sec),
+                    "final_cleanup_timeout_sec": float(final_cleanup_timeout_sec),
                 }
             )
         ),
@@ -3786,10 +4276,49 @@ def create_fpf_restart_hrt_step(
     )
 
 
+def create_fpf_up_port_baseline_step(
+    *,
+    action: str,
+    devices: t.List[str],
+    baseline_key: str,
+    expected_interfaces_by_device: t.Optional[t.Mapping[str, t.Sequence[str]]] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Capture or verify the exact run-scoped set of operationally-UP ports."""
+    if action not in {"capture", "verify"}:
+        raise ValueError("action must be 'capture' or 'verify'")
+    if not devices:
+        raise ValueError("devices must be non-empty")
+    if not baseline_key:
+        raise ValueError("baseline_key must be non-empty")
+    params: t.Dict[str, t.Any] = {
+        "custom_step_name": "fpf_up_port_baseline",
+        "action": action,
+        "devices": devices,
+        "baseline_key": baseline_key,
+    }
+    if expected_interfaces_by_device is not None:
+        params["expected_interfaces_by_device"] = {
+            str(device): [str(interface) for interface in interfaces]
+            for device, interfaces in expected_interfaces_by_device.items()
+        }
+    return Step(
+        name=StepName.CUSTOM_STEP,
+        description=description
+        or f"{action.title()} UP-port baseline {baseline_key!r} on {devices}",
+        step_params=Params(json_params=json.dumps(params)),
+        device_regexes=device_regexes,
+    )
+
+
 def create_fpf_lldp_batched_set_interface_admin_step(
     neighbor_pattern: str,
     enable: bool,
     device_regexes: t.Optional[t.List[str]] = None,
+    interface_cache_key: t.Optional[str] = None,
+    use_cached_interfaces: bool = False,
+    expected_interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Resolve interfaces from LLDP at runtime, then batch admin-enable/disable.
@@ -3812,6 +4341,12 @@ def create_fpf_lldp_batched_set_interface_admin_step(
             LLDP remote system name on the DUT (e.g. ``"gtsw001*"``).
         enable: True to enable (no-shut), False to disable (held admin-down).
         device_regexes: Optional device-regex scope (e.g. the DUT STSW).
+        interface_cache_key: Run-scoped key under which a disable step stores
+            the exact resolved interface set for a later enable step.
+        use_cached_interfaces: Prefer the cached set when enabling. If the
+            cache is absent, ``expected_interfaces`` is the fail-closed fallback.
+        expected_interfaces: Exact allowlist for LLDP resolution and the
+            LLDP-independent restore-only fallback.
         description: Custom step description.
     """
     return Step(
@@ -3827,6 +4362,19 @@ def create_fpf_lldp_batched_set_interface_admin_step(
                     "custom_step_name": "fpf_lldp_batched_set_interface_admin",
                     "neighbor_pattern": neighbor_pattern,
                     "is_enable": enable,
+                    **(
+                        {"interface_cache_key": interface_cache_key}
+                        if interface_cache_key
+                        else {}
+                    ),
+                    **(
+                        {"use_cached_interfaces": True} if use_cached_interfaces else {}
+                    ),
+                    **(
+                        {"expected_interfaces": expected_interfaces}
+                        if expected_interfaces is not None
+                        else {}
+                    ),
                 }
             )
         ),
@@ -3841,15 +4389,17 @@ def create_fpf_stsw_drain_and_reinject_steps(
     prefix_count: int,
     community_list: str,
     drain_community: t.Optional[str] = None,
+    injection_groups: t.Optional[t.Sequence[t.Mapping[str, object]]] = None,
 ) -> t.List[Step]:
     """Drain (or undrain) an STSW plane, then re-inject the FPF prefixes.
 
     Composition (no new step type): drains/undrains ``stsw`` via the existing
-    LOCAL_DRAINER drain/undrain step, then re-injects ``prefix_count`` prefixes
-    on ``trigger_stsws`` via ``create_fpf_bgp_prefix_injection_step``. When
-    draining, an optional ``drain_community`` is appended to ``community_list`` so
-    the re-injected prefixes carry the extra drain-marker community; when
-    undraining, the base ``community_list`` is used unchanged.
+    LOCAL_DRAINER drain/undrain step, verifies the requested state fail-closed,
+    then re-injects ``prefix_count`` prefixes on ``trigger_stsws`` via
+    ``create_fpf_bgp_prefix_injection_step``. When draining, an optional
+    ``drain_community`` is supplied as an extra BGP community (not concatenated
+    into the named community-list preset); when undraining, only the base preset
+    is used.
 
     Used by the cascaded STSW-plane-drain + GTSW-device-drain FPF configs.
 
@@ -3861,26 +4411,75 @@ def create_fpf_stsw_drain_and_reinject_steps(
         community_list: Base community list string for the injection.
         drain_community: Optional extra community appended to ``community_list``
             when draining (ignored on undrain).
+        injection_groups: Optional split-VF group definitions. When supplied,
+            each group's devices, prefix base, and count are re-injected
+            independently instead of advertising one prefix base on every STSW.
 
     Returns:
-        Ordered [drain/undrain step, prefix-injection step].
+        Ordered drain/undrain, readback, and prefix-injection step(s).
     """
-    if drained and drain_community:
-        injected_communities = f"{community_list} {drain_community}"
-    else:
-        injected_communities = community_list
-
     action = "Drain" if drained else "Undrain"
+    drain_step = create_fpf_drain_interface_step(
+        interfaces=[],
+        drain=drained,
+        target_device=stsw,
+        description=f"{action} STSW {stsw} (local drainer)",
+    )
+    verify_step = create_fpf_verify_disruption_step(
+        interfaces=[],
+        mode="device_drain",
+        expect_drained=drained,
+        fail_if_ineffective=True,
+        target_device=stsw,
+        description=f"Fail-closed readback: STSW {stsw} is {action.lower()}ed",
+    )
+    if injection_groups is not None:
+        if not injection_groups:
+            raise ValueError("injection_groups must not be empty")
+        injection_steps = []
+        for group in injection_groups:
+            devices = group.get("devices")
+            prefix_base = group.get("prefix_base")
+            count = group.get("count")
+            batch_size = group.get("batch_size")
+            if (
+                not isinstance(devices, list)
+                or not devices
+                or not all(isinstance(device, str) for device in devices)
+                or not isinstance(prefix_base, str)
+                or not isinstance(count, int)
+                or count <= 0
+                or (batch_size is not None and not isinstance(batch_size, int))
+            ):
+                raise ValueError(f"Invalid FPF VF injection group: {group!r}")
+            injection_steps.append(
+                create_fpf_bgp_prefix_injection_step(
+                    devices=devices,
+                    prefix_base=prefix_base,
+                    count=count,
+                    batch_size=batch_size,
+                    community_list=str(group.get("community_list", community_list)),
+                    extra_communities=(
+                        [drain_community] if drained and drain_community else None
+                    ),
+                    description=(
+                        f"Re-inject {count} prefixes from {prefix_base} on "
+                        f"{', '.join(devices)} after {action.lower()} of {stsw}"
+                    ),
+                )
+            )
+        return [drain_step, verify_step, *injection_steps]
+
     return [
-        create_drain_undrain_step(
-            drain=drained,
-            drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
-            description=f"{action} STSW {stsw} (local drainer)",
-        ),
+        drain_step,
+        verify_step,
         create_fpf_bgp_prefix_injection_step(
             devices=trigger_stsws,
             count=prefix_count,
-            community_list=injected_communities,
+            community_list=community_list,
+            extra_communities=(
+                [drain_community] if drained and drain_community else None
+            ),
             description=f"Re-inject {prefix_count} prefixes on "
             f"{', '.join(trigger_stsws)} after {action.lower()} of {stsw}",
         ),
@@ -4016,6 +4615,7 @@ def create_run_task_step(
     params_dict: t.Dict[str, t.Any],
     description: t.Optional[str] = None,
     ixia_needed: bool = False,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a generic step to run a task.
@@ -4025,6 +4625,8 @@ def create_run_task_step(
         params_dict: Parameters to pass to the task
         description: Custom description for the step
         ixia_needed: Whether the task requires Ixia
+        start_traffic: Whether the generic step pre-hook should ensure IXIA
+            traffic is running before the task.
 
     Returns:
         Step object for running the task
@@ -4046,6 +4648,7 @@ def create_run_task_step(
                 )
             )
         ),
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4240,6 +4843,7 @@ def create_longevity_step(
     collect_port_state: bool = False,
     poll_interval: int = 5,
     fail_on_flap: bool = True,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a longevity step that waits for a specified duration.
@@ -4258,11 +4862,13 @@ def create_longevity_step(
         fail_on_flap: When collecting port state, fail the step if any monitored
             interface flaps during the hold. A steady-state longevity hold
             should see zero flaps, so any flap is a real defect.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for longevity/wait
     """
     params_dict: t.Dict[str, t.Any] = {"duration": duration}
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     if description:
         params_dict["description"] = description
     if collect_port_state:
@@ -4281,9 +4887,11 @@ def create_service_interruption_step(
     service: taac_types.Service,
     trigger: taac_types.ServiceInterruptionTrigger = taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
     create_cold_boot_file: bool = False,
+    intentional_stop: bool = False,
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to interrupt a service (restart, crash, etc.).
@@ -4292,17 +4900,31 @@ def create_service_interruption_step(
         service: The service to interrupt (e.g., Service.AGENT, Service.BGP)
         trigger: The trigger type (SYSTEMCTL_RESTART, CRASH, etc.)
         create_cold_boot_file: Whether to create a cold boot file
+        intentional_stop: For an explicit SYSTEMCTL_STOP, accept systemd's
+            FAILED state only when MainPID proves that the process is absent.
+            This bypasses the generic driver's INACTIVE-only retry behavior.
         description: Custom description for the step
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for service interruption
     """
+    if (
+        intentional_stop
+        and trigger != taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP
+    ):
+        raise ValueError("intentional_stop is valid only for SYSTEMCTL_STOP")
+
     input_obj = taac_types.ServiceInterruptionInput(
         name=service,
         trigger=trigger,
         create_cold_boot_file=create_cold_boot_file,
     )
+    step_params_dict: t.Dict[str, t.Any] = {}
+    if intentional_stop:
+        step_params_dict["intentional_stop"] = True
+    _add_skip_start_traffic_param(step_params_dict, start_traffic)
 
     return Step(
         name=StepName.SERVICE_INTERRUPTION_STEP,
@@ -4310,6 +4932,11 @@ def create_service_interruption_step(
         description=description,
         id=step_id,
         device_regexes=device_regexes,
+        step_params=(
+            Params(json_params=json.dumps(step_params_dict))
+            if step_params_dict
+            else None
+        ),
     )
 
 
@@ -4320,6 +4947,7 @@ def create_service_convergence_step(
     service_convergence_timeout: t.Optional[t.Dict[taac_types.Service, int]] = None,
     step_id: t.Optional[str] = None,
     device_regexes: t.Optional[t.List[str]] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to wait for service convergence.
@@ -4330,6 +4958,7 @@ def create_service_convergence_step(
         timeout: Optional timeout in seconds for convergence (simple timeout)
         service_convergence_timeout: Optional dict mapping services to their timeout values
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for service convergence
@@ -4354,6 +4983,7 @@ def create_service_convergence_step(
         description=description,
         id=step_id,
         device_regexes=device_regexes,
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4368,6 +4998,7 @@ def create_interface_flap_step(
     delay: t.Optional[int] = None,
     device_name: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to enable or disable interfaces.
@@ -4383,6 +5014,7 @@ def create_interface_flap_step(
         delay: Optional delay between interface operations in seconds
         device_name: Optional device name for the interface flap (used with SSH method)
         step_id: Optional step ID
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for interface flap
@@ -4396,6 +5028,7 @@ def create_interface_flap_step(
         params_dict["delay"] = delay
     if device_name is not None:
         params_dict["device_name"] = device_name
+    _add_skip_start_traffic_param(params_dict, start_traffic)
 
     params = Params(
         json_params=json.dumps(params_dict),
@@ -4416,6 +5049,7 @@ def create_system_reboot_step(
     trigger: taac_types.SystemRebootTrigger,
     description: t.Optional[str] = None,
     use_ipv6: bool = True,
+    device_regexes: t.Optional[t.List[str]] = None,
 ) -> Step:
     """
     Create a step to reboot the system.
@@ -4424,6 +5058,7 @@ def create_system_reboot_step(
         trigger: The reboot trigger type (FULL_SYSTEM_REBOOT, BMC_POWER_RESET, etc.)
         description: Custom description for the step
         use_ipv6: Use IPv6 for post-reboot ping reachability check
+        device_regexes: Optional exact device scope for the reboot
 
     Returns:
         Step object for system reboot
@@ -4434,6 +5069,7 @@ def create_system_reboot_step(
         input_json=thrift_to_json(taac_types.SystemRebootInput(trigger=trigger)),
         description=description,
         step_params=Params(json_params=json.dumps(params_dict)),
+        device_regexes=device_regexes,
     )
 
 
@@ -4441,6 +5077,7 @@ def create_validation_step(
     point_in_time_checks: t.List[taac_types.PointInTimeHealthCheck],
     stage: taac_types.ValidationStage = taac_types.ValidationStage.MID_TEST,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
     fail_fast: bool = False,
 ) -> Step:
     """
@@ -4450,6 +5087,9 @@ def create_validation_step(
         point_in_time_checks: List of health checks to perform
         stage: Validation stage (PRE_TEST, MID_TEST, POST_TEST)
         description: Custom description for the step
+        start_traffic: Whether the generic step pre-hook should ensure IXIA
+            traffic is running. Set False for recovery validation that must run
+            while traffic remains stopped.
         fail_fast: Report the validation step as failed as soon as a check fails
 
     Returns:
@@ -4465,6 +5105,7 @@ def create_validation_step(
             )
         ),
         description=description,
+        step_params=_skip_start_traffic_step_params(start_traffic),
     )
 
 
@@ -4720,6 +5361,9 @@ def create_drain_undrain_step(
     drain_handler: t.Optional[taac_types.DrainHandler] = None,
     interfaces: t.Optional[t.List[str]] = None,
     description: t.Optional[str] = None,
+    device_regexes: t.Optional[t.List[str]] = None,
+    hard_drain_interfaces: bool = False,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to drain or undrain a device, or specific interfaces.
@@ -4733,23 +5377,47 @@ def create_drain_undrain_step(
             up); with NDS the interface list is passed through to the NDS drain.
             When omitted, the whole device is drained.
         description: Custom description for the step
+        device_regexes: Optional exact device scope for the drain operation
+        hard_drain_interfaces: For a LOCAL_DRAINER interface drain, use the
+            bulk hard ``drain_interfaces`` API instead of the bulk
+            ``softdrain_interfaces`` API. Set this on its paired undrain as
+            well, because hard-drained interfaces report UNKNOWN rather than
+            an authoritative ``isDrained`` value. Invalid for device drains.
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for drain/undrain operation
     """
+    if hard_drain_interfaces and (
+        drain_handler != taac_types.DrainHandler.LOCAL_DRAINER or not interfaces
+    ):
+        raise ValueError(
+            "hard_drain_interfaces requires a LOCAL_DRAINER operation with at "
+            "least one interface"
+        )
     input_kwargs: t.Dict[str, t.Any] = {"drain": drain}
     if drain_handler is not None:
         input_kwargs["drain_handler"] = drain_handler
 
-    step_params = None
+    step_params_dict: t.Dict[str, t.Any] = {}
     if interfaces:
-        step_params = Params(json_params=json.dumps({"interfaces": interfaces}))
+        step_params_dict.update(
+            {
+                "interfaces": interfaces,
+                "hard_drain_interfaces": hard_drain_interfaces,
+            }
+        )
+    _add_skip_start_traffic_param(step_params_dict, start_traffic)
+    step_params = (
+        Params(json_params=json.dumps(step_params_dict)) if step_params_dict else None
+    )
 
     return Step(
         name=StepName.DRAIN_UNDRAIN_STEP,
         description=description,
         input_json=thrift_to_json(taac_types.DrainUndrainInput(**input_kwargs)),
         step_params=step_params,
+        device_regexes=device_regexes,
     )
 
 
@@ -4819,6 +5487,7 @@ def create_verify_port_speed_step_v2(
     ports: t.List[str],
     speed_to_verify: int,
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create a step to verify port speed.
@@ -4827,20 +5496,19 @@ def create_verify_port_speed_step_v2(
         ports: List of port names to verify
         speed_to_verify: Expected speed in Gbps
         description: Custom description for the step
+        start_traffic: Whether the generic step pre-hook should start IXIA.
 
     Returns:
         Step object for port speed verification
     """
+    params_dict: t.Dict[str, t.Any] = {
+        "ports": ports,
+        "speed_to_verify": speed_to_verify,
+    }
+    _add_skip_start_traffic_param(params_dict, start_traffic)
     return Step(
         name=StepName.VERIFY_PORT_SPEED,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "ports": ports,
-                    "speed_to_verify": speed_to_verify,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params_dict)),
         description=description,
     )
 
@@ -6009,6 +6677,25 @@ def create_validated_bgp_session_oscillation_step(
     )
 
 
+def create_session_churn_step(
+    *,
+    hostname: str,
+    session_churn: SessionChurn,
+    description: str | None = None,
+) -> Step:
+    """Lower typed session-churn intent to the established CustomStep boundary."""
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_session_oscillation",
+            "hostname": hostname,
+            **session_churn.to_step_params(),
+        },
+        description=description or "Run validated BGP session oscillations",
+    )
+
+
 def create_stop_bgp_keepalive_step(
     peer_regex: str,
     session_index: t.Optional[int] = None,
@@ -6287,6 +6974,25 @@ def create_validated_bgp_route_oscillation_step(
     )
 
 
+def create_route_churn_step(
+    *,
+    hostname: str,
+    route_churn: RouteChurn,
+    description: str | None = None,
+) -> Step:
+    """Lower a typed route-churn specification to the CustomStep boundary."""
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_route_oscillation",
+            "hostname": hostname,
+            **route_churn.to_step_params(),
+        },
+        description=description or "Run validated dual-stack BGP route oscillations",
+    )
+
+
 def create_validated_igp_pnh_metric_oscillation_step(
     device_name: str,
     start_ipv4s: t.Sequence[str],
@@ -6311,6 +7017,17 @@ def create_validated_igp_pnh_metric_oscillation_step(
             "step": step,
             "duration": duration,
             "frequency": frequency,
+        },
+        description="Run acknowledged Open/R PNH metric oscillations",
+    )
+
+
+def create_igp_metric_churn_step(churn: IgpMetricChurn) -> Step:
+    """Lower typed IGP metric-churn intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_pnh_metric_oscillation",
+            **churn.to_step_params(),
         },
         description="Run acknowledged Open/R PNH metric oscillations",
     )
@@ -6364,6 +7081,17 @@ def create_validated_igp_unresolvable_pnh_step(
             "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
             "convergence_stability_polls": convergence_stability_polls,
             "convergence_stability_max_seconds": (convergence_stability_max_seconds),
+        },
+        description="Run validated unresolvable Open/R PNH workflow",
+    )
+
+
+def create_igp_unresolvable_churn_step(churn: IgpUnresolvableChurn) -> Step:
+    """Lower typed unresolvable-PNH intent to the CustomStep boundary."""
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_igp_unresolvable_pnh",
+            **churn.to_step_params(),
         },
         description="Run validated unresolvable Open/R PNH workflow",
     )
@@ -9561,6 +10289,92 @@ class RunSSHCmdStep(StepBase[taac_types.BaseInput]):
 
 class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
     STEP_NAME = taac_types.StepName.DRAIN_UNDRAIN_STEP
+    LOCAL_DRAINER_READBACK_ATTEMPTS = 3
+    LOCAL_DRAINER_READBACK_INTERVAL_SECONDS = 5
+    LOCAL_DRAINER_READBACK_TIMEOUT_SECONDS = 30.0
+
+    async def _read_local_drainer_interface_states(
+        self,
+        fboss_driver: t.Any,
+        names: t.Sequence[str],
+        expected_drained: bool,
+    ) -> t.Tuple[t.Dict[str, object], BaseException | None]:
+        try:
+            all_ports = await fboss_driver.async_get_all_port_info()
+        except Exception as error:
+            observed = f"not read ({type(error).__name__}: {error})"
+            return dict.fromkeys(names, observed), error
+
+        ports_by_name = {
+            port.name: port
+            for port in all_ports.values()
+            if getattr(port, "name", None)
+        }
+        mismatches = {}
+        for name in names:
+            port = ports_by_name.get(name)
+            observed: object = "not present in Agent port map"
+            if port is not None:
+                observed = port.isDrained
+            if observed is None or observed != expected_drained:
+                mismatches[name] = observed
+        return mismatches, None
+
+    async def _wait_for_local_drainer_interface_state(
+        self,
+        fboss_driver: t.Any,
+        interface_names: t.Sequence[str],
+        expected_drained: bool,
+    ) -> None:
+        pending = set(interface_names)
+        mismatched_interfaces: t.Dict[str, object] = dict.fromkeys(
+            interface_names, "not read"
+        )
+        last_exception: BaseException | None = None
+
+        async def poll() -> None:
+            nonlocal last_exception, mismatched_interfaces
+            for attempt in range(1, self.LOCAL_DRAINER_READBACK_ATTEMPTS + 1):
+                names = sorted(pending)
+                (
+                    mismatched_interfaces,
+                    read_error,
+                ) = await self._read_local_drainer_interface_states(
+                    fboss_driver, names, expected_drained
+                )
+                if read_error is not None:
+                    last_exception = read_error
+                    self.logger.warning(
+                        "LOCAL_DRAINER readback incomplete for %s (attempt %s/%s)",
+                        names,
+                        attempt,
+                        self.LOCAL_DRAINER_READBACK_ATTEMPTS,
+                    )
+                pending.clear()
+                pending.update(mismatched_interfaces)
+                if not pending:
+                    return
+                if attempt < self.LOCAL_DRAINER_READBACK_ATTEMPTS:
+                    await asyncio.sleep(self.LOCAL_DRAINER_READBACK_INTERVAL_SECONDS)
+
+        try:
+            await asyncio.wait_for(
+                poll(), timeout=self.LOCAL_DRAINER_READBACK_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as error:
+            last_exception = error
+
+        if not pending:
+            return
+
+        expected = "drained" if expected_drained else "undrained"
+        error = RuntimeError(
+            f"LOCAL_DRAINER interface readback did not reach "
+            f"{expected}: {mismatched_interfaces}"
+        )
+        if last_exception is not None:
+            raise error from last_exception
+        raise error
 
     async def run(
         self,
@@ -9573,33 +10387,51 @@ class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
                 try_json_to_thrift(interface, taac_types.TestInterface)
                 for interface in try_json_loads(interfaces)
             ]
-            interfaces = [
-                (
-                    self.device.get_interface_by_name(interface)
-                    if isinstance(interface, str)
-                    else interface
-                )
+        if input.drain_handler == taac_types.DrainHandler.LOCAL_DRAINER:
+            # A local-drainer target need not be part of the testbed topology.
+            # Preserve raw names so unrelated DUT uplinks remain valid targets.
+            interface_names = [
+                interface if isinstance(interface, str) else interface.interface_name
                 for interface in interfaces
             ]
-        interface_names = [interface.interface_name for interface in interfaces]
-        if input.drain_handler == taac_types.DrainHandler.LOCAL_DRAINER:
             if interface_names:
-                # Per-port (link) drain: soft-drain each interface on-box
-                # (depreferences BGP advertisements without bringing the link
-                # down at the data plane). undrain_interface reverses it.
-                # softdrain/undrain_interface are FbossSwitch-only; cast to Any
-                # to avoid importing FbossSwitch here (keeps the BUCK target light).
+                # Use one bulk request so all link policies are applied before
+                # the local drainer restarts BGP. Singular calls would trigger
+                # one BGP restart per interface.
                 fboss_driver = t.cast(t.Any, self.driver)
-                for name in interface_names:
-                    if input.drain:
-                        await fboss_driver.async_softdrain_interface(name)
-                    else:
-                        await fboss_driver.async_undrain_interface(name)
+                hard_interface_operation = params.get("hard_drain_interfaces", False)
+                hard_interface_drain = input.drain and hard_interface_operation
+                if hard_interface_drain:
+                    await fboss_driver.async_drain_interfaces(interface_names)
+                elif input.drain:
+                    await fboss_driver.async_softdrain_interfaces(interface_names)
+                else:
+                    await fboss_driver.async_undrain_interfaces(interface_names)
+                # FBOSS hard drain is a routing-policy operation and does not
+                # populate Agent PortInfo.isDrained (local_drainer explicitly
+                # reports per-interface state as UNKNOWN).  That field is an
+                # authoritative readback only for soft drain and undrain.
+                if not hard_interface_operation:
+                    await self._wait_for_local_drainer_interface_state(
+                        fboss_driver,
+                        interface_names,
+                        input.drain,
+                    )
             elif input.drain:
                 await self.driver.async_onbox_drain_device()
             else:
                 await self.driver.async_onbox_undrain_device()
         elif input.drain_handler == taac_types.DrainHandler.NDS:
+            # NDS requires topology-backed interfaces. Resolve and validate raw
+            # names before constructing the external drainer request.
+            interface_names = [
+                (
+                    self.device.get_interface_by_name(interface).interface_name
+                    if isinstance(interface, str)
+                    else interface.interface_name
+                )
+                for interface in interfaces
+            ]
             await async_nds_drain(
                 self.device.name,
                 force_undrain=not input.drain,
@@ -9711,7 +10543,21 @@ class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
             )
         match input.trigger:
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP:
-                await self.driver.async_stop_service(service, agents)
+                if params.get("intentional_stop", False):
+                    if agents is not None:
+                        raise ValueError(
+                            "intentional_stop does not support per-agent service control"
+                        )
+                    if not self.is_fboss or not isinstance(self.driver, FbossSwitch):
+                        raise ValueError(
+                            "intentional_stop is supported only by the FBOSS driver"
+                        )
+                    await self.driver.async_stop_service(
+                        service,
+                        accept_failed_if_process_absent=True,
+                    )
+                else:
+                    await self.driver.async_stop_service(service, agents)
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_START:
                 await self.driver.async_start_service(service, agents)
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART:
@@ -11875,6 +12721,7 @@ def create_fpf_bgp_prefix_injection_step(
     increment_step: str = "0:0:1::",
     community_list: t.Optional[str] = None,
     communities: t.Optional[t.List[str]] = None,
+    extra_communities: t.Optional[t.List[str]] = None,
     batch_size: t.Optional[int] = None,
     withdraw_only: bool = False,
     description: t.Optional[str] = None,
@@ -11896,6 +12743,8 @@ def create_fpf_bgp_prefix_injection_step(
         params["community_list"] = community_list
     if communities is not None:
         params["communities"] = communities
+    if extra_communities is not None:
+        params["extra_communities"] = extra_communities
     return Step(
         name=StepName.FPF_BGP_PREFIX_INJECTION_STEP,
         step_params=Params(json_params=json.dumps(params)),

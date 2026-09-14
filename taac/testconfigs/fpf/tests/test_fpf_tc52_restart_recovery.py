@@ -115,6 +115,58 @@ class TestFpfTc52RestartRecovery(unittest.TestCase):
             _playbook(config, "fpf_tc52_hrt_restart_longevity"),
         )
 
+    def test_shared_recovered_longevity_has_gate_and_qualification(self):
+        config = (
+            fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
+        )
+        recovered_playbooks = (
+            "fpf_tc28_fsdb_kill_longevity",
+            "fpf_tc39_fsdb_kill5m_longevity",
+            "fpf_tc49_bgp_kill_5s_10min_longevity",
+            "fpf_tc50_wedge_agent_kill_5s_10min_longevity",
+            "fpf_tc51_fsdb_kill_5s_10min_longevity",
+            "fpf_tc52_hrt_restart_longevity",
+            "fpf_tc55_gtsw_device_reboot_recovery_undrain",
+            "fpf_tc38_persistent_ndp_clear_stable",
+            "fpf_tc58_multi_fboss_process_kill_15s_5min_longevity",
+        )
+        for playbook_name in recovered_playbooks:
+            with self.subTest(playbook=playbook_name):
+                playbook = _playbook(config, playbook_name)
+                prechecks = {
+                    check.check_id: check
+                    for check in playbook.prechecks or []
+                    if check.check_id
+                }
+                for check_id in (
+                    "fpf_prod_hrt_prefix_stability_precheck",
+                    "fpf_hrt_system_memory_precheck",
+                    "fpf_hrt_driver_disconnect_precheck",
+                ):
+                    self.assertNotIn(check_id, prechecks)
+                steps = [
+                    step for stage in playbook.stages for step in stage.steps or []
+                ]
+                gate = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _params(step.step_params).get("custom_step_name")
+                    == "fpf_verify_recovered_state"
+                )
+                anchor = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if _params(step.step_params).get("custom_step_name")
+                    == "record_fpf_recovered_baseline_time"
+                )
+                self.assertLess(gate, anchor)
+                self.assertEqual(
+                    _params(steps[anchor + 1].step_params)["duration"], 120
+                )
+                self.assertEqual(
+                    _params(steps[anchor + 2].step_params)["duration"], 300
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

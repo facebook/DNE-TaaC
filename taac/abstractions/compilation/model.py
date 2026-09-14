@@ -19,6 +19,7 @@ from taac.abstractions.config_artifact_semantics import (
 from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
+    validate_ixia_bgp_tcp_window_size_bytes,
 )
 from taac.abstractions.physical_interface_semantics import (
     PhysicalInterfaceGroupKind,
@@ -579,6 +580,7 @@ class IxiaBgpSessionPlan:
     hold_timer_s: int
     keepalive_timer_s: int
     enable_graceful_restart: bool
+    tcp_window_size_bytes: int | None = None
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.IXIA_BGP_SESSION)
@@ -612,6 +614,8 @@ class IxiaBgpSessionPlan:
         _require_positive(self.keepalive_timer_s, "keepalive_timer_s")
         if not isinstance(self.enable_graceful_restart, bool):
             raise TypeError("IXIA graceful-restart intent must be a bool")
+        if self.tcp_window_size_bytes is not None:
+            validate_ixia_bgp_tcp_window_size_bytes(self.tcp_window_size_bytes)
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,6 @@ class TestbedError(Exception):
 from taac.constants import (
     TestCaseFailure,
     TestDevice,
-    TestResult,
     TestTopology,
 )
 from taac.driver.abstract_switch import AbstractSwitch
@@ -48,6 +47,7 @@ from taac.utils.taac_log_formatter import (
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
+from taac.test_run_result import types as trr_types
 
 
 StepInput = t.TypeVar("StepInput", bound=t.Any)
@@ -66,7 +66,7 @@ class Step(t.Generic[StepInput], ABC):
         name: str,
         device: TestDevice,
         topology: TestTopology,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_config: taac_types.TestConfig,
         test_case_name: str,
         test_case_start_time: float,
@@ -106,7 +106,7 @@ class Step(t.Generic[StepInput], ABC):
     async def _run(self, input: StepInput, params: t.Dict[str, t.Any]) -> None:
         step_start_time = time.time()
         try:
-            if self.ixia:
+            if self.ixia and not params.get("skip_start_traffic", False):
                 self.ixia.start_traffic()
             log_step_info(
                 self.__class__.STEP_NAME.name,

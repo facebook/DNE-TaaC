@@ -76,6 +76,7 @@ from taac.task_definitions import (
     create_coop_apply_patchers_task,
     create_coop_register_patcher_task,
     create_coop_unregister_patchers_task,
+    create_run_commands_on_shell_task,
     create_wait_for_agent_convergence_task,
 )
 from taac.utils.netwhoami_utils import fetch_whoami
@@ -106,6 +107,7 @@ from taac.test_as_a_config.types import TestConfig
 # the actual `eth1/13/3` address.
 _ARP_RESPONSE_BODY_HEX = "00010800060400020011010000010a00fe010011010000020a00fefe"
 _ARP_RESPONSE_BCAST_BODY_HEX = _ARP_RESPONSE_BODY_HEX
+_BGP_CONFIG_NAMES = ["bgpcpp", "bgpcpp_softdrain"]
 
 
 def _register_arp_custom_payloads() -> None:
@@ -121,6 +123,84 @@ def _register_arp_custom_payloads() -> None:
     register_custom_frame_payload(
         "TEST_RAW_ARP_RESPONSE_BCAST_TRAFFIC", _ARP_RESPONSE_BCAST_BODY_HEX
     )
+
+
+def _select_playbooks(
+    playbooks: list[taac_types.Playbook],
+    playbooks_selected: list[str] | None,
+) -> list[taac_types.Playbook]:
+    """Return the requested CPU-queue playbooks in caller-specified order."""
+    if playbooks_selected is None:
+        return playbooks
+
+    playbooks_by_name = {playbook.name: playbook for playbook in playbooks}
+    unknown_names = [
+        name for name in playbooks_selected if name not in playbooks_by_name
+    ]
+    if unknown_names:
+        raise ValueError(
+            "Unknown CPU queue playbook selections: "
+            f"{unknown_names}; available: {sorted(playbooks_by_name)}"
+        )
+    return [playbooks_by_name[name] for name in playbooks_selected]
+
+
+def _create_v4_peer_group_patcher_tasks(
+    *,
+    hostname: str,
+    peer_group_name: str,
+    description: str,
+    ingress_policy_name: str,
+    egress_policy_name: str,
+    is_confed_peer: str,
+    peer_tag: str,
+    max_routes: str,
+    disable_ipv6_afi: str,
+    v4_over_v6_nexthop: str,
+    receive_link_bandwidth: str | None = None,
+) -> list[taac_types.Task]:
+    """Register a V4 peer group with the policy valid for each BGP variant."""
+    live_egress_policy = egress_policy_name.removesuffix("_DRAIN")
+    common_args = {
+        "name": peer_group_name,
+        "description": description,
+        "next_hop_self": "True",
+        "disable_ipv4_afi": "False",
+        "disable_ipv6_afi": disable_ipv6_afi,
+        "is_confed_peer": is_confed_peer,
+        "ingress_policy_name": ingress_policy_name,
+        "bgp_peer_timers_hold_time_seconds": "30",
+        "bgp_peer_timers_keep_alive_seconds": "10",
+        "bgp_peer_timers_out_delay_seconds": "7",
+        "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
+        "peer_tag": peer_tag,
+        "max_routes": max_routes,
+        "warning_only": "True",
+        "warning_limit": "0",
+        "link_bandwidth_bps": "auto",
+        "v4_over_v6_nexthop": v4_over_v6_nexthop,
+        "is_passive": "False",
+    }
+    if receive_link_bandwidth is not None:
+        common_args["receive_link_bandwidth"] = receive_link_bandwidth
+
+    return [
+        create_coop_register_patcher_task(
+            hostname=hostname,
+            config_name=config_name,
+            patcher_name=f"add_peer_group_patcher_{peer_group_name}",
+            task_name="coop_register_patcher",
+            patcher_args={
+                **common_args,
+                "egress_policy_name": variant_egress_policy,
+            },
+            py_func_name="add_peer_group_patcher",
+        )
+        for config_name, variant_egress_policy in (
+            ("bgpcpp", live_egress_policy),
+            ("bgpcpp_softdrain", f"{live_egress_policy}_DRAIN"),
+        )
+    ]
 
 
 def get_cpu_queue_constants(hostname: str):
@@ -227,6 +307,8 @@ def create_npi_cpu_queue_test_config(
     low_queue: int | None = None,
     mid_queue: int | None = None,
     high_queue: int | None = None,
+    playbooks_selected: list[str] | None = None,
+    restore_soft_drain: bool = False,
 ):
     """Build the DC-TypeF 51T NPI CPU queue TestConfig.
 
@@ -259,6 +341,11 @@ def create_npi_cpu_queue_test_config(
             get_cpu_queue_constants() lookup. Required for NPI devices not yet in
             netwhoami inventory (e.g. a pre-arrival bring-up stub like w800). If
             any is None, indices are resolved from hardware via netwhoami.
+        playbooks_selected: Optional ordered subset of CPU queue playbook names.
+            All CPU queue playbooks are included when omitted.
+        restore_soft_drain: Undrain the DUT before setup and restore its original
+            soft-drained lab posture during teardown. The commands run through
+            the device driver, which selects the NetOS managed shell when needed.
 
     Returns:
         TestConfig: The DC-TypeF NPI CPU queue TestConfig.
@@ -277,7 +364,7 @@ def create_npi_cpu_queue_test_config(
     return TestConfig(
         name=test_config_name,
         ixia_protocol_verification_timeout=600,
-        basset_pool="dne.test",
+        basset_pool=basset_pool or "dne.test",
         # Tier 1 IXIA cache LoadConfig restores server-side vports but does
         # NOT rehydrate the Python-side `self.vport_indices` dict (see
         # `assign_ports` gate at `ixia/ixia.py:4566` skipped when
@@ -305,10 +392,20 @@ def create_npi_cpu_queue_test_config(
         # Setup tasks to configure the device before testing
         setup_tasks=[
             create_coop_unregister_patchers_task(device_name),
+            *(
+                [
+                    create_run_commands_on_shell_task(
+                        hostname=device_name,
+                        cmds=["fboss_local_drainer undrain"],
+                    )
+                ]
+                if restore_soft_drain
+                else []
+            ),
             # Remove all the bgp peers present in the device first
             create_coop_register_patcher_task(
                 hostname=device_name,
-                config_name="bgpcpp",
+                config_names=_BGP_CONFIG_NAMES,
                 patcher_name="a_remove_bgp_peers",
                 task_name="coop_register_patcher",
                 patcher_args={"delete_all": "True"},
@@ -317,7 +414,7 @@ def create_npi_cpu_queue_test_config(
             # Configure BGP switch prefix limit
             create_coop_register_patcher_task(
                 hostname=device_name,
-                config_name="bgpcpp",
+                config_names=_BGP_CONFIG_NAMES,
                 patcher_name="configure_bgp_switch_limit",
                 task_name="coop_register_patcher",
                 patcher_args={
@@ -327,7 +424,7 @@ def create_npi_cpu_queue_test_config(
             ),
             create_coop_register_patcher_task(
                 hostname=device_name,
-                config_name="bgpcpp",
+                config_names=_BGP_CONFIG_NAMES,
                 patcher_name=f"update_peer_group_patcher_{peergroup_downlink_mimic_v6}",
                 task_name="coop_register_patcher",
                 patcher_args={
@@ -346,7 +443,7 @@ def create_npi_cpu_queue_test_config(
             ),
             create_coop_register_patcher_task(
                 hostname=device_name,
-                config_name="bgpcpp",
+                config_names=_BGP_CONFIG_NAMES,
                 patcher_name=f"update_peer_group_patcher_{peergroup_uplink_mimic_v6}",
                 task_name="coop_register_patcher",
                 patcher_args={
@@ -363,62 +460,30 @@ def create_npi_cpu_queue_test_config(
                 },
                 py_func_name="configure_bgp_peer_group",
             ),
-            create_coop_register_patcher_task(
+            *_create_v4_peer_group_patcher_tasks(
                 hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"add_peer_group_patcher_{peergroup_downlink_mimic_v4}",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": peergroup_downlink_mimic_v4,
-                    "description": "BGP peering from SSW to FSW, IPv4 sessions",
-                    "next_hop_self": "True",
-                    "disable_ipv4_afi": "False",
-                    "disable_ipv6_afi": "True",
-                    "is_confed_peer": is_downlink_peer_confed,
-                    "ingress_policy_name": route_map_downlink_ingress,
-                    "egress_policy_name": route_map_downlink_egress,
-                    "bgp_peer_timers_hold_time_seconds": "30",
-                    "bgp_peer_timers_keep_alive_seconds": "10",
-                    "bgp_peer_timers_out_delay_seconds": "7",
-                    "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
-                    "peer_tag": downlink_peer_tag,
-                    "max_routes": per_peer_max_route_limit,
-                    "warning_only": "True",
-                    "warning_limit": "0",
-                    "link_bandwidth_bps": "auto",
-                    "v4_over_v6_nexthop": "False",
-                    "is_passive": "False",
-                },
-                py_func_name="add_peer_group_patcher",
+                peer_group_name=peergroup_downlink_mimic_v4,
+                description="BGP peering from SSW to FSW, IPv4 sessions",
+                ingress_policy_name=route_map_downlink_ingress,
+                egress_policy_name=route_map_downlink_egress,
+                is_confed_peer=is_downlink_peer_confed,
+                peer_tag=downlink_peer_tag,
+                max_routes=per_peer_max_route_limit,
+                disable_ipv6_afi="True",
+                v4_over_v6_nexthop="False",
             ),
-            create_coop_register_patcher_task(
+            *_create_v4_peer_group_patcher_tasks(
                 hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"add_peer_group_patcher_{peergroup_uplink_mimic_v4}",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": peergroup_uplink_mimic_v4,
-                    "description": "BGP peering from FAUU to EB, IPV6 sessions",
-                    "next_hop_self": "True",
-                    "disable_ipv4_afi": "False",
-                    "disable_ipv6_afi": "False",
-                    "is_confed_peer": is_uplink_peer_confed,
-                    "ingress_policy_name": route_map_uplink_ingress,
-                    "egress_policy_name": route_map_uplink_egress,
-                    "bgp_peer_timers_hold_time_seconds": "30",
-                    "bgp_peer_timers_keep_alive_seconds": "10",
-                    "bgp_peer_timers_out_delay_seconds": "7",
-                    "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
-                    "peer_tag": uplink_peer_tag,
-                    "warning_only": "True",
-                    "max_routes": per_peer_max_route_limit,
-                    "warning_limit": "0",
-                    "link_bandwidth_bps": "auto",
-                    "v4_over_v6_nexthop": "true",
-                    "is_passive": "False",
-                    "receive_link_bandwidth": "1",
-                },
-                py_func_name="add_peer_group_patcher",
+                peer_group_name=peergroup_uplink_mimic_v4,
+                description="BGP peering from FAUU to EB, IPV6 sessions",
+                ingress_policy_name=route_map_uplink_ingress,
+                egress_policy_name=route_map_uplink_egress,
+                is_confed_peer=is_uplink_peer_confed,
+                peer_tag=uplink_peer_tag,
+                max_routes=per_peer_max_route_limit,
+                disable_ipv6_afi="False",
+                v4_over_v6_nexthop="true",
+                receive_link_bandwidth="1",
             ),
             create_coop_apply_patchers_task(
                 hostnames=[device_name],
@@ -512,6 +577,16 @@ def create_npi_cpu_queue_test_config(
         # Tasks to clean up after testing is complete
         teardown_tasks=[
             create_coop_unregister_patchers_task(device_name),
+            *(
+                [
+                    create_run_commands_on_shell_task(
+                        hostname=device_name,
+                        cmds=["fboss_local_drainer softdrain"],
+                    )
+                ]
+                if restore_soft_drain
+                else []
+            ),
         ],
         # Configure IXIA ports for traffic generation
         basic_port_configs=[
@@ -1917,18 +1992,19 @@ def create_npi_cpu_queue_test_config(
         ],
         # Test execution playbooks - CPU queue classification tests only
         playbooks=add_common_checks_to_cpu_queue_playbooks(
-            create_cpu_queue_playbooks(
-                low_queue=low_queue,
-                mid_queue=mid_queue,
-                high_queue=high_queue,
-                ixia_downlink_interface=ixia_downlink_interface,
-                # Total IXIA-mimic BGP peers across all three directions; used
-                # by create_cpu_queue_playbooks to scale the A2-leakage noise
-                # tolerance per queue (BGP control traffic on the high queue
-                # scales linearly with established session count).
-                bgp_peer_count=downlink_peer_count
-                + uplink_peer_count
-                + rogue_peer_count,
+            _select_playbooks(
+                create_cpu_queue_playbooks(
+                    low_queue=low_queue,
+                    mid_queue=mid_queue,
+                    high_queue=high_queue,
+                    ixia_downlink_interface=ixia_downlink_interface,
+                    # Total IXIA-mimic BGP peers across all three directions;
+                    # used to scale the A2-leakage noise tolerance per queue.
+                    bgp_peer_count=downlink_peer_count
+                    + uplink_peer_count
+                    + rogue_peer_count,
+                ),
+                playbooks_selected,
             ),
             unique_prefix_limit=unique_prefix_limit,
             ixia_packet_loss_threshold=ixia_packet_loss_threshold,

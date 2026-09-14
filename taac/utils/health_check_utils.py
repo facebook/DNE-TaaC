@@ -48,6 +48,7 @@ from taac.utils.oss_taac_lib_utils import (
     get_root_logger,
     none_throws,
 )
+from taac.utils.upper_bound_gate import evaluate_upper_bound_gates
 
 LOGGER: ConsoleFileLogger = get_root_logger()
 
@@ -583,7 +584,11 @@ def evaluate_rss_delta_from_baseline(
         )
 
     growth_pct = (current_rss_bytes - baseline_rss_bytes) / baseline_rss_bytes * 100.0
-    passed = growth_pct <= max_growth_pct
+    gate_result = evaluate_upper_bound_gates(
+        values={"rss_growth_pct": growth_pct},
+        thresholds={"rss_growth_pct": max_growth_pct},
+    )
+    passed = gate_result.passed
     message = (
         f"RSS delta-from-baseline: baseline={int(baseline_rss_bytes)} bytes, "
         f"current={int(current_rss_bytes)} bytes, growth={growth_pct:.2f}% "

@@ -3,7 +3,6 @@
 # pyre-unsafe
 
 import logging
-import time
 import typing as t
 
 from taac.constants import TestDevice
@@ -19,7 +18,7 @@ from taac.libs.fpf.fpf_collector_registry import (
     get_recovery_start_time,
     get_restart_completion_time,
     get_restart_time,
-    get_test_case_start_time,
+    resolve_observation_window,
 )
 from taac.libs.fpf.fpf_prod_hrt_prefix import normalize_prefix
 from taac.libs.fpf.fpf_stress_checks import (
@@ -100,12 +99,7 @@ def discover_prod_collectors(
     hosts: t.List[str] = []
     hiw = getattr(c, "hosts_in_window", None)
     if callable(hiw):
-        window_end = check_params.get("window_end", time.time())
-        tc_start = get_test_case_start_time()
-        lookback_sec = check_params.get("lookback_sec", 900)
-        window_start = check_params.get(
-            "window_start", tc_start if tc_start else window_end - lookback_sec
-        )
+        window_start, window_end = resolve_observation_window(check_params)
         hosts = t.cast(t.List[str], hiw(window_start, window_end) or [])
     if not hosts:
         hosts = list(getattr(c, "hosts", []) or [])
@@ -624,6 +618,7 @@ def _evaluate_host_transition(
         info = timeline[norm]
         display = info["display"]
         samples = info["samples"]
+        res.n_samples += len(samples)
         baseline_reachable = set(samples[0][2].reachable_planes)
         relevant = sorted(impacted_planes & baseline_reachable)
         if not relevant:
@@ -631,7 +626,6 @@ def _evaluate_host_transition(
             # VF2 prefix when a VF1 lane was disabled) — skip from transition.
             continue
         any_relevant = True
-        res.n_samples += len(samples)
         final_reachable = set(samples[-1][2].reachable_planes)
         for plane in relevant:
             last_reachable_ts: t.Optional[float] = None
@@ -977,12 +971,7 @@ class FpfProdHrtPrefixStabilityHealthCheck(
                 message="No prod_hrt_prefix collector(s) in registry",
             )
 
-        window_end = check_params.get("window_end", time.time())
-        tc_start = get_test_case_start_time()
-        lookback_sec = check_params.get("lookback_sec", 900)
-        window_start = check_params.get(
-            "window_start", tc_start if tc_start else window_end - lookback_sec
-        )
+        window_start, window_end = resolve_observation_window(check_params)
 
         mode = check_params.get("mode", "stability")
         # Blip-handling contract for the stability assertion (mode="stability"):
@@ -1250,10 +1239,17 @@ class FpfProdHrtPrefixStabilityHealthCheck(
             if host in target_norms_by_host and res.status == "SKIP":
                 res.status = "FAIL"
                 res.s1_ok = False
-                res.compliance_issues.append(
-                    f"required host {host} produced no in-window samples for "
-                    "its configured prefixes"
-                )
+                if res.n_prefixes:
+                    res.compliance_issues.append(
+                        f"required host {host} produced {res.n_samples} "
+                        "configured-prefix sample(s), but no affected plane "
+                        f"scope overlapped {sorted(impacted)}"
+                    )
+                else:
+                    res.compliance_issues.append(
+                        f"required host {host} produced no in-window samples for "
+                        "its configured prefixes"
+                    )
             host_results.append(res)
             self.logger.info(
                 f"  [prod HRT prefix][{host}] mode={mode} VERDICT {res.status} — "

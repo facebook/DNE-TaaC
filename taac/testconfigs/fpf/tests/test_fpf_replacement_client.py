@@ -15,6 +15,9 @@ from taac.testconfigs.fpf import (
     fpf_shared_injection_suite,
     fpf_tc21_prod_prefix_drain_link,
     fpf_tc25_wedge_agent_restart,
+    fpf_tc35_stsw_undrain_reinject,
+    fpf_tc36_stsw_all_connections_down,
+    fpf_tc54_stsw_device_drain,
 )
 
 
@@ -87,6 +90,9 @@ class FpfReplacementClientTest(unittest.TestCase):
         try:
             with patch.dict(os.environ, traffic_env):
                 importlib.reload(fpf_hardening_common)
+                importlib.reload(fpf_tc35_stsw_undrain_reinject)
+                importlib.reload(fpf_tc36_stsw_all_connections_down)
+                importlib.reload(fpf_tc54_stsw_device_drain)
                 importlib.reload(fpf_shared_injection_suite)
                 importlib.reload(fpf_tc25_wedge_agent_restart)
 
@@ -114,6 +120,9 @@ class FpfReplacementClientTest(unittest.TestCase):
                         )
         finally:
             importlib.reload(fpf_hardening_common)
+            importlib.reload(fpf_tc35_stsw_undrain_reinject)
+            importlib.reload(fpf_tc36_stsw_all_connections_down)
+            importlib.reload(fpf_tc54_stsw_device_drain)
             importlib.reload(fpf_shared_injection_suite)
             importlib.reload(fpf_tc25_wedge_agent_restart)
 

@@ -9,6 +9,10 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_ebgp_route_oscillation_playbook,
     get_bgp_ebb_ibgp_route_oscillation_playbook,
 )
+from taac.stages.stage_definitions import (
+    create_validated_bgp_route_oscillations_stage,
+    create_validated_ebgp_route_oscillations_stage,
+)
 from taac.test_as_a_config import types as taac_types
 
 
@@ -40,6 +44,14 @@ class BgpRouteOscillationPlaybookTest(unittest.TestCase):
             (0, 750),
             (payload["prefix_start_index"], payload["prefix_end_index"]),
         )
+        legacy = create_validated_ebgp_route_oscillations_stage(
+            device_name="dut.example.com",
+            expected_established_sessions=744,
+        )
+        self.assertEqual(
+            legacy.steps[0].description, playbook.stages[0].steps[0].description
+        )
+        self.assertEqual(_step_payload(legacy.steps[0]), payload)
 
     def test_ibgp_playbook_wires_exact_multi_plane_contract(self) -> None:
         playbook = get_bgp_ebb_ibgp_route_oscillation_playbook(
@@ -65,3 +77,14 @@ class BgpRouteOscillationPlaybookTest(unittest.TestCase):
         self.assertEqual(
             (0, 750), (payload["prefix_start_index"], payload["prefix_end_index"])
         )
+        legacy = create_validated_bgp_route_oscillations_stage(
+            device_name="dut.example.com",
+            expected_established_sessions=1272,
+            prefix_pool_regex=r"^PREFIX_POOL_IBGP_IPV[46]_PLANE_[1-4]_REMOTE_EB$",
+            expected_prefix_pool_names=EXPECTED_IBGP_POOLS,
+            parent_prefixes_to_ignore=["2001:db8:ffff::/80"],
+        )
+        self.assertEqual(
+            legacy.steps[0].description, playbook.stages[0].steps[0].description
+        )
+        self.assertEqual(_step_payload(legacy.steps[0]), payload)

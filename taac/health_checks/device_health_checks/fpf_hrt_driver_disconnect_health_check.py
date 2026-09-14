@@ -23,7 +23,6 @@ all provided host entities at once and judges each host independently: one host
 that ever dropped below 1 fails the check while the others are still reported OK.
 """
 
-import time
 import typing as t
 from datetime import datetime
 
@@ -36,8 +35,8 @@ from taac.internal.ods_utils import (
     async_query_ods,
 )
 from taac.libs.fpf.fpf_collector_registry import (
-    get_test_case_start_time,
     register_artifact,
+    resolve_observation_window,
 )
 from taac.utils.common import async_get_fburl
 from taac.health_check.health_check import types as hc_types
@@ -107,14 +106,9 @@ class FpfHrtDriverDisconnectHealthCheck(
             check_params.get("expected_value", EXPECTED_CONNECTED_VALUE)
         )
 
-        window_end = float(check_params.get("window_end", time.time()))
-        tc_start = get_test_case_start_time()
         lookback_sec = check_params.get("lookback_sec", DEFAULT_LOOKBACK_SEC)
-        window_start = float(
-            check_params.get(
-                "window_start",
-                tc_start if tc_start else window_end - lookback_sec,
-            )
+        window_start, window_end = resolve_observation_window(
+            check_params, DEFAULT_LOOKBACK_SEC
         )
         start_time = int(window_start)
         end_time = int(window_end)

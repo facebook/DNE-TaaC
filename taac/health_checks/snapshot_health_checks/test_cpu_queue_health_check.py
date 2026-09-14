@@ -114,6 +114,14 @@ class TestCreateCpuQueueSnapshotCheckFactory(unittest.TestCase):
         payload = self._payload(hc)
         self.assertEqual(payload["active_min_out_pps_per_queue"], {"0": 10})
 
+    def test_active_discard_queues_pass_through(self):
+        hc = create_cpu_queue_snapshot_check(
+            active_queues=[9],
+            active_discard_queues=[9],
+        )
+        payload = self._payload(hc)
+        self.assertEqual(payload["active_discard_queues"], [9])
+
 
 class TestCpuQueueHealthCheckCompareSnapshots(unittest.IsolatedAsyncioTestCase):
     """End-to-end tests for `compare_snapshots`, focused on the inactive_queues
@@ -158,6 +166,27 @@ class TestCpuQueueHealthCheckCompareSnapshots(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    async def test_equal_snapshot_timestamps_use_one_second_window(self):
+        input_ = hc_types.CpuQueueHealthCheckIn(
+            active_queues=[2], active_min_out_pps_per_queue={2: 1}
+        )
+        pre = _make_stats_snapshot({2: 0}, {}, timestamp=1000)
+        post = _make_stats_snapshot({2: 1}, {}, timestamp=1000)
+
+        result = await self.hc.compare_snapshots(self.device, input_, {}, pre, post)
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_decreasing_snapshot_timestamps_fail(self):
+        input_ = hc_types.CpuQueueHealthCheckIn(active_queues=[2])
+        pre = _make_stats_snapshot({2: 0}, {}, timestamp=1001)
+        post = _make_stats_snapshot({2: 1}, {}, timestamp=1000)
+
+        result = await self.hc.compare_snapshots(self.device, input_, {}, pre, post)
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("must not move backwards", result.message)
+
     async def test_active_queue_below_threshold_fails(self):
         result = await self._compare(
             hc_types.CpuQueueHealthCheckIn(
@@ -188,6 +217,29 @@ class TestCpuQueueHealthCheckCompareSnapshots(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    async def test_absent_inactive_queue_is_zero_traffic_and_passes(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[2],
+                inactive_queues=[9],
+                active_min_out_pps_per_queue={2: 10, 9: 100},
+            ),
+            pre_out={2: 0},
+            post_out={2: 6000},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_active_queue_sparse_zero_to_traffic_passes(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[2],
+                active_min_out_pps_per_queue={2: 10},
+            ),
+            pre_out={},
+            post_out={2: 6000},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
     async def test_inactive_queue_above_noise_tolerance_fails(self):
         """A2 leakage check: misclassification routing test traffic to the wrong
         queue produces growth far above noise; assertion must fire."""
@@ -202,6 +254,19 @@ class TestCpuQueueHealthCheckCompareSnapshots(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("9", result.message)
+
+    async def test_inactive_queue_sparse_zero_to_traffic_fails(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[],
+                inactive_queues=[9],
+                active_min_out_pps_per_queue={9: 100},
+            ),
+            pre_out={},
+            post_out={9: 60000},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("queue 9", result.message)
 
     async def test_no_discard_queue_with_new_discards_fails(self):
         result = await self._compare(
@@ -227,6 +292,46 @@ class TestCpuQueueHealthCheckCompareSnapshots(unittest.IsolatedAsyncioTestCase):
             post_out={0: 0, 2: 0, 9: 0},
             pre_disc={0: 100, 2: 0, 9: 0},
             post_disc={0: 100, 2: 0, 9: 0},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_absent_no_discard_queue_counter_passes_as_sparse_zero(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[],
+                no_discard_queues=[9],
+            ),
+            pre_out={},
+            post_out={},
+            pre_disc={},
+            post_disc={},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_one_sided_no_discard_queue_counter_fails(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[],
+                no_discard_queues=[9],
+            ),
+            pre_out={},
+            post_out={},
+            pre_disc={},
+            post_disc={9: 1},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("sparse zero baseline", result.message)
+
+    async def test_active_discard_queue_sparse_zero_to_discards_passes(self):
+        result = await self._compare(
+            hc_types.CpuQueueHealthCheckIn(
+                active_queues=[],
+                active_discard_queues=[9],
+            ),
+            pre_out={},
+            post_out={},
+            pre_disc={},
+            post_disc={9: 1},
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 

@@ -50,6 +50,9 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
             community set. Overrides ``communities`` if both are provided.
         communities: Explicit list of "ASN:VALUE" community strings.
             Used only when ``community_list`` is not set.
+        extra_communities: Explicit communities appended to the selected preset
+            (or explicit ``communities``). This keeps the preset name valid while
+            adding markers such as the STSW drain community.
         batch_size: Maximum prefixes sent in each BGP RPC. When omitted, all
             prefixes are sent in one request.
         withdraw_only: If True, only withdraw (delNetworks) the prefixes
@@ -80,6 +83,7 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
         increment_step: str = params.get("increment_step", "0:0:1::")
         community_list: t.Optional[str] = params.get("community_list")
         communities_raw: t.Optional[t.List[str]] = params.get("communities")
+        extra_communities: t.List[str] = list(params.get("extra_communities", []))
         self._batch_size = params.get("batch_size")
         self._withdraw_only = params.get("withdraw_only", False)
 
@@ -97,13 +101,13 @@ class FpfBgpPrefixInjectionStep(Step[taac_types.BaseInput]):
                     f"Unknown community_list preset '{community_list}'. "
                     f"Valid presets: {sorted(COMMUNITY_PRESETS.keys())}"
                 )
-            community_strs = COMMUNITY_PRESETS[community_list]
+            community_strs = [*COMMUNITY_PRESETS[community_list], *extra_communities]
             self.logger.info(
                 f"Using community preset '{community_list}' "
                 f"({len(community_strs)} communities)"
             )
         elif communities_raw:
-            community_strs = communities_raw
+            community_strs = [*communities_raw, *extra_communities]
         else:
             raise ValueError(
                 "Either 'community_list' or 'communities' must be provided "

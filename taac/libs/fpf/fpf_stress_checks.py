@@ -21,11 +21,12 @@ import asyncio
 import atexit
 import ipaddress
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from neteng.netcastle.logger import get_root_logger
 from taac.internal.driver.fboss_switch_internal import (
@@ -43,6 +44,9 @@ from taac.libs.collectors.base_collector import (  # noqa: F401
     _parse_ts,
     BaseCollector,
 )
+
+SCALE_RECOVERY_POLL_GRACE_INTERVALS: float = 2.0
+DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC: float = 10.0
 from taac.libs.fpf.fpf_bgp_rib import (  # oss-rewrite-touch
     _count_matching,
     get_bgp_rib,
@@ -345,6 +349,9 @@ class HrtRemoteFailureRow:
     valid: bool = True
     notes: str = ""
     plane_ids: List[int] = field(default_factory=lambda: list(range(NUM_LANES)))
+    request_start_epoch: float = 0.0
+    request_end_epoch: float = 0.0
+    duration_sec: float = 0.0
 
 
 @dataclass
@@ -357,6 +364,175 @@ class BgpRibRow:
     request_start_epoch: float = 0.0
     request_end_epoch: float = 0.0
     duration_sec: float = 0.0
+
+
+@dataclass
+class FibRouteRow:
+    timestamp: str
+    gtsw: str
+    matched: int
+    total: int
+    notes: str = ""
+    request_start_epoch: float = 0.0
+    request_end_epoch: float = 0.0
+    duration_sec: float = 0.0
+
+
+@dataclass(frozen=True)
+class ExactLifecycleSeriesResult:
+    """Verdict for one exact-count signal in a lifecycle phase."""
+
+    passed: bool
+    final: Optional[int]
+    first_exact_sec: Optional[float]
+    valid_count: int
+    error_count: int
+    ignored_error_count: int
+    detail: str
+
+
+def evaluate_exact_lifecycle_series(
+    rows: Sequence[Any],
+    *,
+    expected: int,
+    anchor_ts: float,
+    deadline_sec: float,
+    value_getter: Callable[[Any], Optional[int]],
+    transition: bool,
+    window_end_ts: Optional[float] = None,
+    allowed_error_intervals: Sequence[Tuple[float, float]] = (),
+) -> ExactLifecycleSeriesResult:
+    """Evaluate exact present/absent state without treating error-zero as data.
+
+    ``transition=True`` allows pre-convergence values, but requires the first
+    exact value by ``deadline_sec`` and rejects every later regression.
+    ``transition=False`` is a strict stable-state check: every valid sample must
+    be exact. Error rows are never values, even when their numeric field is zero;
+    only errors whose request began inside an explicitly confirmed outage
+    interval are ignored and counted for diagnostics.
+    """
+    valid: List[Tuple[float, int]] = []
+    error_count = 0
+    ignored_error_count = 0
+    end = float("inf") if window_end_ts is None else window_end_ts
+    for row in rows:
+        try:
+            sample_ts = float(getattr(row, "request_end_epoch", 0.0) or 0.0)
+            if sample_ts <= 0:
+                sample_ts = _parse_ts(str(row.timestamp)).timestamp()
+        except (TypeError, ValueError):
+            error_count += 1
+            continue
+        if sample_ts < anchor_ts or sample_ts > end:
+            continue
+        notes = str(getattr(row, "notes", "") or "")
+        is_error = not bool(getattr(row, "valid", True)) or notes.startswith("error:")
+        if is_error:
+            request_start = float(getattr(row, "request_start_epoch", 0.0) or sample_ts)
+            if any(
+                start <= request_start <= stop
+                for start, stop in allowed_error_intervals
+            ):
+                ignored_error_count += 1
+            else:
+                error_count += 1
+            continue
+        value = value_getter(row)
+        if value is None:
+            error_count += 1
+            continue
+        valid.append((sample_ts, int(value)))
+
+    if error_count:
+        return ExactLifecycleSeriesResult(
+            False,
+            valid[-1][1] if valid else None,
+            None,
+            len(valid),
+            error_count,
+            ignored_error_count,
+            f"{error_count} unexpected error/null sample(s)",
+        )
+    if not valid:
+        return ExactLifecycleSeriesResult(
+            False,
+            None,
+            None,
+            0,
+            0,
+            ignored_error_count,
+            "no valid samples in phase window",
+        )
+
+    exact_index = next(
+        (i for i, (_ts, value) in enumerate(valid) if value == expected), None
+    )
+    first_exact_sec = (
+        round(valid[exact_index][0] - anchor_ts, 3) if exact_index is not None else None
+    )
+    final = valid[-1][1]
+    if not transition:
+        wrong = [(ts, value) for ts, value in valid if value != expected]
+        passed = not wrong and final == expected
+        detail = (
+            f"all {len(valid)} valid sample(s) exact {expected}"
+            if passed
+            else f"{len(wrong)}/{len(valid)} valid sample(s) not exact {expected}; final={final}"
+        )
+        return ExactLifecycleSeriesResult(
+            passed,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            detail,
+        )
+
+    if exact_index is None:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            None,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"never reached exact {expected}; final={final}",
+        )
+    if first_exact_sec is None or first_exact_sec > deadline_sec:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"first exact {expected} at +{first_exact_sec}s exceeds {deadline_sec:g}s",
+        )
+    regression = next(
+        ((ts, value) for ts, value in valid[exact_index + 1 :] if value != expected),
+        None,
+    )
+    if regression is not None:
+        return ExactLifecycleSeriesResult(
+            False,
+            final,
+            first_exact_sec,
+            len(valid),
+            0,
+            ignored_error_count,
+            f"regressed to {regression[1]} after first exact {expected}",
+        )
+    passed = final == expected
+    return ExactLifecycleSeriesResult(
+        passed,
+        final,
+        first_exact_sec,
+        len(valid),
+        0,
+        ignored_error_count,
+        f"first exact {expected} at +{first_exact_sec}s; final={final}",
+    )
 
 
 @dataclass
@@ -425,6 +601,245 @@ class PerLaneResult:
     host: Optional[str] = None
     device_id: Optional[int] = None
     error_count: int = 0
+    inconclusive: bool = False
+
+
+@dataclass(frozen=True)
+class ScaleRecoveryEvaluation:
+    """Shared live/JSONL verdict for a scale-time remote-failure series."""
+
+    passed: bool
+    inconclusive: bool
+    actual: int
+    recovery_sec: Optional[float]
+    detail: str
+
+
+def derive_scale_recovery_poll_grace_sec(
+    *,
+    poll_interval_sec: Optional[float] = None,
+) -> Optional[float]:
+    """Return deterministic scheduling grace from a declared poll interval.
+
+    Never infer cadence from observed gaps: a missing poll is precisely what the
+    continuity check is intended to detect, so using those gaps would let the
+    failure enlarge its own allowance.
+    """
+    if poll_interval_sec is None or poll_interval_sec <= 0:
+        return None
+    return poll_interval_sec * SCALE_RECOVERY_POLL_GRACE_INTERVALS
+
+
+def scale_recovery_observation_sec(
+    max_convergence_sec: float,
+    recovery_stability_sec: float,
+    poll_interval_sec: float,
+    poll_duration_budget_sec: float = DEFAULT_SCALE_RECOVERY_POLL_DURATION_BUDGET_SEC,
+) -> int:
+    """Observation horizon covering recovery, stability, cadence, and RPC time."""
+    poll_grace_sec = derive_scale_recovery_poll_grace_sec(
+        poll_interval_sec=poll_interval_sec
+    )
+    if poll_grace_sec is None:
+        raise ValueError("poll_interval_sec must be positive")
+    if poll_duration_budget_sec < 0:
+        raise ValueError("poll_duration_budget_sec must be non-negative")
+    return math.ceil(
+        max_convergence_sec
+        + recovery_stability_sec
+        + poll_grace_sec
+        + poll_duration_budget_sec
+    )
+
+
+def normalize_scale_recovery_poll_duration(value: object) -> Optional[float]:
+    """Return a finite non-negative RPC duration, or ``None`` if malformed."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(duration) or duration < 0:
+        return None
+    return duration
+
+
+def evaluate_scale_recovery_samples(
+    samples: Sequence[Tuple[float, int]],
+    *,
+    error_count: int,
+    expected: int,
+    trigger_ts: float,
+    observation_end_ts: float,
+    max_convergence_sec: float,
+    recovery_stability_sec: float,
+    poll_grace_sec: Optional[float],
+    poll_duration_budget_sec: float = 0.0,
+    sample_durations_sec: Optional[Dict[float, float]] = None,
+    unscoped_timestamp_count: int = 0,
+    invalid_duration_count: int = 0,
+) -> ScaleRecoveryEvaluation:
+    """Require bounded recovery plus complete, fresh exact-state evidence.
+
+    Unlike generic three-signal convergence, scale recovery does not grant
+    partial stability credit. Insufficient observation is explicit and distinct
+    from a product failure; invalid samples, a late recovery, a regression after
+    recovery, or a non-exact final value remain hard failures.
+    """
+    ordered = sorted((ts, value) for ts, value in samples if ts >= trigger_ts)
+    if error_count:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            ordered[-1][1] if ordered else 0,
+            None,
+            f"{error_count} invalid/missing post-mutation sample(s)",
+        )
+    if not ordered:
+        return ScaleRecoveryEvaluation(
+            False,
+            True,
+            0,
+            None,
+            "INCONCLUSIVE — no valid post-mutation samples",
+        )
+    last_ts, last_actual = ordered[-1]
+    if last_actual != expected:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            last_actual,
+            None,
+            f"final={last_actual}, expected exact final={expected}",
+        )
+
+    first_mismatch_index = next(
+        (index for index, (_, value) in enumerate(ordered) if value != expected),
+        None,
+    )
+    if first_mismatch_index is None:
+        recovery_index = 0
+        if ordered[0][0] - trigger_ts > max_convergence_sec:
+            return ScaleRecoveryEvaluation(
+                False,
+                True,
+                last_actual,
+                None,
+                "INCONCLUSIVE — first valid exact-state sample arrived after "
+                f"the {max_convergence_sec:g}s recovery window",
+            )
+    else:
+        # The exact-final guard above guarantees an expected-valued sample after
+        # the first mismatch, so this bounded scan has no impossible sentinel
+        # branch while still preserving explicit post-recovery regression checks.
+        recovery_index = first_mismatch_index + 1
+        while ordered[recovery_index][1] != expected:
+            recovery_index += 1
+        regression = next(
+            (
+                (ts, value)
+                for ts, value in ordered[recovery_index + 1 :]
+                if value != expected
+            ),
+            None,
+        )
+        if regression is not None:
+            regression_sec = round(regression[0] - trigger_ts, 1)
+            return ScaleRecoveryEvaluation(
+                False,
+                False,
+                last_actual,
+                None,
+                f"regressed to {regression[1]} at mutation+{regression_sec}s "
+                f"after reaching exact {expected}",
+            )
+
+    recovery_ts = ordered[recovery_index][0]
+    recovery_sec = round(recovery_ts - trigger_ts, 1)
+    if recovery_sec > max_convergence_sec:
+        return ScaleRecoveryEvaluation(
+            False,
+            False,
+            last_actual,
+            recovery_sec,
+            f"recovered to exact {expected} in {recovery_sec}s "
+            f"> {max_convergence_sec:g}s SLA",
+        )
+
+    stable_tail_sec = round(last_ts - recovery_ts, 1)
+    total_coverage_grace_sec = (poll_grace_sec or 0.0) + poll_duration_budget_sec
+    required_observation_end = (
+        trigger_ts
+        + max_convergence_sec
+        + recovery_stability_sec
+        + total_coverage_grace_sec
+    )
+    coverage_gaps = []
+    if poll_grace_sec is None:
+        coverage_gaps.append("poll cadence could not be derived")
+    if observation_end_ts < required_observation_end:
+        coverage_gaps.append(
+            f"window ended at mutation+{observation_end_ts - trigger_ts:.1f}s "
+            f"before required {max_convergence_sec + recovery_stability_sec + total_coverage_grace_sec:g}s "
+            f"({max_convergence_sec:g}s recovery + {recovery_stability_sec:g}s "
+            f"stable tail + {poll_grace_sec or 0.0:g}s cadence grace + "
+            f"{poll_duration_budget_sec:g}s RPC budget)"
+        )
+    if poll_grace_sec is not None and observation_end_ts - last_ts > poll_grace_sec:
+        coverage_gaps.append(
+            f"last valid sample was {observation_end_ts - last_ts:.1f}s old "
+            f"(freshness limit {poll_grace_sec:g}s)"
+        )
+    if stable_tail_sec < recovery_stability_sec:
+        coverage_gaps.append(
+            f"only {stable_tail_sec}s of exact-state tail was observed "
+            f"(need {recovery_stability_sec:g}s)"
+        )
+    if poll_grace_sec is not None:
+        tail = ordered[recovery_index:]
+        durations = sample_durations_sec or {}
+        discontinuities = [
+            (previous[0], current[0], durations.get(current[0], 0.0))
+            for previous, current in zip(tail, tail[1:])
+            if current[0] - previous[0]
+            > poll_grace_sec + durations.get(current[0], 0.0)
+        ]
+        if discontinuities:
+            largest_gap = max(end - start for start, end, _duration in discontinuities)
+            coverage_gaps.append(
+                f"stable tail contains a {largest_gap:.1f}s sample gap "
+                f"(cadence grace {poll_grace_sec:g}s plus measured RPC duration)"
+            )
+    if unscoped_timestamp_count:
+        coverage_gaps.append(
+            f"{unscoped_timestamp_count} row(s) had unparseable timestamps and "
+            "could not be scoped before/after the mutation"
+        )
+    if invalid_duration_count:
+        coverage_gaps.append(
+            f"{invalid_duration_count} post-mutation row(s) had malformed RPC "
+            "duration metadata"
+        )
+    if coverage_gaps:
+        return ScaleRecoveryEvaluation(
+            False,
+            True,
+            last_actual,
+            recovery_sec,
+            "INCONCLUSIVE — insufficient collector coverage: "
+            + "; ".join(coverage_gaps),
+        )
+
+    return ScaleRecoveryEvaluation(
+        True,
+        False,
+        last_actual,
+        recovery_sec,
+        f"recovered to exact {expected} in {recovery_sec}s "
+        f"(SLA {max_convergence_sec:g}s), held for {stable_tail_sec}s; "
+        f"final={last_actual}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +1264,93 @@ class HrtBulkCollector(BaseCollector):
 
 
 # ---------------------------------------------------------------------------
+# Filtered FBOSS FIB Collector
+# ---------------------------------------------------------------------------
+
+
+class FibRouteCollector(BaseCollector):
+    """Poll exact FBOSS FIB counts for one IPv6 namespace per GTSW."""
+
+    def __init__(
+        self,
+        gtsws: List[str],
+        subnet_prefix: str,
+        tmp_path: str = "/tmp/fpf_stress_fib.log",
+        interval_sec: float = 2.0,
+    ) -> None:
+        super().__init__(tmp_path, interval_sec)
+        self.gtsws = gtsws
+        self.subnet = ipaddress.IPv6Network(subnet_prefix, strict=False)
+        self.rows: List[FibRouteRow] = []
+
+    def _write_header(self, f) -> None:
+        f.write(
+            f"{'timestamp':<34}  {'gtsw':<34}  {'matched':>8}  {'total':>8}  "
+            f"{'req_start':>14}  {'req_end':>14}  {'duration_s':>10}  notes\n"
+        )
+
+    async def _poll_once(self) -> None:
+        async def _one_gtsw(gtsw: str) -> FibRouteRow:
+            notes = ""
+            request_start_epoch = time.time()
+            try:
+                driver = FbossSwitchInternal(gtsw, logger)
+                routes = await asyncio.wait_for(
+                    driver.async_get_desired_unicast_routes_in_network(
+                        str(self.subnet)
+                    ),
+                    timeout=max(0.1, self.POLL_TIMEOUT_SEC - 1.0),
+                )
+                matched = len(routes)
+                total = matched
+            except asyncio.TimeoutError:
+                self._record_host_timeout(gtsw, max(0.1, self.POLL_TIMEOUT_SEC - 1.0))
+                notes = "error: poll timeout"
+                matched = 0
+                total = 0
+            except Exception as error:
+                notes = f"error: {error}"
+                matched = 0
+                total = 0
+            request_end_epoch = time.time()
+            return FibRouteRow(
+                timestamp=_now_str(),
+                gtsw=gtsw,
+                matched=matched,
+                total=total,
+                notes=notes,
+                request_start_epoch=request_start_epoch,
+                request_end_epoch=request_end_epoch,
+                duration_sec=round(request_end_epoch - request_start_epoch, 3),
+            )
+
+        rows = await asyncio.gather(*(_one_gtsw(gtsw) for gtsw in self.gtsws))
+        for row in rows:
+            self.rows.append(row)
+            self._file.write(
+                f"{row.timestamp:<34}  {row.gtsw:<34}  {row.matched:>8}  "
+                f"{row.total:>8}  {row.request_start_epoch:>14.3f}  "
+                f"{row.request_end_epoch:>14.3f}  {row.duration_sec:>10.3f}  "
+                f"{row.notes}\n"
+            )
+            self._write_json_row(
+                {
+                    "collector": "fib",
+                    "timestamp": row.timestamp,
+                    "gtsw": row.gtsw,
+                    "matched": row.matched,
+                    "total": row.total,
+                    "request_start_epoch": row.request_start_epoch,
+                    "request_end_epoch": row.request_end_epoch,
+                    "duration_sec": row.duration_sec,
+                    "valid": not row.notes.startswith("error:"),
+                    "notes": row.notes,
+                }
+            )
+        self._file.flush()
+
+
+# ---------------------------------------------------------------------------
 # BGP RIB Collector
 # ---------------------------------------------------------------------------
 
@@ -1138,11 +1640,13 @@ class HrtRemoteFailureCollector(BaseCollector):
 
     async def _poll_once(self) -> None:
         async def _one_host(host: str) -> List[HrtRemoteFailureRow]:
-            timestamp = _now_str()
+            request_start_epoch = time.time()
             try:
                 client_ctx = await get_hrt_client(host)
                 async with client_ctx as client:
                     remote_failures = await client.getRemoteFailures()
+                request_end_epoch = time.time()
+                timestamp = _now_str()
                 return [
                     HrtRemoteFailureRow(
                         timestamp=timestamp,
@@ -1151,6 +1655,9 @@ class HrtRemoteFailureCollector(BaseCollector):
                         lane_counts=counts,
                         unique=total_unique,
                         plane_ids=self.plane_ids,
+                        request_start_epoch=request_start_epoch,
+                        request_end_epoch=request_end_epoch,
+                        duration_sec=round(request_end_epoch - request_start_epoch, 3),
                     )
                     for dev_id in self.device_ids
                     for counts, total_unique in [
@@ -1160,6 +1667,8 @@ class HrtRemoteFailureCollector(BaseCollector):
                     ]
                 ]
             except Exception as e:
+                request_end_epoch = time.time()
+                timestamp = _now_str()
                 notes = f"error: {e}"
                 logger.error(f"[HrtRemoteFailureCollector] {host}: {e}")
                 return [
@@ -1172,6 +1681,9 @@ class HrtRemoteFailureCollector(BaseCollector):
                         valid=False,
                         notes=notes,
                         plane_ids=self.plane_ids,
+                        request_start_epoch=request_start_epoch,
+                        request_end_epoch=request_end_epoch,
+                        duration_sec=round(request_end_epoch - request_start_epoch, 3),
                     )
                     for dev_id in self.device_ids
                 ]
@@ -1202,6 +1714,10 @@ class HrtRemoteFailureCollector(BaseCollector):
                         "unique": row.unique,
                         "valid": row.valid,
                         "notes": row.notes,
+                        "poll_interval_sec": self.interval_sec,
+                        "request_start_epoch": row.request_start_epoch,
+                        "request_end_epoch": row.request_end_epoch,
+                        "duration_sec": row.duration_sec,
                     }
                 )
         self._file.flush()
@@ -1212,6 +1728,7 @@ class HrtRemoteFailureCollector(BaseCollector):
         lanes: List[int],
         expected_per_lane: Optional[Dict[int, int]] = None,
         max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
         device_ids: Optional[List[int]] = None,
         only_hosts: Optional[List[str]] = None,
         _single_tuple: bool = False,
@@ -1237,6 +1754,7 @@ class HrtRemoteFailureCollector(BaseCollector):
                             lanes=lanes,
                             expected_per_lane=expected_per_lane,
                             max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
                             _single_tuple=True,
                         )
                         for result in tuple_results:
@@ -1579,6 +2097,128 @@ class HrtRemoteFailureCollector(BaseCollector):
             )
         return results
 
+    def evaluate_per_lane_scale_recovery(
+        self,
+        trigger_time: datetime,
+        lanes: List[int],
+        expected_per_lane: Optional[Dict[int, int]] = None,
+        max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
+        poll_grace_sec: Optional[float] = None,
+        poll_duration_budget_sec: float = 0.0,
+        observation_end_ts: Optional[float] = None,
+        device_ids: Optional[List[int]] = None,
+        only_hosts: Optional[List[str]] = None,
+        _single_tuple: bool = False,
+    ) -> List[PerLaneResult]:
+        """Allow scale-time RF transients but require bounded exact recovery.
+
+        Recovery is the first valid expected-valued sample after the scale
+        transition. It must occur within ``max_convergence_sec`` of the scale
+        mutation, remain exact with continuous collector coverage for
+        ``recovery_stability_sec``, and finish at the expected count. Invalid
+        post-mutation samples and post-recovery regressions fail the tuple.
+        """
+        if not _single_tuple:
+            results: List[PerLaneResult] = []
+            selected_hosts = (
+                only_hosts or self.hosts or sorted({row.host for row in self.rows})
+            )
+            selected_devices = device_ids or self.device_ids
+            saved_rows = self.rows
+            try:
+                for host in sorted(selected_hosts):
+                    for device_id in sorted(selected_devices):
+                        self.rows = [
+                            row
+                            for row in saved_rows
+                            if row.host == host and row.device_id == device_id
+                        ]
+                        tuple_results = self.evaluate_per_lane_scale_recovery(
+                            trigger_time=trigger_time,
+                            lanes=lanes,
+                            expected_per_lane=expected_per_lane,
+                            max_convergence_sec=max_convergence_sec,
+                            recovery_stability_sec=recovery_stability_sec,
+                            poll_grace_sec=poll_grace_sec,
+                            poll_duration_budget_sec=poll_duration_budget_sec,
+                            observation_end_ts=observation_end_ts,
+                            _single_tuple=True,
+                        )
+                        for result in tuple_results:
+                            result.host = host
+                            result.device_id = device_id
+                            result.device = f"{host}/dev{device_id}/L{result.lane}"
+                        results.extend(tuple_results)
+                return results
+            finally:
+                self.rows = saved_rows
+
+        expected_per_lane = expected_per_lane or {}
+        trigger_ts = trigger_time.timestamp()
+        results = []
+        for lane_id in sorted(lanes):
+            expected = expected_per_lane.get(lane_id, 0)
+            samples: List[Tuple[float, int]] = []
+            sample_durations_sec: Dict[float, float] = {}
+            error_count = 0
+            unscoped_timestamp_count = 0
+            invalid_duration_count = 0
+            for row in self.rows:
+                try:
+                    row_ts = _parse_ts(row.timestamp).timestamp()
+                except (TypeError, ValueError):
+                    unscoped_timestamp_count += 1
+                    continue
+                if row_ts < trigger_ts:
+                    continue
+                if not row.valid or row.notes.startswith("error:"):
+                    error_count += 1
+                    continue
+                if lane_id >= len(row.lane_counts):
+                    error_count += 1
+                    continue
+                samples.append((row_ts, row.lane_counts[lane_id]))
+                duration = normalize_scale_recovery_poll_duration(row.duration_sec)
+                if duration is None:
+                    invalid_duration_count += 1
+                else:
+                    sample_durations_sec[row_ts] = duration
+
+            evaluation = evaluate_scale_recovery_samples(
+                samples,
+                error_count=error_count,
+                expected=expected,
+                trigger_ts=trigger_ts,
+                observation_end_ts=(
+                    observation_end_ts
+                    if observation_end_ts is not None
+                    else (samples[-1][0] if samples else trigger_ts)
+                ),
+                max_convergence_sec=max_convergence_sec,
+                recovery_stability_sec=recovery_stability_sec,
+                poll_grace_sec=poll_grace_sec,
+                poll_duration_budget_sec=poll_duration_budget_sec,
+                sample_durations_sec=sample_durations_sec,
+                unscoped_timestamp_count=unscoped_timestamp_count,
+                invalid_duration_count=invalid_duration_count,
+            )
+            results.append(
+                PerLaneResult(
+                    lane=lane_id,
+                    device=f"HRT neg L{lane_id}",
+                    check_type="HRT remote_failure scale recovery",
+                    passed=evaluation.passed,
+                    expected=expected,
+                    actual=evaluation.actual,
+                    convergence_sec=evaluation.recovery_sec,
+                    detail=evaluation.detail,
+                    error_count=error_count,
+                    inconclusive=evaluation.inconclusive,
+                )
+            )
+        return results
+
     def evaluate_per_lane_window(
         self,
         window_start: float,
@@ -1587,6 +2227,9 @@ class HrtRemoteFailureCollector(BaseCollector):
         expected_per_lane: Optional[Dict[int, int]] = None,
         direction: str = "drain",
         max_convergence_sec: int = 120,
+        recovery_stability_sec: float = 60.0,
+        poll_grace_sec: Optional[float] = None,
+        poll_duration_budget_sec: float = 0.0,
         only_hosts: Optional[List[str]] = None,
         device_ids: Optional[List[int]] = None,
     ) -> List[PerLaneResult]:
@@ -1632,6 +2275,19 @@ class HrtRemoteFailureCollector(BaseCollector):
                     lanes=lanes,
                     expected_per_lane=expected_per_lane,
                     last_n=10,
+                    device_ids=device_ids,
+                    only_hosts=only_hosts,
+                )
+            if direction == "scale_recovery":
+                return self.evaluate_per_lane_scale_recovery(
+                    trigger_time=trigger_time,
+                    lanes=lanes,
+                    expected_per_lane=expected_per_lane,
+                    max_convergence_sec=max_convergence_sec,
+                    recovery_stability_sec=recovery_stability_sec,
+                    poll_grace_sec=poll_grace_sec,
+                    poll_duration_budget_sec=poll_duration_budget_sec,
+                    observation_end_ts=window_end,
                     device_ids=device_ids,
                     only_hosts=only_hosts,
                 )

@@ -147,7 +147,7 @@ SSW_ELBERT_QZD1 = PhysicalInventory(
     usage=frozenset({"adhoc"}),
     device_name="ssw001.s002.f01.qzd1",
     primary_ixia_chassis_ip="",
-    mac_address="c2:18:50:9c:1f:1d",
+    mac_address="2a:e7:1d:21:b5:3b",
     extras={
         **_BGP_DC_CHRONOS_SHARED_EXTRAS,
         "ixia_downlink_interface": "eth7/16/1",

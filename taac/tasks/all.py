@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import copy
+import importlib
 import ipaddress
 import itertools
 import json
@@ -100,6 +101,170 @@ class WaitForAgentConvergenceTask(BaseTask):
                 )
             )
         await asyncio.gather(*coroutines)
+
+
+class CoopSetAccessPolicyTask(BaseTask):
+    """Set multiple port policies in one COOP API call and verify readback."""
+
+    NAME = "coop_set_access_policy"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "coop_set_access_policy is available only in Meta-internal TAAC"
+            )
+        from coop_thrift.coop.types import AccessPolicyState
+
+        coop_utils = importlib.import_module(
+            "neteng.test_infra.dne.taac.internal.coop_utils"
+        )
+
+        hostname = params["hostname"]
+        requested = params["policies"]
+        policies = {
+            port_name: AccessPolicyState[coop_utils.parse_access_mode(state_name).name]
+            for port_name, state_name in requested.items()
+        }
+        await coop_utils.async_set_and_verify_access_policy(hostname, policies)
+
+
+class ValidateAccessPolicyHardwareTask(BaseTask):
+    """Fail when Agent policy state and uncached SAI PORT state disagree."""
+
+    NAME = "validate_access_policy_hardware"
+
+    async def _read_fboss_json(
+        self,
+        driver: t.Any,
+        command: str,
+        parser: t.Callable[[str, str], t.Any],
+        hostname: str,
+    ) -> t.Any:
+        last_error = "command returned empty output"
+        for attempt in range(1, 4):
+            output = await driver.async_run_cmd_on_shell(command)
+            if output.strip():
+                try:
+                    return parser(output, hostname)
+                except ValueError as error:
+                    last_error = f"parser rejected output: {error}"
+            if attempt == 3:
+                break
+            self.logger.warning(
+                "%s did not return usable output on %s (attempt %s/3): %s",
+                command,
+                hostname,
+                attempt,
+                last_error,
+            )
+            await asyncio.sleep(1)
+        raise RuntimeError(
+            f"Unable to read {command!r} from {hostname} after 3 attempts: {last_error}"
+        )
+
+    async def _validate_coop_readback(
+        self,
+        coop_utils: t.Any,
+        access_policy_state: t.Any,
+        hostname: str,
+        expectations: t.Mapping[str, t.Any],
+    ) -> None:
+        coop_policies = await coop_utils.async_get_access_policy(hostname)
+        mismatches = []
+        for port_name, mode in expectations.items():
+            actual = coop_policies.get(port_name)
+            expected = access_policy_state[mode.name]
+            if actual != expected and not (
+                mode is coop_utils.AccessMode.UNCONSTRAINED and actual is None
+            ):
+                mismatches.append(
+                    f"{port_name}: COOP state is {actual}, expected {expected}"
+                )
+        if mismatches:
+            raise RuntimeError(
+                "Access-policy COOP/Agent drift: " + "; ".join(mismatches)
+            )
+
+    async def _validate_hardware_state(
+        self,
+        coop_utils: t.Any,
+        hostname: str,
+        expectations: t.Mapping[str, t.Any],
+        requested_mechanism: t.Optional[str],
+    ) -> None:
+        driver = await async_get_device_driver(hostname)
+        software_ports = await self._read_fboss_json(
+            driver,
+            "fboss2 --fmt json show port",
+            coop_utils.parse_access_policy_port_entries,
+            hostname,
+        )
+        missing = sorted(set(expectations) - software_ports.keys())
+        if missing:
+            raise RuntimeError(f"Ports absent from Agent output: {missing}")
+        hardware_ports = await self._read_fboss_json(
+            driver,
+            "fboss2 --fmt json show hw-object PORT uncached",
+            coop_utils.parse_access_policy_hw_port_objects,
+            hostname,
+        )
+        offset = coop_utils.infer_access_policy_system_port_offset(
+            software_ports.values(),
+            hardware_ports,
+            (software_ports[port_name].port_id for port_name in expectations),
+        )
+        inferred_mechanisms = (
+            {}
+            if requested_mechanism
+            else coop_utils.infer_access_policy_mechanism(
+                expectations, software_ports, hardware_ports, offset
+            )
+        )
+        failures = []
+        for port_name, mode in expectations.items():
+            mechanism = requested_mechanism or inferred_mechanisms[port_name]
+            software = software_ports[port_name]
+            hardware = hardware_ports[software.port_id + offset]
+            result = coop_utils.validate_access_policy_hardware_port(
+                software, hardware, mode, mechanism
+            )
+            self.logger.info(
+                "%s access-policy HW check: mode=%s mechanism=%s "
+                "IngressAcl=%s Metadata=%s result=%s",
+                port_name,
+                mode.value,
+                mechanism,
+                hardware.ingress_acl,
+                hardware.metadata,
+                "PASS" if result.passed else "FAIL",
+            )
+            if not result.passed:
+                failures.append(f"{port_name}: {result.reason}")
+        if failures:
+            raise RuntimeError("Access-policy SW/HW drift: " + "; ".join(failures))
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "validate_access_policy_hardware is available only internally"
+            )
+        from coop_thrift.coop.types import AccessPolicyState
+
+        coop_utils = importlib.import_module(
+            "neteng.test_infra.dne.taac.internal.coop_utils"
+        )
+        hostname = params["hostname"]
+        expectations = {
+            port_name: coop_utils.parse_access_mode(mode)
+            for port_name, mode in params["expectations"].items()
+        }
+        requested_mechanism = params.get("mechanism")
+        await self._validate_coop_readback(
+            coop_utils, AccessPolicyState, hostname, expectations
+        )
+        await self._validate_hardware_state(
+            coop_utils, hostname, expectations, requested_mechanism
+        )
 
 
 class WaitForBgpConvergenceTask(BaseTask):
@@ -369,6 +534,23 @@ class ConfigureParallelBgpPeers(BaseTask):
             )
             ip_addresses.append(new_address)
         return ip_addresses
+
+
+class IxiaStopTrafficAndWaitTask(BaseTask):
+    """Stop IXIA traffic and keep it stopped for a recovery window."""
+
+    NAME = "ixia_stop_traffic_and_wait"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        wait_seconds = float(params.get("wait_seconds", 0))
+        if wait_seconds < 0:
+            raise ValueError("wait_seconds must be non-negative")
+        self.ixia.stop_traffic()
+        self.logger.info(
+            "IXIA traffic stopped; holding recovery window for %.1f seconds",
+            wait_seconds,
+        )
+        await asyncio.sleep(wait_seconds)
 
 
 class CoopUnregisterPatchersTask(BaseTask):

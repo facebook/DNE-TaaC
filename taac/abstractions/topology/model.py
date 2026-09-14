@@ -14,6 +14,7 @@ from taac.abstractions.config_artifact_semantics import (
 from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
+    validate_ixia_bgp_tcp_window_size_bytes,
 )
 from taac.abstractions.physical_interface_semantics import (
     PhysicalInterfaceProfile,
@@ -177,6 +178,16 @@ def _validate_ixia_bgp_integer(
     if value < 0 or (not allow_zero and value == 0):
         qualifier = "non-negative" if allow_zero else "positive"
         raise ValueError(f"IXIA BGP {field_name} must be {qualifier}")
+
+
+@dataclass(frozen=True)
+class BgpSlowPeerConfig:
+    """IXIA transport settings that make one device group a slow receiver."""
+
+    tcp_window_size_bytes: int = 1500
+
+    def __post_init__(self) -> None:
+        validate_ixia_bgp_tcp_window_size_bytes(self.tcp_window_size_bytes)
 
 
 @dataclass(frozen=True)
@@ -528,6 +539,7 @@ class DeviceGroupSpec:
     # must be ABSENT from the DUT config at baseline so the test can add it live.
     dut_neighbor_absent: bool = False
     peer_relationship: PeerRelationship | None = None
+    slow_peer: BgpSlowPeerConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -660,10 +672,16 @@ class ResolvedDeviceGroup:
     provenance: "ResolvedDeviceGroupProvenance | None" = None
     ixia_children: tuple[ResolvedIxiaDeviceGroupChild, ...] = ()
     peer_relationship: PeerRelationship | None = None
+    slow_peer: BgpSlowPeerConfig | None = None
 
     @property
     def peer_count(self) -> int:
         return len(self.peers)
+
+    @property
+    def slow_peer_tcp_window_size_bytes(self) -> int | None:
+        slow_peer = self.slow_peer
+        return slow_peer.tcp_window_size_bytes if slow_peer is not None else None
 
 
 @dataclass(frozen=True)
@@ -748,6 +766,15 @@ class BoundDeviceGroup:
     @property
     def dut_neighbor_absent(self) -> bool:
         return self.spec.dut_neighbor_absent
+
+    @property
+    def slow_peer(self) -> BgpSlowPeerConfig | None:
+        return self.spec.slow_peer
+
+    @property
+    def slow_peer_tcp_window_size_bytes(self) -> int | None:
+        slow_peer = self.slow_peer
+        return slow_peer.tcp_window_size_bytes if slow_peer is not None else None
 
     @property
     def peers(self) -> tuple[ResolvedPeer, ...]:

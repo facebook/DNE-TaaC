@@ -173,7 +173,7 @@ def create_standard_prechecks(
     peergroup_ibgp_v4: str,
     precheck_thresholds=None,
     expected_established_sessions: int | None = 0,
-    cpu_baseline: float = 4.0,
+    cpu_baseline: float = 5.0,
     check_cpu_load_average: bool = True,
     check_ibgp_pnh: bool = False,
     check_bgp_convergence: bool = True,
@@ -198,7 +198,15 @@ def create_standard_prechecks(
         peergroup_ibgp_v4: IPv4 iBGP peer group name
         precheck_thresholds: Hardware capacity thresholds (optional)
         expected_established_sessions: Expected number of established BGP sessions
-        cpu_baseline: CPU load average baseline threshold
+        cpu_baseline: CPU load average baseline threshold. The gate fails when
+            the 1, 5 OR 15-minute average exceeds it, so in practice the
+            volatile 1-minute figure decides. Applies to the callers that do
+            not pass a value of their own, currently the churn/storm and
+            drain-undrain profiles; the standard-shape profiles thread 8.0
+            (6.0 for runtime update) through ProfileContext. Raised from 4.0
+            because the gate samples immediately after setup has converged the
+            full session count, so the 1-minute average still carries that
+            convergence and 4.0 left no headroom for it.
         check_cpu_load_average: Add the startup CPU load-average gate. Disable
             when resource utilization is collected by non-terminating periodic
             telemetry instead.

@@ -2,28 +2,40 @@
 
 # pyre-unsafe
 import asyncio
+import contextlib
+import ipaddress
 import json
 import time
 import typing as t
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from facebook.network.Address.types import BinaryAddress
+from neteng.fboss.ctrl.types import NdpEntryThrift
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
+    TestCaseFailure,
     TestDevice,
     TestTopology,
 )
-from taac.driver.driver_constants import SwitchLldpData
+from taac.driver.driver_constants import (
+    SwitchLldpData,
+    SystemctlServiceStatus,
+)
+from neteng.test_infra.dne.taac.internal.steps import custom_step as custom_step_module
 from taac.internal.steps.custom_step import (
     _nic_mstreg_bdf,
     CustomStep,
 )
+from taac.libs.fpf import fpf_collector_registry
 from taac.libs.fpf.fpf_collector_registry import (
     clear_drain_mutations,
     get_drain_mutation,
     mark_drain_mutation,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
+from neteng.test_infra.dne.taac.steps import step_definitions as fpf_step_definitions
 from taac.steps.step_definitions import (
     create_fpf_conditional_undrain_step,
     create_fpf_drain_interface_step,
@@ -36,7 +48,10 @@ from taac.steps.step_definitions import (
     create_fpf_rapid_flap_step,
     create_fpf_rapid_flap_step_lldp,
     create_fpf_repeated_service_crash_step,
+    create_fpf_repeated_sw_hw_agent_crash_step,
     create_fpf_stsw_drain_and_reinject_steps,
+    create_fpf_up_port_baseline_step,
+    create_fpf_verify_recovered_state_step,
 )
 from taac.test_as_a_config.types import Service, Step, StepName, TestConfig
 
@@ -67,6 +82,7 @@ def _make_custom_step(hostname: str = "gtsw001.l1001.c085.ash6") -> CustomStep:
     cs.hostname = hostname
     cs.driver = AsyncMock()
     cs.logger = MagicMock()
+    cs.parameter_evaluator.jq_vars = {}
     return cs
 
 
@@ -82,6 +98,512 @@ def _params(step: Step) -> dict:
     assert step.step_params is not None
     assert step.step_params.json_params is not None
     return json.loads(step.step_params.json_params)
+
+
+class TestFpfUpPortBaselineStep(unittest.IsolatedAsyncioTestCase):
+    def test_factory_serializes_run_scoped_capture(self) -> None:
+        step = create_fpf_up_port_baseline_step(
+            action="capture",
+            devices=["gtsw001", "gtsw002"],
+            baseline_key="rapid_flap_ports",
+            device_regexes=["gtsw001"],
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        self.assertEqual(list(step.device_regexes or []), ["gtsw001"])
+        self.assertEqual(
+            _params(step),
+            {
+                "custom_step_name": "fpf_up_port_baseline",
+                "action": "capture",
+                "devices": ["gtsw001", "gtsw002"],
+                "baseline_key": "rapid_flap_ports",
+            },
+        )
+
+    async def test_capture_then_verify_requires_every_previously_up_port(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        drivers = {
+            "gtsw001": AsyncMock(),
+            "gtsw002": AsyncMock(),
+        }
+        drivers["gtsw001"].async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/1/1": True, "eth1/1/2": False},
+            {"eth1/1/1": True, "eth1/1/2": False},
+        ]
+        drivers["gtsw002"].async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/2/1": True},
+            {"eth1/2/1": False},
+        ]
+        params = {
+            "devices": list(drivers),
+            "baseline_key": "rapid_flap_ports",
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            side_effect=lambda host, *_: drivers[host],
+        ):
+            await cs.fpf_up_port_baseline({**params, "action": "capture"})
+            with self.assertRaisesRegex(TestCaseFailure, "gtsw002:eth1/2/1"):
+                await cs.fpf_up_port_baseline({**params, "action": "verify"})
+
+    async def test_verify_passes_and_consumes_matching_baseline(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.side_effect = [
+            {"eth1/1/1": True, "eth1/1/2": False},
+            {"eth1/1/1": True, "eth1/1/2": True},
+        ]
+        params = {
+            "devices": ["gtsw001"],
+            "baseline_key": "reboot_ports",
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            await cs.fpf_up_port_baseline({**params, "action": "capture"})
+            await cs.fpf_up_port_baseline({**params, "action": "verify"})
+        self.assertNotIn(
+            "fpf_up_port_baseline::reboot_ports",
+            cs.parameter_evaluator.jq_vars,
+        )
+
+    async def test_verify_uses_exact_expected_fallback_without_capture(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+            "eth1/41/5": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            await cs.fpf_up_port_baseline(
+                {
+                    "action": "verify",
+                    "devices": ["gtsw001"],
+                    "baseline_key": "tc36_ports",
+                    "expected_interfaces_by_device": {
+                        "gtsw001": ["eth1/1/1", "eth1/2/1"]
+                    },
+                }
+            )
+
+    async def test_capture_fails_if_expected_port_is_not_up(self) -> None:
+        cs = _make_custom_step(hostname="gtsw001")
+        driver = AsyncMock()
+        driver.async_get_all_interfaces_operational_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.internal.steps.custom_step.async_get_device_driver",
+            return_value=driver,
+        ):
+            with self.assertRaisesRegex(TestCaseFailure, "gtsw001:eth1/2/1"):
+                await cs.fpf_up_port_baseline(
+                    {
+                        "action": "capture",
+                        "devices": ["gtsw001"],
+                        "baseline_key": "tc36_ports",
+                        "expected_interfaces_by_device": {
+                            "gtsw001": ["eth1/1/1", "eth1/2/1"]
+                        },
+                    }
+                )
+
+
+class TestFpfRecoveredStateGate(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _timestamp(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S.%f%z"
+        )
+
+    def _collectors(self) -> dict[str, MagicMock]:
+        now = time.strftime("%Y-%m-%d %H:%M:%S.000%z")
+        hosts = ["server", "client"]
+        device_ids = [0, 1]
+        local_planes = [0, 1, 2, 3]
+
+        def rows(**kwargs):
+            return [SimpleNamespace(timestamp=now, valid=True, notes="", **kwargs)]
+
+        bulk = MagicMock()
+        bulk.rows = [
+            row
+            for host in hosts
+            for device_id in device_ids
+            for row in rows(
+                host=host,
+                device_id=device_id,
+                lane_counts=[4032, 4032, 4032, 4032],
+                plane_ids=local_planes,
+            )
+        ]
+        plane = MagicMock()
+        plane.rows = [
+            row
+            for host in hosts
+            for device_id in device_ids
+            for row in rows(
+                host=host,
+                device_id=device_id,
+                plane_states={0: "UP", 1: "UP", 2: "UP", 3: "UP"},
+            )
+        ]
+        sessions = MagicMock()
+        sessions.rows = [row for host in hosts for row in rows(host=host, connected=32)]
+        remote_vf1 = MagicMock()
+        remote_vf1.rows = [
+            row
+            for host in hosts
+            for row in rows(
+                host=host,
+                device_id=0,
+                lane_counts=[0, 0, 0, 0],
+                plane_ids=local_planes,
+            )
+        ]
+        remote_vf2 = MagicMock()
+        remote_vf2.rows = [
+            row
+            for host in hosts
+            for row in rows(
+                host=host,
+                device_id=1,
+                lane_counts=[0, 0, 0, 0],
+                plane_ids=local_planes,
+            )
+        ]
+        reachability = SimpleNamespace(
+            device_ids=[0],
+            reachable_planes=[0, 1, 2, 3],
+            drained_planes=[],
+            unreachable_planes=[],
+            plane_up=[0, 1, 2, 3],
+            plane_down=[],
+        )
+        prod = MagicMock()
+        prod.rows = [
+            row
+            for host in hosts
+            for row in rows(host=host, prefixes={"2401:db00::/64": reachability})
+        ]
+        collectors = {
+            "hrt": bulk,
+            "hrt_plane_status": plane,
+            "hrt_fsdb_session": sessions,
+            "hrt_remote_failure_vf1": remote_vf1,
+            "hrt_remote_failure_vf2": remote_vf2,
+            "prod_hrt_prefix": prod,
+        }
+        for collector in collectors.values():
+            collector.POLL_TIMEOUT_SEC = 1.0
+            collector.interval_sec = 0.1
+        return collectors
+
+    async def _verify(
+        self,
+        collectors: dict[str, MagicMock],
+        params: dict,
+        refresh: t.Optional[t.Callable[[], None]] = None,
+        monotonic_side_effect: t.Optional[t.List[float]] = None,
+    ) -> None:
+        initial_rows = {
+            name: tuple(collector.rows) for name, collector in collectors.items()
+        }
+        refreshed = False
+
+        async def _refresh(_delay: float) -> None:
+            nonlocal refreshed
+            if refreshed:
+                return
+            refreshed = True
+            if refresh is not None:
+                refresh()
+                return
+            for name, collector in collectors.items():
+                collector.rows.extend(initial_rows[name])
+
+        patches = [
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=_refresh,
+            ),
+        ]
+        if monotonic_side_effect is not None:
+            patches.append(
+                patch(
+                    "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                    side_effect=monotonic_side_effect,
+                )
+            )
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            await _make_custom_step().fpf_verify_recovered_state(params)
+
+    def _params(self) -> dict:
+        prod_expectation = {
+            "device_ids": [0],
+            "reachable_planes": [0, 1, 2, 3],
+            "drained_planes": [],
+            "unreachable_planes": [],
+            "plane_up": [0, 1, 2, 3],
+            "plane_down": [],
+        }
+        return {
+            "device_planes_by_host": {
+                host: {"0": [0, 1, 2, 3], "1": [0, 1, 2, 3]}
+                for host in ("server", "client")
+            },
+            "expected_count": 4032,
+            "expected_sessions": 32,
+            "prod_prefix_expectations_by_host": {
+                host: {"2401:db00::/64": prod_expectation}
+                for host in ("server", "client")
+            },
+            "rf_vf_groups": [
+                {"suffix": "vf1", "device_ids": [0], "lanes": [0, 1, 2, 3]},
+                {"suffix": "vf2", "device_ids": [1], "lanes": [0, 1, 2, 3]},
+            ],
+            "max_age_sec": 30,
+        }
+
+    async def test_factory_and_exact_both_host_gate(self):
+        params = self._params()
+        step = create_fpf_verify_recovered_state_step(**params)
+        self.assertEqual(
+            _params(step)["custom_step_name"], "fpf_verify_recovered_state"
+        )
+        self.assertEqual(_params(step)["future_timestamp_grace_sec"], 1.0)
+        collectors = self._collectors()
+        await self._verify(collectors, params)
+
+    async def test_post_gate_append_accepts_request_timestamp_36s_old(self):
+        collectors = self._collectors()
+        request_start = time.time() - 36.0
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(request_start)
+
+        await self._verify(collectors, self._params())
+
+    async def test_post_gate_refresh_timeout_reports_missing_keys_and_contract(self):
+        collectors = self._collectors()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "timed out.*hrt:client/dev0.*timeout1s\\+interval0.1s",
+        ):
+            await self._verify(
+                collectors,
+                self._params(),
+                refresh=lambda: None,
+                monotonic_side_effect=[0.0, 0.0, 3.0],
+            )
+
+    async def test_first_fresh_bad_row_fails_without_later_good_masking(self):
+        collectors = self._collectors()
+        initial_rows = {
+            name: tuple(collector.rows) for name, collector in collectors.items()
+        }
+
+        def _append_bad_then_good() -> None:
+            bad_bulk = SimpleNamespace(**vars(initial_rows["hrt"][0]))
+            bad_bulk.lane_counts = [4031, 4032, 4032, 4032]
+            collectors["hrt"].rows.append(bad_bulk)
+            for name, collector in collectors.items():
+                collector.rows.extend(initial_rows[name])
+
+        with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
+            await self._verify(
+                collectors,
+                self._params(),
+                refresh=_append_bad_then_good,
+            )
+
+    async def test_missing_control_prefix_fails_closed(self):
+        collectors = self._collectors()
+        collectors["prod_hrt_prefix"].rows = collectors["prod_hrt_prefix"].rows[:1]
+        with self.assertRaisesRegex(RuntimeError, "prod_hrt_prefix:client"):
+            await self._verify(
+                collectors,
+                self._params(),
+                monotonic_side_effect=[0.0, 3.0],
+            )
+
+    async def test_missing_client_session_fails_closed(self):
+        collectors = self._collectors()
+        collectors["hrt_fsdb_session"].rows = collectors["hrt_fsdb_session"].rows[:1]
+        with self.assertRaisesRegex(RuntimeError, "hrt_fsdb_session:client"):
+            await self._verify(
+                collectors,
+                self._params(),
+                monotonic_side_effect=[0.0, 3.0],
+            )
+
+    async def test_plane_counts_are_keyed_by_declared_plane_ids(self):
+        collectors = self._collectors()
+        first = collectors["hrt"].rows[0]
+        first.plane_ids = [3, 2, 1, 0]
+        first.lane_counts = [4032, 4032, 4032, 4031]
+        with self.assertRaisesRegex(RuntimeError, "bad planes=\\{0: 4031\\}"):
+            await self._verify(collectors, self._params())
+
+    async def test_prod_prefix_wrong_device_fails_closed(self):
+        collectors = self._collectors()
+        collectors["prod_hrt_prefix"].rows[0].prefixes["2401:db00::/64"].device_ids = [
+            1
+        ]
+        with self.assertRaisesRegex(RuntimeError, "actual="):
+            await self._verify(collectors, self._params())
+
+    async def test_legacy_rf_rows_keep_full_plane_vector_but_check_each_vf_half(
+        self,
+    ):
+        collectors = self._collectors()
+        collectors["hrt"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[4032] * 8,
+                plane_ids=list(range(8)),
+            )
+        ]
+        collectors["hrt_plane_status"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                plane_states=dict.fromkeys(range(8), "UP"),
+            )
+        ]
+        collectors["hrt_fsdb_session"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                connected=32,
+            )
+        ]
+        collectors["hrt_remote_failure_vf1"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[0, 0, 0, 0, 4032, 4032, 4032, 4032],
+                plane_ids=list(range(8)),
+            )
+        ]
+        collectors["hrt_remote_failure_vf2"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                device_id=0,
+                lane_counts=[4032, 4032, 4032, 4032, 0, 0, 0, 0],
+                plane_ids=list(range(8)),
+            )
+        ]
+        reachability = collectors["prod_hrt_prefix"].rows[0].prefixes["2401:db00::/64"]
+        reachability.unreachable_planes = [4, 5, 6, 7]
+        reachability.plane_up = list(range(8))
+        collectors["prod_hrt_prefix"].rows = [
+            SimpleNamespace(
+                timestamp=self._timestamp(time.time()),
+                valid=True,
+                notes="",
+                host="server",
+                prefixes={"2401:db00::/64": reachability},
+            )
+        ]
+        params = self._params()
+        params["device_planes_by_host"] = {"server": {"0": list(range(8))}}
+        params["prod_prefix_expectations_by_host"] = {
+            "server": {
+                "2401:db00::/64": {
+                    "device_ids": [0],
+                    "reachable_planes": [0, 1, 2, 3],
+                    "drained_planes": [],
+                    "unreachable_planes": [4, 5, 6, 7],
+                    "plane_up": list(range(8)),
+                    "plane_down": [],
+                }
+            }
+        }
+        params["rf_vf_groups"] = [
+            {"suffix": "vf1", "lanes": [0, 1, 2, 3]},
+            {"suffix": "vf2", "lanes": [4, 5, 6, 7]},
+        ]
+
+        await self._verify(collectors, params)
+
+    async def test_rf_row_missing_full_collector_plane_fails_closed(self):
+        collectors = self._collectors()
+        row = collectors["hrt_remote_failure_vf1"].rows[0]
+        row.plane_ids = [0, 1, 2]
+        row.lane_counts = [0, 0, 0]
+
+        with self.assertRaisesRegex(RuntimeError, "full collector planes"):
+            await self._verify(collectors, self._params())
+
+    async def test_small_future_timestamp_within_grace_is_fresh(self):
+        collectors = self._collectors()
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(1000.1)
+        params = self._params()
+        params["future_timestamp_grace_sec"] = 0.5
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.time",
+                return_value=1000.0,
+            ),
+        ):
+            await self._verify(collectors, params)
+
+    async def test_future_timestamp_beyond_grace_fails_distinctly(self):
+        collectors = self._collectors()
+        for collector in collectors.values():
+            for row in collector.rows:
+                row.timestamp = self._timestamp(1001.1)
+        params = self._params()
+        params["future_timestamp_grace_sec"] = 1.0
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.get_collector",
+                side_effect=collectors.get,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.time",
+                return_value=1000.0,
+            ),
+            self.assertRaisesRegex(RuntimeError, "in the future \\(grace 1s\\)"),
+        ):
+            await self._verify(collectors, params)
 
 
 class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):
@@ -133,33 +655,491 @@ class TestRepeatedServiceCrashStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called_service.value, "fsdb")
 
 
+class TestRepeatedSwHwAgentCrashStep(unittest.IsolatedAsyncioTestCase):
+    def test_factory_has_exact_narrow_scope_and_actual_timing(self):
+        step = create_fpf_repeated_sw_hw_agent_crash_step(
+            device_regexes=["gtsw001"],
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        self.assertEqual(list(step.device_regexes), ["gtsw001"])
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_repeated_sw_hw_agent_crash")
+        self.assertEqual(params["process_names"], ["fboss_sw_agent", "fboss_hw_agent"])
+        self.assertEqual(
+            params["recovery_services"],
+            [
+                int(Service.FBOSS_SW_AGENT.value),
+                int(Service.FBOSS_HW_AGENT_0.value),
+            ],
+        )
+        self.assertEqual(params["every_sec"], 15)
+        self.assertEqual(params["duration_sec"], 300)
+        self.assertEqual(params["recovery_timeout_sec"], 120)
+
+    async def test_attempts_both_exact_kills_and_collects_first_error(self):
+        cs = _make_custom_step()
+        cs.driver.async_run_cmd_on_shell.side_effect = [
+            RuntimeError("sw kill failed"),
+            "",
+        ]
+        cs.driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        with (
+            self.assertRaisesRegex(
+                TestCaseFailure,
+                "failed after attempting both targets.*sw kill failed",
+            ),
+            patch("time.time", side_effect=[0.0, 1.0]),
+        ):
+            await cs.fpf_repeated_sw_hw_agent_crash(
+                _params(create_fpf_repeated_sw_hw_agent_crash_step())
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in cs.driver.async_run_cmd_on_shell.await_args_list],
+            ["pkill -9 fboss_sw_agent", "pkill -9 fboss_hw_agent"],
+        )
+        recovered = [
+            call.args[0] for call in cs.driver.async_get_service_status.await_args_list
+        ]
+        self.assertEqual(
+            [service.value for service in recovered],
+            ["fboss_sw_agent", "fboss_hw_agent@0"],
+        )
+
+    async def test_successful_cycle_never_uses_broad_or_qsfp_match(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        sleeps = []
+
+        async def fake_sleep(duration):
+            sleeps.append(duration)
+
+        with (
+            patch("time.time", side_effect=[0.0, 1.0, 1000.0]),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await cs.fpf_repeated_sw_hw_agent_crash(
+                _params(create_fpf_repeated_sw_hw_agent_crash_step())
+            )
+
+        commands = [
+            call.args[0] for call in cs.driver.async_run_cmd_on_shell.await_args_list
+        ]
+        self.assertEqual(
+            commands,
+            ["pkill -9 fboss_sw_agent", "pkill -9 fboss_hw_agent"],
+        )
+        self.assertFalse(any("-f" in command for command in commands))
+        self.assertFalse(any("qsfp" in command for command in commands))
+        self.assertEqual(sleeps, [15])
+
+
 class TestNdpClearLoopStep(unittest.IsolatedAsyncioTestCase):
+    TARGET_INTERFACE = "eth1/41/5"
+    NEIGHBOR_HOST = "twshared1352.03.mwg2"
+
+    @staticmethod
+    def _ndp_entry(
+        address: str,
+        *,
+        port: int = 205,
+        mac: str = "ba:ce:00:00:00:e8",
+        interface_id: int = 2093,
+        vlan_name: str = "downlink_93",
+        state: str = "REACHABLE",
+    ) -> NdpEntryThrift:
+        return NdpEntryThrift(
+            ip=BinaryAddress(addr=ipaddress.IPv6Address(address).packed),
+            mac=mac,
+            port=port,
+            state=state,
+            interfaceID=interface_id,
+            vlanName=vlan_name,
+        )
+
+    def _params(self, *, every_sec: float = 4, duration_sec: float = 120) -> dict:
+        return {
+            "target_interface": self.TARGET_INTERFACE,
+            "neighbor_host": self.NEIGHBOR_HOST,
+            "every_sec": every_sec,
+            "duration_sec": duration_sec,
+        }
+
+    def _configure_live_shape(
+        self, cs: CustomStep
+    ) -> tuple[AsyncMock, AsyncMock, MagicMock]:
+        driver = _driver_mock(cs)
+        driver.async_get_lldp_neighbors.return_value = {
+            self.TARGET_INTERFACE: SimpleNamespace(
+                remote_device_name=self.NEIGHBOR_HOST
+            )
+        }
+        driver.async_get_interface_name_to_port_id_and_vlan_id.return_value = (
+            SimpleNamespace(port_id=205, vlan_id=2093)
+        )
+        unrelated = [
+            self._ndp_entry(f"2401:db00:ffff::{index}", port=99)
+            for index in range(1, 412)
+        ]
+        driver.async_get_ndp_table.return_value = [
+            *unrelated,
+            self._ndp_entry("2401:db00:292a:8154:bace::b"),
+            self._ndp_entry("fe80::b8ce:ff:fe00:e8"),
+            self._ndp_entry("2401:db00:292a:8154:bace::d", state="DYNAMIC"),
+        ]
+        client = AsyncMock()
+        client.getStatus.return_value = "ALIVE"
+        client_context = MagicMock()
+        client_context.__aenter__ = AsyncMock(return_value=client)
+        client_context.__aexit__ = AsyncMock(return_value=False)
+        driver.get_sw_agent_client.return_value = client_context
+        return driver, client, client_context
+
+    async def _run_with_fake_clock(
+        self,
+        cs: CustomStep,
+        params: dict,
+        client: AsyncMock,
+        *,
+        latencies: t.Sequence[float],
+        first_flush_count: int = 2,
+    ) -> float:
+        clock = 0.0
+        call_index = 0
+        active = 0
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock
+            clock += max(0.0, delay)
+
+        async def flush(_entries: list) -> int:
+            nonlocal active, call_index, clock
+            self.assertEqual(active, 0)
+            active += 1
+            latency = latencies[call_index % len(latencies)]
+            call_index += 1
+            clock += latency
+            active -= 1
+            return first_flush_count if call_index == 1 else 0
+
+        client.flushNeighborEntries.side_effect = flush
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+        ):
+            await cs.fpf_ndp_clear_loop(params)
+        self.assertEqual(active, 0)
+        return clock
+
     def test_factory_shape(self):
         step = create_fpf_ndp_clear_loop_step(
-            every_sec=1, duration_sec=120, device_regexes=["gtsw001.*"]
+            target_interface=self.TARGET_INTERFACE,
+            neighbor_host=self.NEIGHBOR_HOST,
+            every_sec=4,
+            duration_sec=120,
+            device_regexes=["gtsw001.*"],
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         p = _params(step)
         self.assertEqual(p["custom_step_name"], "fpf_ndp_clear_loop")
-        self.assertEqual(p["every_sec"], 1)
+        self.assertEqual(p["every_sec"], 4)
         self.assertEqual(p["duration_sec"], 120)
+        self.assertEqual(p["target_interface"], self.TARGET_INTERFACE)
+        self.assertEqual(p["neighbor_host"], self.NEIGHBOR_HOST)
+        self.assertNotIn("rpc_timeout_sec", p)
 
-    async def test_clears_expected_number_of_times(self):
+        with self.assertRaisesRegex(ValueError, "exact multiple"):
+            create_fpf_ndp_clear_loop_step(
+                target_interface=self.TARGET_INTERFACE,
+                neighbor_host=self.NEIGHBOR_HOST,
+                every_sec=0.1,
+                duration_sec=0.31,
+            )
+
+    async def test_capacity_calibrated_trace_completes_30_slots_at_t120(self):
         cs = _make_custom_step()
-        ticks = [0.0] + [float(i) for i in range(120)] + [1000.0]
+        driver, client, client_context = self._configure_live_shape(cs)
 
-        async def fake_sleep(d):
-            pass
+        clock = await self._run_with_fake_clock(
+            cs,
+            self._params(),
+            client,
+            latencies=[1.082, 2.980, 2.365, 1.109, 1.097, 1.064],
+        )
+
+        self.assertEqual(client.flushNeighborEntries.await_count, 30)
+        self.assertAlmostEqual(clock, 120.0)
+        first_payload = client.flushNeighborEntries.await_args_list[0].args[0]
+        self.assertEqual(
+            {str(ipaddress.IPv6Address(entry.ip.addr)) for entry in first_payload},
+            {"2401:db00:292a:8154:bace::b", "fe80::b8ce:ff:fe00:e8"},
+        )
+        self.assertEqual({entry.interfaceID for entry in first_payload}, {2093})
+        client.getStatus.assert_awaited_once()
+        client_context.__aenter__.assert_awaited_once()
+        client_context.__aexit__.assert_awaited_once()
+        driver.async_run_cmd_on_shell.assert_not_awaited()
+        self.assertTrue(
+            any(
+                '"expected_attempts": 30' in str(call)
+                and '"max_outstanding": 1' in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
+
+    async def test_rpc_at_four_second_boundary_fails_closed(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+
+        with self.assertRaisesRegex(RuntimeError, "completed at/after the next 4s"):
+            await self._run_with_fake_clock(
+                cs,
+                self._params(duration_sec=4),
+                client,
+                latencies=[4.0],
+            )
+
+        client.flushNeighborEntries.assert_awaited_once()
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_rpc_just_before_four_second_boundary_passes(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+
+        clock = await self._run_with_fake_clock(
+            cs,
+            self._params(duration_sec=4),
+            client,
+            latencies=[3.999],
+        )
+
+        self.assertEqual(client.flushNeighborEntries.await_count, 1)
+        self.assertAlmostEqual(clock, 4.0)
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_real_wait_for_enforces_next_slot_deadline(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        never = asyncio.Event()
+
+        async def blocked_flush(_entries: list) -> int:
+            await never.wait()
+            return 0
+
+        client.flushNeighborEntries.side_effect = blocked_flush
+        with self.assertRaisesRegex(RuntimeError, "next 0.01s request boundary"):
+            await cs.fpf_ndp_clear_loop(self._params(every_sec=0.01, duration_sec=0.01))
+
+        client.flushNeighborEntries.assert_awaited_once()
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_warmup_failure_closes_client_without_mutation(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        client.getStatus.side_effect = RuntimeError("not ready")
+
+        with self.assertRaisesRegex(RuntimeError, "open/warm failed: not ready"):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=4))
+
+        client.flushNeighborEntries.assert_not_awaited()
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_warmup_timeout_closes_client_without_mutation(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        never = asyncio.Event()
+        client.getStatus.side_effect = never.wait
 
         with (
-            patch("time.time", side_effect=ticks),
-            patch("asyncio.sleep", side_effect=fake_sleep),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "_FPF_NDP_CLIENT_WARMUP_TIMEOUT_SEC",
+                0.02,
+            ),
+            self.assertRaisesRegex(RuntimeError, "open/warm timed out"),
         ):
-            await cs.fpf_ndp_clear_loop({"every_sec": 1, "duration_sec": 120})
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=4))
 
-        self.assertEqual(cs.driver.async_run_cmd_on_shell.await_count, 120)
-        for call in cs.driver.async_run_cmd_on_shell.await_args_list:
-            self.assertEqual(call.args[0], "fboss2 clear ndp")
+        client.flushNeighborEntries.assert_not_awaited()
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_rpc_error_closes_client(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        client.flushNeighborEntries.side_effect = RuntimeError("agent rejected flush")
+
+        with self.assertRaisesRegex(RuntimeError, "RPC failed: agent rejected flush"):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=4))
+
+        client_context.__aexit__.assert_awaited_once()
+        self.assertTrue(
+            any(
+                '"outcome": "error"' in str(call)
+                and "agent rejected flush" in str(call)
+                for call in t.cast(MagicMock, cs.logger.info).call_args_list
+            )
+        )
+
+    async def test_controller_missed_cadence_fails_without_second_rpc(self):
+        cs = _make_custom_step()
+        _driver, client, client_context = self._configure_live_shape(cs)
+        clock = 0.0
+        overslept = False
+
+        def fake_monotonic() -> float:
+            return clock
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal clock, overslept
+            clock += delay
+            if delay > 0 and not overslept:
+                clock += 4.0
+                overslept = True
+
+        client.flushNeighborEntries.return_value = 1
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.time.monotonic",
+                side_effect=fake_monotonic,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+            self.assertRaisesRegex(RuntimeError, "controller missed slot 2/2"),
+        ):
+            await cs.fpf_ndp_clear_loop(self._params(duration_sec=8))
+
+        client.flushNeighborEntries.assert_awaited_once()
+        client_context.__aexit__.assert_awaited_once()
+
+    async def test_lldp_mismatch_fails_before_clear(self):
+        cs = _make_custom_step()
+        driver, _client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_lldp_neighbors.return_value[
+            self.TARGET_INTERFACE
+        ].remote_device_name = "wrong-host.mwg2"
+
+        with self.assertRaisesRegex(RuntimeError, "LLDP neighbor=wrong-host"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        driver.get_sw_agent_client.assert_not_awaited()
+
+    async def test_empty_ambiguous_and_nonflushable_scope_fail(self):
+        cs = _make_custom_step()
+        driver, _client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value = []
+        with self.assertRaisesRegex(RuntimeError, "no flushable IPv6 NDP entries"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        cs = _make_custom_step()
+        driver, _client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value.append(
+            self._ndp_entry("2401:db00:292a:8154:bace::c", mac="00:11:22:33:44:55")
+        )
+        with self.assertRaisesRegex(RuntimeError, "ambiguous NDP scope"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        cs = _make_custom_step()
+        driver, _client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value = [
+            self._ndp_entry("2401:db00:292a:8154:bace::b", state="DYNAMIC"),
+            self._ndp_entry("fe80::b8ce:ff:fe00:e8", state="STATIC"),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "no flushable IPv6 NDP entries"):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+    async def test_entry_interface_id_drives_rpc_not_port_vlan(self):
+        cs = _make_custom_step()
+        driver, client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_ndp_table.return_value = [
+            self._ndp_entry("2401:db00:292a:8154:bace::b", interface_id=9999)
+        ]
+        await self._run_with_fake_clock(
+            cs,
+            self._params(duration_sec=4),
+            client,
+            latencies=[1.0],
+        )
+
+        payload = client.flushNeighborEntries.await_args_list[0].args[0]
+        self.assertEqual([entry.interfaceID for entry in payload], [9999])
+
+    async def test_missing_port_vlan_is_diagnostic_only(self):
+        cs = _make_custom_step()
+        driver, client, _client_context = self._configure_live_shape(cs)
+        driver.async_get_interface_name_to_port_id_and_vlan_id.return_value = (
+            SimpleNamespace(port_id=205)
+        )
+        await self._run_with_fake_clock(
+            cs,
+            self._params(duration_sec=4),
+            client,
+            latencies=[1.0],
+        )
+
+        client.flushNeighborEntries.assert_awaited_once()
+
+    async def test_invalid_state_interface_id_and_count_fail(self):
+        for entry, expected in (
+            (self._ndp_entry("2401:db00::1", state=""), "invalid state"),
+            (
+                self._ndp_entry("2401:db00::1", interface_id=-1),
+                "invalid interfaceID=-1",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                cs = _make_custom_step()
+                driver, _client, _client_context = self._configure_live_shape(cs)
+                driver.async_get_ndp_table.return_value = [entry]
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    await cs.fpf_ndp_clear_loop(self._params())
+                driver.get_sw_agent_client.assert_not_awaited()
+
+        for result in (-1, True, "2"):
+            with self.subTest(result=result):
+                cs = _make_custom_step()
+                _driver, client, client_context = self._configure_live_shape(cs)
+                client.flushNeighborEntries.return_value = result
+                with self.assertRaisesRegex(RuntimeError, "invalid flush count"):
+                    await cs.fpf_ndp_clear_loop(self._params(duration_sec=4))
+                client_context.__aexit__.assert_awaited_once()
+
+    async def test_zero_total_flush_fails_exact_rate_contract(self):
+        cs = _make_custom_step()
+        _driver, client, _client_context = self._configure_live_shape(cs)
+        with self.assertRaisesRegex(RuntimeError, "total_flushed=0"):
+            await self._run_with_fake_clock(
+                cs,
+                self._params(duration_sec=8),
+                client,
+                latencies=[1.0],
+                first_flush_count=0,
+            )
+
+    async def test_cancelled_clear_closes_client_and_reraises(self):
+        cs = _make_custom_step()
+        driver, client, client_context = self._configure_live_shape(cs)
+
+        async def flush(_entries: list) -> int:
+            raise asyncio.CancelledError
+
+        client.flushNeighborEntries.side_effect = flush
+        with self.assertRaises(asyncio.CancelledError):
+            await cs.fpf_ndp_clear_loop(self._params())
+
+        client.flushNeighborEntries.assert_awaited_once()
+        client_context.__aexit__.assert_awaited_once()
+        driver.async_run_cmd_on_shell.assert_not_awaited()
 
 
 class TestOwnedDrainCleanup(unittest.IsolatedAsyncioTestCase):
@@ -923,6 +1903,233 @@ class TestMultiGtswRapidFlapStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["expected_interfaces"], interfaces)
         self.assertEqual(params["nic_recovery_by_gtsw_interface"], recovery)
 
+    def test_factory_serializes_delayed_strict_qsfp_churn(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=1800,
+            churn_service=Service.QSFP_SERVICE,
+            churn_action="crash",
+            churn_every_sec=600,
+            churn_initial_delay_sec=600,
+            churn_recovery_timeout_sec=120,
+            fail_closed=True,
+            expected_interfaces=["eth1/41/5"],
+        )
+        params = _params(step)
+        self.assertEqual(params["churn_service"], int(Service.QSFP_SERVICE.value))
+        self.assertEqual(params["churn_action"], "crash")
+        self.assertEqual(params["churn_every_sec"], 600)
+        self.assertEqual(params["churn_initial_delay_sec"], 600)
+        self.assertEqual(params["churn_recovery_timeout_sec"], 120)
+        self.assertEqual(params["churn_recovery_poll_interval_sec"], 5)
+
+    def test_factory_serializes_retryable_post_churn_cleanup(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            neighbor_hosts=["twshared1352.03.mwg2"],
+            duration_sec=900,
+            churn_service=Service.AGENT,
+            retry_final_cleanup_after_churn=True,
+            final_cleanup_service_recovery_timeout_sec=120,
+            final_cleanup_retry_timeout_sec=120,
+            fail_closed=True,
+            expected_interfaces=["eth1/41/5"],
+        )
+        params = _params(step)
+        self.assertTrue(params["retry_final_cleanup_after_churn"])
+        self.assertEqual(params["final_cleanup_service_recovery_timeout_sec"], 120)
+        self.assertEqual(params["final_cleanup_retry_timeout_sec"], 120)
+
+    async def test_cleanup_race_retries_after_churn_service_is_ready(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = {
+            "eth1/41/5": SwitchLldpData(
+                remote_device_name="twshared1352.03.mwg2",
+                remote_intf_name="beth0",
+            )
+        }
+        restore = AsyncMock(side_effect=[RuntimeError("switch is initializing"), None])
+        wait_ready = AsyncMock()
+        with (
+            patch("time.time", return_value=0.0),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=restore),
+            patch.object(cs, "_wait_for_fpf_service_active", new=wait_ready),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001"],
+                    "neighbor_hosts": ["twshared1352.03.mwg2"],
+                    "duration_sec": 0,
+                    "churn_service": int(Service.AGENT.value),
+                    "churn_devices": ["gtsw001"],
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "retry_final_cleanup_after_churn": True,
+                    "final_cleanup_service_recovery_timeout_sec": 120,
+                    "final_cleanup_retry_timeout_sec": 120,
+                    "final_up_timeout_sec": 60,
+                }
+            )
+        self.assertEqual(restore.await_count, 2)
+        wait_ready.assert_awaited_once()
+
+    async def test_post_churn_cleanup_preserves_natural_recovery_failure(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_lldp_neighbors.return_value = {
+            "eth1/41/5": SwitchLldpData(
+                remote_device_name="twshared1352.03.mwg2",
+                remote_intf_name="beth0",
+            )
+        }
+        restore = AsyncMock(
+            side_effect=[
+                TestCaseFailure("natural interface recovery exceeded 60s"),
+                None,
+            ]
+        )
+        with (
+            self.assertRaisesRegex(
+                TestCaseFailure,
+                "natural interface recovery exceeded 60s",
+            ),
+            patch("time.time", return_value=0.0),
+            patch(
+                "neteng.test_infra.dne.taac.internal.steps.custom_step."
+                "async_get_device_driver",
+                new=AsyncMock(return_value=driver),
+            ),
+            patch.object(cs, "_restore_rapid_flap_interfaces", new=restore),
+            patch.object(
+                cs,
+                "_wait_for_fpf_service_active",
+                new=AsyncMock(),
+            ),
+        ):
+            await cs.fpf_multi_gtsw_rapid_flap(
+                {
+                    "gtsws": ["gtsw001"],
+                    "neighbor_hosts": ["twshared1352.03.mwg2"],
+                    "duration_sec": 0,
+                    "churn_service": int(Service.AGENT.value),
+                    "churn_devices": ["gtsw001"],
+                    "fail_closed": True,
+                    "expected_interfaces": ["eth1/41/5"],
+                    "retry_final_cleanup_after_churn": True,
+                    "final_cleanup_service_recovery_timeout_sec": 120,
+                    "final_cleanup_retry_timeout_sec": 120,
+                    "final_up_timeout_sec": 60,
+                }
+            )
+        self.assertEqual(restore.await_count, 2)
+
+    def test_factory_rejects_unknown_churn_action(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported service churn action"):
+            create_fpf_multi_gtsw_rapid_flap_step(
+                gtsws=["gtsw001"],
+                duration_sec=1800,
+                churn_service=Service.QSFP_SERVICE,
+                churn_action="stop",
+            )
+
+    def test_factory_preserves_poll_interval_without_recovery_timeout(self):
+        step = create_fpf_multi_gtsw_rapid_flap_step(
+            gtsws=["gtsw001"],
+            duration_sec=1800,
+            churn_service=Service.QSFP_SERVICE,
+            churn_recovery_poll_interval_sec=7,
+        )
+
+        self.assertEqual(_params(step)["churn_recovery_poll_interval_sec"], 7)
+
+    async def test_qsfp_crash_recovery_waits_until_service_is_active(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.side_effect = [
+            SystemctlServiceStatus.FAILED,
+            SystemctlServiceStatus.TRANSITIONING,
+            SystemctlServiceStatus.ACTIVE,
+        ]
+        with (
+            patch("time.monotonic", side_effect=[0.0, 1.0, 2.0]),
+            patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await cs._wait_for_fpf_service_active(
+                driver=driver,
+                device="gtsw001",
+                service=cs._resolve_driver_service(Service.QSFP_SERVICE),
+                timeout_sec=120,
+                poll_interval_sec=5,
+            )
+        self.assertEqual(driver.async_get_service_status.await_count, 3)
+        self.assertEqual([call.args for call in sleep.await_args_list], [(5,), (5,)])
+
+    async def test_qsfp_crash_recovery_timeout_is_strict(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.return_value = (
+            SystemctlServiceStatus.TRANSITIONING
+        )
+        with (
+            self.assertRaisesRegex(RuntimeError, "did not recover ACTIVE within 120s"),
+            patch("time.monotonic", side_effect=[0.0, 120.0]),
+        ):
+            await cs._wait_for_fpf_service_active(
+                driver=driver,
+                device="gtsw001",
+                service=cs._resolve_driver_service(Service.QSFP_SERVICE),
+                timeout_sec=120,
+                poll_interval_sec=5,
+            )
+
+    async def test_fail_closed_crash_path_uses_sigkill_and_verifies_recovery(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_get_service_status.return_value = SystemctlServiceStatus.ACTIVE
+        qsfp_service = cs._resolve_driver_service(Service.QSFP_SERVICE)
+        errors = await cs._run_fpf_service_churn_action(
+            driver=driver,
+            device="gtsw001",
+            service=Service.QSFP_SERVICE,
+            driver_service=qsfp_service,
+            action="crash",
+            recovery_timeout_sec=120,
+            recovery_poll_interval_sec=5,
+        )
+        self.assertEqual(errors, [])
+        driver.async_crash_service.assert_awaited_once_with(qsfp_service)
+        driver.async_restart_service.assert_not_awaited()
+        driver.async_get_service_status.assert_awaited_once_with(qsfp_service)
+
+    async def test_churn_action_failure_does_not_attempt_recovery(self):
+        cs = _make_custom_step()
+        driver = AsyncMock()
+        driver.async_crash_service.side_effect = RuntimeError("boom")
+        qsfp_service = cs._resolve_driver_service(Service.QSFP_SERVICE)
+
+        errors = await cs._run_fpf_service_churn_action(
+            driver=driver,
+            device="gtsw001",
+            service=Service.QSFP_SERVICE,
+            driver_service=qsfp_service,
+            action="crash",
+            recovery_timeout_sec=120,
+            recovery_poll_interval_sec=5,
+        )
+
+        self.assertEqual(
+            errors,
+            ["gtsw001: crash QSFP_SERVICE failed: boom"],
+        )
+        driver.async_get_service_status.assert_not_awaited()
+
     async def test_fail_closed_propagates_gtsw_failure_after_cleanup(self):
         cs = _make_custom_step()
         driver = AsyncMock()
@@ -1193,6 +2400,8 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
             neighbor_pattern="gtsw001*",
             enable=False,
             device_regexes=["stsw001.s001.l202.mwg2"],
+            interface_cache_key="tc36_members",
+            expected_interfaces=["eth1/1/1", "eth1/2/1"],
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         self.assertEqual(list(step.device_regexes), ["stsw001.s001.l202.mwg2"])
@@ -1200,31 +2409,134 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["custom_step_name"], "fpf_lldp_batched_set_interface_admin")
         self.assertEqual(p["neighbor_pattern"], "gtsw001*")
         self.assertFalse(p["is_enable"])
-        # No pre-resolved interface list.
-        self.assertNotIn("interfaces", p)
+        self.assertEqual(p["interface_cache_key"], "tc36_members")
+        self.assertEqual(p["expected_interfaces"], ["eth1/1/1", "eth1/2/1"])
 
     async def test_batched_disable_calls_thrift_once_with_resolved_list(self):
         cs = _make_custom_step()
         cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
-        await cs.fpf_lldp_batched_set_interface_admin(
-            {"neighbor_pattern": "gtsw001*", "is_enable": False}
-        )
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": False,
+            "eth1/2/1": False,
+        }
+        with patch(
+            "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_disruption_time"
+        ) as set_disruption_time:
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": False,
+                    "interface_cache_key": "tc36_members",
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_disruption_time.assert_called_once()
         # ONE batched thrift call over the resolved set.
         cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
             interface_names=("eth1/1/1", "eth1/2/1"),
             is_enable_port=False,
         )
-
-    async def test_batched_enable_calls_thrift_once(self):
-        cs = _make_custom_step()
-        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
-        await cs.fpf_lldp_batched_set_interface_admin(
-            {"neighbor_pattern": "rtptest*", "is_enable": True}
+        self.assertEqual(
+            cs.parameter_evaluator.jq_vars["fpf_lldp_interface_cache::tc36_members"],
+            ["eth1/1/1", "eth1/2/1"],
         )
+
+    async def test_batched_enable_prefers_cached_disable_scope(self):
+        cs = _make_custom_step()
+        cs.parameter_evaluator.jq_vars["fpf_lldp_interface_cache::tc36_members"] = [
+            "eth1/1/1",
+            "eth1/2/1",
+        ]
+        cs.driver.async_get_lldp_neighbors.return_value = {}
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_start_time"
+            ) as set_recovery_start_time,
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_completion_time"
+            ) as set_recovery_completion_time,
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": True,
+                    "interface_cache_key": "tc36_members",
+                    "use_cached_interfaces": True,
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_recovery_start_time.assert_called_once()
+        set_recovery_completion_time.assert_called_once()
         cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
-            interface_names=("eth1/4/1",),
+            interface_names=("eth1/1/1", "eth1/2/1"),
             is_enable_port=True,
         )
+        cs.driver.async_get_lldp_neighbors.assert_not_awaited()
+
+    async def test_restore_only_uses_explicit_fallback_without_lldp(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = {}
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": True,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_start_time"
+            ) as set_recovery_start_time,
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_recovery_completion_time"
+            ) as set_recovery_completion_time,
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": True,
+                    "interface_cache_key": "tc36_members",
+                    "use_cached_interfaces": True,
+                    "expected_interfaces": ["eth1/1/1", "eth1/2/1"],
+                }
+            )
+        set_recovery_start_time.assert_called_once()
+        set_recovery_completion_time.assert_called_once()
+        cs.driver.async_thrift_disable_enable_interfaces.assert_awaited_once_with(
+            interface_names=("eth1/1/1", "eth1/2/1"),
+            is_enable_port=True,
+        )
+
+    async def test_disable_rejects_lldp_scope_outside_expected_set(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        with self.assertRaisesRegex(RuntimeError, "does not match expected scope"):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {
+                    "neighbor_pattern": "gtsw001*",
+                    "is_enable": False,
+                    "expected_interfaces": ["eth1/1/1"],
+                }
+            )
+        cs.driver.async_thrift_disable_enable_interfaces.assert_not_awaited()
+
+    async def test_admin_readback_mismatch_fails_closed(self):
+        cs = _make_custom_step()
+        cs.driver.async_get_lldp_neighbors.return_value = _lldp_table()
+        cs.driver.async_get_all_interfaces_admin_status.return_value = {
+            "eth1/1/1": False,
+            "eth1/2/1": True,
+        }
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry.set_disruption_time"
+            ),
+            self.assertRaisesRegex(RuntimeError, "admin read-back failed"),
+        ):
+            await cs.fpf_lldp_batched_set_interface_admin(
+                {"neighbor_pattern": "gtsw001*", "is_enable": False}
+            )
 
     async def test_no_match_raises(self):
         cs = _make_custom_step()
@@ -1236,14 +2548,155 @@ class TestLldpBatchedSetInterfaceAdminStep(unittest.IsolatedAsyncioTestCase):
         cs.driver.async_thrift_disable_enable_interfaces.assert_not_awaited()
 
 
+class TestRemotePrefixGrSequenceStep(unittest.IsolatedAsyncioTestCase):
+    def test_service_hostname_strips_only_facebook_suffix(self):
+        normalize = getattr(
+            custom_step_module,
+            "_fpf_service_ssh_host",
+            None,
+        )
+        self.assertIsNotNone(normalize)
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2.facebook.com"),
+            "gtsw001.l1002.c087.mwg2",
+        )
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2"),
+            "gtsw001.l1002.c087.mwg2",
+        )
+        self.assertEqual(
+            normalize("gtsw001.l1002.c087.mwg2.tfbnw.net"),
+            "gtsw001.l1002.c087.mwg2.tfbnw.net",
+        )
+
+    async def test_sequence_confirms_states_and_records_boundaries(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_remote_prefix_gr_sequence_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        step = factory(
+            local_gtsw="gtsw001.l1002.c087.mwg2.facebook.com",
+            remote_gtsw="gtsw001.l1001.c087.mwg2.facebook.com",
+            between_stops_sec=30,
+            before_local_restart_sec=30,
+            max_fsdb_outage_sec=120,
+        )
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_remote_prefix_gr_sequence")
+
+        cs = _make_custom_step()
+        calls: list[tuple[str, str, bool]] = []
+        service_states = {"fsdb": "active", "bgpd": "active"}
+
+        async def fake_ssh(
+            host,
+            command,
+            timeout_sec=30,
+            preserve_lab_ssh_hostname=False,
+        ):
+            calls.append((host, command, preserve_lab_ssh_hostname))
+            if command == "systemctl stop fsdb":
+                service_states["fsdb"] = "inactive"
+                return (0, "", "")
+            if command == "systemctl stop bgpd":
+                service_states["bgpd"] = "inactive"
+                return (0, "", "")
+            if command == "systemctl start fsdb":
+                service_states["fsdb"] = "active"
+                return (0, "", "")
+            if command.startswith("systemctl is-active "):
+                return (0, service_states[command.rsplit(" ", 1)[-1]], "")
+            return (1, "", "unexpected command")
+
+        cs._ssh_run_host = fake_ssh
+        fpf_collector_registry.clear_all()
+        with (
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch.object(
+                fpf_collector_registry.time,
+                "time",
+                side_effect=[100.0, 130.0, 160.0],
+            ),
+        ):
+            await cs.fpf_remote_prefix_gr_sequence(params)
+
+        self.assertEqual(
+            calls,
+            [
+                ("gtsw001.l1002.c087.mwg2", "systemctl stop fsdb", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl stop bgpd", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl start fsdb", True),
+                ("gtsw001.l1002.c087.mwg2", "systemctl is-active fsdb", True),
+            ],
+        )
+        self.assertEqual(fpf_collector_registry.get_disruption_time(), 100.0)
+        self.assertEqual(fpf_collector_registry.get_mutation_time(), 130.0)
+        self.assertEqual(fpf_collector_registry.get_restart_completion_time(), 160.0)
+
+    async def test_recovery_starts_only_origin_bgp_and_records_completion(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_remote_prefix_start_origin_bgp_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        params = _params(factory(remote_gtsw="gtsw001.l1001.c087.mwg2.facebook.com"))
+        cs = _make_custom_step()
+        calls: list[tuple[str, str, bool]] = []
+
+        async def fake_ssh(
+            host,
+            command,
+            timeout_sec=30,
+            preserve_lab_ssh_hostname=False,
+        ):
+            calls.append((host, command, preserve_lab_ssh_hostname))
+            return (0, "active\n" if "is-active" in command else "", "")
+
+        cs._ssh_run_host = fake_ssh
+        fpf_collector_registry.clear_all()
+        with patch.object(
+            fpf_collector_registry.time,
+            "time",
+            side_effect=[200.0, 201.0],
+        ):
+            await cs.fpf_remote_prefix_start_origin_bgp(params)
+
+        self.assertEqual(
+            calls,
+            [
+                ("gtsw001.l1001.c087.mwg2", "systemctl start bgpd", True),
+                ("gtsw001.l1001.c087.mwg2", "systemctl is-active bgpd", True),
+            ],
+        )
+        self.assertEqual(fpf_collector_registry.get_recovery_start_time(), 200.0)
+        self.assertEqual(
+            fpf_collector_registry.get_recovery_completion_time(),
+            201.0,
+        )
+
+
 class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _paos_output(admin_status: int, oper_status: int) -> str:
+        return (
+            f"admin_status             | 0x{admin_status:08x}\n"
+            f"oper_status              | 0x{oper_status:08x}\n"
+        )
+
     def test_factory_shape(self):
         step = create_fpf_nic_mstreg_flap_step(
             host="rtptest1555.mwg2",
             dev=0,
             lane=0,
-            iterations=5,
-            interval_sec=2.0,
+            duration_sec=900,
+            down_time_sec=2.0,
+            up_time_sec=2.0,
+            final_cleanup_timeout_sec=120.0,
         )
         self.assertEqual(step.name, StepName.CUSTOM_STEP)
         # Host-side step — no device_regexes (GPU hosts aren't FBOSS DUTs).
@@ -1253,8 +2706,33 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["host"], "rtptest1555.mwg2")
         self.assertEqual(p["dev"], 0)
         self.assertEqual(p["lane"], 0)
-        self.assertEqual(p["iterations"], 5)
-        self.assertEqual(p["interval_sec"], 2.0)
+        self.assertEqual(p["duration_sec"], 900)
+        self.assertEqual(p["down_time_sec"], 2.0)
+        self.assertEqual(p["up_time_sec"], 2.0)
+        self.assertEqual(p["final_cleanup_timeout_sec"], 120.0)
+
+    def test_single_paos_factory_shape(self):
+        factory = getattr(
+            fpf_step_definitions,
+            "create_fpf_nic_mstreg_paos_step",
+            None,
+        )
+        self.assertIsNotNone(factory)
+        step = factory(
+            host="twshared1352.03.mwg2",
+            dev=0,
+            lane=0,
+            admin_up=False,
+            verify_link_health=False,
+        )
+        self.assertEqual(step.name, StepName.CUSTOM_STEP)
+        params = _params(step)
+        self.assertEqual(params["custom_step_name"], "fpf_nic_mstreg_paos")
+        self.assertEqual(params["host"], "twshared1352.03.mwg2")
+        self.assertEqual(params["dev"], 0)
+        self.assertEqual(params["lane"], 0)
+        self.assertFalse(params["admin_up"])
+        self.assertFalse(params["verify_link_health"])
 
     def test_bdf_mapping_for_several_dev_lane_pairs(self):
         # The handler computes the BDF deterministically (no ethtool) via
@@ -1274,96 +2752,201 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             _nic_mstreg_bdf(0, -1)  # lane < 0
 
-    async def test_handler_runs_mstreg_cycles_with_deterministic_bdf(self):
+    def test_paos_readback_parser_accepts_native_equals_format(self):
         cs = _make_custom_step()
-        # Capture every ssh-run call (host, cmd): alternating mstreg DOWN/UP.
-        # No ethtool probe — the BDF is computed deterministically.
-        calls: list[tuple[str, str]] = []
+        self.assertEqual(cs._nic_paos_field("admin_status=0x1", "admin_status"), 1)
+        self.assertEqual(cs._nic_paos_field("oper_status = 0x2", "oper_status"), 2)
+
+    async def test_single_handler_uses_noninteractive_command_and_readback(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+        calls: list[str] = []
 
         async def fake_ssh(host, cmd, timeout_sec=30):
-            calls.append((host, cmd))
-            return (0, "", "")
-
-        sleeps: list[float] = []
-
-        async def fake_sleep(d):
-            sleeps.append(d)
+            calls.append(cmd)
+            if "--get" in cmd:
+                return (0, self._paos_output(2, 2), "")
+            return (0, "set ok", "")
 
         cs._ssh_run_host = fake_ssh
+        await handler(
+            {
+                "host": "twshared1352.03.mwg2",
+                "dev": 0,
+                "lane": 0,
+                "admin_up": False,
+                "state_timeout_sec": 0.0,
+                "state_poll_interval_sec": 0.0,
+                "verify_link_health": False,
+            }
+        )
 
-        with patch("asyncio.sleep", side_effect=fake_sleep):
+        self.assertEqual(
+            calls[0],
+            "mstreg --yes -d 0000:03:00.0 --reg_name PAOS "
+            '--set "admin_status=2,ase=1,fd=1" -i "local_port=1"',
+        )
+        self.assertEqual(
+            calls[1],
+            'mstreg --yes -d 0000:03:00.0 --reg_name PAOS --get -i "local_port=1"',
+        )
+
+    async def test_single_handler_nonzero_rc_is_hard_failure(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+        cs._ssh_run_host = AsyncMock(return_value=(7, "", "permission denied"))
+
+        with self.assertRaisesRegex(TestCaseFailure, "PAOS-DOWN.*rc=7"):
+            await handler(
+                {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "admin_up": False,
+                }
+            )
+
+    async def test_single_handler_rejects_failed_state_transition(self):
+        cs = _make_custom_step()
+        handler = getattr(cs, "fpf_nic_mstreg_paos", None)
+        self.assertIsNotNone(handler)
+
+        async def fake_ssh(host, cmd, timeout_sec=30):
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            return (0, "set ok", "")
+
+        cs._ssh_run_host = fake_ssh
+        with self.assertRaisesRegex(TestCaseFailure, "did not reach DOWN"):
+            await handler(
+                {
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "admin_up": False,
+                    "state_timeout_sec": 0.0,
+                    "state_poll_interval_sec": 0.0,
+                }
+            )
+
+    async def test_continuous_handler_is_deadline_bounded_and_finishes_up(self):
+        cs = _make_custom_step()
+        transitions: list[tuple[bool, bool]] = []
+
+        async def fake_transition(*, admin_up, require_link_health, **kwargs):
+            transitions.append((admin_up, require_link_health))
+
+        cs._set_and_verify_nic_paos = fake_transition
+        cs._ssh_run_host = AsyncMock(return_value=(0, "", ""))
+        # A zero-second deadline still completes one full DOWN/UP cycle before
+        # checking the wall clock, then performs the unconditional final-UP
+        # cleanup. Avoid mocking time.monotonic globally because asyncio's own
+        # bounded-cleanup timer uses the same clock.
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
             await cs.fpf_nic_mstreg_flap(
                 {
                     "host": "rtptest1555.mwg2",
                     "dev": 0,
-                    "lane": 1,
-                    "iterations": 3,
-                    "interval_sec": 2.0,
+                    "lane": 0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 2.0,
+                    "up_time_sec": 2.0,
+                    "final_cleanup_timeout_sec": 120.0,
                 }
             )
-
-        # No ethtool: 6 mstreg (3 DOWN + 3 UP) = 6 total ssh calls.
-        self.assertEqual(len(calls), 6)
-        self.assertFalse(any("ethtool" in cmd for _, cmd in calls))
-
-        # dev=0 lane=1 -> BDF 0000:03:00.1; calls alternate DOWN then UP.
-        expected_bdf = "0000:03:00.1"
-        expected_down = (
-            f"mstreg -d {expected_bdf} --reg_name PAOS "
-            f'--set "admin_status=2,ase=1,fd=1" -i "local_port=1"'
+        self.assertEqual(
+            transitions,
+            [(False, False), (True, False), (True, True)],
         )
-        expected_up = (
-            f"mstreg -d {expected_bdf} --reg_name PAOS "
-            f'--set "admin_status=1,ase=1,fd=1" -i "local_port=1"'
-        )
-        self.assertEqual(calls[0], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[1], ("rtptest1555.mwg2", expected_up))
-        self.assertEqual(calls[2], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[3], ("rtptest1555.mwg2", expected_up))
-        self.assertEqual(calls[4], ("rtptest1555.mwg2", expected_down))
-        self.assertEqual(calls[5], ("rtptest1555.mwg2", expected_up))
+        self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0] * 2)
 
-        # One sleep after every DOWN and after every UP -> 6 sleeps of 2.0s.
-        self.assertEqual(sleeps, [2.0] * 6)
-
-    async def test_handler_uses_bdf_for_dev2_lane7(self):
+    async def test_continuous_handler_restores_up_after_cancellation(self):
         cs = _make_custom_step()
-        seen_cmds = []
+        transitions: list[tuple[bool, bool]] = []
+
+        async def fake_transition(*, admin_up, require_link_health, **kwargs):
+            transitions.append((admin_up, require_link_health))
+
+        cs._set_and_verify_nic_paos = fake_transition
+        cs._ssh_run_host = AsyncMock(return_value=(0, "", ""))
+        with (
+            patch("time.monotonic", return_value=0.0),
+            patch("asyncio.sleep", side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await cs.fpf_nic_mstreg_flap(
+                    {
+                        "host": "twshared1352.03.mwg2",
+                        "dev": 0,
+                        "lane": 0,
+                        "duration_sec": 900.0,
+                        "down_time_sec": 2.0,
+                        "up_time_sec": 2.0,
+                        "final_cleanup_timeout_sec": 120.0,
+                    }
+                )
+        self.assertEqual(transitions, [(False, False), (True, True)])
+
+    async def test_link_verifier_requires_active_and_status_opcode_zero(self):
+        cs = _make_custom_step()
+        calls: list[str] = []
 
         async def fake_ssh(host, cmd, timeout_sec=30):
-            seen_cmds.append(cmd)
-            return (0, "", "")
+            calls.append(cmd)
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            if cmd.startswith("mlxlink"):
+                return (0, "State : Active\nStatus Opcode : 0\n", "")
+            return (0, "set ok", "")
 
         cs._ssh_run_host = fake_ssh
-        with patch("asyncio.sleep", new=AsyncMock()):
-            await cs.fpf_nic_mstreg_flap(
+        await cs.fpf_nic_mstreg_verify_link(
+            {
+                "host": "twshared1352.03.mwg2",
+                "dev": 0,
+                "lane": 0,
+                "timeout_sec": 0.0,
+                "poll_interval_sec": 0.0,
+            }
+        )
+        self.assertIn("mlxlink -d 0000:03:00.0 -m", calls)
+
+    async def test_link_verifier_rejects_nonzero_status_opcode(self):
+        cs = _make_custom_step()
+
+        async def fake_ssh(host, cmd, timeout_sec=30):
+            if "--get" in cmd:
+                return (0, self._paos_output(1, 1), "")
+            if cmd.startswith("mlxlink"):
+                return (0, "State : Active\nStatus Opcode : 57\n", "")
+            return (0, "set ok", "")
+
+        cs._ssh_run_host = fake_ssh
+        with self.assertRaisesRegex(TestCaseFailure, "opcode_zero=False"):
+            await cs.fpf_nic_mstreg_verify_link(
                 {
-                    "host": "rtptest1555.mwg2",
-                    "dev": 2,
-                    "lane": 7,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "host": "twshared1352.03.mwg2",
+                    "dev": 0,
+                    "lane": 0,
+                    "timeout_sec": 0.0,
+                    "poll_interval_sec": 0.0,
                 }
             )
-        # dev=2 lane=7 -> BDF 0010:03:00.7; every mstreg cmd carries it.
-        self.assertTrue(seen_cmds)
-        self.assertTrue(all("-d 0010:03:00.7 " in cmd for cmd in seen_cmds))
 
     async def test_handler_raises_on_out_of_range_dev_or_lane(self):
         cs = _make_custom_step()
 
-        async def fake_ssh(host, cmd, timeout_sec=30):
-            return (0, "", "")
-
-        cs._ssh_run_host = fake_ssh
         with self.assertRaises(ValueError):
             await cs.fpf_nic_mstreg_flap(
                 {
                     "host": "rtptest1555.mwg2",
                     "dev": 4,
                     "lane": 0,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 0.0,
+                    "up_time_sec": 0.0,
                 }
             )
         with self.assertRaises(ValueError):
@@ -1372,13 +2955,55 @@ class TestNicMstregFlapStep(unittest.IsolatedAsyncioTestCase):
                     "host": "rtptest1555.mwg2",
                     "dev": 0,
                     "lane": 8,
-                    "iterations": 1,
-                    "interval_sec": 0.0,
+                    "duration_sec": 0.0,
+                    "down_time_sec": 0.0,
+                    "up_time_sec": 0.0,
                 }
             )
 
 
 class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
+    def test_split_vf_groups_keep_prefix_bases_and_target_scope(self):
+        stsw = "stsw001.s001.c085.ash6"
+        steps = create_fpf_stsw_drain_and_reinject_steps(
+            stsw=stsw,
+            drained=True,
+            trigger_stsws=[stsw],
+            prefix_count=1000,
+            community_list="stsw",
+            drain_community="65446:10",
+            injection_groups=[
+                {
+                    "devices": ["stsw001.s001.c085.ash6"],
+                    "prefix_base": "5000:dd::/64",
+                    "count": 4032,
+                    "batch_size": 252,
+                },
+                {
+                    "devices": ["stsw001.s005.c085.ash6"],
+                    "prefix_base": "5000:ee::/64",
+                    "count": 4032,
+                    "batch_size": 252,
+                },
+            ],
+        )
+        self.assertEqual(len(steps), 4)
+        self.assertEqual(_params(steps[0])["target_device"], stsw)
+        self.assertEqual(_params(steps[1])["mode"], "device_drain")
+        self.assertTrue(_params(steps[1])["fail_if_ineffective"])
+        injections = [_params(step) for step in steps[2:]]
+        self.assertEqual(
+            [params["prefix_base"] for params in injections],
+            ["5000:dd::/64", "5000:ee::/64"],
+        )
+        self.assertTrue(
+            all(params["community_list"] == "stsw" for params in injections)
+        )
+        self.assertTrue(
+            all(params["extra_communities"] == ["65446:10"] for params in injections)
+        )
+        self.assertTrue(all(params["batch_size"] == 252 for params in injections))
+
     def test_drain_appends_drain_community_and_orders_steps(self):
         steps = create_fpf_stsw_drain_and_reinject_steps(
             stsw="stsw001.s001.c085.ash6",
@@ -1388,13 +3013,12 @@ class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
             community_list="65000:1",
             drain_community="65000:999",
         )
-        self.assertEqual(len(steps), 2)
-        # First step: drain/undrain (LOCAL_DRAINER).
-        self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
-        # Second step: prefix injection with the appended drain community.
-        self.assertEqual(steps[1].name, StepName.FPF_BGP_PREFIX_INJECTION_STEP)
-        inj = _params(steps[1])
-        self.assertEqual(inj["community_list"], "65000:1 65000:999")
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(_params(steps[0])["custom_step_name"], "fpf_drain_interface")
+        self.assertEqual(_params(steps[1])["custom_step_name"], "fpf_verify_disruption")
+        inj = _params(steps[2])
+        self.assertEqual(inj["community_list"], "65000:1")
+        self.assertEqual(inj["extra_communities"], ["65000:999"])
         self.assertEqual(inj["count"], 20000)
         self.assertEqual(inj["devices"], ["stsw001.s001.c085.ash6"])
 
@@ -1407,10 +3031,12 @@ class TestStswDrainAndReinjectSteps(unittest.IsolatedAsyncioTestCase):
             community_list="65000:1",
             drain_community="65000:999",
         )
-        self.assertEqual(steps[0].name, StepName.DRAIN_UNDRAIN_STEP)
-        inj = _params(steps[1])
+        self.assertEqual(_params(steps[0])["is_drain"], False)
+        self.assertEqual(_params(steps[1])["expect_drained"], False)
+        inj = _params(steps[2])
         # Undrain: drain_community is ignored.
         self.assertEqual(inj["community_list"], "65000:1")
+        self.assertNotIn("extra_communities", inj)
 
 
 if __name__ == "__main__":

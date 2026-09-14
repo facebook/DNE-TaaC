@@ -227,6 +227,12 @@ def get_check_results() -> t.List[t.Tuple[str, str, str, str]]:
 # set at the START of the playbook (before inject + stabilization).
 _disruption_time: float = 0.0
 
+# Wall-clock epoch of a scale mutation (prefix add/withdraw), recorded at
+# runtime immediately before the mutation begins.  This is deliberately
+# separate from ``_disruption_time``: a scale transition is not a link/service
+# disruption, and sharing the marker would change unrelated link-event windows.
+_mutation_time: float = 0.0
+
 # Wall-clock epoch of a recovery/restart action. This is intentionally separate
 # from ``_disruption_time``: GR-beyond tests use the latter to retain the full
 # service-down observation window while affected-rib recovery SLAs start here.
@@ -245,6 +251,12 @@ _restart_completion_time: float = 0.0
 _recovery_start_time: float = 0.0
 _recovery_completion_time: float = 0.0
 
+# Effective start of a recovered-state qualification window. It is recorded
+# only after every current-state recovery gate (including traffic readiness)
+# succeeds, so subsequent strict collector checks cannot accidentally include
+# the intentional outage or an incomplete recovery.
+_recovered_baseline_time: float = 0.0
+
 # Signal 1: end-to-end convergence ceiling. Includes any stimulus push
 # duration. 180s allows ~110s for 10k-prefix injection + ~70s propagation.
 DEFAULT_SIGNAL1_E2E_MAX_SEC: float = 180.0
@@ -260,6 +272,35 @@ DEFAULT_SIGNAL3_STABILITY_DURATION_SEC: float = 60.0
 # before the full duration elapses (gives partial credit so tests don't fail
 # purely because their soak window is short relative to the stability check).
 DEFAULT_STABILITY_PARTIAL_CREDIT_FRACTION: float = 0.8
+
+
+def resolve_observation_window(
+    check_params: t.Mapping[str, t.Any],
+    default_lookback_sec: float = 900.0,
+) -> t.Tuple[float, float]:
+    """Resolve a collector/ODS observation window.
+
+    Existing checks remain anchored at the current playbook start. Prechecks
+    that run immediately after collector setup may explicitly select the recent
+    lookback window so they inspect the setup baseline instead of an empty
+    post-playbook-start interval.
+    """
+    window_end = float(check_params.get("window_end", time.time()))
+    lookback_sec = float(check_params.get("lookback_sec", default_lookback_sec))
+    tc_start = get_test_case_start_time()
+    use_test_case_start = bool(check_params.get("use_test_case_start_time", True))
+    default_start = (
+        tc_start if use_test_case_start and tc_start else window_end - lookback_sec
+    )
+    return float(check_params.get("window_start", default_start)), window_end
+
+
+def enforce_final_exact(result: PerLaneResult, expected: int) -> PerLaneResult:
+    """Fail a convergence result whose final valid count is not exact."""
+    if result.actual != expected:
+        result.passed = False
+        result.detail += f" | Final exact count: FAIL — {result.actual} != {expected}"
+    return result
 
 
 async def everpaste_details_suffix(
@@ -321,6 +362,15 @@ def get_disruption_time() -> float:
     return _disruption_time
 
 
+def set_mutation_time(ts: float) -> None:
+    global _mutation_time
+    _mutation_time = ts
+
+
+def get_mutation_time() -> float:
+    return _mutation_time
+
+
 def set_restart_time(ts: float) -> None:
     global _restart_time
     _restart_time = ts
@@ -357,6 +407,19 @@ def set_recovery_completion_time(ts: float) -> None:
 
 def get_recovery_completion_time() -> float:
     return _recovery_completion_time
+
+
+def set_recovered_baseline_time(ts: float) -> None:
+    global _recovered_baseline_time
+    _recovered_baseline_time = ts
+    # Existing collector checks already use test_case_start_time as their common
+    # window anchor. Move that anchor only for the explicit recovered-baseline
+    # opt-in after every current-state gate has passed.
+    set_test_case_start_time(ts)
+
+
+def get_recovered_baseline_time() -> float:
+    return _recovered_baseline_time
 
 
 def validate_restart_tolerant_tuple(
@@ -428,8 +491,8 @@ def validate_restart_tolerant_tuple(
 
 
 def clear_all() -> None:
-    global _disruption_time, _restart_time, _restart_completion_time
-    global _recovery_start_time, _recovery_completion_time
+    global _disruption_time, _mutation_time, _restart_time, _restart_completion_time
+    global _recovery_start_time, _recovery_completion_time, _recovered_baseline_time
     global _disruption_effective, _disruption_effective_detail
     global _baseline_impaired_lanes, _baseline_impaired_tuples
     global _allow_baseline_failures
@@ -439,10 +502,12 @@ def clear_all() -> None:
     _artifacts.clear()
     _check_results.clear()
     _disruption_time = 0.0
+    _mutation_time = 0.0
     _restart_time = 0.0
     _restart_completion_time = 0.0
     _recovery_start_time = 0.0
     _recovery_completion_time = 0.0
+    _recovered_baseline_time = 0.0
     _disruption_effective = None
     _disruption_effective_detail = ""
     _baseline_impaired_lanes = {}

@@ -18,6 +18,7 @@ from taac.abstractions.topology.attributes import (
 )
 from taac.abstractions.topology.model import (
     BgpPeerGroup,
+    BgpSlowPeerConfig,
     DeviceGroupPartition,
     IxiaDeviceGroupChild,
     IxiaEndpointPortLabelStyle,
@@ -1061,6 +1062,7 @@ def _validate_device_group(
     )
     _validate_device_group_routing_driver(dg, path, issues)
     _validate_device_group_port_assignment(dg, path, endpoint_by_name, issues)
+    _validate_device_group_slow_peer(dg, path, endpoint_by_name, issues)
     _validate_device_group_partition(dg, path, issues)
     _validate_ixia_children(dg, path, endpoint_by_name, issues)
     _validate_route_attribute_pool(
@@ -1299,6 +1301,55 @@ def _validate_device_group_port_assignment(
         )
 
 
+def _device_group_is_ixia_facing(
+    dg: DeviceGroupSpec,
+    endpoint_by_name: t.Mapping[str, EndpointSpec],
+) -> bool:
+    # IXIA children inherit their parent endpoints and cannot declare endpoints.
+    return any(
+        _endpoint_is_ixia(endpoint_by_name.get(endpoint_name))
+        for endpoint_name in (dg.a_endpoint, dg.z_endpoint)
+    )
+
+
+def _validate_device_group_slow_peer(
+    dg: DeviceGroupSpec,
+    path: str,
+    endpoint_by_name: t.Mapping[str, EndpointSpec],
+    issues: list[ValidationIssue],
+) -> None:
+    if dg.slow_peer is None:
+        return
+    if not isinstance(dg.slow_peer, BgpSlowPeerConfig):
+        issues.append(
+            _issue(
+                f"{path}.slow_peer",
+                "invalid_slow_peer_config",
+                "slow_peer must be a BgpSlowPeerConfig",
+            )
+        )
+        return
+    if all(
+        endpoint_name in endpoint_by_name
+        for endpoint_name in (dg.a_endpoint, dg.z_endpoint)
+    ) and not _device_group_is_ixia_facing(dg, endpoint_by_name):
+        issues.append(
+            _issue(
+                f"{path}.slow_peer",
+                "slow_peer_requires_ixia",
+                "slow_peer requires an IXIA-backed device group",
+            )
+        )
+    if dg.peer_group is None:
+        issues.append(
+            _issue(
+                f"{path}.slow_peer",
+                "slow_peer_requires_bgp",
+                "slow_peer requires a BGP peer group",
+            )
+        )
+
+
 def _validate_ixia_children(
     dg: DeviceGroupSpec,
     path: str,
@@ -1376,11 +1427,7 @@ def _validate_ixia_child_parent(
     endpoint_by_name: t.Mapping[str, EndpointSpec],
     issues: list[ValidationIssue],
 ) -> None:
-    ixia_facing = any(
-        _endpoint_is_ixia(endpoint_by_name.get(endpoint_name))
-        for endpoint_name in (dg.a_endpoint, dg.z_endpoint)
-    )
-    if not ixia_facing and all(
+    if not _device_group_is_ixia_facing(dg, endpoint_by_name) and all(
         endpoint_name in endpoint_by_name
         for endpoint_name in (dg.a_endpoint, dg.z_endpoint)
     ):

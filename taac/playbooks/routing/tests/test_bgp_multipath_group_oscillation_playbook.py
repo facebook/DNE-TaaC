@@ -4,12 +4,17 @@
 import json
 import unittest
 
+from taac.abstractions.churn.workloads import MultipathChurn
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_multipath_group_oscillation_playbook,
 )
 from taac.stages.stage_definitions import (
     create_multipath_group_oscillation_stage,
+)
+from taac.steps.step_definitions import (
+    create_bgp_multipath_oscillation_step,
+    create_multipath_churn_step,
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_BGP_MON_IC_PARENT_NETWORK,
@@ -33,6 +38,35 @@ def _step_params(step: taac_types.Step) -> dict:
 
 
 class BgpMultipathGroupOscillationPlaybookTest(unittest.TestCase):
+    def test_typed_step_matches_legacy_payload(self) -> None:
+        legacy = create_bgp_multipath_oscillation_step(
+            hostname="dut.example.com",
+            ipv4_peer_regex=".*IPV4_EBGP$",
+            ipv6_peer_regex=".*IPV6_EBGP$",
+            ipv4_session_count=140,
+            ipv6_session_count=140,
+            test_duration_seconds=1680,
+            oscillation_interval_seconds=280,
+            min_peers_to_stop=1,
+            max_peers_to_stop=11,
+        )
+        typed = create_multipath_churn_step(
+            MultipathChurn.create(
+                hostname="dut.example.com",
+                ipv4_peer_regex=".*IPV4_EBGP$",
+                ipv6_peer_regex=".*IPV6_EBGP$",
+                ipv4_session_count=140,
+                ipv6_session_count=140,
+                test_duration_seconds=1680,
+                oscillation_interval_seconds=280,
+                min_peers_to_stop=1,
+                max_peers_to_stop=11,
+            )
+        )
+
+        self.assertEqual(_step_params(legacy), _step_params(typed))
+        self.assertEqual(legacy.description, typed.description)
+
     def test_stage_uses_path_aware_targeted_probe_workflow(self) -> None:
         stage = create_multipath_group_oscillation_stage(
             hostname="dut.example.com", oscillation_interval_seconds=280

@@ -209,6 +209,143 @@ class TestIxiaPacketLossRun(unittest.IsolatedAsyncioTestCase):
         result = await self.health_check._run(self.mock_ixia, input_data, {})
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
+    async def test_missing_named_traffic_item_fails(self, mock_everpaste):
+        self.mock_ixia.has_traffic_items.return_value = True
+        self.mock_ixia.get_traffic_start_time.return_value = 0
+        self.mock_ixia.get_latest_stats.return_value = [
+            _make_stat("OTHER_TRAFFIC", duration=0),
+        ]
+        mock_item = MagicMock()
+        mock_item.Enabled = True
+        mock_tracking = MagicMock()
+        mock_tracking.find.return_value.TrackBy = ["trackingenabled0"]
+        mock_item.Tracking = mock_tracking
+        self.mock_ixia.get_traffic_items.return_value = [mock_item]
+
+        input_data = hc_types.IxiaPacketLossHealthCheckIn(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=["EXPECTED_TRAFFIC"],
+                    str_value="0",
+                    metric=hc_types.PacketLossMetric.PERCENTAGE,
+                )
+            ],
+            sleep_time=0,
+        )
+
+        result = await self.health_check._run(self.mock_ixia, input_data, {})
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("EXPECTED_TRAFFIC", result.message)
+        self.assertIn("missing from IXIA statistics", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
+    async def test_empty_stats_fail_for_unnamed_threshold(self, mock_everpaste):
+        self.mock_ixia.has_traffic_items.return_value = True
+        self.mock_ixia.get_traffic_start_time.return_value = 0
+        self.mock_ixia.get_latest_stats.return_value = []
+        mock_item = MagicMock()
+        mock_item.Enabled = True
+        mock_tracking = MagicMock()
+        mock_tracking.find.return_value.TrackBy = ["trackingenabled0"]
+        mock_item.Tracking = mock_tracking
+        self.mock_ixia.get_traffic_items.return_value = [mock_item]
+        input_data = hc_types.IxiaPacketLossHealthCheckIn(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    str_value="0",
+                    metric=hc_types.PacketLossMetric.PERCENTAGE,
+                )
+            ],
+            sleep_time=0,
+        )
+
+        result = await self.health_check._run(self.mock_ixia, input_data, {})
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("<all traffic items>", result.message)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
+    async def test_skipped_missing_named_traffic_item_is_ignored(self, mock_everpaste):
+        self.mock_ixia.has_traffic_items.return_value = True
+        self.mock_ixia.get_traffic_start_time.return_value = 0
+        self.mock_ixia.get_latest_stats.return_value = [
+            _make_stat("OTHER_TRAFFIC", duration=0),
+        ]
+        mock_item = MagicMock()
+        mock_item.Enabled = True
+        mock_tracking = MagicMock()
+        mock_tracking.find.return_value.TrackBy = ["trackingenabled0"]
+        mock_item.Tracking = mock_tracking
+        self.mock_ixia.get_traffic_items.return_value = [mock_item]
+        input_data = hc_types.IxiaPacketLossHealthCheckIn(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=["EXPECTED_TRAFFIC"],
+                    str_value="0",
+                    metric=hc_types.PacketLossMetric.PERCENTAGE,
+                )
+            ],
+            sleep_time=0,
+        )
+
+        result = await self.health_check._run(
+            self.mock_ixia,
+            input_data,
+            {"skip_traffic_items": ["EXPECTED_TRAFFIC"]},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        mock_everpaste.assert_not_awaited()
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    async def test_retries_transient_snapshot_contention(self, mock_sleep):
+        expected = [_make_stat("TRAFFIC_A", duration=0)]
+        self.mock_ixia.get_latest_stats.side_effect = [
+            RuntimeError("Snapshot DefaultSnapshotSettings already in progress"),
+            expected,
+        ]
+
+        result = await self.health_check._get_latest_stats(self.mock_ixia, 123.0)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(self.mock_ixia.get_latest_stats.call_count, 2)
+        mock_sleep.assert_awaited_once_with(5)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    async def test_does_not_retry_other_statistics_errors(self, mock_sleep):
+        self.mock_ixia.get_latest_stats.side_effect = RuntimeError("other error")
+
+        with self.assertRaisesRegex(RuntimeError, "other error"):
+            await self.health_check._get_latest_stats(self.mock_ixia, 123.0)
+
+        self.mock_ixia.get_latest_stats.assert_called_once_with(since_time=123.0)
+        mock_sleep.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

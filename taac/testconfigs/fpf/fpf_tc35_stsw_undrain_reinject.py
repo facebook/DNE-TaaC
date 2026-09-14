@@ -11,13 +11,11 @@ After a 5-minute longevity settle, the steady state is validated against the
 ordinary STABLE-STATE expectation contract (same as fpf_stress_test_config):
 the previously-drained plane is fully reachable again, all sessions up, no loss.
 
-Two-playbook "longevity-anchored health check" pattern:
-  1. Disruption-only playbook (NO checks): the STSW undrain+reinject step pair,
-     then a 300s longevity settle.
-  2. Stable-state v2 hardening playbook (soak 300s): every stable-state health
-     check anchors at LONGEVITY START with the SAME stable-state expectations as
-     fpf_stress_test_config (no drain-specific plane/recovery knobs — by undrain
-     end the fabric is back to baseline).
+The single self-contained playbook first establishes and verifies a drained
+state with split-VF drain-community reinjection, waits 300s, then undrains with
+a fail-closed readback, restores the base/live communities, and waits another
+300s. RDMA is restored only after the undrain, followed by a 120s exact recovery
+qualification and a 300s strict stable-state soak.
 
 ASSUMPTIONS (documented):
   - On undrain, create_fpf_stsw_drain_and_reinject_steps re-injects with the
@@ -32,7 +30,6 @@ Usage:
 
 from taac.libs.fpf.fpf_prod_prefix_map import get_prefix
 from taac.playbooks.playbook_definitions import (
-    create_fpf_disruption_only_playbook,
     create_fpf_hardening_playbook_v2,
 )
 from taac.steps.step_definitions import (
@@ -47,12 +44,15 @@ from taac.task_definitions import (
     create_fpf_withdraw_vf_groups_task,
 )
 from taac.testconfigs.fpf.fpf_hardening_common import (
-    ALL_LANES,
     ALL_STSWS,
     ALLOW_BASELINE_FAILURES,
     create_fpf_endpoints,
     DEFAULT_COMMUNITY_LIST,
     EXPECTED_FSDB_SESSION_COUNT,
+    fpf_hrt_device_ids,
+    fpf_hrt_lanes,
+    fpf_hrt_vf_device_ids,
+    fpf_ib_traffic_config,
     fpf_ib_traffic_tasks,
     fpf_rf_vf_groups,
     fpf_vf_injection_groups,
@@ -60,6 +60,7 @@ from taac.testconfigs.fpf.fpf_hardening_common import (
     GPU_HOSTS,
     HRT_MEMORY_HOSTS,
     OBSERVER_GTSWS,
+    skip_ib_traffic,
     skip_ssh_dependencies,
     SPRAY_HOSTS,
     VF_COLLECTOR_SUBNET,
@@ -72,12 +73,20 @@ from taac.test_as_a_config.types import TestConfig
 # teardown. The undrain step below re-injects the same per-group count
 # (VF_GROUP_PREFIX_COUNT) across all 8 STSWs with the base community.
 INJECTION_GROUPS = fpf_vf_injection_groups()
-RF_VF_GROUPS = fpf_rf_vf_groups()
 PREFIX_COUNT = VF_GROUP_PREFIX_COUNT
 INJECT_SETTLE_SEC = 300
-INJECTED_LANES = ALL_LANES
+INJECTED_LANES = fpf_hrt_lanes()
+HRT_DEVICE_IDS = fpf_hrt_device_ids()
+HRT_VF_DEVICE_IDS = fpf_hrt_vf_device_ids(HRT_DEVICE_IDS)
+RF_VF_GROUPS = fpf_rf_vf_groups(
+    active_lanes=INJECTED_LANES,
+    device_ids_by_vf=(HRT_VF_DEVICE_IDS if HRT_DEVICE_IDS != [0] else None),
+)
+IB_TRAFFIC_CONFIG = fpf_ib_traffic_config()
 TRIGGER_STSWS = ALL_STSWS
 LONGEVITY_SEC = 300
+RECOVERED_BASELINE_LOOKBACK_SEC = 120
+DRAIN_COMMUNITY = "65446:10"
 
 # STSW plane to undrain (the first STSW plane: stsw001.s001.l202.mwg2).
 UNDRAIN_TARGET_STSW = TRIGGER_STSWS[0]
@@ -85,60 +94,95 @@ UNDRAIN_TARGET_STSW = TRIGGER_STSWS[0]
 PROD_PREFIX_HOST = GPU_HOSTS[0]
 PROD_PREFIX_DEVICE_ID = 0
 PROD_PREFIXES = [get_prefix(PROD_PREFIX_HOST, PROD_PREFIX_DEVICE_ID)]
+PROD_PREFIXES_BY_HOST = {host: PROD_PREFIXES for host in GPU_HOSTS}
 
 
 def create_fpf_tc35_test_config() -> TestConfig:
     skip_ssh = skip_ssh_dependencies()
-    ib_setup, ib_teardown = fpf_ib_traffic_tasks(skip_ssh)
-    spray = None if skip_ssh else SPRAY_HOSTS
+    skip_ib = skip_ib_traffic()
+    ib_setup, ib_teardown = fpf_ib_traffic_tasks(
+        skip_ssh, skip_ib, traffic_config=IB_TRAFFIC_CONFIG
+    )
+    spray = None if skip_ssh or skip_ib else SPRAY_HOSTS
 
-    disrupt_steps = [
+    prepare_drained_steps = [
         *create_fpf_stsw_drain_and_reinject_steps(
             stsw=UNDRAIN_TARGET_STSW,
-            drained=False,
+            drained=True,
             trigger_stsws=TRIGGER_STSWS,
             prefix_count=PREFIX_COUNT,
             community_list=DEFAULT_COMMUNITY_LIST,
+            drain_community=DRAIN_COMMUNITY,
+            injection_groups=INJECTION_GROUPS,
         ),
         create_longevity_step(
             duration=LONGEVITY_SEC,
             description=(
-                f"Settle {LONGEVITY_SEC}s after STSW {UNDRAIN_TARGET_STSW} "
-                "undrain + reinject"
+                f"Establish drained baseline for {LONGEVITY_SEC}s after STSW "
+                f"{UNDRAIN_TARGET_STSW} drain + drain-community reinject"
             ),
         ),
     ]
-
-    disrupt_playbook = create_fpf_disruption_only_playbook(
-        gtsws=OBSERVER_GTSWS,
-        hosts=GPU_HOSTS,
-        trigger_stsws=TRIGGER_STSWS,
-        disruption_steps=disrupt_steps,
-        playbook_name="fpf_tc35_stsw_undrain_reinject_disrupt",
-    )
 
     # Stable-state longevity playbook: same expectations as the stress config.
     longevity_playbook = create_fpf_hardening_playbook_v2(
         gtsws=OBSERVER_GTSWS,
         hosts=GPU_HOSTS,
         trigger_stsws=TRIGGER_STSWS,
-        soak_duration_sec=LONGEVITY_SEC,
+        disruption_steps=[
+            *prepare_drained_steps,
+            *create_fpf_stsw_drain_and_reinject_steps(
+                stsw=UNDRAIN_TARGET_STSW,
+                drained=False,
+                trigger_stsws=TRIGGER_STSWS,
+                prefix_count=PREFIX_COUNT,
+                community_list=DEFAULT_COMMUNITY_LIST,
+                injection_groups=INJECTION_GROUPS,
+            ),
+            create_longevity_step(
+                duration=LONGEVITY_SEC,
+                description=(
+                    f"Wait {LONGEVITY_SEC}s after STSW {UNDRAIN_TARGET_STSW} "
+                    "undrain + live-community reinject"
+                ),
+            ),
+        ],
+        soak_duration_sec=0,
         stabilization_delay_sec=0,
         prefix_count=PREFIX_COUNT,
         community_list=DEFAULT_COMMUNITY_LIST,
         playbook_name="fpf_tc35_stsw_undrain_reinject_longevity",
         prod_prefixes=PROD_PREFIXES,
+        prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
         skip_ssh_dependent_checks=skip_ssh,
         fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
         hrt_memory_hosts=HRT_MEMORY_HOSTS,
         hrt_driver_hosts=HRT_MEMORY_HOSTS,
         spray_hosts=spray,
+        ib_traffic_config=IB_TRAFFIC_CONFIG if spray else None,
         # Check all 8 injected lanes (not just the default [0,1]).
         lanes=INJECTED_LANES,
         # Prefixes injected once by the setup task (8-STSW split-per-VF); the
         # undrain step re-injects them with the base community.
         skip_injection=True,
         rf_vf_groups=RF_VF_GROUPS,
+        hrt_device_ids=HRT_DEVICE_IDS,
+        recovered_baseline_qualification_sec=RECOVERED_BASELINE_LOOKBACK_SEC,
+        ensure_traffic_after_disruption=True,
+        final_validation_steps=[
+            create_longevity_step(
+                duration=LONGEVITY_SEC,
+                description="Strict stable-state soak after undrain recovery",
+            )
+        ],
+        cleanup_steps=create_fpf_stsw_drain_and_reinject_steps(
+            stsw=UNDRAIN_TARGET_STSW,
+            drained=False,
+            trigger_stsws=TRIGGER_STSWS,
+            prefix_count=PREFIX_COUNT,
+            community_list=DEFAULT_COMMUNITY_LIST,
+            injection_groups=INJECTION_GROUPS,
+        ),
     )
 
     return TestConfig(
@@ -149,9 +193,11 @@ def create_fpf_tc35_test_config() -> TestConfig:
             create_fpf_start_collectors_task(
                 gtsws=OBSERVER_GTSWS,
                 hosts=GPU_HOSTS,
+                hrt_device_ids=HRT_DEVICE_IDS,
+                hrt_plane_ids=INJECTED_LANES,
+                fsdb_session_hosts=GPU_HOSTS,
                 subnet_prefix=VF_COLLECTOR_SUBNET,
-                prod_prefixes=PROD_PREFIXES,
-                prod_prefix_host=PROD_PREFIX_HOST,
+                prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
                 prod_prefix_device_id=PROD_PREFIX_DEVICE_ID,
                 fsdb_mode=FSDB_COLLECTOR_MODE,
                 allow_baseline_failures=ALLOW_BASELINE_FAILURES,
@@ -174,7 +220,7 @@ def create_fpf_tc35_test_config() -> TestConfig:
             ),
             *ib_teardown,
         ],
-        playbooks=[disrupt_playbook, longevity_playbook],
+        playbooks=[longevity_playbook],
         tags=["fpf"],
     )
 

@@ -285,7 +285,15 @@ class FpfDrainSafetyTest(unittest.TestCase):
             [task.task_name for task in [*config.setup_tasks, *config.teardown_tasks]],
         )
         for playbook in config.playbooks:
-            if playbook.name.startswith(("fpf_tc17_", "fpf_tc19_")):
+            if playbook.name.startswith(
+                (
+                    "fpf_tc17_",
+                    "fpf_tc19_",
+                    "fpf_tc35_",
+                    "fpf_tc54_",
+                    "fpf_tc55_",
+                )
+            ):
                 continue
             custom_names = {
                 _step_params(step).get("custom_step_name")

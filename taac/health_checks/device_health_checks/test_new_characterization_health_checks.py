@@ -3,6 +3,7 @@
 # pyre-unsafe
 
 import inspect
+import json
 import typing as t
 import unittest
 from types import SimpleNamespace
@@ -13,6 +14,9 @@ from taac.health_checks.device_health_checks.cpu_percentile_health_check import 
 )
 from taac.health_checks.device_health_checks.rss_delta_health_check import (
     RssDeltaHealthCheck,
+)
+from taac.health_checks.healthcheck_definitions import (
+    create_cpu_percentile_observe_check,
 )
 from taac.health_check.health_check import types as hc_types
 
@@ -58,6 +62,36 @@ class NewCharacterizationHealthChecksTest(unittest.TestCase):
         self.assertEqual(
             RssDeltaHealthCheck.CHECK_NAME, hc_types.CheckName.RSS_DELTA_CHECK
         )
+
+
+class CpuPercentileHealthCheckFactoryTest(unittest.TestCase):
+    def test_empty_gate_map_allows_legacy_scalar_gate(self) -> None:
+        check = create_cpu_percentile_observe_check(
+            gate_threshold_pct=55.0,
+            gate_thresholds_pct={},
+        )
+
+        check_params = check.check_params
+        self.assertIsNotNone(check_params)
+        assert check_params is not None
+        self.assertIsNotNone(check_params.json_params)
+        payload = json.loads(t.cast(str, check_params.json_params))
+        self.assertEqual(55.0, payload["gate_threshold_pct"])
+        self.assertNotIn("gate_thresholds_pct", payload)
+
+    def test_integral_float_percentile_key_is_normalized(self) -> None:
+        check = create_cpu_percentile_observe_check(gate_thresholds_pct={95.0: 60.0})
+
+        check_params = check.check_params
+        self.assertIsNotNone(check_params)
+        assert check_params is not None
+        self.assertIsNotNone(check_params.json_params)
+        payload = json.loads(t.cast(str, check_params.json_params))
+        self.assertEqual({"95": 60.0}, payload["gate_thresholds_pct"])
+
+    def test_fractional_percentile_key_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            create_cpu_percentile_observe_check(gate_thresholds_pct={95.5: 60.0})
 
 
 class RssDeltaHealthCheckRunTest(unittest.IsolatedAsyncioTestCase):
@@ -160,6 +194,80 @@ class CpuPercentileHealthCheckRunTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("exceeds", (result.message or "").lower())
+
+    async def test_multiple_gates_pass_and_preserve_all_percentiles(self) -> None:
+        result = await self._run(
+            {
+                "summary": _cpu_summary(p95=50.0),
+                "gate_thresholds_pct": {"80": 35.0, "95": 60.0},
+            }
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        message = result.message or ""
+        for percentile in ("p70", "p80", "p95", "p99"):
+            self.assertIn(percentile, message)
+        self.assertIn("p80=30.0%", message)
+        self.assertIn("p95=50.0%", message)
+        self.assertIn("threshold=35.0%", message)
+        self.assertIn("threshold=60.0%", message)
+        self.assertIn("within", message)
+
+    async def test_multiple_gates_fail_when_one_exceeds_threshold(self) -> None:
+        result = await self._run(
+            {
+                "summary": _cpu_summary(p95=50.0),
+                "gate_thresholds_pct": {"80": 35.0, "95": 45.0},
+            }
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        message = result.message or ""
+        self.assertIn("p95=50.0%", message)
+        self.assertIn("threshold=45.0%", message)
+        self.assertIn("exceeds", message)
+
+    async def test_multiple_gates_fail_when_percentile_was_not_collected(
+        self,
+    ) -> None:
+        result = await self._run(
+            {
+                "summary": _cpu_summary(p95=50.0),
+                "gate_thresholds_pct": {"80": 35.0, "90": 45.0},
+            }
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        message = result.message or ""
+        self.assertIn("p90", message)
+        self.assertIn("not collected", message)
+
+    async def test_multiple_missing_percentiles_use_plural_message(self) -> None:
+        result = await self._run(
+            {
+                "summary": _cpu_summary(p95=50.0),
+                "gate_thresholds_pct": {"90": 45.0, "100": 60.0},
+            }
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        message = result.message or ""
+        self.assertIn("p90, p100", message)
+        self.assertIn("percentiles were not collected", message)
+
+    async def test_gate_observations_are_sorted_by_numeric_percentile(self) -> None:
+        summary = _cpu_summary(p95=50.0)
+        summary["raw"]["p100"] = 60.0
+        result = await self._run(
+            {
+                "summary": summary,
+                "gate_thresholds_pct": {"100": 65.0, "80": 35.0},
+            }
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        message = result.message or ""
+        self.assertLess(message.rfind("p80="), message.rfind("p100="))
 
     async def test_gate_on_uncollected_percentile_fails(self) -> None:
         # Gate requested on a percentile the STOP step never stashed (only

@@ -31,9 +31,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import TestDevice
 from taac.health_checks.device_health_checks.fpf_hrt_bulk_convergence_health_check import (
+    _normalize_expected_per_lane,
     FpfHrtBulkConvergenceHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_hrt_remote_failure_convergence_health_check import (
+    _resolve_jsonl_observation_end,
     FpfHrtRemoteFailureConvergenceHealthCheck,
 )
 from taac.health_checks.device_health_checks.fpf_hrt_session_stat_health_check import (
@@ -45,10 +47,20 @@ from taac.health_checks.device_health_checks.fpf_prod_hrt_prefix_stability_healt
 from taac.health_checks.device_health_checks.generic_ods_health_check import (
     GenericOdsHealthCheck,
 )
+from taac.libs.fpf.fpf_collector_registry import (
+    clear_all,
+    enforce_final_exact,
+    resolve_observation_window,
+    set_test_case_start_time,
+)
 from taac.libs.fpf.fpf_prod_hrt_prefix import PrefixReachability
 from taac.libs.fpf.fpf_stress_checks import (
+    derive_scale_recovery_poll_grace_sec,
     FsdbSessionWindowResult,
     HrtBulkRow,
+    HrtRemoteFailureCollector,
+    HrtRemoteFailureRow,
+    normalize_scale_recovery_poll_duration,
     PerLaneResult,
     ProdHrtPrefixRow,
 )
@@ -70,6 +82,7 @@ PROD_MODULE = (
     "neteng.test_infra.dne.taac.health_checks.device_health_checks"
     ".fpf_prod_hrt_prefix_stability_health_check"
 )
+REGISTRY_MODULE = "neteng.test_infra.dne.taac.libs.fpf.fpf_collector_registry"
 ODS_MODULE = (
     "neteng.test_infra.dne.taac.health_checks.device_health_checks."
     "generic_ods_health_check"
@@ -90,6 +103,355 @@ def _ts_str(epoch: float) -> str:
 # A fixed window the synthetic rows live inside.
 WINDOW_START = 1_700_000_000.0
 WINDOW_END = WINDOW_START + 300.0
+
+
+class FpfScaleWindowPolicyTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        clear_all()
+
+    def test_prod_precheck_uses_recent_baseline_instead_of_playbook_start(self):
+        set_test_case_start_time(WINDOW_END - 300)
+        with patch(f"{REGISTRY_MODULE}.time.time", return_value=WINDOW_END):
+            rolling = resolve_observation_window(
+                {"lookback_sec": 120, "use_test_case_start_time": False}
+            )
+            legacy = resolve_observation_window({"lookback_sec": 900})
+            self.assertEqual(rolling, (WINDOW_END - 120, WINDOW_END))
+            self.assertEqual(legacy, (WINDOW_END - 300, WINDOW_END))
+            intentional_outage_ts = WINDOW_END - 200
+            self.assertFalse(rolling[0] <= intentional_outage_ts <= rolling[1])
+            self.assertTrue(legacy[0] <= intentional_outage_ts <= legacy[1])
+
+    def test_final_exact_rejects_under_and_over_count(self):
+        for actual in (3999, 4001):
+            with self.subTest(actual=actual):
+                result = PerLaneResult(
+                    lane=0,
+                    device="gtsw001",
+                    check_type="scale checkpoint",
+                    passed=True,
+                    expected=4000,
+                    actual=actual,
+                    detail="three signals passed",
+                )
+                self.assertFalse(enforce_final_exact(result, 4000).passed)
+        exact = PerLaneResult(
+            lane=0,
+            device="gtsw001",
+            check_type="scale checkpoint",
+            passed=True,
+            expected=4000,
+            actual=4000,
+        )
+        self.assertTrue(enforce_final_exact(exact, 4000).passed)
+
+    def test_jsonl_window_end_is_lazy_and_grace_requires_declared_cadence(self):
+        self.assertEqual(
+            _resolve_jsonl_observation_end(
+                [{"timestamp": "not parsed when explicitly configured"}],
+                WINDOW_END,
+            ),
+            WINDOW_END,
+        )
+        self.assertEqual(
+            derive_scale_recovery_poll_grace_sec(poll_interval_sec=5),
+            10,
+        )
+        self.assertIsNone(derive_scale_recovery_poll_grace_sec())
+
+    def _rf_result(
+        self,
+        counts: list[int],
+        offsets: list[int],
+        *,
+        invalid_index: int | None = None,
+        window_end_offset: int = 300,
+    ) -> PerLaneResult:
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[count, 0, 0, 0],
+                valid=index != invalid_index,
+                notes="error: timeout" if index == invalid_index else "",
+            )
+            for index, (count, offset) in enumerate(zip(counts, offsets))
+        ]
+        return collector.evaluate_per_lane_window(
+            window_start=WINDOW_START,
+            window_end=WINDOW_START + window_end_offset,
+            lanes=[0],
+            expected_per_lane={0: 0},
+            direction="scale_recovery",
+            max_convergence_sec=120,
+            poll_grace_sec=10,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+
+    def test_scale_rf_allows_bounded_transient_and_requires_exact_final(self):
+        passing = self._rf_result(
+            [152, *([0] * 13)],
+            [30, *range(120, 181, 5)],
+            window_end_offset=190,
+        )
+        self.assertTrue(passing.passed)
+        self.assertFalse(passing.inconclusive)
+
+        truncated = self._rf_result([0, 152, 0, 0], [5, 30, 60, 120])
+        self.assertFalse(truncated.passed)
+        self.assertTrue(truncated.inconclusive)
+        self.assertIn("insufficient collector coverage", truncated.detail)
+
+        self.assertFalse(self._rf_result([0, 152, 152], [5, 30, 60]).passed)
+        late = self._rf_result([152, *([0] * 30)], [30, *range(150, 296, 5)])
+        self.assertFalse(late.passed)
+        self.assertFalse(late.inconclusive)
+        self.assertIn("> 120s SLA", late.detail)
+
+        regressed = self._rf_result(
+            [152, *([0] * 8), 7, *([0] * 39)],
+            [30, *range(60, 100, 5), 100, *range(105, 300, 5)],
+        )
+        self.assertFalse(regressed.passed)
+        self.assertFalse(regressed.inconclusive)
+        self.assertIn("regressed", regressed.detail)
+
+        invalid = self._rf_result([0, 152, 0, 0], [5, 30, 60, 295], invalid_index=1)
+        self.assertFalse(invalid.passed)
+        self.assertFalse(invalid.inconclusive)
+
+        short_horizon = self._rf_result(
+            [152, *([0] * 22)],
+            [30, *range(60, 166, 5)],
+            window_end_offset=170,
+        )
+        self.assertFalse(short_horizon.passed)
+        self.assertTrue(short_horizon.inconclusive)
+
+    def test_scale_rf_requires_continuous_tail_and_post_trigger_data(self):
+        gapped = self._rf_result(
+            [152, 0, 0, 0], [30, 120, 150, 185], window_end_offset=190
+        )
+        self.assertFalse(gapped.passed)
+        self.assertTrue(gapped.inconclusive)
+        self.assertIn("sample gap", gapped.detail)
+
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START - 5),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[],
+                valid=False,
+                notes="error: pre-trigger timeout",
+            ),
+            *[
+                HrtRemoteFailureRow(
+                    timestamp=_ts_str(WINDOW_START + offset),
+                    host=GPU_HOST,
+                    device_id=0,
+                    lane_counts=[count, 0, 0, 0],
+                )
+                for count, offset in zip([152, *([0] * 13)], [30, *range(120, 181, 5)])
+            ],
+        ]
+        result = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(result.passed)
+
+        collector.rows = collector.rows[:1]
+        no_post_trigger = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(no_post_trigger.inconclusive)
+        self.assertIn("no valid post-mutation", no_post_trigger.detail)
+
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=None,
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[0, 0, 0, 0],
+            ),
+            *[
+                HrtRemoteFailureRow(
+                    timestamp=_ts_str(WINDOW_START + offset),
+                    host=GPU_HOST,
+                    device_id=0,
+                    lane_counts=[count, 0, 0, 0],
+                )
+                for count, offset in zip([152, *([0] * 13)], [30, *range(120, 181, 5)])
+            ],
+        ]
+        unscoped = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertFalse(unscoped.passed)
+        self.assertTrue(unscoped.inconclusive)
+        self.assertIn("could not be scoped", unscoped.detail)
+
+    def test_scale_rf_continuity_accounts_for_measured_rpc_duration(self):
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        offsets = [30, 120, 135, *range(140, 181, 5)]
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[152 if offset == 30 else 0, 0, 0, 0],
+                duration_sec=5.0 if offset == 135 else 0.0,
+            )
+            for offset in offsets
+        ]
+        result = collector.evaluate_per_lane_scale_recovery(
+            trigger_time=datetime.fromtimestamp(WINDOW_START, tz=timezone.utc),
+            lanes=[0],
+            expected_per_lane={0: 0},
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            poll_grace_sec=10,
+            observation_end_ts=WINDOW_START + 190,
+            only_hosts=[GPU_HOST],
+            device_ids=[0],
+        )[0]
+        self.assertTrue(result.passed)
+
+    def test_jsonl_malformed_duration_is_not_an_unscoped_timestamp(self):
+        rows = [
+            {
+                "timestamp": _ts_str(WINDOW_START - 5),
+                "lane_counts": [0],
+                "duration_sec": "ignored-before-trigger",
+            },
+            *[
+                {
+                    "timestamp": _ts_str(WINDOW_START + offset),
+                    "lane_counts": [152 if offset == 30 else 0],
+                    "duration_sec": "bad" if offset == 125 else 0.0,
+                }
+                for offset in [30, *range(120, 181, 5)]
+            ],
+        ]
+        result = FpfHrtRemoteFailureConvergenceHealthCheck(
+            logger=MagicMock()
+        )._evaluate_scale_recovery_from_rows(
+            lane_id=0,
+            expected=0,
+            rows=rows,
+            trigger_ts=WINDOW_START,
+            max_convergence_sec=120,
+            recovery_stability_sec=60,
+            observation_end_ts=WINDOW_START + 190,
+            poll_grace_sec=10,
+            poll_duration_budget_sec=10,
+        )
+        self.assertFalse(result[1])
+        self.assertTrue(result[5])
+        self.assertIn("malformed RPC duration", result[4])
+        self.assertNotIn("could not be scoped", result[4])
+
+    def test_poll_duration_normalization_accepts_only_json_numeric_values(self):
+        self.assertEqual(normalize_scale_recovery_poll_duration(1), 1.0)
+        self.assertEqual(normalize_scale_recovery_poll_duration(1.25), 1.25)
+        self.assertEqual(normalize_scale_recovery_poll_duration("2.5"), 2.5)
+        for malformed in (True, None, [], object(), "nan", "inf", -1):
+            with self.subTest(malformed=repr(malformed)):
+                self.assertIsNone(normalize_scale_recovery_poll_duration(malformed))
+
+    def test_exact_lane_map_is_complete_and_well_typed(self):
+        self.assertEqual(
+            _normalize_expected_per_lane([0, 1], {"0": 4000, "1": 4000}, True),
+            ({0: 4000, 1: 4000}, None),
+        )
+        for raw in (
+            {"0": 4000},
+            {"0": 4000, "1": 4000, "2": 4000},
+            {"lane0": 4000, "1": 4000},
+            {"0": "4000", "1": 4000},
+        ):
+            with self.subTest(raw=raw):
+                _expected, error = _normalize_expected_per_lane([0, 1], raw, True)
+                self.assertIsNotNone(error)
+
+
+class FpfScaleRecoveryStatusTest(unittest.IsolatedAsyncioTestCase):
+    async def test_truncated_currently_zero_series_is_inconclusive(self):
+        collector = HrtRemoteFailureCollector(
+            hosts=[GPU_HOST], device_ids=[0], supernet="5000:dd::/32"
+        )
+        collector.rows = [
+            HrtRemoteFailureRow(
+                timestamp=_ts_str(WINDOW_START + offset),
+                host=GPU_HOST,
+                device_id=0,
+                lane_counts=[count, 0, 0, 0],
+            )
+            for count, offset in ((0, 5), (152, 30), (0, 60), (0, 120))
+        ]
+        health_check = FpfHrtRemoteFailureConvergenceHealthCheck(logger=MagicMock())
+        details = AsyncMock(return_value="")
+        with (
+            patch(f"{REMOTE_MODULE}.get_collector", return_value=collector),
+            patch(f"{REMOTE_MODULE}.get_mutation_time", return_value=WINDOW_START),
+            patch(
+                f"{REMOTE_MODULE}.everpaste_details_suffix",
+                new=details,
+            ),
+        ):
+            result = await health_check._run(
+                MagicMock(spec=TestDevice),
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "lanes": [0],
+                    "expected_per_lane": {"0": 0},
+                    "direction": "scale_recovery",
+                    "max_convergence_sec": 120,
+                    "recovery_stability_sec": 60,
+                    "use_live_collectors": True,
+                    "use_mutation_time": True,
+                    "only_hosts": [GPU_HOST],
+                    "window_end": WINDOW_END,
+                },
+            )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.SKIP)
+        self.assertIn("INCONCLUSIVE", result.message)
+        self.assertIn("[SKIP]", details.call_args.args[1][0])
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +954,10 @@ class Tc36Tc37ProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTestCas
                 {"new": AsyncMock(return_value="")},
             ),
             (f"{PROD_MODULE}.disruption_inconclusive_skip", {"return_value": None}),
-            (f"{PROD_MODULE}.get_test_case_start_time", {"return_value": WINDOW_START}),
+            (
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
+                {"return_value": WINDOW_START},
+            ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": 0.0}),
         ):
             p = patch(target, **kw)
@@ -661,14 +1026,23 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
                 {"new": AsyncMock(return_value="")},
             ),
             (f"{PROD_MODULE}.disruption_inconclusive_skip", {"return_value": None}),
-            (f"{PROD_MODULE}.get_test_case_start_time", {"return_value": WINDOW_START}),
+            (
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
+                {"return_value": WINDOW_START},
+            ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": 0.0}),
         ):
             p = patch(target, **kw)
             self.addCleanup(p.stop)
             p.start()
 
-    async def _run(self, rows, *, mode: str = "transition"):
+    async def _run(
+        self,
+        rows,
+        *,
+        mode: str = "transition",
+        impacted_planes_by_host=None,
+    ):
         collector = MagicMock()
         collector.hosts = [GPU_HOST, REMOTE_GPU_HOST]
         collector.get_rows_in_window.return_value = rows
@@ -696,10 +1070,14 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
                         GPU_HOST: [PROD_PREFIX],
                         REMOTE_GPU_HOST: [PROD_PREFIX],
                     },
-                    "impacted_planes_by_host": {
-                        GPU_HOST: [0],
-                        REMOTE_GPU_HOST: [0],
-                    },
+                    "impacted_planes_by_host": (
+                        impacted_planes_by_host
+                        if impacted_planes_by_host is not None
+                        else {
+                            GPU_HOST: [0],
+                            REMOTE_GPU_HOST: [0],
+                        }
+                    ),
                     "max_transition_sec": 30.0,
                     "max_drain_sec": 30.0,
                     "disruption_ts": WINDOW_START + 10.0,
@@ -808,6 +1186,19 @@ class Tc15MultiHostProdPrefixTransitionSimulationTest(unittest.IsolatedAsyncioTe
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("required host", result.message)
 
+    async def test_remote_samples_without_plane_scope_report_attribution_gap(self):
+        rows = [
+            *self._host_rows(GPU_HOST, transition=True),
+            *self._host_rows(REMOTE_GPU_HOST, transition=True),
+        ]
+        result = await self._run(
+            rows,
+            impacted_planes_by_host={GPU_HOST: [0]},
+        )
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("configured-prefix sample", result.message)
+        self.assertIn("no affected plane scope", result.message)
+
 
 class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTestCase):
     """TC17 cleanup may undrain before the restore playbook starts."""
@@ -822,7 +1213,7 @@ class Tc17ProdPrefixRecoveryTimestampSimulationTest(unittest.IsolatedAsyncioTest
                 {"new": AsyncMock(return_value="")},
             ),
             (
-                f"{PROD_MODULE}.get_test_case_start_time",
+                f"{REGISTRY_MODULE}.get_test_case_start_time",
                 {"return_value": WINDOW_START + 200.0},
             ),
             (f"{PROD_MODULE}.get_disruption_time", {"return_value": WINDOW_START}),

@@ -3,6 +3,7 @@
 import posixpath
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from neteng.test_infra.dne.taac.tasks import fpf_ib_traffic_task as task_module
@@ -45,6 +46,33 @@ class FpfIbTrafficProcessValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("|| echo 0", command)
         self.assertIn("$proc/cmdline", command)
         self.assertIn("$proc/cgroup", command)
+
+    async def test_lab_ssh_can_preserve_allowlisted_short_hostname(self) -> None:
+        lab_exec = AsyncMock(
+            return_value=SimpleNamespace(
+                timed_out=False,
+                exit_code=0,
+                stdout="active\n",
+                stderr="",
+            )
+        )
+        with (
+            patch.object(task_module, "lab_ssh_transport_enabled", return_value=True),
+            patch.object(task_module, "lab_ssh_async_exec", new=lab_exec),
+        ):
+            result = await task_module.async_ssh_run(
+                "gtsw001.l1002.c087.mwg2",
+                "systemctl is-active fsdb",
+                preserve_lab_ssh_hostname=True,
+            )
+
+        self.assertEqual(result, (0, "active\n", ""))
+        lab_exec.assert_awaited_once_with(
+            host="gtsw001.l1002.c087.mwg2",
+            command="systemctl is-active fsdb",
+            timeout_sec=30,
+            username="root",
+        )
 
     def test_custom_binary_is_used_by_command_and_process_inventory(self) -> None:
         binary_path = "/root/ib_write_bw"

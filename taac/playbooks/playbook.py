@@ -16,7 +16,6 @@ from abc import ABC, abstractmethod
 
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     TestDevice,
-    TestResult,
     TestTopology,
 )
 from taac.ixia.taac_ixia import TaacIxia
@@ -26,6 +25,7 @@ from taac.utils.oss_taac_lib_utils import (
     get_root_logger,
 )
 from taac.test_as_a_config import types as taac_types
+from taac.test_run_result import types as trr_types
 
 
 class Playbook(ABC):
@@ -36,7 +36,7 @@ class Playbook(ABC):
         playbook: taac_types.Playbook,
         devices: t.List[TestDevice],
         topology: TestTopology,
-        test_case_results: t.List[TestResult],
+        test_case_results: t.List[trr_types.CheckResult],
         test_config: taac_types.TestConfig,
         test_case_name: str,
         test_case_start_time: float,

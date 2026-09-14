@@ -4,9 +4,14 @@
 import json
 import unittest
 
+from taac.abstractions.churn.workloads import IgpMetricChurn
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_igp_pnh_metric_oscillation_playbook,
+)
+from taac.steps.step_definitions import (
+    create_igp_metric_churn_step,
+    create_validated_igp_pnh_metric_oscillation_step,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -19,6 +24,36 @@ def _step_payload(step: taac_types.Step) -> dict:
 
 
 class BgpIgpPnhMetricOscillationPlaybookTest(unittest.TestCase):
+    def test_typed_step_matches_legacy_payload(self) -> None:
+        kwargs = {
+            "device_name": "dut.example.com",
+            "start_ipv4s": ["20.164.28.10", "20.165.28.10"],
+            "start_ipv6s": ["2401:db00:e80d:11:9::10", "2401:db00:e80d:11:10::10"],
+            "local_link": {"ifName": "po1", "metric": 10},
+            "other_link": {"ifName": "po1", "metric": 20},
+            "count": 63,
+            "step": 2,
+            "duration": 2400,
+            "frequency": 30,
+        }
+        legacy = create_validated_igp_pnh_metric_oscillation_step(**kwargs)
+        typed = create_igp_metric_churn_step(
+            IgpMetricChurn.create(
+                hostname="dut.example.com",
+                start_ipv4s=kwargs["start_ipv4s"],
+                start_ipv6s=kwargs["start_ipv6s"],
+                local_link=kwargs["local_link"],
+                other_link=kwargs["other_link"],
+                count=63,
+                step=2,
+                duration=2400,
+                frequency=30,
+            )
+        )
+
+        self.assertEqual(_step_payload(legacy), _step_payload(typed))
+        self.assertEqual(legacy.description, typed.description)
+
     def test_playbook_wires_acknowledged_stage_and_fallback_cleanup(self) -> None:
         local_link = {
             "ifName": "po1",

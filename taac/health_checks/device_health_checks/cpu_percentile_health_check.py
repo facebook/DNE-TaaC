@@ -10,10 +10,10 @@ percentile summary into a jq variable. This point-in-time postcheck reads that
 summary and reports it into the POST-HEALTH CHECK RESULTS table so the numbers
 are visible run-over-run.
 
-Observe-only by default: with no ``gate_threshold_pct`` it always PASSes and puts
-the measured percentiles in the message. Supply ``gate_threshold_pct`` (and
-optionally ``gate_percentile``) to flip it into a gate. A missing summary (the
-STOP collector never ran) FAILs loudly -- never a silent pass.
+Observe-only by default: with no threshold it always PASSes and puts every
+measured percentile in the message. Supply the legacy scalar gate or a
+percentile-to-threshold map to gate one or more raw percentiles. A missing
+summary (the STOP collector never ran) FAILs loudly -- never a silent pass.
 """
 
 import math
@@ -23,6 +23,7 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
+from taac.utils.upper_bound_gate import evaluate_upper_bound_gates
 from taac.health_check.health_check import types as hc_types
 
 
@@ -57,6 +58,29 @@ class CpuPercentileHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChec
             f"{core_str}) {suffix}"
         )
 
+    @staticmethod
+    def _gate_thresholds(check_params: t.Dict[str, t.Any]) -> t.Dict[int, float]:
+        configured_gates = check_params.get("gate_thresholds_pct")
+        if configured_gates is not None:
+            if not isinstance(configured_gates, dict):
+                raise ValueError("gate_thresholds_pct must be a mapping")
+            gates = {
+                int(percentile): float(threshold)
+                for percentile, threshold in configured_gates.items()
+            }
+            if any(not math.isfinite(threshold) for threshold in gates.values()):
+                raise ValueError("gate thresholds must be finite")
+            return gates
+
+        gate_threshold_pct = check_params.get("gate_threshold_pct")
+        if gate_threshold_pct is None:
+            return {}
+        return {
+            int(float(check_params.get("gate_percentile", 95.0))): float(
+                gate_threshold_pct
+            )
+        }
+
     def _evaluate(
         self, obj: TestDevice, check_params: t.Dict[str, t.Any]
     ) -> hc_types.HealthCheckResult:
@@ -86,44 +110,55 @@ class CpuPercentileHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChec
             )
         self.add_data_to_log(summary)
 
-        gate_threshold_pct = check_params.get("gate_threshold_pct")
-        gate_percentile = check_params.get("gate_percentile", 95.0)
-        if gate_threshold_pct is None:
+        try:
+            gate_thresholds = self._gate_thresholds(check_params)
+        except (TypeError, ValueError) as error:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.FAIL,
+                message=self._format_message(
+                    summary, f"invalid CPU percentile gate configuration: {error}"
+                ),
+            )
+        if not gate_thresholds:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.PASS,
                 message=self._format_message(summary, "(observe-only)"),
             )
 
-        gated_value = (summary.get("raw", {}) or {}).get(f"p{int(gate_percentile)}")
-        if gated_value is None:
-            # A gate the caller explicitly asked for that cannot be evaluated
-            # (the requested percentile was never collected) must FAIL loudly,
-            # not silently pass -- same 'never silently pass' contract as above.
-            have = ",".join(sorted((summary.get("raw") or {}).keys()))
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.FAIL,
-                message=self._format_message(
-                    summary,
-                    f"gate requested on p{int(gate_percentile)} but that "
-                    f"percentile was not collected (have: {have})",
-                ),
+        gate_result = evaluate_upper_bound_gates(
+            values=raw,
+            thresholds={
+                f"p{percentile}": threshold
+                for percentile, threshold in sorted(gate_thresholds.items())
+            },
+        )
+        observations: t.List[str] = []
+        for observation in gate_result.observations:
+            relation = "within" if observation.passed else "exceeds"
+            observations.append(
+                f"{observation.metric}={observation.value:.1f}% {relation} "
+                f"threshold={observation.threshold:.1f}%"
             )
-        if gated_value > float(gate_threshold_pct):
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.FAIL,
-                message=self._format_message(
-                    summary,
-                    f"p{int(gate_percentile)}={gated_value:.1f}% exceeds "
-                    f"threshold={float(gate_threshold_pct):.1f}%",
-                ),
+        if gate_result.missing_metrics:
+            have = ",".join(sorted(raw))
+            missing = ", ".join(gate_result.missing_metrics)
+            subject = (
+                "that percentile was"
+                if len(gate_result.missing_metrics) == 1
+                else "those percentiles were"
             )
+            observations.append(
+                f"gate requested on {missing} but {subject} not collected "
+                f"(have: {have})"
+            )
+        status = (
+            hc_types.HealthCheckStatus.PASS
+            if gate_result.passed
+            else hc_types.HealthCheckStatus.FAIL
+        )
         return hc_types.HealthCheckResult(
-            status=hc_types.HealthCheckStatus.PASS,
-            message=self._format_message(
-                summary,
-                f"p{int(gate_percentile)} within threshold="
-                f"{float(gate_threshold_pct):.1f}%",
-            ),
+            status=status,
+            message=self._format_message(summary, "; ".join(observations)),
         )
 
     async def _run(
