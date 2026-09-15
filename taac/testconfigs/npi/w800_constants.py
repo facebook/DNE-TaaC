@@ -21,11 +21,20 @@ Consumed by `wedge800_npi_test_config.py`.
 # ---------------------------------------------------------------------------
 # Device identity
 # ---------------------------------------------------------------------------
-# TODO(w800): real DUT hostname once the device is in the lab / netwhoami.
-W800_DEVICE_NAME = "wedge800001.TODO.example"
+# TODO(w800): real scale-topology hostnames once the devices are in the lab.
+W800_FSW_DEVICE_NAMES: list[str] = [
+    "wedge800fsw001.TODO.example",
+    "wedge800fsw002.TODO.example",
+]
+W800_RSW_DUT_DEVICE_NAME: str = "wedge800rsw001.TODO.example"
+W800_RSW_PEER_DEVICE_NAME: str = "wedge800rsw002.TODO.example"
+# TODO(w800): real standalone DUT hostname once the device is in the lab.
+W800_DEVICE_NAME: str = "wedge800001.TODO.example"
 # TODO(w800): local MAC for the DUT side of IXIA peering (placeholder = locally
 # administered address). Read from the real DUT when it arrives.
-W800_LOCAL_MAC_ADDRESS = "02:00:00:00:00:0c"
+W800_LOCAL_MAC_ADDRESS: str = "02:00:00:00:00:0c"
+# TODO(w800): local MAC for the peer RSW side of IXIA peering.
+W800_RSW_PEER_LOCAL_MAC_ADDRESS: str = "02:00:00:00:00:0d"
 # Basset device pool. TODO(w800): confirm the w800 lab pool.
 W800_BASSET_POOL = "dne.test"
 
@@ -39,6 +48,19 @@ W800_BASSET_POOL = "dne.test"
 W800_IXIA_DOWNLINK_INTERFACE = "eth1/13/1"
 W800_IXIA_UPLINK_INTERFACE = "eth1/13/3"
 W800_IXIA_ROGUE_INTERFACE = "eth1/13/5"
+W800_RSW_DUT_IXIA_PORTS: list[str] = [
+    W800_IXIA_DOWNLINK_INTERFACE,
+    W800_IXIA_UPLINK_INTERFACE,
+    W800_IXIA_ROGUE_INTERFACE,
+]
+W800_RSW_PEER_IXIA_DOWNLINK_INTERFACE: str = "eth1/13/1"
+W800_RSW_PEER_IXIA_UPLINK_INTERFACE: str = "eth1/13/3"
+W800_RSW_PEER_IXIA_ROGUE_INTERFACE: str = "eth1/13/5"
+W800_RSW_PEER_IXIA_PORTS: list[str] = [
+    W800_RSW_PEER_IXIA_DOWNLINK_INTERFACE,
+    W800_RSW_PEER_IXIA_UPLINK_INTERFACE,
+    W800_RSW_PEER_IXIA_ROGUE_INTERFACE,
+]
 
 # ---------------------------------------------------------------------------
 # CPU queue indices (low / mid / high)

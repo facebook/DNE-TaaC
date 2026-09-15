@@ -35,6 +35,9 @@ from taac.testconfigs.npi.cpu_queue_test_config import (
 from taac.testconfigs.npi.thrift_hardening_test_config import (
     create_npi_thrift_hardening_test_config,
 )
+from taac.testconfigs.npi.w800_scale_topology import (
+    apply_w800_scale_topology,
+)
 from taac.testconfigs.routing.factories.bgp_dc_chronos_node import (
     build_bgp_dc_test_config,
 )
@@ -42,6 +45,7 @@ from taac.testconfigs.snake.test_test_config import (
     gen_snake_test_config,
 )
 from taac.test_as_a_config import types as taac_types
+
 
 # ===========================================================================
 # CPU queue tests: Generic (FE + BE)
@@ -59,7 +63,7 @@ from taac.test_as_a_config import types as taac_types
 # is not yet in inventory.
 W800_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     test_config_name="W800_CPU_QUEUE_TEST_CONFIG",
-    device_name=w800.W800_DEVICE_NAME,
+    device_name=w800.W800_RSW_DUT_DEVICE_NAME,
     local_mac_address=w800.W800_LOCAL_MAC_ADDRESS,
     ixia_downlink_interface=w800.W800_IXIA_DOWNLINK_INTERFACE,
     ixia_uplink_interface=w800.W800_IXIA_UPLINK_INTERFACE,
@@ -114,6 +118,10 @@ W800_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     mid_queue=w800.W800_CPU_MID_QUEUE,
     high_queue=w800.W800_CPU_HIGH_QUEUE,
 )
+W800_CPU_QUEUE_TEST_CONFIG = apply_w800_scale_topology(
+    W800_CPU_QUEUE_TEST_CONFIG,
+    start_directional_traffic=False,
+)
 
 
 # ===========================================================================
@@ -129,7 +137,7 @@ W800_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 # does NOT hit netwhoami at build time, so no stub bypass is needed.
 W800_BGP_HARDENING_TEST_CONFIG = build_bgp_dc_test_config(
     test_config_name="W800_BGP_HARDENING_TEST_CONFIG",
-    device_name=w800.W800_DEVICE_NAME,
+    device_name=w800.W800_RSW_DUT_DEVICE_NAME,
     local_mac_address=w800.W800_LOCAL_MAC_ADDRESS,
     ixia_downlink_interface=w800.W800_IXIA_DOWNLINK_INTERFACE,
     ixia_uplink_interface=w800.W800_IXIA_UPLINK_INTERFACE,
@@ -204,6 +212,10 @@ W800_BGP_HARDENING_TEST_CONFIG = build_bgp_dc_test_config(
         "test_longevity_frequent_best_path_computation",
         "test_longevity_cold_start_with_prefix_and_session_oscillations",
     ],
+)
+W800_BGP_HARDENING_TEST_CONFIG = apply_w800_scale_topology(
+    W800_BGP_HARDENING_TEST_CONFIG,
+    start_directional_traffic=True,
 )
 
 
