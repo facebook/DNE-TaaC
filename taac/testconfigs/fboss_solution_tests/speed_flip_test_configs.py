@@ -603,6 +603,107 @@ class SpeedFlipTestConfig:
         return test_config
 
 
+# Host-agnostic transition specs shared by the two 51T configs above, keyed by
+# subport: (name_suffix, stages [(gbps, subports)], expected {subport: gbps},
+# trigger_stage_builder, down_only). Extracted 1:1 from the literals -- including
+# 100G_TO_400G, whose upstream body stages only 100G and expects 100G.
+SPEED_FLIP_51T_TRANSITIONS = [
+    ("100G_TO_200G", [(100, ("1", "5")), (200, ("1", "5"))],
+     {"1": 200, "5": 200}, None, False),
+    ("100G_TO_200G_MICROSERVER_REBOOT", [(100, ("1", "5")), (200, ("1", "5"))],
+     {"1": 200, "5": 200}, microserver_reboot_undrain_stages, True),
+    ("100G_TO_200G_BMC_REBOOT", [(100, ("1", "5")), (200, ("1", "5"))],
+     {"1": 200, "5": 200}, bmc_reboot_undrain_stages, True),
+    ("100G_TO_400G", [(100, ("1", "5"))], {"1": 100, "5": 100}, None, False),
+    ("100G_TO_200G/400G", [(100, ("1", "5")), (200, ("1", "5")), (400, ("5",))],
+     {"1": 200, "5": 400}, None, False),
+    ("100G_TO_400G/200G", [(100, ("1", "5")), (200, ("1", "5")), (400, ("1",))],
+     {"1": 400, "5": 200}, None, False),
+    ("100G_TO_800G", [(100, ("1", "5")), (800, ("1",))], {"1": 800}, None, False),
+    ("200G_TO_400G", [(200, ("1", "5"))], {"1": 200, "5": 200}, None, False),
+    ("200G_TO_200G/400G", [(200, ("1",))], {"1": 200, "5": 400}, None, False),
+    ("200G_TO_400G/200G", [(200, ("5",))], {"1": 400, "5": 200}, None, False),
+    ("200G_TO_800G", [(200, ("1", "5")), (800, ("1",))], {"1": 800}, None, False),
+    ("200G/400G_TO_800G", [(200, ("1",)), (800, ("1",))], {"1": 800}, None, False),
+    ("400G/200G_TO_800G", [(200, ("5",)), (800, ("1",))], {"1": 800}, None, False),
+    ("400G_TO_800G", [(800, ("1",))], {"1": 800}, None, False),
+]
+
+
+def build_two_device_speed_flip_test_config(
+    test_config_name: str,
+    dut_device_name: str,
+    peer_device_name: str,
+    cage_pairs: t.List[t.Tuple[str, str]],
+    port_state_change: bool,
+    transitions=None,
+    number_of_iterations: int = 10,
+) -> TestConfig:
+    """The 51T speed-flip suite for a DUT/peer pair, derived from cage pairs.
+
+    Same playbooks as the hand-written SPEED_FLIP_51T_TEST_PORTS_{DOWN,UP}
+    configs, with hosts and cages parameterized and every stage spanning all
+    ``cage_pairs`` (the hand-written ones drive one cage and fail the
+    target_port_cage_count=4 runtime gate). ``port_state_change`` selects the
+    DOWN (True) or UP variant, which also drops the down-only reboot rows.
+    """
+    if transitions is None:
+        transitions = SPEED_FLIP_51T_TRANSITIONS
+    direction = "DOWN" if port_state_change else "UP"
+    cages = {
+        dut_device_name: [d for d, _ in cage_pairs],
+        peer_device_name: [p for _, p in cage_pairs],
+    }
+
+    def _ports(subports):
+        return {
+            host: [f"{c}/{sp}" for c in host_cages for sp in subports]
+            for host, host_cages in cages.items()
+        }
+
+    playbooks = []
+    for suffix, stages, expected, trigger, down_only in transitions:
+        if down_only and not port_state_change:
+            continue
+        playbooks.append(
+            SpeedFlipPlaybook(
+                stages=[
+                    SpeedTransitionStage(
+                        endpoints=_ports(subports),
+                        speed_in_gbps=speed,
+                        patcher_name=f"change_speed_test_{speed}",
+                        port_state_change=port_state_change,
+                    )
+                    for speed, subports in stages
+                ],
+                health_check_params={
+                    host: {
+                        "interfaces": [
+                            {"interface_name": f"{c}/{sp}", "expected_speed": speed}
+                            for c in host_cages
+                            for sp, speed in sorted(expected.items())
+                        ]
+                    }
+                    for host, host_cages in cages.items()
+                },
+                playbook_name=(
+                    f"SPEED_FLIP_51T_TEST_PORTS_{direction}_{suffix}_PLAYBOOK"
+                ),
+                number_of_iterations=number_of_iterations,
+                trigger_stage_builder=trigger,
+            )
+        )
+    return SpeedFlipTestConfig(
+        endpoints=[dut_device_name, peer_device_name],
+        test_config_name=test_config_name,
+        snapshot_health_check_params={
+            host: [f"{c}/{sp}" for c in host_cages for sp in ("1", "5")]
+            for host, host_cages in cages.items()
+        },
+        playbooks=playbooks,
+    ).build_test_config()
+
+
 SPEED_FLIP_TEST_CONFIGS = [
     # Speed Flip Test Configs for 12.8T Platform
     # Only 100G to 200G Speed Flips Valid on 12.8T Platform

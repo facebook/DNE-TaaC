@@ -144,6 +144,17 @@ DIST_NON_CONTIGUOUS: str = "non_contiguous"
 SUPPORTED_PREFIX_LENGTHS: list[int] = [48, 64, 80, 128]
 DEFAULT_PREFIX_LENGTH: int = 64
 
+# Switch-wide BGP prefix limit these tests configure, via
+# create_bgp_switch_limit_patcher_task in create_mp3n_setup_tasks.
+#
+# Named because PREFIX_LIMIT_CHECK asserts EXACT equality against the limit
+# bgpd is running with -- not the observed route count -- so the postcheck's
+# expected value and the value the patcher writes must be the same number.
+# Keeping one definition makes that impossible to get wrong; the two were
+# previously a literal here and route-count estimates in
+# DISTRIBUTION_PREFIX_LIMITS, which can never agree.
+MP3N_SWITCH_PREFIX_LIMIT: int = 75000
+
 
 # -----------------------------------------------------------------------------
 # 2.2 Device Configuration
@@ -636,6 +647,7 @@ def create_mp3n_setup_tasks(
     ingress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_IN",
     egress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_OUT",
     patcher_suffix: str = "rtsw_ixia",
+    switch_prefix_limit: int = MP3N_SWITCH_PREFIX_LIMIT,
 ) -> List[taac_types.Task]:
     """Create setup tasks to configure BGP peering on DUT.
 
@@ -713,7 +725,7 @@ def create_mp3n_setup_tasks(
         ),
         create_bgp_switch_limit_patcher_task(
             hostname=device_name,
-            prefix_limit=75000,
+            prefix_limit=switch_prefix_limit,
         ),
     ]
 
@@ -968,6 +980,7 @@ def create_warmboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for Warmboot testing.
 
@@ -1000,7 +1013,11 @@ def create_warmboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else DISTRIBUTION_PREFIX_LIMITS[distribution_type]
+            ),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1118,6 +1135,7 @@ def create_bgp_restart_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for BGP Restart testing.
 
@@ -1150,7 +1168,11 @@ def create_bgp_restart_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else DISTRIBUTION_PREFIX_LIMITS[distribution_type]
+            ),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1268,6 +1290,7 @@ def create_coldboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for Coldboot testing.
 
@@ -1301,7 +1324,11 @@ def create_coldboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else DISTRIBUTION_PREFIX_LIMITS[distribution_type]
+            ),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1466,6 +1493,7 @@ def create_warmboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create warmboot playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1482,6 +1510,7 @@ def create_warmboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1493,6 +1522,7 @@ def create_bgp_restart_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create BGP restart playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1509,6 +1539,7 @@ def create_bgp_restart_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1520,6 +1551,7 @@ def create_coldboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create coldboot playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1536,6 +1568,7 @@ def create_coldboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1547,6 +1580,7 @@ def create_all_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create all playbooks (warmboot, BGP restart, coldboot) for a distribution."""
     if distribution_interface_map is None:
@@ -1558,6 +1592,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
         + create_bgp_restart_playbooks_for_distribution(
             distribution_type,
@@ -1565,6 +1600,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
         + create_coldboot_playbooks_for_distribution(
             distribution_type,
@@ -1572,6 +1608,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            prefix_limit=prefix_limit,
         )
     )
 
@@ -1950,6 +1987,295 @@ def _create_parameterized_device_group(
             route_scales=[create_route_scale(DEFAULT_PREFIX_LENGTH, dist, 0)],
         ),
     )
+
+
+# =============================================================================
+# SECTION 11.1: TWO-PORT (SINGLE STRESSER) FACTORY
+# =============================================================================
+def create_two_port_device_test_configs(
+    device_name: str,
+    remote_as: int,
+    peer_group: str,
+    stresser: tuple[str, str, str, str],
+    downlink: tuple[str, str, str, str],
+    mac_address: str,
+    ingress_policy: str,
+    egress_policy: str,
+    patcher_suffix: str,
+    config_name_prefix: str,
+    distributions: list[str] | None = None,
+    basset_pool: str | None = None,
+    convergence_duration: int = 300,
+    switch_prefix_limit: int = MP3N_SWITCH_PREFIX_LIMIT,
+    prefix_limits: dict[str, int] | None = None,
+    ixia_port_queue_config: str | None = None,
+) -> dict[str, TestConfig]:
+    """Build the prefix-profiling TestConfigs for a DUT with only TWO IXIA ports.
+
+    ``create_device_test_configs`` above assumes its original attachment:
+    four IXIA cables, one per distribution plus a downlink, all live at once. A
+    DUT with a single pair of IXIA ports cannot host that, but it does not need
+    to -- each distribution is already a SEPARATE TestConfig, and each one only
+    ever drives two ports:
+
+        downlink  -- the traffic source; carries no BGP session of its own
+        stresser  -- the emulated peer that advertises the prefixes under test,
+                     and the traffic destination
+
+    So the three distributions are run one at a time over the SAME physical
+    pair. Two properties of the playbook stages make that exact rather than
+    approximate, and both are load-bearing:
+
+      * ``create_enable_and_configure_stage`` always emits a "disable" step for
+        the two distributions it is not testing. Those steps select device
+        groups by the regex ``.*PREFIX_STRESSER_<DIST>.*``, and
+        ``Ixia.toggle_device_groups`` only raises on an empty selection when
+        ``require_match=True`` -- which that step never passes. A config that
+        carries only its own stresser group therefore runs the stage unchanged,
+        with the two foreign disables as silent no-ops.
+
+        The foreign distributions get ONLY that disable step. The stage emits
+        exactly one ``update_prefix_counts_by_port``, for the distribution under
+        test, at ``distribution_interface_map[distribution_type]`` -- so mapping
+        all three distributions to one interface cannot make a foreign update
+        land on the port carrying the dist under test. Same for the prefix-shape
+        step that follows it, which is scoped by network-group regex. Audited
+        across all 36 generated playbooks: 36 update calls, one per playbook,
+        each with its own distribution's prefix_count/multiplier.
+
+      * ``update_prefix_counts_by_port`` resolves by (hostname, interface) and
+        rewrites ``NumberOfAddresses``/``Multiplier`` on EVERY network group on
+        that port. Co-locating all three stresser groups on one port would make
+        every ``enable_and_configure`` stage cross-write the other two
+        distributions' scale, so one stresser group per config is required, not
+        merely tidy.
+
+    Because the returned configs share a physical port, they are mutually
+    exclusive: run them sequentially, never concurrently.
+
+    Args:
+        stresser / downlink: ``(interface, network_v6, ixia_chassis_ip, ixia_port)``.
+            The DUT takes ``<network_v6>::a`` on each and the IXIA side ``::b``.
+        distributions: subset to build; defaults to all three.
+        ixia_port_queue_config: portQueueConfigName to rebind BOTH IXIA-facing
+            ports to, e.g. "uplink_sp_olympic". Set it when the DUT's committed
+            binding carries an egress SHAPER: the reference testbed binds these
+            ports to `downlink_queue_config`, whose every queue pins
+            portQueueRate min==max==12.5 Gbps, so the DUT forwards 11.6 Gbps of
+            IXIA's ~70 and drops 83.6% -- which fails IXIA_PACKET_LOSS_CHECK
+            for a reason that has nothing to do with the prefix scale under
+            test. Same knob as the 2-IXIA hardening conveyor's parameter of the
+            same name. None leaves the binding alone.
+        switch_prefix_limit: the switch-wide BGP prefix limit for this DUT.
+            Drives BOTH the value the setup tasks write and what every
+            distribution's ``PREFIX_LIMIT_CHECK`` expects, because that check
+            asserts EXACT equality against the running limit rather than
+            counting routes. Pass the device's own constant so the pair cannot
+            drift; the ``MP3N_SWITCH_PREFIX_LIMIT`` default only keeps existing
+            callers working.
+        prefix_limits: per-distribution override for ``PREFIX_LIMIT_CHECK``
+            alone, leaving the written limit untouched. Rarely needed -- an
+            override that does not match what was written cannot pass. It is
+            deliberately not defaulted to the module-level
+            ``DISTRIBUTION_PREFIX_LIMITS`` (route-count estimates that can never
+            match). A key for a distribution that is not being built raises,
+            rather than being silently dropped.
+
+    Returns:
+        ``{distribution_type: TestConfig}``, each carrying all 12 playbooks for
+        that distribution (4 warmboot + 4 bgp_restart + 4 coldboot).
+    """
+    if distributions is None:
+        distributions = [DIST_CONTIGUOUS, DIST_HYBRID, DIST_NON_CONTIGUOUS]
+
+    # Cover every built distribution up front, so no playbook can inherit the
+    # module default that PREFIX_LIMIT_CHECK can never match. Defaulting to the
+    # limit this run actually writes is what keeps check and write in step. An
+    # override for a distribution that is not being built is a typo, not a no-op.
+    limits = {dist: switch_prefix_limit for dist in distributions}
+    if prefix_limits:
+        unknown = sorted(set(prefix_limits) - set(distributions))
+        if unknown:
+            raise ValueError(
+                f"create_two_port_device_test_configs: prefix_limits names "
+                f"{unknown}, which are not being built (distributions="
+                f"{sorted(distributions)})"
+            )
+        limits.update(prefix_limits)
+
+    tag_names = {
+        DIST_CONTIGUOUS: "PREFIX_STRESSER_CONTIGUOUS",
+        DIST_HYBRID: "PREFIX_STRESSER_HYBRID",
+        DIST_NON_CONTIGUOUS: "PREFIX_STRESSER_NON_CONTIGUOUS",
+    }
+
+    st_iface, st_net, st_chassis, st_port = stresser
+    dl_iface, dl_net, dl_chassis, dl_port = downlink
+
+    # Built per config rather than once and aliased into all three. Thrift
+    # structs are immutable so sharing would be safe today, but identical
+    # objects across the three configs would quietly defeat any later
+    # per-distribution tweak of the endpoint or the downlink.
+    def _endpoint() -> taac_types.Endpoint:
+        return taac_types.Endpoint(
+            name=device_name,
+            ixia_ports=[dl_iface, st_iface],
+            dut=True,
+            mac_address=mac_address,
+            direct_ixia_connections=[
+                taac_types.DirectIxiaConnection(
+                    interface=dl_iface, ixia_chassis_ip=dl_chassis, ixia_port=dl_port
+                ),
+                taac_types.DirectIxiaConnection(
+                    interface=st_iface, ixia_chassis_ip=st_chassis, ixia_port=st_port
+                ),
+            ],
+        )
+
+    # Traffic source. No v6_bgp_config: the downlink only needs a routed
+    # address for the DUT to forward from, so it emulates a host, not a peer.
+    def _downlink_port_config() -> taac_types.BasicPortConfig:
+        return taac_types.BasicPortConfig(
+            l1_config=MP3N_L1_CONFIG,
+            endpoint=f"{device_name}:{dl_iface}",
+            device_group_configs=[
+                taac_types.DeviceGroupConfig(
+                    device_group_index=0,
+                    tag_name="DOWNLINK_L3_TRAFFIC",
+                    multiplier=1,
+                    v6_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{dl_net}::b",
+                        gateway_starting_ip=f"{dl_net}::a",
+                        increment_ip="::",
+                        gateway_increment_ip="::",
+                        mask=64,
+                    ),
+                )
+            ],
+        )
+
+    # Every distribution resolves to the one stresser interface.
+    interface_map = {dist: st_iface for dist in distributions}
+
+    def _setup_tasks(dist: str) -> list[taac_types.Task]:
+        tasks = create_mp3n_setup_tasks(
+            device_name=device_name,
+            peer_group=peer_group,
+            local_ip=f"{st_net}::a",
+            peer_ip=f"{st_net}::b",
+            interface_configs=[
+                (st_iface, f"{st_net}::a", f"{st_net}::b", f"ixia_mp3n_{dist}"),
+                (dl_iface, f"{dl_net}::a", f"{dl_net}::b", "ixia_mp3n_downlink"),
+            ],
+            peer_description=f"ixia_mp3n_{dist}",
+            remote_as=remote_as,
+            ingress_policy=ingress_policy,
+            egress_policy=egress_policy,
+            patcher_suffix=patcher_suffix,
+            switch_prefix_limit=switch_prefix_limit,
+        )
+        if not ixia_port_queue_config:
+            return tasks
+        # Registering a patcher only queues it; coop_apply_patchers is what
+        # writes the config and restarts the service. Splice ahead of that
+        # task -- appending puts the rebind after the apply, where it is
+        # queued and silently never lands.
+        #
+        # Located by name rather than index so an upstream reorder cannot
+        # silently move the rebind to the wrong side of the apply. The explicit
+        # raise matters more than it looks: these configs are built at import
+        # (taac/testconfigs/npi/__init__.py imports wedge800_npi_test_config),
+        # so a bare next() would surface an upstream rename as a StopIteration
+        # with no message, failing the whole npi package import.
+        apply_idx = next(
+            (i for i, t in enumerate(tasks) if t.task_name == "coop_apply_patchers"),
+            None,
+        )
+        if apply_idx is None:
+            raise RuntimeError(
+                "create_two_port_device_test_configs: create_mp3n_setup_tasks "
+                "returned no 'coop_apply_patchers' task, so there is no point "
+                "to splice the port-queue rebind before (task_names: "
+                f"{[t.task_name for t in tasks]}); did it get renamed?"
+            )
+        rebind = create_coop_register_patcher_task(
+            hostname=device_name,
+            config_name="agent",
+            patcher_name="queue_config_all_ixia_ports",
+            task_name="change_port_queue_config",
+            py_func_name="change_port_queue_config",
+            patcher_args={
+                f"{st_iface}": ixia_port_queue_config,
+                f"{dl_iface}": ixia_port_queue_config,
+            },
+        )
+        return tasks[:apply_idx] + [rebind] + tasks[apply_idx:]
+
+    def _make(dist: str) -> TestConfig:
+        return TestConfig(
+            name=f"{config_name_prefix}_{dist.upper()}_PREFIX_ALL",
+            basset_pool=basset_pool,
+            ixia_protocol_verification_timeout=10,
+            skip_ixia_protocol_verification=True,
+            endpoints=[_endpoint()],
+            basic_port_configs=[
+                _downlink_port_config(),
+                taac_types.BasicPortConfig(
+                    l1_config=MP3N_L1_CONFIG,
+                    endpoint=f"{device_name}:{st_iface}",
+                    device_group_configs=[
+                        # enable=True: this config's only stresser group, so
+                        # unlike the four-port factory there is nothing to hold
+                        # down until its own playbook enables it.
+                        _create_parameterized_device_group(
+                            dist=dist,
+                            ixia_ip=f"{st_net}::b",
+                            gateway_ip=f"{st_net}::a",
+                            remote_as=remote_as,
+                            tag_name=tag_names[dist],
+                            enable=True,
+                        )
+                    ],
+                ),
+            ],
+            basic_traffic_item_configs=[
+                taac_types.BasicTrafficItemConfig(
+                    name=DISTRIBUTION_TRAFFIC_ITEM_MAP[dist],
+                    bidirectional=False,
+                    merge_destinations=True,
+                    line_rate=10,
+                    src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{dl_iface}",
+                            device_group_index=0,
+                        ),
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{st_iface}",
+                            device_group_index=0,
+                            network_group_index=0,
+                        ),
+                    ],
+                    traffic_type=ixia_types.TrafficType.IPV6,
+                    tracking_types=[
+                        ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                    ],
+                ),
+            ],
+            setup_tasks=_setup_tasks(dist),
+            teardown_tasks=create_mp3n_teardown_tasks(device_name=device_name),
+            playbooks=create_all_playbooks_for_distribution(
+                dist,
+                device_name=device_name,
+                distribution_interface_map=interface_map,
+                convergence_duration=convergence_duration,
+                prefix_limit=limits[dist],
+            ),
+        )
+
+    return {dist: _make(dist) for dist in distributions}
 
 
 # =============================================================================

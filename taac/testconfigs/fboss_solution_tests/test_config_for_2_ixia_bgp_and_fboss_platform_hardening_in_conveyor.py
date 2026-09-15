@@ -832,6 +832,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     uplink_interfaces_to_flap=None,
     nbr_device_name=None,
     nbr_interfaces_to_flap=None,
+    add_nbr_endpoint=True,
     uplink_flap_iterations=50,
     uplink_flap_interval_s=30,
     uplink_flap_settle_s=30,
@@ -904,6 +905,11 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             index-aligned far-end ports, enabling the TC4 DUT+NBR simultaneous
             flap. ``nbr_interfaces_to_flap[i]`` must be the far end of
             ``uplink_interfaces_to_flap[i]``.
+        add_nbr_endpoint: With the nbr args set, also add the neighbour as a
+            non-DUT Endpoint (default; required internally). OSS callers may
+            pass False: the flap step resolves the neighbour's driver from
+            device_info.csv by ``device_name`` and the nbr leg skips
+            port-state verification, so nothing else needs the Endpoint.
         uplink_flap_iterations / uplink_flap_interval_s / uplink_flap_settle_s:
             Flap cycles per playbook, seconds between interface operations, and
             the post-recovery settle window before the zero-loss assertion.
@@ -1113,11 +1119,14 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             ),
         ]
 
-    # TC4 drives thrift flaps on the neighbor, so it needs its own Endpoint for
-    # the runner to build a driver for it.
+    # TC4 drives thrift flaps on the neighbor, which internally requires its
+    # own Endpoint; OSS callers can opt out (see add_nbr_endpoint docstring).
     _nbr_endpoints = (
         [taac_types.Endpoint(name=nbr_device_name)]
-        if nbr_device_name and nbr_interfaces_to_flap and uplink_interfaces_to_flap
+        if nbr_device_name
+        and nbr_interfaces_to_flap
+        and uplink_interfaces_to_flap
+        and add_nbr_endpoint
         else []
     )
 
