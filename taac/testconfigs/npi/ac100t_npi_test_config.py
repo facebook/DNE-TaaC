@@ -15,6 +15,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
       ac100t_constants.py; bind build_bgp_dc_test_config next)
     - Snake tests                          <-- implemented below
     - L2/NDP/ARP hardening tests           <-- implemented below
+    - Platform hardening tests             <-- implemented below
     - Longevity tests                      (TODO -- constants staged;
       gen_snake_test_config)
     - Thrift hardening tests               (TODO -- constants staged;
@@ -240,6 +241,66 @@ AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Platform hardening tests
+# ===========================================================================
+# The process/service-lifecycle robustness slice of the platform-hardening
+# conveyor factory: every FBOSS service restarted, crashed, warmbooted and
+# coldbooted -- individually, in pairs, and in the QSFP-warmboot combinations --
+# plus the cgroup system-slice OOM-kill policy check. Each playbook carries the
+# factory's TC-level prechecks/postchecks, so the assertion is that the DUT
+# converges and traffic recovers after every disruption.
+#
+# Deliberately EXCLUDED from this class, though the same factory emits them:
+#   test_hardening_of_{ndp,arp,mac}_overload* -> the L2/NDP/ARP class (parent diff)
+#   test_ecmp_{group,member}_overload_limit   -> the DLB and ECMP hardening class
+#   test_cpu_high_priority_queue_overload     -> the CPU queue class
+#   test_bgp_malformed_packet_test            -> the BGP hardening class
+AC100T_PLATFORM_HARDENING_TEST_CONFIG = (
+    test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name="AC100T_PLATFORM_HARDENING_TEST_CONFIG",
+        **_AC100T_HARDENING_PARAMS,
+        playbooks_selected=[
+            # cgroup / OOM policy
+            "test_cgroup_system_slice_oom_kill_policy",
+            # Single-service restart
+            "test_agent_warmboot",
+            "test_bgpd_restart",
+            "test_qsfp_service_restart",
+            "test_fsdb_restart",
+            "test_openr_restart",
+            "test_fboss_hw_agent_0_restart",
+            "test_fboss_sw_agent_warmboot",
+            # Single-service crash
+            "test_agent_crash",
+            "test_bgpd_crash",
+            "test_openr_crash",
+            "test_qsfp_service_crash",
+            "test_fsdb_crash",
+            "test_fboss_sw_agent_crash",
+            "test_fboss_hw_agent_0_crash",
+            # Cold boot
+            "test_agent_coldboot",
+            "test_fboss_hw_agent_0_coldboot",
+            # Concurrent / paired service churn
+            "test_fboss_sw_agent_and_hw_agent_0_restart",
+            "test_fboss_sw_agent_and_hw_agent_0_crash",
+            "test_bgpd_and_fsdb_restart",
+            "test_agent_and_bgpd_restart",
+            "test_agent_and_fsdb_restart",
+            "test_agent_and_qsfp_service_restart",
+            "test_fsdb_and_qsfp_service_restart",
+            "test_sw_agent_and_wedge_agent_restart",
+            "test_agent_warmboot_wedge_and_sw_agent",
+            # QSFP warmboot combinations
+            "test_qsfp_service_warmboot_and_reset",
+            "test_qsfp_service_warmboot_and_agent_coldboot",
+            "test_qsfp_service_warmboot_and_tx_flap",
+        ],
+    )
+)
+
+
+# ===========================================================================
 # Snake tests
 # ===========================================================================
 # Built from the snake/loopback standalone builder (gen_snake_test_config),
@@ -320,6 +381,7 @@ AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
+    AC100T_PLATFORM_HARDENING_TEST_CONFIG,
     AC100T_SNAKE_800G_TEST_CONFIG,
     AC100T_SNAKE_400G_TEST_CONFIG,
 ]
