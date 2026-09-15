@@ -1301,6 +1301,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     allow_all_v4_policies=False,
     uplink_bgp_peer_type=None,
     skip_playbooks=None,
+    playbooks_selected=None,
 ):
     """Build the conveyor TestConfig for combined BGP++ and FBOSS platform hardening.
 
@@ -1371,6 +1372,14 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
             pre-V4-policy DUTs).
         uplink_bgp_peer_type: Optional override for uplink BGP peer type (e.g., RSW).
         skip_playbooks: Optional set of playbook names to skip.
+        playbooks_selected: Optional allowlist of playbook names to KEEP. When
+            ``None`` (the default) every generated playbook is kept, so
+            existing callers are unaffected. Use it to package one class of
+            tests out of this factory -- an allowlist of the three names you
+            want, rather than a ``skip_playbooks`` listing the ~38 you do not,
+            which would silently absorb any playbook added here later. Mirrors
+            ``playbooks_selected`` on ``build_bgp_dc_test_config``. Applied
+            after ``skip_playbooks``.
 
     Returns:
         TestConfig: The fully-built conveyor TestConfig.
@@ -2972,6 +2981,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                     ]
                 )
                 if pb.name not in (skip_playbooks or [])
+                and (playbooks_selected is None or pb.name in playbooks_selected)
             ],
             tc_prechecks=tc_prechecks,
             tc_postchecks=tc_postchecks,

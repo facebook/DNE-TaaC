@@ -13,6 +13,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - Longevity tests                      <-- implemented below
     - Thrift hardening tests               <-- implemented below
     - Snake tests                          <-- implemented below
+    - L2/NDP/ARP hardening tests           <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
@@ -24,6 +25,9 @@ registration pattern).
 """
 
 from ixia.ixia import types as ixia_types
+from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
+    test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
+)
 from taac.testconfigs.fboss_solution_tests.speed_flip_test_configs import (
     build_subsume_churn_test_config,
     Circuit,
@@ -127,6 +131,80 @@ W800_CPU_QUEUE_TEST_CONFIG = apply_w800_scale_topology(
 
 
 # ===========================================================================
+# Shared hardening device scaffolding
+# ===========================================================================
+# The two hardening factories used below -- build_bgp_dc_test_config and
+# test_config_for_bgp_and_fboss_platform_hardening_in_conveyor -- share 59
+# required parameters; the ONLY one the conveyor does not accept is
+# `ixia_rogue_interface`, which the BGP-DC call passes separately. So the whole
+# device scaffolding lives here once and both factories splat it, which keeps a
+# device value from drifting between classes and makes a new class a playbook
+# selection rather than another ~58-line copy.
+_W800_HARDENING_PARAMS = {
+    "device_name": w800.W800_RSW_DUT_DEVICE_NAME,
+    "local_mac_address": w800.W800_LOCAL_MAC_ADDRESS,
+    "ixia_downlink_interface": w800.W800_IXIA_DOWNLINK_INTERFACE,
+    "ixia_uplink_interface": w800.W800_IXIA_UPLINK_INTERFACE,
+    "peergroup_uplink_mimic_v6": w800.W800_PEERGROUP_UPLINK_MIMIC_V6,
+    "peergroup_uplink_mimic_v4": w800.W800_PEERGROUP_UPLINK_MIMIC_V4,
+    "peergroup_downlink_mimic_v6": w800.W800_PEERGROUP_DOWNLINK_MIMIC_V6,
+    "peergroup_downlink_mimic_v4": w800.W800_PEERGROUP_DOWNLINK_MIMIC_V4,
+    "peergroup_rogue_mimic_v6": w800.W800_PEERGROUP_ROGUE_MIMIC_V6,
+    "peergroup_rogue_mimic_v4": w800.W800_PEERGROUP_ROGUE_MIMIC_V4,
+    "route_map_uplink_ingress": w800.W800_ROUTE_MAP_UPLINK_INGRESS,
+    "route_map_uplink_egress": w800.W800_ROUTE_MAP_UPLINK_EGRESS,
+    "route_map_downlink_ingress": w800.W800_ROUTE_MAP_DOWNLINK_INGRESS,
+    "route_map_downlink_egress": w800.W800_ROUTE_MAP_DOWNLINK_EGRESS,
+    "route_map_rogue_ingress": w800.W800_ROUTE_MAP_ROGUE_INGRESS,
+    "route_map_rogue_egress": w800.W800_ROUTE_MAP_ROGUE_EGRESS,
+    "ixia_downlink_ic_parent_network_v6": w800.W800_IXIA_DOWNLINK_IC_PARENT_NETWORK_V6,
+    "ixia_uplink_ic_parent_network_v6": w800.W800_IXIA_UPLINK_IC_PARENT_NETWORK_V6,
+    "ixia_rogue_ic_parent_network_v6": w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+    "ixia_downlink_ic_parent_network_v4": w800.W800_IXIA_DOWNLINK_IC_PARENT_NETWORK_V4,
+    "ixia_uplink_ic_parent_network_v4": w800.W800_IXIA_UPLINK_IC_PARENT_NETWORK_V4,
+    "ixia_rogue_ic_parent_network_v4": w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V4,
+    "good_ndp_entry_network_v6": w800.W800_GOOD_NDP_ENTRY_NETWORK_V6,
+    "rogue_ndp_entry_network_v6": w800.W800_ROGUE_NDP_ENTRY_NETWORK_V6,
+    "good_arp_entry_network_v4": w800.W800_GOOD_ARP_ENTRY_NETWORK_V4,
+    "rogue_arp_entry_network_v4": w800.W800_ROGUE_ARP_ENTRY_NETWORK_V4,
+    "prefix_limit": w800.W800_BGP_PREFIX_LIMIT,
+    "per_peer_max_route_limit": w800.W800_PER_PEER_MAX_ROUTE_LIMIT,
+    "downlink_peer_count": w800.W800_DOWNLINK_PEER_COUNT,
+    "uplink_peer_count": w800.W800_UPLINK_PEER_COUNT,
+    "rogue_peer_count": w800.W800_ROGUE_PEER_COUNT,
+    "remote_downlink_as_4byte": w800.W800_REMOTE_DOWNLINK_AS_4BYTE,
+    "remote_uplink_as_4byte": w800.W800_REMOTE_UPLINK_AS_4BYTE,
+    "remote_rogue_as_4byte": w800.W800_REMOTE_ROGUE_AS_4BYTE,
+    "is_uplink_peer_confed": w800.W800_IS_UPLINK_PEER_CONFED,
+    "is_downlink_peer_confed": w800.W800_IS_DOWNLINK_PEER_CONFED,
+    "is_rogue_peer_confed": w800.W800_IS_ROGUE_PEER_CONFED,
+    "ixia_downlink_prefix_count_v6": w800.W800_IXIA_DOWNLINK_PREFIX_COUNT_V6,
+    "ixia_uplink_prefix_count_v6": w800.W800_IXIA_UPLINK_PREFIX_COUNT_V6,
+    "ixia_rogue_prefix_count_v6": w800.W800_IXIA_ROGUE_PREFIX_COUNT_V6,
+    "ixia_downlink_prefix_count_v4": w800.W800_IXIA_DOWNLINK_PREFIX_COUNT_V4,
+    "ixia_uplink_prefix_count_v4": w800.W800_IXIA_UPLINK_PREFIX_COUNT_V4,
+    "ixia_rogue_prefix_count_v4": w800.W800_IXIA_ROGUE_PREFIX_COUNT_V4,
+    "ixia_downlink_communities": w800.W800_IXIA_DOWNLINK_COMMUNITIES,
+    "ixia_uplink_communities": w800.W800_IXIA_UPLINK_COMMUNITIES,
+    "uplink_peer_tag": w800.W800_UPLINK_PEER_TAG,
+    "downlink_peer_tag": w800.W800_DOWNLINK_PEER_TAG,
+    "ecmp_group_limit": w800.W800_ECMP_GROUP_LIMIT,
+    "good_ndp_entries_uplink": w800.W800_GOOD_NDP_ENTRIES_UPLINK,
+    "good_ndp_entries_downlink": w800.W800_GOOD_NDP_ENTRIES_DOWNLINK,
+    "rogue_ndp_entries": w800.W800_ROGUE_NDP_ENTRIES,
+    "good_arp_entries": w800.W800_GOOD_ARP_ENTRIES,
+    "rogue_arp_entries": w800.W800_ROGUE_ARP_ENTRIES,
+    "good_mac_entry_count": w800.W800_GOOD_MAC_ENTRY_COUNT,
+    "rogue_mac_entry_count": w800.W800_ROGUE_MAC_ENTRY_COUNT,
+    "bgp_induced_ecmp_group_count": w800.W800_BGP_INDUCED_ECMP_GROUP_COUNT,
+    "ixia_uplink_good_ndp_network": w800.W800_IXIA_UPLINK_GOOD_NDP_NETWORK,
+    "ixia_downlink_good_ndp_network": w800.W800_IXIA_DOWNLINK_GOOD_NDP_NETWORK,
+    "basset_pool": w800.W800_BASSET_POOL,
+    "ecmp_member_limit": w800.W800_ECMP_MEMBER_LIMIT,
+}
+
+
+# ===========================================================================
 # BGP Hardening tests
 # ===========================================================================
 # Built from the centralized BGP-DC chronos factory (build_bgp_dc_test_config),
@@ -139,67 +217,10 @@ W800_CPU_QUEUE_TEST_CONFIG = apply_w800_scale_topology(
 # does NOT hit netwhoami at build time, so no stub bypass is needed.
 W800_BGP_HARDENING_TEST_CONFIG = build_bgp_dc_test_config(
     test_config_name="W800_BGP_HARDENING_TEST_CONFIG",
-    device_name=w800.W800_RSW_DUT_DEVICE_NAME,
-    local_mac_address=w800.W800_LOCAL_MAC_ADDRESS,
-    ixia_downlink_interface=w800.W800_IXIA_DOWNLINK_INTERFACE,
-    ixia_uplink_interface=w800.W800_IXIA_UPLINK_INTERFACE,
+    **_W800_HARDENING_PARAMS,
+    # The one BGP-DC parameter the conveyor factory does not accept, so it
+    # stays out of the shared dict.
     ixia_rogue_interface=w800.W800_IXIA_ROGUE_INTERFACE,
-    peergroup_uplink_mimic_v6=w800.W800_PEERGROUP_UPLINK_MIMIC_V6,
-    peergroup_uplink_mimic_v4=w800.W800_PEERGROUP_UPLINK_MIMIC_V4,
-    peergroup_downlink_mimic_v6=w800.W800_PEERGROUP_DOWNLINK_MIMIC_V6,
-    peergroup_downlink_mimic_v4=w800.W800_PEERGROUP_DOWNLINK_MIMIC_V4,
-    peergroup_rogue_mimic_v6=w800.W800_PEERGROUP_ROGUE_MIMIC_V6,
-    peergroup_rogue_mimic_v4=w800.W800_PEERGROUP_ROGUE_MIMIC_V4,
-    route_map_uplink_ingress=w800.W800_ROUTE_MAP_UPLINK_INGRESS,
-    route_map_uplink_egress=w800.W800_ROUTE_MAP_UPLINK_EGRESS,
-    route_map_downlink_ingress=w800.W800_ROUTE_MAP_DOWNLINK_INGRESS,
-    route_map_downlink_egress=w800.W800_ROUTE_MAP_DOWNLINK_EGRESS,
-    route_map_rogue_ingress=w800.W800_ROUTE_MAP_ROGUE_INGRESS,
-    route_map_rogue_egress=w800.W800_ROUTE_MAP_ROGUE_EGRESS,
-    ixia_downlink_ic_parent_network_v6=w800.W800_IXIA_DOWNLINK_IC_PARENT_NETWORK_V6,
-    ixia_uplink_ic_parent_network_v6=w800.W800_IXIA_UPLINK_IC_PARENT_NETWORK_V6,
-    ixia_rogue_ic_parent_network_v6=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
-    ixia_downlink_ic_parent_network_v4=w800.W800_IXIA_DOWNLINK_IC_PARENT_NETWORK_V4,
-    ixia_uplink_ic_parent_network_v4=w800.W800_IXIA_UPLINK_IC_PARENT_NETWORK_V4,
-    ixia_rogue_ic_parent_network_v4=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V4,
-    good_ndp_entry_network_v6=w800.W800_GOOD_NDP_ENTRY_NETWORK_V6,
-    rogue_ndp_entry_network_v6=w800.W800_ROGUE_NDP_ENTRY_NETWORK_V6,
-    good_arp_entry_network_v4=w800.W800_GOOD_ARP_ENTRY_NETWORK_V4,
-    rogue_arp_entry_network_v4=w800.W800_ROGUE_ARP_ENTRY_NETWORK_V4,
-    prefix_limit=w800.W800_BGP_PREFIX_LIMIT,
-    per_peer_max_route_limit=w800.W800_PER_PEER_MAX_ROUTE_LIMIT,
-    downlink_peer_count=w800.W800_DOWNLINK_PEER_COUNT,
-    uplink_peer_count=w800.W800_UPLINK_PEER_COUNT,
-    rogue_peer_count=w800.W800_ROGUE_PEER_COUNT,
-    remote_downlink_as_4byte=w800.W800_REMOTE_DOWNLINK_AS_4BYTE,
-    remote_uplink_as_4byte=w800.W800_REMOTE_UPLINK_AS_4BYTE,
-    remote_rogue_as_4byte=w800.W800_REMOTE_ROGUE_AS_4BYTE,
-    is_uplink_peer_confed=w800.W800_IS_UPLINK_PEER_CONFED,
-    is_downlink_peer_confed=w800.W800_IS_DOWNLINK_PEER_CONFED,
-    is_rogue_peer_confed=w800.W800_IS_ROGUE_PEER_CONFED,
-    ixia_downlink_prefix_count_v6=w800.W800_IXIA_DOWNLINK_PREFIX_COUNT_V6,
-    ixia_uplink_prefix_count_v6=w800.W800_IXIA_UPLINK_PREFIX_COUNT_V6,
-    ixia_rogue_prefix_count_v6=w800.W800_IXIA_ROGUE_PREFIX_COUNT_V6,
-    ixia_downlink_prefix_count_v4=w800.W800_IXIA_DOWNLINK_PREFIX_COUNT_V4,
-    ixia_uplink_prefix_count_v4=w800.W800_IXIA_UPLINK_PREFIX_COUNT_V4,
-    ixia_rogue_prefix_count_v4=w800.W800_IXIA_ROGUE_PREFIX_COUNT_V4,
-    ixia_downlink_communities=w800.W800_IXIA_DOWNLINK_COMMUNITIES,
-    ixia_uplink_communities=w800.W800_IXIA_UPLINK_COMMUNITIES,
-    uplink_peer_tag=w800.W800_UPLINK_PEER_TAG,
-    downlink_peer_tag=w800.W800_DOWNLINK_PEER_TAG,
-    ecmp_group_limit=w800.W800_ECMP_GROUP_LIMIT,
-    good_ndp_entries_uplink=w800.W800_GOOD_NDP_ENTRIES_UPLINK,
-    good_ndp_entries_downlink=w800.W800_GOOD_NDP_ENTRIES_DOWNLINK,
-    rogue_ndp_entries=w800.W800_ROGUE_NDP_ENTRIES,
-    good_arp_entries=w800.W800_GOOD_ARP_ENTRIES,
-    rogue_arp_entries=w800.W800_ROGUE_ARP_ENTRIES,
-    good_mac_entry_count=w800.W800_GOOD_MAC_ENTRY_COUNT,
-    rogue_mac_entry_count=w800.W800_ROGUE_MAC_ENTRY_COUNT,
-    bgp_induced_ecmp_group_count=w800.W800_BGP_INDUCED_ECMP_GROUP_COUNT,
-    ixia_uplink_good_ndp_network=w800.W800_IXIA_UPLINK_GOOD_NDP_NETWORK,
-    ixia_downlink_good_ndp_network=w800.W800_IXIA_DOWNLINK_GOOD_NDP_NETWORK,
-    basset_pool=w800.W800_BASSET_POOL,
-    ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
     # Exactly the BGP_DC longevity playbooks the w800 test plan lists for BGP
     # Hardening (the sheet's "todo" rows without a playbook are omitted).
     playbooks_selected=[
@@ -218,6 +239,50 @@ W800_BGP_HARDENING_TEST_CONFIG = build_bgp_dc_test_config(
 W800_BGP_HARDENING_TEST_CONFIG = apply_w800_scale_topology(
     W800_BGP_HARDENING_TEST_CONFIG,
     start_directional_traffic=True,
+)
+
+
+# ===========================================================================
+# L2 / NDP / ARP hardening tests
+# ===========================================================================
+# The neighbour-table overload trio: each floods the DUT with rogue NDP / ARP /
+# MAC entries on top of a good-entry baseline and asserts the soft limit holds,
+# good entries survive, and traffic keeps forwarding.
+#
+# Built from the platform-hardening conveyor factory, NOT from
+# build_bgp_dc_test_config: the BGP-DC builder sets basic_traffic_item_configs=[]
+# ("runs setup + playbooks only, with no IXIA traffic generation"), and
+# test_hardening_of_mac_overload_entries drives
+# configure_traffic_item_src_mac_entry_count against a traffic-item regex, so it
+# has nothing to act on there. Every other BGP-DC caller excludes these three
+# playbooks for that reason. The conveyor factory owns its own copies of them
+# and builds the traffic items they need.
+#
+# NOT wrapped in apply_w800_scale_topology, unlike the CPU-queue and
+# BGP-hardening configs above: this factory brings its own traffic items and its
+# own traffic_items_to_start regex, which the wrapper would overwrite with just
+# the two cross-RSW directional items -- disabling exactly the traffic these
+# playbooks measure.
+W800_L2_NDP_ARP_HARDENING_TEST_CONFIG = (
+    test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name="W800_L2_NDP_ARP_HARDENING_TEST_CONFIG",
+        **_W800_HARDENING_PARAMS,
+        playbooks_selected=[
+            # The base overload trio ...
+            "test_hardening_of_ndp_overload_entries",
+            "test_hardening_of_arp_overload_entries",
+            "test_hardening_of_mac_overload_entries",
+            # ... and the same three extended with the wedge_agent-churn and
+            # table-clear disruption tails (UTP L2M_002 / L2M_003 / L2M_005 /
+            # L2M_006 / L2M_009). L2M_008 (clear MAC table) is not implemented
+            # upstream: FBOSS exposes no MAC-flush CLI or thrift API.
+            "test_hardening_of_ndp_overload_with_agent_churn",
+            "test_hardening_of_ndp_overload_10x_with_table_clear",
+            "test_hardening_of_arp_overload_with_agent_churn",
+            "test_hardening_of_arp_overload_10x_with_table_clear",
+            "test_hardening_of_mac_overload_with_agent_churn",
+        ],
+    )
 )
 
 
@@ -407,6 +472,7 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
 W800_TEST_CONFIGS = [
     W800_CPU_QUEUE_TEST_CONFIG,
     W800_BGP_HARDENING_TEST_CONFIG,
+    W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     W800_LONGEVITY_TEST_CONFIG,
     W800_SNAKE_800G_TEST_CONFIG,
     W800_SNAKE_400G_TEST_CONFIG,
