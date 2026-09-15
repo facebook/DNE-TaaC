@@ -50,7 +50,6 @@ from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
     get_root_logger,
     none_throws,
-    retryable,
     string_is_ip,
 )
 from taac.utils.serf_utils import (
@@ -89,6 +88,9 @@ DEFAULT_DEVICE_GROUP_CONFIG = taac_types.DeviceGroupConfig(
     v6_addresses_config=taac_types.IpAddressesConfig(),
 )
 
+IXIA_LLDP_DISCOVERY_ATTEMPTS: int = 6
+IXIA_LLDP_DISCOVERY_INTERVAL_SECONDS: int = 30
+
 
 class TrafficGenerator:
     def __init__(
@@ -121,6 +123,7 @@ class TrafficGenerator:
         setup_tasks: t.Optional[t.Sequence[taac_types.Task]] = None,
         cache_candidate_name: t.Optional[str] = None,
         trace_api_calls: bool = False,
+        wait_for_lldp_reconvergence: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -155,6 +158,7 @@ class TrafficGenerator:
         self.ixia_config_cache = ixia_config_cache
         # Opt-in IXIA REST API soft recovery — see IxiaRecovery Thrift docstring
         self.ixia_recovery = ixia_recovery
+        self.wait_for_lldp_reconvergence = wait_for_lldp_reconvergence
         # Record every IxNetwork REST call to a JSONL file — see ixia_tracer.py
         self.trace_api_calls = trace_api_calls
         # TestConfig setup_tasks — used by the v3 IXIA topology-cache key so
@@ -191,6 +195,7 @@ class TrafficGenerator:
 
         self._port_configs: t.List[ixia_types.PortConfig] = []
         self._traffic_items: t.List[ixia_types.TrafficItem] = []
+        self._ixia_asset_snapshot_by_endpoint: dict[str, list[IxiaEndpointInfo]] = {}
 
     def teardown_ixia_setup(self) -> None:
         if not self.ixia:
@@ -245,6 +250,7 @@ class TrafficGenerator:
 
     @async_retryable(retries=3, sleep_time=10)
     async def async_create_ixia_config(self) -> ixia_types.IxiaConfig:
+        self._ixia_asset_snapshot_by_endpoint.clear()
         await self.async_update_all_endpoints()
 
         ixia_config = ixia_types.IxiaConfig(
@@ -781,7 +787,6 @@ class TrafficGenerator:
                 return basic_port_config
         return self.default_basic_port_config
 
-    @retryable(num_tries=3, sleep_time=60, debug=True)
     def select_ixia_assets(
         self, endpoint: taac_types.Endpoint, ixia_assets: t.List[IxiaEndpointInfo]
     ) -> t.List[IxiaEndpointInfo]:
@@ -819,14 +824,42 @@ class TrafficGenerator:
         ]
         return desired_ixia_assets
 
-    @async_memoize_timed(3600)
-    @async_retryable(retries=3, sleep_time=30, exceptions=(Exception,))
+    async def _async_get_complete_lldp_ixia_assets(
+        self, endpoint: taac_types.Endpoint
+    ) -> t.List[IxiaEndpointInfo]:
+        from taac.internal.internal_utils import (
+            async_create_lldp_ixia_connection_assets,
+        )
+
+        lldp_assets = await async_create_lldp_ixia_connection_assets(endpoint.name)
+        self.logger.debug(f"lldp ixia assets: {lldp_assets}")
+        desired_ixia_assets = self.select_ixia_assets(endpoint, lldp_assets)
+        if not desired_ixia_assets:
+            raise InsufficientInputError(
+                f"Unable to find any LLDP ixia assets for endpoint {endpoint.name}"
+            )
+        return desired_ixia_assets
+
+    @async_retryable(
+        num_tries=IXIA_LLDP_DISCOVERY_ATTEMPTS,
+        sleep_time=IXIA_LLDP_DISCOVERY_INTERVAL_SECONDS,
+        exceptions=(ValueError, InsufficientInputError),
+    )
+    async def _async_wait_for_complete_lldp_ixia_assets(
+        self, endpoint: taac_types.Endpoint
+    ) -> t.List[IxiaEndpointInfo]:
+        return await self._async_get_complete_lldp_ixia_assets(endpoint)
+
     async def async_get_endpoint_desired_ixia_assets(
         self, endpoint: taac_types.Endpoint
     ) -> t.List[IxiaEndpointInfo]:
         """
         Fetches the Ixia assets that are needed for the given endpoint
         """
+        snapshot = self._ixia_asset_snapshot_by_endpoint.get(endpoint.name)
+        if snapshot is not None:
+            return snapshot
+
         direct_ixia_connection_assets = self.create_direct_ixia_connection_assets(
             endpoint
         )
@@ -838,7 +871,11 @@ class TrafficGenerator:
                     f"[OSS Mode] Using {len(direct_ixia_connection_assets)} direct IXIA connection(s) "
                     f"for endpoint {endpoint.name}"
                 )
-                return list(set(direct_ixia_connection_assets))
+                desired_ixia_assets = list(set(direct_ixia_connection_assets))
+                self._ixia_asset_snapshot_by_endpoint[endpoint.name] = (
+                    desired_ixia_assets
+                )
+                return desired_ixia_assets
             else:
                 raise InsufficientInputError(
                     f"[OSS Mode] No direct IXIA connections provided for endpoint {endpoint.name}. "
@@ -855,22 +892,30 @@ class TrafficGenerator:
                 f"Using {len(direct_ixia_connection_assets)} direct IXIA connection(s) "
                 f"for endpoint {endpoint.name}, skipping LLDP/optical switch discovery"
             )
-            return list(set(direct_ixia_connection_assets))
+            desired_ixia_assets = list(set(direct_ixia_connection_assets))
+            self._ixia_asset_snapshot_by_endpoint[endpoint.name] = desired_ixia_assets
+            return desired_ixia_assets
 
-        # Lazy import for OSS compatibility - only needed in internal mode
-        from taac.internal.internal_utils import (
-            async_create_lldp_ixia_connection_assets,
-        )
-
-        lldp_assets = await async_create_lldp_ixia_connection_assets(endpoint.name)
-        self.logger.debug(f"lldp ixia assets: {lldp_assets}")
-        ixia_assets = (
-            lldp_assets
-            or await async_create_optical_switch_ixia_connection_assets(endpoint.name)
-        )
-        desired_ixia_assets: t.List[IxiaEndpointInfo] = []
-        if ixia_assets:
-            desired_ixia_assets = self.select_ixia_assets(endpoint, ixia_assets)
+        try:
+            if self.wait_for_lldp_reconvergence:
+                desired_ixia_assets = (
+                    await self._async_wait_for_complete_lldp_ixia_assets(endpoint)
+                )
+            else:
+                desired_ixia_assets = await self._async_get_complete_lldp_ixia_assets(
+                    endpoint
+                )
+        except (ValueError, InsufficientInputError) as error:
+            self.logger.warning(
+                f"LLDP IXIA discovery did not resolve {endpoint.name}: {error}. "
+                "Falling back to optical-switch discovery."
+            )
+            optical_switch_assets = (
+                await async_create_optical_switch_ixia_connection_assets(endpoint.name)
+            )
+            desired_ixia_assets = self.select_ixia_assets(
+                endpoint, optical_switch_assets
+            )
         if not desired_ixia_assets:
             raise InsufficientInputError(
                 f"Unable to find any ixia assets for endpoint {endpoint.name}"
@@ -887,7 +932,9 @@ class TrafficGenerator:
                     # Type is guaranteed to be str here since we checked primary_chassis_ip is truthy
                     asset.ixia_chassis_ip = str(self.primary_chassis_ip)
 
-        return list(set(desired_ixia_assets))
+        desired_ixia_assets = list(set(desired_ixia_assets))
+        self._ixia_asset_snapshot_by_endpoint[endpoint.name] = desired_ixia_assets
+        return desired_ixia_assets
 
     async def async_create_endpoint_ixia_port_configs(
         self, endpoint: taac_types.Endpoint

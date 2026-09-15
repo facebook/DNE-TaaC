@@ -583,6 +583,7 @@ class TestSetupOrchestrator:
             ixia_config_cache=ixia_config_cache,
             ixia_recovery=ixia_recovery,
             trace_api_calls=self._trace_ixia_api,
+            wait_for_lldp_reconvergence=not self._skip_package_update,
             # v3 IXIA topology-cache key folds in setup_tasks so cache
             # auto-invalidates when an engineer edits a setup task during
             # testconfig development. See

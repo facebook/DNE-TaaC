@@ -30,6 +30,7 @@ _test_configs = types.ModuleType(_TEST_CONFIGS_MODULE)
 _test_configs.get_test_config = lambda config: config
 sys.modules[_TEST_CONFIGS_MODULE] = _test_configs
 
+from taac.constants import IxiaEndpointInfo
 from taac.libs import (
     test_setup_orchestrator as _test_setup_orchestrator,
     traffic_generator as _traffic_generator,
@@ -451,6 +452,119 @@ class IxiaChassisResolutionTest(unittest.IsolatedAsyncioTestCase):
                 await generator.async_get_primary_ixia_chassis_ip()
 
         self.assertIs(context.exception.__cause__, resolution_error)
+
+
+def _discovered_ixia_asset(interface: str, port: str) -> IxiaEndpointInfo:
+    return IxiaEndpointInfo(
+        ixia_chassis_ip="192.0.2.10",
+        ixia_slot_num="1",
+        ixia_port_num=port,
+        remote_device_name="dut1",
+        remote_intf_name=interface,
+        is_logical_port=True,
+    )
+
+
+class IxiaLldpDiscoveryTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.endpoint = taac_types.Endpoint(
+            name="dut1",
+            dut=True,
+            ixia_ports=["eth1/1/1", "eth1/1/2"],
+        )
+        self.complete_assets = [
+            _discovered_ixia_asset("eth1/1/1", "17"),
+            _discovered_ixia_asset("eth1/1/2", "18"),
+        ]
+
+    async def test_requeries_until_complete_then_reuses_snapshot(self) -> None:
+        lldp_discovery = AsyncMock(
+            side_effect=[[], self.complete_assets[:1], self.complete_assets]
+        )
+        optical_discovery = AsyncMock()
+        generator = TrafficGenerator(
+            endpoints=[self.endpoint],
+            logger=MagicMock(),
+            wait_for_lldp_reconvergence=True,
+        )
+
+        with (
+            patch(
+                f"{_INTERNAL_UTILS_MODULE}.async_create_lldp_ixia_connection_assets",
+                new=lldp_discovery,
+            ),
+            patch(
+                f"{_TRAFFIC_GENERATOR_MODULE}.async_create_optical_switch_ixia_connection_assets",
+                new=optical_discovery,
+            ),
+            patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            assets = await generator.async_get_endpoint_desired_ixia_assets(
+                self.endpoint
+            )
+            repeated_assets = await generator.async_get_endpoint_desired_ixia_assets(
+                self.endpoint
+            )
+
+        self.assertCountEqual(self.complete_assets, assets)
+        self.assertCountEqual(self.complete_assets, repeated_assets)
+        self.assertEqual(3, lldp_discovery.await_count)
+        self.assertEqual(2, sleep.await_count)
+        optical_discovery.assert_not_awaited()
+
+    async def test_uses_optical_fallback_after_lldp_deadline(self) -> None:
+        lldp_discovery = AsyncMock(return_value=[])
+        optical_discovery = AsyncMock(return_value=self.complete_assets)
+        generator = TrafficGenerator(
+            endpoints=[self.endpoint],
+            logger=MagicMock(),
+            wait_for_lldp_reconvergence=True,
+        )
+
+        with (
+            patch(
+                f"{_INTERNAL_UTILS_MODULE}.async_create_lldp_ixia_connection_assets",
+                new=lldp_discovery,
+            ),
+            patch(
+                f"{_TRAFFIC_GENERATOR_MODULE}.async_create_optical_switch_ixia_connection_assets",
+                new=optical_discovery,
+            ),
+            patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            assets = await generator.async_get_endpoint_desired_ixia_assets(
+                self.endpoint
+            )
+
+        self.assertCountEqual(self.complete_assets, assets)
+        self.assertEqual(6, lldp_discovery.await_count)
+        self.assertEqual(5, sleep.await_count)
+        optical_discovery.assert_awaited_once_with("dut1")
+
+    async def test_skipped_package_update_does_not_delay_fallback(self) -> None:
+        lldp_discovery = AsyncMock(return_value=[])
+        optical_discovery = AsyncMock(return_value=self.complete_assets)
+        generator = TrafficGenerator(endpoints=[self.endpoint], logger=MagicMock())
+
+        with (
+            patch(
+                f"{_INTERNAL_UTILS_MODULE}.async_create_lldp_ixia_connection_assets",
+                new=lldp_discovery,
+            ),
+            patch(
+                f"{_TRAFFIC_GENERATOR_MODULE}.async_create_optical_switch_ixia_connection_assets",
+                new=optical_discovery,
+            ),
+            patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            assets = await generator.async_get_endpoint_desired_ixia_assets(
+                self.endpoint
+            )
+
+        self.assertCountEqual(self.complete_assets, assets)
+        lldp_discovery.assert_awaited_once_with("dut1")
+        sleep.assert_not_awaited()
+        optical_discovery.assert_awaited_once_with("dut1")
 
 
 class IxiaFallbackTest(unittest.IsolatedAsyncioTestCase):
