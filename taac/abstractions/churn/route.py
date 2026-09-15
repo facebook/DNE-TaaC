@@ -34,6 +34,7 @@ DEFAULT_ROUTE_CHURN_LOOKUP_ATTEMPTS = 3
 DEFAULT_ROUTE_CHURN_LOOKUP_RETRY_SECONDS = 1.0
 DEFAULT_ROUTE_CHURN_MAX_CONSECUTIVE_OBSERVATION_FAILURES = 3
 DEFAULT_ROUTE_CHURN_CANCELLATION_GRACE_SECONDS = 10.0
+DEFAULT_ROUTE_STORM_CANCELLATION_GRACE_SECONDS = 10.0
 
 
 def _json_number(value: float) -> int | float:
@@ -457,6 +458,52 @@ class RouteStorm:
             raise ValueError(
                 "CICD-EBB-11 requires exactly 10,500 dual-stack route paths"
             )
+
+    @property
+    def scenario(self) -> ChurnScenario:
+        cycle_seconds = self.cycle.withdraw_seconds + self.cycle.advertise_seconds
+        execution_seconds = self.cycle.cycles * cycle_seconds
+        transition_budget_seconds = (
+            self.cycle.cycles * 2 * self.observation.convergence_hard_timeout_seconds
+        )
+        work_budget_seconds = (
+            self.heavy_setup.hard_timeout_seconds
+            + self.observation.session_establish_timeout_seconds
+            + self.observation.quiet_window_seconds
+            + execution_seconds
+            + transition_budget_seconds
+        )
+        return ChurnScenario(
+            scenario_id="bgp_route_storm",
+            workload=ChurnWorkload(families=(ChurnFamily(name="routes"),)),
+            preparation=PreparationPolicy(
+                initial_resolution_timeout_seconds=(
+                    self.observation.session_establish_timeout_seconds
+                ),
+                baseline_capture_timeout_seconds=(
+                    self.observation.quiet_window_seconds
+                ),
+                total_timeout_seconds=work_budget_seconds,
+            ),
+            execution=ExecutionPolicy(
+                duration_seconds=execution_seconds,
+                cadence_seconds=cycle_seconds,
+                max_iterations=self.cycle.cycles,
+            ),
+            recovery=RecoveryPolicy(
+                total_timeout_seconds=(
+                    self.observation.restore_timeout_seconds
+                    + DEFAULT_ROUTE_STORM_CANCELLATION_GRACE_SECONDS
+                ),
+                restore_observation_timeout_seconds=(
+                    self.observation.restore_timeout_seconds
+                ),
+                ixia_restore_timeout_seconds=self.observation.restore_timeout_seconds,
+                cancellation_grace_seconds=(
+                    DEFAULT_ROUTE_STORM_CANCELLATION_GRACE_SECONDS
+                ),
+            ),
+        )
 
     def to_step_params(self) -> dict[str, t.Any]:
         """Lower typed route-storm intent to the established flat contract."""
