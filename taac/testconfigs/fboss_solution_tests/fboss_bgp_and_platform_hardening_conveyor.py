@@ -1301,6 +1301,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     allow_all_v4_policies=False,
     uplink_bgp_peer_type=None,
     skip_playbooks=None,
+    stress_static_routes=True,
 ):
     """Build the conveyor TestConfig for combined BGP++ and FBOSS platform hardening.
 
@@ -1371,6 +1372,9 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
             pre-V4-policy DUTs).
         uplink_bgp_peer_type: Optional override for uplink BGP peer type (e.g., RSW).
         skip_playbooks: Optional set of playbook names to skip.
+        stress_static_routes: When ``False``, omit the add_stress_static_routes
+            setup task (platforms whose good_ndp_entries_uplink is too small to
+            reach ecmp_member_limit).
 
     Returns:
         TestConfig: The fully-built conveyor TestConfig.
@@ -1701,13 +1705,22 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                     ),
                 ]
             ),
-            create_add_stress_static_routes_task(
-                hostname=device_name,
-                max_ecmp_group=ecmp_group_limit,
-                max_ecmp_members=ecmp_member_limit,
-                nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
-                lb_prefix_agg="6000:ab::/32",
-                device_group_count=good_ndp_entries_uplink,
+            # generate_prefix_nh_list_map caps each group at
+            # device_group_count // 4 members, so a platform with few uplink
+            # NDP nexthops cannot reach ecmp_member_limit; let it opt out.
+            *(
+                [
+                    create_add_stress_static_routes_task(
+                        hostname=device_name,
+                        max_ecmp_group=ecmp_group_limit,
+                        max_ecmp_members=ecmp_member_limit,
+                        nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
+                        lb_prefix_agg="6000:ab::/32",
+                        device_group_count=good_ndp_entries_uplink,
+                    )
+                ]
+                if stress_static_routes
+                else []
             ),
             create_configure_parallel_bgp_peers_task(
                 hostname=device_name,
