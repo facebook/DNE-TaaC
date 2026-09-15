@@ -12,6 +12,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - BGP Hardening tests                  <-- implemented below
     - Longevity tests                      <-- implemented below
     - Thrift hardening tests               <-- implemented below
+    - Snake tests                          <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
@@ -22,6 +23,7 @@ register the resulting TestConfig constant (see cpu_queue section for the
 registration pattern).
 """
 
+from ixia.ixia import types as ixia_types
 from taac.testconfigs.fboss_solution_tests.speed_flip_test_configs import (
     build_subsume_churn_test_config,
     Circuit,
@@ -245,6 +247,75 @@ W800_LONGEVITY_TEST_CONFIG = gen_snake_test_config(
 
 
 # ===========================================================================
+# Snake tests
+# ===========================================================================
+# Same builder as the longevity config above, but one TestConfig per speed
+# grade -- the shape the reference MINIPACK3_STANDALONE_TEST_CONFIG_{400G,800G}
+# configs use, so a failure names the speed it happened at. Each config runs
+# the full gen_snake_playbooks suite (thrift/qsfp_util interface toggles, qsfp
+# reset, agent warmboot/coldboot/crash, qsfp_service and fsdb restart/crash,
+# BMC and microserver reboots) over the jumpered loops for that speed.
+#
+# Longevity playbooks are left in the suite rather than skipped: the snake
+# builder emits them unconditionally and they are cheap relative to the
+# disruptive cases. The 72hr soak is owned by W800_LONGEVITY_TEST_CONFIG.
+W800_SNAKE_800G_TEST_CONFIG = gen_snake_test_config(
+    name="W800_SNAKE_800G_TEST_CONFIG",
+    hostname=w800.W800_DEVICE_NAME,
+    basset_pool=w800.W800_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{w800.W800_DEVICE_NAME}:{source_interface}",
+            destination=f"{w800.W800_DEVICE_NAME}:{destination_interface}",
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+        )
+        for (
+            source_interface,
+            destination_interface,
+            source_ip,
+            destination_ip,
+        ) in w800.W800_SNAKE_800G_LOOPS
+    ],
+    line_rate=w800.W800_SNAKE_LINE_RATE,
+    traffic_item_name="W800_800G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=w800.W800_SNAKE_IMIX_WEIGHT,
+    ),
+    iteration=w800.W800_SNAKE_ITERATION,
+)
+
+
+W800_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
+    name="W800_SNAKE_400G_TEST_CONFIG",
+    hostname=w800.W800_DEVICE_NAME,
+    basset_pool=w800.W800_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{w800.W800_DEVICE_NAME}:{source_interface}",
+            destination=f"{w800.W800_DEVICE_NAME}:{destination_interface}",
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+        )
+        for (
+            source_interface,
+            destination_interface,
+            source_ip,
+            destination_ip,
+        ) in w800.W800_SNAKE_400G_LOOPS
+    ],
+    line_rate=w800.W800_SNAKE_LINE_RATE,
+    traffic_item_name="W800_400G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=w800.W800_SNAKE_IMIX_WEIGHT,
+    ),
+    iteration=w800.W800_SNAKE_ITERATION,
+)
+
+
+# ===========================================================================
 # Thrift hardening tests (THFT_001..005)
 # ===========================================================================
 # Built from the centralized create_npi_thrift_hardening_test_config factory
@@ -324,6 +395,24 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
     ],
     churn_iterations=w800.W800_SPEED_FLIP_CHURN_ITERATIONS,
 )
+
+
+# ===========================================================================
+# Registry
+# ===========================================================================
+# The ONE symbol the central registry (testconfigs/internal/__init__.py and
+# internal/all.py, which spreads it into INTERNAL_TEST_CONFIGS) imports from
+# this module. Append new w800 TestConfigs here as each test class is bound,
+# so adding a config never requires touching the registry files again.
+W800_TEST_CONFIGS = [
+    W800_CPU_QUEUE_TEST_CONFIG,
+    W800_BGP_HARDENING_TEST_CONFIG,
+    W800_LONGEVITY_TEST_CONFIG,
+    W800_SNAKE_800G_TEST_CONFIG,
+    W800_SNAKE_400G_TEST_CONFIG,
+    W800_THRIFT_HARDENING_TEST_CONFIG,
+    W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG,
+]
 
 
 # ===========================================================================

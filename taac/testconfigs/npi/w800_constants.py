@@ -237,6 +237,46 @@ W800_SNAKE_SOURCE_IP = "5000:1::1/64"
 W800_SNAKE_DEST_IP = "5000:1::2/64"
 
 # ===========================================================================
+# Snake tests (per speed grade)
+# ===========================================================================
+# Consumed by wedge800_npi_test_config.py's W800_SNAKE_*_TEST_CONFIG, built
+# with gen_snake_test_config() -- the same builder as the longevity config
+# above, but one TestConfig per speed grade (the shape the reference
+# MINIPACK3_STANDALONE_TEST_CONFIG_{400G,800G} configs use) so a failure
+# names the speed it happened at.
+#
+# Each loop entry is (source_interface, destination_interface, source_ip,
+# destination_ip); source and destination are two cages on the SAME DUT
+# joined by a fiber jumper, with point-to-point /64 addressing. Every loop
+# in a config must run at that config's speed grade.
+#
+# The 800G loop deliberately reuses the longevity jumper above: it is the
+# same physical cable, so it must not be described twice.
+# TODO(w800): real jumpered cages per speed grade once the DUT is cabled.
+W800_SNAKE_800G_LOOPS = [
+    (
+        W800_SNAKE_SOURCE_INTERFACE,
+        W800_SNAKE_DEST_INTERFACE,
+        W800_SNAKE_SOURCE_IP,
+        W800_SNAKE_DEST_IP,
+    ),
+]
+W800_SNAKE_400G_LOOPS = [
+    ("eth1/3/1", "eth1/4/1", "5000:2::1/64", "5000:2::2/64"),
+    ("eth1/3/5", "eth1/4/5", "4000:2::1/64", "4000:2::2/64"),
+]
+
+# 99% rather than 100%: the reference 800G snake caps line rate to stay under
+# the IXIA overspeed rounding that reports false loss (T227297634).
+W800_SNAKE_LINE_RATE = 99
+W800_SNAKE_ITERATION = 10
+# FRONTEND IMIX distribution -- the DEFAULT_FRAME_SIZE weights from
+# qos_scheduling_test_config.py. Deliberately NOT the DSF_FRAME_SIZES weights
+# the reference Minipack3 800G snake uses: those are the backend/DSF fabric
+# profile, and w800 is a frontend platform.
+W800_SNAKE_IMIX_WEIGHT = {100: 1, 1500: 4, 4500: 5, 7000: 1, 9000: 1}
+
+# ===========================================================================
 # Thrift hardening tests (THFT_001..005)
 # ===========================================================================
 # Consumed by wedge800_npi_test_config.py's W800_THRIFT_HARDENING_TEST_CONFIG.

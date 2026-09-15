@@ -13,6 +13,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - CPU queue tests: Generic (FE + BE)   <-- implemented below
     - BGP Hardening tests                  (TODO -- constants already staged in
       ac100t_constants.py; bind build_bgp_dc_test_config next)
+    - Snake tests                          <-- implemented below
     - Longevity tests                      (TODO -- constants staged;
       gen_snake_test_config)
     - Thrift hardening tests               (TODO -- constants staged;
@@ -31,12 +32,17 @@ register the resulting TestConfig constant (see cpu_queue section for the
 registration pattern).
 """
 
+from ixia.ixia import types as ixia_types
 from taac.testconfigs.npi import (  # oss-rewrite-touch
     ac100t_constants as ac100t,
 )
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_npi_cpu_queue_test_config,
 )
+from taac.testconfigs.snake.test_test_config import (
+    gen_snake_test_config,
+)
+from taac.test_as_a_config import types as taac_types
 
 # ===========================================================================
 # CPU queue tests: Generic (FE + BE)
@@ -115,6 +121,77 @@ AC100T_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 
 
 # ===========================================================================
+# Snake tests
+# ===========================================================================
+# Built from the snake/loopback standalone builder (gen_snake_test_config),
+# one TestConfig per speed grade in AC100T_SNAKE_PORT_SPEEDS_GBPS -- the shape
+# the reference MINIPACK3_STANDALONE_TEST_CONFIG_{400G,800G} configs use, so a
+# failure names the speed it happened at. Each config runs the full
+# gen_snake_playbooks suite (thrift/qsfp_util interface toggles, qsfp reset,
+# agent warmboot/coldboot/crash, qsfp_service and fsdb restart/crash, BMC and
+# microserver reboots) over the jumpered loops for that speed.
+#
+# Snake is single-DUT loopback, so this runs on one Steller Eagle unit rather
+# than the full 4-DUT topology. Snake builds the TestConfig without a
+# build-time netwhoami lookup (topology discovery is deferred to runtime), so
+# no stub bypass is needed.
+AC100T_SNAKE_800G_TEST_CONFIG = gen_snake_test_config(
+    name="AC100T_SNAKE_800G_TEST_CONFIG",
+    hostname=ac100t.AC100T_SNAKE_DEVICE_NAME,
+    basset_pool=ac100t.AC100T_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{source_interface}",
+            destination=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{destination_interface}",
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+        )
+        for (
+            source_interface,
+            destination_interface,
+            source_ip,
+            destination_ip,
+        ) in ac100t.AC100T_SNAKE_800G_LOOPS
+    ],
+    line_rate=ac100t.AC100T_SNAKE_LINE_RATE,
+    traffic_item_name="AC100T_800G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=ac100t.AC100T_SNAKE_IMIX_WEIGHT,
+    ),
+    iteration=ac100t.AC100T_SNAKE_ITERATION,
+)
+
+
+AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
+    name="AC100T_SNAKE_400G_TEST_CONFIG",
+    hostname=ac100t.AC100T_SNAKE_DEVICE_NAME,
+    basset_pool=ac100t.AC100T_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{source_interface}",
+            destination=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{destination_interface}",
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+        )
+        for (
+            source_interface,
+            destination_interface,
+            source_ip,
+            destination_ip,
+        ) in ac100t.AC100T_SNAKE_400G_LOOPS
+    ],
+    line_rate=ac100t.AC100T_SNAKE_LINE_RATE,
+    traffic_item_name="AC100T_400G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=ac100t.AC100T_SNAKE_IMIX_WEIGHT,
+    ),
+    iteration=ac100t.AC100T_SNAKE_ITERATION,
+)
+
+
+# ===========================================================================
 # Registry
 # ===========================================================================
 # The ONE symbol the central registry (testconfigs/internal/__init__.py and
@@ -123,4 +200,6 @@ AC100T_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 # so adding a config never requires touching the registry files again.
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
+    AC100T_SNAKE_800G_TEST_CONFIG,
+    AC100T_SNAKE_400G_TEST_CONFIG,
 ]

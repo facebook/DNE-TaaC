@@ -9,6 +9,14 @@ Allows callers to use the package-level path:
     )
 
 instead of the deeper module path.
+
+A NEW per-platform TestConfig does NOT belong here. Append it to that
+platform's ``<PLATFORM>_TEST_CONFIGS`` list (``W800_TEST_CONFIGS`` in
+wedge800_npi_test_config.py, ``AC100T_TEST_CONFIGS`` in
+ac100t_npi_test_config.py) and it reaches ``INTERNAL_TEST_CONFIGS``
+automatically -- neither this file nor testconfigs/internal/ needs an edit.
+The individual names below predate those lists and are kept only so existing
+callers of the package path keep working.
 """
 
 from taac.testconfigs.npi.ac100t_npi_test_config import (
@@ -64,6 +72,7 @@ from taac.testconfigs.npi.wedge800_npi_test_config import (
     W800_CPU_QUEUE_TEST_CONFIG,
     W800_LONGEVITY_TEST_CONFIG,
     W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG,
+    W800_TEST_CONFIGS,
     W800_THRIFT_HARDENING_TEST_CONFIG,
 )
 
@@ -98,6 +107,7 @@ __all__ = [
     "MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG",
     "W800_LONGEVITY_TEST_CONFIG",
     "W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG",
+    "W800_TEST_CONFIGS",
     "W800_THRIFT_HARDENING_TEST_CONFIG",
     "build_dlb_hardening_testconfig",
     "create_dctypef_npi_cpu_queue_test_config",
