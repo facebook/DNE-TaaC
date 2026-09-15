@@ -848,6 +848,7 @@ def get_bgp_ebb_route_storm_playbook(
     )
     playbook_name = "bgp_ebb_route_storm_playbook"
     return create_dice_unified_churn_playbook(
+        restore_topology_baseline=True,
         spec=route_churn_spec(
             playbook_name=playbook_name,
             device=device_name,
@@ -875,7 +876,7 @@ def get_bgp_ebb_route_storm_playbook(
                 device_name=device_name,
                 config=characterization,
             ),
-        )
+        ),
     )
 
 

@@ -135,6 +135,7 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         )
 
+        self.assertTrue(playbook.restore_topology_baseline)
         self.assertEqual(1, len(playbook.stages))
         self.assertEqual(1, len(playbook.stages[0].steps))
         step = playbook.stages[0].steps[0]
