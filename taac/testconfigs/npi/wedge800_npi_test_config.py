@@ -15,6 +15,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - Snake tests                          <-- implemented below
     - L2/NDP/ARP hardening tests           <-- implemented below
     - Platform hardening tests             <-- implemented below
+    - FE QoS scheduling and buffering      <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
@@ -28,6 +29,9 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
+)
+from taac.testconfigs.fboss_solution_tests.qos_scheduling_test_config import (
+    test_config_qos_scheduling,
 )
 from taac.testconfigs.fboss_solution_tests.speed_flip_test_configs import (
     build_subsume_churn_test_config,
@@ -141,6 +145,8 @@ W800_CPU_QUEUE_TEST_CONFIG = apply_w800_scale_topology(
 # device scaffolding lives here once and both factories splat it, which keeps a
 # device value from drifting between classes and makes a new class a playbook
 # selection rather than another ~58-line copy.
+# `ecmp_member_limit` is deliberately NOT in here: test_config_qos_scheduling
+# does not accept it, so it is passed at the call sites that do.
 _W800_HARDENING_PARAMS = {
     "device_name": w800.W800_RSW_DUT_DEVICE_NAME,
     "local_mac_address": w800.W800_LOCAL_MAC_ADDRESS,
@@ -201,7 +207,6 @@ _W800_HARDENING_PARAMS = {
     "ixia_uplink_good_ndp_network": w800.W800_IXIA_UPLINK_GOOD_NDP_NETWORK,
     "ixia_downlink_good_ndp_network": w800.W800_IXIA_DOWNLINK_GOOD_NDP_NETWORK,
     "basset_pool": w800.W800_BASSET_POOL,
-    "ecmp_member_limit": w800.W800_ECMP_MEMBER_LIMIT,
 }
 
 
@@ -219,6 +224,7 @@ _W800_HARDENING_PARAMS = {
 W800_BGP_HARDENING_TEST_CONFIG = build_bgp_dc_test_config(
     test_config_name="W800_BGP_HARDENING_TEST_CONFIG",
     **_W800_HARDENING_PARAMS,
+    ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
     # The one BGP-DC parameter the conveyor factory does not accept, so it
     # stays out of the shared dict.
     ixia_rogue_interface=w800.W800_IXIA_ROGUE_INTERFACE,
@@ -268,6 +274,7 @@ W800_L2_NDP_ARP_HARDENING_TEST_CONFIG = (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         test_config_name="W800_L2_NDP_ARP_HARDENING_TEST_CONFIG",
         **_W800_HARDENING_PARAMS,
+        ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
         playbooks_selected=[
             # The base overload trio ...
             "test_hardening_of_ndp_overload_entries",
@@ -306,6 +313,7 @@ W800_PLATFORM_HARDENING_TEST_CONFIG = (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         test_config_name="W800_PLATFORM_HARDENING_TEST_CONFIG",
         **_W800_HARDENING_PARAMS,
+        ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
         playbooks_selected=[
             # cgroup / OOM policy
             "test_cgroup_system_slice_oom_kill_policy",
@@ -344,6 +352,41 @@ W800_PLATFORM_HARDENING_TEST_CONFIG = (
             "test_qsfp_service_warmboot_and_tx_flap",
         ],
     )
+)
+
+
+# ===========================================================================
+# FE QoS scheduling and buffering
+# ===========================================================================
+# The full frontend QoS matrix from the centralized test_config_qos_scheduling
+# factory: 6 per-ClassOfService scheduling playbooks (NC / ICP / GOLD / SILVER
+# / BRONZE / NCNF) plus 26 buffering playbooks -- per-queue congestion, single
+# -queue congestion, every priority-vs-congested queue pair, and the
+# multi-queue combinations. 32 playbooks in total.
+#
+# "FE" (frontend, 6 ClassOfService queues) rather than the BE variant
+# (be_test_config_qos_scheduling, 4 DSF traffic classes): both w800 and ac100t
+# are frontend platforms.
+#
+# The congestion half is what makes this "and buffering" -- without the
+# congestion_* arguments the factory emits only the 6 scheduling playbooks.
+# Following the SSW-Elbert reference, congestion reuses the rogue IXIA port,
+# parent network and remote AS rather than requiring a fourth IXIA port.
+#
+# Shares the same 59 device parameters as the hardening factories, so it splats
+# the same scaffolding dict; it additionally takes `ixia_rogue_interface`,
+# which the conveyor factory does not accept and so is passed separately.
+W800_FE_QOS_TEST_CONFIG = test_config_qos_scheduling(
+    test_config_name="W800_FE_QOS_TEST_CONFIG",
+    **_W800_HARDENING_PARAMS,
+    ixia_rogue_interface=w800.W800_IXIA_ROGUE_INTERFACE,
+    # Congestion traffic rides the otherwise-idle rogue port.
+    ixia_congestion_interface=w800.W800_IXIA_ROGUE_INTERFACE,
+    ixia_congestion_ic_parent_network_v6=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+    congestion_peer_as_4byte=w800.W800_REMOTE_ROGUE_AS_4BYTE,
+    congestion_prefix_count_v6=w800.W800_CONGESTION_PREFIX_COUNT_V6,
+    congestion_prefix_start_v6=w800.W800_CONGESTION_PREFIX_START_V6,
+    is_congestion_peer_confed=w800.W800_IS_ROGUE_PEER_CONFED,
 )
 
 
@@ -534,6 +577,7 @@ W800_TEST_CONFIGS = [
     W800_CPU_QUEUE_TEST_CONFIG,
     W800_BGP_HARDENING_TEST_CONFIG,
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
+    W800_FE_QOS_TEST_CONFIG,
     W800_PLATFORM_HARDENING_TEST_CONFIG,
     W800_LONGEVITY_TEST_CONFIG,
     W800_SNAKE_800G_TEST_CONFIG,

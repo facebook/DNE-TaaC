@@ -16,6 +16,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - Snake tests                          <-- implemented below
     - L2/NDP/ARP hardening tests           <-- implemented below
     - Platform hardening tests             <-- implemented below
+    - FE QoS scheduling and buffering      <-- implemented below
     - Longevity tests                      (TODO -- constants staged;
       gen_snake_test_config)
     - Thrift hardening tests               (TODO -- constants staged;
@@ -37,6 +38,9 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
+)
+from taac.testconfigs.fboss_solution_tests.qos_scheduling_test_config import (
+    test_config_qos_scheduling,
 )
 from taac.testconfigs.npi import (  # oss-rewrite-touch
     ac100t_constants as ac100t,
@@ -138,6 +142,8 @@ AC100T_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
 #
 # These factories are SINGLE-DUT, so they run on the same Steller Eagle unit
 # the CPU-queue class uses (DUT2) rather than the full 4-DUT topology.
+# `ecmp_member_limit` is deliberately NOT in here: test_config_qos_scheduling
+# does not accept it, so it is passed at the call sites that do.
 _AC100T_HARDENING_PARAMS = {
     "device_name": ac100t.AC100T_CPU_QUEUE_DUT,
     "local_mac_address": ac100t.AC100T_CPU_QUEUE_LOCAL_MAC_ADDRESS,
@@ -198,7 +204,6 @@ _AC100T_HARDENING_PARAMS = {
     "ixia_uplink_good_ndp_network": ac100t.AC100T_IXIA_UPLINK_GOOD_NDP_NETWORK,
     "ixia_downlink_good_ndp_network": ac100t.AC100T_IXIA_DOWNLINK_GOOD_NDP_NETWORK,
     "basset_pool": ac100t.AC100T_BASSET_POOL,
-    "ecmp_member_limit": ac100t.AC100T_ECMP_MEMBER_LIMIT,
 }
 
 
@@ -221,6 +226,7 @@ AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG = (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         test_config_name="AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG",
         **_AC100T_HARDENING_PARAMS,
+        ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
         playbooks_selected=[
             # The base overload trio ...
             "test_hardening_of_ndp_overload_entries",
@@ -259,6 +265,7 @@ AC100T_PLATFORM_HARDENING_TEST_CONFIG = (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         test_config_name="AC100T_PLATFORM_HARDENING_TEST_CONFIG",
         **_AC100T_HARDENING_PARAMS,
+        ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
         playbooks_selected=[
             # cgroup / OOM policy
             "test_cgroup_system_slice_oom_kill_policy",
@@ -297,6 +304,41 @@ AC100T_PLATFORM_HARDENING_TEST_CONFIG = (
             "test_qsfp_service_warmboot_and_tx_flap",
         ],
     )
+)
+
+
+# ===========================================================================
+# FE QoS scheduling and buffering
+# ===========================================================================
+# The full frontend QoS matrix from the centralized test_config_qos_scheduling
+# factory: 6 per-ClassOfService scheduling playbooks (NC / ICP / GOLD / SILVER
+# / BRONZE / NCNF) plus 26 buffering playbooks -- per-queue congestion, single
+# -queue congestion, every priority-vs-congested queue pair, and the
+# multi-queue combinations. 32 playbooks in total.
+#
+# "FE" (frontend, 6 ClassOfService queues) rather than the BE variant
+# (be_test_config_qos_scheduling, 4 DSF traffic classes): both w800 and ac100t
+# are frontend platforms.
+#
+# The congestion half is what makes this "and buffering" -- without the
+# congestion_* arguments the factory emits only the 6 scheduling playbooks.
+# Following the SSW-Elbert reference, congestion reuses the rogue IXIA port,
+# parent network and remote AS rather than requiring a fourth IXIA port.
+#
+# Shares the same 59 device parameters as the hardening factories, so it splats
+# the same scaffolding dict; it additionally takes `ixia_rogue_interface`,
+# which the conveyor factory does not accept and so is passed separately.
+AC100T_FE_QOS_TEST_CONFIG = test_config_qos_scheduling(
+    test_config_name="AC100T_FE_QOS_TEST_CONFIG",
+    **_AC100T_HARDENING_PARAMS,
+    ixia_rogue_interface=ac100t.AC100T_CPU_QUEUE_IXIA_ROGUE_INTERFACE,
+    # Congestion traffic rides the otherwise-idle rogue port.
+    ixia_congestion_interface=ac100t.AC100T_CPU_QUEUE_IXIA_ROGUE_INTERFACE,
+    ixia_congestion_ic_parent_network_v6=ac100t.AC100T_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+    congestion_peer_as_4byte=ac100t.AC100T_REMOTE_ROGUE_AS_4BYTE,
+    congestion_prefix_count_v6=ac100t.AC100T_CONGESTION_PREFIX_COUNT_V6,
+    congestion_prefix_start_v6=ac100t.AC100T_CONGESTION_PREFIX_START_V6,
+    is_congestion_peer_confed=ac100t.AC100T_IS_ROGUE_PEER_CONFED,
 )
 
 
@@ -381,6 +423,7 @@ AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
+    AC100T_FE_QOS_TEST_CONFIG,
     AC100T_PLATFORM_HARDENING_TEST_CONFIG,
     AC100T_SNAKE_800G_TEST_CONFIG,
     AC100T_SNAKE_400G_TEST_CONFIG,

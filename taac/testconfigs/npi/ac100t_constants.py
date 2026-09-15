@@ -414,3 +414,23 @@ AC100T_SPEED_FLIP_CHURN_CAGES = [
     ("eth1/21", "eth1/2"),
     ("eth1/22", "eth1/3"),
 ]
+
+# ===========================================================================
+# FE QoS scheduling and buffering
+# ===========================================================================
+# Consumed by ac100t_npi_test_config.py's AC100T_FE_QOS_TEST_CONFIG, built with
+# test_config_qos_scheduling(). Following the SSW-Elbert reference, the
+# congestion traffic REUSES the rogue IXIA port, its parent network and its
+# remote AS (AC100T_CPU_QUEUE_IXIA_ROGUE_INTERFACE /
+# AC100T_IXIA_ROGUE_IC_PARENT_NETWORK_V6 / AC100T_REMOTE_ROGUE_AS_4BYTE) rather
+# than needing a fourth port on DUT2's fanout -- the rogue port is idle during
+# QoS runs. Only the congestion prefix block is QoS-specific.
+#
+# NOTE: the topology doc's own QoS case (route sets B + D -> A, 2x800G -> 1x800G)
+# is a MULTI-DUT scenario that this single-DUT factory cannot express; it stays
+# on the deferred multi-DUT list. This config covers the per-queue scheduling
+# and buffering matrix on one DUT.
+# TODO(ac100t): tune the congestion prefix block once real Steller Eagle egress
+# buffer sizing is known.
+AC100T_CONGESTION_PREFIX_COUNT_V6 = 100
+AC100T_CONGESTION_PREFIX_START_V6 = "2001:db8:0:2f00::"

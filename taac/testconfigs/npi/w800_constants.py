@@ -313,3 +313,20 @@ W800_SPEED_FLIP_CHURN_CAGES = [
     ("eth1/21", "eth1/2"),
     ("eth1/22", "eth1/3"),
 ]
+
+# ===========================================================================
+# FE QoS scheduling and buffering
+# ===========================================================================
+# Consumed by wedge800_npi_test_config.py's W800_FE_QOS_TEST_CONFIG, built with
+# test_config_qos_scheduling(). Following the SSW-Elbert reference, the
+# congestion traffic REUSES the rogue IXIA port, its parent network and its
+# remote AS (W800_IXIA_ROGUE_INTERFACE /
+# W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6 / W800_REMOTE_ROGUE_AS_4BYTE) rather
+# than needing a fourth IXIA port -- the rogue port is idle during QoS runs.
+# Only the congestion prefix block is QoS-specific, so it is the only thing
+# defined here.
+# TODO(w800): tune the congestion prefix block once real w800 egress buffer
+# sizing is known -- it sets how much traffic is driven into the congested
+# queue.
+W800_CONGESTION_PREFIX_COUNT_V6 = 100
+W800_CONGESTION_PREFIX_START_V6 = "2001:db8:0:1f00::"
