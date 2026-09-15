@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from taac.abstractions.churn.attribute import AttributeChurn
-from taac.abstractions.churn.route import RouteChurn
+from neteng.test_infra.dne.taac.abstractions.churn.route import RouteChurn, RouteStorm
 from taac.abstractions.churn.session import SessionChurn
 from taac.abstractions.churn.workloads import (
     IgpUnresolvableChurn,
@@ -2410,62 +2410,14 @@ def create_bgp_ebb_attribute_churn_stage(
 def create_bgp_ebb_route_storm_stage(
     *,
     hostname: str,
-    ixia_interface_mimic_ibgp: str,
-    expected_established_sessions: int,
-    observer_peer_parent_prefix: str,
-    prefix_pool_names: dict[str, str],
-    peer_count_per_plane: int,
-    selected_peer_rows: list[int],
-    routes_per_peer: int,
-    samples_per_block: int,
-    cycles: int,
-    advertise_seconds: int,
-    withdraw_seconds: int,
-    poll_interval_seconds: int,
-    session_establish_timeout_seconds: int,
-    restore_timeout_seconds: int,
-    quiet_window_seconds: int,
-    max_lookup_concurrency: int,
-    as_path_pool_size: int,
-    as_path_length: int,
-    as_set_length: int,
-    communities_per_route: int,
-    extended_communities_per_route: int,
-    bounded_validation: bool = False,
-    convergence_hard_timeout_seconds: int = 300,
-    heavy_setup_hard_timeout_seconds: int = 1_800,
-    heavy_route_batch_rows: int = 15_750,
+    route_storm: RouteStorm,
 ) -> Stage:
     """Create CICD-EBB-11 as one failure-safe, audited custom workflow."""
     return Stage(
         steps=[
             create_bgp_route_storm_step(
                 hostname=hostname,
-                ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-                expected_established_sessions=expected_established_sessions,
-                observer_peer_parent_prefix=observer_peer_parent_prefix,
-                prefix_pool_names=prefix_pool_names,
-                peer_count_per_plane=peer_count_per_plane,
-                selected_peer_rows=selected_peer_rows,
-                routes_per_peer=routes_per_peer,
-                samples_per_block=samples_per_block,
-                cycles=cycles,
-                advertise_seconds=advertise_seconds,
-                withdraw_seconds=withdraw_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-                convergence_hard_timeout_seconds=convergence_hard_timeout_seconds,
-                heavy_setup_hard_timeout_seconds=heavy_setup_hard_timeout_seconds,
-                heavy_route_batch_rows=heavy_route_batch_rows,
-                session_establish_timeout_seconds=session_establish_timeout_seconds,
-                restore_timeout_seconds=restore_timeout_seconds,
-                quiet_window_seconds=quiet_window_seconds,
-                max_lookup_concurrency=max_lookup_concurrency,
-                as_path_pool_size=as_path_pool_size,
-                as_path_length=as_path_length,
-                as_set_length=as_set_length,
-                communities_per_route=communities_per_route,
-                extended_communities_per_route=extended_communities_per_route,
-                bounded_validation=bounded_validation,
+                route_storm=route_storm,
             )
         ]
     )

@@ -40,7 +40,16 @@ from taac.abstractions.churn.policies import (
     PreparationPolicy,
     RecoveryPolicy,
 )
-from taac.abstractions.churn.route import RouteChurn
+from taac.abstractions.churn.route import (
+    RouteChurn,
+    RouteStorm,
+    RouteStormAttributeShape,
+    RouteStormCyclePolicy,
+    RouteStormGeometry,
+    RouteStormHeavySetup,
+    RouteStormObservationPolicy,
+    RouteStormTargetSelector,
+)
 from taac.abstractions.churn.selectors import UniformRowSelection
 from taac.abstractions.churn.session import SessionChurn
 from taac.abstractions.churn.specs import (
@@ -728,6 +737,54 @@ def get_bgp_ebb_attribute_churn_playbook(
     )
 
 
+def _bgp_ebb_route_storm(
+    *,
+    ixia_interface_mimic_ibgp: str,
+    observer_peer_parent_prefix: str,
+    expected_established_sessions: int,
+    cycles: int,
+    quiet_window_seconds: int,
+    bounded_validation: bool,
+) -> RouteStorm:
+    return RouteStorm(
+        expected_established_sessions=expected_established_sessions,
+        selector=RouteStormTargetSelector(
+            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+            observer_peer_parent_prefix=observer_peer_parent_prefix,
+            ipv4_prefix_pool_name="PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
+            ipv6_prefix_pool_name="PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
+            peer_count_per_plane=62,
+            selected_peer_rows=(0, 10, 20, 30, 40, 50, 61),
+        ),
+        geometry=RouteStormGeometry(routes_per_peer=750, samples_per_block=2),
+        cycle=RouteStormCyclePolicy(
+            cycles=cycles,
+            advertise_seconds=30,
+            withdraw_seconds=30,
+        ),
+        observation=RouteStormObservationPolicy(
+            poll_interval_seconds=5,
+            convergence_hard_timeout_seconds=300,
+            session_establish_timeout_seconds=300,
+            restore_timeout_seconds=300,
+            quiet_window_seconds=quiet_window_seconds,
+            max_lookup_concurrency=1,
+        ),
+        heavy_setup=RouteStormHeavySetup(
+            hard_timeout_seconds=1_800,
+            route_batch_rows=15_750,
+        ),
+        attributes=RouteStormAttributeShape(
+            as_path_pool_size=10,
+            as_path_length=255,
+            as_set_length=255,
+            communities_per_route=32,
+            extended_communities_per_route=16,
+        ),
+        bounded_validation=bounded_validation,
+    )
+
+
 def get_bgp_ebb_route_storm_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
@@ -803,34 +860,14 @@ def get_bgp_ebb_route_storm_playbook(
                 [
                     create_bgp_ebb_route_storm_stage(
                         hostname=device_name,
-                        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-                        expected_established_sessions=total_session_count,
-                        observer_peer_parent_prefix=observer_peer_parent_prefix,
-                        prefix_pool_names={
-                            "ipv4": "PREFIX_POOL_IBGP_IPV4_PLANE_1_REMOTE_EB",
-                            "ipv6": "PREFIX_POOL_IBGP_IPV6_PLANE_1_REMOTE_EB",
-                        },
-                        peer_count_per_plane=62,
-                        selected_peer_rows=[0, 10, 20, 30, 40, 50, 61],
-                        routes_per_peer=750,
-                        samples_per_block=2,
-                        cycles=cycles,
-                        advertise_seconds=30,
-                        withdraw_seconds=30,
-                        poll_interval_seconds=5,
-                        convergence_hard_timeout_seconds=300,
-                        heavy_setup_hard_timeout_seconds=1_800,
-                        heavy_route_batch_rows=15_750,
-                        session_establish_timeout_seconds=300,
-                        restore_timeout_seconds=300,
-                        quiet_window_seconds=quiet_window_seconds,
-                        bounded_validation=bounded_validation,
-                        max_lookup_concurrency=1,
-                        as_path_pool_size=10,
-                        as_path_length=255,
-                        as_set_length=255,
-                        communities_per_route=32,
-                        extended_communities_per_route=16,
+                        route_storm=_bgp_ebb_route_storm(
+                            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+                            observer_peer_parent_prefix=observer_peer_parent_prefix,
+                            expected_established_sessions=total_session_count,
+                            cycles=cycles,
+                            quiet_window_seconds=quiet_window_seconds,
+                            bounded_validation=bounded_validation,
+                        ),
                     ),
                 ],
                 playbook_name=playbook_name,

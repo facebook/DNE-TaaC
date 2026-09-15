@@ -337,3 +337,210 @@ class RouteChurn:
                 fail_on_session_flap=bool(params.get("fail_on_session_flap", True)),
             ),
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormTargetSelector:
+    ixia_interface_mimic_ibgp: str
+    observer_peer_parent_prefix: str
+    ipv4_prefix_pool_name: str
+    ipv6_prefix_pool_name: str
+    peer_count_per_plane: int
+    selected_peer_rows: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.ixia_interface_mimic_ibgp
+            or not self.observer_peer_parent_prefix
+            or not self.ipv4_prefix_pool_name
+            or not self.ipv6_prefix_pool_name
+        ):
+            raise ValueError("route-storm selectors must be non-empty")
+        if self.selected_peer_rows != tuple(sorted(set(self.selected_peer_rows))):
+            raise ValueError("selected_peer_rows must be unique and sorted")
+        if any(
+            row < 0 or row >= self.peer_count_per_plane
+            for row in self.selected_peer_rows
+        ):
+            raise ValueError("selected_peer_rows must be in range")
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormGeometry:
+    routes_per_peer: int
+    samples_per_block: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormCyclePolicy:
+    cycles: int
+    advertise_seconds: int
+    withdraw_seconds: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormObservationPolicy:
+    poll_interval_seconds: int
+    convergence_hard_timeout_seconds: int
+    session_establish_timeout_seconds: int
+    restore_timeout_seconds: int
+    quiet_window_seconds: int
+    max_lookup_concurrency: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormHeavySetup:
+    hard_timeout_seconds: int
+    route_batch_rows: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStormAttributeShape:
+    as_path_pool_size: int
+    as_path_length: int
+    as_set_length: int
+    communities_per_route: int
+    extended_communities_per_route: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.as_path_length != 255
+            or self.as_set_length != 255
+            or self.extended_communities_per_route != 16
+        ):
+            raise ValueError(
+                "CICD-EBB-11 requires 255-AS AS_SEQUENCE and AS_SET segments "
+                "plus 16 extended communities"
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStorm:
+    expected_established_sessions: int
+    selector: RouteStormTargetSelector
+    geometry: RouteStormGeometry
+    cycle: RouteStormCyclePolicy
+    observation: RouteStormObservationPolicy
+    heavy_setup: RouteStormHeavySetup
+    attributes: RouteStormAttributeShape
+    bounded_validation: bool = False
+
+    def __post_init__(self) -> None:
+        numeric_values = (
+            self.expected_established_sessions,
+            self.selector.peer_count_per_plane,
+            self.geometry.routes_per_peer,
+            self.geometry.samples_per_block,
+            self.cycle.cycles,
+            self.cycle.advertise_seconds,
+            self.cycle.withdraw_seconds,
+            self.observation.poll_interval_seconds,
+            self.observation.convergence_hard_timeout_seconds,
+            self.heavy_setup.hard_timeout_seconds,
+            self.heavy_setup.route_batch_rows,
+            self.observation.session_establish_timeout_seconds,
+            self.observation.restore_timeout_seconds,
+            self.observation.quiet_window_seconds,
+            self.observation.max_lookup_concurrency,
+            self.attributes.as_path_pool_size,
+            self.attributes.as_path_length,
+            self.attributes.as_set_length,
+            self.attributes.communities_per_route,
+            self.attributes.extended_communities_per_route,
+        )
+        if any(value <= 0 for value in numeric_values):
+            raise ValueError("BGP route-storm numeric parameters must be positive")
+        route_path_count = (
+            len(self.selector.selected_peer_rows) * self.geometry.routes_per_peer * 2
+        )
+        if route_path_count != 10_500:
+            raise ValueError(
+                "CICD-EBB-11 requires exactly 10,500 dual-stack route paths"
+            )
+
+    def to_step_params(self) -> dict[str, t.Any]:
+        """Lower typed route-storm intent to the established flat contract."""
+        params: dict[str, t.Any] = {
+            "ixia_interface_mimic_ibgp": self.selector.ixia_interface_mimic_ibgp,
+            "observer_peer_parent_prefix": self.selector.observer_peer_parent_prefix,
+            "prefix_pool_names": {
+                "ipv4": self.selector.ipv4_prefix_pool_name,
+                "ipv6": self.selector.ipv6_prefix_pool_name,
+            },
+            "selected_peer_rows": list(self.selector.selected_peer_rows),
+        }
+        if self.bounded_validation:
+            params["bounded_validation"] = True
+        params.update(
+            {
+                "expected_established_sessions": self.expected_established_sessions,
+                "peer_count_per_plane": self.selector.peer_count_per_plane,
+                "routes_per_peer": self.geometry.routes_per_peer,
+                "samples_per_block": self.geometry.samples_per_block,
+                "cycles": self.cycle.cycles,
+                "advertise_seconds": self.cycle.advertise_seconds,
+                "withdraw_seconds": self.cycle.withdraw_seconds,
+                "poll_interval_seconds": self.observation.poll_interval_seconds,
+                "convergence_hard_timeout_seconds": self.observation.convergence_hard_timeout_seconds,
+                "heavy_setup_hard_timeout_seconds": self.heavy_setup.hard_timeout_seconds,
+                "heavy_route_batch_rows": self.heavy_setup.route_batch_rows,
+                "session_establish_timeout_seconds": self.observation.session_establish_timeout_seconds,
+                "restore_timeout_seconds": self.observation.restore_timeout_seconds,
+                "quiet_window_seconds": self.observation.quiet_window_seconds,
+                "max_lookup_concurrency": self.observation.max_lookup_concurrency,
+                "as_path_pool_size": self.attributes.as_path_pool_size,
+                "as_path_length": self.attributes.as_path_length,
+                "as_set_length": self.attributes.as_set_length,
+                "communities_per_route": self.attributes.communities_per_route,
+                "extended_communities_per_route": self.attributes.extended_communities_per_route,
+            }
+        )
+        return params
+
+    @classmethod
+    def from_step_params(cls, params: t.Mapping[str, t.Any]) -> RouteStorm:
+        pool_names = t.cast(t.Mapping[str, str], params["prefix_pool_names"])
+        return cls(
+            expected_established_sessions=params["expected_established_sessions"],
+            selector=RouteStormTargetSelector(
+                ixia_interface_mimic_ibgp=params["ixia_interface_mimic_ibgp"],
+                observer_peer_parent_prefix=params["observer_peer_parent_prefix"],
+                ipv4_prefix_pool_name=pool_names["ipv4"],
+                ipv6_prefix_pool_name=pool_names["ipv6"],
+                peer_count_per_plane=params["peer_count_per_plane"],
+                selected_peer_rows=tuple(params["selected_peer_rows"]),
+            ),
+            geometry=RouteStormGeometry(
+                routes_per_peer=params["routes_per_peer"],
+                samples_per_block=params["samples_per_block"],
+            ),
+            cycle=RouteStormCyclePolicy(
+                cycles=params["cycles"],
+                advertise_seconds=params["advertise_seconds"],
+                withdraw_seconds=params["withdraw_seconds"],
+            ),
+            observation=RouteStormObservationPolicy(
+                poll_interval_seconds=params["poll_interval_seconds"],
+                convergence_hard_timeout_seconds=params[
+                    "convergence_hard_timeout_seconds"
+                ],
+                session_establish_timeout_seconds=params[
+                    "session_establish_timeout_seconds"
+                ],
+                restore_timeout_seconds=params["restore_timeout_seconds"],
+                quiet_window_seconds=params["quiet_window_seconds"],
+                max_lookup_concurrency=params["max_lookup_concurrency"],
+            ),
+            heavy_setup=RouteStormHeavySetup(
+                hard_timeout_seconds=params["heavy_setup_hard_timeout_seconds"],
+                route_batch_rows=params["heavy_route_batch_rows"],
+            ),
+            attributes=RouteStormAttributeShape(
+                as_path_pool_size=params["as_path_pool_size"],
+                as_path_length=params["as_path_length"],
+                as_set_length=params["as_set_length"],
+                communities_per_route=params["communities_per_route"],
+                extended_communities_per_route=params["extended_communities_per_route"],
+            ),
+            bounded_validation=params.get("bounded_validation", False),
+        )
