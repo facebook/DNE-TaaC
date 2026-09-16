@@ -19415,66 +19415,75 @@ TEST_QSFP_SERVICE_AND_AGENT_WARMBOOT_PLAYBOOK = Playbook(
     ],
 )
 
-TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK = Playbook(
-    name="test_bgpd_and_fsdb_restart",
-    stages=[
-        create_steps_stage(
-            steps=[
-                create_service_interruption_step(
-                    service=Service.BGP,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+
+def _create_repeated_concurrent_service_restart_playbook(
+    name: str,
+    services: list[Service],
+    convergence_services: list[Service],
+    expected_restarted_services: list[str],
+    iteration: int = 5,
+) -> Playbook:
+    stages = []
+    for iteration_index in range(iteration):
+        stages.extend(
+            [
+                create_steps_stage(
+                    steps=[
+                        create_service_interruption_step(
+                            service=service,
+                            trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                        )
+                        for service in services
+                    ],
+                    concurrent=True,
+                    stage_id=f"{name}_restart_{iteration_index + 1}",
                 ),
-                create_service_interruption_step(
-                    service=Service.FSDB,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                create_steps_stage(
+                    steps=[
+                        create_service_convergence_step(
+                            services=convergence_services,
+                        ),
+                    ],
+                    stage_id=f"{name}_convergence_{iteration_index + 1}",
                 ),
-                create_service_convergence_step(
-                    services=[Service.AGENT, Service.BGP, Service.FSDB]
-                ),
-            ],
-            iteration=5,
-        ),
-    ],
-    postchecks=[
-        create_service_restart_health_check(
-            DEFAULT_SERVICE_NAMES,
-            expected_restarted_services=["bgpd", "fsdb"],
-        ),
-    ],
+            ]
+        )
+    return Playbook(
+        name=name,
+        stages=stages,
+        postchecks=[
+            create_service_restart_health_check(
+                DEFAULT_SERVICE_NAMES,
+                expected_restarted_services=expected_restarted_services,
+            ),
+        ],
+    )
+
+
+TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK = (
+    _create_repeated_concurrent_service_restart_playbook(
+        name="test_bgpd_and_fsdb_restart",
+        services=[Service.BGP, Service.FSDB],
+        convergence_services=[Service.AGENT, Service.BGP, Service.FSDB],
+        expected_restarted_services=["bgpd", "fsdb"],
+    )
 )
 
 
-TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK = Playbook(
-    name="test_agent_and_fsdb_restart",
-    stages=[
-        create_steps_stage(
-            steps=[
-                create_service_interruption_step(
-                    service=Service.AGENT,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                ),
-                create_service_interruption_step(
-                    service=Service.FSDB,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                ),
-                create_service_convergence_step(services=[Service.AGENT, Service.FSDB]),
-            ],
-            iteration=5,
-        ),
-    ],
-    postchecks=[
-        create_service_restart_health_check(
-            DEFAULT_SERVICE_NAMES,
-            expected_restarted_services=[
-                "wedge_agent",
-                "fsdb",
-                "fboss_sw_agent",
-                "fboss_hw_agent@0",
-                "bgpd",
-                "openr",
-            ],
-        ),
-    ],
+TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK = (
+    _create_repeated_concurrent_service_restart_playbook(
+        name="test_agent_and_fsdb_restart",
+        services=[Service.AGENT, Service.FSDB],
+        convergence_services=[Service.AGENT, Service.FSDB],
+        expected_restarted_services=[
+            "wedge_agent",
+            "fsdb",
+            "fboss_sw_agent",
+            "fboss_hw_agent@0",
+            "bgpd",
+            "openr",
+        ],
+    )
 )
 
 
@@ -19540,39 +19549,20 @@ TEST_AGENT_AND_BGPD_RESTART_PLAYBOOK = Playbook(
     ],
 )
 
-TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK = Playbook(
-    name="test_agent_and_qsfp_service_restart",
-    stages=[
-        create_steps_stage(
-            steps=[
-                create_service_interruption_step(
-                    service=Service.AGENT,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                ),
-                create_service_interruption_step(
-                    service=Service.QSFP_SERVICE,
-                    trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                ),
-                create_service_convergence_step(
-                    services=[Service.AGENT, Service.QSFP_SERVICE]
-                ),
-            ],
-            iteration=5,
-        ),
-    ],
-    postchecks=[
-        create_service_restart_health_check(
-            DEFAULT_SERVICE_NAMES,
-            expected_restarted_services=[
-                "wedge_agent",
-                "qsfp_service",
-                "fboss_sw_agent",
-                "fboss_hw_agent@0",
-                "bgpd",
-                "openr",
-            ],
-        ),
-    ],
+TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK = (
+    _create_repeated_concurrent_service_restart_playbook(
+        name="test_agent_and_qsfp_service_restart",
+        services=[Service.AGENT, Service.QSFP_SERVICE],
+        convergence_services=[Service.AGENT, Service.QSFP_SERVICE],
+        expected_restarted_services=[
+            "wedge_agent",
+            "qsfp_service",
+            "fboss_sw_agent",
+            "fboss_hw_agent@0",
+            "bgpd",
+            "openr",
+        ],
+    )
 )
 
 TEST_FSDB_AND_QSFP_SERVICE_RESTART_PLAYBOOK = Playbook(
@@ -20401,6 +20391,76 @@ def create_fboss_hw_agent_0_coldboot_playbook(
             ),
         ],
     )
+
+
+def _repeat_single_stage_playbook(
+    playbook: Playbook,
+    iteration: int,
+) -> Playbook:
+    if len(playbook.stages) != 1:
+        raise ValueError(
+            f"Playbook '{playbook.name}' must have exactly one stage to repeat"
+        )
+    return playbook(
+        enabled=True,
+        stages=[playbook.stages[0](iteration=iteration)],
+    )
+
+
+def get_critical_services_single_box_playbooks(
+    iteration: int = 5,
+    ixia_rogue_ic_parent_network_v6: str = "",
+    ixia_rogue_ic_parent_network_v4: str = "",
+) -> list[Playbook]:
+    """Build the critical-services playbooks that require only one DUT."""
+    playbooks = [
+        create_agent_warmboot_playbook(iteration=iteration),
+        _repeat_single_stage_playbook(
+            TEST_FBOSS_SW_AGENT_WARMBOOT_PLAYBOOK(attribute_filters={}),
+            iteration,
+        ),
+        create_agent_warmboot_wedge_and_sw_agent_playbook(iteration=iteration),
+        create_bgpd_restart_playbook(
+            iteration=iteration,
+            ixia_rogue_ic_parent_network_v6=ixia_rogue_ic_parent_network_v6,
+            ixia_rogue_ic_parent_network_v4=ixia_rogue_ic_parent_network_v4,
+        ),
+        create_qsfp_service_restart_playbook(iteration=iteration),
+        create_fsdb_restart_playbook(iteration=iteration),
+        create_openr_restart_playbook(iteration=iteration),
+        create_agent_coldboot_playbook(iteration=iteration),
+        create_fboss_hw_agent_0_coldboot_playbook(iteration=iteration),
+        create_agent_crash_playbook(iteration=iteration),
+        _repeat_single_stage_playbook(
+            TEST_FBOSS_SW_AGENT_CRASH_PLAYBOOK,
+            iteration,
+        ),
+        _repeat_single_stage_playbook(
+            TEST_FBOSS_HW_AGENT_0_CRASH_PLAYBOOK,
+            iteration,
+        ),
+        create_bgpd_crash_playbook(iteration=iteration),
+        create_qsfp_service_crash_playbook(iteration=iteration),
+        create_fsdb_crash_playbook(iteration=iteration),
+        create_openr_crash_playbook(iteration=iteration),
+        create_qsfp_service_warmboot_and_agent_coldboot_playbook(
+            iteration=iteration,
+        ),
+        _repeat_single_stage_playbook(
+            TEST_QSFP_SERVICE_AND_AGENT_WARMBOOT_PLAYBOOK,
+            iteration,
+        ),
+        create_qsfp_service_warmboot_and_tx_flap_playbook(
+            iteration=iteration,
+        ),
+        create_qsfp_service_warmboot_and_reset_playbook(
+            iteration=iteration,
+        ),
+        TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK,
+        TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK,
+        TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK,
+    ]
+    return [playbook(enabled=True) for playbook in playbooks]
 
 
 def _nbr_flap_non_circuit_checks(

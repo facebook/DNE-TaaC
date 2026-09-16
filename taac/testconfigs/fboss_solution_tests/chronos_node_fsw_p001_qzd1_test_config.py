@@ -11,10 +11,15 @@ from `internal_test_configs.py` verbatim (inlined at extraction time).
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
 )
+from taac.test_as_a_config.types import Playbook, TestConfig
 
-CHRONOS_NODE_FSW_P001_QZD1_TEST_CONFIG = (
-    test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
-        test_config_name="CHRONOS_NODE_FSW_P001_QZD1",
+
+def create_chronos_node_fsw_p001_qzd1_test_config(
+    test_config_name: str,
+    playbooks: list[Playbook] | None = None,
+) -> TestConfig:
+    return test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name=test_config_name,
         device_name="fsw001.p001.f01.qzd1",
         local_mac_address="fe:59:c0:46:07:94",
         ixia_downlink_interface="eth8/16/1",
@@ -88,5 +93,10 @@ CHRONOS_NODE_FSW_P001_QZD1_TEST_CONFIG = (
         rogue_mac_entry_count=200,
         bgp_induced_ecmp_group_count=50,
         basset_pool="dne.test",
+        playbooks=playbooks,
     )
+
+
+CHRONOS_NODE_FSW_P001_QZD1_TEST_CONFIG = create_chronos_node_fsw_p001_qzd1_test_config(
+    test_config_name="CHRONOS_NODE_FSW_P001_QZD1",
 )
