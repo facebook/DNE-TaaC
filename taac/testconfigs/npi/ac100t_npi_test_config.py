@@ -20,8 +20,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - System reboot tests                  <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
     - Prefix profiling & overload tests    <-- implemented below
-    - Longevity tests                      (TODO -- constants staged;
-      gen_snake_test_config)
+    - Longevity tests                      <-- implemented below
     - Thrift hardening tests               (TODO -- constants staged;
       create_npi_thrift_hardening_test_config)
     - Interface flaps                      (TODO -- deferred)
@@ -372,6 +371,33 @@ AC100T_FE_QOS_TEST_CONFIG = test_config_qos_scheduling(
 
 
 # ===========================================================================
+# Longevity tests (LONG_001)
+# ===========================================================================
+# The 72-hour traffic bake runs on one 800G loopback pair. The focused
+# allowlist keeps shorter soaks and disruptive snake cases out of this package.
+AC100T_LONGEVITY_TEST_CONFIG = gen_snake_test_config(
+    name="AC100T_LONGEVITY_TEST_CONFIG",
+    hostname=ac100t.AC100T_SNAKE_DEVICE_NAME,
+    basset_pool=ac100t.AC100T_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{ac100t.AC100T_SNAKE_SOURCE_INTERFACE}",
+            destination=f"{ac100t.AC100T_SNAKE_DEVICE_NAME}:{ac100t.AC100T_SNAKE_DEST_INTERFACE}",
+            source_ip=ac100t.AC100T_SNAKE_SOURCE_IP,
+            destination_ip=ac100t.AC100T_SNAKE_DEST_IP,
+        ),
+    ],
+    line_rate=ac100t.AC100T_SNAKE_LINE_RATE,
+    traffic_item_name="AC100T_72HR_LONGEVITY_800G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=ac100t.AC100T_SNAKE_IMIX_WEIGHT,
+    ),
+    playbooks_to_include=["test_72hr_longevity"],
+)
+
+
+# ===========================================================================
 # System reboot tests (REBT_001..003)
 # ===========================================================================
 # Reuse the 800G single-DUT snake topology because the reboot behavior is
@@ -542,6 +568,7 @@ AC100T_TEST_CONFIGS = [
     AC100T_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
+    AC100T_LONGEVITY_TEST_CONFIG,
     AC100T_PLATFORM_HARDENING_TEST_CONFIG,
     AC100T_SYSTEM_REBOOT_TEST_CONFIG,
     AC100T_SNAKE_800G_TEST_CONFIG,

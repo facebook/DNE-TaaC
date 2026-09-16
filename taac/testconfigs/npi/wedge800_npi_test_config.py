@@ -509,13 +509,8 @@ W800_SYSTEM_REBOOT_TEST_CONFIG = gen_snake_test_config(
 # ===========================================================================
 # Longevity tests
 # ===========================================================================
-# Built from the snake/loopback standalone builder (gen_snake_test_config) --
-# the ONLY factory that emits the w800 test plan's test_72hr_longevity playbook
-# (via gen_snake_longevity_playbook). Cloned from MINIPACK3_STANDALONE_TEST_CONFIG.
-# The snake suite also includes shorter-duration longevity + link/service toggle
-# playbooks; prune via playbooks_to_skip when tuning for w800. Snake builds the
-# TestConfig object without a build-time netwhoami lookup (topology discovery is
-# deferred to runtime), so no stub bypass is needed.
+# The 72-hour traffic bake runs on one 800G loopback pair. The focused
+# allowlist keeps shorter soaks and disruptive snake cases out of this package.
 W800_LONGEVITY_TEST_CONFIG = gen_snake_test_config(
     name="W800_LONGEVITY_TEST_CONFIG",
     hostname=w800.W800_DEVICE_NAME,
@@ -528,6 +523,13 @@ W800_LONGEVITY_TEST_CONFIG = gen_snake_test_config(
             destination_ip=w800.W800_SNAKE_DEST_IP,
         ),
     ],
+    line_rate=w800.W800_SNAKE_LINE_RATE,
+    traffic_item_name="W800_72HR_LONGEVITY_800G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=w800.W800_SNAKE_IMIX_WEIGHT,
+    ),
+    playbooks_to_include=["test_72hr_longevity"],
 )
 
 
