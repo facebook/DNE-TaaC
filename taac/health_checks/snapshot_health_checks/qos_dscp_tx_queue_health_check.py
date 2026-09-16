@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import logging
 import typing as t
 
 from taac.constants import TestTopology
@@ -12,6 +13,13 @@ from taac.health_checks.constants import Snapshot
 from taac.utils.health_check_utils import get_fb303_client
 from taac.utils.qos_constants import ClassOfService
 from taac.health_check.health_check import types as hc_types
+
+# Module-level stdlib logger: unlike the injected ConsoleFileLogger (self.logger),
+# which sets propagate=False and writes only to its own console/RotatingFileHandler
+# (a container tempfile that dies with the run), this propagates to the root logger
+# the OSS runner configures — so its records reach the runner's --log-file and are
+# persisted. Used for the per-queue measurement so it survives the container.
+logger = logging.getLogger(__name__)
 
 
 COS_QUEUE_FB303_COUNTER_DESC = {
@@ -145,6 +153,43 @@ class QoSDscpTxQueueHealthCheck(
             return None
         return pre_value, post_value
 
+    def _log_queue_measurement(
+        self,
+        tx_queue_info: hc_types.TxQueueInfo,
+        label: str,
+        pre_counter: int,
+        post_counter: int,
+        adj_diff: int,
+        offset: int,
+        *,
+        target: bool,
+    ) -> None:
+        """Emit the measured pre/post per-queue byte counters at INFO.
+
+        The comparison logic keeps its numbers only in ``failure_reasons``, so a
+        PASS discarded them and the run recorded a bare verdict. Logging the
+        measurement here surfaces it on every run — pass or fail — into the run
+        log (and thus any ``--log-file``). ``target`` distinguishes a queue that
+        should carry the traffic from an exclusivity queue that should stay idle.
+        """
+        logger.info(
+            "QOS_DSCP_TX_QUEUE measurement %s:%s [%s] %s=%s  before=%d after=%d "
+            "raw_diff=%d adj_diff=%d offset=%d  expected %s%s %s",
+            tx_queue_info.hostname,
+            tx_queue_info.interface,
+            "target" if target else "should-stay-idle",
+            tx_queue_info.key_desc,
+            label,
+            pre_counter,
+            post_counter,
+            post_counter - pre_counter,
+            adj_diff,
+            offset,
+            "" if target else "NOT ",
+            tx_queue_info.comparison.name,
+            tx_queue_info.val,
+        )
+
     def _compare_cos(
         self,
         tx_queue_info: hc_types.TxQueueInfo,
@@ -172,6 +217,15 @@ class QoSDscpTxQueueHealthCheck(
                 else DEFAULT_QUEUE_OFFSET_BYTES
             )
             diff = max(0, diff - offset)
+            self._log_queue_measurement(
+                tx_queue_info,
+                str(cos),
+                pre_counter,
+                post_counter,
+                diff,
+                offset,
+                target=True,
+            )
             if not evaluate_comparison(
                 diff, tx_queue_info.comparison, tx_queue_info.val
             ):
@@ -204,6 +258,15 @@ class QoSDscpTxQueueHealthCheck(
                     else DEFAULT_QUEUE_OFFSET_BYTES
                 )
                 diff = max(0, diff - offset)
+                self._log_queue_measurement(
+                    tx_queue_info,
+                    str(cos),
+                    pre_counter,
+                    post_counter,
+                    diff,
+                    offset,
+                    target=False,
+                )
                 if evaluate_comparison(
                     diff, tx_queue_info.comparison, tx_queue_info.val
                 ):
@@ -243,6 +306,15 @@ class QoSDscpTxQueueHealthCheck(
                 else DEFAULT_QUEUE_OFFSET_BYTES
             )
             diff = max(0, diff - offset)
+            self._log_queue_measurement(
+                tx_queue_info,
+                desc,
+                pre_counter,
+                post_counter,
+                diff,
+                offset,
+                target=True,
+            )
             if not evaluate_comparison(
                 diff, tx_queue_info.comparison, tx_queue_info.val
             ):
@@ -282,6 +354,15 @@ class QoSDscpTxQueueHealthCheck(
                     else DEFAULT_QUEUE_OFFSET_BYTES
                 )
                 diff = max(0, diff - offset)
+                self._log_queue_measurement(
+                    tx_queue_info,
+                    desc,
+                    pre_counter,
+                    post_counter,
+                    diff,
+                    offset,
+                    target=False,
+                )
                 if evaluate_comparison(
                     diff, tx_queue_info.comparison, tx_queue_info.val
                 ):
