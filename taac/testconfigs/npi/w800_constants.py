@@ -330,3 +330,92 @@ W800_SPEED_FLIP_CHURN_CAGES = [
 # queue.
 W800_CONGESTION_PREFIX_COUNT_V6 = 100
 W800_CONGESTION_PREFIX_START_V6 = "2001:db8:0:1f00::"
+
+# ===========================================================================
+# Prefix profiling & overload tests
+# ===========================================================================
+# Consumed by w800_npi_test_config.py's W800_PREFIX_PROFILING_* configs, built
+# with create_device_test_configs() from the MP3N prefix-profiling module.
+#
+# Prefix profiling drives three route DISTRIBUTIONS into the DUT's FIB --
+# contiguous (sequential), hybrid (clustered) and non-contiguous (scattered) --
+# at four prefix lengths (/48, /64, /80, /128), then warmboots / restarts bgpd /
+# coldboots under that load and measures reconvergence.
+#
+# Each distribution needs its OWN IXIA port (they are separate BGP peers
+# advertising separate prefix pools), plus a downlink port that sources the
+# traffic, so this class needs FOUR IXIA ports -- one more than the
+# uplink/downlink/rogue trio the hardening classes use. Each spec is
+# (interface, network_v6, ixia_chassis_ip, ixia_port).
+# TODO(w800): real interfaces, chassis IP and IXIA port numbers once the DUT is
+# racked and cabled to the chassis.
+W800_PREFIX_PROFILING_IXIA_CHASSIS_IP: str = "2001:db8:0:ffff::1"
+W800_PREFIX_PROFILING_CONTIGUOUS_SPEC: tuple[str, str, str, str] = (
+    "eth1/9/1",
+    "2001:db8:0:2101",
+    W800_PREFIX_PROFILING_IXIA_CHASSIS_IP,
+    "1/1",
+)
+W800_PREFIX_PROFILING_HYBRID_SPEC: tuple[str, str, str, str] = (
+    "eth1/10/1",
+    "2001:db8:0:2102",
+    W800_PREFIX_PROFILING_IXIA_CHASSIS_IP,
+    "1/2",
+)
+W800_PREFIX_PROFILING_NON_CONTIGUOUS_SPEC: tuple[str, str, str, str] = (
+    "eth1/11/1",
+    "2001:db8:0:2103",
+    W800_PREFIX_PROFILING_IXIA_CHASSIS_IP,
+    "1/3",
+)
+W800_PREFIX_PROFILING_DOWNLINK_SPEC: tuple[str, str, str, str] = (
+    "eth1/12/1",
+    "2001:db8:0:2104",
+    W800_PREFIX_PROFILING_IXIA_CHASSIS_IP,
+    "1/4",
+)
+
+# BGP policy names the prefix-profiling peer attaches to. Separate from the
+# hardening route-maps: prefix profiling advertises its own prefix pools and
+# must not be filtered by the production ingress policy.
+# TODO(w800): real policy names on the DUT.
+W800_PREFIX_PROFILING_INGRESS_POLICY: str = "TODO_W800_PREFIX_PROFILING_IN"
+W800_PREFIX_PROFILING_EGRESS_POLICY: str = "TODO_W800_PREFIX_PROFILING_OUT"
+W800_PREFIX_PROFILING_PATCHER_SUFFIX: str = "w800_ixia_prefix_profiling"
+
+# Per-hardware route scale: prefix length -> (prefix_count, multiplier). This is
+# the ONLY hardware-specific part of a prefix profile -- the fixed-prefix /
+# random-mask / prefix-step patterns that define each distribution are shared
+# and inherited from the MP3N baseline.
+#
+# Seeded from the MP3N/RTSW baseline so the configs build and are runnable
+# shape-wise before the hardware exists.
+# TODO(w800): retune all three tables against real W800 FIB headroom -- these
+# numbers are what the test is actually measuring, so they matter more than any
+# other placeholder in this file.
+W800_PREFIX_PROFILING_CONTIGUOUS_SCALE: dict[int, tuple[int, int]] = {
+    48: (74000, 1),
+    64: (74000, 1),
+    80: (74000, 1),
+    128: (15000, 1),
+}
+W800_PREFIX_PROFILING_HYBRID_SCALE: dict[int, tuple[int, int]] = {
+    48: (1000, 74),
+    64: (1000, 74),
+    80: (1000, 74),
+    128: (202, 74),
+}
+W800_PREFIX_PROFILING_NON_CONTIGUOUS_SCALE: dict[int, tuple[int, int]] = {
+    48: (1, 40000),
+    64: (1, 40000),
+    80: (1, 40000),
+    128: (1, 1000),
+}
+
+# PREFIX_LIMIT_CHECK ceiling per distribution: total routes + 100 headroom.
+# Must be kept consistent with the scale tables above.
+W800_PREFIX_PROFILING_LIMITS: dict[str, int] = {
+    "contiguous": 74100,
+    "hybrid": 74100,
+    "non_contiguous": 40100,
+}

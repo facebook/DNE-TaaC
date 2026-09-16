@@ -49,7 +49,7 @@ Network Groups (3 distribution types):
 # =============================================================================
 import json
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Dict, List
 
@@ -406,6 +406,111 @@ NON_CONTIGUOUS_PREFIX_CONFIGS: dict[int, PrefixMaskConfig] = {
         multiplier=1000,
     ),
 }
+# Total route counts + 100 buffer for PREFIX_LIMIT_CHECK
+DISTRIBUTION_PREFIX_LIMITS: Dict[str, int] = {
+    DIST_CONTIGUOUS: 74100,  # 74000 + 100 buffer
+    DIST_HYBRID: 74100,  # 74000 + 100 buffer
+    DIST_NON_CONTIGUOUS: 40100,  # 40000 + 100 buffer
+}
+
+
+# -----------------------------------------------------------------------------
+# 3.3 Per-hardware prefix profile
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class PrefixProfilingProfile:
+    """The prefix scale a single hardware platform is profiled at.
+
+    Prefix counts, multipliers and the resulting FIB limits are properties of
+    the DUT's silicon, not of the test, so every generator below takes one of
+    these rather than reading the module-level MP3N dictionaries. A new
+    platform supplies its own profile instead of editing shared globals.
+    """
+
+    contiguous: dict[int, PrefixMaskConfig]
+    hybrid: dict[int, PrefixMaskConfig]
+    non_contiguous: dict[int, PrefixMaskConfig]
+    # Per-distribution PREFIX_LIMIT_CHECK ceiling: total routes + headroom.
+    prefix_limits: Dict[str, int]
+
+    def configs_for(self, distribution: str) -> dict[int, PrefixMaskConfig]:
+        """Prefix configs keyed by prefix length for one distribution type."""
+        return {
+            DIST_CONTIGUOUS: self.contiguous,
+            DIST_HYBRID: self.hybrid,
+            DIST_NON_CONTIGUOUS: self.non_contiguous,
+        }.get(distribution, self.contiguous)
+
+    def mask_config(self, prefix_length: int, distribution: str) -> PrefixMaskConfig:
+        """One prefix config, falling back to the /64 entry."""
+        configs = self.configs_for(distribution)
+        return configs.get(prefix_length, configs[DEFAULT_PREFIX_LENGTH])
+
+    def prefix_limit(self, distribution: str) -> int:
+        return self.prefix_limits[distribution]
+
+
+# The MP3N/RTSW scale this module was originally written against. It stays the
+# default for every generator so existing callers are unaffected.
+MP3N_PREFIX_PROFILE: PrefixProfilingProfile = PrefixProfilingProfile(
+    contiguous=CONTIGUOUS_PREFIX_CONFIGS,
+    hybrid=HYBRID_PREFIX_CONFIGS,
+    non_contiguous=NON_CONTIGUOUS_PREFIX_CONFIGS,
+    prefix_limits=DISTRIBUTION_PREFIX_LIMITS,
+)
+
+
+def build_prefix_profiling_profile(
+    contiguous_scale: dict[int, tuple[int, int]],
+    hybrid_scale: dict[int, tuple[int, int]],
+    non_contiguous_scale: dict[int, tuple[int, int]],
+    prefix_limits: Dict[str, int],
+    baseline: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+) -> PrefixProfilingProfile:
+    """Build a platform profile from just its scale numbers.
+
+    Only ``prefix_count`` and ``multiplier`` vary by hardware -- how many routes
+    the DUT's FIB is being pushed to. The pattern fields (``fixed_prefix``,
+    ``random_mask``, ``prefix_step``, ``seed``) describe what "contiguous" /
+    "hybrid" / "non-contiguous" MEAN and are identical everywhere, so they are
+    inherited from ``baseline`` rather than restated per platform.
+
+    Each ``*_scale`` maps prefix length -> ``(prefix_count, multiplier)`` and
+    must cover every prefix length the baseline defines.
+
+    Construct a ``PrefixProfilingProfile`` directly instead if a platform ever
+    needs different patterns, not just different counts.
+    """
+
+    def _scaled(
+        base: dict[int, PrefixMaskConfig],
+        scale: dict[int, tuple[int, int]],
+    ) -> dict[int, PrefixMaskConfig]:
+        missing = sorted(set(base) - set(scale))
+        if missing:
+            raise ValueError(f"prefix scale is missing prefix lengths: {missing}")
+        return {
+            length: replace(
+                mask, prefix_count=scale[length][0], multiplier=scale[length][1]
+            )
+            for length, mask in base.items()
+        }
+
+    return PrefixProfilingProfile(
+        contiguous=_scaled(baseline.contiguous, contiguous_scale),
+        hybrid=_scaled(baseline.hybrid, hybrid_scale),
+        non_contiguous=_scaled(baseline.non_contiguous, non_contiguous_scale),
+        prefix_limits=prefix_limits,
+    )
+
+
+# Network-group index per distribution. Wiring, not hardware scale, so this is
+# NOT part of PrefixProfilingProfile.
+DISTRIBUTION_NETWORK_GROUP_INDEX: Dict[str, int] = {
+    DIST_CONTIGUOUS: 0,
+    DIST_HYBRID: 1,
+    DIST_NON_CONTIGUOUS: 2,
+}
 
 
 # =============================================================================
@@ -419,15 +524,10 @@ NON_CONTIGUOUS_PREFIX_CONFIGS: dict[int, PrefixMaskConfig] = {
 def get_prefix_mask_config(
     prefix_length: int,
     distribution: str,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> PrefixMaskConfig:
     """Get PrefixMaskConfig for a given prefix length and distribution type."""
-    config_map = {
-        DIST_CONTIGUOUS: CONTIGUOUS_PREFIX_CONFIGS,
-        DIST_HYBRID: HYBRID_PREFIX_CONFIGS,
-        DIST_NON_CONTIGUOUS: NON_CONTIGUOUS_PREFIX_CONFIGS,
-    }
-    configs = config_map.get(distribution, CONTIGUOUS_PREFIX_CONFIGS)
-    return configs.get(prefix_length, configs[64])
+    return profile.mask_config(prefix_length, distribution)
 
 
 # -----------------------------------------------------------------------------
@@ -441,9 +541,10 @@ def create_route_scale(
     multiplier: int | None = None,
     starting_prefix: str | None = None,
     bgp_communities: List[str] | None = None,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> taac_types.RouteScaleSpec:
     """Create a RouteScaleSpec with the specified prefix length and distribution."""
-    mask_config = get_prefix_mask_config(prefix_length, distribution)
+    mask_config = get_prefix_mask_config(prefix_length, distribution, profile)
 
     if prefix_count is None:
         prefix_count = mask_config.prefix_count
@@ -488,6 +589,7 @@ def create_route_scale(
 def get_enabled_route_scales(
     enabled_groups: List[int] | None = None,
     prefix_length: int | None = None,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> List[taac_types.RouteScaleSpec]:
     """Get the list of enabled RouteScaleSpec based on enabled network groups."""
     if enabled_groups is None:
@@ -502,7 +604,7 @@ def get_enabled_route_scales(
     }
 
     return [
-        create_route_scale(prefix_length, index_to_dist[idx], idx)
+        create_route_scale(prefix_length, index_to_dist[idx], idx, profile=profile)
         for idx in enabled_groups
         if idx in index_to_dist
     ]
@@ -516,6 +618,7 @@ def create_uplink_contiguous_device_group(
     ixia_ip: str = PREFIX_STRESSER_CONTIGUOUS_IXIA_IP,
     gateway_ip: str = PREFIX_STRESSER_CONTIGUOUS_GATEWAY_IP,
     remote_as: int = REMOTE_AS_4BYTE,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> taac_types.DeviceGroupConfig:
     """Create Device Group for Contiguous prefix distribution."""
     if prefix_length is None:
@@ -543,7 +646,9 @@ def create_uplink_contiguous_device_group(
                 ixia_types.BgpCapability.IpV6Unicast,
                 ixia_types.BgpCapability.Ipv6UnicastAddPath,
             ],
-            route_scales=[create_route_scale(prefix_length, DIST_CONTIGUOUS, 0)],
+            route_scales=[
+                create_route_scale(prefix_length, DIST_CONTIGUOUS, 0, profile=profile)
+            ],
         ),
     )
 
@@ -553,6 +658,7 @@ def create_uplink_hybrid_device_group(
     ixia_ip: str = PREFIX_STRESSER_HYBRID_IXIA_IP,
     gateway_ip: str = PREFIX_STRESSER_HYBRID_GATEWAY_IP,
     remote_as: int = REMOTE_AS_4BYTE,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> taac_types.DeviceGroupConfig:
     """Create Device Group for Hybrid prefix distribution."""
     if prefix_length is None:
@@ -580,7 +686,9 @@ def create_uplink_hybrid_device_group(
                 ixia_types.BgpCapability.IpV6Unicast,
                 ixia_types.BgpCapability.Ipv6UnicastAddPath,
             ],
-            route_scales=[create_route_scale(prefix_length, DIST_HYBRID, 0)],
+            route_scales=[
+                create_route_scale(prefix_length, DIST_HYBRID, 0, profile=profile)
+            ],
         ),
     )
 
@@ -590,6 +698,7 @@ def create_uplink_non_contiguous_device_group(
     ixia_ip: str = PREFIX_STRESSER_NON_CONTIGUOUS_IXIA_IP,
     gateway_ip: str = PREFIX_STRESSER_NON_CONTIGUOUS_GATEWAY_IP,
     remote_as: int = REMOTE_AS_4BYTE,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> taac_types.DeviceGroupConfig:
     """Create Device Group for Non-Contiguous prefix distribution."""
     if prefix_length is None:
@@ -617,7 +726,11 @@ def create_uplink_non_contiguous_device_group(
                 ixia_types.BgpCapability.IpV6Unicast,
                 ixia_types.BgpCapability.Ipv6UnicastAddPath,
             ],
-            route_scales=[create_route_scale(prefix_length, DIST_NON_CONTIGUOUS, 0)],
+            route_scales=[
+                create_route_scale(
+                    prefix_length, DIST_NON_CONTIGUOUS, 0, profile=profile
+                )
+            ],
         ),
     )
 
@@ -908,12 +1021,7 @@ ENDPOINT: taac_types.Endpoint = taac_types.Endpoint(
 # -----------------------------------------------------------------------------
 # 8.0 Prefix Count Limits per Distribution Type (for health checks)
 # -----------------------------------------------------------------------------
-# Total route counts + 100 buffer for PREFIX_LIMIT_CHECK
-DISTRIBUTION_PREFIX_LIMITS: Dict[str, int] = {
-    DIST_CONTIGUOUS: 74100,  # 74000 + 100 buffer
-    DIST_HYBRID: 74100,  # 74000 + 100 buffer
-    DIST_NON_CONTIGUOUS: 40100,  # 40000 + 100 buffer
-}
+# Moved to SECTION 3.3 so PrefixProfilingProfile can reference it.
 
 
 # -----------------------------------------------------------------------------
@@ -968,6 +1076,7 @@ def create_warmboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for Warmboot testing.
 
@@ -1000,7 +1109,7 @@ def create_warmboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=profile.prefix_limit(distribution_type),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1118,6 +1227,7 @@ def create_bgp_restart_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for BGP Restart testing.
 
@@ -1150,7 +1260,7 @@ def create_bgp_restart_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=profile.prefix_limit(distribution_type),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1268,6 +1378,7 @@ def create_coldboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for Coldboot testing.
 
@@ -1301,7 +1412,7 @@ def create_coldboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=DISTRIBUTION_PREFIX_LIMITS[distribution_type],
+            prefix_limit=profile.prefix_limit(distribution_type),
             bgp_convergence_threshold=300,
         )
         + [
@@ -1426,11 +1537,9 @@ def create_coldboot_playbook(
 # -----------------------------------------------------------------------------
 # 9.1 Distribution Config Mapping
 # -----------------------------------------------------------------------------
-DISTRIBUTION_CONFIG_MAP: dict[str, tuple[dict[int, PrefixMaskConfig], int]] = {
-    DIST_CONTIGUOUS: (CONTIGUOUS_PREFIX_CONFIGS, 0),
-    DIST_HYBRID: (HYBRID_PREFIX_CONFIGS, 1),
-    DIST_NON_CONTIGUOUS: (NON_CONTIGUOUS_PREFIX_CONFIGS, 2),
-}
+# Superseded by PrefixProfilingProfile.configs_for() +
+# DISTRIBUTION_NETWORK_GROUP_INDEX (SECTION 3.3): the config dicts are now a
+# per-hardware input rather than a module global.
 
 DISTRIBUTION_SETUP_MAP: dict[
     str,
@@ -1466,13 +1575,15 @@ def create_warmboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create warmboot playbooks for a distribution type."""
     if prefix_lengths is None:
         prefix_lengths = SUPPORTED_PREFIX_LENGTHS
     if distribution_interface_map is None:
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
-    config_dict, ng_index = DISTRIBUTION_CONFIG_MAP[distribution_type]
+    config_dict = profile.configs_for(distribution_type)
+    ng_index = DISTRIBUTION_NETWORK_GROUP_INDEX[distribution_type]
     return [
         create_warmboot_playbook(
             distribution_type,
@@ -1482,6 +1593,7 @@ def create_warmboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
         for pl in prefix_lengths
     ]
@@ -1493,13 +1605,15 @@ def create_bgp_restart_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create BGP restart playbooks for a distribution type."""
     if prefix_lengths is None:
         prefix_lengths = SUPPORTED_PREFIX_LENGTHS
     if distribution_interface_map is None:
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
-    config_dict, ng_index = DISTRIBUTION_CONFIG_MAP[distribution_type]
+    config_dict = profile.configs_for(distribution_type)
+    ng_index = DISTRIBUTION_NETWORK_GROUP_INDEX[distribution_type]
     return [
         create_bgp_restart_playbook(
             distribution_type,
@@ -1509,6 +1623,7 @@ def create_bgp_restart_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
         for pl in prefix_lengths
     ]
@@ -1520,13 +1635,15 @@ def create_coldboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create coldboot playbooks for a distribution type."""
     if prefix_lengths is None:
         prefix_lengths = SUPPORTED_PREFIX_LENGTHS
     if distribution_interface_map is None:
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
-    config_dict, ng_index = DISTRIBUTION_CONFIG_MAP[distribution_type]
+    config_dict = profile.configs_for(distribution_type)
+    ng_index = DISTRIBUTION_NETWORK_GROUP_INDEX[distribution_type]
     return [
         create_coldboot_playbook(
             distribution_type,
@@ -1536,6 +1653,7 @@ def create_coldboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
         for pl in prefix_lengths
     ]
@@ -1547,6 +1665,7 @@ def create_all_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create all playbooks (warmboot, BGP restart, coldboot) for a distribution."""
     if distribution_interface_map is None:
@@ -1558,6 +1677,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
         + create_bgp_restart_playbooks_for_distribution(
             distribution_type,
@@ -1565,6 +1685,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
         + create_coldboot_playbooks_for_distribution(
             distribution_type,
@@ -1572,6 +1693,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             convergence_duration=convergence_duration,
+            profile=profile,
         )
     )
 
@@ -1596,6 +1718,7 @@ def create_test_config_for_distribution(
     config_name_prefix: str = "MP3N_PREFIX_PROFILING_SCALE",
     basset_pool: str | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> TestConfig:
     """Create a TestConfig for a distribution type."""
     if prefix_lengths is None:
@@ -1677,6 +1800,7 @@ def create_test_config_for_distribution(
                 device_name=device_name,
                 distribution_interface_map=distribution_interface_map,
                 convergence_duration=convergence_duration,
+                profile=profile,
             )
         ),
     )
@@ -1767,6 +1891,7 @@ def create_device_test_configs(
     config_name_prefix: str,
     basset_pool: str | None = None,
     convergence_duration: int = 300,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> tuple[TestConfig, TestConfig, TestConfig]:
     """Create all MP3N test configs for a device from interface specs.
 
@@ -1820,6 +1945,7 @@ def create_device_test_configs(
                     remote_as=remote_as,
                     tag_name=tag_names[dist],
                     enable=enable_map[dist],
+                    profile=profile,
                 )
             ],
         )
@@ -1906,6 +2032,7 @@ def create_device_test_configs(
                 device_name=device_name,
                 distribution_interface_map=interface_map,
                 convergence_duration=convergence_duration,
+                profile=profile,
             ),
         )
 
@@ -1923,6 +2050,7 @@ def _create_parameterized_device_group(
     remote_as: int,
     tag_name: str,
     enable: bool = True,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> taac_types.DeviceGroupConfig:
     """Create a parameterized DeviceGroupConfig for any device."""
     return taac_types.DeviceGroupConfig(
@@ -1947,7 +2075,9 @@ def _create_parameterized_device_group(
                 ixia_types.BgpCapability.IpV6Unicast,
                 ixia_types.BgpCapability.Ipv6UnicastAddPath,
             ],
-            route_scales=[create_route_scale(DEFAULT_PREFIX_LENGTH, dist, 0)],
+            route_scales=[
+                create_route_scale(DEFAULT_PREFIX_LENGTH, dist, 0, profile=profile)
+            ],
         ),
     )
 

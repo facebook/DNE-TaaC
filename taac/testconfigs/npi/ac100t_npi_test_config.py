@@ -19,6 +19,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - Critical services tests              <-- implemented below
     - System reboot tests                  <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
+    - Prefix profiling & overload tests    <-- implemented below
     - Longevity tests                      (TODO -- constants staged;
       gen_snake_test_config)
     - Thrift hardening tests               (TODO -- constants staged;
@@ -40,6 +41,10 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.playbooks.playbook_definitions import (
     get_critical_services_single_box_playbooks,
+)
+from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
+    build_prefix_profiling_profile,
+    create_device_test_configs,
 )
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
@@ -406,6 +411,52 @@ AC100T_SYSTEM_REBOOT_TEST_CONFIG = gen_snake_test_config(
 
 
 # ===========================================================================
+# Prefix profiling & overload tests
+# ===========================================================================
+# Three TestConfigs -- one per route distribution (contiguous / hybrid /
+# non-contiguous) -- from create_device_test_configs(). Each drives its
+# distribution into the DUT's FIB at /48, /64, /80 and /128, then warmboots,
+# restarts bgpd and coldboots under that load and measures reconvergence: 12
+# playbooks per config.
+#
+# The route scale is supplied as a per-hardware PrefixProfilingProfile rather
+# than read from the module's MP3N globals, so retuning AC100T is an edit to
+# ac100t_constants.py alone and cannot perturb the RTSW/GTSW configs that share
+# the factory. Only the counts and multipliers are hardware-specific; the
+# fixed-prefix / random-mask / prefix-step patterns that DEFINE each
+# distribution are inherited from the MP3N baseline.
+#
+# This class needs FOUR IXIA ports -- one per distribution plus a traffic
+# downlink -- rather than the uplink/downlink/rogue trio the hardening classes
+# share, so it does not reuse _AC100T_HARDENING_PARAMS.
+(
+    AC100T_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
+    AC100T_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
+    AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
+) = create_device_test_configs(
+    device_name=ac100t.AC100T_CPU_QUEUE_DUT,
+    remote_as=ac100t.AC100T_REMOTE_UPLINK_AS_4BYTE,
+    peer_group=ac100t.AC100T_PEERGROUP_UPLINK_MIMIC_V6,
+    contiguous=ac100t.AC100T_PREFIX_PROFILING_CONTIGUOUS_SPEC,
+    hybrid=ac100t.AC100T_PREFIX_PROFILING_HYBRID_SPEC,
+    non_contiguous=ac100t.AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_SPEC,
+    downlink=ac100t.AC100T_PREFIX_PROFILING_DOWNLINK_SPEC,
+    mac_address=ac100t.AC100T_CPU_QUEUE_LOCAL_MAC_ADDRESS,
+    ingress_policy=ac100t.AC100T_PREFIX_PROFILING_INGRESS_POLICY,
+    egress_policy=ac100t.AC100T_PREFIX_PROFILING_EGRESS_POLICY,
+    patcher_suffix=ac100t.AC100T_PREFIX_PROFILING_PATCHER_SUFFIX,
+    config_name_prefix="AC100T_PREFIX_PROFILING",
+    basset_pool=ac100t.AC100T_BASSET_POOL,
+    profile=build_prefix_profiling_profile(
+        contiguous_scale=ac100t.AC100T_PREFIX_PROFILING_CONTIGUOUS_SCALE,
+        hybrid_scale=ac100t.AC100T_PREFIX_PROFILING_HYBRID_SCALE,
+        non_contiguous_scale=ac100t.AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_SCALE,
+        prefix_limits=ac100t.AC100T_PREFIX_PROFILING_LIMITS,
+    ),
+)
+
+
+# ===========================================================================
 # Snake tests
 # ===========================================================================
 # Built from the snake/loopback standalone builder (gen_snake_test_config),
@@ -488,6 +539,9 @@ AC100T_TEST_CONFIGS = [
     AC100T_CRITICAL_SERVICES_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     AC100T_FE_QOS_TEST_CONFIG,
+    AC100T_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
+    AC100T_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
+    AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
     AC100T_PLATFORM_HARDENING_TEST_CONFIG,
     AC100T_SYSTEM_REBOOT_TEST_CONFIG,
     AC100T_SNAKE_800G_TEST_CONFIG,

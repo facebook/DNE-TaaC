@@ -18,6 +18,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - Critical services tests              <-- implemented below
     - System reboot tests                  <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
+    - Prefix profiling & overload tests    <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
@@ -31,6 +32,10 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.playbooks.playbook_definitions import (
     get_critical_services_single_box_playbooks,
+)
+from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
+    build_prefix_profiling_profile,
+    create_device_test_configs,
 )
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
@@ -456,6 +461,52 @@ W800_SYSTEM_REBOOT_TEST_CONFIG = gen_snake_test_config(
 
 
 # ===========================================================================
+# Prefix profiling & overload tests
+# ===========================================================================
+# Three TestConfigs -- one per route distribution (contiguous / hybrid /
+# non-contiguous) -- from create_device_test_configs(). Each drives its
+# distribution into the DUT's FIB at /48, /64, /80 and /128, then warmboots,
+# restarts bgpd and coldboots under that load and measures reconvergence: 12
+# playbooks per config.
+#
+# The route scale is supplied as a per-hardware PrefixProfilingProfile rather
+# than read from the module's MP3N globals, so retuning W800 is an edit to
+# w800_constants.py alone and cannot perturb the RTSW/GTSW configs that share
+# the factory. Only the counts and multipliers are hardware-specific; the
+# fixed-prefix / random-mask / prefix-step patterns that DEFINE each
+# distribution are inherited from the MP3N baseline.
+#
+# This class needs FOUR IXIA ports -- one per distribution plus a traffic
+# downlink -- rather than the uplink/downlink/rogue trio the hardening classes
+# share, so it does not reuse _W800_HARDENING_PARAMS.
+(
+    W800_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
+    W800_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
+    W800_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
+) = create_device_test_configs(
+    device_name=w800.W800_RSW_DUT_DEVICE_NAME,
+    remote_as=w800.W800_REMOTE_UPLINK_AS_4BYTE,
+    peer_group=w800.W800_PEERGROUP_UPLINK_MIMIC_V6,
+    contiguous=w800.W800_PREFIX_PROFILING_CONTIGUOUS_SPEC,
+    hybrid=w800.W800_PREFIX_PROFILING_HYBRID_SPEC,
+    non_contiguous=w800.W800_PREFIX_PROFILING_NON_CONTIGUOUS_SPEC,
+    downlink=w800.W800_PREFIX_PROFILING_DOWNLINK_SPEC,
+    mac_address=w800.W800_LOCAL_MAC_ADDRESS,
+    ingress_policy=w800.W800_PREFIX_PROFILING_INGRESS_POLICY,
+    egress_policy=w800.W800_PREFIX_PROFILING_EGRESS_POLICY,
+    patcher_suffix=w800.W800_PREFIX_PROFILING_PATCHER_SUFFIX,
+    config_name_prefix="W800_PREFIX_PROFILING",
+    basset_pool=w800.W800_BASSET_POOL,
+    profile=build_prefix_profiling_profile(
+        contiguous_scale=w800.W800_PREFIX_PROFILING_CONTIGUOUS_SCALE,
+        hybrid_scale=w800.W800_PREFIX_PROFILING_HYBRID_SCALE,
+        non_contiguous_scale=w800.W800_PREFIX_PROFILING_NON_CONTIGUOUS_SCALE,
+        prefix_limits=w800.W800_PREFIX_PROFILING_LIMITS,
+    ),
+)
+
+
+# ===========================================================================
 # Longevity tests
 # ===========================================================================
 # Built from the snake/loopback standalone builder (gen_snake_test_config) --
@@ -644,6 +695,9 @@ W800_TEST_CONFIGS = [
     W800_BGP_HARDENING_TEST_CONFIG,
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     W800_FE_QOS_TEST_CONFIG,
+    W800_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
+    W800_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
+    W800_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
     W800_PLATFORM_HARDENING_TEST_CONFIG,
     W800_SYSTEM_REBOOT_TEST_CONFIG,
     W800_LONGEVITY_TEST_CONFIG,
