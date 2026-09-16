@@ -391,6 +391,15 @@ AC100T_STSW_FLAP_PORTS = [
     "eth1/6/1",
 ]
 
+# Interface-flap qualification uses the same DUT2-side inter-DUT links plus
+# their index-aligned far ends on DUT3 for the simultaneous DUT/NBR case.
+# TODO(ac100t): replace with the real DUT3-side ports once the topology is cabled.
+AC100T_INTERFACE_FLAP_NBR_DEVICE_NAME = AC100T_DUT3_DEVICE_NAME
+AC100T_INTERFACE_FLAP_NBR_PORTS = [
+    "eth1/5/1",
+    "eth1/6/1",
+]
+
 # ===========================================================================
 # Speed flip tests (subsume-churn / SPD_041)
 # ===========================================================================

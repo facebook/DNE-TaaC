@@ -292,6 +292,15 @@ W800_STSW_FLAP_PORTS = [
     "eth1/6/1",
 ]
 
+# Interface-flap qualification uses the same DUT-side uplinks plus their
+# index-aligned far ends on the peer RSW for the simultaneous DUT/NBR case.
+# TODO(w800): replace with the real peer-side ports once the topology is cabled.
+W800_INTERFACE_FLAP_NBR_DEVICE_NAME = W800_RSW_PEER_DEVICE_NAME
+W800_INTERFACE_FLAP_NBR_PORTS = [
+    "eth1/5/1",
+    "eth1/6/1",
+]
+
 # ===========================================================================
 # Speed flip tests (subsume-churn / SPD_041)
 # ===========================================================================

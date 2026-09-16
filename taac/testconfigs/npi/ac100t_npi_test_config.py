@@ -23,7 +23,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - Longevity tests                      <-- implemented below
     - Thrift hardening tests               (TODO -- constants staged;
       create_npi_thrift_hardening_test_config)
-    - Interface flaps                      (TODO -- deferred)
+    - Interface flaps                      <-- implemented below
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
       OSS; feasible subset reuses existing speed_flip_test_configs.py)
@@ -50,6 +50,9 @@ from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conv
 )
 from taac.testconfigs.fboss_solution_tests.qos_scheduling_test_config import (
     test_config_qos_scheduling,
+)
+from taac.testconfigs.fboss_solution_tests.test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor import (
+    test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor,
 )
 from taac.testconfigs.npi import (  # oss-rewrite-touch
     ac100t_constants as ac100t,
@@ -336,6 +339,35 @@ AC100T_CRITICAL_SERVICES_TEST_CONFIG = test_config_for_bgp_and_fboss_platform_ha
 
 
 # ===========================================================================
+# Interface flap tests (INTF_001..006)
+# ===========================================================================
+AC100T_INTERFACE_FLAP_TEST_CONFIG = (
+    test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name="AC100T_INTERFACE_FLAP_TEST_CONFIG",
+        **{
+            key: value
+            for key, value in _AC100T_HARDENING_PARAMS.items()
+            if key != "peergroup_rogue_mimic_v4"
+        },
+        ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
+        uplink_interfaces_to_flap=ac100t.AC100T_STSW_FLAP_PORTS,
+        nbr_device_name=ac100t.AC100T_INTERFACE_FLAP_NBR_DEVICE_NAME,
+        nbr_interfaces_to_flap=ac100t.AC100T_INTERFACE_FLAP_NBR_PORTS,
+        uplink_flap_iterations=50,
+        uplink_flap_interval_s=8,
+        playbooks_selected=[
+            "test_flap_1_uplink_port",
+            "test_flap_half_uplink_ports",
+            "test_flap_n_minus_1_uplink_ports",
+            "test_flap_half_uplinks_dut_and_half_nbr",
+            "test_flap_n_minus_1_uplink_ports_qsfp_low_power",
+            "test_flap_n_minus_1_uplink_ports_qsfp_tx_disable",
+        ],
+    )
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -563,6 +595,7 @@ AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
     AC100T_CRITICAL_SERVICES_TEST_CONFIG,
+    AC100T_INTERFACE_FLAP_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     AC100T_FE_QOS_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,

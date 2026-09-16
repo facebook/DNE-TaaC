@@ -19,7 +19,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - System reboot tests                  <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
     - Prefix profiling & overload tests    <-- implemented below
-    - Interface flaps                      (TODO -- deferred)
+    - Interface flaps                      <-- implemented below
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
       OSS; feasible subset reuses existing speed_flip_test_configs.py)
@@ -46,6 +46,9 @@ from taac.testconfigs.fboss_solution_tests.qos_scheduling_test_config import (
 from taac.testconfigs.fboss_solution_tests.speed_flip_test_configs import (
     build_subsume_churn_test_config,
     Circuit,
+)
+from taac.testconfigs.fboss_solution_tests.test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor import (
+    test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor,
 )
 from taac.testconfigs.npi import (  # oss-rewrite-touch
     w800_constants as w800,
@@ -387,6 +390,35 @@ W800_CRITICAL_SERVICES_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Interface flap tests (INTF_001..006)
+# ===========================================================================
+W800_INTERFACE_FLAP_TEST_CONFIG = (
+    test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name="W800_INTERFACE_FLAP_TEST_CONFIG",
+        **{
+            key: value
+            for key, value in _W800_HARDENING_PARAMS.items()
+            if key != "peergroup_rogue_mimic_v4"
+        },
+        ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
+        uplink_interfaces_to_flap=w800.W800_STSW_FLAP_PORTS,
+        nbr_device_name=w800.W800_INTERFACE_FLAP_NBR_DEVICE_NAME,
+        nbr_interfaces_to_flap=w800.W800_INTERFACE_FLAP_NBR_PORTS,
+        uplink_flap_iterations=50,
+        uplink_flap_interval_s=8,
+        playbooks_selected=[
+            "test_flap_1_uplink_port",
+            "test_flap_half_uplink_ports",
+            "test_flap_n_minus_1_uplink_ports",
+            "test_flap_half_uplinks_dut_and_half_nbr",
+            "test_flap_n_minus_1_uplink_ports_qsfp_low_power",
+            "test_flap_n_minus_1_uplink_ports_qsfp_tx_disable",
+        ],
+    )
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -694,6 +726,7 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
 W800_TEST_CONFIGS = [
     W800_CPU_QUEUE_TEST_CONFIG,
     W800_CRITICAL_SERVICES_TEST_CONFIG,
+    W800_INTERFACE_FLAP_TEST_CONFIG,
     W800_BGP_HARDENING_TEST_CONFIG,
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     W800_FE_QOS_TEST_CONFIG,
@@ -713,7 +746,6 @@ W800_TEST_CONFIGS = [
 # ===========================================================================
 # Deferred classes (TODO -- see w800 test plan)
 # ===========================================================================
-# Interface flaps  -> W800_INTERFACE_FLAP_TEST_CONFIG   (TODO: bind next)
 # PTP Test         -> W800_PTP_TEST_CONFIG              (TODO: sheet rows are
 #                     all 'todo' -- no playbook defined yet)
 # Speed flip       -> reboot / coldboot / 400G-200G->800G variants (TODO:
