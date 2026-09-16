@@ -32,6 +32,7 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.playbooks.playbook_definitions import (
     get_critical_services_single_box_playbooks,
+    get_drain_playbooks,
 )
 from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
     build_prefix_profiling_profile,
@@ -419,6 +420,17 @@ W800_INTERFACE_FLAP_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Drain tests (DRAN_003..004)
+# ===========================================================================
+W800_DRAIN_TEST_CONFIG = test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+    test_config_name="W800_DRAIN_TEST_CONFIG",
+    **_W800_HARDENING_PARAMS,
+    ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
+    playbooks=get_drain_playbooks(iteration=25),
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -726,6 +738,7 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
 W800_TEST_CONFIGS = [
     W800_CPU_QUEUE_TEST_CONFIG,
     W800_CRITICAL_SERVICES_TEST_CONFIG,
+    W800_DRAIN_TEST_CONFIG,
     W800_INTERFACE_FLAP_TEST_CONFIG,
     W800_BGP_HARDENING_TEST_CONFIG,
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,

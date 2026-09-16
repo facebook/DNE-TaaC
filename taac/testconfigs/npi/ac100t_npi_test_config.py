@@ -40,6 +40,7 @@ registration pattern).
 from ixia.ixia import types as ixia_types
 from taac.playbooks.playbook_definitions import (
     get_critical_services_single_box_playbooks,
+    get_drain_playbooks,
 )
 from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
     build_prefix_profiling_profile,
@@ -368,6 +369,17 @@ AC100T_INTERFACE_FLAP_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Drain tests (DRAN_003..004)
+# ===========================================================================
+AC100T_DRAIN_TEST_CONFIG = test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+    test_config_name="AC100T_DRAIN_TEST_CONFIG",
+    **_AC100T_HARDENING_PARAMS,
+    ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
+    playbooks=get_drain_playbooks(iteration=25),
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -595,6 +607,7 @@ AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
     AC100T_CRITICAL_SERVICES_TEST_CONFIG,
+    AC100T_DRAIN_TEST_CONFIG,
     AC100T_INTERFACE_FLAP_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     AC100T_FE_QOS_TEST_CONFIG,

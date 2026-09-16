@@ -18986,6 +18986,20 @@ TEST_DEVICE_DRAIN_PLAYBOOK = Playbook(
 )
 
 
+def get_drain_playbooks(iteration: int = 25) -> list[Playbook]:
+    """Build the device and interface drain playbooks for one explicit DUT."""
+    return [
+        playbook(
+            attribute_filters={},
+            stages=[playbook.stages[0](iteration=iteration)],
+        )
+        for playbook in (
+            TEST_DEVICE_DRAIN_PLAYBOOK,
+            TEST_INTERFACE_DRAIN_PLAYBOOK,
+        )
+    ]
+
+
 TEST_DEVICE_DRAIN_AND_REMOTE_INTERFACE_DRAIN_PLAYBOOK = Playbook(
     name="test_device_drain_and_remote_interface_drain",
     attribute_filters={"role": ["FDSW"]},
