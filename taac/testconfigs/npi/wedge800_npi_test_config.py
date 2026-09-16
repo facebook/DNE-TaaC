@@ -16,6 +16,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - L2/NDP/ARP hardening tests           <-- implemented below
     - Platform hardening tests             <-- implemented below
     - Critical services tests              <-- implemented below
+    - System reboot tests                  <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
@@ -416,6 +417,45 @@ W800_FE_QOS_TEST_CONFIG = test_config_qos_scheduling(
 
 
 # ===========================================================================
+# System reboot tests (REBT_001..003)
+# ===========================================================================
+# Reuse the 800G single-DUT snake topology because the reboot behavior is
+# independent of port speed. This dedicated package runs the three system,
+# BMC, and microserver reboot cases five times as required by the test plan.
+W800_SYSTEM_REBOOT_TEST_CONFIG = gen_snake_test_config(
+    name="W800_SYSTEM_REBOOT_TEST_CONFIG",
+    hostname=w800.W800_DEVICE_NAME,
+    basset_pool=w800.W800_STANDALONE_BASSET_POOL,
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source=f"{w800.W800_DEVICE_NAME}:{source_interface}",
+            destination=f"{w800.W800_DEVICE_NAME}:{destination_interface}",
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+        )
+        for (
+            source_interface,
+            destination_interface,
+            source_ip,
+            destination_ip,
+        ) in w800.W800_SNAKE_800G_LOOPS
+    ],
+    line_rate=w800.W800_SNAKE_LINE_RATE,
+    traffic_item_name="W800_SYSTEM_REBOOT_800G_IMIX",
+    frame_size_settings=ixia_types.FrameSize(
+        type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+        imix_weight=w800.W800_SNAKE_IMIX_WEIGHT,
+    ),
+    iteration=5,
+    playbooks_to_include=[
+        "test_snake_system_reboot_bmc_full",
+        "test_snake_system_reboot_bmc_microserver",
+        "test_snake_system_reboot_microserver",
+    ],
+)
+
+
+# ===========================================================================
 # Longevity tests
 # ===========================================================================
 # Built from the snake/loopback standalone builder (gen_snake_test_config) --
@@ -605,6 +645,7 @@ W800_TEST_CONFIGS = [
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     W800_FE_QOS_TEST_CONFIG,
     W800_PLATFORM_HARDENING_TEST_CONFIG,
+    W800_SYSTEM_REBOOT_TEST_CONFIG,
     W800_LONGEVITY_TEST_CONFIG,
     W800_SNAKE_800G_TEST_CONFIG,
     W800_SNAKE_400G_TEST_CONFIG,
