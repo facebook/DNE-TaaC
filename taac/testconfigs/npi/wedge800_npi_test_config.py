@@ -15,6 +15,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - Snake tests                          <-- implemented below
     - L2/NDP/ARP hardening tests           <-- implemented below
     - Platform hardening tests             <-- implemented below
+    - Critical services tests              <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
     - Interface flaps                      (TODO -- deferred)
     - PTP tests                            (TODO -- deferred)
@@ -27,6 +28,9 @@ registration pattern).
 """
 
 from ixia.ixia import types as ixia_types
+from taac.playbooks.playbook_definitions import (
+    get_critical_services_single_box_playbooks,
+)
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
 )
@@ -356,6 +360,27 @@ W800_PLATFORM_HARDENING_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Critical services tests
+# ===========================================================================
+# The 23 single-box critical-services cases run on the RSW DUT with five
+# disruption cycles per case. The shared builder keeps this package aligned
+# with the FSW qualification config while the hardening factory supplies the
+# existing W800 topology, traffic, setup, and health checks.
+W800_CRITICAL_SERVICES_TEST_CONFIG = (
+    test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+        test_config_name="W800_CRITICAL_SERVICES_TEST_CONFIG",
+        **_W800_HARDENING_PARAMS,
+        ecmp_member_limit=w800.W800_ECMP_MEMBER_LIMIT,
+        playbooks=get_critical_services_single_box_playbooks(
+            iteration=5,
+            ixia_rogue_ic_parent_network_v6=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+            ixia_rogue_ic_parent_network_v4=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V4,
+        ),
+    )
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -575,6 +600,7 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
 # so adding a config never requires touching the registry files again.
 W800_TEST_CONFIGS = [
     W800_CPU_QUEUE_TEST_CONFIG,
+    W800_CRITICAL_SERVICES_TEST_CONFIG,
     W800_BGP_HARDENING_TEST_CONFIG,
     W800_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     W800_FE_QOS_TEST_CONFIG,

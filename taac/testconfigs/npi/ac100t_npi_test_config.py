@@ -16,6 +16,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - Snake tests                          <-- implemented below
     - L2/NDP/ARP hardening tests           <-- implemented below
     - Platform hardening tests             <-- implemented below
+    - Critical services tests              <-- implemented below
     - FE QoS scheduling and buffering      <-- implemented below
     - Longevity tests                      (TODO -- constants staged;
       gen_snake_test_config)
@@ -36,6 +37,9 @@ registration pattern).
 """
 
 from ixia.ixia import types as ixia_types
+from taac.playbooks.playbook_definitions import (
+    get_critical_services_single_box_playbooks,
+)
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
 )
@@ -308,6 +312,25 @@ AC100T_PLATFORM_HARDENING_TEST_CONFIG = (
 
 
 # ===========================================================================
+# Critical services tests
+# ===========================================================================
+# The 23 single-box critical-services cases run on DUT2 with five disruption
+# cycles per case. The shared builder keeps this package aligned with the FSW
+# qualification config while the hardening factory supplies the existing
+# AC100T topology, traffic, setup, and health checks.
+AC100T_CRITICAL_SERVICES_TEST_CONFIG = test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
+    test_config_name="AC100T_CRITICAL_SERVICES_TEST_CONFIG",
+    **_AC100T_HARDENING_PARAMS,
+    ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
+    playbooks=get_critical_services_single_box_playbooks(
+        iteration=5,
+        ixia_rogue_ic_parent_network_v6=ac100t.AC100T_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+        ixia_rogue_ic_parent_network_v4=ac100t.AC100T_IXIA_ROGUE_IC_PARENT_NETWORK_V4,
+    ),
+)
+
+
+# ===========================================================================
 # FE QoS scheduling and buffering
 # ===========================================================================
 # The full frontend QoS matrix from the centralized test_config_qos_scheduling
@@ -422,6 +445,7 @@ AC100T_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 # so adding a config never requires touching the registry files again.
 AC100T_TEST_CONFIGS = [
     AC100T_CPU_QUEUE_TEST_CONFIG,
+    AC100T_CRITICAL_SERVICES_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
     AC100T_FE_QOS_TEST_CONFIG,
     AC100T_PLATFORM_HARDENING_TEST_CONFIG,
