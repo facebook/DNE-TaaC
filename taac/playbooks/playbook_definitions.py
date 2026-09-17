@@ -13173,28 +13173,40 @@ def create_spillover_testing_playbooks(
 
 
 # =============================================================================
-# KO3 ECMP-ONLY RESOURCE TESTING PLAYBOOK FACTORIES
+# ECMP-ONLY RESOURCE TESTING PLAYBOOK FACTORIES
 #
-# KO3 has NO DLB. These mirror the Wedge400 ECMP groups/members factories but:
+# These exercise plain ECMP only -- no DLB. They mirror the Wedge400 ECMP
+# groups/members factories but:
 #   - assert ONLY `total` (group count) + `max_next_hops` (width) in the
-#     resource-stickiness check (never the dlb/other-modes split; on KO3 the
+#     resource-stickiness check (never the dlb/other-modes split; here the
 #     groups land under the check's "Default (DLB)" = default-switching-mode
 #     column).
 #   - use the Main (in-budget) + Rouge (overflow) traffic items, no DLB Gold.
 #   - playbook NAMES carry "ECMP_ONLY".
 # Expected group/width counts below are the SIZING TARGETS — re-tune them after
-# the first KO3 hardware run (W400/IcePack derived theirs empirically).
+# the first hardware run on a given platform (W400/IcePack derived theirs
+# empirically).
 # =============================================================================
 def create_ecmp_only_groups_playbooks(
     source_interface: str,
     asic: EcmpAsic = EcmpAsic.G200,
     main_csv_path: str | None = None,
     main_pool_name: str = "MAIN_ECMP_PREFIXES",
+    disruptive_iterations: int = 5,
+    disruptive_settle_seconds: int = 300,
+    overflow_settle_seconds: int = 180,
 ) -> list[Playbook]:
-    """KO3 ECMP-ONLY Group-utilization playbooks (fill the GROUP table).
+    """ECMP-ONLY Group-utilization playbooks (fill the GROUP table).
 
     8 playbooks: Full_Utilization (Rouge disabled) and Overcommit (Rouge
-    enabled), each in base / Warmboot / bgp_restart / Coldboot flavors.
+    admitted only after Main owns the table), each in base / Warmboot /
+    bgp_restart / Coldboot flavors.
+
+    Both flavors start with Rouge disabled. Overcommit then re-admits it in the
+    ``admit_main_then_overflow`` stage, gated on Main holding the full group
+    budget. Admitting Rouge concurrently with Main instead lets the two pools
+    race for one shared next-hop pool, which starves Main rather than testing
+    that the overflow is rejected.
 
     ``main_csv_path`` is the GROUP-table CSV (768 groups @ ~17-18 width). When
     set, each playbook injects it into the ``main_pool_name`` NetworkGroup via an
@@ -13225,17 +13237,19 @@ def create_ecmp_only_groups_playbooks(
             ],
         )
 
-    def _group_count_check():
-        # GROUP-util: assert ECMP group + member tables stay within the G200
-        # budget (post-75% caps: 768 groups / 13629 members), read directly from
-        # `fboss2 show hw-object NEXT_HOP_GROUP` (no DLB buckets). Member check
-        # fails on `>= max`, so pass max + 1.
+    def _group_count_check(churning: bool = False):
+        # GROUP-util: assert ECMP group + member tables stay within the
+        # platform budget, read directly from `fboss2 show hw-object
+        # NEXT_HOP_GROUP` (no DLB buckets). Both are upper bounds -- fewer
+        # groups/members passes -- so a table that shrinks as next-hops come
+        # and go is fine. Member check fails on `>= max`, so pass max + 1.
         return create_ecmp_group_and_member_count_check(
             ecmp_group_count=profile.max_ecmp_groups,
             ecmp_member_count=profile.max_ecmp_members + 1,
+            allow_parent_child_mismatch=churning,
         )
 
-    def _common_postchecks():
+    def _common_postchecks(churning: bool = False):
         return [
             create_systemctl_active_state_check(
                 services=[
@@ -13246,7 +13260,7 @@ def create_ecmp_only_groups_playbooks(
                     hc_types.Service.FBOSS_SW_AGENT,
                 ]
             ),
-            _group_count_check(),
+            _group_count_check(churning),
             create_cpu_utilization_check(
                 threshold=400.0, start_time_jq_var="test_case_start_time"
             ),
@@ -13264,9 +13278,22 @@ def create_ecmp_only_groups_playbooks(
                 start_time_jq_var="test_case_start_time",
             ),
             create_unclean_exit_check(),
-            # Main programs (0% loss); Rouge is disabled here so its traffic is
-            # fully dropped (100% expected).
-            _packet_loss(main_loss="0", rouge_loss="100"),
+            # Steady state: Main programs (0% loss) and Rouge is either disabled
+            # or rejected, so its traffic is fully dropped (100%).
+            #
+            # `churning` (overcommit + prefix flapping) relaxes both to 100%,
+            # i.e. record-only. With Main and Rouge flapping against one shared
+            # next-hop pool, every Main withdrawal frees capacity Rouge can
+            # claim before Main re-advertises -- so Main does lose traffic and
+            # Rouge does forward some. Whether the accountant should protect an
+            # incumbent pool's capacity during reconvergence is a real open
+            # question, but it is not one this playbook can assert on, and
+            # failing here would only mask the checks that still mean something.
+            # The observed percentages are still logged for analysis.
+            _packet_loss(
+                main_loss="100" if churning else "0",
+                rouge_loss="100",
+            ),
         ]
 
     def _disable_rouge_step():
@@ -13276,8 +13303,75 @@ def create_ecmp_only_groups_playbooks(
                 "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
                 "enable": False,
             },
-            description="Disable Rouge overflow group for Group-util testing",
+            description="Disable Rouge overflow group before Main is programmed",
         )
+
+    def _main_programmed_gate_step():
+        # Rouge must not be admitted until Main owns the group table, otherwise
+        # the two pools race for the same next-hop pool and Rouge wins an
+        # arbitrary share of it. Poll rather than sleep a fixed time: the dump
+        # is large and intermittently returns empty, so a single read is not
+        # trustworthy.
+        # Group count alone is not enough: after a cold boot the DUT holds the
+        # full complement of groups with ZERO members, because their next-hops
+        # never re-resolved. Gating on groups only would green-light a device
+        # that forwards nothing, so require resolved next-hops too.
+        expected = profile.max_ecmp_groups
+        nh = profile.ndp_pool_multiplier
+        return create_run_ssh_command_step(
+            cmd=(
+                "for i in $(seq 1 30); do "
+                "o=$(fboss2 show hw-object NEXT_HOP_GROUP 2>/dev/null); "
+                "g=$(echo \"$o\" | grep -c '^NextHopGroupSaiId'); "
+                "m=$(echo \"$o\" | grep -c '^NextHopGroupMemberSaiId'); "
+                "h=$(echo \"$o\" | grep -oE 'NextHopId: [0-9]+' | sort -u | wc -l); "
+                f'if [ "$g" -eq {expected} ] && [ "$m" -gt 0 ] && [ "$h" -eq {nh} ]; '
+                f'then echo "Main programmed: groups=$g/{expected} members=$m '
+                f'next_hops=$h/{nh}"; exit 0; fi; '
+                "sleep 10; done; "
+                f'echo "FAILED: Main at groups=$g/{expected} members=$m '
+                f'next_hops=$h/{nh} before Rouge was admitted"; exit 1'
+            ),
+            description=(
+                f"Gate: Main holds {expected} ECMP groups with {nh} resolved next-hops"
+            ),
+        )
+
+    def _admit_rouge_steps():
+        # `enable` only writes the Enabled multivalue; the emulated session
+        # stays down until it is started, and the DUT cannot resolve the
+        # next-hops behind it until the group has sent NS.
+        return [
+            create_ixia_api_step(
+                api_name="toggle_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
+                    "enable": True,
+                },
+                description="Admit Rouge overflow group (flag enabled)",
+            ),
+            create_ixia_api_step(
+                api_name="start_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
+                },
+                description="Start Rouge overflow group and resolve next-hops",
+            ),
+            create_longevity_step(
+                duration=overflow_settle_seconds,
+                description="Let Rouge advertise and be rejected",
+            ),
+        ]
+
+    def _admit_overflow_stages(overcommit: bool):
+        if not overcommit:
+            return []
+        return [
+            create_steps_stage(
+                stage_id="admit_main_then_overflow",
+                steps=[_main_programmed_gate_step()] + _admit_rouge_steps(),
+            )
+        ]
 
     def _resource_accountant_check_step():
         return create_run_ssh_command_step(
@@ -13290,15 +13384,32 @@ def create_ecmp_only_groups_playbooks(
         )
 
     def _flap_step(enable: bool):
-        # Simple whole-fabric prefix churn during the disruption. churn_mode must
-        # contain "prefix" (apply_flap_timing only acts on "prefix"/"session"; a
-        # bare "churn"/"random" silently no-ops). is_all_prefix_groups flaps every
-        # BGP prefix network group (Main + Rouge) on the uptime/downtime timers.
+        # Whole-fabric prefix churn during the disruption. churn_mode MUST
+        # contain "prefix": both ChronosNode.run and apply_flap_timing gate on
+        # that substring, so the previous "random" armed nothing and the flap
+        # stages were silent no-ops. is_all_prefix_groups flaps every BGP prefix
+        # network group (Main + Rouge) on the 15s/15s default uptime/downtime.
+        # churn_duration_s=0 is deliberate: the step arms flapping on IXIA and
+        # returns, the disruption stages run, then _flap_step(False) disarms.
         return create_toggle_ixia_prefix_session_flap_churn_step(
-            churn_mode="random",
+            churn_mode="prefix",
             enable_prefix_flap=enable,
             is_all_prefix_groups=True,
             churn_duration_s=0,
+        )
+
+    def _resolve_nexthops_step():
+        # A cold boot wipes the DUT's neighbour table. The NDP_SUPPORTING_NEXTHOP
+        # device group only solicits when it first comes up, and the DUT does not
+        # re-probe next-hops behind routes it has already re-learned -- so both
+        # sides sit converged while every ECMP group stays memberless and the
+        # data plane is black. Re-send NS so the next-hops resolve again.
+        return create_ixia_api_step(
+            api_name="start_device_groups",
+            args_dict={
+                "device_group_name_regex": ".*NDP_SUPPORTING_NEXTHOP",
+            },
+            description="Re-resolve next-hops after cold boot (NDP device group NS)",
         )
 
     def _disruptive_stages(service, cold_boot: bool):
@@ -13307,7 +13418,7 @@ def create_ecmp_only_groups_playbooks(
                 stage_id="enable_prefix_flapping", steps=[_flap_step(True)]
             ),
             create_steps_stage(
-                iteration=5,
+                iteration=disruptive_iterations,
                 steps=[
                     create_service_interruption_step(
                         service=service,
@@ -13318,7 +13429,10 @@ def create_ecmp_only_groups_playbooks(
                         services=[Service.AGENT, Service.BGP],
                         timeout=300,
                     ),
-                    create_longevity_step(duration=300),
+                    # Warm boot preserves the neighbour table and a bgpd restart
+                    # never touches it, so only the cold-boot path needs this.
+                    *([_resolve_nexthops_step()] if cold_boot else []),
+                    create_longevity_step(duration=disruptive_settle_seconds),
                 ],
             ),
             create_steps_stage(
@@ -13326,7 +13440,7 @@ def create_ecmp_only_groups_playbooks(
             ),
             create_steps_stage(
                 stage_id="post_restart_stabilization",
-                steps=[create_longevity_step(duration=300)],
+                steps=[create_longevity_step(duration=disruptive_settle_seconds)],
             ),
         ]
 
@@ -13342,10 +13456,14 @@ def create_ecmp_only_groups_playbooks(
         )
 
     def _configure_steps(overcommit: bool):
-        # Establish the group-table shape before prechecks: disable Rouge for the
-        # in-budget (Full_Utilization) case, and CSV-inject Main when provided.
-        # Device groups default to enable=True, so overcommit needs no toggle.
-        steps = [] if overcommit else [_disable_rouge_step()]
+        # Establish the group-table shape before prechecks, and always start
+        # from Rouge disabled -- including overcommit, which re-admits it in the
+        # `admit_main_then_overflow` stage once Main owns the table. Relying on
+        # the config default here is not safe: `Enabled` is persistent state and
+        # no teardown restores it, so a preceding Full_Utilization playbook in
+        # the same IXIA session would otherwise leave Rouge off for the whole
+        # overcommit case.
+        steps = [_disable_rouge_step()]
         if main_csv_path:
             steps.append(_mutate_main_step())
         return steps
@@ -13367,7 +13485,8 @@ def create_ecmp_only_groups_playbooks(
             description="ECMP-ONLY Group utilization (fill ECMP group table)",
             # backup_and_restore_ixia_config=True,
             setup_steps=_configure_steps(overcommit),
-            stages=[
+            stages=_admit_overflow_stages(overcommit)
+            + [
                 create_steps_stage(
                     stage_id="run_traffic_steady_state",
                     steps=steps,
@@ -13393,9 +13512,14 @@ def create_ecmp_only_groups_playbooks(
             name=name,
             # backup_and_restore_ixia_config=True,
             setup_steps=_configure_steps(overcommit),
-            stages=ra_stages + _disruptive_stages(service, cold_boot),
+            stages=_admit_overflow_stages(overcommit)
+            + ra_stages
+            + _disruptive_stages(service, cold_boot),
             skip_test_config_snapshot_checks=True,
-            postchecks=_common_postchecks(),
+            # Only overcommit churns: Full_Utilization flaps too, but with Rouge
+            # disabled there is no second pool to contend for the freed
+            # next-hops, so Main is still expected to hold 0% loss there.
+            postchecks=_common_postchecks(churning=overcommit),
         )
 
     return [
@@ -13427,8 +13551,15 @@ def create_ecmp_only_members_playbooks(
     asic: EcmpAsic = EcmpAsic.G200,
     main_csv_path: str | None = None,
     main_pool_name: str = "MAIN_ECMP_PREFIXES",
+    disruptive_iterations: int = 5,
+    disruptive_settle_seconds: int = 300,
+    overflow_settle_seconds: int = 180,
 ) -> list[Playbook]:
-    """KO3 ECMP-ONLY Member-utilization playbooks (fill the MEMBER table).
+    """ECMP-ONLY Member-utilization playbooks (fill the MEMBER table).
+
+    Both flavors start with Rouge disabled. Overcommit re-admits it in the
+    ``admit_main_then_overflow`` stage, gated on Main holding the full member
+    budget, so the two pools never race for the shared next-hop pool.
 
     ``main_csv_path`` is the WIDTH/MEMBER-table CSV (width 128 -> 107 groups:
     106 full @128 + 1 partial @61 = 13,629 members). When set, each playbook
@@ -13460,18 +13591,20 @@ def create_ecmp_only_members_playbooks(
             ],
         )
 
-    def _member_count_check():
-        # MEMBER-util: assert the ECMP group + member tables stay within the G200
-        # budget (post-75% ResourceAccountant caps: 768 groups / 13629 members).
-        # Counts come directly from `fboss2 show hw-object NEXT_HOP_GROUP` — no
-        # DLB/mode buckets (non-DLB platform). The member check fails on
-        # `>= max`, so pass max + 1 to allow exactly a full member table.
+    def _member_count_check(churning: bool = False):
+        # MEMBER-util: assert the ECMP group + member tables stay within the
+        # platform budget. Counts come directly from `fboss2 show hw-object
+        # NEXT_HOP_GROUP` — no DLB/mode buckets (non-DLB platform). Both are
+        # upper bounds, so a table that shrinks as next-hops come and go
+        # passes. The member check fails on `>= max`, so pass max + 1 to allow
+        # exactly a full member table.
         return create_ecmp_group_and_member_count_check(
             ecmp_group_count=profile.max_ecmp_groups,
             ecmp_member_count=profile.max_ecmp_members + 1,
+            allow_parent_child_mismatch=churning,
         )
 
-    def _common_postchecks():
+    def _common_postchecks(churning: bool = False):
         return [
             create_systemctl_active_state_check(
                 services=[
@@ -13482,7 +13615,7 @@ def create_ecmp_only_members_playbooks(
                     hc_types.Service.FBOSS_SW_AGENT,
                 ]
             ),
-            _member_count_check(),
+            _member_count_check(churning),
             create_cpu_utilization_check(
                 threshold=400.0, start_time_jq_var="test_case_start_time"
             ),
@@ -13500,7 +13633,14 @@ def create_ecmp_only_members_playbooks(
                 start_time_jq_var="test_case_start_time",
             ),
             create_unclean_exit_check(),
-            _packet_loss(main_loss="0", rouge_loss="100"),
+            # See the Group-util factory: `churning` (overcommit + prefix
+            # flapping) relaxes Main to 100% i.e. record-only, because Main and
+            # Rouge contend for one shared next-hop pool on every flap and Main
+            # genuinely cannot hold its budget. Percentages are still logged.
+            _packet_loss(
+                main_loss="100" if churning else "0",
+                rouge_loss="100",
+            ),
         ]
 
     def _widen_main_step():
@@ -13536,8 +13676,69 @@ def create_ecmp_only_members_playbooks(
                 "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
                 "enable": False,
             },
-            description="Disable Rouge overflow group for Member-util testing",
+            description="Disable Rouge overflow group before Main is programmed",
         )
+
+    def _main_programmed_gate_step():
+        # Member-util fills the MEMBER table, so gate on member count. Polls
+        # because the dump is large and intermittently comes back empty.
+        # See the Group-util gate: member count on its own can be satisfied
+        # while next-hops are unresolved, so require the full next-hop pool too.
+        expected = profile.max_ecmp_members
+        nh = profile.ndp_pool_multiplier
+        return create_run_ssh_command_step(
+            cmd=(
+                "for i in $(seq 1 30); do "
+                "o=$(fboss2 show hw-object NEXT_HOP_GROUP 2>/dev/null); "
+                "m=$(echo \"$o\" | grep -c '^NextHopGroupMemberSaiId'); "
+                "h=$(echo \"$o\" | grep -oE 'NextHopId: [0-9]+' | sort -u | wc -l); "
+                f'if [ "$m" -eq {expected} ] && [ "$h" -eq {nh} ]; then '
+                f'echo "Main programmed: members=$m/{expected} '
+                f'next_hops=$h/{nh}"; exit 0; fi; '
+                "sleep 10; done; "
+                f'echo "FAILED: Main at members=$m/{expected} next_hops=$h/{nh} '
+                'before Rouge was admitted"; exit 1'
+            ),
+            description=(
+                f"Gate: Main holds {expected} ECMP members with {nh} resolved next-hops"
+            ),
+        )
+
+    def _admit_rouge_steps():
+        # `enable` only writes the Enabled multivalue; the emulated session
+        # stays down until it is started, and the DUT cannot resolve the
+        # next-hops behind it until the group has sent NS.
+        return [
+            create_ixia_api_step(
+                api_name="toggle_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
+                    "enable": True,
+                },
+                description="Admit Rouge overflow group (flag enabled)",
+            ),
+            create_ixia_api_step(
+                api_name="start_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*ROUGE_OVERFLOW_RESOURCE",
+                },
+                description="Start Rouge overflow group and resolve next-hops",
+            ),
+            create_longevity_step(
+                duration=overflow_settle_seconds,
+                description="Let Rouge advertise and be rejected",
+            ),
+        ]
+
+    def _admit_overflow_stages(overcommit: bool):
+        if not overcommit:
+            return []
+        return [
+            create_steps_stage(
+                stage_id="admit_main_then_overflow",
+                steps=[_main_programmed_gate_step()] + _admit_rouge_steps(),
+            )
+        ]
 
     def _resource_accountant_check_step():
         return create_run_ssh_command_step(
@@ -13550,15 +13751,32 @@ def create_ecmp_only_members_playbooks(
         )
 
     def _flap_step(enable: bool):
-        # Simple whole-fabric prefix churn during the disruption. churn_mode must
-        # contain "prefix" (apply_flap_timing only acts on "prefix"/"session"; a
-        # bare "churn"/"random" silently no-ops). is_all_prefix_groups flaps every
-        # BGP prefix network group (Main + Rouge) on the uptime/downtime timers.
+        # Whole-fabric prefix churn during the disruption. churn_mode MUST
+        # contain "prefix": both ChronosNode.run and apply_flap_timing gate on
+        # that substring, so the previous "random" armed nothing and the flap
+        # stages were silent no-ops. is_all_prefix_groups flaps every BGP prefix
+        # network group (Main + Rouge) on the 15s/15s default uptime/downtime.
+        # churn_duration_s=0 is deliberate: the step arms flapping on IXIA and
+        # returns, the disruption stages run, then _flap_step(False) disarms.
         return create_toggle_ixia_prefix_session_flap_churn_step(
-            churn_mode="random",
+            churn_mode="prefix",
             enable_prefix_flap=enable,
             is_all_prefix_groups=True,
             churn_duration_s=0,
+        )
+
+    def _resolve_nexthops_step():
+        # A cold boot wipes the DUT's neighbour table. The NDP_SUPPORTING_NEXTHOP
+        # device group only solicits when it first comes up, and the DUT does not
+        # re-probe next-hops behind routes it has already re-learned -- so both
+        # sides sit converged while every ECMP group stays memberless and the
+        # data plane is black. Re-send NS so the next-hops resolve again.
+        return create_ixia_api_step(
+            api_name="start_device_groups",
+            args_dict={
+                "device_group_name_regex": ".*NDP_SUPPORTING_NEXTHOP",
+            },
+            description="Re-resolve next-hops after cold boot (NDP device group NS)",
         )
 
     def _disruptive_stages(service, cold_boot: bool):
@@ -13567,7 +13785,7 @@ def create_ecmp_only_members_playbooks(
                 stage_id="enable_prefix_flapping", steps=[_flap_step(True)]
             ),
             create_steps_stage(
-                iteration=5,
+                iteration=disruptive_iterations,
                 steps=[
                     create_service_interruption_step(
                         service=service,
@@ -13578,7 +13796,10 @@ def create_ecmp_only_members_playbooks(
                         services=[Service.AGENT, Service.BGP],
                         timeout=300,
                     ),
-                    create_longevity_step(duration=300),
+                    # Warm boot preserves the neighbour table and a bgpd restart
+                    # never touches it, so only the cold-boot path needs this.
+                    *([_resolve_nexthops_step()] if cold_boot else []),
+                    create_longevity_step(duration=disruptive_settle_seconds),
                 ],
             ),
             create_steps_stage(
@@ -13586,16 +13807,20 @@ def create_ecmp_only_members_playbooks(
             ),
             create_steps_stage(
                 stage_id="post_restart_stabilization",
-                steps=[create_longevity_step(duration=300)],
+                steps=[create_longevity_step(duration=disruptive_settle_seconds)],
             ),
         ]
 
     def _configure_steps(overcommit: bool):
-        # Device groups default to enable=True, so overcommit needs no enable —
-        # Rouge is already on and will overflow. Only Full_Utilization disables
-        # Rouge. Main gets its full member-table shape from the CSV (or the
-        # formulaic widen when no CSV is provided).
-        steps = [] if overcommit else [_disable_rouge_step()]
+        # Always start from Rouge disabled -- including overcommit, which
+        # re-admits it in the `admit_main_then_overflow` stage once Main owns
+        # the member table. Relying on the config default here is not safe:
+        # `Enabled` is persistent state and no teardown restores it, so a
+        # preceding Full_Utilization playbook in the same IXIA session would
+        # otherwise leave Rouge off for the whole overcommit case. Main gets its
+        # full member-table shape from the CSV (or the formulaic widen when no
+        # CSV is provided).
+        steps = [_disable_rouge_step()]
         steps.append(_mutate_main_step() if main_csv_path else _widen_main_step())
         return steps
 
@@ -13618,7 +13843,8 @@ def create_ecmp_only_members_playbooks(
             # Establish the member-table shape (CSV-inject / widen Main, disable
             # Rouge when in-budget) up front, before prechecks, via setup_steps.
             setup_steps=_configure_steps(overcommit),
-            stages=[
+            stages=_admit_overflow_stages(overcommit)
+            + [
                 create_steps_stage(
                     stage_id="run_traffic",
                     steps=steps,
@@ -13644,9 +13870,14 @@ def create_ecmp_only_members_playbooks(
             name=name,
             # backup_and_restore_ixia_config=True,
             setup_steps=_configure_steps(overcommit),
-            stages=ra_stages + _disruptive_stages(service, cold_boot),
+            stages=_admit_overflow_stages(overcommit)
+            + ra_stages
+            + _disruptive_stages(service, cold_boot),
             skip_test_config_snapshot_checks=True,
-            postchecks=_common_postchecks(),
+            # Only overcommit churns: Full_Utilization flaps too, but with Rouge
+            # disabled there is no second pool to contend for the freed
+            # next-hops, so Main is still expected to hold 0% loss there.
+            postchecks=_common_postchecks(churning=overcommit),
         )
 
     return [
@@ -13674,7 +13905,7 @@ def create_ecmp_only_members_playbooks(
 
 
 # =============================================================================
-# KO3 ECMP-ONLY: cyclic-disruption longevity playbooks.
+# ECMP-ONLY: cyclic-disruption longevity playbooks.
 #
 # Two hour-long stability tests that share one skeleton — baseline, then a
 # repeated disruption cycle, then a stabilization window — and differ only in
@@ -13701,7 +13932,7 @@ def create_ecmp_only_members_playbooks(
 #
 # Differences from the IcePack cases, and why:
 #   - IcePack runs ONE cycle inside a 120 s window. These run continuously for
-#     an hour, which is what the KO3 cases ask for.
+#     an hour, which is what the ECMP-only cases ask for.
 #   - IcePack grades loss over a post-recovery window. Here the loss window is
 #     bounded to the disruption loop (clear-stats step before the loop +
 #     `clear_traffic_stats=False` on the postcheck), so the threshold grades
@@ -13723,7 +13954,7 @@ def create_ecmp_only_longevity_playbooks(
     cold_start_loss_margin_pct: float = 10.0,
     stabilization_seconds: int = 300,
 ) -> list[Playbook]:
-    """KO3 ECMP-ONLY cyclic-disruption longevity playbooks (2 playbooks).
+    """ECMP-ONLY cyclic-disruption longevity playbooks (2 playbooks).
 
     ``main_csv_path`` is the GROUP-table CSV (768 groups @ ~17-18 width),
     injected into ``main_pool_name`` before traffic starts, exactly as the
@@ -13745,7 +13976,7 @@ def create_ecmp_only_longevity_playbooks(
     - ``ndp_loss_threshold`` defaults to the IcePack precedent (5.0%), but that
       number was set for a SINGLE 30 s flap. If the FBOSS NDP cache does not
       survive the down window, loss becomes duty-cycle-dominated — re-tune
-      after the first KO3 hardware run.
+      after the first hardware run on a given platform.
     - The cold-start threshold is DERIVED, not guessed: protocols are down for
       a known fraction of the loop, so the floor is arithmetic. The threshold
       is that floor plus ``cold_start_loss_margin_pct``, which catches a device
@@ -13965,6 +14196,20 @@ def create_ecmp_only_longevity_playbooks(
                 api_name="start_protocols",
                 args_dict={},
                 description="Cold start: start all IXIA protocols",
+            ),
+            # StartAllProtocols brings the emulated interfaces back, but they
+            # only solicit their gateway once at first bring-up -- they do not
+            # re-announce to a DUT that has lost its neighbour table, and the
+            # DUT does not re-probe next-hops behind routes it has already
+            # re-learned. Without this NS pass the groups can come back with
+            # zero members and the data plane stays black. Same fix as the
+            # agent-coldboot path in the group/member factories.
+            create_ixia_api_step(
+                api_name="start_device_groups",
+                args_dict={
+                    "device_group_name_regex": ".*NDP_SUPPORTING_NEXTHOP",
+                },
+                description="Cold start: re-resolve next-hops (NDP device group NS)",
             ),
             create_longevity_step(
                 duration=protocol_restart_settle_seconds,

@@ -79,9 +79,17 @@ DLB_RESOURCE_PROFILES: dict = {
 # whether you fill the GROUP table (narrow) or the MEMBER table (wide).
 # =============================================================================
 class EcmpAsic(Enum):
-    """ASIC families supported by the ECMP-only (non-DLB) resource playbooks."""
+    """ASIC families supported by the ECMP-only (non-DLB) resource playbooks.
+
+    Membership here means "the ECMP-only playbooks can target this ASIC", NOT
+    "this ASIC lacks DLB". Tomahawk4 does support DLB/ARS
+    (``Tomahawk4Asic.cpp`` advertises ``Feature::ARS``); running it through the
+    ECMP-only suite deliberately exercises the plain ECMP group/member tables
+    and leaves DLB to the 3-port Wedge400/IcePack configs.
+    """
 
     G200 = "g200"  # Kodiak-3 (KO3) — ECMP only, no DLB
+    TOMAHAWK4 = "tomahawk4"  # Elbert / Minipack2 — has DLB, tested ECMP-only here
 
 
 @dataclass(frozen=True)
@@ -94,7 +102,13 @@ class EcmpResourceProfile:
     (width) — never the ``dlb``/``other_modes`` split.
     """
 
-    # Hardware ECMP table limits (sizing reference / documentation).
+    # ECMP table limits the test targets. These are the ResourceAccountant
+    # ENFORCED ceilings, i.e. the raw silicon limits already multiplied by
+    # FLAGS_ecmp_resource_percentage (75, see fboss/agent/AgentFeatures.cpp).
+    # ResourceAccountant::checkEcmpResource applies that derate to BOTH
+    # getMaxEcmpGroups() and getMaxEcmpMembers() for the final state, so a CSV
+    # sized to the raw limit would be rejected and the in-budget "Main" traffic
+    # would lose by design. Store the derated number here.
     max_ecmp_groups: int
     max_ecmp_members: int
     max_group_width: int
@@ -147,5 +161,29 @@ ECMP_RESOURCE_PROFILES: dict = {
         rouge_network_group_multiplier=8160,
         rouge_ecmp_width=17,
         ndp_pool_multiplier=500,
+    ),
+    # Tomahawk4 / Elbert (Minipack2). Raw silicon (Tomahawk4Asic.h): 2048
+    # groups, 56,000 members, getMaxWideEcmpSize()=128. Derated by the 75%
+    # ecmp_resource_percentage -> 1536 groups / 42,000 members.
+    #   GROUP-util:  42,000 members @ width 27 -> 528x28 + 1008x27 = 1536 groups.
+    #   MEMBER-util: 42,000 members @ width 128 -> 328x128 + 1x16 = 329 groups.
+    # max_unique_next_hops=512 (also TH4's getMaxVariableWidthEcmpSize) rather
+    # than 500: gen_ecmp_csv's _BODY_STRIDE=37 divides (500-56)=444, which
+    # collapses the body window to 12 offsets and touches only 368 unique NHs.
+    # 512 leaves a body range of 456, coprime with 37, so all 512 get used.
+    EcmpAsic.TOMAHAWK4: EcmpResourceProfile(
+        max_ecmp_groups=1536,
+        max_ecmp_members=42000,
+        max_group_width=128,
+        max_unique_next_hops=512,
+        group_util_width=27,
+        group_util_counts={"total": 1536, "max_next_hops": 28},
+        member_util_width=128,
+        member_util_counts={"total": 329, "max_next_hops": 128},
+        # 900 groups @ width 27. Main + Rouge = 2436 groups / 66,300 members,
+        # over both derated ceilings -> Rouge rejected in the overcommit runs.
+        rouge_network_group_multiplier=24300,
+        rouge_ecmp_width=27,
+        ndp_pool_multiplier=512,
     ),
 }

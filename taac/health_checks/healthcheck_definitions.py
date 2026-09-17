@@ -785,18 +785,31 @@ def create_port_speed_check(
 def create_ecmp_group_and_member_count_check(
     ecmp_member_count: t.Optional[int] = None,
     ecmp_group_count: t.Optional[int] = None,
+    allow_parent_child_mismatch: bool = False,
 ) -> PointInTimeHealthCheck:
     """ECMP_GROUP_AND_MEMBER_COUNT_CHECK — verifies ECMP group + member counts.
+
+    Both counts are upper bounds: fewer groups/members than the threshold
+    passes. Zero, however, always fails -- churn can reduce the counts but
+    never empty the table, so zero means nothing is programmed (or the dump
+    returned no data).
 
     Args:
         ecmp_member_count: Maximum allowed ECMP member count.
         ecmp_group_count: Maximum allowed ECMP group count.
+        allow_parent_child_mismatch: Skip the parent/child group-id set
+            equality assertion. Set this only where the table is expected to
+            be mid-flight -- e.g. under prefix flapping, where a parent group
+            legitimately exists before its members are programmed. The count
+            ceilings remain enforced either way.
     """
     json_payload: t.Dict[str, t.Any] = {}
     if ecmp_member_count is not None:
         json_payload["ecmp_member_count"] = ecmp_member_count
     if ecmp_group_count is not None:
         json_payload["ecmp_group_count"] = ecmp_group_count
+    if allow_parent_child_mismatch:
+        json_payload["allow_parent_child_mismatch"] = True
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.ECMP_GROUP_AND_MEMBER_COUNT_CHECK,
         check_params=Params(json_params=json.dumps(json_payload)),

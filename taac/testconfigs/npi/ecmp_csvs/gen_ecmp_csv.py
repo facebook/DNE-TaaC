@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""KO3 ECMP CSV generator — IXIA add-path (prefix, next-hop) upload files.
+"""ECMP CSV generator — IXIA add-path (prefix, next-hop) upload files.
 
-ECMP ONLY. KO3 has no DLB, so unlike ``dlb_csvs/gen_dlb_csv.py`` there is no
-DLB super-group / ARS / spillover machinery and no community sidecar (the KO3
-config uses a PERMIT-ALL ingress policy, so routes install without gating).
+ECMP ONLY. Unlike ``dlb_csvs/gen_dlb_csv.py`` there is no DLB super-group / ARS
+/ spillover machinery and no community sidecar (the ECMP-only configs use a
+PERMIT-ALL ingress policy, so routes install without gating).
+
+Platform-agnostic: call ``gen_for_profile_pool(profile, pool)`` and the sizing
+comes from ``ECMP_RESOURCE_PROFILES[asic]`` with addressing from an
+``EcmpNhPool``. The module-level ``MAX_*`` constants are only defaults for the
+``__main__`` CLI and happen to carry the KO3/G200 numbers.
 
 The CSV row model (matches the IXIA sample + the DLB CSVs): full 8-hextet IPv6,
 no leading zeros, no ``::`` compression. Header ``Address,Ipv6 Next Hop``.
@@ -16,19 +21,17 @@ Semantics enforced by ``ixia/taac_ixia.py::apply_pool_mutations``:
     prefixes with unique NH sets (FBOSS `EcmpResourceManager` dedups prefixes
     that share an identical NH set into ONE group).
 
-KO3 silicon budget (see ``ECMP_RESOURCE_PROFILES[EcmpAsic.G200]`` in
-``playbooks/dlb_platform_constants.py``):
-  * max ECMP groups   = 768
-  * max ECMP members  = 13,629   (sum of widths across all groups)
-  * max group width   = 128
-  * max UNIQUE NHs     = 500     (device-wide next-hop table)
+Per-platform budgets live in ``ECMP_RESOURCE_PROFILES`` in
+``playbooks/dlb_platform_constants.py``; each entry supplies max ECMP groups,
+max ECMP members (sum of widths across all groups), max group width, and the
+device-wide unique-NH cap. Example (KO3 / G200): 768 / 13,629 / 128 / 500.
 
 The unique-NH cap is the reason we generate CSVs instead of a formulaic
 sliding-window ``CustomNetworkGroupConfig``: 768 DISTINCT groups cannot be
 built from a step-1 sliding window over 500 NHs (a linear window yields only
 ``500 - width + 1`` distinct sets, < 768). We instead draw each group as a
-DISTINCT SUBSET of a fixed 500-NH pool, so unique-NH count is bounded by the
-pool size regardless of width or group count, and NHs are reused across groups.
+DISTINCT SUBSET of a fixed pool, so unique-NH count is bounded by the pool size
+regardless of width or group count, and NHs are reused across groups.
 
 Anchor-pair construction (deterministic, provably drop-safe)
 ------------------------------------------------------------
@@ -81,9 +84,19 @@ MAX_UNIQUE_NHS = 500
 
 # Body-window stride: any value coprime with the body-range length spreads the
 # per-group body across the whole body range (maximizing unique-NH usage toward
-# the pool cap). 37 is coprime with our body-range lengths (460, 484). Body
-# choice does NOT affect correctness -- the anchor pair carries distinctness and
-# drop-robustness -- so this only tunes how many body NHs get touched.
+# the pool cap). Body choice does NOT affect correctness -- the anchor pair
+# carries distinctness and drop-robustness -- so this only tunes how many body
+# NHs get touched.
+#
+# The body range is ``pool_size - anchor_count``, and ``anchor_count`` grows
+# with the group count, so coprimality has to be checked per (pool_size, groups)
+# pair. Worked examples:
+#   G200  768 groups -> anchors 40, body 460  gcd(37,460)=1  -> all 500 NHs used
+#   TH4  1536 groups -> anchors 56, body 456  gcd(37,456)=1  -> all 512 NHs used
+# A pool_size of 500 at 1536 groups would give body 444 = 2^2*3*37, sharing the
+# factor 37 and collapsing the window to 12 distinct offsets (only 368 of 500
+# NHs touched). If a new platform's unique-NH count comes out well below its
+# pool size, this is why -- adjust pool_size rather than the stride.
 _BODY_STRIDE = 37
 
 

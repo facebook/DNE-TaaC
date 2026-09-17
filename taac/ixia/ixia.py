@@ -4622,6 +4622,50 @@ class Ixia:
         )
 
     @external_api
+    def start_device_groups(
+        self,
+        device_group_name_regex: str,
+        require_match: bool = True,
+        settle_time_after_start: int = 10,
+    ) -> None:
+        """Start the matched device groups and resolve their next-hops.
+
+        ``toggle_device_groups(enable=True)`` only writes the ``Enabled``
+        multivalue and applies it; the emulated session stays down until it is
+        started. The ARP/NS pass is not optional either -- a freshly started
+        device group does not answer the DUT's neighbor solicitation until it
+        has sent its own, so without it the DUT cannot resolve the next-hops
+        these routes point at and the routes never program.
+
+        Scoped to the matched groups so an already-converged device group on
+        another port is left alone, unlike a global ``StartAllProtocols``.
+
+        Args:
+            device_group_name_regex: Regex matched against device group names.
+            require_match: Raise when the regex selects nothing.
+            settle_time_after_start: Seconds to wait between the start and the
+                ARP/NS pass, so the protocol stack is up before it is asked to
+                transmit.
+        """
+        device_groups = self.find_device_groups(device_group_name_regex)
+        if require_match and not device_groups:
+            raise ValueError(
+                "start_device_groups: regex "
+                f"{device_group_name_regex!r} selected no device groups"
+            )
+        for device_group in device_groups:
+            for network_group in device_group.NetworkGroup.find():
+                network_group.Start()
+            device_group.Start()
+        self.logger.info(
+            "Successfully started device group "
+            f"{[device_group.Name for device_group in device_groups]}"
+        )
+        time.sleep(settle_time_after_start)
+        for device_group in device_groups:
+            self._send_arp_ns_on_device_group(device_group)
+
+    @external_api
     def rename_device_groups(
         self,
         device_group_name_regex: str,
@@ -5914,8 +5958,24 @@ class Ixia:
         # Configure prefix length
         ip_prefix_pool.PrefixLength.Single(config.prefix_length)
 
-        # Create BGP V6 IP Route Property
-        bgp_route_prop = ip_prefix_pool.BgpV6IPRouteProperty.add()
+        # Reuse the BGP V6 IP Route Property if one is already present.
+        #
+        # On IxNetwork >= 26.4.4101.8, `Ipv6PrefixPools.add()` under a
+        # BGP-enabled device group AUTO-CREATES a bgpV6IPRouteProperty. Calling
+        # `.add()` unconditionally then tries to create a second one and the
+        # commit is rejected:
+        #     400 code 5500  Unable to add .../bgpV6IPRouteProperty:L100
+        #         code 10000 Commit operation failed
+        # The call passes no payload, so the failure is invariant to every value
+        # configured here — which is what made it look like a config problem.
+        # Older builds (e.g. 26.0.2601.3) do not auto-create it, so the same
+        # code works there; this find-or-create handles both.
+        existing_route_props = ip_prefix_pool.BgpV6IPRouteProperty.find()
+        bgp_route_prop = (
+            existing_route_props[0]
+            if existing_route_props
+            else ip_prefix_pool.BgpV6IPRouteProperty.add()
+        )
 
         # Configure next hop settings
         bgp_route_prop.NextHopType.Single(config.next_hop_type)

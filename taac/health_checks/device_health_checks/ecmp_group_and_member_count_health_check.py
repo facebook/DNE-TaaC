@@ -22,6 +22,33 @@ class EcmpGroupAndMemberCountHealthCheck(
     CHECK_NAME = hc_types.CheckName.ECMP_GROUP_AND_MEMBER_COUNT_CHECK
     OPERATING_SYSTEMS = ["FBOSS"]
 
+    # `fboss2 show hw-object NEXT_HOP_GROUP` dumps several MB at scale and
+    # intermittently returns nothing at all -- exit 0, empty stdout -- while the
+    # table is fully programmed (observed: check read zero members at 18:01:38
+    # while the device held 1536 groups / 42000 members either side of it).
+    # A single read is therefore not trustworthy: retry before concluding the
+    # table is empty, so a flaky dump is not reported as a dead data plane.
+    _EMPTY_DUMP_RETRIES = 4
+    _EMPTY_DUMP_RETRY_DELAY_S = 5
+
+    async def _async_dump_next_hop_groups(self) -> str:
+        """Read the NEXT_HOP_GROUP dump, retrying while it comes back empty."""
+        cmd = "fboss2 show hw-object NEXT_HOP_GROUP"
+        res = ""
+        for attempt in range(1, self._EMPTY_DUMP_RETRIES + 1):
+            # pyrefly: ignore [missing-attribute]
+            res = await self.driver.async_run_cmd_on_shell(cmd) or ""
+            if "NextHopGroupSaiId" in res:
+                return res
+            self.logger.warning(
+                f"NEXT_HOP_GROUP dump returned no groups "
+                f"(attempt {attempt}/{self._EMPTY_DUMP_RETRIES}, "
+                f"{len(res)} bytes); retrying"
+            )
+            if attempt < self._EMPTY_DUMP_RETRIES:
+                await asyncio.sleep(self._EMPTY_DUMP_RETRY_DELAY_S)
+        return res
+
     async def _run(
         self,
         obj: TestDevice,
@@ -34,8 +61,19 @@ class EcmpGroupAndMemberCountHealthCheck(
         ecmp_group_threshold = check_params.get(
             "ecmp_group_count", MAX_ECMP_GROUP_COUNT
         )
+        # Under prefix flapping the group table is mid-flight by construction:
+        # a parent group can exist a moment before its members are programmed,
+        # so parent/child set equality is not a meaningful invariant there. The
+        # count ceilings still are, and stay enforced.
+        allow_parent_child_mismatch = check_params.get(
+            "allow_parent_child_mismatch", False
+        )
         tasks = []
-        tasks.append(self.async_verify_ecmp_nexthop_group_count(ecmp_group_threshold))
+        tasks.append(
+            self.async_verify_ecmp_nexthop_group_count(
+                ecmp_group_threshold, allow_parent_child_mismatch
+            )
+        )
         tasks.append(
             self.async_verify_ecmp_nexthop_group_member_count(ecmp_member_threshold)
         )
@@ -51,11 +89,11 @@ class EcmpGroupAndMemberCountHealthCheck(
             status=hc_types.HealthCheckStatus.PASS,
         )
 
-    async def async_verify_ecmp_nexthop_group_count(self, max_count: int) -> None:
+    async def async_verify_ecmp_nexthop_group_count(
+        self, max_count: int, allow_parent_child_mismatch: bool = False
+    ) -> None:
         # currently only works for fboss
-        cmd = "fboss2 show hw-object NEXT_HOP_GROUP"
-        # pyrefly: ignore [missing-attribute]
-        res = await self.driver.async_run_cmd_on_shell(cmd)
+        res = await self._async_dump_next_hop_groups()
         parent_nhop_group_id_set = set()
         group_to_mbr_intf_map = defaultdict(list)
         for line in res.splitlines():
@@ -76,7 +114,21 @@ class EcmpGroupAndMemberCountHealthCheck(
                         nhop_group_id = int(match.group(2))
                         nhop_id = int(match.group(3))
                         group_to_mbr_intf_map[nhop_group_id].append(nhop_id)
-        if parent_nhop_group_id_set != set(group_to_mbr_intf_map.keys()):
+        # Zero is never a legitimate steady state. Churn (prefix flapping,
+        # overcommit contention, next-hops coming and going) legitimately
+        # REDUCES the group count, but it cannot take it to zero -- that means
+        # either nothing is programmed or the dump came back with no data. Both
+        # are failures, and without this the check silently passes: zero is
+        # under every ceiling, and an empty set trivially equals an empty set.
+        if not parent_nhop_group_id_set and not group_to_mbr_intf_map:
+            raise Exception(
+                # pyrefly: ignore [missing-attribute]
+                f"No ECMP next-hop groups programmed on {self.driver.hostname}: "
+                "`fboss2 show hw-object NEXT_HOP_GROUP` reported zero groups"
+            )
+        if not allow_parent_child_mismatch and parent_nhop_group_id_set != set(
+            group_to_mbr_intf_map.keys()
+        ):
             raise Exception(
                 f"Parent NextHopGroupSaiId {parent_nhop_group_id_set} does not match with Child NextHopGroupMemberSaiId {group_to_mbr_intf_map.keys()}"
             )
@@ -92,16 +144,21 @@ class EcmpGroupAndMemberCountHealthCheck(
     ) -> None:
         # Step 1: Determine the minimum length of subnets needed
 
-        # Define the command to run on the shell
-        cmd = "fboss2 show hw-object NEXT_HOP_GROUP"
         # Run the command on the shell and get the result
-        # pyrefly: ignore [missing-attribute]
-        res = await self.driver.async_run_cmd_on_shell(cmd)
+        res = await self._async_dump_next_hop_groups()
         # Use regular expression to find all occurrences of NextHopGroupMemberSaiId(xxxx):
         pattern = r"NextHopGroupMemberSaiId\(\d+\):"
         matches = re.findall(pattern, res)
         # Count the occurrences
         current_count = len(matches)
+        # Same lower bound as the group count: churn reduces the member count
+        # but never to zero, so zero means nothing is programmed.
+        if current_count == 0:
+            raise ValueError(
+                # pyrefly: ignore [missing-attribute]
+                f"No ECMP next-hop group members programmed on {self.driver.hostname}: "
+                "`fboss2 show hw-object NEXT_HOP_GROUP` reported zero members"
+            )
         # Check if the current count is greater than or equal to the requested scale
         if current_count >= max_count:
             raise ValueError(
