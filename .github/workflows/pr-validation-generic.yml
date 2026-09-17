@@ -1,0 +1,79 @@
+# Generic PR validation: checkout, build the image, run its test suite.
+#
+# Intended as a portable starting point for DNE-Taac to validate PRs from
+# outside contributors. It builds from scratch on every run and does not
+# publish anything.
+#
+# Trigger is intentionally manual-only (workflow_dispatch) so this template
+# cannot fire on its own. A repo adopting it should replace the trigger
+# below with:
+#
+#   on:
+#     pull_request:
+#
+# which runs (not `pull_request_target`) so it always executes the PR's own
+# workflow file and runs with a read-only GITHUB_TOKEN and no repository
+# secrets, even for first-time contributors from a fork.
+
+name: PR Validation
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build + Test
+    # Override by setting a repository or organization Actions variable named
+    # PR_VALIDATION_RUNNER (e.g. to a larger runner label) if the default
+    # runner is undersized for this build; falls back to ubuntu-latest.
+    runs-on: ${{ vars.PR_VALIDATION_RUNNER || 'ubuntu-latest' }}
+    # Override by setting a repository or organization Actions variable named
+    # PR_VALIDATION_TIMEOUT_MINUTES if a full build needs more (or less) time
+    # than the default; falls back to 180 minutes.
+    timeout-minutes: ${{ fromJSON(vars.PR_VALIDATION_TIMEOUT_MINUTES || '180') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # Catches a dependency graph that has drifted to an inconsistent set of
+      # revisions before paying for a full compile to discover it.
+      - name: Verify fbcode dependency pins
+        run: ./scripts/pin_fbcode_snapshot.py --check
+
+      # Cap build parallelism to the runner's actual memory: the fbthrift /
+      # cc1plus compile phase is memory-hungry per worker, and a worker count
+      # sized to CPU count alone can trigger the OOM killer on smaller
+      # runners. One job per PR_VALIDATION_GIB_PER_WORKER GiB of RAM, capped
+      # at the CPU count, floored at 1. Override the GiB-per-worker figure
+      # via a repository or organization Actions variable named
+      # PR_VALIDATION_GIB_PER_WORKER; falls back to 5.
+      - name: Compute safe build parallelism
+        id: jobs
+        env:
+          GIB_PER_WORKER: ${{ vars.PR_VALIDATION_GIB_PER_WORKER || '5' }}
+        run: |
+          CPUS=$(nproc)
+          RAM_GIB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+          NUM_JOBS=$(( RAM_GIB / GIB_PER_WORKER ))
+          if (( NUM_JOBS < 1 )); then
+            NUM_JOBS=1
+          fi
+          if (( NUM_JOBS > CPUS )); then
+            NUM_JOBS=$CPUS
+          fi
+          echo "num_jobs=${NUM_JOBS}" >> "$GITHUB_OUTPUT"
+          echo "CPUs: ${CPUS}, RAM: ${RAM_GIB} GiB, GiB/worker: ${GIB_PER_WORKER}, using --num-jobs ${NUM_JOBS}"
+
+      - name: Build and test
+        run: |
+          ./scripts/validate.sh \
+            --build --regen-thrift \
+            --num-jobs "${{ steps.jobs.outputs.num_jobs }}"
