@@ -1,0 +1,9 @@
+# Device info for the OTG BGP + platform hardening conveyor.
+# Pass via: --device-info-csv examples/topology/otg_hardening_device_info.csv
+#
+# Format: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system
+#
+# mac_address is REQUIRED here: HIGH_QUEUE_BGP_CP_TRAFFIC targets the DUT's own
+# MAC so the DUT punts the frames to its CPU instead of forwarding them.
+# Replace with the real DUT MAC.
+device,,,02:00:00:00:00:01,,FBOSS,

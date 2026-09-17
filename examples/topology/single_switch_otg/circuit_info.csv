@@ -1,0 +1,19 @@
+# Single-switch OTG topology: DUT connected to an OTG traffic generator
+# (ixia-c / Keysight Elemental) on two ports.
+# Format: hostname,local_interface,local_platform,local_parent_interface,
+#         neighbor_hostname,neighbor_interface,neighbor_platform,
+#         neighbor_parent_interface,status,role
+#
+# neighbor_platform=ixia classifies these rows as TGEN links.
+# neighbor_interface carries the OTG port-location string (ixia-c:
+# interface names like eth1; Keysight OTG: controller port endpoints).
+# status=3 means active.
+#
+#   Port A (eth1): used by bgp_session_test.py and traffic_forwarding_test.py
+#   Port B (eth2): used by traffic_forwarding_test.py only
+#
+# Replace hostnames, DUT interfaces, and OTG port locations with your wiring.
+switch01.example.com,eth1/1/1,FBOSS,,otg01.example.com,eth1,ixia,,3,
+otg01.example.com,eth1,ixia,,switch01.example.com,eth1/1/1,FBOSS,,3,
+switch01.example.com,eth1/2/1,FBOSS,,otg01.example.com,eth2,ixia,,3,
+otg01.example.com,eth2,ixia,,switch01.example.com,eth1/2/1,FBOSS,,3,

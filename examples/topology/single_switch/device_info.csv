@@ -1,0 +1,8 @@
+# Single-switch topology: one FBOSS DUT + one Ixia chassis
+# Format: hostname,ipv6_address,ipv4_address,mac_address,role,operating_system,hardware
+#
+# Replace switch01.example.com with your DUT hostname (matches --dut flag).
+# Replace ixia01.example.com with your Ixia chassis hostname (must match
+# the neighbor_hostname entries in circuit_info.csv).
+switch01.example.com,,,,,FBOSS,
+ixia01.example.com,,,,,,
