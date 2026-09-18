@@ -87,12 +87,7 @@ from taac.task_definitions import (
 )
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
-from taac.test_as_a_config.types import (
-    Params,
-    Playbook,
-    PointInTimeHealthCheck,
-    TestConfig,
-)
+from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, TestConfig
 
 # =============================================================================
 # SECTION 2: CONSTANTS
@@ -2083,7 +2078,169 @@ def _create_parameterized_device_group(
 
 
 # =============================================================================
-# SECTION 12: GTSW001.L1001.C085.ASH6
+# SECTION 12: TWO-PORT DEVICE FACTORY
+# =============================================================================
+def create_two_port_device_test_configs(
+    device_name: str,
+    remote_as: int,
+    peer_group: str,
+    prefix_stresser: tuple[str, str, str, str],
+    downlink: tuple[str, str, str, str],
+    mac_address: str,
+    ingress_policy: str,
+    egress_policy: str,
+    patcher_suffix: str,
+    config_name_prefix: str,
+    basset_pool: str | None = None,
+    convergence_duration: int = 300,
+    pre_setup_tasks: list[taac_types.Task] | None = None,
+    post_setup_tasks: list[taac_types.Task] | None = None,
+) -> tuple[TestConfig, TestConfig, TestConfig]:
+    """Create the three prefix-distribution configs on two physical ports.
+
+    Each TestConfig owns one distribution-specific device group on the shared
+    prefix-stresser port and one L3 traffic device group on the downlink port.
+    """
+    stresser_iface, stresser_net, stresser_chassis, stresser_port = prefix_stresser
+    downlink_iface, downlink_net, downlink_chassis, downlink_port = downlink
+    endpoint = taac_types.Endpoint(
+        name=device_name,
+        ixia_ports=[stresser_iface, downlink_iface],
+        dut=True,
+        mac_address=mac_address,
+        direct_ixia_connections=[
+            taac_types.DirectIxiaConnection(
+                interface=stresser_iface,
+                ixia_chassis_ip=stresser_chassis,
+                ixia_port=stresser_port,
+            ),
+            taac_types.DirectIxiaConnection(
+                interface=downlink_iface,
+                ixia_chassis_ip=downlink_chassis,
+                ixia_port=downlink_port,
+            ),
+        ],
+    )
+    interface_map = {
+        distribution: stresser_iface
+        for distribution in (DIST_CONTIGUOUS, DIST_HYBRID, DIST_NON_CONTIGUOUS)
+    }
+
+    def _make(distribution: str) -> TestConfig:
+        traffic_name = DISTRIBUTION_TRAFFIC_ITEM_MAP[distribution]
+        port_configs = [
+            taac_types.BasicPortConfig(
+                l1_config=MP3N_L1_CONFIG,
+                endpoint=f"{device_name}:{downlink_iface}",
+                device_group_configs=[
+                    taac_types.DeviceGroupConfig(
+                        device_group_index=0,
+                        tag_name="DOWNLINK_L3_TRAFFIC",
+                        multiplier=1,
+                        v6_addresses_config=taac_types.IpAddressesConfig(
+                            starting_ip=f"{downlink_net}::b",
+                            gateway_starting_ip=f"{downlink_net}::a",
+                            increment_ip="::",
+                            gateway_increment_ip="::",
+                            mask=64,
+                        ),
+                    )
+                ],
+            ),
+            taac_types.BasicPortConfig(
+                l1_config=MP3N_L1_CONFIG,
+                endpoint=f"{device_name}:{stresser_iface}",
+                device_group_configs=[
+                    _create_parameterized_device_group(
+                        dist=distribution,
+                        ixia_ip=f"{stresser_net}::b",
+                        gateway_ip=f"{stresser_net}::a",
+                        remote_as=remote_as,
+                        tag_name=f"PREFIX_STRESSER_{distribution.upper()}",
+                    )
+                ],
+            ),
+        ]
+        return TestConfig(
+            name=(f"{config_name_prefix}_{distribution.upper()}_PREFIX_ALL"),
+            basset_pool=basset_pool,
+            ixia_protocol_verification_timeout=10,
+            skip_ixia_protocol_verification=True,
+            endpoints=[endpoint],
+            basic_port_configs=port_configs,
+            basic_traffic_item_configs=[
+                taac_types.BasicTrafficItemConfig(
+                    name=traffic_name,
+                    bidirectional=False,
+                    merge_destinations=True,
+                    line_rate=10,
+                    src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{downlink_iface}",
+                            device_group_index=0,
+                        ),
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{stresser_iface}",
+                            device_group_index=0,
+                            network_group_index=0,
+                        ),
+                    ],
+                    traffic_type=ixia_types.TrafficType.IPV6,
+                    tracking_types=[
+                        ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                    ],
+                ),
+            ],
+            setup_tasks=[
+                *(pre_setup_tasks or []),
+                *create_mp3n_setup_tasks(
+                    device_name=device_name,
+                    peer_group=peer_group,
+                    local_ip=f"{stresser_net}::a",
+                    peer_ip=f"{stresser_net}::b",
+                    interface_configs=[
+                        (
+                            stresser_iface,
+                            f"{stresser_net}::a",
+                            f"{stresser_net}::b",
+                            f"ixia_mp3n_{distribution}",
+                        ),
+                        (
+                            downlink_iface,
+                            f"{downlink_net}::a",
+                            f"{downlink_net}::b",
+                            "ixia_mp3n_downlink",
+                        ),
+                    ],
+                    peer_description=f"ixia_mp3n_{distribution}",
+                    remote_as=remote_as,
+                    ingress_policy=ingress_policy,
+                    egress_policy=egress_policy,
+                    patcher_suffix=patcher_suffix,
+                ),
+                *(post_setup_tasks or []),
+            ],
+            teardown_tasks=create_mp3n_teardown_tasks(device_name=device_name),
+            playbooks=create_all_playbooks_for_distribution(
+                distribution,
+                device_name=device_name,
+                distribution_interface_map=interface_map,
+                convergence_duration=convergence_duration,
+            ),
+        )
+
+    return (
+        _make(DIST_CONTIGUOUS),
+        _make(DIST_HYBRID),
+        _make(DIST_NON_CONTIGUOUS),
+    )
+
+
+# =============================================================================
+# SECTION 13: GTSW001.L1001.C085.ASH6
 # =============================================================================
 # Topology (ixia19.netcastle.ash6):
 #   eth1/1/1 -> 1/25 (contiguous), eth1/1/3 -> 1/27 (hybrid),
