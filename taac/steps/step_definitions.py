@@ -1283,6 +1283,7 @@ def create_openr_scale_injection_step(
     num_prefixes_per_node: t.Optional[int] = None,
     num_sites: t.Optional[int] = None,
     num_super_spines: t.Optional[int] = None,
+    prefix_seed: t.Optional[int] = None,
     extra_flags: t.Optional[t.List[str]] = None,
     run_duration_sec: t.Optional[int] = None,
     run_timeout_sec: int = 240,
@@ -1290,6 +1291,7 @@ def create_openr_scale_injection_step(
     require_binary_present: bool = True,
     restart_openr: bool = False,
     openr_ready_timeout_sec: t.Optional[int] = None,
+    expected_updated_key_vals_delta: t.Optional[int] = None,
     jq_var_prefix: str = "openr_scale",
     area: t.Optional[str] = None,
     areas: t.Optional[str] = None,
@@ -1302,9 +1304,9 @@ def create_openr_scale_injection_step(
     ``kvstore.received_key_vals`` is sampled from the DUT's own Open/R over
     Thrift immediately before and after the injector runs; the injector's own
     report of what it sent is exactly the number a policed path invalidates, so
-    it is never the source. ``kvstore.updated_key_vals`` is logged over the same
-    window as a diagnostic -- gating on the merged subset belongs to the
-    KvStore-merge test, which carries a clean-store precondition.
+    it is never the source. ``kvstore.updated_key_vals`` is required and logged
+    over the same window by default. ``expected_updated_key_vals_delta`` opts into
+    exact equality for a KvStore-merge test with a clean-store precondition.
 
     Also publishes what was injected, as jq variables for
     ``create_openr_kvstore_keys_check``:
@@ -1362,6 +1364,15 @@ def create_openr_scale_injection_step(
             Open/R's own Thrift interface.
         openr_ready_timeout_sec: budget for Open/R to serve Thrift again after
             the restart. Observed cost to INITIALIZED is ~26s.
+        expected_updated_key_vals_delta: optional exact increase required from
+            ``kvstore.updated_key_vals.sum``. Omitted by default so existing
+            Test 2 serialization and diagnostic-only behavior remain unchanged.
+        prefix_seed: derive each node's prefixes from
+            ``(prefix_seed, node, index)`` instead of drawing them at random,
+            which makes the injected ``prefix:`` key names computable off-box
+            and lets a check assert them by name. 0 or omitted keeps the
+            historical random behaviour. Published as
+            ``{jq_var_prefix}_prefix_seed``.
         area: restrict key accounting to one KvStore area. Read side only --
             it scopes what the step counts, and does not reach the injector.
         areas: comma-separated area names for the injector's ``--areas``. Two or
@@ -1376,6 +1387,14 @@ def create_openr_scale_injection_step(
         )
     if dut_role not in ("leaf", "spine"):
         raise ValueError(f"dut_role must be 'leaf' or 'spine', got {dut_role!r}")
+    if (
+        expected_updated_key_vals_delta is not None
+        and expected_updated_key_vals_delta < 0
+    ):
+        raise ValueError(
+            "expected_updated_key_vals_delta must be non-negative, got "
+            f"{expected_updated_key_vals_delta}"
+        )
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "openr_scale_injection",
@@ -1401,9 +1420,11 @@ def create_openr_scale_injection_step(
         ("num_prefixes_per_node", num_prefixes_per_node),
         ("num_sites", num_sites),
         ("num_super_spines", num_super_spines),
+        ("prefix_seed", prefix_seed),
         ("extra_flags", extra_flags),
         ("run_duration_sec", run_duration_sec),
         ("openr_ready_timeout_sec", openr_ready_timeout_sec),
+        ("expected_updated_key_vals_delta", expected_updated_key_vals_delta),
         ("area", area),
         ("areas", areas),
     ):
@@ -1417,6 +1438,67 @@ def create_openr_scale_injection_step(
             f"Inject {num_spines}-spine/{num_leaves}-leaf Open/R topology into "
             f"{dut_name} KvStore from {helper_name}"
         ),
+    )
+
+
+def create_openr_scale_kvstore_state_step(
+    dut_name: str,
+    seeds: t.Sequence[int],
+    num_spines: int,
+    num_leaves: int,
+    num_control_nodes: int,
+    num_sites: int,
+    ecmp_width: int,
+    prefixes_per_node: int,
+    dut_role: t.Literal["leaf", "spine"],
+    area: str,
+    checkpoint: t.Literal["single"] = "single",
+    retry_count: int = 6,
+    retry_delay_seconds: float = 5.0,
+    adjacency_batch_size: int = 16,
+    prefix_batch_size: int = 500,
+) -> Step:
+    """Create a surplus-tolerant semantic KvStore Value-validation barrier."""
+    if checkpoint != "single":
+        raise ValueError(f"Unsupported checkpoint {checkpoint!r}")
+    if len(seeds) != 1 or any(
+        not isinstance(seed, int) or isinstance(seed, bool) or seed <= 0
+        for seed in seeds
+    ):
+        raise ValueError(f"single requires one positive integer seed, got {seeds!r}")
+    if not dut_name or not area:
+        raise ValueError("dut_name and area must be nonempty")
+    if dut_role not in {"leaf", "spine"}:
+        raise ValueError(f"dut_role must be 'leaf' or 'spine', got {dut_role!r}")
+    if (
+        min(num_spines, num_leaves, ecmp_width, adjacency_batch_size, prefix_batch_size)
+        <= 0
+    ):
+        raise ValueError("spines, leaves, ECMP width, and batch sizes must be positive")
+    if min(num_control_nodes, num_sites, prefixes_per_node, retry_count) < 0:
+        raise ValueError("counts and retry_count must be nonnegative")
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must be nonnegative")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "openr_scale_kvstore_state",
+            "dut_name": dut_name,
+            "seeds": list(seeds),
+            "num_spines": num_spines,
+            "num_leaves": num_leaves,
+            "num_control_nodes": num_control_nodes,
+            "num_sites": num_sites,
+            "ecmp_width": ecmp_width,
+            "prefixes_per_node": prefixes_per_node,
+            "dut_role": dut_role,
+            "area": area,
+            "checkpoint": checkpoint,
+            "retry_count": retry_count,
+            "retry_delay_seconds": retry_delay_seconds,
+            "adjacency_batch_size": adjacency_batch_size,
+            "prefix_batch_size": prefix_batch_size,
+        },
+        description=f"Validate Open/R scale KvStore state {checkpoint} on {dut_name}",
     )
 
 
