@@ -5085,7 +5085,7 @@ class Ixia:
                     )
                 if increment_ip:
                     self.logger.debug(
-                        f"Updated increment ip prefix for prefix pool {prefix_pool.Name} to {starting_ip}"
+                        f"Updated increment ip prefix for prefix pool {prefix_pool.Name} to {increment_ip}"
                     )
             if prefix_length:
                 prefix_pool.PrefixLength.Single(prefix_length)

@@ -44,5 +44,4 @@ _IXIA02_CHASSIS = "2401:db00:2066:3036::3002"
     patcher_suffix="fadu_ixia",
     config_name_prefix="FA003_DU003_QZA1_PREFIX_PROFILING_SCALE",
     basset_pool="dne.test",
-    convergence_duration=300,
 )

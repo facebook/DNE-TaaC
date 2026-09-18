@@ -85,6 +85,9 @@ from taac.task_definitions import (
     create_coop_register_patcher_task,
     create_coop_unregister_patchers_task,
 )
+from taac.testconfigs.ai_bb.prefix_profiling_constants import (
+    PFOV_CICD_DUT_NAMES,
+)
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, TestConfig
@@ -93,30 +96,31 @@ from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, TestCo
 # SECTION 2: CONSTANTS
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Route-install convergence wait (enable_and_configure -> regenerate_traffic)
-# -----------------------------------------------------------------------------
-# Wait applied AFTER enable_and_configure and BEFORE regenerate_traffic in every
-# prefix-profiling playbook, sized for the worst case: non-contiguous /128.
-#
-# Why it needs to be this large (~400s more than the original 300s):
-#   * For non-contiguous (and any case whose advertised count changes),
-#     enable_and_configure changes NetworkGroup.Multiplier, which forces a full
-#     IXIA protocol stop/start (see update_prefix_counts_by_port) -- routes are
-#     withdrawn and re-advertised, not edited on the fly.
-#   * The re-advertised /128s are scattered random addresses, so the Cisco G200
-#     (Kodiak3) LPM TCAM allocator must defragment / make space for each insert
-#     and programs them one at a time. The FIB therefore fills GRADUALLY, and
-#     measured end-to-end convergence for these cases is ~600-700s.
-#   * At the old 300s wait, traffic was regenerated before the FIB was fully
-#     populated, so it hit not-yet-installed prefixes and the mid-test packet
-#     loss check failed. 700s lets the FIB finish installing first.
-#
-# Contiguous / shorter masks converge far faster and do NOT need this; the value
-# is set for the slowest case. A better future fix is a route-count convergence
-# gate (poll `fboss2 show route summary` hwEntriesUsed until stable) instead of a
-# fixed wait, so the fast cases don't over-wait.
-ROUTE_CONVERGENCE_WAIT_SEC = 700
+PFOV_TIMING_PROFILES: dict[str, dict[str, int]] = {
+    "npi": {
+        "initial_route_install_s": 300,
+        "route_cycles": 5,
+        "route_convergence_threshold_s": 90,
+        "route_cycle_wait_s": 90,
+        "post_route_convergence_s": 300,
+        "final_traffic_soak_s": 60,
+        "resource_sampling_s": 120,
+    },
+    "cicd": {
+        "initial_route_install_s": 120,
+        "route_cycles": 1,
+        "route_convergence_threshold_s": 90,
+        "route_cycle_wait_s": 90,
+        "post_route_convergence_s": 120,
+        "final_traffic_soak_s": 60,
+        "resource_sampling_s": 30,
+    },
+}
+
+
+def get_pfov_timing_profile(device_name: str) -> dict[str, int]:
+    profile_name = "cicd" if device_name.lower() in PFOV_CICD_DUT_NAMES else "npi"
+    return PFOV_TIMING_PROFILES[profile_name]
 
 
 # -----------------------------------------------------------------------------
@@ -1024,12 +1028,14 @@ ENDPOINT: taac_types.Endpoint = taac_types.Endpoint(
 # -----------------------------------------------------------------------------
 def _create_common_postchecks(
     prefix_limit: int,
+    resource_sampling_s: int,
     bgp_convergence_threshold: int = 300,
 ) -> List[PointInTimeHealthCheck]:
     """Create common postchecks for all playbooks.
 
     Args:
         prefix_limit: Maximum expected prefix count + buffer for PREFIX_LIMIT_CHECK
+        resource_sampling_s: CPU and memory sampling window in seconds.
         bgp_convergence_threshold: Threshold in seconds for BGP_CONVERGENCE_CHECK (default: 300)
 
     Note:
@@ -1037,7 +1043,7 @@ def _create_common_postchecks(
     - BGP_CONVERGENCE_CHECK: Uses bgp_convergence_threshold, fail_on_eor_expired=False
     """
     return [
-        create_unclean_exit_check(),
+        create_unclean_exit_check(sleep_timer=resource_sampling_s),
         create_prefix_limit_check(prefix_limit=str(prefix_limit)),
         create_memory_utilization_check(
             threshold=5 * (1024**3),
@@ -1049,9 +1055,12 @@ def _create_common_postchecks(
                 "fboss_hw_agent@0": 8 * (1024**3),
             },
             start_time_jq_var="test_case_start_time",
+            sleep_timer=resource_sampling_s,
         ),
         create_cpu_utilization_check(
-            threshold=400.0, start_time_jq_var="test_case_start_time"
+            threshold=400.0,
+            start_time_jq_var="test_case_start_time",
+            sleep_timer=resource_sampling_s,
         ),
         create_bgp_convergence_check(
             convergence_threshold=bgp_convergence_threshold,
@@ -1070,7 +1079,6 @@ def create_warmboot_playbook(
     _network_group_index: int = 0,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for Warmboot testing.
@@ -1093,6 +1101,7 @@ def create_warmboot_playbook(
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
     ng_regex = f".*PREFIX_STRESSER_{distribution_type.upper()}.*"
     dist_interface = distribution_interface_map[distribution_type]
+    timing = get_pfov_timing_profile(device_name)
 
     return build_mp3n_profiling_playbook(
         name=f"test_{distribution_type}_warmboot_{prefix_length}",
@@ -1105,6 +1114,7 @@ def create_warmboot_playbook(
         ],
         postchecks=_create_common_postchecks(
             prefix_limit=profile.prefix_limit(distribution_type),
+            resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
         + [
@@ -1131,6 +1141,8 @@ def create_warmboot_playbook(
                 uplink_interface=dist_interface,
                 prefix_count=mask_config.prefix_count,
                 network_group_regex=ng_regex,
+                starting_prefix=mask_config.fixed_prefix,
+                prefix_step=mask_config.prefix_step,
                 fixed_prefix=mask_config.fixed_prefix
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
@@ -1151,7 +1163,7 @@ def create_warmboot_playbook(
                 stage_id_prefix="wait_route_install_warmboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=ROUTE_CONVERGENCE_WAIT_SEC,
+                duration=timing["initial_route_install_s"],
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_warmboot",
@@ -1182,14 +1194,18 @@ def create_warmboot_playbook(
             ),
             create_toggle_and_analyze_stage(
                 network_group_regex=f".*PREFIX_STRESSER_{distribution_type.upper()}.*",
-                iterations=5,
-                time_threshold=60,
+                iterations=timing["route_cycles"],
+                time_threshold=timing["route_convergence_threshold_s"],
+                wait_time_seconds=timing["route_cycle_wait_s"],
+                expected_route_count=(
+                    mask_config.prefix_count * mask_config.multiplier
+                ),
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_convergence_warmboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=convergence_duration,
+                duration=timing["post_route_convergence_s"],
             ),
             create_clear_stats_stage(
                 stage_id_prefix="clear_stats_warmboot",
@@ -1205,7 +1221,7 @@ def create_warmboot_playbook(
                 stage_id_prefix="soak_warmboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=120,
+                duration=timing["final_traffic_soak_s"],
             ),
         ],
     )
@@ -1221,7 +1237,6 @@ def create_bgp_restart_playbook(
     _network_group_index: int,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for BGP Restart testing.
@@ -1244,6 +1259,7 @@ def create_bgp_restart_playbook(
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
     ng_regex = f".*PREFIX_STRESSER_{distribution_type.upper()}.*"
     dist_interface = distribution_interface_map[distribution_type]
+    timing = get_pfov_timing_profile(device_name)
 
     return build_mp3n_profiling_playbook(
         name=f"bgp_restart_{distribution_type}_{prefix_length}",
@@ -1256,6 +1272,7 @@ def create_bgp_restart_playbook(
         ],
         postchecks=_create_common_postchecks(
             prefix_limit=profile.prefix_limit(distribution_type),
+            resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
         + [
@@ -1282,6 +1299,8 @@ def create_bgp_restart_playbook(
                 uplink_interface=dist_interface,
                 prefix_count=mask_config.prefix_count,
                 network_group_regex=ng_regex,
+                starting_prefix=mask_config.fixed_prefix,
+                prefix_step=mask_config.prefix_step,
                 fixed_prefix=mask_config.fixed_prefix
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
@@ -1302,7 +1321,7 @@ def create_bgp_restart_playbook(
                 stage_id_prefix="wait_route_install_bgp_restart",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=ROUTE_CONVERGENCE_WAIT_SEC,
+                duration=timing["initial_route_install_s"],
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_bgp_restart",
@@ -1333,14 +1352,18 @@ def create_bgp_restart_playbook(
             ),
             create_toggle_and_analyze_stage(
                 network_group_regex=f".*PREFIX_STRESSER_{distribution_type.upper()}.*",
-                iterations=5,
-                time_threshold=60,
+                iterations=timing["route_cycles"],
+                time_threshold=timing["route_convergence_threshold_s"],
+                wait_time_seconds=timing["route_cycle_wait_s"],
+                expected_route_count=(
+                    mask_config.prefix_count * mask_config.multiplier
+                ),
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_convergence_bgp_restart",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=convergence_duration,
+                duration=timing["post_route_convergence_s"],
             ),
             create_clear_stats_stage(
                 stage_id_prefix="clear_stats_bgp_restart",
@@ -1356,7 +1379,7 @@ def create_bgp_restart_playbook(
                 stage_id_prefix="soak_bgp_restart",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=120,
+                duration=timing["final_traffic_soak_s"],
             ),
         ],
     )
@@ -1372,7 +1395,6 @@ def create_coldboot_playbook(
     _network_group_index: int,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> Playbook:
     """Create a TAAC Playbook for Coldboot testing.
@@ -1396,6 +1418,7 @@ def create_coldboot_playbook(
         distribution_interface_map = DISTRIBUTION_INTERFACE_MAP
     ng_regex = f".*PREFIX_STRESSER_{distribution_type.upper()}.*"
     dist_interface = distribution_interface_map[distribution_type]
+    timing = get_pfov_timing_profile(device_name)
 
     return build_mp3n_profiling_playbook(
         name=f"test_{distribution_type}_coldboot_{prefix_length}",
@@ -1408,6 +1431,7 @@ def create_coldboot_playbook(
         ],
         postchecks=_create_common_postchecks(
             prefix_limit=profile.prefix_limit(distribution_type),
+            resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
         + [
@@ -1434,6 +1458,8 @@ def create_coldboot_playbook(
                 uplink_interface=dist_interface,
                 prefix_count=mask_config.prefix_count,
                 network_group_regex=ng_regex,
+                starting_prefix=mask_config.fixed_prefix,
+                prefix_step=mask_config.prefix_step,
                 fixed_prefix=mask_config.fixed_prefix
                 if distribution_type != DIST_CONTIGUOUS
                 else None,
@@ -1454,7 +1480,7 @@ def create_coldboot_playbook(
                 stage_id_prefix="wait_route_install_coldboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=ROUTE_CONVERGENCE_WAIT_SEC,
+                duration=timing["initial_route_install_s"],
             ),
             create_regenerate_traffic_stage(
                 stage_id_prefix="regenerate_traffic_coldboot",
@@ -1496,14 +1522,18 @@ def create_coldboot_playbook(
             ),
             create_toggle_and_analyze_stage(
                 network_group_regex=f".*PREFIX_STRESSER_{distribution_type.upper()}.*",
-                iterations=5,
-                time_threshold=60,
+                iterations=timing["route_cycles"],
+                time_threshold=timing["route_convergence_threshold_s"],
+                wait_time_seconds=timing["route_cycle_wait_s"],
+                expected_route_count=(
+                    mask_config.prefix_count * mask_config.multiplier
+                ),
             ),
             create_wait_convergence_stage(
                 stage_id_prefix="wait_route_convergence_coldboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=convergence_duration,
+                duration=timing["post_route_convergence_s"],
             ),
             create_clear_stats_stage(
                 stage_id_prefix="clear_stats_coldboot",
@@ -1519,7 +1549,7 @@ def create_coldboot_playbook(
                 stage_id_prefix="soak_coldboot",
                 distribution_type=distribution_type,
                 prefix_length=prefix_length,
-                duration=120,
+                duration=timing["final_traffic_soak_s"],
             ),
         ],
     )
@@ -1569,7 +1599,6 @@ def create_warmboot_playbooks_for_distribution(
     prefix_lengths: list[int] | None = None,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create warmboot playbooks for a distribution type."""
@@ -1587,7 +1616,6 @@ def create_warmboot_playbooks_for_distribution(
             ng_index,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
         for pl in prefix_lengths
@@ -1599,7 +1627,6 @@ def create_bgp_restart_playbooks_for_distribution(
     prefix_lengths: list[int] | None = None,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create BGP restart playbooks for a distribution type."""
@@ -1617,7 +1644,6 @@ def create_bgp_restart_playbooks_for_distribution(
             ng_index,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
         for pl in prefix_lengths
@@ -1629,7 +1655,6 @@ def create_coldboot_playbooks_for_distribution(
     prefix_lengths: list[int] | None = None,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create coldboot playbooks for a distribution type."""
@@ -1647,7 +1672,6 @@ def create_coldboot_playbooks_for_distribution(
             ng_index,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
         for pl in prefix_lengths
@@ -1659,7 +1683,6 @@ def create_all_playbooks_for_distribution(
     prefix_lengths: list[int] | None = None,
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> list[Playbook]:
     """Create all playbooks (warmboot, BGP restart, coldboot) for a distribution."""
@@ -1671,7 +1694,6 @@ def create_all_playbooks_for_distribution(
             prefix_lengths,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
         + create_bgp_restart_playbooks_for_distribution(
@@ -1679,7 +1701,6 @@ def create_all_playbooks_for_distribution(
             prefix_lengths,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
         + create_coldboot_playbooks_for_distribution(
@@ -1687,7 +1708,6 @@ def create_all_playbooks_for_distribution(
             prefix_lengths,
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
-            convergence_duration=convergence_duration,
             profile=profile,
         )
     )
@@ -1712,7 +1732,6 @@ def create_test_config_for_distribution(
     patcher_suffix: str = "rtsw_ixia",
     config_name_prefix: str = "MP3N_PREFIX_PROFILING_SCALE",
     basset_pool: str | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> TestConfig:
     """Create a TestConfig for a distribution type."""
@@ -1794,7 +1813,6 @@ def create_test_config_for_distribution(
                 prefix_lengths,
                 device_name=device_name,
                 distribution_interface_map=distribution_interface_map,
-                convergence_duration=convergence_duration,
                 profile=profile,
             )
         ),
@@ -1885,7 +1903,6 @@ def create_device_test_configs(
     patcher_suffix: str,
     config_name_prefix: str,
     basset_pool: str | None = None,
-    convergence_duration: int = 300,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> tuple[TestConfig, TestConfig, TestConfig]:
     """Create all MP3N test configs for a device from interface specs.
@@ -2026,7 +2043,6 @@ def create_device_test_configs(
                 dist,
                 device_name=device_name,
                 distribution_interface_map=interface_map,
-                convergence_duration=convergence_duration,
                 profile=profile,
             ),
         )
@@ -2092,9 +2108,9 @@ def create_two_port_device_test_configs(
     patcher_suffix: str,
     config_name_prefix: str,
     basset_pool: str | None = None,
-    convergence_duration: int = 300,
     pre_setup_tasks: list[taac_types.Task] | None = None,
     post_setup_tasks: list[taac_types.Task] | None = None,
+    profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
 ) -> tuple[TestConfig, TestConfig, TestConfig]:
     """Create the three prefix-distribution configs on two physical ports.
 
@@ -2157,6 +2173,7 @@ def create_two_port_device_test_configs(
                         gateway_ip=f"{stresser_net}::a",
                         remote_as=remote_as,
                         tag_name=f"PREFIX_STRESSER_{distribution.upper()}",
+                        profile=profile,
                     )
                 ],
             ),
@@ -2228,7 +2245,7 @@ def create_two_port_device_test_configs(
                 distribution,
                 device_name=device_name,
                 distribution_interface_map=interface_map,
-                convergence_duration=convergence_duration,
+                profile=profile,
             ),
         )
 
@@ -2266,5 +2283,4 @@ _GTSW001_CHASSIS = "2401:db00:2066:31fb::3019"
     patcher_suffix="gtsw_ixia",
     config_name_prefix="GTSW001_C085_MP3N_PREFIX_PROFILING_SCALE",
     basset_pool="dne.test",
-    convergence_duration=300,
 )

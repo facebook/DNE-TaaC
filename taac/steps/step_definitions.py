@@ -9377,6 +9377,8 @@ def create_toggle_device_group_step(
     distribution_type: str,
     enable: bool,
     description: t.Optional[str] = None,
+    require_match: bool = False,
+    expected_match_count: int | None = None,
 ) -> Step:
     """Toggle the IXIA `PREFIX_STRESSER_*` device group on or off.
 
@@ -9392,6 +9394,8 @@ def create_toggle_device_group_step(
         enable: True to enable the device group, False to disable.
         description: Custom description for the step. If omitted, a
             default is generated from the args.
+        require_match: Fail when no device group matches the distribution.
+        expected_match_count: Exact number of matching device groups required.
 
     Returns:
         A `Step` with `step_name=StepName.INVOKE_IXIA_API_STEP` calling
@@ -9401,13 +9405,14 @@ def create_toggle_device_group_step(
         description
         or f"{'Enable' if enable else 'Disable'} {distribution_type} device group"
     )
-    return create_ixia_api_step(
-        api_name="toggle_device_groups",
-        args_dict={
-            "enable": enable,
-            "device_group_name_regex": f".*PREFIX_STRESSER_{distribution_type.upper()}.*",
-        },
+    return create_ixia_device_group_toggle_step(
+        enable=enable,
+        device_group_name_regex=(
+            f".*PREFIX_STRESSER_{distribution_type.upper()}.*"
+        ),
         description=desc,
+        require_match=require_match,
+        expected_match_count=expected_match_count,
     )
 
 
@@ -9544,8 +9549,10 @@ def create_configure_prefix_length_step(
     network_group_regex: str,
     prefix_length: int,
     distribution_type: str,
+    starting_ip: str | None = None,
+    increment_ip: str | None = None,
 ) -> Step:
-    """Set the advertised prefix length for a CONTIGUOUS-distribution group.
+    """Set the advertised address pattern for a CONTIGUOUS-distribution group.
 
     Wraps the IXIA `configure_advertised_prefixes` API, used in MP3N
     prefix-profiling tests with the INCREMENT pattern. Adjusting the
@@ -9559,17 +9566,25 @@ def create_configure_prefix_length_step(
         prefix_length: New prefix length (e.g. 24, 32, 48, 64, 128).
         distribution_type: Label for the step description (typically
             `CONTIGUOUS`).
+        starting_ip: First advertised prefix for the selected mask.
+        increment_ip: Address increment between consecutive prefixes.
 
     Returns:
         A `Step` with `step_name=StepName.INVOKE_IXIA_API_STEP` calling
         `configure_advertised_prefixes`.
     """
+    args: dict[str, t.Any] = {
+        "network_group_regex": network_group_regex,
+        "prefix_length": prefix_length,
+    }
+    if starting_ip is not None:
+        args["starting_ip"] = starting_ip
+    if increment_ip is not None:
+        args["increment_ip"] = increment_ip
+
     return create_ixia_api_step(
         api_name="configure_advertised_prefixes",
-        args_dict={
-            "network_group_regex": network_group_regex,
-            "prefix_length": prefix_length,
-        },
+        args_dict=args,
         description=f"Configure prefix length for {distribution_type} (/{prefix_length})",
     )
 
@@ -9959,6 +9974,9 @@ def create_route_convergence_health_check_step(
     iterations: int = 5,
     time_threshold: int = 35,
     wait_time_seconds: int = 60,
+    expected_route_count: int | None = None,
+    observation_timeout_seconds: int = 15,
+    observation_poll_interval_seconds: float = 1,
 ) -> Step:
     """Run the Route Convergence health check N times to measure converge time.
 
@@ -9992,6 +10010,9 @@ def create_route_convergence_health_check_step(
                 iterations=iterations,
                 time_threshold=time_threshold,
                 wait_time_seconds=wait_time_seconds,
+                expected_route_count=expected_route_count,
+                observation_timeout_seconds=observation_timeout_seconds,
+                observation_poll_interval_seconds=observation_poll_interval_seconds,
             ),
         ],
         stage=taac_types.ValidationStage.MID_TEST,

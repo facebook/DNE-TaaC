@@ -39,7 +39,6 @@ _IXIA_CHASSIS = "2401:db00:116:3006:21a:c5ff:fe01:314c"
     patcher_suffix="fsw004_p001_ixia",
     config_name_prefix="FSW004_P001_F01_QZD1_PREFIX_PROFILING_SCALE",
     basset_pool="dne.test",
-    convergence_duration=300,
     pre_setup_tasks=[
         create_run_commands_on_shell_task(
             hostname="fsw004.p001.f01.qzd1",

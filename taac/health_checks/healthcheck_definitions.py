@@ -704,6 +704,7 @@ def _build_threshold_check(
     delta: t.Optional[float] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
     vmhwm_threshold: t.Optional[t.Union[int, float]] = None,
+    sleep_timer: t.Optional[int] = None,
 ) -> PointInTimeHealthCheck:
     """Internal helper: build a CPU/memory-style threshold-based PointInTimeHealthCheck.
 
@@ -719,6 +720,8 @@ def _build_threshold_check(
         json_payload["delta"] = delta
     if vmhwm_threshold is not None:
         json_payload["vmhwm_threshold"] = vmhwm_threshold
+    if sleep_timer is not None:
+        json_payload["sleep_timer"] = sleep_timer
     jq_params = {"start_time": f".{start_time_jq_var}"} if start_time_jq_var else None
     if not json_payload and not jq_params:
         return PointInTimeHealthCheck(name=check_name, check_scope=check_scope)
@@ -737,6 +740,7 @@ def create_cpu_utilization_check(
     threshold_by_service: t.Optional[t.Dict[str, float]] = None,
     start_time_jq_var: t.Optional[str] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
+    sleep_timer: t.Optional[int] = None,
 ) -> PointInTimeHealthCheck:
     """CPU_UTILIZATION_CHECK — verifies CPU utilization stays below thresholds.
 
@@ -748,6 +752,8 @@ def create_cpu_utilization_check(
             jq variable name (typically ``"test_case_start_time"``).
         check_scope: Optional scope override (e.g. ``Scope.DEFAULT`` to run on
             the DUT only).
+        sleep_timer: Sampling window in seconds. When omitted, the runtime
+            default is used.
     """
     return _build_threshold_check(
         hc_types.CheckName.CPU_UTILIZATION_CHECK,
@@ -755,6 +761,7 @@ def create_cpu_utilization_check(
         threshold_by_service,
         start_time_jq_var,
         check_scope=check_scope,
+        sleep_timer=sleep_timer,
     )
 
 
@@ -765,6 +772,7 @@ def create_memory_utilization_check(
     delta: t.Optional[t.Union[int, float]] = None,
     check_scope: t.Optional["hc_types.Scope"] = None,
     vmhwm_threshold: t.Optional[t.Union[int, float]] = None,
+    sleep_timer: t.Optional[int] = None,
 ) -> PointInTimeHealthCheck:
     """MEMORY_UTILIZATION_CHECK — verifies memory usage stays below thresholds.
 
@@ -783,6 +791,8 @@ def create_memory_utilization_check(
             counter, so this reads ``/proc/<pid>/status`` VmHWM directly and
             asserts it stays below the ceiling. Use for the UG spec's
             "VmHWM below 10 GB" pass criterion. Only honored on the Arista path.
+        sleep_timer: Sampling window in seconds. When omitted, the runtime
+            default is used.
     """
     return _build_threshold_check(
         hc_types.CheckName.MEMORY_UTILIZATION_CHECK,
@@ -791,6 +801,7 @@ def create_memory_utilization_check(
         start_time_jq_var,
         check_scope=check_scope,
         vmhwm_threshold=vmhwm_threshold,
+        sleep_timer=sleep_timer,
     )
 
 
@@ -2599,6 +2610,9 @@ def create_route_convergence_time_check(
     iterations: int = 5,
     time_threshold: int = 35,
     wait_time_seconds: int = 60,
+    expected_route_count: int | None = None,
+    observation_timeout_seconds: int = 15,
+    observation_poll_interval_seconds: float = 1,
 ) -> PointInTimeHealthCheck:
     """ROUTE_CONVERGENCE_TIME_CHECK — DELETE/ADD-cycle BGP convergence check.
 
@@ -2610,7 +2624,11 @@ def create_route_convergence_time_check(
         "iterations": iterations,
         "time_threshold": time_threshold,
         "wait_time_seconds": wait_time_seconds,
+        "observation_timeout_seconds": observation_timeout_seconds,
+        "observation_poll_interval_seconds": observation_poll_interval_seconds,
     }
+    if expected_route_count is not None:
+        check_params["expected_route_count"] = expected_route_count
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.ROUTE_CONVERGENCE_TIME_CHECK,
         check_params=Params(json_params=json.dumps(check_params)),

@@ -5272,6 +5272,8 @@ def create_enable_and_configure_stage(
     seed: int | None = None,
     random_mask_count: int | None = None,
     network_group_multiplier: int | None = None,
+    starting_prefix: str | None = None,
+    prefix_step: str | None = None,
 ) -> Stage:
     """Stage 1: Disable the other device groups, enable the target, then
     reconfigure its advertised prefixes (count + multiplier + prefix length /
@@ -5292,7 +5294,14 @@ def create_enable_and_configure_stage(
         if other_type != distribution_type:
             steps.append(create_toggle_device_group_step(other_type, enable=False))
 
-    steps.append(create_toggle_device_group_step(distribution_type, enable=True))
+    steps.append(
+        create_toggle_device_group_step(
+            distribution_type,
+            enable=True,
+            require_match=True,
+            expected_match_count=1,
+        )
+    )
 
     steps.append(
         create_update_prefix_count_step(
@@ -5327,6 +5336,8 @@ def create_enable_and_configure_stage(
                 network_group_regex=network_group_regex,
                 prefix_length=prefix_length,
                 distribution_type=distribution_type,
+                starting_ip=starting_prefix,
+                increment_ip=prefix_step,
             )
         )
 
@@ -5451,6 +5462,9 @@ def create_toggle_and_analyze_stage(
     iterations: int = 5,
     time_threshold: int = 35,
     wait_time_seconds: int = 60,
+    expected_route_count: int | None = None,
+    observation_timeout_seconds: int = 15,
+    observation_poll_interval_seconds: float = 1,
     stage_id: str | None = None,
 ) -> Stage:
     """Toggle BGP prefixes and analyze route convergence timing."""
@@ -5462,6 +5476,9 @@ def create_toggle_and_analyze_stage(
                 iterations=iterations,
                 time_threshold=time_threshold,
                 wait_time_seconds=wait_time_seconds,
+                expected_route_count=expected_route_count,
+                observation_timeout_seconds=observation_timeout_seconds,
+                observation_poll_interval_seconds=observation_poll_interval_seconds,
             ),
         ],
     )

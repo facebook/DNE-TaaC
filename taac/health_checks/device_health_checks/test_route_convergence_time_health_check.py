@@ -2,7 +2,7 @@
 
 # pyre-unsafe
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from neteng.netcastle.logger import ConsoleFileLogger
 from taac.constants import TestDevice
@@ -39,7 +39,7 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
     def test_parse_start_time_hhmmss_with_microseconds(self):
         """Test parsing HH:MM:SS.microseconds format."""
         result = self.health_check._parse_start_time_to_hhmmss("14:30:45.123456")
-        self.assertEqual(result, "14:30:45")
+        self.assertEqual(result, "14:30:45.123456")
 
     def test_parse_start_time_hhmm_format(self):
         """Test parsing HH:MM format."""
@@ -253,7 +253,7 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result["passed"])
-        self.assertEqual(result["time"], 8.5)
+        self.assertEqual(result["time"], 8.0)
         self.assertEqual(result["routes"], 5000)
 
     async def test_run_single_operation_toggle_failure(self):
@@ -342,6 +342,136 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["passed"])
         self.assertIn("No ADD operations found", result["message"])
 
+    async def test_run_single_operation_polls_until_expected_routes_arrive(self):
+        """A delayed complete log sample should satisfy the original SLA."""
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            side_effect=[
+                "202601011430 14:30:00.000000",
+                "",
+                "METRICS 500 0 1 0.000000 14:30:05.000000 14:30:05.000000",
+                "",
+                "METRICS 1000 0 2 8.000000 14:30:05.000000 14:30:08.000000",
+            ]
+        )
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.health_checks.device_health_checks."
+                "route_convergence_time_health_check.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.health_checks.device_health_checks."
+                "route_convergence_time_health_check.time.monotonic",
+                return_value=0.0,
+            ),
+        ):
+            result = await self.health_check._run_single_operation(
+                operation_type="ADD",
+                network_group_regex=".*CONTIGUOUS.*",
+                time_threshold=35,
+                wait_time_seconds=0,
+                log_file="/var/facebook/logs/wedge_agent.log",
+                start_time_file="/tmp/toggle_start_time",
+                iteration=1,
+                expected_route_count=1000,
+                observation_timeout_seconds=10,
+                observation_poll_interval_seconds=1,
+            )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["routes"], 1000)
+
+    async def test_run_single_operation_fails_on_incomplete_route_count(self):
+        """A partial route sample must fail when observation time expires."""
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            side_effect=[
+                "202601011430 14:30:00.000000",
+                "",
+                "METRICS 500 0 1 0.000000 14:30:05.000000 14:30:05.000000",
+                "",
+                "METRICS 500 0 1 0.000000 14:30:05.000000 14:30:05.000000",
+            ]
+        )
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.health_checks.device_health_checks."
+                "route_convergence_time_health_check.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "neteng.test_infra.dne.taac.health_checks.device_health_checks."
+                "route_convergence_time_health_check.time.monotonic",
+                side_effect=[0.0, 0.0, 11.0],
+            ),
+        ):
+            result = await self.health_check._run_single_operation(
+                operation_type="ADD",
+                network_group_regex=".*CONTIGUOUS.*",
+                time_threshold=35,
+                wait_time_seconds=0,
+                log_file="/var/facebook/logs/wedge_agent.log",
+                start_time_file="/tmp/toggle_start_time",
+                iteration=1,
+                expected_route_count=1000,
+                observation_timeout_seconds=10,
+                observation_poll_interval_seconds=1,
+            )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("observed 500/1000 routes", result["message"])
+
+    async def test_run_single_operation_uses_toggle_to_completion_time(self):
+        """A late single batch must not appear as zero-second convergence."""
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            side_effect=[
+                "202601011430 14:30:00.000000",
+                "",
+                "METRICS 1000 0 1 0.000000 14:30:40.000000 14:30:40.000000",
+            ]
+        )
+
+        result = await self.health_check._run_single_operation(
+            operation_type="ADD",
+            network_group_regex=".*CONTIGUOUS.*",
+            time_threshold=35,
+            wait_time_seconds=0,
+            log_file="/var/facebook/logs/wedge_agent.log",
+            start_time_file="/tmp/toggle_start_time",
+            iteration=1,
+            expected_route_count=1000,
+            observation_timeout_seconds=0,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["time"], 40.0)
+        self.assertIn("40.000s > 35s", result["message"])
+
+    async def test_run_logs_each_failed_operation(self):
+        """A failed operation should be visible before the aggregate result."""
+        self.health_check._run_single_operation = AsyncMock(
+            side_effect=[
+                {"passed": True, "time": 1.0, "routes": 1000},
+                {"passed": False, "message": "No ADD operations found in logs"},
+            ]
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            self.health_check_input,
+            {
+                "network_group_regex": ".*CONTIGUOUS.*",
+                "iterations": 1,
+                "wait_time_seconds": 0,
+            },
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.logger.error.assert_called_once_with(
+            "[Iter 1] ADD FAILED: No ADD operations found in logs"
+        )
+
     # =========================================================================
     # Tests for _capture_start_time (async)
     # =========================================================================
@@ -355,7 +485,7 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
             "/tmp/toggle_start_time"
         )
 
-        self.assertEqual(hhmmss, "09:52:15")
+        self.assertEqual(hhmmss, "09:52:15.879279")
         self.assertEqual(stamp, "202607170952")
 
     async def test_capture_start_time_malformed_returns_none(self):
