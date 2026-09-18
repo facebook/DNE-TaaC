@@ -136,17 +136,32 @@ _UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
     "bgp_ebb_route_storm_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 35.0), (95, 100.0)), rss_max_growth_pct=10.0
     ),
+    "bgp_ebb_route_registry_runtime_update_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 30.0), (95, 60.0)), rss_max_growth_pct=10.0
+    ),
     "bgp_ebb_multipath_group_oscillation_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 6.0), (95, 70.0)), rss_max_growth_pct=10.0
     ),
     "bgp_ebb_igp_pnh_metric_oscillation_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 30.0), (95, 100.0)), rss_max_growth_pct=10.0
     ),
+    "bgp_ebb_fauu_drain_undrain_playbook": CharacterizationGates(
+        rss_max_growth_pct=15.0
+    ),
+    "bgp_ebb_plane_drain_undrain_playbook": CharacterizationGates(
+        rss_max_growth_pct=10.0
+    ),
     "bgp_ebb_longevity_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 150.0), (95, 180.0)), rss_max_growth_pct=35.0
     ),
+    "bgp_ebb_ebgp_session_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 150.0), (95, 180.0)), rss_max_growth_pct=25.0
+    ),
     "bgp_ebb_ebgp_route_oscillation_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 60.0), (95, 160.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_ibgp_plane_session_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 10.0), (95, 20.0)), rss_max_growth_pct=10.0
     ),
     "bgp_ebb_ibgp_route_oscillation_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 90.0), (95, 160.0)), rss_max_growth_pct=10.0
@@ -154,11 +169,23 @@ _UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
     "bgp_ebb_igp_unresolvable_pnh_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 4.0), (95, 5.0)), rss_max_growth_pct=10.0
     ),
+    "bgp_ebb_nexthop_group_count_threshold_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 10.0), (95, 8.0)), rss_max_growth_pct=10.0
+    ),
 }
 
 _NON_UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
     "bgp_ebb_attribute_churn_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 140.0), (95, 150.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_route_registry_runtime_update_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 40.0), (95, 70.0)), rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_fauu_drain_undrain_playbook": CharacterizationGates(
+        rss_max_growth_pct=10.0
+    ),
+    "bgp_ebb_ebgp_session_oscillation_playbook": CharacterizationGates(
+        cpu_thresholds_pct=((80, 150.0), (95, 200.0)), rss_max_growth_pct=10.0
     ),
     "bgp_ebb_ebgp_route_oscillation_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 140.0), (95, 190.0)), rss_max_growth_pct=10.0

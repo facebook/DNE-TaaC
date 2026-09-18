@@ -30,9 +30,15 @@ _PLAYBOOK_NAMES = (
     "bgp_ebb_nexthop_group_count_threshold_playbook",
 )
 
-_UG_GATES = {
+_GateExpectation = tuple[dict[str, float] | None, float | None]
+
+_UG_GATES: dict[str, _GateExpectation] = {
     "bgp_ebb_attribute_churn_playbook": ({"80": 5.0, "95": 60.0}, 10.0),
     "bgp_ebb_route_storm_playbook": ({"80": 35.0, "95": 100.0}, 10.0),
+    "bgp_ebb_route_registry_runtime_update_playbook": (
+        {"80": 30.0, "95": 60.0},
+        10.0,
+    ),
     "bgp_ebb_multipath_group_oscillation_playbook": (
         {"80": 6.0, "95": 70.0},
         10.0,
@@ -41,9 +47,19 @@ _UG_GATES = {
         {"80": 30.0, "95": 100.0},
         10.0,
     ),
+    "bgp_ebb_fauu_drain_undrain_playbook": (None, 15.0),
+    "bgp_ebb_plane_drain_undrain_playbook": (None, 10.0),
     "bgp_ebb_longevity_playbook": ({"80": 150.0, "95": 180.0}, 35.0),
+    "bgp_ebb_ebgp_session_oscillation_playbook": (
+        {"80": 150.0, "95": 180.0},
+        25.0,
+    ),
     "bgp_ebb_ebgp_route_oscillation_playbook": (
         {"80": 60.0, "95": 160.0},
+        10.0,
+    ),
+    "bgp_ebb_ibgp_plane_session_oscillation_playbook": (
+        {"80": 10.0, "95": 20.0},
         10.0,
     ),
     "bgp_ebb_ibgp_route_oscillation_playbook": (
@@ -54,10 +70,23 @@ _UG_GATES = {
         {"80": 4.0, "95": 5.0},
         10.0,
     ),
+    "bgp_ebb_nexthop_group_count_threshold_playbook": (
+        {"80": 10.0, "95": 8.0},
+        10.0,
+    ),
 }
 
-_NON_UG_GATES = {
+_NON_UG_GATES: dict[str, _GateExpectation] = {
     "bgp_ebb_attribute_churn_playbook": ({"80": 140.0, "95": 150.0}, 10.0),
+    "bgp_ebb_route_registry_runtime_update_playbook": (
+        {"80": 40.0, "95": 70.0},
+        10.0,
+    ),
+    "bgp_ebb_fauu_drain_undrain_playbook": (None, 10.0),
+    "bgp_ebb_ebgp_session_oscillation_playbook": (
+        {"80": 150.0, "95": 200.0},
+        10.0,
+    ),
     "bgp_ebb_ebgp_route_oscillation_playbook": (
         {"80": 140.0, "95": 190.0},
         10.0,
@@ -104,7 +133,7 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
     def _assert_gates(
         self,
         enable_update_group: bool,
-        expected_gates: dict[str, tuple[dict[str, float], float]],
+        expected_gates: dict[str, _GateExpectation],
     ) -> None:
         playbooks = {
             playbook.name: playbook
@@ -142,8 +171,15 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
                     continue
 
                 expected_cpu, expected_rss = expected
-                self.assertEqual(expected_cpu, cpu_params["gate_thresholds_pct"])
-                self.assertEqual(expected_rss, rss_params["max_growth_pct"])
+                if expected_cpu is None:
+                    self.assertNotIn("gate_thresholds_pct", cpu_params)
+                    self.assertNotIn("gate_threshold_pct", cpu_params)
+                else:
+                    self.assertEqual(expected_cpu, cpu_params["gate_thresholds_pct"])
+                if expected_rss is None:
+                    self.assertNotIn("max_growth_pct", rss_params)
+                else:
+                    self.assertEqual(expected_rss, rss_params["max_growth_pct"])
 
     def test_update_group_uses_all_calibrated_gates(self) -> None:
         self._assert_gates(True, _UG_GATES)
