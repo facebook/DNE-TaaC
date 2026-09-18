@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # pyre-unsafe
-"""Minipack/Tomahawk3 CPU-queue qualification on fsw004.p003.f01.qzd1."""
+"""Minipack/Tomahawk3 CPU-queue qualification on fsw004.p004.f01.qzd1."""
 
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_npi_cpu_queue_test_config,
@@ -11,10 +11,10 @@ from taac.testconfigs.npi.minipack_cpu_queue_constants import (
 )
 
 
-MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
-    test_config_name="MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG",
-    device_name="fsw004.p003.f01.qzd1",
-    local_mac_address="c2:18:50:99:92:2d",
+MINIPACK_FSW004_P004_QZD1_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
+    test_config_name="MINIPACK_FSW004_P004_QZD1_CPU_QUEUE_TEST_CONFIG",
+    device_name="fsw004.p004.f01.qzd1",
+    local_mac_address="c2:18:50:99:93:41",
     ixia_downlink_interface="eth7/16/1",
     ixia_uplink_interface="eth9/16/1",
     ixia_rogue_interface="eth8/16/1",
@@ -81,4 +81,4 @@ MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_conf
 )
 
 
-__all__ = ["MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG"]
+__all__ = ["MINIPACK_FSW004_P004_QZD1_CPU_QUEUE_TEST_CONFIG"]

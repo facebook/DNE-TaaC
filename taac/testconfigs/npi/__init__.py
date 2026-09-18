@@ -46,6 +46,9 @@ from taac.testconfigs.npi.icepack_gtsw_warmboot_troubleshooting_config import (
 from taac.testconfigs.npi.minipack_fsw004_p003_qzd1_cpu_queue_test_config import (
     MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG,
 )
+from taac.testconfigs.npi.minipack_fsw004_p004_qzd1_cpu_queue_test_config import (
+    MINIPACK_FSW004_P004_QZD1_CPU_QUEUE_TEST_CONFIG,
+)
 from taac.testconfigs.npi.multinode_pfc_test_config import (
     NPI_DVT_ICEPACK_GTSW__MULTI_NODE_PFC_TEST_CONFIG,
     NPI_DVT_ICEPACK_GTSW__PFC002_TEST_CONFIG,
@@ -105,6 +108,7 @@ __all__ = [
     "W800_BGP_HARDENING_TEST_CONFIG",
     "W800_CPU_QUEUE_TEST_CONFIG",
     "MINIPACK_FSW004_P003_QZD1_CPU_QUEUE_TEST_CONFIG",
+    "MINIPACK_FSW004_P004_QZD1_CPU_QUEUE_TEST_CONFIG",
     "W800_LONGEVITY_TEST_CONFIG",
     "W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG",
     "W800_TEST_CONFIGS",

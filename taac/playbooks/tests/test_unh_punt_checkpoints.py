@@ -49,3 +49,40 @@ class UnhPuntCheckpointTest(unittest.TestCase):
                 self.fail(f"{pb.name} packet-loss postcheck has no input_json")
             thresholds = json.loads(input_json)["thresholds"]
             self.assertEqual([t["str_value"] for t in thresholds], ["90000"], pb.name)
+            self.assertCountEqual(
+                thresholds[0]["names"],
+                ["BGP_PREFIX_TRAFFIC", "BGP_PREFIX_TRAFFIC_V4", "IPV6_TRAFFIC"],
+                pb.name,
+            )
+            check_params = loss[0].check_params
+            if check_params is None or check_params.json_params is None:
+                self.fail(f"{pb.name} packet-loss postcheck has no check_params")
+            self.assertCountEqual(
+                json.loads(check_params.json_params)["skip_traffic_items"],
+                thresholds[0]["names"],
+                pb.name,
+            )
+
+    def test_precheck_tolerates_missing_unh_traffic_items(self) -> None:
+        for pb in create_cpu_queue_playbooks(0, 2, 9, "eth1/32/1"):
+            if pb.name not in UNH:
+                continue
+            loss = [c for c in pb.prechecks or [] if "PACKET_LOSS" in str(c.name)]
+            self.assertEqual(len(loss), 1, pb.name)
+            input_json = loss[0].input_json
+            check_params = loss[0].check_params
+            if input_json is None:
+                self.fail(f"{pb.name} packet-loss precheck has no input_json")
+            if check_params is None or check_params.json_params is None:
+                self.fail(f"{pb.name} packet-loss precheck has no check_params")
+            names = json.loads(input_json)["thresholds"][0]["names"]
+            self.assertCountEqual(
+                names,
+                ["BGP_PREFIX_TRAFFIC", "BGP_PREFIX_TRAFFIC_V4", "IPV6_TRAFFIC"],
+                pb.name,
+            )
+            self.assertCountEqual(
+                json.loads(check_params.json_params)["skip_traffic_items"],
+                names,
+                pb.name,
+            )

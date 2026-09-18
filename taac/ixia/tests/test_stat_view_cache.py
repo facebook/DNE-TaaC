@@ -1,6 +1,6 @@
 # pyre-unsafe
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-"""Unit tests for TaacIxia.get_or_create_stat_view caching helper."""
+"""Unit tests for TaacIxia statistics and test-case lifecycle behavior."""
 
 import threading
 import typing as t
@@ -29,6 +29,26 @@ def _create_taac_ixia():
     ixia._latest_packet_loss_sample_time = {}
     ixia._latest_traffic_rate_sample_time = {}
     return ixia
+
+
+class BeginTestCaseTest(unittest.TestCase):
+    def setUp(self):
+        self.ixia = _create_taac_ixia()
+
+    def test_begin_test_case_does_not_start_disabled_sampler(self):
+        self.ixia.sample_time = 0
+        self.ixia.capturing = False
+        self.ixia.paused = True
+        self.ixia._current_playbook_name = None
+        self.ixia.rotate_api_trace_phase = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.prepare_traffic = MagicMock()
+        self.ixia.start = MagicMock()
+
+        self.ixia.begin_test_case("first")
+        self.ixia.begin_test_case("second")
+
+        self.ixia.start.assert_not_called()
 
 
 class GetOrCreateStatViewTest(unittest.TestCase):
