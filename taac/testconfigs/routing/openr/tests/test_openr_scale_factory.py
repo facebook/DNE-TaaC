@@ -17,10 +17,18 @@ from taac.testconfigs.routing.openr.openr_scale_test_config import (
 from taac.health_check.health_check import types as hc_types
 
 
-def _injection_step_params(config) -> dict:
-    """Pull the injection step's params out of the single stage."""
+def _step_params(config, index: int) -> dict:
+    """Pull one ordered step's params out of the single stage."""
     stage = config.playbooks[0].stages[0]
-    return json.loads(stage.steps[0].step_params.json_params)
+    return json.loads(stage.steps[index].step_params.json_params)
+
+
+def _injection_step_params(config) -> dict:
+    return _step_params(config, 0)
+
+
+def _validation_step_params(config) -> dict:
+    return _step_params(config, 1)
 
 
 def _wired_check_names(config) -> set:
@@ -122,10 +130,60 @@ class OpenRScaleTestConfigTest(unittest.TestCase):
         self.assertNotIn(hc_types.CheckName.CPU_UTILIZATION_CHECK, wired)
         self.assertNotIn(hc_types.CheckName.MEMORY_UTILIZATION_CHECK, wired)
 
-    def test_the_injection_step_carries_the_whole_assertion(self) -> None:
-        """The gate lives in the step, which brackets the injector with counter
-        reads, so the stage needs no separate validation step and the playbook
-        needs no postcheck."""
+    def test_injection_is_followed_by_single_semantic_validation(self) -> None:
+        """The counter gate acknowledges this run's injection; the next ordered
+        step validates every expected resident Value and decoded payload."""
         playbook = OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG.playbooks[0]
-        self.assertEqual(1, len(playbook.stages[0].steps))
+        self.assertEqual(2, len(playbook.stages[0].steps))
+        injection = _injection_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
+        validation = _validation_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
+        self.assertEqual("openr_scale_injection", injection["custom_step_name"])
+        self.assertEqual("openr_scale_kvstore_state", validation["custom_step_name"])
+        self.assertEqual("single", validation["checkpoint"])
+        for merge_only_field in ("state_key", "action", "owner"):
+            self.assertNotIn(merge_only_field, validation)
+        self.assertFalse(any("fingerprint" in key for key in validation))
         self.assertEqual([], list(playbook.postchecks or ()))
+
+    def test_semantic_validation_uses_the_injected_production_contract(self) -> None:
+        injection = _injection_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
+        validation = _validation_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
+        self.assertEqual(20250903, injection["prefix_seed"])
+        self.assertEqual([injection["prefix_seed"]], validation["seeds"])
+        self.assertEqual(
+            {
+                "num_spines": 64,
+                "num_leaves": 256,
+                "num_control_nodes": 0,
+                "num_sites": 20,
+                "ecmp_width": 8,
+                "prefixes_per_node": 11,
+                "dut_role": "leaf",
+                "area": "0",
+            },
+            {
+                key: validation[key]
+                for key in (
+                    "num_spines",
+                    "num_leaves",
+                    "num_control_nodes",
+                    "num_sites",
+                    "ecmp_width",
+                    "prefixes_per_node",
+                    "dut_role",
+                    "area",
+                )
+            },
+        )
+        self.assertEqual(validation["num_spines"], injection["num_spines"])
+        self.assertEqual(validation["num_leaves"], injection["num_leaves"])
+        self.assertEqual(validation["num_control_nodes"], injection["num_super_spines"])
+        self.assertEqual(validation["num_sites"], injection["num_sites"])
+        self.assertEqual(
+            [f"--num_pods={validation['ecmp_width']}"], injection["extra_flags"]
+        )
+        self.assertEqual(
+            validation["prefixes_per_node"], injection["num_prefixes_per_node"]
+        )
+        self.assertEqual(validation["dut_role"], injection["dut_role"])
+        self.assertEqual(validation["area"], injection["area"])

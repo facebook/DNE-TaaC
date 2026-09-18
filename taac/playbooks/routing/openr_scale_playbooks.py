@@ -12,6 +12,7 @@ import typing as t
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_openr_scale_injection_step,
+    create_openr_scale_kvstore_state_step,
 )
 from taac.test_as_a_config.types import Playbook
 
@@ -27,16 +28,21 @@ def get_openr_scale_kvstore_injection_playbook(
     dut_inband_address: str,
     num_spines: int,
     num_leaves: int,
+    num_control_nodes: int,
+    num_sites: int,
+    ecmp_width: int,
+    prefixes_per_node: int,
+    dut_role: t.Literal["leaf", "spine"],
+    area: str,
+    prefix_seed: int,
     dut_mgmt_addresses: t.Optional[t.List[str]] = None,
-    dut_role: str = "leaf",
     dut_port: int = 2018,
     scale_tester_remote_path: str = "/mnt/flash/scale_test_server",
-    num_prefixes_per_node: t.Optional[int] = None,
     injection_run_duration_sec: t.Optional[int] = None,
     injection_timeout_sec: int = 240,
 ) -> Playbook:
     """
-    Build the Open/R scale KvStore injection and key-receipt test.
+    Build the Open/R scale KvStore injection and semantic-state test.
 
     See ``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/openr_scale_catalog.yaml``
     for the test contract and triage guidance.
@@ -45,19 +51,20 @@ def get_openr_scale_kvstore_injection_playbook(
     1. Trigger: run ``scale_test_server`` on the helper, injecting a synthetic
        ``num_spines``/``num_leaves`` fabric into the DUT's KvStore over the
        DUT's inband address.
-    2. Behavioural validation: the injection step samples
+    2. Delivery acknowledgement: the injection step samples
        ``kvstore.received_key_vals`` on the DUT immediately before and after the
-       injector runs, and fails when the increase falls short of the key-values
-       the fabric should have sent.
+       injector runs, and fails unless the increase is exactly the number of
+       key-values the fabric should have sent.
+    3. Semantic validation: the next ordered step derives every expected key
+       and Value independently from the fixed seed and topology, reads only
+       those keys, and compares the outer Value and decoded payload fields.
 
-    The gate is on key-values *received*, read from the DUT's own Open/R over
-    Thrift. The DUT is a real lab box already holding thousands of its own
-    genuine keys, and every earlier run leaves an infinite-TTL residue behind,
-    so no assertion over resident KvStore *state* can establish that this run's
-    keys arrived. A receive counter sampled across the injection can.
-    ``kvstore.updated_key_vals`` is logged over the same window; the merged
-    subset is gated by the KvStore-merge test, which carries the clean-store
-    precondition that makes exact per-node counts meaningful.
+    The two barriers answer different questions. The counter proves this run
+    delivered the expected number of key-values; it cannot identify them. The
+    semantic barrier proves every expected resident key and payload is correct;
+    it deliberately tolerates surplus synthetic and operational keys already on
+    this real lab DUT, so resident state alone cannot attribute delivery to this
+    run.
 
     There is no Open/R liveness precheck or postcheck. On EOS Open/R is a
     configured daemon, not a systemd unit, so ``SYSTEMCTL_ACTIVE_STATE_CHECK``
@@ -83,9 +90,14 @@ def get_openr_scale_kvstore_injection_playbook(
             large ``adj:`` requests mid-flight; listing them here turns that
             mistake into an explicit precondition failure.
         num_spines / num_leaves: fabric size.
+        num_control_nodes: BBF control-node count, passed to the injector as
+            ``num_super_spines``.
+        num_sites: number of BBF sites.
+        ecmp_width: adjacency width expected in decoded payloads.
+        prefixes_per_node: prefixes each synthetic node advertises.
         dut_role: ``leaf`` (neighbors are spines) or ``spine``.
-        num_prefixes_per_node: prefixes each synthetic node advertises, and so
-            part of the expected send count.
+        area: KvStore and payload area to validate.
+        prefix_seed: fixed positive seed shared by injection and validation.
         injection_run_duration_sec: how long the injector serves the fabric
             before exiting. The injected keys outlive it.
         injection_timeout_sec: cap on the injector command; must exceed the run
@@ -104,7 +116,7 @@ def get_openr_scale_kvstore_injection_playbook(
                 stage_id="openr_scale_kvstore_injection",
                 description=(
                     f"Inject a {num_spines}-spine/{num_leaves}-leaf Open/R "
-                    f"fabric into {dut_name} and verify it received every key"
+                    f"fabric into {dut_name} and validate every expected Value"
                 ),
                 steps=[
                     create_openr_scale_injection_step(
@@ -114,12 +126,30 @@ def get_openr_scale_kvstore_injection_playbook(
                         forbidden_dut_hosts=dut_mgmt_addresses,
                         num_spines=num_spines,
                         num_leaves=num_leaves,
-                        num_prefixes_per_node=num_prefixes_per_node,
+                        num_prefixes_per_node=prefixes_per_node,
+                        num_sites=num_sites,
+                        num_super_spines=num_control_nodes,
+                        prefix_seed=prefix_seed,
+                        extra_flags=[f"--num_pods={ecmp_width}"],
                         dut_role=dut_role,
+                        area=area,
                         dut_port=dut_port,
                         remote_path=scale_tester_remote_path,
                         run_duration_sec=injection_run_duration_sec,
                         run_timeout_sec=injection_timeout_sec,
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        dut_name=dut_name,
+                        seeds=[prefix_seed],
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_control_nodes=num_control_nodes,
+                        num_sites=num_sites,
+                        ecmp_width=ecmp_width,
+                        prefixes_per_node=prefixes_per_node,
+                        dut_role=dut_role,
+                        area=area,
+                        checkpoint="single",
                     ),
                 ],
             ),
