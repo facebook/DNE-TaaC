@@ -1441,7 +1441,7 @@ def create_openr_scale_injection_step(
     )
 
 
-def create_openr_scale_kvstore_state_step(
+def create_openr_scale_kvstore_state_step(  # noqa: C901
     dut_name: str,
     seeds: t.Sequence[int],
     num_spines: int,
@@ -1452,24 +1452,40 @@ def create_openr_scale_kvstore_state_step(
     prefixes_per_node: int,
     dut_role: t.Literal["leaf", "spine"],
     area: str,
-    checkpoint: t.Literal["single"] = "single",
+    checkpoint: t.Literal["single", "after_a", "after_b"] = "single",
+    state_key: str | None = None,
     retry_count: int = 6,
     retry_delay_seconds: float = 5.0,
     adjacency_batch_size: int = 16,
     prefix_batch_size: int = 500,
+    enforce_production_counts: bool = True,
 ) -> Step:
-    """Create a surplus-tolerant semantic KvStore Value-validation barrier."""
-    if checkpoint != "single":
+    """Create a semantic KvStore validation barrier for one or two injections."""
+    expected_seed_count = {"single": 1, "after_a": 1, "after_b": 2}.get(checkpoint)
+    if expected_seed_count is None:
         raise ValueError(f"Unsupported checkpoint {checkpoint!r}")
-    if len(seeds) != 1 or any(
+    if len(seeds) != expected_seed_count or any(
         not isinstance(seed, int) or isinstance(seed, bool) or seed <= 0
         for seed in seeds
     ):
-        raise ValueError(f"single requires one positive integer seed, got {seeds!r}")
+        raise ValueError(
+            f"{checkpoint} requires exactly {expected_seed_count} positive integer "
+            f"seed(s), got {seeds!r}"
+        )
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f"seeds must be distinct positive integers, got {seeds!r}")
     if not dut_name or not area:
         raise ValueError("dut_name and area must be nonempty")
     if dut_role not in {"leaf", "spine"}:
         raise ValueError(f"dut_role must be 'leaf' or 'spine', got {dut_role!r}")
+    if checkpoint == "single" and state_key is not None:
+        raise ValueError("single must not include state_key")
+    if checkpoint != "single" and (not isinstance(state_key, str) or not state_key):
+        raise ValueError(f"{checkpoint} requires nonempty state_key")
+    if not isinstance(enforce_production_counts, bool):
+        raise ValueError("enforce_production_counts must be a boolean")
+    if checkpoint != "single" and enforce_production_counts and dut_role != "leaf":
+        raise ValueError("production KvStore counts require dut_role='leaf'")
     if (
         min(num_spines, num_leaves, ecmp_width, adjacency_batch_size, prefix_batch_size)
         <= 0
@@ -1479,26 +1495,47 @@ def create_openr_scale_kvstore_state_step(
         raise ValueError("counts and retry_count must be nonnegative")
     if retry_delay_seconds < 0:
         raise ValueError("retry_delay_seconds must be nonnegative")
+
+    params: dict[str, t.Any] = {
+        "custom_step_name": "openr_scale_kvstore_state",
+        "dut_name": dut_name,
+        "seeds": list(seeds),
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "num_control_nodes": num_control_nodes,
+        "num_sites": num_sites,
+        "ecmp_width": ecmp_width,
+        "prefixes_per_node": prefixes_per_node,
+        "dut_role": dut_role,
+        "area": area,
+        "checkpoint": checkpoint,
+        "retry_count": retry_count,
+        "retry_delay_seconds": retry_delay_seconds,
+        "adjacency_batch_size": adjacency_batch_size,
+        "prefix_batch_size": prefix_batch_size,
+    }
+    if checkpoint != "single":
+        params.update(
+            action="validate",
+            state_key=state_key,
+            enforce_production_counts=enforce_production_counts,
+        )
+    return create_custom_step(
+        params_dict=params,
+        description=f"Validate Open/R scale KvStore state {checkpoint} on {dut_name}",
+    )
+
+
+def create_openr_scale_kvstore_state_cleanup_step(state_key: str) -> Step:
+    """Create an idempotent runner-local fingerprint cleanup step."""
+    if not state_key:
+        raise ValueError("state_key must be nonempty")
     return create_custom_step(
         params_dict={
-            "custom_step_name": "openr_scale_kvstore_state",
-            "dut_name": dut_name,
-            "seeds": list(seeds),
-            "num_spines": num_spines,
-            "num_leaves": num_leaves,
-            "num_control_nodes": num_control_nodes,
-            "num_sites": num_sites,
-            "ecmp_width": ecmp_width,
-            "prefixes_per_node": prefixes_per_node,
-            "dut_role": dut_role,
-            "area": area,
-            "checkpoint": checkpoint,
-            "retry_count": retry_count,
-            "retry_delay_seconds": retry_delay_seconds,
-            "adjacency_batch_size": adjacency_batch_size,
-            "prefix_batch_size": prefix_batch_size,
+            "custom_step_name": "openr_scale_kvstore_state_cleanup",
+            "state_key": state_key,
         },
-        description=f"Validate Open/R scale KvStore state {checkpoint} on {dut_name}",
+        description="Clear Open/R scale KvStore fingerprint state",
     )
 
 
