@@ -101,6 +101,7 @@ def _compose_endpoint(
         dut=base.dut,
         mac_address=base.mac_address,
         exclude_ixia_ports=base.exclude_ixia_ports,
+        basset_query=base.basset_query,
     )
 
 
