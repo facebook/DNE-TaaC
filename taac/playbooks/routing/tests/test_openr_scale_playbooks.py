@@ -7,6 +7,11 @@ import unittest
 
 from taac.playbooks.routing.openr_scale_playbooks import (
     get_openr_scale_kvstore_injection_playbook,
+    get_openr_scale_kvstore_merge_playbook,
+)
+from openr.tests.scale.scripts.scale_key_names import (
+    bbf_simple_node_names,
+    expected_key_set,
 )
 
 
@@ -104,3 +109,145 @@ class OpenRScalePlaybookTest(unittest.TestCase):
         for merge_only_field in ("state_key", "action", "owner"):
             self.assertNotIn(merge_only_field, validation)
         self.assertFalse(any("fingerprint" in key for key in validation))
+
+
+_HELPER = "eb02.lab.ash6"
+_DUT = "eb04.lab.ash6"
+_DUT_INBAND = "2401:db00:e50d:11:8::10"
+_MGMT_ADDRESSES = ["2401:db00:2066:304a::1005", "2401:db00:2066:304a::1003"]
+_REMOTE_PATH = "/mnt/flash/scale_test_server"
+_SEED_A = 20250903
+_SEED_B = 20250904
+_NUM_SPINES = 64
+_NUM_LEAVES = 256
+_NUM_CONTROL_NODES = 0
+_NUM_SITES = 20
+_ECMP_WIDTH = 8
+_PREFIXES_PER_NODE = 11
+_STATE_KEY = "openr_scale_kvstore_merge_adjacency_fingerprints"
+
+
+def _playbook(
+    num_spines: int = _NUM_SPINES,
+    num_leaves: int = _NUM_LEAVES,
+    num_control_nodes: int = _NUM_CONTROL_NODES,
+    num_sites: int = _NUM_SITES,
+    ecmp_width: int = _ECMP_WIDTH,
+    prefixes_per_node: int = _PREFIXES_PER_NODE,
+    seed_a: int = _SEED_A,
+    seed_b: int = _SEED_B,
+) -> t.Any:
+    return get_openr_scale_kvstore_merge_playbook(
+        helper_name=_HELPER,
+        dut_name=_DUT,
+        dut_inband_address=_DUT_INBAND,
+        dut_mgmt_addresses=_MGMT_ADDRESSES,
+        scale_tester_remote_path=_REMOTE_PATH,
+        num_spines=num_spines,
+        num_leaves=num_leaves,
+        num_control_nodes=num_control_nodes,
+        num_sites=num_sites,
+        ecmp_width=ecmp_width,
+        prefixes_per_node=prefixes_per_node,
+        seed_a=seed_a,
+        seed_b=seed_b,
+        area="0",
+        state_key=_STATE_KEY,
+        injection_run_duration_sec=5,
+        injection_timeout_sec=120,
+    )
+
+
+def _params(step: t.Any) -> dict[str, t.Any]:
+    if step.step_params is None:
+        raise AssertionError("custom Step must populate step_params")
+    return t.cast(dict[str, t.Any], json.loads(step.step_params.json_params))
+
+
+class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
+    def test_sequence_is_exactly_inject_validate_inject_validate(self) -> None:
+        playbook = _playbook()
+        self.assertEqual("openr_scale_kvstore_merge_playbook", playbook.name)
+        self.assertEqual([], list(playbook.prechecks or []))
+        self.assertEqual([], list(playbook.postchecks or []))
+        self.assertEqual([], list(playbook.snapshot_checks or []))
+        self.assertEqual(1, len(playbook.stages))
+        self.assertEqual(
+            [
+                "openr_scale_injection",
+                "openr_scale_kvstore_state",
+                "openr_scale_injection",
+                "openr_scale_kvstore_state",
+            ],
+            [_params(step)["custom_step_name"] for step in playbook.stages[0].steps],
+        )
+        self.assertEqual(
+            ["after_a", "after_b"],
+            [
+                _params(playbook.stages[0].steps[index])["checkpoint"]
+                for index in (1, 3)
+            ],
+        )
+
+    def test_injections_use_distinct_identities_and_exact_runtime_flags(self) -> None:
+        steps = _playbook().stages[0].steps
+        injection_a = _params(steps[0])
+        injection_b = _params(steps[2])
+
+        self.assertEqual(
+            [_SEED_A, _SEED_B], [injection_a["prefix_seed"], injection_b["prefix_seed"]]
+        )
+        self.assertNotEqual(injection_a["jq_var_prefix"], injection_b["jq_var_prefix"])
+        for params in (injection_a, injection_b):
+            self.assertEqual(["--num_pods=8"], params["extra_flags"])
+            self.assertEqual(5, params["run_duration_sec"])
+            self.assertEqual(120, params["run_timeout_sec"])
+            self.assertEqual("bbf-simple", params["topology_type"])
+            self.assertEqual(_NUM_CONTROL_NODES, params["num_super_spines"])
+            self.assertEqual(_NUM_SITES, params["num_sites"])
+            self.assertFalse(params["simulate_neighbors"])
+            self.assertFalse(params["verify_routes"])
+            self.assertNotIn("expected_received_key_vals_delta", params)
+
+    def test_updated_expectations_are_derived_from_exact_key_sets(self) -> None:
+        nodes = bbf_simple_node_names(
+            _NUM_SPINES,
+            _NUM_LEAVES,
+            _NUM_CONTROL_NODES,
+            _NUM_SITES,
+            "leaf",
+        )
+        expected_a = expected_key_set(nodes, _SEED_A, _PREFIXES_PER_NODE)
+        expected_b = expected_key_set(nodes, _SEED_B, _PREFIXES_PER_NODE)
+        steps = _playbook().stages[0].steps
+
+        self.assertEqual(4_068, len(expected_a))
+        self.assertEqual(3_729, len(expected_b - expected_a))
+        self.assertEqual(
+            len(expected_a),
+            _params(steps[0])["expected_updated_key_vals_delta"],
+        )
+        self.assertEqual(
+            len(expected_b - expected_a),
+            _params(steps[2])["expected_updated_key_vals_delta"],
+        )
+
+    def test_state_barriers_share_one_local_identity_and_cleanup_is_local(self) -> None:
+        playbook = _playbook()
+        steps = playbook.stages[0].steps
+        state_a = _params(steps[1])
+        state_b = _params(steps[3])
+        self.assertEqual([_SEED_A], state_a["seeds"])
+        self.assertEqual([_SEED_A, _SEED_B], state_b["seeds"])
+        self.assertEqual(_STATE_KEY, state_a["state_key"])
+        self.assertEqual(_STATE_KEY, state_b["state_key"])
+
+        cleanup_steps = list(playbook.cleanup_steps or [])
+        self.assertEqual(1, len(cleanup_steps))
+        self.assertEqual(
+            {
+                "custom_step_name": "openr_scale_kvstore_state_cleanup",
+                "state_key": _STATE_KEY,
+            },
+            _params(cleanup_steps[0]),
+        )

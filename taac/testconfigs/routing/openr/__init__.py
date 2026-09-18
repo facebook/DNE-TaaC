@@ -22,8 +22,10 @@ Test Cases
 - Test 2 (OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG): run the pre-staged
   scale_test_server on the helper to inject a synthetic BBF fabric into the
   DUT's KvStore, and assert the DUT holds the full injected key population.
+- Test 3 (OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG): isolate both stores, inject
+  two deterministic fabrics, and validate exact merge semantics in sequence.
 
-Both tests must run with ``--skip-testbed-isolation``: they depend on the
+All tests must run with ``--skip-testbed-isolation``: they depend on the
 pre-existing Port-Channel1910 interconnect, which testbed isolation shuts.
 
 Lab Environment
@@ -40,6 +42,9 @@ References
 from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
     OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG,
 )
+from taac.testconfigs.routing.openr.openr_scale_kvstore_merge_test_config import (
+    OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG,
+)
 from taac.testconfigs.routing.openr.openr_scale_test_config import (
     OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG,
 )
@@ -47,4 +52,5 @@ from taac.testconfigs.routing.openr.openr_scale_test_config import (
 __all__ = [
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
+    "OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG",
 ]

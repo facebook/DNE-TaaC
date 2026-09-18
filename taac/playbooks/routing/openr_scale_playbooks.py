@@ -12,13 +12,19 @@ import typing as t
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_openr_scale_injection_step,
+    create_openr_scale_kvstore_state_cleanup_step,
     create_openr_scale_kvstore_state_step,
+)
+from openr.tests.scale.scripts.scale_key_names import (
+    bbf_simple_node_names,
+    expected_key_set,
 )
 from taac.test_as_a_config.types import Playbook
 
 
 __all__ = [
     "get_openr_scale_kvstore_injection_playbook",
+    "get_openr_scale_kvstore_merge_playbook",
 ]
 
 
@@ -154,4 +160,115 @@ def get_openr_scale_kvstore_injection_playbook(
                 ],
             ),
         ],
+    )
+
+
+def get_openr_scale_kvstore_merge_playbook(
+    helper_name: str,
+    dut_name: str,
+    dut_inband_address: str,
+    num_spines: int,
+    num_leaves: int,
+    num_control_nodes: int,
+    num_sites: int,
+    ecmp_width: int,
+    prefixes_per_node: int,
+    seed_a: int,
+    seed_b: int,
+    area: str,
+    state_key: str,
+    dut_mgmt_addresses: t.Optional[t.List[str]] = None,
+    dut_role: t.Literal["leaf", "spine"] = "leaf",
+    dut_port: int = 2018,
+    scale_tester_remote_path: str = "/mnt/flash/scale_test_server",
+    injection_run_duration_sec: int = 5,
+    injection_timeout_sec: int = 120,
+) -> Playbook:
+    """Build the isolated two-injection KvStore merge lifecycle."""
+    node_names_a = bbf_simple_node_names(
+        num_spines,
+        num_leaves,
+        num_control_nodes,
+        num_sites,
+        dut_role,
+    )
+    node_names_b = bbf_simple_node_names(
+        num_spines,
+        num_leaves,
+        num_control_nodes,
+        num_sites,
+        dut_role,
+    )
+    expected_a = expected_key_set(node_names_a, seed_a, prefixes_per_node)
+    expected_b = expected_key_set(node_names_b, seed_b, prefixes_per_node)
+    expected_updated_a = len(expected_a)
+    expected_updated_b = len(expected_b - expected_a)
+    common_injection = {
+        "helper_name": helper_name,
+        "dut_name": dut_name,
+        "dut_host": dut_inband_address,
+        "forbidden_dut_hosts": dut_mgmt_addresses,
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "num_prefixes_per_node": prefixes_per_node,
+        "num_sites": num_sites,
+        "num_super_spines": num_control_nodes,
+        "dut_role": dut_role,
+        "dut_port": dut_port,
+        "topology_type": "bbf-simple",
+        "extra_flags": [f"--num_pods={ecmp_width}"],
+        "remote_path": scale_tester_remote_path,
+        "run_duration_sec": injection_run_duration_sec,
+        "run_timeout_sec": injection_timeout_sec,
+        "area": area,
+    }
+    common_validation = {
+        "dut_name": dut_name,
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "num_control_nodes": num_control_nodes,
+        "num_sites": num_sites,
+        "ecmp_width": ecmp_width,
+        "prefixes_per_node": prefixes_per_node,
+        "dut_role": dut_role,
+        "area": area,
+        "state_key": state_key,
+    }
+
+    return Playbook(
+        name="openr_scale_kvstore_merge_playbook",
+        prechecks=[],
+        postchecks=[],
+        snapshot_checks=[],
+        stages=[
+            create_steps_stage(
+                stage_id="openr_scale_kvstore_merge",
+                description="Inject two deterministic fabrics and validate KvStore merge semantics",
+                steps=[
+                    create_openr_scale_injection_step(
+                        **common_injection,
+                        prefix_seed=seed_a,
+                        expected_updated_key_vals_delta=expected_updated_a,
+                        jq_var_prefix="openr_scale_merge_a",
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        **common_validation,
+                        seeds=[seed_a],
+                        checkpoint="after_a",
+                    ),
+                    create_openr_scale_injection_step(
+                        **common_injection,
+                        prefix_seed=seed_b,
+                        expected_updated_key_vals_delta=expected_updated_b,
+                        jq_var_prefix="openr_scale_merge_b",
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        **common_validation,
+                        seeds=[seed_a, seed_b],
+                        checkpoint="after_b",
+                    ),
+                ],
+            )
+        ],
+        cleanup_steps=[create_openr_scale_kvstore_state_cleanup_step(state_key)],
     )
