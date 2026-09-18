@@ -63,6 +63,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.internal.tasks.openr_route_action_task import (
         OpenRRouteActionTask,
     )
+    from taac.internal.tasks.openr_scale_isolation_task import (
+        OpenRScaleIsolationTask,
+    )
     from taac.tasks.bgp_policy_generator_task import (
         GenerateCommunityBgpPolicyAndInjectTask,
         GenerateCommunityBgpPolicyTask,
@@ -225,6 +228,7 @@ if not TAAC_OSS:
     TASK_REGISTRY.extend(
         [
             OpenRRouteActionTask,
+            OpenRScaleIsolationTask,
             DeviceProvisioningTask,
             EosCompilerLifecycleTask,
             EosOsUpgradeTask,

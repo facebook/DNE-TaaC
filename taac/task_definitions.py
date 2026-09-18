@@ -29,6 +29,58 @@ from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Params, PeriodicTask, Task
 
 
+def create_openr_scale_isolation_task(
+    hosts: t.Sequence[str],
+    helper_hostname: str,
+    scale_tester_remote_path: str,
+    area: str = "0",
+    ttl_ms: int = 30_000,
+    wait_sec: int = 90,
+    batch_size: int = 500,
+) -> Task:
+    """Create the ordered, cancellation-safe Open/R scale isolation task."""
+    if (
+        isinstance(hosts, (str, bytes))
+        or not hosts
+        or any(not isinstance(host, str) or not host.strip() for host in hosts)
+    ):
+        raise ValueError("hosts must be a nonempty sequence of nonempty strings")
+    if not helper_hostname:
+        raise ValueError("helper_hostname must be nonempty")
+    if not scale_tester_remote_path.startswith("/") or any(
+        component in ("", ".", "..")
+        for component in scale_tester_remote_path.split("/")[1:]
+    ):
+        raise ValueError("scale_tester_remote_path must be a safe absolute path")
+    if not area:
+        raise ValueError("area must be nonempty")
+    for name, value in (
+        ("ttl_ms", ttl_ms),
+        ("wait_sec", wait_sec),
+        ("batch_size", batch_size),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if wait_sec * 1000 <= ttl_ms:
+        raise ValueError("wait_sec * 1000 must exceed ttl_ms")
+    return Task(
+        task_name="openr_scale_isolation",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "hosts": list(hosts),
+                    "helper_hostname": helper_hostname,
+                    "scale_tester_remote_path": scale_tester_remote_path,
+                    "area": area,
+                    "ttl_ms": ttl_ms,
+                    "wait_sec": wait_sec,
+                    "batch_size": batch_size,
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_ensure_interfaces_enabled_task(
     interfaces_by_device: t.Mapping[str, t.Sequence[str]],
 ) -> Task:
