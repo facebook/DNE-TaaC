@@ -8,6 +8,33 @@ from taac.ixia.ixia import Ixia
 
 
 class BurstTransmissionControlTest(unittest.TestCase):
+    def test_start_traffic_items_preserves_other_traffic(self) -> None:
+        ixia = object.__new__(Ixia)
+        selected_item = MagicMock()
+        selected_item.Name = "selected"
+        other_item = MagicMock()
+        other_item.Name = "other"
+        ixia.ixnetwork = MagicMock()
+        ixia.ixnetwork.Traffic.TrafficItem.find.return_value = [
+            selected_item,
+            other_item,
+        ]
+        ixia.logger = MagicMock()
+
+        ixia.start_traffic_items(traffic_item_regex="^selected$")
+
+        selected_item.StartStatelessTrafficBlocking.assert_called_once_with()
+        other_item.StartStatelessTrafficBlocking.assert_not_called()
+
+    def test_start_traffic_items_rejects_missing_item(self) -> None:
+        ixia = object.__new__(Ixia)
+        ixia.ixnetwork = MagicMock()
+        ixia.ixnetwork.Traffic.TrafficItem.find.return_value = []
+        ixia.logger = MagicMock()
+
+        with self.assertRaisesRegex(ValueError, "no traffic started"):
+            ixia.start_traffic_items(traffic_item_regex="missing")
+
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_repeat_bursts_preserves_other_traffic(self, sleep: MagicMock) -> None:
         ixia = object.__new__(Ixia)

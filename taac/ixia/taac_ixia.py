@@ -11,6 +11,7 @@ from threading import Thread
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 from ixia.ixia import types as ixia_types
+from ixnetwork_restpy.assistants.statistics.row import Row as IxnStatRow
 from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
@@ -49,12 +50,11 @@ StatViewAssistant = t.Union[IxnStatViewAssistant, UhdStatViewAssistant]
 # cpu_queue runs at the very first postcheck's IxiaPacketLossHealthCheck on
 # a busy chassis.
 #
-# Default remains 2s for back-compat with existing TestConfigs that rely on
-# per-stage Scuba telemetry freshness. Override via env
-# `TAAC_IXIA_SAMPLE_INTERVAL_S` to raise the cadence on a per-run basis;
-# set to `0` to disable the periodic sampler entirely (foreground HC stat
-# reads still work via the direct-snapshot fallback in `get_latest_stats`).
-_DEFAULT_SAMPLE_INTERVAL_FALLBACK_S = 2
+# Disable periodic sampling by default so it cannot contend with foreground
+# health-check snapshots. TestConfigs that need per-stage Scuba telemetry can
+# opt in via `TAAC_IXIA_SAMPLE_INTERVAL_S`; foreground health-check stat reads
+# continue through the direct-snapshot fallback in `get_latest_stats`.
+_DEFAULT_SAMPLE_INTERVAL_FALLBACK_S = 0
 try:
     DEFAULT_SAMPLE_RATE = int(
         os.environ.get(
@@ -302,7 +302,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     ) -> t.List:
         stats = []
         view_name = view._ViewName
-        for row in view.Rows:
+        for row in self._get_stat_view_rows(view):
             stats.append(
                 self._packet_loss_stat(
                     view_name,
@@ -310,6 +310,39 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 )
             )
         return stats
+
+    def _get_stat_view_rows(self, view: StatViewAssistant) -> t.Any:
+        try:
+            return view.Rows
+        except Exception as error:
+            if "Snapshot DefaultSnapshotSettings already in progress" not in str(error):
+                raise
+            self.logger.warning(
+                f"IXIA CSV snapshot is busy for '{view._ViewName}'; "
+                "reading the live statistics pages directly"
+            )
+            return self._get_raw_stat_view_rows(view)
+
+    @staticmethod
+    def _get_raw_stat_view_rows(view: StatViewAssistant) -> IxnStatRow:
+        raw_view = t.cast(t.Any, view)._View
+        data = raw_view.Data
+        if not data.IsReady:
+            raise IxiaSetupError(
+                f"IXIA statistics view '{view._ViewName}' is not ready"
+            )
+        columns = list(data.ColumnCaptions)
+        rows = []
+        for page_number in range(1, max(1, int(data.TotalPages)) + 1):
+            data.CurrentPage = page_number
+            for raw_row in data.PageValues or []:
+                values = (
+                    raw_row[0]
+                    if len(raw_row) == 1 and isinstance(raw_row[0], list)
+                    else raw_row
+                )
+                rows.append(list(values))
+        return IxnStatRow(raw_view.Caption, columns, rows)
 
     @staticmethod
     def _packet_loss_stat(
@@ -348,7 +381,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
     ) -> t.List:
         stats = []
         view_name = view._ViewName
-        for row in view.Rows:
+        for row in self._get_stat_view_rows(view):
             stat = {}
             stat["identifier"] = row[VIEW_TO_IDENTIFIER[view_name]]
             if "Tx Rate (Mbps)" in row.Columns:
@@ -705,7 +738,10 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
 
     def wait_for_view_assistants_ready(self):
         self.traffic_item_view_assistant = self._get_traffic_item_view()
-        self.ptp_drill_down_view_assistant = self._get_ptp_drill_down_view()
+        if self.ixia_config is not None and self.ixia_config.ptp_configs:
+            self.ptp_drill_down_view_assistant = self._get_ptp_drill_down_view()
+        else:
+            self.ptp_drill_down_view_assistant = None
 
     @retryable(sleep_time=5, num_tries=2)
     def _get_ptp_drill_down_view(
@@ -739,9 +775,6 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
 
     @retryable(sleep_time=5, num_tries=2)
     def _get_traffic_item_view(self) -> t.Optional[StatViewAssistant]:
-        StatViewAssistant = (
-            UhdStatViewAssistant if self.is_uhd_chassis else IxnStatViewAssistant
-        )
         all_traffic_items = self.get_traffic_items()
         enabled_traffic_items = [
             traffic_item for traffic_item in all_traffic_items if traffic_item.Enabled
@@ -765,8 +798,7 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             )
             return
         try:
-            with self.stat_view_snapshot():
-                return StatViewAssistant(self.ixnetwork, TRAFFIC_ITEM_VIEW, Timeout=60)
+            return self.get_or_create_stat_view(TRAFFIC_ITEM_VIEW, timeout=60)
         except Exception as e:
             self.logger.error(f"Error getting traffic item views: {e}")
             raise e
@@ -1531,10 +1563,11 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.rotate_api_trace_phase(self._current_playbook_name or test_case_uuid)
         self.enable_traffic(traffic_regexes)
         self.prepare_traffic()
-        if not self.capturing:
-            self.start()
-        else:
-            self.paused = False
+        if self.sample_time > 0:
+            if not self.capturing:
+                self.start()
+            else:
+                self.paused = False
 
     def end_test_case(self, traffic_regexes=None) -> None:
         self.paused = True

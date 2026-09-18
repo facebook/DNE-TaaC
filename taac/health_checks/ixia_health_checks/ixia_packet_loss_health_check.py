@@ -177,7 +177,14 @@ class IxiaPacketLossHealthCheck(
                 key = hc_types.PACKET_LOSS_METRIC_MAP[threshold.metric]
                 if key not in statistic:
                     self.logger.error(
-                        f"Skipping threshold for {entity_id} as {key} is not present"
+                        f"Failing threshold for {entity_id} as {key} is not present"
+                    )
+                    violations.append(
+                        hc_types.PacketLossViolation(
+                            name=entity_id,
+                            str_value=f"missing {key}",
+                            threshold=threshold,
+                        )
                     )
                     continue
 

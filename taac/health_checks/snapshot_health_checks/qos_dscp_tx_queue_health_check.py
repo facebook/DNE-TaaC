@@ -145,6 +145,33 @@ class QoSDscpTxQueueHealthCheck(
             return None
         return pre_value, post_value
 
+    def _adjusted_counter_delta(
+        self,
+        pre_counter: int,
+        post_counter: int,
+        offset: int,
+        tx_queue_info: hc_types.TxQueueInfo,
+        label: str,
+        failure_reasons: t.List[str],
+    ) -> t.Optional[int]:
+        raw_delta = post_counter - pre_counter
+        if raw_delta < 0:
+            failure_reasons.append(
+                f"Counter decreased for "
+                f"{tx_queue_info.hostname}:{tx_queue_info.interface} ({label}); "
+                f"the {tx_queue_info.key_desc} snapshot interval could not be "
+                "verified because the counter reset or was reinitialized.\n"
+                f"  Before: {pre_counter}\n"
+                f"  After:  {post_counter}"
+            )
+            return None
+        return max(0, raw_delta - offset)
+
+    @staticmethod
+    def _cos_label(cos: int) -> str:
+        cos_enum = ClassOfService(cos)
+        return f"{cos_enum.name} ({int(cos_enum)})"
+
     def _compare_cos(
         self,
         tx_queue_info: hc_types.TxQueueInfo,
@@ -165,13 +192,21 @@ class QoSDscpTxQueueHealthCheck(
                     "queue could not be verified."
                 )
                 continue
-            diff = post_counter - pre_counter
             offset = (
                 NC_QUEUE_OFFSET_BYTES
                 if cos == ClassOfService.NC
                 else DEFAULT_QUEUE_OFFSET_BYTES
             )
-            diff = max(0, diff - offset)
+            diff = self._adjusted_counter_delta(
+                pre_counter,
+                post_counter,
+                offset,
+                tx_queue_info,
+                self._cos_label(cos),
+                failure_reasons,
+            )
+            if diff is None:
+                continue
             if not evaluate_comparison(
                 diff, tx_queue_info.comparison, tx_queue_info.val
             ):
@@ -197,13 +232,21 @@ class QoSDscpTxQueueHealthCheck(
                 if pair is None:
                     continue
                 pre_counter, post_counter = pair
-                diff = post_counter - pre_counter
                 offset = (
                     NC_QUEUE_OFFSET_BYTES
                     if cos == ClassOfService.NC
                     else DEFAULT_QUEUE_OFFSET_BYTES
                 )
-                diff = max(0, diff - offset)
+                diff = self._adjusted_counter_delta(
+                    pre_counter,
+                    post_counter,
+                    offset,
+                    tx_queue_info,
+                    self._cos_label(cos),
+                    failure_reasons,
+                )
+                if diff is None:
+                    continue
                 if evaluate_comparison(
                     diff, tx_queue_info.comparison, tx_queue_info.val
                 ):
@@ -236,13 +279,21 @@ class QoSDscpTxQueueHealthCheck(
                     "queue could not be verified."
                 )
                 continue
-            diff = post_counter - pre_counter
             offset = (
                 NC_QUEUE_OFFSET_BYTES
                 if desc == NC_QUEUE_DESC
                 else DEFAULT_QUEUE_OFFSET_BYTES
             )
-            diff = max(0, diff - offset)
+            diff = self._adjusted_counter_delta(
+                pre_counter,
+                post_counter,
+                offset,
+                tx_queue_info,
+                desc,
+                failure_reasons,
+            )
+            if diff is None:
+                continue
             if not evaluate_comparison(
                 diff, tx_queue_info.comparison, tx_queue_info.val
             ):
@@ -275,13 +326,21 @@ class QoSDscpTxQueueHealthCheck(
                 if pair is None:
                     continue
                 pre_counter, post_counter = pair
-                diff = post_counter - pre_counter
                 offset = (
                     NC_QUEUE_OFFSET_BYTES
                     if desc == NC_QUEUE_DESC
                     else DEFAULT_QUEUE_OFFSET_BYTES
                 )
-                diff = max(0, diff - offset)
+                diff = self._adjusted_counter_delta(
+                    pre_counter,
+                    post_counter,
+                    offset,
+                    tx_queue_info,
+                    desc,
+                    failure_reasons,
+                )
+                if diff is None:
+                    continue
                 if evaluate_comparison(
                     diff, tx_queue_info.comparison, tx_queue_info.val
                 ):

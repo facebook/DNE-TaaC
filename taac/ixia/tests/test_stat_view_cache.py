@@ -140,6 +140,87 @@ class GetOrCreateStatViewTest(unittest.TestCase):
             # Constructor called exactly once across three calls.
             self.assertEqual(mock_cls.call_count, 1)
 
+    def test_traffic_item_view_reuses_cached_instance_between_test_cases(self):
+        traffic_item = MagicMock()
+        traffic_item.Enabled = True
+        traffic_item.Tracking.find.return_value.TrackBy.__contains__.return_value = True
+        self.ixia.get_traffic_items = MagicMock(return_value=[traffic_item])
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.IxnStatViewAssistant"
+        ) as mock_cls:
+            mock_cls.return_value = MagicMock(name="traffic_item_view")
+            first = self.ixia._get_traffic_item_view()
+            second = self.ixia._get_traffic_item_view()
+
+        self.assertIs(first, second)
+        mock_cls.assert_called_once_with(
+            self.ixia.ixnetwork,
+            "Traffic Item Statistics",
+            Timeout=60,
+        )
+
+    def test_non_ptp_config_skips_ptp_statistics_view(self):
+        self.ixia.ixia_config = MagicMock(ptp_configs=[])
+        self.ixia._get_traffic_item_view = MagicMock()
+        self.ixia._get_ptp_drill_down_view = MagicMock()
+
+        self.ixia.wait_for_view_assistants_ready()
+
+        self.ixia._get_traffic_item_view.assert_called_once_with()
+        self.ixia._get_ptp_drill_down_view.assert_not_called()
+        self.assertIsNone(self.ixia.ptp_drill_down_view_assistant)
+
+    def test_attached_session_without_ixia_config_skips_ptp_statistics_view(self):
+        self.ixia.ixia_config = None
+        self.ixia._get_traffic_item_view = MagicMock()
+        self.ixia._get_ptp_drill_down_view = MagicMock()
+
+        self.ixia.wait_for_view_assistants_ready()
+
+        self.ixia._get_traffic_item_view.assert_called_once_with()
+        self.ixia._get_ptp_drill_down_view.assert_not_called()
+
+    def test_snapshot_busy_falls_back_to_live_statistics_pages(self):
+        class BusyTrafficView:
+            _ViewName = "Traffic Item Statistics"
+
+            @property
+            def Rows(self):
+                raise RuntimeError(
+                    "Snapshot DefaultSnapshotSettings already in progress"
+                )
+
+        view = BusyTrafficView()
+        view._View = MagicMock()
+        view._View.Caption = view._ViewName
+        view._View.Data.IsReady = True
+        view._View.Data.ColumnCaptions = [
+            "Traffic Item",
+            "Packet Loss Duration (ms)",
+            "Loss %",
+            "Frames Delta",
+        ]
+        view._View.Data.TotalPages = 1
+        view._View.Data.PageValues = [
+            [["TRAFFIC_A", "0", "0", "0"]],
+        ]
+
+        result = self.ixia._get_packet_loss_statistics_unlocked(view)
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "identifier": "TRAFFIC_A",
+                    "view": "Traffic Item Statistics",
+                    "packet_loss_duration": 0.0,
+                    "packet_loss_percentage": 0.0,
+                    "frame_delta": 0.0,
+                }
+            ],
+        )
+
     def test_different_view_names_cached_separately(self):
         """Different view_names produce different cached instances."""
         with patch(

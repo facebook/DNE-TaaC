@@ -946,16 +946,23 @@ class TrafficGenerator:
             raise InsufficientInputError(
                 f"Unable to find any ixia assets for endpoint {endpoint.name}"
             )
-        driver = await async_get_device_driver(hostname)
-        await asyncio.gather(
-            *[
-                driver.async_check_interface_status(
-                    ixia_asset.remote_intf_name,
-                    state=InterfaceEventState.STABLE,
-                )
-                for ixia_asset in ixia_assets
-            ]
-        )
+        if endpoint.direct_ixia_connections:
+            self.logger.info(
+                "Skipping pre-session DUT link-state validation for explicitly "
+                f"mapped IXIA ports on {hostname}; IXIA port assignment will "
+                "validate availability and establish the links"
+            )
+        else:
+            driver = await async_get_device_driver(hostname)
+            await asyncio.gather(
+                *[
+                    driver.async_check_interface_status(
+                        ixia_asset.remote_intf_name,
+                        state=InterfaceEventState.STABLE,
+                    )
+                    for ixia_asset in ixia_assets
+                ]
+            )
         for asset in ixia_assets:
             chassis_hostname = await async_get_hostname_from_ip(asset.ixia_chassis_ip)
             try:

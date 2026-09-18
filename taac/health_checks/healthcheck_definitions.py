@@ -565,6 +565,11 @@ def create_ixia_packet_loss_check_traffic_split(
     expect_loss_traffic: t.List[str],
     no_loss_traffic: t.List[str],
     no_loss_threshold: str = "0.1",
+    no_loss_metric: hc_types.PacketLossMetric = hc_types.PacketLossMetric.DURATION,
+    no_loss_comparison: hc_types.ComparisonType = (
+        hc_types.ComparisonType.LESS_THAN_EQUAL_TO
+    ),
+    skip_traffic_items: t.Optional[t.List[str]] = None,
 ) -> PointInTimeHealthCheck:
     """IXIA_PACKET_LOSS_CHECK — split-threshold variant.
 
@@ -573,28 +578,50 @@ def create_ixia_packet_loss_check_traffic_split(
     for another set. Traffic-item names are formed as
     ``f"{device_name.upper()}_{traffic}"``.
     """
+    thresholds = []
+    if expect_loss_traffic:
+        thresholds.append(
+            hc_types.PacketLossThreshold(
+                names=[
+                    f"{device_name.upper()}_{traffic}"
+                    for traffic in expect_loss_traffic
+                ],
+                expect_packet_loss=True,
+            )
+        )
+    if no_loss_traffic:
+        thresholds.append(
+            hc_types.PacketLossThreshold(
+                names=[
+                    f"{device_name.upper()}_{traffic}" for traffic in no_loss_traffic
+                ],
+                str_value=no_loss_threshold,
+                metric=no_loss_metric,
+                comparison=no_loss_comparison,
+                expect_packet_loss=False,
+            )
+        )
+    if not thresholds:
+        raise ValueError("packet loss check requires at least one traffic item")
+
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
         input_json=thrift_to_json(
-            hc_types.IxiaPacketLossHealthCheckIn(
-                thresholds=[
-                    hc_types.PacketLossThreshold(
-                        names=[
+            hc_types.IxiaPacketLossHealthCheckIn(thresholds=thresholds)
+        ),
+        check_params=(
+            Params(
+                json_params=json.dumps(
+                    {
+                        "skip_traffic_items": [
                             f"{device_name.upper()}_{traffic}"
-                            for traffic in expect_loss_traffic
-                        ],
-                        expect_packet_loss=True,
-                    ),
-                    hc_types.PacketLossThreshold(
-                        names=[
-                            f"{device_name.upper()}_{traffic}"
-                            for traffic in no_loss_traffic
-                        ],
-                        str_value=no_loss_threshold,
-                        expect_packet_loss=False,
-                    ),
-                ]
+                            for traffic in skip_traffic_items
+                        ]
+                    }
+                )
             )
+            if skip_traffic_items is not None
+            else None
         ),
     )
 

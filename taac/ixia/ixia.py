@@ -6725,6 +6725,12 @@ class Ixia:
     def _send_arp_ns_on_device_group(self, device_group: "DeviceGroup") -> None:
         """Send ARP/NS on a device group and its children recursively."""
         dg_name = device_group.Name
+        enabled_values = tuple(
+            _normalize_ixia_boolean(value) for value in device_group.Enabled.Values
+        )
+        if enabled_values and all(value is False for value in enabled_values):
+            self.logger.debug(f"[{dg_name}] Skipping ARP/NS for disabled device group")
+            return
         for ethernet in device_group.Ethernet.find():
             for ipv4 in ethernet.Ipv4.find():
                 try:
@@ -11366,6 +11372,9 @@ class Ixia:
 
         pattern = re.compile(traffic_item_regex)
         matched = 0
+        if transmit_mode is not None:
+            for vport in self.ixnetwork.Vport.find():
+                vport.update(TxMode=transmit_mode)
         for ti in self.ixnetwork.Traffic.TrafficItem.find():
             if pattern.search(ti.Name):
                 matched += 1
@@ -11453,6 +11462,26 @@ class Ixia:
             burst_packet_count=burst_packet_count,
             inter_burst_gap_ms=inter_burst_gap_ms,
             min_gap_bytes=min_gap_bytes,
+        )
+
+    @external_api
+    def start_traffic_items(self, traffic_item_regex: str) -> None:
+        """Start matching traffic items without interrupting running traffic."""
+        pattern = re.compile(traffic_item_regex)
+        traffic_items = [
+            item
+            for item in self.ixnetwork.Traffic.TrafficItem.find()
+            if pattern.search(item.Name)
+        ]
+        if not traffic_items:
+            raise ValueError(
+                f"No traffic item matched '{traffic_item_regex}'; no traffic started."
+            )
+
+        for traffic_item in traffic_items:
+            traffic_item.StartStatelessTrafficBlocking()
+        self.logger.info(
+            f"Started traffic item(s) {[item.Name for item in traffic_items]}"
         )
 
     @external_api

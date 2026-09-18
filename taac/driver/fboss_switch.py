@@ -4822,8 +4822,7 @@ class FbossSwitch(AbstractSwitch):
     async def async_get_all_interface_names(
         self,
     ) -> List[str]:
-        async with self.async_agent_client as client:
-            port_info_result = await client.getAllPortInfo()
+        port_info_result = await self.async_get_all_port_info()
         return [port_info.name for port_info in port_info_result.values()]
 
     @memoize_on_app_overload()

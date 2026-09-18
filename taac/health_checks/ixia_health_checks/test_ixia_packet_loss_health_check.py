@@ -101,8 +101,8 @@ class TestVerifyPacketLossThreshold(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0].name, "TRAFFIC_A")
 
-    def test_missing_metric_key_skipped(self):
-        """Stats missing the metric key should be skipped with a log error."""
+    def test_missing_metric_key_is_violation(self):
+        """A requested metric missing from IXIA stats must fail closed."""
         stats = [
             {"identifier": "TRAFFIC_A"},
         ]
@@ -112,7 +112,8 @@ class TestVerifyPacketLossThreshold(unittest.TestCase):
             metric=hc_types.PacketLossMetric.DURATION,
         )
         violations = self.health_check.verify_packet_loss_threshold(stats, threshold)
-        self.assertEqual(len(violations), 0)
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].name, "TRAFFIC_A")
         self.logger.error.assert_called()
 
     def test_percentage_metric(self):

@@ -4579,6 +4579,7 @@ def create_ixia_api_step(
     api_name: str,
     args_dict: t.Dict[str, t.Any],
     description: t.Optional[str] = None,
+    start_traffic: bool = True,
 ) -> Step:
     """
     Create an Ixia API step.
@@ -4587,6 +4588,7 @@ def create_ixia_api_step(
         api_name: Name of the Ixia API to call
         args_dict: Arguments to pass to the API
         description: Custom description for the step
+        start_traffic: Whether the generic step pre-hook should start traffic
 
     Returns:
         Step object for Ixia API call
@@ -4594,17 +4596,16 @@ def create_ixia_api_step(
     if description is None:
         description = f"Call Ixia API: {api_name}"
 
+    params = {
+        "api_name": api_name,
+        "args_json": json.dumps(args_dict),
+    }
+    _add_skip_start_traffic_param(params, start_traffic)
+
     return Step(
         name=StepName.INVOKE_IXIA_API_STEP,
         description=description,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "api_name": api_name,
-                    "args_json": json.dumps(args_dict),
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
     )
 
 

@@ -8,13 +8,16 @@ strict-priority scheduling behavior across NC, ICP, GOLD, SILVER, BRONZE, and NC
 """
 
 import json
+import re
 import typing as t
 
 from ixia.ixia import types as ixia_types
+from taac.constants import WEDGE_AGENT_BINDS_TO_CASCADE
 from taac.health_checks.healthcheck_definitions import (
     create_buffer_utilization_snapshot_check,
     create_ixia_packet_loss_check,
     create_qos_dscp_tx_queue_snapshot_check,
+    create_service_restart_check,
 )
 from taac.playbooks.playbook_definitions import (
     build_qos_scheduling_playbook,
@@ -32,22 +35,19 @@ from taac.steps.step_definitions import (
     create_longevity_step,
     create_service_convergence_step,
     create_service_interruption_step,
+    create_validation_step,
 )
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     create_ixia_packet_loss_check_traffic_split,
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
 )
-from taac.utils.json_thrift_utils import thrift_to_json
 from taac.utils.qos_constants import ClassOfService
 from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
-    Params,
     Playbook,
     PointInTimeHealthCheck,
     Service,
-    ServiceConvergenceInput,
-    ServiceInterruptionInput,
     ServiceInterruptionTrigger,
     SnapshotHealthCheck,
     Step,
@@ -98,11 +98,24 @@ ACTIVE_QUEUE_BUFFER_MAX_BYTES = 105 * 1024 * 1024  # 105 MB
 # All other queues must not exceed 5 MB.
 OTHER_QUEUE_BUFFER_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
-# Buffer utilization thresholds for congestion tests (bytes).
-# Congested queue(s) are expected to build buffer — use a generous limit.
-CONGESTED_QUEUE_BUFFER_MAX_BYTES = 150 * 1024 * 1024  # 150 MB (full MMU)
-# Non-congested queues (including priority) should NOT build buffer.
-NON_CONGESTED_QUEUE_BUFFER_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+# Buffer utilization thresholds for continuous congestion tests (bytes).
+CONTINUOUS_CONGESTED_QUEUE_BUFFER_MAX_BYTES = 110 * 1024 * 1024
+CONTINUOUS_OTHER_QUEUE_BUFFER_MAX_BYTES = 5 * 1024 * 1024
+PRIORITY_QUEUE_BUFFER_MAX_BYTES = 10 * 1024 * 1024
+OTHER_QUEUE_BOUND_DELEGATED_BYTES = 200 * 1024 * 1024
+
+# Buffer utilization thresholds for warmboot/reverse-order congestion tests.
+LONG_RUNNING_CONGESTED_QUEUE_BUFFER_MAX_BYTES = 150 * 1024 * 1024
+LONG_RUNNING_OTHER_QUEUE_BUFFER_MAX_BYTES = 10 * 1024 * 1024
+
+# Burst spec: 30 ms at the configured traffic-item rate and 5 ms between bursts.
+BURST_INTER_GAP_MS = 5.0
+BURST_DURATION_MS = 30.0
+IMIX_MEAN_WIRE_BYTES = (100 * 1 + 1500 * 4 + 4500 * 5 + 7000 * 1 + 9000 * 1) / 12 + 20
+PORT_SPEED_BITS_PER_SECOND = 100_000_000_000
+BURST_REPEAT_COUNT = round(
+    LONGEVITY_DURATION_S * 1000 / (BURST_DURATION_MS + BURST_INTER_GAP_MS)
+)
 
 # Linerate for each per-queue congestion traffic item in multi-queue tests.
 MULTI_CONGESTION_LINERATE = 10
@@ -124,6 +137,12 @@ DEFAULT_FRAME_SIZE = ixia_types.FrameSize(
 # Name suffix for the congestion traffic item created on the dedicated
 # congestion IXIA port.
 CONGESTION_TRAFFIC_ITEM_SUFFIX = "CONGESTION_TRAFFIC"
+
+DISABLED_AUXILIARY_TRAFFIC_SUFFIXES = [
+    "GOOD_BUT_LOSSY_NDP_TRAFFIC",
+    "LOSSY_ROGUE_NDP_TRAFFIC",
+    "HIGH_QUEUE_BGP_CP_TRAFFIC",
+]
 
 
 def _get_ipv6_packet_headers() -> t.List[taac_types.PacketHeader]:
@@ -158,6 +177,7 @@ def _make_buffer_utilization_check(
     interfaces: t.List[str],
     active_queue_max_bytes: int,
     other_queue_max_bytes: int,
+    active_queue_desc_list: t.Optional[t.List[str]] = None,
     pre_snapshot_checkpoint_id: t.Optional[str] = None,
     post_snapshot_checkpoint_id: t.Optional[str] = None,
 ) -> SnapshotHealthCheck:
@@ -168,6 +188,7 @@ def _make_buffer_utilization_check(
                 hostname=device_name,
                 interfaces=interfaces,
                 active_cos_list=[int(c) for c in active_cos_list],
+                active_queue_desc_list=active_queue_desc_list or [],
                 active_queue_max_bytes=active_queue_max_bytes,
                 other_queue_max_bytes=other_queue_max_bytes,
             ),
@@ -185,21 +206,87 @@ def _make_qos_snapshot_check(
     post_snapshot_checkpoint_id: t.Optional[str] = None,
 ) -> SnapshotHealthCheck:
     """Helper to create a QOS_DSCP_TX_QUEUE_CHECK SnapshotHealthCheck."""
+    return _make_qos_cos_list_snapshot_check(
+        device_name=device_name,
+        cos_list=[cos],
+        interfaces=interfaces,
+        pre_snapshot_checkpoint_id=pre_snapshot_checkpoint_id,
+        post_snapshot_checkpoint_id=post_snapshot_checkpoint_id,
+    )
+
+
+def _make_qos_cos_list_snapshot_check(
+    device_name: str,
+    cos_list: t.List[ClassOfService],
+    interfaces: t.List[str],
+    enforce_exclusivity: bool = True,
+    pre_snapshot_checkpoint_id: t.Optional[str] = None,
+    post_snapshot_checkpoint_id: t.Optional[str] = None,
+) -> SnapshotHealthCheck:
     return create_qos_dscp_tx_queue_snapshot_check(
         tx_queue_info_list=[
             hc_types.TxQueueInfo(
                 hostname=device_name,
                 interface=interface,
-                cos_list=[int(cos)],
-                key_desc="out_bytes.sum.60",
+                cos_list=[int(cos) for cos in cos_list],
+                key_desc="out_bytes.sum",
                 val=0,
                 comparison=hc_types.ComparisonType.GREATER_THAN,
-                enforce_exclusivity=True,
+                enforce_exclusivity=enforce_exclusivity,
             )
             for interface in interfaces
         ],
         pre_snapshot_checkpoint_id=pre_snapshot_checkpoint_id,
         post_snapshot_checkpoint_id=post_snapshot_checkpoint_id,
+    )
+
+
+def _make_qos_queue_desc_snapshot_check(
+    device_name: str,
+    queue_descs: t.List[str],
+    interfaces: t.List[str],
+    idle_cos_list: t.Optional[t.List[ClassOfService]] = None,
+    pre_snapshot_checkpoint_id: t.Optional[str] = None,
+    post_snapshot_checkpoint_id: t.Optional[str] = None,
+) -> SnapshotHealthCheck:
+    tx_queue_info_list = []
+    for interface in interfaces:
+        tx_queue_info_list.append(
+            hc_types.TxQueueInfo(
+                hostname=device_name,
+                interface=interface,
+                queue_desc_list=queue_descs,
+                key_desc="out_bytes.sum",
+                val=0,
+                comparison=hc_types.ComparisonType.GREATER_THAN,
+                enforce_exclusivity=False,
+            )
+        )
+        if idle_cos_list:
+            tx_queue_info_list.append(
+                hc_types.TxQueueInfo(
+                    hostname=device_name,
+                    interface=interface,
+                    cos_list=[int(cos) for cos in idle_cos_list],
+                    key_desc="out_bytes.sum",
+                    val=0,
+                    comparison=hc_types.ComparisonType.EQUAL_TO,
+                    enforce_exclusivity=False,
+                )
+            )
+    return create_qos_dscp_tx_queue_snapshot_check(
+        tx_queue_info_list=tx_queue_info_list,
+        pre_snapshot_checkpoint_id=pre_snapshot_checkpoint_id,
+        post_snapshot_checkpoint_id=post_snapshot_checkpoint_id,
+    )
+
+
+def _burst_packet_count(line_rate_percent: int) -> int:
+    return round(
+        PORT_SPEED_BITS_PER_SECOND
+        * (line_rate_percent / 100)
+        * (BURST_DURATION_MS / 1000)
+        / (IMIX_MEAN_WIRE_BYTES * 8)
     )
 
 
@@ -211,22 +298,19 @@ def _make_scheduling_packet_loss_check(
         thresholds=[
             hc_types.PacketLossThreshold(
                 names=[
-                    f"{device_name.upper()}_GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                    f"{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC",
-                    f"{device_name.upper()}_HIGH_QUEUE_BGP_CP_TRAFFIC",
-                ],
-                expect_packet_loss=True,
-            ),
-            hc_types.PacketLossThreshold(
-                names=[
                     f"{device_name.upper()}_V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
                     f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
                     f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
                 ],
-                str_value="1",
-                metric=hc_types.PacketLossMetric.PERCENTAGE,
+                str_value="0",
+                metric=hc_types.PacketLossMetric.DURATION,
+                comparison=hc_types.ComparisonType.EQUAL_TO,
                 expect_packet_loss=False,
             ),
+        ],
+        skip_traffic_items=[
+            f"{device_name.upper()}_{traffic}"
+            for traffic in DISABLED_AUXILIARY_TRAFFIC_SUFFIXES
         ],
     )
 
@@ -249,15 +333,16 @@ def _make_congestion_packet_loss_check(
         device_name,
         expect_loss_traffic=[
             congestion_traffic_item_suffix,
-            "GOOD_BUT_LOSSY_NDP_TRAFFIC",
-            "LOSSY_ROGUE_NDP_TRAFFIC",
-            "HIGH_QUEUE_BGP_CP_TRAFFIC",
         ],
         no_loss_traffic=[
             "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
             "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
             "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
         ],
+        no_loss_threshold="0",
+        no_loss_metric=hc_types.PacketLossMetric.DURATION,
+        no_loss_comparison=hc_types.ComparisonType.EQUAL_TO,
+        skip_traffic_items=DISABLED_AUXILIARY_TRAFFIC_SUFFIXES,
     )
 
 
@@ -274,7 +359,10 @@ def _ixia_enable_traffic_step(
     if regexes is not None:
         args["regexes"] = regexes
     return create_ixia_api_step(
-        api_name="enable_traffic", args_dict=args, description=step_id
+        api_name="enable_traffic",
+        args_dict=args,
+        description=step_id,
+        start_traffic=False,
     )
 
 
@@ -283,7 +371,10 @@ def _ixia_regenerate_and_apply_step(
 ) -> Step:
     """Build an INVOKE_IXIA_API_STEP that regenerates and applies traffic."""
     return create_ixia_api_step(
-        api_name="regenerate_traffic_items", args_dict={}, description=step_id
+        api_name="regenerate_traffic_items",
+        args_dict={},
+        description=step_id,
+        start_traffic=False,
     )
 
 
@@ -291,7 +382,10 @@ def _ixia_apply_traffic_step(
     step_id: t.Optional[str] = None,
 ) -> Step:
     return create_ixia_api_step(
-        api_name="apply_traffic", args_dict={}, description=step_id
+        api_name="apply_traffic",
+        args_dict={},
+        description=step_id,
+        start_traffic=False,
     )
 
 
@@ -299,7 +393,10 @@ def _ixia_clear_traffic_stats_step(
     step_id: t.Optional[str] = None,
 ) -> Step:
     return create_ixia_api_step(
-        api_name="clear_traffic_stats", args_dict={}, description=step_id
+        api_name="clear_traffic_stats",
+        args_dict={},
+        description=step_id,
+        start_traffic=False,
     )
 
 
@@ -308,7 +405,10 @@ def _ixia_stop_traffic_step(
 ) -> Step:
     """Build an INVOKE_IXIA_API_STEP that stops the traffic engine."""
     return create_ixia_api_step(
-        api_name="stop_traffic", args_dict={}, description=step_id
+        api_name="stop_traffic",
+        args_dict={},
+        description=step_id,
+        start_traffic=False,
     )
 
 
@@ -317,8 +417,144 @@ def _ixia_start_traffic_step(
 ) -> Step:
     """Build an INVOKE_IXIA_API_STEP that starts the traffic engine."""
     return create_ixia_api_step(
-        api_name="start_traffic", args_dict={}, description=step_id
+        api_name="start_traffic",
+        args_dict={},
+        description=step_id,
+        start_traffic=False,
     )
+
+
+def _ixia_start_traffic_items_step(
+    traffic_item_regex: str,
+    step_id: t.Optional[str] = None,
+) -> Step:
+    return create_ixia_api_step(
+        api_name="start_traffic_items",
+        args_dict={"traffic_item_regex": traffic_item_regex},
+        description=step_id,
+        start_traffic=False,
+    )
+
+
+def _ixia_set_burst_step(
+    traffic_item_regex: str,
+    line_rate_percent: int,
+    step_id: t.Optional[str] = None,
+) -> Step:
+    return create_ixia_api_step(
+        api_name="set_transmission_control",
+        args_dict={
+            "traffic_item_regex": traffic_item_regex,
+            "transmission_type": "burstFixedDuration",
+            "duration": LONGEVITY_DURATION_S,
+            "burst_packet_count": _burst_packet_count(line_rate_percent),
+            "inter_burst_gap_ms": BURST_INTER_GAP_MS,
+            "repeat_burst_count": BURST_REPEAT_COUNT,
+            "transmit_mode": "sequential",
+        },
+        description=step_id,
+        start_traffic=False,
+    )
+
+
+def _ixia_set_continuous_step(
+    traffic_item_regex: str,
+    step_id: t.Optional[str] = None,
+) -> Step:
+    return create_ixia_api_step(
+        api_name="set_transmission_control",
+        args_dict={
+            "traffic_item_regex": traffic_item_regex,
+            "transmission_type": "continuous",
+            "transmit_mode": "interleaved",
+        },
+        description=step_id,
+        start_traffic=False,
+    )
+
+
+def _exact_traffic_item_regexes(names: t.Iterable[str]) -> t.List[str]:
+    return [rf"^{re.escape(name)}$" for name in names]
+
+
+def _combined_exact_traffic_item_regex(names: t.Iterable[str]) -> str:
+    escaped_names = [re.escape(name) for name in names]
+    if not escaped_names:
+        raise ValueError("At least one traffic item name is required")
+    return rf"^(?:{'|'.join(escaped_names)})$"
+
+
+def _stop_and_validate_traffic_steps(
+    packet_loss_check: PointInTimeHealthCheck,
+    phase: str,
+) -> t.List[Step]:
+    return [
+        _ixia_stop_traffic_step(step_id=f"stop_for_{phase}_validation"),
+        create_validation_step(
+            point_in_time_checks=[packet_loss_check],
+            description=f"validate_{phase}_traffic",
+            start_traffic=False,
+        ),
+    ]
+
+
+def _ixia_api_name(step: Step) -> t.Optional[str]:
+    if step.name != StepName.INVOKE_IXIA_API_STEP or step.step_params is None:
+        return None
+    return json.loads(step.step_params.json_params or "{}").get("api_name")
+
+
+def _add_phase_packet_loss_validation(
+    stage: taac_types.Stage,
+    packet_loss_check: PointInTimeHealthCheck,
+) -> taac_types.Stage:
+    steps = list(stage.steps or [])
+    if any(step.name == StepName.VALIDATION_STEP for step in steps):
+        return stage
+    stage_id = stage.id or "unnamed_stage"
+
+    if "warmboot" in stage_id:
+        steps = [
+            step for step in steps if _ixia_api_name(step) != "clear_traffic_stats"
+        ]
+        interruption_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.name == StepName.SERVICE_INTERRUPTION_STEP
+        )
+        steps[interruption_index:interruption_index] = [
+            _ixia_start_traffic_step(step_id="start_warmboot_traffic"),
+            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_warmboot"),
+        ]
+    elif "reverse" in stage_id:
+        steps = [
+            step for step in steps if _ixia_api_name(step) != "clear_traffic_stats"
+        ]
+        first_start_index = next(
+            index
+            for index, step in enumerate(steps)
+            if _ixia_api_name(step) in {"start_traffic", "start_traffic_items"}
+        )
+        steps.insert(
+            first_start_index,
+            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
+        )
+    else:
+        steps = [
+            step for step in steps if _ixia_api_name(step) != "clear_traffic_stats"
+        ]
+        longevity_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.name == StepName.LONGEVITY_STEP
+        )
+        steps.insert(
+            longevity_index,
+            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_measurement"),
+        )
+
+    steps.extend(_stop_and_validate_traffic_steps(packet_loss_check, stage_id))
+    return stage(steps=steps)
 
 
 # ---------------------------------------------------------------------------
@@ -414,17 +650,15 @@ def _create_qos_scheduling_playbook(
         ],
     )
 
-    # Stage 2: Burst traffic — stop traffic, switch to burst mode, restart.
-    # TODO(harshalsh): When IXIA infra supports burstFixedDuration
-    # transmission control (30ms burst, 5ms IFG), add steps here to:
-    #   1. _ixia_stop_traffic_step()
-    #   2. set_transmission_control(burst_duration_ms=30, inter_burst_gap_ms=5)
-    #   3. _ixia_start_traffic_step()
-    # For now, run a second continuous longevity as a placeholder.
+    # Stage 2: Reconfigure every preserved flow for repeating 30 ms bursts.
     burst_longevity_stage = create_steps_stage(
         stage_id="qos_burst_longevity",
         steps=[
             _ixia_stop_traffic_step(step_id="stop_for_burst"),
+            _ixia_set_burst_step(v6_layer3_name, 33, "burst_v6_layer3"),
+            _ixia_set_burst_step(v6_directional_name, 33, "burst_v6_directional"),
+            _ixia_set_burst_step(v4_directional_name, 34, "burst_v4_directional"),
+            _ixia_regenerate_and_apply_step(step_id="regenerate_burst_traffic"),
             _ixia_clear_traffic_stats_step(step_id="clear_stats_for_burst"),
             _ixia_start_traffic_step(step_id="start_burst_traffic"),
             create_longevity_step(
@@ -503,6 +737,12 @@ def _create_qos_scheduling_playbook(
             continuous_longevity_stage,
             burst_longevity_stage,
         ],
+        cleanup_steps=[
+            _ixia_stop_traffic_step(step_id="cleanup_stop_after_burst"),
+            _ixia_set_continuous_step(v6_layer3_name, "restore_v6_layer3"),
+            _ixia_set_continuous_step(v6_directional_name, "restore_v6_directional"),
+            _ixia_set_continuous_step(v4_directional_name, "restore_v4_directional"),
+        ],
     )
 
 
@@ -525,15 +765,8 @@ def _create_qos_congestion_playbook(
        *priority* queue (e.g. NC) at 33% linerate each (99% total).
     2. Configure the congestion traffic item to send on the *congested*
        queue (e.g. ICP) at 30% linerate from the dedicated congestion port.
-    3. Traffic sequencing within the playbook stages:
-       a. Stop all traffic items.
-       b. Start the congestion traffic item first.
-       c. Then start the 3 existing items.
-       d. Let traffic run (longevity).
-    4. Warmboot (AGENT restart) while all traffic is flowing, then
-       convergence and post-warmboot longevity.
-    5. Health check validates (after initial longevity AND again after
-       warmboot):
+    3. Run the continuous congestion phase for the catalog duration.
+    4. Health checks validate:
        - Priority queue traffic items see NO packet loss.
        - Congested queue traffic item sees packet loss (expected due to
          oversubscription).
@@ -599,8 +832,10 @@ def _create_qos_congestion_playbook(
         ),
     }
 
-    # Regex pattern for the congestion traffic item.
-    congestion_item_regex = f"{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX}"
+    target_traffic_regexes = _exact_traffic_item_regexes(
+        traffic_items_to_configure.keys()
+    )
+    congestion_item_regex = _exact_traffic_item_regexes([congestion_name])[0]
 
     # Stage 1: Stop the traffic engine so we can reconfigure items, then
     # enable all four items (existing + congestion), apply, start, and
@@ -611,13 +846,10 @@ def _create_qos_congestion_playbook(
         steps=[
             # 1. Stop the traffic engine (traffic_items_to_start started it).
             _ixia_stop_traffic_step(step_id="stop_traffic_engine"),
-            # 2. Enable ALL traffic items (including the congestion item which
-            #    was created with Enabled=False).  Passing regexes=None with
-            #    enable=True enables every item.
             _ixia_enable_traffic_step(
-                regexes=None,
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_all_traffic",
+                step_id="select_test_traffic",
             ),
             # 3. Regenerate and apply the traffic configuration.
             _ixia_regenerate_and_apply_step(step_id="regenerate_traffic"),
@@ -633,28 +865,6 @@ def _create_qos_congestion_playbook(
         ],
     )
 
-    # Stage 2: Warmboot while all traffic (priority + congestion) is flowing,
-    # then revalidate that only the congestion item sees loss.
-    warmboot_stage = create_steps_stage(
-        stage_id="qos_congestion_warmboot",
-        steps=[
-            create_service_interruption_step(
-                service=Service.AGENT,
-                trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                step_id="do_warmboot",
-            ),
-            create_service_convergence_step(
-                services=[Service.AGENT], step_id="warmboot_convergence"
-            ),
-            # Clear stats after convergence so the post-warmboot health check
-            # measures only the period after the switch has recovered.
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_post_warmboot"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="post_warmboot_longevity"
-            ),
-        ],
-    )
-
     # IXIA packet loss health check: validates strict priority scheduling.
     # - The 3 existing items (priority queue) should see NO packet loss.
     # - The congestion item (lower-priority queue) SHOULD see loss.
@@ -662,55 +872,45 @@ def _create_qos_congestion_playbook(
         device_name=device_name,
         congestion_traffic_item_suffix=CONGESTION_TRAFFIC_ITEM_SUFFIX,
     )
-    # Same check applied after warmboot to revalidate.
-    post_warmboot_packet_loss_check = _make_congestion_packet_loss_check(
-        device_name=device_name,
-        congestion_traffic_item_suffix=CONGESTION_TRAFFIC_ITEM_SUFFIX,
-    )
-
-    # Stage 3: Stop all traffic, restart in reverse order (priority first,
-    # then congestion), and run longevity + checks again.
-    reverse_restart_stage = create_steps_stage(
-        stage_id="qos_congestion_reverse_restart",
-        steps=[
-            _ixia_stop_traffic_step(step_id="stop_all_traffic"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
-            # Start priority traffic items first (the 3 existing items).
-            _ixia_start_traffic_step(step_id="start_priority_traffic"),
-            create_longevity_step(duration=10, step_id="settle_priority"),
-            # Now enable and start the congestion item so it competes.
-            _ixia_enable_traffic_step(
-                regexes=[congestion_item_regex],
-                enable=True,
-                step_id="enable_congestion_traffic_reverse",
-            ),
-            _ixia_regenerate_and_apply_step(step_id="regenerate_reverse"),
-            _ixia_apply_traffic_step(step_id="apply_reverse"),
-            _ixia_start_traffic_step(step_id="start_all_reverse"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_reverse"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="reverse_longevity"
-            ),
-        ],
-    )
-
-    # Packet loss check after reverse-order restart.
-    reverse_restart_packet_loss_check = _make_congestion_packet_loss_check(
-        device_name=device_name,
-        congestion_traffic_item_suffix=CONGESTION_TRAFFIC_ITEM_SUFFIX,
-    )
-
     # Buffer utilization snapshot checks on the congested egress port.
     # Congestion traffic flows from the congestion IXIA port → DUT →
     # downlink IXIA port, so the congested egress interface is ixia_downlink_interface.
     # The congested queue is expected to use buffer; all others should not.
+    idle_cos_list = [
+        cos for cos in COS_PRIORITY_ORDER if cos not in {priority_cos, congested_cos}
+    ]
     snapshot_checks = [
+        _make_qos_cos_list_snapshot_check(
+            device_name=device_name,
+            cos_list=[priority_cos, congested_cos],
+            interfaces=[ixia_downlink_interface],
+            pre_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.start",
+            post_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.end",
+        ),
         _make_buffer_utilization_check(
             device_name=device_name,
             active_cos_list=[congested_cos],
             interfaces=[ixia_downlink_interface],
-            active_queue_max_bytes=CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            other_queue_max_bytes=NON_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+            active_queue_max_bytes=CONTINUOUS_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+            other_queue_max_bytes=OTHER_QUEUE_BOUND_DELEGATED_BYTES,
+            pre_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.start",
+            post_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.end",
+        ),
+        _make_buffer_utilization_check(
+            device_name=device_name,
+            active_cos_list=[priority_cos],
+            interfaces=[ixia_downlink_interface],
+            active_queue_max_bytes=PRIORITY_QUEUE_BUFFER_MAX_BYTES,
+            other_queue_max_bytes=OTHER_QUEUE_BOUND_DELEGATED_BYTES,
+            pre_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.start",
+            post_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.end",
+        ),
+        _make_buffer_utilization_check(
+            device_name=device_name,
+            active_cos_list=idle_cos_list,
+            interfaces=[ixia_downlink_interface],
+            active_queue_max_bytes=CONTINUOUS_OTHER_QUEUE_BUFFER_MAX_BYTES,
+            other_queue_max_bytes=OTHER_QUEUE_BOUND_DELEGATED_BYTES,
             pre_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.start",
             post_snapshot_checkpoint_id="stage.qos_congestion_traffic.step.congestion_longevity.end",
         ),
@@ -736,13 +936,9 @@ def _create_qos_congestion_playbook(
             f"(?!{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC)"
             f"(?!{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX})",
         ],
-        postchecks=[
-            congestion_packet_loss_check,
-            post_warmboot_packet_loss_check,
-            reverse_restart_packet_loss_check,
-        ],
+        postchecks=[congestion_packet_loss_check],
         snapshot_checks=snapshot_checks,
-        stages=[congestion_stage, warmboot_stage, reverse_restart_stage],
+        stages=[congestion_stage],
         cleanup_steps=cleanup_steps,
     )
 
@@ -818,6 +1014,10 @@ def _create_ncnf_scheduling_playbook(
         stage_id="qos_burst_longevity",
         steps=[
             _ixia_stop_traffic_step(step_id="stop_for_burst"),
+            _ixia_set_burst_step(v6_layer3_name, 33, "burst_v6_layer3"),
+            _ixia_set_burst_step(v6_directional_name, 33, "burst_v6_directional"),
+            _ixia_set_burst_step(v4_directional_name, 34, "burst_v4_directional"),
+            _ixia_regenerate_and_apply_step(step_id="regenerate_burst_traffic"),
             _ixia_clear_traffic_stats_step(step_id="clear_stats_for_burst"),
             _ixia_start_traffic_step(step_id="start_burst_traffic"),
             create_longevity_step(
@@ -826,9 +1026,36 @@ def _create_ncnf_scheduling_playbook(
         ],
     )
 
-    # TODO(harshalsh): Add QOS_DSCP_TX_QUEUE_CHECK and BUFFER_UTILIZATION_CHECK
-    # snapshot health checks once NCNF is a ClassOfService enum value.
-    snapshot_checks: t.List[SnapshotHealthCheck] = []
+    egress_interfaces = [ixia_downlink_interface, ixia_uplink_interface]
+    snapshot_checks = []
+    for stage_id, step_id in (
+        ("qos_continuous_longevity", "continuous_longevity"),
+        ("qos_burst_longevity", "burst_longevity"),
+    ):
+        pre_checkpoint = f"stage.{stage_id}.step.{step_id}.start"
+        post_checkpoint = f"stage.{stage_id}.step.{step_id}.end"
+        snapshot_checks.extend(
+            [
+                _make_qos_queue_desc_snapshot_check(
+                    device_name=device_name,
+                    queue_descs=[NCNF_QUEUE_DESC],
+                    idle_cos_list=list(COS_DSCP_VALUES),
+                    interfaces=egress_interfaces,
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+                _make_buffer_utilization_check(
+                    device_name=device_name,
+                    active_cos_list=[],
+                    active_queue_desc_list=[NCNF_QUEUE_DESC],
+                    interfaces=egress_interfaces,
+                    active_queue_max_bytes=ACTIVE_QUEUE_BUFFER_MAX_BYTES,
+                    other_queue_max_bytes=OTHER_QUEUE_BUFFER_MAX_BYTES,
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+            ]
+        )
 
     return build_qos_scheduling_playbook(
         name=playbook_name,
@@ -846,6 +1073,12 @@ def _create_ncnf_scheduling_playbook(
         stages=[
             continuous_longevity_stage,
             burst_longevity_stage,
+        ],
+        cleanup_steps=[
+            _ixia_stop_traffic_step(step_id="cleanup_stop_after_burst"),
+            _ixia_set_continuous_step(v6_layer3_name, "restore_v6_layer3"),
+            _ixia_set_continuous_step(v6_directional_name, "restore_v6_directional"),
+            _ixia_set_continuous_step(v4_directional_name, "restore_v4_directional"),
         ],
     )
 
@@ -1008,7 +1241,10 @@ def _create_qos_per_queue_congestion_playbook(
         ),
     }
 
-    congestion_item_regex = f"{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX}"
+    target_traffic_regexes = _exact_traffic_item_regexes(
+        traffic_items_to_configure.keys()
+    )
+    congestion_item_regex = _exact_traffic_item_regexes([congestion_name])[0]
 
     # Stage 1: Stop traffic, enable all items, start, longevity.
     congestion_stage = create_steps_stage(
@@ -1016,9 +1252,9 @@ def _create_qos_per_queue_congestion_playbook(
         steps=[
             _ixia_stop_traffic_step(step_id="stop_traffic_engine"),
             _ixia_enable_traffic_step(
-                regexes=None,
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_all_traffic",
+                step_id="select_test_traffic",
             ),
             _ixia_regenerate_and_apply_step(step_id="regenerate_traffic"),
             _ixia_apply_traffic_step(step_id="apply_traffic"),
@@ -1026,48 +1262,6 @@ def _create_qos_per_queue_congestion_playbook(
             _ixia_clear_traffic_stats_step(step_id="clear_stats"),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="congestion_longevity"
-            ),
-        ],
-    )
-
-    # Stage 2: Warmboot while all traffic is flowing.
-    warmboot_stage = create_steps_stage(
-        stage_id="qos_per_queue_congestion_warmboot",
-        steps=[
-            create_service_interruption_step(
-                service=Service.AGENT,
-                trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                step_id="do_warmboot",
-            ),
-            create_service_convergence_step(
-                services=[Service.AGENT], step_id="warmboot_convergence"
-            ),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_post_warmboot"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="post_warmboot_longevity"
-            ),
-        ],
-    )
-
-    # Stage 3: Stop all, restart in reverse order.
-    reverse_restart_stage = create_steps_stage(
-        stage_id="qos_per_queue_congestion_reverse_restart",
-        steps=[
-            _ixia_stop_traffic_step(step_id="stop_all_traffic"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
-            _ixia_start_traffic_step(step_id="start_priority_traffic"),
-            create_longevity_step(duration=10, step_id="settle_priority"),
-            _ixia_enable_traffic_step(
-                regexes=[congestion_item_regex],
-                enable=True,
-                step_id="enable_congestion_traffic_reverse",
-            ),
-            _ixia_regenerate_and_apply_step(step_id="regenerate_reverse"),
-            _ixia_apply_traffic_step(step_id="apply_reverse"),
-            _ixia_start_traffic_step(step_id="start_all_reverse"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_reverse"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="reverse_longevity"
             ),
         ],
     )
@@ -1081,21 +1275,26 @@ def _create_qos_per_queue_congestion_playbook(
                 "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
                 "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
                 "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                "GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                "LOSSY_ROGUE_NDP_TRAFFIC",
-                "HIGH_QUEUE_BGP_CP_TRAFFIC",
             ],
             no_loss_traffic=[],
+            skip_traffic_items=DISABLED_AUXILIARY_TRAFFIC_SUFFIXES,
         )
 
     # Buffer utilization: congested queue may use buffer, all others should not.
     snapshot_checks = [
+        _make_qos_snapshot_check(
+            device_name=device_name,
+            cos=cos,
+            interfaces=[ixia_downlink_interface],
+            pre_snapshot_checkpoint_id="stage.qos_per_queue_congestion_traffic.step.congestion_longevity.start",
+            post_snapshot_checkpoint_id="stage.qos_per_queue_congestion_traffic.step.congestion_longevity.end",
+        ),
         _make_buffer_utilization_check(
             device_name=device_name,
             active_cos_list=[cos],
             interfaces=[ixia_downlink_interface],
-            active_queue_max_bytes=CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            other_queue_max_bytes=NON_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+            active_queue_max_bytes=CONTINUOUS_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+            other_queue_max_bytes=CONTINUOUS_OTHER_QUEUE_BUFFER_MAX_BYTES,
             pre_snapshot_checkpoint_id="stage.qos_per_queue_congestion_traffic.step.congestion_longevity.start",
             post_snapshot_checkpoint_id="stage.qos_per_queue_congestion_traffic.step.congestion_longevity.end",
         ),
@@ -1119,13 +1318,9 @@ def _create_qos_per_queue_congestion_playbook(
             f"(?!{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC)"
             f"(?!{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX})",
         ],
-        postchecks=[
-            _make_loss_check(),
-            _make_loss_check(),
-            _make_loss_check(),
-        ],
+        postchecks=[_make_loss_check()],
         snapshot_checks=snapshot_checks,
-        stages=[congestion_stage, warmboot_stage, reverse_restart_stage],
+        stages=[congestion_stage],
         cleanup_steps=cleanup_steps,
     )
 
@@ -1189,63 +1384,39 @@ def _create_ncnf_per_queue_congestion_playbook(
         ),
     }
 
-    congestion_item_regex = f"{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX}"
+    baseline_traffic_regex = _combined_exact_traffic_item_regex(
+        [v6_layer3_name, v6_directional_name, v4_directional_name]
+    )
+    target_traffic_regexes = _exact_traffic_item_regexes(
+        traffic_items_to_configure.keys()
+    )
+    congestion_item_regex = _exact_traffic_item_regexes([congestion_name])[0]
 
     congestion_stage = create_steps_stage(
         stage_id="qos_per_queue_congestion_traffic",
         steps=[
             _ixia_stop_traffic_step(step_id="stop_traffic_engine"),
             _ixia_enable_traffic_step(
-                regexes=None,
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_all_traffic",
+                step_id="select_test_traffic",
             ),
             _ixia_regenerate_and_apply_step(step_id="regenerate_traffic"),
             _ixia_apply_traffic_step(step_id="apply_traffic"),
-            _ixia_start_traffic_step(step_id="start_traffic_engine"),
+            _ixia_start_traffic_items_step(
+                congestion_item_regex, step_id="start_congestion_first"
+            ),
+            create_longevity_step(
+                duration=10,
+                step_id="settle_congestion",
+                start_traffic=False,
+            ),
+            _ixia_start_traffic_items_step(
+                baseline_traffic_regex, step_id="add_priority_traffic"
+            ),
             _ixia_clear_traffic_stats_step(step_id="clear_stats"),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="congestion_longevity"
-            ),
-        ],
-    )
-
-    warmboot_stage = create_steps_stage(
-        stage_id="qos_per_queue_congestion_warmboot",
-        steps=[
-            create_service_interruption_step(
-                service=Service.AGENT,
-                trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                step_id="do_warmboot",
-            ),
-            create_service_convergence_step(
-                services=[Service.AGENT], step_id="warmboot_convergence"
-            ),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_post_warmboot"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="post_warmboot_longevity"
-            ),
-        ],
-    )
-
-    reverse_restart_stage = create_steps_stage(
-        stage_id="qos_per_queue_congestion_reverse_restart",
-        steps=[
-            _ixia_stop_traffic_step(step_id="stop_all_traffic"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
-            _ixia_start_traffic_step(step_id="start_priority_traffic"),
-            create_longevity_step(duration=10, step_id="settle_priority"),
-            _ixia_enable_traffic_step(
-                regexes=[congestion_item_regex],
-                enable=True,
-                step_id="enable_congestion_traffic_reverse",
-            ),
-            _ixia_regenerate_and_apply_step(step_id="regenerate_reverse"),
-            _ixia_apply_traffic_step(step_id="apply_reverse"),
-            _ixia_start_traffic_step(step_id="start_all_reverse"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_reverse"),
-            create_longevity_step(
-                duration=LONGEVITY_DURATION_S, step_id="reverse_longevity"
             ),
         ],
     )
@@ -1258,16 +1429,37 @@ def _create_ncnf_per_queue_congestion_playbook(
                 "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
                 "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
                 "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                "GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                "LOSSY_ROGUE_NDP_TRAFFIC",
-                "HIGH_QUEUE_BGP_CP_TRAFFIC",
             ],
             no_loss_traffic=[],
+            skip_traffic_items=DISABLED_AUXILIARY_TRAFFIC_SUFFIXES,
         )
 
-    # TODO(harshalsh): Add BUFFER_UTILIZATION_CHECK once NCNF is a
-    # ClassOfService enum value.
-    snapshot_checks: t.List[SnapshotHealthCheck] = []
+    pre_checkpoint = (
+        "stage.qos_per_queue_congestion_traffic.step.congestion_longevity.start"
+    )
+    post_checkpoint = (
+        "stage.qos_per_queue_congestion_traffic.step.congestion_longevity.end"
+    )
+    snapshot_checks = [
+        _make_qos_queue_desc_snapshot_check(
+            device_name=device_name,
+            queue_descs=[NCNF_QUEUE_DESC],
+            idle_cos_list=list(COS_DSCP_VALUES),
+            interfaces=[ixia_downlink_interface],
+            pre_snapshot_checkpoint_id=pre_checkpoint,
+            post_snapshot_checkpoint_id=post_checkpoint,
+        ),
+        _make_buffer_utilization_check(
+            device_name=device_name,
+            active_cos_list=[],
+            active_queue_desc_list=[NCNF_QUEUE_DESC],
+            interfaces=[ixia_downlink_interface],
+            active_queue_max_bytes=CONTINUOUS_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+            other_queue_max_bytes=CONTINUOUS_OTHER_QUEUE_BUFFER_MAX_BYTES,
+            pre_snapshot_checkpoint_id=pre_checkpoint,
+            post_snapshot_checkpoint_id=post_checkpoint,
+        ),
+    ]
 
     cleanup_steps = [
         _ixia_enable_traffic_step(
@@ -1286,13 +1478,9 @@ def _create_ncnf_per_queue_congestion_playbook(
             f"(?!{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC)"
             f"(?!{device_name.upper()}_{CONGESTION_TRAFFIC_ITEM_SUFFIX})",
         ],
-        postchecks=[
-            _make_loss_check(),
-            _make_loss_check(),
-            _make_loss_check(),
-        ],
+        postchecks=[_make_loss_check()],
         snapshot_checks=snapshot_checks,
-        stages=[congestion_stage, warmboot_stage, reverse_restart_stage],
+        stages=[congestion_stage],
         cleanup_steps=cleanup_steps,
     )
 
@@ -1394,6 +1582,20 @@ def _create_qos_single_queue_congestion_playbook(
     )
     congestion_name = f"{device_name.upper()}_{congestion_suffix}"
 
+    def _make_loss_check() -> PointInTimeHealthCheck:
+        return create_ixia_packet_loss_check_traffic_split(
+            device_name,
+            expect_loss_traffic=[congestion_suffix],
+            no_loss_traffic=[
+                "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
+                "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+                "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+            ],
+            no_loss_threshold="0",
+            no_loss_metric=hc_types.PacketLossMetric.DURATION,
+            no_loss_comparison=hc_types.ComparisonType.EQUAL_TO,
+        )
+
     traffic_items_to_configure = {
         v6_layer3_name: taac_types.TrafficItemSettings(
             line_rate=33,
@@ -1428,8 +1630,13 @@ def _create_qos_single_queue_congestion_playbook(
     traffic_items_to_start_regex = "".join(
         f"(?!{device_name.upper()}_{suffix})" for suffix in exclude_suffixes
     )
-
-    congestion_item_regex = congestion_name
+    baseline_traffic_regex = _combined_exact_traffic_item_regex(
+        [v6_layer3_name, v6_directional_name, v4_directional_name]
+    )
+    target_traffic_regexes = _exact_traffic_item_regexes(
+        traffic_items_to_configure.keys()
+    )
+    congestion_item_regex = _exact_traffic_item_regexes([congestion_name])[0]
 
     # Stage 1: Stop traffic, enable all items including per-queue congestion,
     # start, and run longevity.
@@ -1438,24 +1645,39 @@ def _create_qos_single_queue_congestion_playbook(
         steps=[
             _ixia_stop_traffic_step(step_id="stop_traffic_engine"),
             _ixia_enable_traffic_step(
-                regexes=[congestion_item_regex],
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_congestion_traffic",
+                step_id="select_test_traffic",
             ),
             _ixia_regenerate_and_apply_step(step_id="regenerate_traffic"),
             _ixia_apply_traffic_step(step_id="apply_traffic"),
-            _ixia_start_traffic_step(step_id="start_traffic_engine"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats"),
+            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_initial"),
+            _ixia_start_traffic_items_step(
+                congestion_item_regex, step_id="start_congestion_traffic"
+            ),
+            create_longevity_step(
+                duration=10,
+                step_id="settle_congestion",
+                start_traffic=False,
+            ),
+            _ixia_start_traffic_items_step(
+                baseline_traffic_regex, step_id="add_priority_traffic"
+            ),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="congestion_longevity"
             ),
+            *_stop_and_validate_traffic_steps(_make_loss_check(), "initial_congestion"),
         ],
     )
 
-    # Stage 2: Warmboot while all traffic is flowing.
+    # Stage 2: Start a fresh measurement window before warmboot. Counters are
+    # intentionally not cleared after the restart: loss during warmboot is part
+    # of the hitless-forwarding contract.
     warmboot_stage = create_steps_stage(
         stage_id="qos_single_congestion_warmboot",
         steps=[
+            _ixia_start_traffic_step(step_id="start_warmboot_traffic"),
+            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_warmboot"),
             create_service_interruption_step(
                 service=Service.AGENT,
                 trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
@@ -1464,9 +1686,11 @@ def _create_qos_single_queue_congestion_playbook(
             create_service_convergence_step(
                 services=[Service.AGENT], step_id="warmboot_convergence"
             ),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_post_warmboot"),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="post_warmboot_longevity"
+            ),
+            *_stop_and_validate_traffic_steps(
+                _make_loss_check(), "warmboot_congestion"
             ),
         ],
     )
@@ -1477,52 +1701,59 @@ def _create_qos_single_queue_congestion_playbook(
         steps=[
             _ixia_stop_traffic_step(step_id="stop_all_traffic"),
             _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
-            _ixia_start_traffic_step(step_id="start_priority_traffic"),
-            create_longevity_step(duration=10, step_id="settle_priority"),
             _ixia_enable_traffic_step(
-                regexes=[congestion_item_regex],
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_congestion_traffic_reverse",
+                step_id="select_all_test_traffic_reverse",
             ),
-            _ixia_regenerate_and_apply_step(step_id="regenerate_reverse"),
-            _ixia_apply_traffic_step(step_id="apply_reverse"),
-            _ixia_start_traffic_step(step_id="start_all_reverse"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_reverse"),
+            _ixia_regenerate_and_apply_step(step_id="regenerate_priority"),
+            _ixia_apply_traffic_step(step_id="apply_priority"),
+            _ixia_start_traffic_items_step(
+                baseline_traffic_regex, step_id="start_priority_traffic"
+            ),
+            create_longevity_step(
+                duration=10,
+                step_id="settle_priority",
+                start_traffic=False,
+            ),
+            _ixia_start_traffic_items_step(
+                congestion_item_regex, step_id="add_congestion_traffic"
+            ),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="reverse_longevity"
             ),
+            *_stop_and_validate_traffic_steps(_make_loss_check(), "reverse_congestion"),
         ],
     )
 
-    # Packet loss checks: congestion item expects loss, priority items do not.
-    def _make_loss_check() -> PointInTimeHealthCheck:
-        return create_ixia_packet_loss_check_traffic_split(
-            device_name,
-            expect_loss_traffic=[
-                congestion_suffix,
-                "GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                "LOSSY_ROGUE_NDP_TRAFFIC",
-                "HIGH_QUEUE_BGP_CP_TRAFFIC",
-            ],
-            no_loss_traffic=[
-                "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
-                "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-            ],
+    snapshot_checks = []
+    for stage_id, step_id in (
+        ("qos_single_congestion_traffic", "congestion_longevity"),
+        ("qos_single_congestion_warmboot", "post_warmboot_longevity"),
+        ("qos_single_congestion_reverse_restart", "reverse_longevity"),
+    ):
+        pre_checkpoint = f"stage.{stage_id}.step.{step_id}.start"
+        post_checkpoint = f"stage.{stage_id}.step.{step_id}.end"
+        snapshot_checks.extend(
+            [
+                _make_qos_cos_list_snapshot_check(
+                    device_name=device_name,
+                    cos_list=[priority_cos, congested_cos],
+                    interfaces=[ixia_downlink_interface],
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+                _make_buffer_utilization_check(
+                    device_name=device_name,
+                    active_cos_list=[congested_cos],
+                    interfaces=[ixia_downlink_interface],
+                    active_queue_max_bytes=LONG_RUNNING_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+                    other_queue_max_bytes=LONG_RUNNING_OTHER_QUEUE_BUFFER_MAX_BYTES,
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+            ]
         )
-
-    # Buffer utilization: congested queue may use buffer, all others should not.
-    snapshot_checks = [
-        _make_buffer_utilization_check(
-            device_name=device_name,
-            active_cos_list=[congested_cos],
-            interfaces=[ixia_downlink_interface],
-            active_queue_max_bytes=CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            other_queue_max_bytes=NON_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            pre_snapshot_checkpoint_id="stage.qos_single_congestion_traffic.step.congestion_longevity.start",
-            post_snapshot_checkpoint_id="stage.qos_single_congestion_traffic.step.congestion_longevity.end",
-        ),
-    ]
 
     # Cleanup: disable the per-queue congestion item.
     cleanup_steps = [
@@ -1537,11 +1768,7 @@ def _create_qos_single_queue_congestion_playbook(
         name=playbook_name,
         traffic_items_to_configure=traffic_items_to_configure,
         traffic_items_to_start=[traffic_items_to_start_regex],
-        postchecks=[
-            _make_loss_check(),
-            _make_loss_check(),
-            _make_loss_check(),
-        ],
+        postchecks=[],
         snapshot_checks=snapshot_checks,
         stages=[congestion_stage, warmboot_stage, reverse_restart_stage],
         cleanup_steps=cleanup_steps,
@@ -1683,6 +1910,13 @@ def _create_qos_multi_congestion_playbook(
     traffic_items_to_start_regex = "".join(
         f"(?!{device_name.upper()}_{suffix})" for suffix in exclude_suffixes
     )
+    baseline_traffic_regex = _combined_exact_traffic_item_regex(
+        [v6_layer3_name, v6_directional_name, v4_directional_name]
+    )
+    congestion_traffic_regex = _combined_exact_traffic_item_regex(congestion_item_names)
+    target_traffic_regexes = _exact_traffic_item_regexes(
+        traffic_items_to_configure.keys()
+    )
 
     # Stage 1: Stop traffic, enable all items, start congestion first,
     # then priority, run longevity.
@@ -1691,14 +1925,23 @@ def _create_qos_multi_congestion_playbook(
         steps=[
             _ixia_stop_traffic_step(step_id="stop_traffic_engine"),
             _ixia_enable_traffic_step(
-                regexes=None,
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_all_traffic",
+                step_id="select_test_traffic",
             ),
             _ixia_regenerate_and_apply_step(step_id="regenerate_traffic"),
             _ixia_apply_traffic_step(step_id="apply_traffic"),
-            _ixia_start_traffic_step(step_id="start_traffic_engine"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats"),
+            _ixia_start_traffic_items_step(
+                congestion_traffic_regex, step_id="start_congestion_traffic"
+            ),
+            create_longevity_step(
+                duration=10,
+                step_id="settle_congestion",
+                start_traffic=False,
+            ),
+            _ixia_start_traffic_items_step(
+                baseline_traffic_regex, step_id="add_priority_traffic"
+            ),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="congestion_longevity"
             ),
@@ -1717,7 +1960,6 @@ def _create_qos_multi_congestion_playbook(
             create_service_convergence_step(
                 services=[Service.AGENT], step_id="warmboot_convergence"
             ),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_post_warmboot"),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="post_warmboot_longevity"
             ),
@@ -1729,18 +1971,24 @@ def _create_qos_multi_congestion_playbook(
         stage_id="qos_multi_congestion_reverse_restart",
         steps=[
             _ixia_stop_traffic_step(step_id="stop_all_traffic"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_before_reverse"),
-            _ixia_start_traffic_step(step_id="start_priority_traffic"),
-            create_longevity_step(duration=10, step_id="settle_priority"),
             _ixia_enable_traffic_step(
-                regexes=congestion_item_names,
+                regexes=target_traffic_regexes,
                 enable=True,
-                step_id="enable_congestion_traffic_reverse",
+                step_id="select_all_test_traffic_reverse",
             ),
-            _ixia_regenerate_and_apply_step(step_id="regenerate_reverse"),
-            _ixia_apply_traffic_step(step_id="apply_reverse"),
-            _ixia_start_traffic_step(step_id="start_all_reverse"),
-            _ixia_clear_traffic_stats_step(step_id="clear_stats_reverse"),
+            _ixia_regenerate_and_apply_step(step_id="regenerate_priority"),
+            _ixia_apply_traffic_step(step_id="apply_priority"),
+            _ixia_start_traffic_items_step(
+                baseline_traffic_regex, step_id="start_priority_traffic"
+            ),
+            create_longevity_step(
+                duration=10,
+                step_id="settle_priority",
+                start_traffic=False,
+            ),
+            _ixia_start_traffic_items_step(
+                congestion_traffic_regex, step_id="add_congestion_traffic"
+            ),
             create_longevity_step(
                 duration=LONGEVITY_DURATION_S, step_id="reverse_longevity"
             ),
@@ -1751,31 +1999,47 @@ def _create_qos_multi_congestion_playbook(
     def _make_multi_congestion_loss_check() -> PointInTimeHealthCheck:
         return create_ixia_packet_loss_check_traffic_split(
             device_name,
-            expect_loss_traffic=all_expect_loss_suffixes
-            + [
-                "GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                "LOSSY_ROGUE_NDP_TRAFFIC",
-                "HIGH_QUEUE_BGP_CP_TRAFFIC",
-            ],
+            expect_loss_traffic=all_expect_loss_suffixes,
             no_loss_traffic=[
                 "V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
                 "V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
                 "V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
             ],
+            no_loss_threshold="0",
+            no_loss_metric=hc_types.PacketLossMetric.DURATION,
+            no_loss_comparison=hc_types.ComparisonType.EQUAL_TO,
+            skip_traffic_items=DISABLED_AUXILIARY_TRAFFIC_SUFFIXES,
         )
 
-    # Buffer utilization: congested queues may use buffer, all others should not.
-    snapshot_checks = [
-        _make_buffer_utilization_check(
-            device_name=device_name,
-            active_cos_list=congested_cos_list,
-            interfaces=[ixia_downlink_interface],
-            active_queue_max_bytes=CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            other_queue_max_bytes=NON_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
-            pre_snapshot_checkpoint_id="stage.qos_multi_congestion_traffic.step.congestion_longevity.start",
-            post_snapshot_checkpoint_id="stage.qos_multi_congestion_traffic.step.congestion_longevity.end",
-        ),
-    ]
+    snapshot_checks = []
+    for stage_id, step_id in (
+        ("qos_multi_congestion_traffic", "congestion_longevity"),
+        ("qos_multi_congestion_warmboot", "post_warmboot_longevity"),
+        ("qos_multi_congestion_reverse_restart", "reverse_longevity"),
+    ):
+        pre_checkpoint = f"stage.{stage_id}.step.{step_id}.start"
+        post_checkpoint = f"stage.{stage_id}.step.{step_id}.end"
+        snapshot_checks.extend(
+            [
+                _make_qos_cos_list_snapshot_check(
+                    device_name=device_name,
+                    cos_list=[priority_cos],
+                    interfaces=[ixia_downlink_interface],
+                    enforce_exclusivity=False,
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+                _make_buffer_utilization_check(
+                    device_name=device_name,
+                    active_cos_list=congested_cos_list,
+                    interfaces=[ixia_downlink_interface],
+                    active_queue_max_bytes=LONG_RUNNING_CONGESTED_QUEUE_BUFFER_MAX_BYTES,
+                    other_queue_max_bytes=LONG_RUNNING_OTHER_QUEUE_BUFFER_MAX_BYTES,
+                    pre_snapshot_checkpoint_id=pre_checkpoint,
+                    post_snapshot_checkpoint_id=post_checkpoint,
+                ),
+            ]
+        )
 
     # Cleanup: disable all per-queue congestion items.
     cleanup_steps = [
@@ -1790,11 +2054,7 @@ def _create_qos_multi_congestion_playbook(
         name=playbook_name,
         traffic_items_to_configure=traffic_items_to_configure,
         traffic_items_to_start=[traffic_items_to_start_regex],
-        postchecks=[
-            _make_multi_congestion_loss_check(),
-            _make_multi_congestion_loss_check(),
-            _make_multi_congestion_loss_check(),
-        ],
+        postchecks=[_make_multi_congestion_loss_check()],
         snapshot_checks=snapshot_checks,
         stages=[congestion_stage, warmboot_stage, reverse_restart_stage],
         cleanup_steps=cleanup_steps,
@@ -2309,7 +2569,14 @@ def test_config_qos_scheduling(
         port_configs.append(congestion_port_config)
 
         # Build the modified traffic item configs list.
-        traffic_configs = list(test_config.basic_traffic_item_configs)
+        traffic_configs = [
+            traffic_config
+            for traffic_config in test_config.basic_traffic_item_configs
+            if not any(
+                traffic_config.name.endswith(suffix)
+                for suffix in DISABLED_AUXILIARY_TRAFFIC_SUFFIXES
+            )
+        ]
         congestion_traffic_item = _build_congestion_traffic_item_config(
             device_name=device_name,
             ixia_congestion_interface=ixia_congestion_interface,
@@ -2345,5 +2612,70 @@ def test_config_qos_scheduling(
         config_fields["basic_traffic_item_configs"] = traffic_configs
         config_fields["endpoints"] = updated_endpoints
         test_config = taac_types.TestConfig(**config_fields)
+
+    normalized_playbooks = []
+    for playbook in test_config.playbooks:
+        prechecks = [
+            check
+            for check in playbook.prechecks or []
+            if check.name != hc_types.CheckName.IXIA_PACKET_LOSS_CHECK
+        ]
+        stages = list(playbook.stages or [])
+        has_inline_ixia_validation = any(
+            step.name == StepName.VALIDATION_STEP
+            for stage in stages
+            for step in stage.steps or []
+        )
+        scenario_packet_loss_check = next(
+            (
+                check
+                for check in playbook.postchecks or []
+                if check.name == hc_types.CheckName.IXIA_PACKET_LOSS_CHECK
+            ),
+            None,
+        )
+        if not has_inline_ixia_validation and scenario_packet_loss_check is not None:
+            stages = [
+                _add_phase_packet_loss_validation(
+                    stage,
+                    scenario_packet_loss_check,
+                )
+                for stage in stages
+            ]
+        postchecks = []
+        for check in playbook.postchecks or []:
+            if check.name == hc_types.CheckName.IXIA_PACKET_LOSS_CHECK:
+                continue
+            postchecks.append(check)
+        if any("warmboot" in (stage.id or "") for stage in stages):
+            postchecks = [
+                check
+                for check in postchecks
+                if check.name != hc_types.CheckName.SERVICE_RESTART_CHECK
+            ]
+            postchecks.append(
+                create_service_restart_check(
+                    expected_restarted_services=WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"]
+                )
+            )
+        normalized_playbooks.append(
+            playbook(
+                prechecks=prechecks,
+                stages=stages,
+                postchecks=postchecks,
+            )
+        )
+
+    config_fields = dict(test_config)
+    config_fields["basic_traffic_item_configs"] = [
+        traffic_config
+        for traffic_config in test_config.basic_traffic_item_configs
+        if not any(
+            traffic_config.name.endswith(suffix)
+            for suffix in DISABLED_AUXILIARY_TRAFFIC_SUFFIXES
+        )
+    ]
+    config_fields["playbooks"] = normalized_playbooks
+    test_config = taac_types.TestConfig(**config_fields)
 
     return test_config
