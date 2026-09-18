@@ -215,6 +215,7 @@ from taac.utils.oss_taac_lib_utils import (
 if not TAAC_OSS:
     from openr.py.openr.cli.utils.commands import OpenrCtrlCmd
     from openr.py.openr.clients.openr_client import get_openr_ctrl_cpp_client
+    from openr.thrift.KvStore import thrift_types as kv_store_types
     from openr.thrift.KvStore.thrift_types import KeyDumpParams
     from openr.thrift.OpenrCtrl.thrift_types import (
         AdjacenciesFilter,
@@ -5364,6 +5365,19 @@ class FbossSwitch(AbstractSwitch):
             f"{self.hostname}: retrieved kvstore prefixes for area(s) {areas}"
         )
         return result
+
+    async def async_get_openr_kvstore_keyvals(
+        self,
+        keys: Sequence[str],
+        area: str = "0",
+    ) -> "kv_store_types.Publication":
+        """Return complete Values for exact KvStore keys in one area."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR KvStore operations require Meta-internal OpenR infrastructure."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            return await client.getKvStoreKeyValsArea(list(keys), area)
 
     async def async_get_openr_kvstore_keys(self) -> Dict[str, List[str]]:
         """
