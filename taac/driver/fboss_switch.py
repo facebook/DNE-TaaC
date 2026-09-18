@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import socket
 import time
 import typing
@@ -80,6 +81,22 @@ from neteng.fboss.bgp_thrift.types import (
     TGetUpdateGroupInfoResponse,
     TOriginatedRoute,
 )
+
+# This response type is absent from the OSS fboss thrift-defs build (drift vs
+# Meta-internal). It is used only as a local-variable annotation below, so an
+# inert placeholder keeps the driver importable without masking unrelated
+# import failures from this generated module.
+if not TAAC_OSS:
+    TGetUpdateGroupSummariesResponse = (
+        fboss_bgp_thrift_types.TGetUpdateGroupSummariesResponse
+    )
+else:
+    TGetUpdateGroupSummariesResponse = getattr(
+        fboss_bgp_thrift_types,
+        "TGetUpdateGroupSummariesResponse",
+        type("TGetUpdateGroupSummariesResponse", (), {}),
+    )
+
 from neteng.fboss.ctrl.clients import FbossCtrl
 from neteng.fboss.ctrl.types import (
     AggregatePortThrift,
@@ -3307,7 +3324,9 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(
+                    f"mkdir -p -- {shlex.quote(parent)}"
+                )
 
         self.logger.info(
             f"Writing {len(contents)} bytes to {self.hostname}:{remote_path}"
@@ -3326,7 +3345,9 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(
+                    f"mkdir -p -- {shlex.quote(parent)}"
+                )
 
         self.logger.info(
             f"Copying {local_path} to {self.hostname}:{remote_path}"

@@ -11,6 +11,7 @@
 #   ./docker/run_taac_docker.sh --regen                  # regen thrift, then shell
 #   ./docker/run_taac_docker.sh --image <image>          # use a specific image
 #   ./docker/run_taac_docker.sh --workspace <path>       # mount a different directory
+#   ./docker/run_taac_docker.sh --env-file <path>        # load KEY=value settings (repeatable)
 #   ./docker/run_taac_docker.sh -v /host:/ctr            # extra volume mount (repeatable)
 #   ./docker/run_taac_docker.sh run <cmd>                # run a command (non-interactive)
 
@@ -24,6 +25,7 @@ WORKSPACE="$REPO_ROOT"
 REGEN=0
 SUBCMD=shell
 EXTRA_VOLUMES=()
+ENV_FILES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,6 +49,18 @@ while [[ $# -gt 0 ]]; do
             WORKSPACE="$(cd "$2" && pwd)"
             shift 2
             ;;
+        --env-file)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Error: --env-file requires a value" >&2
+                exit 1
+            fi
+            if [[ ! -f "$2" ]]; then
+                echo "Error: env file '$2' does not exist or is not a regular file" >&2
+                exit 1
+            fi
+            ENV_FILES+=("$2")
+            shift 2
+            ;;
         -v|--volume)
             if [[ $# -lt 2 || -z "${2:-}" ]]; then
                 echo "Error: -v/--volume requires a value" >&2
@@ -61,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             break
             ;;
         *)
-            echo "Usage: $0 [--regen] [--image <name>] [--workspace <path>] [-v <mount>] [run <cmd...>]" >&2
+            echo "Usage: $0 [--regen] [--image <name>] [--workspace <path>] [--env-file <path>] [-v <mount>] [run <cmd...>]" >&2
             exit 1
             ;;
     esac
@@ -79,6 +93,15 @@ DOCKER_ARGS=(
     -v /tmp:/tmp
     "${EXTRA_VOLUMES[@]}"
 )
+
+# Let Docker parse non-secret profile files so values are data, not shell code.
+# Multiple files are applied in command-line order. Explicitly exported TAAC_*
+# variables are appended below with `-e` and therefore remain the
+# highest-precedence, one-run override. The OSS runner accepts credentials via
+# its separate --secrets-file input.
+for _taac_env_file in "${ENV_FILES[@]}"; do
+    DOCKER_ARGS+=(--env-file "$_taac_env_file")
+done
 if [[ "$SUBCMD" != "run" ]]; then
     DOCKER_ARGS+=(-t)
 fi
