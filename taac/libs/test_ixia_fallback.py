@@ -638,6 +638,21 @@ class IxiaFallbackTest(unittest.IsolatedAsyncioTestCase):
         release.assert_awaited_once_with(orchestrator.basset_butler, self.logger)
         ixia_cleanup.assert_awaited_once_with(strict=True)
 
+    async def test_internal_teardown_before_test_bed_creation(self) -> None:
+        orchestrator = TestSetupOrchestrator(
+            self.config,
+            self.logger,
+            skip_testbed_isolation=False,
+        )
+        ixia_cleanup = AsyncMock()
+        orchestrator.async_teardown_ixia_setup = ixia_cleanup
+
+        with patch(f"{_MODULE}.TAAC_OSS", False):
+            await orchestrator.async_tearDown(strict_ixia_cleanup=True)
+
+        self.assertIsNone(orchestrator.test_bed_chunker)
+        ixia_cleanup.assert_awaited_once_with(strict=True)
+
     async def test_port_failure_cleans_primary_and_selects_secondary(self) -> None:
         teardown = MagicMock()
 

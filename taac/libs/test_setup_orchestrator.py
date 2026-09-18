@@ -450,7 +450,7 @@ class TestSetupOrchestrator:
         3. IXIA teardown
         """
         errors: t.List[Exception] = []
-        if not self._skip_testbed_isolation:
+        if not self._skip_testbed_isolation and self.test_bed_chunker is not None:
             try:
                 await self.test_bed_chunker.async_restore_test_bed_connectivity()
             except Exception as error:
