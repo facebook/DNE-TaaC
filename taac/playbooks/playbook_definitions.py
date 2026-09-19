@@ -10020,9 +10020,15 @@ def create_fboss_sw_agent_and_hw_agent_0_crash_playbook() -> Playbook:
     return TEST_FBOSS_SW_AGENT_AND_HW_AGENT_0_CRASH_PLAYBOOK
 
 
-def create_bgpd_and_fsdb_restart_playbook() -> Playbook:
-    """Platform hardening playbook: bgpd + fsdb concurrent restart (wrapper for module-level constant)."""
-    return TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK
+def create_bgpd_and_fsdb_restart_playbook(iteration: int = 5) -> Playbook:
+    """Build the concurrent bgpd + fsdb restart playbook."""
+    return _create_repeated_concurrent_service_restart_playbook(
+        name="test_bgpd_and_fsdb_restart",
+        services=[Service.BGP, Service.FSDB],
+        convergence_services=[Service.AGENT, Service.BGP, Service.FSDB],
+        expected_restarted_services=["bgpd", "fsdb"],
+        iteration=iteration,
+    )
 
 
 def create_agent_and_bgpd_restart_playbook() -> Playbook:
@@ -10030,14 +10036,40 @@ def create_agent_and_bgpd_restart_playbook() -> Playbook:
     return TEST_AGENT_AND_BGPD_RESTART_PLAYBOOK
 
 
-def create_agent_and_fsdb_restart_playbook() -> Playbook:
-    """Platform hardening playbook: wedge_agent + fsdb concurrent restart (wrapper for module-level constant)."""
-    return TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK
+def create_agent_and_fsdb_restart_playbook(iteration: int = 5) -> Playbook:
+    """Build the concurrent wedge_agent + fsdb restart playbook."""
+    return _create_repeated_concurrent_service_restart_playbook(
+        name="test_agent_and_fsdb_restart",
+        services=[Service.AGENT, Service.FSDB],
+        convergence_services=[Service.AGENT, Service.FSDB],
+        expected_restarted_services=[
+            "wedge_agent",
+            "fsdb",
+            "fboss_sw_agent",
+            "fboss_hw_agent@0",
+            "bgpd",
+            "openr",
+        ],
+        iteration=iteration,
+    )
 
 
-def create_agent_and_qsfp_service_restart_playbook() -> Playbook:
-    """Platform hardening playbook: wedge_agent + qsfp_service concurrent restart (wrapper for module-level constant)."""
-    return TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK
+def create_agent_and_qsfp_service_restart_playbook(iteration: int = 5) -> Playbook:
+    """Build the concurrent wedge_agent + qsfp_service restart playbook."""
+    return _create_repeated_concurrent_service_restart_playbook(
+        name="test_agent_and_qsfp_service_restart",
+        services=[Service.AGENT, Service.QSFP_SERVICE],
+        convergence_services=[Service.AGENT, Service.QSFP_SERVICE],
+        expected_restarted_services=[
+            "wedge_agent",
+            "qsfp_service",
+            "fboss_sw_agent",
+            "fboss_hw_agent@0",
+            "bgpd",
+            "openr",
+        ],
+        iteration=iteration,
+    )
 
 
 def create_fsdb_and_qsfp_service_restart_playbook() -> Playbook:
@@ -19154,7 +19186,11 @@ TEST_FBOSS_SW_AGENT_AND_HW_AGENT_0_RESTART_PLAYBOOK = Playbook(
     postchecks=[
         create_service_restart_health_check(
             DEFAULT_SERVICE_NAMES,
-            expected_restarted_services=["fboss_sw_agent", "fboss_hw_agent@0"],
+            expected_restarted_services=[
+                "bgpd",
+                "fboss_sw_agent",
+                "fboss_hw_agent@0",
+            ],
         ),
     ],
 )
@@ -19735,31 +19771,10 @@ def _create_repeated_concurrent_service_restart_playbook(
     )
 
 
-TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK = (
-    _create_repeated_concurrent_service_restart_playbook(
-        name="test_bgpd_and_fsdb_restart",
-        services=[Service.BGP, Service.FSDB],
-        convergence_services=[Service.AGENT, Service.BGP, Service.FSDB],
-        expected_restarted_services=["bgpd", "fsdb"],
-    )
-)
+TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK = create_bgpd_and_fsdb_restart_playbook()
 
 
-TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK = (
-    _create_repeated_concurrent_service_restart_playbook(
-        name="test_agent_and_fsdb_restart",
-        services=[Service.AGENT, Service.FSDB],
-        convergence_services=[Service.AGENT, Service.FSDB],
-        expected_restarted_services=[
-            "wedge_agent",
-            "fsdb",
-            "fboss_sw_agent",
-            "fboss_hw_agent@0",
-            "bgpd",
-            "openr",
-        ],
-    )
-)
+TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK = create_agent_and_fsdb_restart_playbook()
 
 
 TEST_FBOSS_SW_AGENT_AND_HW_AGENT_0_CRASH_PLAYBOOK = Playbook(
@@ -19787,7 +19802,11 @@ TEST_FBOSS_SW_AGENT_AND_HW_AGENT_0_CRASH_PLAYBOOK = Playbook(
     postchecks=[
         create_service_restart_health_check(
             DEFAULT_SERVICE_NAMES,
-            expected_restarted_services=["fboss_sw_agent", "fboss_hw_agent@0"],
+            expected_restarted_services=[
+                "bgpd",
+                "fboss_sw_agent",
+                "fboss_hw_agent@0",
+            ],
         ),
     ],
 )
@@ -19825,19 +19844,7 @@ TEST_AGENT_AND_BGPD_RESTART_PLAYBOOK = Playbook(
 )
 
 TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK = (
-    _create_repeated_concurrent_service_restart_playbook(
-        name="test_agent_and_qsfp_service_restart",
-        services=[Service.AGENT, Service.QSFP_SERVICE],
-        convergence_services=[Service.AGENT, Service.QSFP_SERVICE],
-        expected_restarted_services=[
-            "wedge_agent",
-            "qsfp_service",
-            "fboss_sw_agent",
-            "fboss_hw_agent@0",
-            "bgpd",
-            "openr",
-        ],
-    )
+    create_agent_and_qsfp_service_restart_playbook()
 )
 
 TEST_FSDB_AND_QSFP_SERVICE_RESTART_PLAYBOOK = Playbook(
@@ -20625,10 +20632,9 @@ def create_fboss_hw_agent_0_coldboot_playbook(
     uses `AGENT` (agent-configured) plus `BGP`, extending the `AGENT`-only gate
     that `test_fboss_hw_agent_0_crash` already relies on.
 
-    The restart check monitors only `fboss_hw_agent@0`. Whether a hw_agent
-    coldboot also bounces `fboss_sw_agent` is not something the documented
-    wedge_agent cascade covers, so keeping the monitored set narrow avoids a
-    false failure in either direction.
+    The restart check monitors every critical service. A hardware-agent
+    coldboot is allowed to restart `fboss_hw_agent@0`, `fboss_sw_agent`, and
+    `bgpd`; any other service restart remains a failure.
 
     Args:
         iteration: Number of coldboot cycles. Default 15.
@@ -20641,8 +20647,12 @@ def create_fboss_hw_agent_0_coldboot_playbook(
         postchecks=[
             create_ixia_packet_loss_check(clear_traffic_stats=True),
             create_service_restart_health_check(
-                ["fboss_hw_agent@0"],
-                expected_restarted_services=["fboss_hw_agent@0"],
+                DEFAULT_SERVICE_NAMES,
+                expected_restarted_services=[
+                    "bgpd",
+                    "fboss_sw_agent",
+                    "fboss_hw_agent@0",
+                ],
             ),
         ],
         stages=[
@@ -20731,9 +20741,9 @@ def get_critical_services_single_box_playbooks(
         create_qsfp_service_warmboot_and_reset_playbook(
             iteration=iteration,
         ),
-        TEST_BGPD_AND_FSDB_RESTART_PLAYBOOK,
-        TEST_AGENT_AND_FSDB_RESTART_PLAYBOOK,
-        TEST_AGENT_AND_QSFP_SERVICE_RESTART_PLAYBOOK,
+        create_bgpd_and_fsdb_restart_playbook(iteration=iteration),
+        create_agent_and_fsdb_restart_playbook(iteration=iteration),
+        create_agent_and_qsfp_service_restart_playbook(iteration=iteration),
     ]
     return [playbook(enabled=True) for playbook in playbooks]
 

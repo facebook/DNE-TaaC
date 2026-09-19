@@ -14,7 +14,7 @@ CHRONOS_NODE_FSW_P001_QZD1_CRITICAL_SERVICES_TEST_CONFIG = (
     create_chronos_node_fsw_p001_qzd1_test_config(
         test_config_name="CHRONOS_NODE_FSW_P001_QZD1_CRITICAL_SERVICES",
         playbooks=get_critical_services_single_box_playbooks(
-            iteration=5,
+            iteration=1,
             ixia_rogue_ic_parent_network_v6="2401:db00:e50d:11:10",
             ixia_rogue_ic_parent_network_v4="10.165.28",
         ),

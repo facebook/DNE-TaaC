@@ -14,6 +14,8 @@ Contents:
 - ``build_bgp_dc_tc_postchecks`` — standard BGP DC TestConfig postchecks list.
 """
 
+import json
+
 from taac.constants import WEDGE_AGENT_BINDS_TO_CASCADE
 from taac.health_checks.healthcheck_definitions import (
     create_cpu_utilization_check,
@@ -41,7 +43,11 @@ _PLAYBOOK_EXPECTED_RESTARTED_SERVICES = {
     "test_agent_coldboot": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
     "test_agent_crash": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
     "test_agent_warmboot_wedge_and_sw_agent": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
-    "test_fboss_sw_agent_warmboot": ["fboss_sw_agent", "fboss_hw_agent@0"],
+    "test_fboss_sw_agent_warmboot": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
     "test_fboss_sw_agent_crash": [
         "bgpd",
         "fboss_sw_agent",
@@ -52,8 +58,31 @@ _PLAYBOOK_EXPECTED_RESTARTED_SERVICES = {
         "fboss_sw_agent",
         "fboss_hw_agent@0",
     ],
-    "test_fboss_hw_agent_0_coldboot": ["fboss_hw_agent@0"],
-    "test_fboss_hw_agent_0_crash": ["fboss_sw_agent", "fboss_hw_agent@0"],
+    "test_fboss_hw_agent_0_coldboot": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
+    "test_fboss_hw_agent_0_warmboot": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
+    "test_fboss_hw_agent_0_restart": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
+    "test_fboss_hw_agent_0_crash": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
+    "test_fboss_sw_agent_and_hw_agent_0_restart": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
     "test_bgpd_restart": ["bgpd"],
     "test_bgpd_crash": ["bgpd"],
     "test_qsfp_service_restart": ["qsfp_service"],
@@ -72,6 +101,9 @@ _PLAYBOOK_EXPECTED_RESTARTED_SERVICES = {
     "test_agent_and_fsdb_restart": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr", "fsdb"],
     "test_agent_and_qsfp_service_restart": WEDGE_AGENT_BINDS_TO_CASCADE
     + ["openr", "qsfp_service"],
+    "test_agent_and_bgpd_restart": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
+    "test_fsdb_and_qsfp_service_restart": ["fsdb", "qsfp_service"],
+    "test_sw_agent_and_wedge_agent_restart": WEDGE_AGENT_BINDS_TO_CASCADE + ["openr"],
     # The L2 overload agent-churn playbooks (UTP L2M_002 / L2M_005 / L2M_009)
     # restart wedge_agent every 5 minutes and then coldboot it, so they take
     # the same allowlist as `test_agent_restart`.
@@ -83,18 +115,31 @@ _PLAYBOOK_EXPECTED_RESTARTED_SERVICES = {
     + ["openr"],
 }
 
+# This can be narrower than the restart allowlist: a dependent service may be
+# restarted cleanly when another service crashes.
 _PLAYBOOK_EXPECTED_UNCLEAN_EXIT_SERVICES = {
-    "test_agent_crash": ["wedge_agent"],
-    "test_fboss_sw_agent_crash": ["fboss_sw_agent"],
-    "test_fboss_sw_agent_and_hw_agent_0_crash": [
+    "test_agent_crash": WEDGE_AGENT_BINDS_TO_CASCADE,
+    "test_fboss_sw_agent_crash": [
+        "bgpd",
         "fboss_sw_agent",
         "fboss_hw_agent@0",
     ],
-    "test_fboss_hw_agent_0_crash": ["fboss_hw_agent@0"],
+    "test_fboss_sw_agent_and_hw_agent_0_crash": [
+        "bgpd",
+        "fboss_sw_agent",
+        "fboss_hw_agent@0",
+    ],
+    "test_fboss_hw_agent_0_crash": ["fboss_sw_agent", "fboss_hw_agent@0"],
     "test_bgpd_crash": ["bgpd"],
     "test_qsfp_service_crash": ["qsfp_service"],
     "test_fsdb_crash": ["fsdb"],
     "test_openr_crash": ["openr"],
+}
+
+_PLAYBOOKS_CLEAR_IXIA_TRAFFIC_STATS = {
+    "test_agent_coldboot",
+    "test_fboss_hw_agent_0_coldboot",
+    "test_qsfp_service_warmboot_and_agent_coldboot",
 }
 
 
@@ -105,6 +150,14 @@ def _replace_or_append_check(checks, check_name, replacement):
             for check in checks
         ]
     return [*checks, replacement]
+
+
+def _set_clear_traffic_stats(check):
+    if not check.input_json:
+        return check
+    input_params = json.loads(check.input_json)
+    input_params["clear_traffic_stats"] = True
+    return check(input_json=json.dumps(input_params))
 
 
 def _apply_tc_checks_to_playbooks(
@@ -127,6 +180,13 @@ def _apply_tc_checks_to_playbooks(
         postchecks = list(pb.postchecks or []) + tc_postchecks
         expected = _PLAYBOOK_EXPECTED_RESTARTED_SERVICES.get(pb.name)
         expected_unclean = _PLAYBOOK_EXPECTED_UNCLEAN_EXIT_SERVICES.get(pb.name)
+        if pb.name in _PLAYBOOKS_CLEAR_IXIA_TRAFFIC_STATS:
+            prechecks = [
+                _set_clear_traffic_stats(check)
+                if check.name == hc_types.CheckName.IXIA_PACKET_LOSS_CHECK
+                else check
+                for check in prechecks
+            ]
         if expected_unclean:
             prechecks = _replace_or_append_check(
                 prechecks,
