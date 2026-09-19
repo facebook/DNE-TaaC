@@ -99,6 +99,8 @@ def test_config(topology: ConfigTopology):
             type=ixia_types.FrameSizeType.FIXED,
             fixed_size=400,
         ),
+        include_benchmark=True,
+        include_link_flap_longevity=True,
         precheck_packet_loss_clear_stats=True,
         packet_loss_sleep_time=30,
         use_ipv6_ping=False,
