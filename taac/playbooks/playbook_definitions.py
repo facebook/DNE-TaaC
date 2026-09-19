@@ -4995,8 +4995,6 @@ def get_bc_agent_interruption_playbook(
 
     if service == taac_types.Service.AGENT:
         expected_restarted = list(SERVICES_EXPECTED_TO_RESTART_DURING_AGENT_WARMBOOT)
-        if trigger == taac_types.ServiceInterruptionTrigger.CRASH:
-            expected_restarted.append("qsfp_service")
     else:
         expected_restarted = [service_name]
 
