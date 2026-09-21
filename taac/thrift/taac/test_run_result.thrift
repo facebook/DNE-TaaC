@@ -7,6 +7,7 @@ include "configerator/structs/neteng/taac/test_as_a_config.thrift"
 namespace py3 taac
 namespace py taac.test_run_result.test_run_result
 namespace cpp2 facebook.taac.test_run_result
+namespace hack neteng.taac.test_run_result
 
 enum RunOutcome {
   UNKNOWN = 0,
