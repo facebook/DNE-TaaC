@@ -468,3 +468,67 @@ class InterfaceFlapStepTest(unittest.IsolatedAsyncioTestCase):
             await self.flap_step.flap_with_shell_cmd(
                 ["eth1/1/1"], "--tx_disable", sequential=False
             )
+
+
+class InterfaceFlapThriftRateLimitTest(unittest.IsolatedAsyncioTestCase):
+    """flap_with_thrift must stay inside the agent's per-method QPS limits.
+
+    getAllPortInfo is capped at 4 QPS and setPortState at 8; exceeding either
+    returns APP_OVERLOAD, which the step would otherwise treat as "thrift is
+    unavailable" and fall back to SSH.
+    """
+
+    def setUp(self) -> None:
+        device = MagicMock(spec=TestDevice)
+        device.name = "test_device"
+        self.step = InterfaceFlapStep(
+            name="test_interface_flap",
+            device=device,
+            topology=MagicMock(spec=TestTopology),
+            test_case_results=[],
+            test_config=MagicMock(spec=TestConfig),
+            test_case_name="test_case",
+            test_case_start_time=time.time(),
+            parameter_evaluator=MagicMock(spec=ParameterEvaluator),
+            step=MagicMock(spec=Step),
+        )
+        self.driver = AsyncMock()
+        self.driver.async_get_all_interfaces_info = AsyncMock(
+            return_value={f"eth1/{i}/1": MagicMock(port_id=i) for i in range(1, 33)}
+        )
+        self.driver.async_set_port_state = AsyncMock()
+        self.step.driver = self.driver
+
+    @patch("asyncio.sleep", new_callable=AsyncMock)
+    async def test_port_id_lookup_is_cached_across_flaps(self, _sleep) -> None:
+        names = ["eth1/1/1", "eth1/2/1"]
+        for _ in range(5):
+            self.assertTrue(await self.step.flap_with_thrift(names, True, False))
+        self.driver.async_get_all_interfaces_info.assert_awaited_once()
+
+    @patch("asyncio.sleep", new_callable=AsyncMock)
+    async def test_set_port_state_is_batched(self, _sleep) -> None:
+        names = [f"eth1/{i}/1" for i in range(1, 33)]
+        self.assertTrue(await self.step.flap_with_thrift(names, False, False))
+        self.assertEqual(self.driver.async_set_port_state.await_count, 32)
+        # 32 ports in batches of 4 => 7 inter-batch pauses.
+        self.assertEqual(_sleep.await_count, 7)
+
+    @patch("asyncio.sleep", new_callable=AsyncMock)
+    async def test_lookup_retries_past_app_overload(self, _sleep) -> None:
+        self.driver.async_get_all_interfaces_info = AsyncMock(
+            side_effect=[
+                Exception("(APP_OVERLOAD) App Overloaded ... ThriftMethodRateLimit"),
+                {"eth1/1/1": MagicMock(port_id=1)},
+            ]
+        )
+        self.assertTrue(await self.step.flap_with_thrift(["eth1/1/1"], True, False))
+        self.assertEqual(self.driver.async_get_all_interfaces_info.await_count, 2)
+
+    @patch("asyncio.sleep", new_callable=AsyncMock)
+    async def test_non_overload_error_is_not_retried(self, _sleep) -> None:
+        self.driver.async_get_all_interfaces_info = AsyncMock(
+            side_effect=Exception("some other failure")
+        )
+        self.assertFalse(await self.step.flap_with_thrift(["eth1/1/1"], True, False))
+        self.driver.async_get_all_interfaces_info.assert_awaited_once()

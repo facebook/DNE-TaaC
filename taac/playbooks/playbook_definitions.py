@@ -110,6 +110,7 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.stages.stage_definitions import (
+    PATCHER_RESTART_TIME_VAR,
     create_attribute_churn_stage,
     create_validated_bgp_route_oscillations_stage,
     create_longevity_stage,
@@ -1263,7 +1264,10 @@ def create_mp3n_gar_agent_restart_playbook(
     )
 
 
-def create_test_portchannel_playbook(longevity_duration: int = 600) -> Playbook:
+def create_test_portchannel_playbook(
+    longevity_duration: int = 600,
+    services_to_skip: t.Optional[t.List[str]] = None,
+) -> Playbook:
     """Build the `test_portchannel` longevity Playbook for port-channel TestConfigs.
 
     Single-stage longevity playbook that exercises a port-channel under
@@ -1317,7 +1321,7 @@ def create_test_portchannel_playbook(longevity_duration: int = 600) -> Playbook:
             create_cpu_utilization_check(
                 threshold=400.0, start_time_jq_var="test_case_start_time"
             ),
-            create_service_restart_check(),
+            create_service_restart_check(services_to_skip=services_to_skip),
         ],
         snapshot_checks=[
             create_core_dumps_snapshot_check(),
@@ -2268,11 +2272,13 @@ def create_ctsw_rtsw_interface_flap_playbook() -> taac_types.Playbook:
                         interfaces="",
                         jq_params={"interfaces": '."{dut}".interfaces'},
                         cache_params={"interfaces": "random_interface"},
+                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
                     ),
                     create_interface_flap_step(
                         enable=True,
                         interfaces="",
                         jq_params={"interfaces": ".cached.random_interface"},
+                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
                     ),
                 ],
             )
@@ -7727,6 +7733,7 @@ def _compute_links_to_flap(
 def _create_lag_prechecks(
     portchannel_name_map: dict[str, list[str]],
     ignore_all_prefixes_except: t.Optional[t.List[str]] = None,
+    parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
 ) -> list[PointInTimeHealthCheck]:
     return [
         create_systemctl_active_state_check(),
@@ -7746,7 +7753,8 @@ def _create_lag_prechecks(
             start_time_jq_var="test_case_start_time",
         ),
         create_bgp_session_establish_check(
-            ignore_all_prefixes_except=ignore_all_prefixes_except
+            ignore_all_prefixes_except=ignore_all_prefixes_except,
+            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
         ),
     ]
 
@@ -7754,13 +7762,15 @@ def _create_lag_prechecks(
 def _create_lag_postchecks(
     portchannel_name_map: dict[str, list[str]],
     ignore_all_prefixes_except: t.Optional[t.List[str]] = None,
+    parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
+    services_to_skip: t.Optional[t.List[str]] = None,
 ) -> list[PointInTimeHealthCheck]:
     return [
         create_systemctl_active_state_check(),
         create_lldp_check(),
         create_portchannel_health_check(portchannel_name_map, expected_up=True),
         create_device_core_dumps_check(),
-        create_service_restart_check(),
+        create_service_restart_check(services_to_skip=services_to_skip),
         create_prefix_limit_check(prefix_limit=74000),
         create_unclean_exit_check(),
         create_memory_utilization_check(
@@ -7775,12 +7785,23 @@ def _create_lag_postchecks(
             start_time_jq_var="test_case_start_time",
         ),
         create_bgp_session_establish_check(
-            ignore_all_prefixes_except=ignore_all_prefixes_except
+            ignore_all_prefixes_except=ignore_all_prefixes_except,
+            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
         ),
         create_cpu_utilization_check(
             threshold=400.0, start_time_jq_var="test_case_start_time"
         ),
     ]
+
+
+# Restarting the agent for the permanent-disable patcher takes these four down
+# together; observed as a single ~2s cascade on MORGAN800CC.
+_PATCHER_RESTARTED_SERVICES: list[str] = [
+    "wedge_agent",
+    "fboss_sw_agent",
+    "fboss_hw_agent@0",
+    "bgpd",
+]
 
 
 def _create_lag_snapshot_checks() -> list[SnapshotHealthCheck]:
@@ -7790,9 +7811,30 @@ def _create_lag_snapshot_checks() -> list[SnapshotHealthCheck]:
     ]
 
 
+def _create_lag_packet_loss_check() -> PointInTimeHealthCheck:
+    """Gate LAG traffic on loss percentage rather than loss duration.
+
+    The default DURATION metric counts the in-flight frames dropped while
+    members are administratively down, so it is never zero on a LAG flap and
+    fails every playbook. Percentage stays meaningful because the check clears
+    the traffic stats first, making the measurement window short enough that
+    a genuine forwarding break dwarfs the flap's own disruption.
+    """
+    return create_ixia_packet_loss_check(
+        clear_traffic_stats=True,
+        thresholds=[
+            hc_types.PacketLossThreshold(
+                metric=hc_types.PacketLossMetric.PERCENTAGE,
+                str_value="0.01",
+            )
+        ],
+    )
+
+
 from taac.steps.step_definitions import (
     create_lag_cleanup_steps as _create_lag_cleanup_steps,
     create_lag_permanent_cleanup_steps as _create_lag_permanent_cleanup_steps,
+    DEFAULT_LINK_UP_WAIT_S as _DEFAULT_LINK_UP_WAIT_S,
 )
 
 
@@ -7803,6 +7845,7 @@ def create_lag_baseline_playbook_1(
     min_link_up_percentage: float,
     portchannel_name_map: dict[str, list[str]],
     iteration: int = 10,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Build LAG_001: port-channel variable-minlink baseline functionality Playbook.
@@ -7950,7 +7993,8 @@ def create_lag_baseline_playbook_1(
                     port_channel_name_map=portchannel_name_map,
                     expected_up=True,
                 ),
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
             create_steps_stage(
                 steps=[
                     create_longevity_step(duration=300),
@@ -7958,11 +8002,11 @@ def create_lag_baseline_playbook_1(
             ),
         ],
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check()
         ],
-        cleanup_steps=_create_lag_cleanup_steps(member_interfaces),
+        cleanup_steps=_create_lag_cleanup_steps(
+            member_interfaces, link_up_wait_s=link_up_wait_s
+        ),
     )
 
 
@@ -7973,6 +8017,7 @@ def create_lag_baseline_playbook_2(
     min_link_up_percentage: float,
     portchannel_name_map: dict[str, list[str]],
     iteration: int = 10,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Build LAG_002: port-channel variable-minlink oscillation Playbook.
@@ -8019,7 +8064,8 @@ def create_lag_baseline_playbook_2(
             create_port_channel_flap_only_stage(
                 interfaces_to_flap=oscillation_interface,
                 iteration=iteration,
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
             create_steps_stage(
                 steps=[
                     create_validation_step(
@@ -8039,14 +8085,15 @@ def create_lag_baseline_playbook_2(
                     port_channel_name_map=portchannel_name_map,
                     expected_up=True,
                 ),
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
         ],
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check()
         ],
-        cleanup_steps=_create_lag_cleanup_steps(member_interfaces),
+        cleanup_steps=_create_lag_cleanup_steps(
+            member_interfaces, link_up_wait_s=link_up_wait_s
+        ),
     )
 
 
@@ -8054,6 +8101,7 @@ def create_lag_longevity_playbook(
     playbook_name: str,
     member_interfaces: list[str],
     duration: int = 3600,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Build LAG_003: port-channel longevity Playbook.
@@ -8080,7 +8128,9 @@ def create_lag_longevity_playbook(
                 ]
             ),
         ],
-        cleanup_steps=_create_lag_cleanup_steps(member_interfaces),
+        cleanup_steps=_create_lag_cleanup_steps(
+            member_interfaces, link_up_wait_s=link_up_wait_s
+        ),
     )
 
 
@@ -8091,6 +8141,7 @@ def create_lag_all_link_flap_playbook(
     iterations: int = 25,
     with_agent_restart: bool = False,
     cold_boot: bool = False,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Build a 100%-member-link-flap port-channel Playbook with optional concurrent agent restart/coldboot.
@@ -8124,11 +8175,13 @@ def create_lag_all_link_flap_playbook(
             interfaces_to_flap=member_interfaces,
             iteration=iterations,
             cold_boot=cold_boot,
+                    link_up_wait_s=link_up_wait_s,
         )
     else:
         test_stage = create_port_channel_flap_only_stage(
             interfaces_to_flap=member_interfaces,
             iteration=iterations,
+                    link_up_wait_s=link_up_wait_s,
         )
 
     return Playbook(
@@ -8157,11 +8210,11 @@ def create_lag_all_link_flap_playbook(
             [hc_types.CheckName.SERVICE_RESTART_CHECK] if with_agent_restart else []
         ),
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check()
         ],
-        cleanup_steps=_create_lag_cleanup_steps(member_interfaces),
+        cleanup_steps=_create_lag_cleanup_steps(
+            member_interfaces, link_up_wait_s=link_up_wait_s
+        ),
     )
 
 
@@ -8175,6 +8228,8 @@ def create_lag_variable_minlink_flap_playbook(
     iterations: int = 25,
     with_agent_restart: bool = False,
     cold_boot: bool = False,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
+    services_to_skip: t.Optional[t.List[str]] = None,
 ) -> Playbook:
     """
     Variable minlink flap: permanently disable links to MinCapToUp,
@@ -8233,11 +8288,13 @@ def create_lag_variable_minlink_flap_playbook(
             interfaces_to_flap=flap_interfaces,
             iteration=iterations,
             cold_boot=cold_boot,
+                    link_up_wait_s=link_up_wait_s,
         )
     else:
         test_stage = create_port_channel_flap_only_stage(
             interfaces_to_flap=flap_interfaces,
             iteration=iterations,
+                    link_up_wait_s=link_up_wait_s,
         )
 
     return Playbook(
@@ -8279,20 +8336,40 @@ def create_lag_variable_minlink_flap_playbook(
                     port_channel_name_map=portchannel_name_map,
                     expected_up=True,
                 ),
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
             create_steps_stage(
                 steps=[
                     create_longevity_step(duration=300),
                 ]
             ),
         ],
+        # Only skipped when a restart is part of the test logic: those variants
+        # stage a second, unrecorded restart that cannot be measured against a
+        # single point in time.
         postchecks_to_skip=(
             [hc_types.CheckName.SERVICE_RESTART_CHECK] if with_agent_restart else []
         ),
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check(),
+            # Overrides the shared SERVICE_RESTART_CHECK by name (per-playbook
+            # postchecks are merged last). The permanent-disable patcher
+            # restarts the agent during setup and teardown even here, so rather
+            # than dropping the check, anchor it to PATCHER_RESTART_TIME_VAR:
+            # the patcher's own restart is accepted, a crash after it is not.
+            *(
+                []
+                if with_agent_restart
+                else [
+                    create_service_restart_check(
+                        expected_restarted_services=_PATCHER_RESTARTED_SERVICES,
+                        restart_start_time_jq_var=PATCHER_RESTART_TIME_VAR,
+                        # Replacing the shared check by name drops everything it
+                        # carried, so its service exclusions must be re-supplied.
+                        services_to_skip=services_to_skip,
+                    )
+                ]
+            ),
         ],
         cleanup_steps=_create_lag_permanent_cleanup_steps(),
     )
@@ -8309,6 +8386,7 @@ def create_lag_cross_flap_playbook(
     iterations: int = 25,
     with_agent_restart: bool = False,
     cold_boot: bool = False,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Build a cross-flap port-channel Playbook.
@@ -8349,6 +8427,7 @@ def create_lag_cross_flap_playbook(
             remote_name=remote_name,
             iterations=iterations,
             cold_boot=cold_boot,
+                    link_up_wait_s=link_up_wait_s,
         )
     else:
         test_stage = create_port_channel_cross_flap_stage(
@@ -8357,6 +8436,7 @@ def create_lag_cross_flap_playbook(
             dut_name=dut_name,
             remote_name=remote_name,
             iterations=iterations,
+                    link_up_wait_s=link_up_wait_s,
         )
 
     return Playbook(
@@ -8392,12 +8472,10 @@ def create_lag_cross_flap_playbook(
             [hc_types.CheckName.SERVICE_RESTART_CHECK] if with_agent_restart else []
         ),
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check()
         ],
         cleanup_steps=_create_lag_cleanup_steps(
-            dut_member_interfaces,
+            dut_member_interfaces, link_up_wait_s=link_up_wait_s
         ),
     )
 
@@ -8417,6 +8495,7 @@ def create_lag_mismatched_minlink_playbook(
     links_to_flap: int,
     iterations: int = 15,
     cold_boot: bool = False,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> Playbook:
     """
     Mismatched minlink config between DUT and remote. Permanently disable
@@ -8523,7 +8602,8 @@ def create_lag_mismatched_minlink_playbook(
                 interfaces_to_flap=flap_interfaces,
                 iteration=iterations,
                 cold_boot=cold_boot,
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
             # Stage 4: Restore — re-enable all disabled links on DUT
             create_steps_stage(
                 steps=[
@@ -8559,7 +8639,8 @@ def create_lag_mismatched_minlink_playbook(
                     port_channel_name_map=portchannel_name_map,
                     expected_up=True,
                 ),
-            ),
+                        link_up_wait_s=link_up_wait_s,
+        ),
             create_steps_stage(
                 steps=[
                     create_longevity_step(duration=300),
@@ -8568,9 +8649,7 @@ def create_lag_mismatched_minlink_playbook(
         ],
         postchecks_to_skip=[hc_types.CheckName.SERVICE_RESTART_CHECK],
         postchecks=[
-            create_ixia_packet_loss_check(
-                clear_traffic_stats=True,
-            )
+            _create_lag_packet_loss_check()
         ],
         cleanup_steps=_create_lag_permanent_cleanup_steps(),
     )
@@ -8589,6 +8668,11 @@ def create_all_lag_playbooks(
     dut_mistmatch_min_link_up_percentage: float,
     remote_mistmatch_min_link_percentage: float | None = None,
     remote_mistmatch_min_link_up_percentage: float | None = None,
+    iteration_override: int | None = None,
+    longevity_duration: int = 3600,
+    bgp_parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
+    services_to_skip: t.Optional[t.List[str]] = None,
+    link_up_wait_s: int = _DEFAULT_LINK_UP_WAIT_S,
 ) -> list[Playbook]:
     """
     Build the full P0 LAG Playbook bundle (LAG_001 through LAG_021).
@@ -8626,14 +8710,25 @@ def create_all_lag_playbooks(
     if remote_mistmatch_min_link_up_percentage is None:
         remote_mistmatch_min_link_up_percentage = 0.75
 
+    def _iters(default: int) -> int:
+        """Per-playbook iteration count, unless the caller pins one for all."""
+        return default if iteration_override is None else iteration_override
+
     portchannel_to_device_map = {
         dut_name: [dut_port_channel_name],
         remote_name: [remote_port_channel_name],
     }
 
-    _prechecks = _create_lag_prechecks(portchannel_to_device_map)
+    _prechecks = _create_lag_prechecks(
+        portchannel_to_device_map,
+        parent_prefixes_to_ignore=bgp_parent_prefixes_to_ignore,
+    )
 
-    _postchecks = _create_lag_postchecks(portchannel_to_device_map)
+    _postchecks = _create_lag_postchecks(
+        portchannel_to_device_map,
+        parent_prefixes_to_ignore=bgp_parent_prefixes_to_ignore,
+        services_to_skip=services_to_skip,
+    )
 
     playbooks_ = [
         # LAG_001: Baseline functionality — progressive disable/enable
@@ -8643,7 +8738,8 @@ def create_all_lag_playbooks(
             min_link_percentage=min_link_percentage,
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
-            iteration=10,
+            iteration=_iters(10),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_002: Baseline functionality — threshold oscillation
         create_lag_baseline_playbook_2(
@@ -8652,22 +8748,25 @@ def create_all_lag_playbooks(
             min_link_percentage=min_link_percentage,
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
-            iteration=10,
+            iteration=_iters(10),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_003: Longevity — 1 hour
         create_lag_longevity_playbook(
             playbook_name="lag_003_longevity",
             member_interfaces=dut_member_interfaces,
-            duration=3600,
+            duration=longevity_duration,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_004: 100% flap + warmboot, 15 iterations
         create_lag_all_link_flap_playbook(
             playbook_name="lag_004_all_flap_warmboot",
             member_interfaces=dut_member_interfaces,
             portchannel_name_map=portchannel_to_device_map,
-            iterations=15,
+            iterations=_iters(15),
             with_agent_restart=True,
             cold_boot=False,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_005: Variable minlink below MinCap + warmboot, 15 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8677,8 +8776,9 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.BELOW_MIN_CAPACITY,
-            iterations=15,
+            iterations=_iters(15),
             with_agent_restart=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_006: Variable minlink at MinCap + warmboot, 15 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8688,8 +8788,9 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.AT_MIN_CAPACITY,
-            iterations=15,
+            iterations=_iters(15),
             with_agent_restart=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_007: Variable minlink above MinCap + warmboot, 15 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8699,17 +8800,19 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.ABOVE_MIN_CAPACITY,
-            iterations=15,
+            iterations=_iters(15),
             with_agent_restart=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_008: 100% flap + coldboot, 10 iterations
         create_lag_all_link_flap_playbook(
             playbook_name="lag_008_all_flap_coldboot",
             member_interfaces=dut_member_interfaces,
             portchannel_name_map=portchannel_to_device_map,
-            iterations=10,
+            iterations=_iters(10),
             with_agent_restart=True,
             cold_boot=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_009: Variable minlink below MinCap + coldboot, 10 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8719,9 +8822,10 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.BELOW_MIN_CAPACITY,
-            iterations=10,
+            iterations=_iters(10),
             with_agent_restart=True,
             cold_boot=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_010: Variable minlink at MinCap + coldboot, 10 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8731,9 +8835,10 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.AT_MIN_CAPACITY,
-            iterations=10,
+            iterations=_iters(10),
             with_agent_restart=True,
             cold_boot=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_011: Variable minlink above MinCap + coldboot, 10 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8743,17 +8848,19 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.ABOVE_MIN_CAPACITY,
-            iterations=10,
+            iterations=_iters(10),
             with_agent_restart=True,
             cold_boot=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_012: 100% flap, no restart, 25 iterations
         create_lag_all_link_flap_playbook(
             playbook_name="lag_012_all_flap_stress",
             member_interfaces=dut_member_interfaces,
             portchannel_name_map=portchannel_to_device_map,
-            iterations=25,
+            iterations=_iters(25),
             with_agent_restart=False,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_013: Variable minlink below MinCap, no restart, 25 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8763,7 +8870,9 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.BELOW_MIN_CAPACITY,
-            iterations=25,
+            iterations=_iters(25),
+            link_up_wait_s=link_up_wait_s,
+            services_to_skip=services_to_skip,
         ),
         # LAG_014: Variable minlink at MinCap, no restart, 25 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8773,7 +8882,9 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.AT_MIN_CAPACITY,
-            iterations=25,
+            iterations=_iters(25),
+            link_up_wait_s=link_up_wait_s,
+            services_to_skip=services_to_skip,
         ),
         # LAG_015: Variable minlink above MinCap, no restart, 25 iterations
         create_lag_variable_minlink_flap_playbook(
@@ -8783,7 +8894,9 @@ def create_all_lag_playbooks(
             min_link_up_percentage=min_link_up_percentage,
             portchannel_name_map=portchannel_to_device_map,
             variation=LinkFlapVariation.ABOVE_MIN_CAPACITY,
-            iterations=25,
+            iterations=_iters(25),
+            link_up_wait_s=link_up_wait_s,
+            services_to_skip=services_to_skip,
         ),
         # LAG_016: Cross flap, no restart, 25 iterations
         create_lag_cross_flap_playbook(
@@ -8794,7 +8907,8 @@ def create_all_lag_playbooks(
             remote_member_interfaces=remote_member_interfaces,
             portchannel_name_map=portchannel_to_device_map,
             cross_flap_links=1,
-            iterations=25,
+            iterations=_iters(25),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_017: Cross flap + warmboot, 15 iterations
         create_lag_cross_flap_playbook(
@@ -8805,8 +8919,9 @@ def create_all_lag_playbooks(
             remote_member_interfaces=remote_member_interfaces,
             portchannel_name_map=portchannel_to_device_map,
             cross_flap_links=1,
-            iterations=15,
+            iterations=_iters(15),
             with_agent_restart=True,
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_018: Mismatched minlink — perm disable 0, flap 3 (remote MinCap)
         create_lag_mismatched_minlink_playbook(
@@ -8822,7 +8937,8 @@ def create_all_lag_playbooks(
             portchannel_name_map=portchannel_to_device_map,
             links_to_permanently_disable=0,
             links_to_flap=3,
-            iterations=15,
+            iterations=_iters(15),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_019: Mismatched minlink — perm disable 0, flap 4 (DUT MinCap)
         create_lag_mismatched_minlink_playbook(
@@ -8838,7 +8954,8 @@ def create_all_lag_playbooks(
             portchannel_name_map=portchannel_to_device_map,
             links_to_permanently_disable=0,
             links_to_flap=4,
-            iterations=15,
+            iterations=_iters(15),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_020: Mismatched minlink — perm disable 1, flap 2 (remote recovers with peer)
         create_lag_mismatched_minlink_playbook(
@@ -8854,7 +8971,8 @@ def create_all_lag_playbooks(
             portchannel_name_map=portchannel_to_device_map,
             links_to_permanently_disable=1,
             links_to_flap=2,
-            iterations=15,
+            iterations=_iters(15),
+            link_up_wait_s=link_up_wait_s,
         ),
         # LAG_021: Mismatched minlink — perm disable 1, flap 3 (both sides down)
         create_lag_mismatched_minlink_playbook(
@@ -8870,7 +8988,8 @@ def create_all_lag_playbooks(
             portchannel_name_map=portchannel_to_device_map,
             links_to_permanently_disable=1,
             links_to_flap=3,
-            iterations=15,
+            iterations=_iters(15),
+            link_up_wait_s=link_up_wait_s,
         ),
     ]
 
@@ -23191,10 +23310,12 @@ def create_port_flap_playbook(
                     create_interface_flap_step(
                         enable=False,
                         interfaces=interface_to_flap,
+                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
                     ),
                     create_interface_flap_step(
                         enable=True,
                         interfaces=interface_to_flap,
+                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
                     ),
                 ]
             )

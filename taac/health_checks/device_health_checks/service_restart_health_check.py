@@ -138,6 +138,7 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         services: t.List[str],
         test_duration: int,
         expected_restarted_services: t.Optional[t.List[str]] = None,
+        duration_since_restart: t.Optional[int] = None,
     ) -> t.Tuple[t.List[str], t.List[str]]:
         """
         Check service uptimes to detect restarts during test execution.
@@ -147,7 +148,13 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             services: List of service names to check
             test_duration: Duration of the test in seconds
             expected_restarted_services: List of services that are expected to
-                restart (e.g. during warmboot). These will be skipped.
+                restart (e.g. during warmboot).
+            duration_since_restart: Seconds since the intentional restart
+                finished. When given, expected services are measured against
+                this instead of being skipped, so a *second* restart after the
+                intentional one is still caught. Without it they are skipped,
+                which is all the caller can do when the restart has no
+                recorded completion time.
 
         Returns:
             Tuple of (failed_services, restarted_services)
@@ -180,13 +187,33 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
                         f"Skipping uptime check for {service} as it's not applicable"
                     )
                     continue
-                if service in expected_set:
+                if service in expected_set and duration_since_restart is None:
                     self.logger.info(
                         f"Skipping uptime check for {service} (expected restart)"
                     )
                     continue
                 if service in agent_uptimes:
                     uptime_seconds = agent_uptimes[service]
+                    if service in expected_set:
+                        # Uptime should date from the intentional restart. Less
+                        # than that means it came back and then restarted again.
+                        if uptime_seconds < duration_since_restart:
+                            crashed_ago = duration_since_restart - uptime_seconds
+                            self.logger.warning(
+                                f"RESTART DETECTED AFTER INTENTIONAL RESTART: {service} on "
+                                f"{obj.name} uptime {uptime_seconds}s is less than "
+                                f"{duration_since_restart}s since the intentional restart"
+                            )
+                            restarted_services.append(
+                                f"{service} (uptime: {uptime_seconds}s, restarted "
+                                f"{crashed_ago}s after the intentional restart)"
+                            )
+                        else:
+                            self.logger.info(
+                                f"{service} uptime {uptime_seconds}s is consistent with the "
+                                f"intentional restart {duration_since_restart}s ago"
+                            )
+                        continue
                     if uptime_seconds < test_duration:
                         restart_time_ago = test_duration - uptime_seconds
                         self.logger.warning(
@@ -618,6 +645,12 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
 
         start_time = check_params.get("start_time", 0)
         services = check_params.get("services", DEFAULT_SERVICE_NAMES)
+        # Services the caller knows are not deployed on this platform. Without
+        # this the check fails on every device that simply does not run one of
+        # the defaults (e.g. FX boxes have no Open/R).
+        services_to_skip = set(check_params.get("services_to_skip", []) or [])
+        if services_to_skip:
+            services = [s for s in services if s not in services_to_skip]
         expected_restarted_services = check_params.get(
             "expected_restarted_services", None
         )
@@ -626,6 +659,15 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
 
         current_time = int(time.time())
         test_duration = current_time - int(start_time)
+        # Set by a `record_jq_timestamp` step after the intentional restart
+        # has converged. Lets expected services be measured against that
+        # point rather than skipped outright.
+        restart_start_time = check_params.get("restart_start_time", None)
+        duration_since_restart = (
+            current_time - int(restart_start_time)
+            if expected_restarted_services and restart_start_time is not None
+            else None
+        )
 
         self.logger.info(f"ServiceRestartHealthCheck starting on {obj.name}:")
         self.logger.info(
@@ -665,7 +707,11 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             failed_services_uptime,
             restarted_services,
         ) = await self._check_services_uptime(
-            obj, services, test_duration, expected_restarted_services
+            obj,
+            services,
+            test_duration,
+            expected_restarted_services,
+            duration_since_restart,
         )
 
         # Combine failed services from both checks

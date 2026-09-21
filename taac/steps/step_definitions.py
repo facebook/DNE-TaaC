@@ -485,6 +485,20 @@ def create_bgp_update_group_state_step(
 _DEFAULT_MAX_HARDWARE_CURRENT_DELTA = 100
 _DEFAULT_MAX_HARDWARE_HIGH_WATERMARK_INCREASE = 100
 
+# Settle time after admin-enabling ports, before their state is asserted.
+# Testbeds on coherent ZR optics must raise this: ZR takes 120-180s to acquire
+# lock, so the stock wait fails a link that is merely still coming up.
+DEFAULT_LINK_UP_WAIT_S = 10
+
+# The agent rate-limits thrift per method via a token bucket (see
+# `thriftApiToRateLimitInQps` in the agent config): setPortState is 8 QPS and
+# getAllPortInfo is 4. Exceeding either returns APP_OVERLOAD, which the flap
+# step would otherwise treat as "thrift is unavailable" and fall back to SSH.
+_SET_PORT_STATE_BATCH = 4
+_SET_PORT_STATE_BATCH_DELAY_S = 0.5
+_THRIFT_RATE_LIMIT_RETRIES = 4
+_THRIFT_RATE_LIMIT_BACKOFF_S = 1.0
+
 
 def create_hardware_capacity_delta_step(
     device_name: str,
@@ -5042,6 +5056,7 @@ def create_interface_flap_step(
     device_name: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
     start_traffic: bool = True,
+    tolerate_failures: bool = False,
 ) -> Step:
     """
     Create a step to enable or disable interfaces.
@@ -5058,11 +5073,16 @@ def create_interface_flap_step(
         device_name: Optional device name for the interface flap (used with SSH method)
         step_id: Optional step ID
         start_traffic: Whether the generic step pre-hook should start IXIA.
+        tolerate_failures: Log rather than raise when the flap cannot be
+            delivered. Set this only where the device is expected to be
+            unreachable, e.g. flapping concurrently with an agent coldboot.
 
     Returns:
         Step object for interface flap
     """
     params_dict: t.Dict[str, t.Any] = {"enable": enable}
+    if tolerate_failures:
+        params_dict["tolerate_failures"] = True
     if interfaces is not None:
         params_dict["interfaces"] = interfaces
     if interface_flap_method is not None:
@@ -11295,6 +11315,10 @@ class ChronosNode(StepBase[taac_types.BaseInput]):
 class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
     STEP_NAME = taac_types.StepName.INTERFACE_FLAP_STEP
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._port_id_cache: t.Optional[t.Dict[str, int]] = None
+
     async def run(
         self,
         input: taac_types.BaseInput,
@@ -11322,12 +11346,20 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
         interface_flap_method = taac_types.InterfaceFlapMethod(
             params["interface_flap_method"]
         )
+        # A thrift port-state change needs direct agent reachability, which a
+        # run driven from a devserver does not have. Pin every flap to the SSH
+        # path instead of threading the method through each playbook builder.
+        if os.environ.get("TAAC_FORCE_SSH_FLAP") == "1":
+            interface_flap_method = (
+                taac_types.InterfaceFlapMethod.SSH_PORT_STATE_CHANGE
+            )
         await self.async_flap_interfaces(
             device_name,
             interfaces,
             interface_flap_method,
             enable,
             sequential,
+            params.get("tolerate_failures", False),
         )
         if delay:
             self.logger.info(f"Sleeping for {delay} seconds...")
@@ -11340,6 +11372,7 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
         interface_flap_method: taac_types.InterfaceFlapMethod,
         enable: bool,
         sequential: bool,
+        tolerate_failures: bool = False,
     ) -> None:
         # Lazy import of internal driver class.
         from taac.internal.driver.arista_switch import (
@@ -11355,6 +11388,35 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
                 f"Interface flap method {interface_flap_method} not supported for EOS devices. "
                 "Only SSH_PORT_STATE_CHANGE is supported for EOS devices"
             )
+        try:
+            await self._dispatch_flap(
+                interface_names, interface_flap_method, enable, sequential
+            )
+        except NotImplementedError:
+            raise
+        except Exception as e:
+            if not tolerate_failures:
+                raise
+            # A step running concurrently with an agent restart loses both thrift
+            # and SSH for part of the window, so a blocked call is expected here
+            # and must not abort the playbook.
+            self.logger.warning(
+                f"Tolerating interface flap failure on {hostname} via "
+                f"{interface_flap_method.name}: {e}"
+            )
+            return
+        action: str = "enabled" if enable else "disabled"
+        self.logger.info(
+            f"Successfully {action} interfaces {interface_names} via {interface_flap_method.name}"
+        )
+
+    async def _dispatch_flap(
+        self,
+        interface_names: t.List[str],
+        interface_flap_method: taac_types.InterfaceFlapMethod,
+        enable: bool,
+        sequential: bool,
+    ) -> None:
         if (
             interface_flap_method
             == taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
@@ -11391,10 +11453,6 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
             raise NotImplementedError(
                 f"Interface flap method {interface_flap_method} not supported"
             )
-        action: str = "enabled" if enable else "disabled"
-        self.logger.info(
-            f"Successfully {action} interfaces {interface_names} via {interface_flap_method.name}"
-        )
 
     async def run_coroutines(
         self,
@@ -11415,6 +11473,32 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
                     self.logger.debug(f"Error during interface flap: {result}")
                     raise result
 
+    async def _async_port_ids(self, interface_names: t.List[str]) -> t.List[int]:
+        """Resolve interface names to port ids, retrying past the QPS limit.
+
+        `getAllPortInfo` is capped at 4 QPS on the agent and is also called by
+        the health checks, so a flap that merely looks up its own port ids can
+        be rejected with APP_OVERLOAD. The mapping does not change during a
+        run, so it is resolved once per device and reused.
+        """
+        if self._port_id_cache is None:
+            last: t.Optional[Exception] = None
+            for attempt in range(_THRIFT_RATE_LIMIT_RETRIES):
+                try:
+                    # pyre-ignore
+                    info = await self.driver.async_get_all_interfaces_info()
+                    self._port_id_cache = {n: i.port_id for n, i in info.items()}
+                    break
+                except Exception as e:
+                    if "APP_OVERLOAD" not in str(e):
+                        raise
+                    last = e
+                    await asyncio.sleep(_THRIFT_RATE_LIMIT_BACKOFF_S * (attempt + 1))
+            else:
+                raise none_throws(last)
+        cache = none_throws(self._port_id_cache)
+        return [cache[name] for name in interface_names]
+
     async def flap_with_thrift(
         self,
         interface_names: t.List[str],
@@ -11422,16 +11506,19 @@ class InterfaceFlapStep(StepBase[taac_types.BaseInput]):
         sequential: bool,
     ) -> bool:
         try:
-            interfaces_info = (
-                # pyre-ignore
-                await self.driver.async_get_all_interfaces_info()
-            )
-            coros = [
-                # pyre-ignore
-                self.driver.async_set_port_state(interfaces_info[iface].port_id, enable)
-                for iface in interface_names
-            ]
-            await self.run_coroutines(coros, sequential)
+            port_ids = await self._async_port_ids(interface_names)
+            # setPortState is capped at 8 QPS by a token bucket of the same
+            # depth, so a 32-member LAG issued at once is a 4x overrun. Pace
+            # the writes instead of letting them fail into the SSH fallback.
+            for start in range(0, len(port_ids), _SET_PORT_STATE_BATCH):
+                batch = port_ids[start : start + _SET_PORT_STATE_BATCH]
+                await self.run_coroutines(
+                    # pyre-ignore
+                    [self.driver.async_set_port_state(pid, enable) for pid in batch],
+                    sequential,
+                )
+                if start + _SET_PORT_STATE_BATCH < len(port_ids):
+                    await asyncio.sleep(_SET_PORT_STATE_BATCH_DELAY_S)
             return True
         except Exception as e:
             self.logger.debug(
@@ -12179,26 +12266,43 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
 
 def create_lag_cleanup_steps(
     all_member_interfaces: t.List[str],
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> t.List[Step]:
     """Build the teardown step list for a LAG / port-channel test.
 
-    Returns two steps in order: (1) re-enable every interface in
-    `all_member_interfaces`, then (2) verify the port-channel itself is
-    operationally UP. Use as the tail of any playbook that flapped LAG
-    members so the testbed is left in a clean state.
+    Returns four steps in order: (1) wait for the agent to reach its configured
+    state, (2) re-enable every interface in `all_member_interfaces`, (3) give
+    the links time to come up, then (4) verify the port-channel is
+    operationally UP. Use as the tail of any playbook that flapped LAG members
+    so the testbed is left in a clean state.
+
+    After a coldboot the agent can stay unconfigured for minutes. Cleanup is
+    the only phase guaranteed to run when a stage aborts, so it carries the
+    wait: without it the re-enable is issued at a device that cannot accept it
+    and the next playbook inherits a down port-channel.
 
     Args:
         port_channel_name: Name of the port-channel interface to verify.
         all_member_interfaces: All physical members of the port-channel
             that should be re-enabled.
+        link_up_wait_s: Seconds to wait after enabling before asserting state.
 
     Returns:
-        A list of two `Step`s — one `INTERFACE_FLAP_STEP` and one
-        `VERIFY_PORT_OPERATIONAL_STATE` — ready to inline into a
-        teardown stage.
+        A list of four `Step`s — `SERVICE_CONVERGENCE_STEP`,
+        `INTERFACE_FLAP_STEP`, `LONGEVITY_STEP` and
+        `VERIFY_PORT_OPERATIONAL_STATE` — ready to inline into a teardown stage.
     """
     return [
-        create_interface_flap_step(enable=True, interfaces=all_member_interfaces),
+        create_service_convergence_step(
+            services=[taac_types.Service.AGENT, taac_types.Service.BGP], timeout=300
+        ),
+        create_interface_flap_step(
+            enable=True,
+            interfaces=all_member_interfaces,
+            interface_flap_method=interface_flap_method,
+        ),
+        create_longevity_step(duration=link_up_wait_s),
         create_verify_port_operational_state_step(
             interfaces=all_member_interfaces, operational_state=True
         ),
@@ -12206,7 +12310,18 @@ def create_lag_cleanup_steps(
 
 
 def create_lag_permanent_cleanup_steps() -> list[taac_types.Step]:
+    """Restore a LAG test that disabled members via the permanent patcher.
+
+    The convergence wait comes first for the same reason as in
+    `create_lag_cleanup_steps`: cleanup is the only phase guaranteed to run
+    when a stage aborts, and after a coldboot the patcher cannot be
+    unregistered — nor the box handed to the next playbook — until the agent
+    and BGP are back.
+    """
     return [
+        create_service_convergence_step(
+            services=[taac_types.Service.AGENT, taac_types.Service.BGP], timeout=300
+        ),
         create_unregister_patcher_step(
             patcher_name="permanently_disable_interface_patcher", config_name="agent"
         ),

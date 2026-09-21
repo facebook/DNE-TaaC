@@ -5055,7 +5055,9 @@ class FbossSwitch(AbstractSwitch):
         subcmd = "enable" if enable else "disable"
         tasks = []
         for interface in interfaces:
-            cmd = f"fboss2 set port {interface} state {subcmd}"
+            # -y is required: fboss2 refuses a port-state change when stdin/stderr
+            # is not a TTY, which is always the case over the driver's shell.
+            cmd = f"fboss2 set port {interface} state {subcmd} -y"
             tasks.append(self.async_run_cmd_on_shell(cmd))
         await asyncio.gather(*tasks)
 

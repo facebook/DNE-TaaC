@@ -2329,6 +2329,7 @@ def create_cpu_queue_snapshot_check(
 
 def create_service_restart_check(
     services: t.Optional[t.List[str]] = None,
+    services_to_skip: t.Optional[t.List[str]] = None,
     daemons: t.Optional[t.List[str]] = None,
     expected_restarted_services: t.Optional[t.List[str]] = None,
     start_time_jq_var: t.Optional[str] = "test_case_start_time",
@@ -2340,6 +2341,8 @@ def create_service_restart_check(
 
     Args:
         services: Services to monitor (e.g. ARISTA_CRITICAL_SAND_AGENTS list).
+        services_to_skip: Services to drop from the monitored set, for platforms
+            that do not deploy them at all (e.g. Open/R on FX).
         daemons: Daemon names variant of services (some checks use this key).
         expected_restarted_services: Services that MUST have restarted.
         start_time_jq_var: jq variable name carrying the lookback start time.
@@ -2350,6 +2353,8 @@ def create_service_restart_check(
     json_payload: t.Dict[str, t.Any] = {}
     if services is not None:
         json_payload["services"] = services
+    if services_to_skip is not None:
+        json_payload["services_to_skip"] = services_to_skip
     if daemons is not None:
         json_payload["daemons"] = daemons
     if expected_restarted_services is not None:

@@ -123,6 +123,7 @@ from taac.steps.step_definitions import (
     create_verify_port_speed_step_v2,
     create_verify_received_routes_step,
     create_wait_for_bgp_update_sent_step,
+    DEFAULT_LINK_UP_WAIT_S,
 )
 from taac.utils.characterization import (
     characterization_session_key,
@@ -4324,6 +4325,11 @@ def create_speed_flip_stage(
 # lines, summary headers, and snapshot checkpoint keys.
 _MAX_DERIVED_STAGE_ID_STEPS = 4
 
+# jq variable holding the moment the permanent-disable patcher's agent restart
+# finished converging. SERVICE_RESTART_CHECK measures uptime against this so the
+# patcher's own restart is expected while a later crash still fails the check.
+PATCHER_RESTART_TIME_VAR = "lag_patcher_restart_time"
+
 
 def _derive_stage_id(steps: list[Step]) -> str:
     """Derive a stage ID by concatenating step names (without ``_STEP`` suffix)."""
@@ -4610,6 +4616,8 @@ def create_port_channel_concurrent_flap_stage(
     interfaces_to_flap: list[str],
     iteration: int = 5,
     cold_boot: bool = False,
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create a concurrent stage for port channel link flapping with agent restart.
@@ -4631,17 +4639,24 @@ def create_port_channel_concurrent_flap_stage(
         concurrent_steps=[
             ConcurrentStep(
                 steps=[
+                    # The restart in the sibling branch takes thrift and SSH away
+                    # for part of the window, so some flaps cannot be delivered.
+                    # That is the condition under test, not a test failure — the
+                    # port-channel state is asserted by the stage that follows.
                     create_interface_flap_step(
                         enable=False,
                         interfaces=interfaces_to_flap,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
                     create_longevity_step(duration=flap_hold_duration),
                     create_interface_flap_step(
                         enable=True,
                         interfaces=interfaces_to_flap,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
+                    create_longevity_step(duration=link_up_wait_s),
                 ]
             ),
             ConcurrentStep(
@@ -4661,6 +4676,8 @@ def create_port_channel_concurrent_flap_stage(
 def create_port_channel_flap_only_stage(
     interfaces_to_flap: list[str],
     iteration: int = 1,
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create a stage for port channel link flapping without agent restart.
@@ -4678,14 +4695,15 @@ def create_port_channel_flap_only_stage(
             create_interface_flap_step(
                 enable=False,
                 interfaces=interfaces_to_flap,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
             create_longevity_step(duration=15),
             create_interface_flap_step(
                 enable=True,
                 interfaces=interfaces_to_flap,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
+            create_longevity_step(duration=link_up_wait_s),
         ],
     )
 
@@ -4696,6 +4714,8 @@ def create_port_channel_cross_flap_stage(
     dut_name: str,
     remote_name: str,
     iterations: int = 1,
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create a stage for port channel cross link flapping on both sides.
@@ -4713,27 +4733,29 @@ def create_port_channel_cross_flap_stage(
                 enable=False,
                 interfaces=dut_flap_interfaces,
                 device_name=dut_name,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
             create_interface_flap_step(
                 enable=False,
                 interfaces=remote_flap_interfaces,
                 device_name=remote_name,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
             create_longevity_step(duration=20),
             create_interface_flap_step(
                 enable=True,
                 interfaces=dut_flap_interfaces,
                 device_name=dut_name,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
+            create_longevity_step(duration=link_up_wait_s),
             create_interface_flap_step(
                 enable=True,
                 interfaces=remote_flap_interfaces,
                 device_name=remote_name,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
+            create_longevity_step(duration=link_up_wait_s),
         ],
     )
 
@@ -4745,6 +4767,8 @@ def create_port_channel_concurrent_cross_flap_stage(
     remote_name: str,
     iterations: int = 1,
     cold_boot: bool = False,
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create a stage for port channel concurrent cross link flapping on both sides with agent restart/agent coldboot.
@@ -4763,31 +4787,39 @@ def create_port_channel_concurrent_cross_flap_stage(
         concurrent_steps=[
             ConcurrentStep(
                 steps=[
+                    # See create_port_channel_concurrent_flap_stage: the restart
+                    # in the sibling branch makes some of these undeliverable.
                     create_interface_flap_step(
                         enable=False,
                         interfaces=dut_flap_interfaces,
                         device_name=dut_name,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
                     create_interface_flap_step(
                         enable=False,
                         interfaces=remote_flap_interfaces,
                         device_name=remote_name,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
                     create_longevity_step(duration=20),
                     create_interface_flap_step(
                         enable=True,
                         interfaces=dut_flap_interfaces,
                         device_name=dut_name,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
+                    create_longevity_step(duration=link_up_wait_s),
                     create_interface_flap_step(
                         enable=True,
                         interfaces=remote_flap_interfaces,
                         device_name=remote_name,
-                        interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                        interface_flap_method=interface_flap_method,
+                        tolerate_failures=True,
                     ),
+                    create_longevity_step(duration=link_up_wait_s),
                 ]
             ),
             ConcurrentStep(
@@ -4807,6 +4839,7 @@ def create_port_channel_concurrent_cross_flap_stage(
 def create_port_channel_permanent_teardown_stage(
     portchannel_health_check: PointInTimeHealthCheck,
     interfaces_to_enable: list[str],
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create the teardown stage for port channel testing.
@@ -4835,6 +4868,12 @@ def create_port_channel_permanent_teardown_stage(
                 trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
             ),
             create_service_convergence_step(),
+            # Overwrites the setup-stage timestamp, so the postcheck compares
+            # against the most recent intentional restart.
+            create_record_jq_timestamp_step(
+                PATCHER_RESTART_TIME_VAR,
+                description="Record completion of the permanent-teardown patcher restart",
+            ),
             create_longevity_step(duration=30),
             create_verify_port_operational_state_step(
                 interfaces=interfaces_to_enable,
@@ -4851,6 +4890,8 @@ def create_port_channel_permanent_teardown_stage(
 def create_port_channel_teardown_stage(
     portchannel_health_check: PointInTimeHealthCheck,
     interfaces_to_enable: list[str],
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create the teardown stage for port channel testing.
@@ -4875,8 +4916,9 @@ def create_port_channel_teardown_stage(
             create_interface_flap_step(
                 enable=True,
                 interfaces=interfaces_to_enable,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
+            create_longevity_step(duration=link_up_wait_s),
             create_verify_port_operational_state_step(
                 interfaces=interfaces_to_enable,
                 operational_state=True,
@@ -4892,6 +4934,8 @@ def create_port_channel_teardown_stage(
 def create_port_channel_all_link_flaps_stage(
     port_channel_name: str,
     port_channel_member_ports: list[str],
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+    link_up_wait_s: int = DEFAULT_LINK_UP_WAIT_S,
 ) -> Stage:
     """
     Create a concurrent stage for flapping all port channel links with agent restart.
@@ -4910,15 +4954,20 @@ def create_port_channel_all_link_flaps_stage(
             ConcurrentStep(
                 steps=[
                     create_interface_flap_step(
-                        enable=False, interfaces=port_channel_member_ports
+                        enable=False,
+                        interfaces=port_channel_member_ports,
+                        interface_flap_method=interface_flap_method,
                     ),
                     create_verify_port_operational_state_step(
                         interfaces=[port_channel_name],
                         operational_state=False,
                     ),
                     create_interface_flap_step(
-                        enable=True, interfaces=port_channel_member_ports
+                        enable=True,
+                        interfaces=port_channel_member_ports,
+                        interface_flap_method=interface_flap_method,
                     ),
+                    create_longevity_step(duration=link_up_wait_s),
                     create_verify_port_operational_state_step(
                         interfaces=[port_channel_name],
                         operational_state=True,
@@ -4971,6 +5020,7 @@ def create_register_port_channel_patcher_stage(
 def create_port_channel_initial_setup_stage_with_permanent_disable(
     portchannel_health_check: PointInTimeHealthCheck,
     interfaces_to_disable: list[str],
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
 ) -> Stage:
     """
     Create the initial setup stage for port channel testing.
@@ -4999,6 +5049,14 @@ def create_port_channel_initial_setup_stage_with_permanent_disable(
                 trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
             ),
             create_service_convergence_step(),
+            # Recorded after convergence so the timestamp marks when the agent
+            # was back, not when the restart was issued. SERVICE_RESTART_CHECK
+            # measures uptime against this to tell the patcher's restart apart
+            # from a later crash.
+            create_record_jq_timestamp_step(
+                PATCHER_RESTART_TIME_VAR,
+                description="Record completion of the permanent-disable patcher restart",
+            ),
             create_longevity_step(duration=30),
             create_verify_port_operational_state_step(
                 interfaces=interfaces_to_disable,
@@ -5015,6 +5073,7 @@ def create_port_channel_initial_setup_stage_with_permanent_disable(
 def create_port_channel_initial_setup_stage(
     portchannel_health_check: PointInTimeHealthCheck,
     interfaces_to_disable: list[str],
+    interface_flap_method: taac_types.InterfaceFlapMethod = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
 ) -> Stage:
     """
     Create the initial setup stage for port channel testing.
@@ -5038,7 +5097,7 @@ def create_port_channel_initial_setup_stage(
             create_interface_flap_step(
                 enable=False,
                 interfaces=interfaces_to_disable,
-                interface_flap_method=taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                interface_flap_method=interface_flap_method,
             ),
             create_verify_port_operational_state_step(
                 interfaces=interfaces_to_disable,
