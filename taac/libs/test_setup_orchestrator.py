@@ -1,7 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import asyncio
+import dataclasses
+import json
 import os
+import re
 import time
 import typing as t
 
@@ -38,6 +41,12 @@ from taac.utils.taac_log_formatter import (
 from taac.test_as_a_config import types as taac_types
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+_JQ_ENDPOINT_ACCESS_PATTERN = re.compile(
+    r'(?P<dot>\.)(?P<dot_key>"(?:\\.|[^"\\])*")'
+    r'|(?P<bracket>\.\s*\[\s*)(?P<bracket_key>"(?:\\.|[^"\\])*")'
+    r"(?P<close>\s*\])"
+)
 
 if not TAAC_OSS:
     from neteng.netcastle.teams.dne_regression.utils.package_fetcher_utils import (
@@ -143,6 +152,9 @@ class TestSetupOrchestrator:
 
         # The following are to be dynamically populated
         self.basset_butler: t.Any = None
+        self._query_basset_butler: t.Any = None
+        self._query_basset_resources: t.List[t.Any] = []
+        self._query_reserved_device_names: t.Set[str] = set()
         self.ixia: t.Optional[AbstractTrafficGenerator] = None
         self.traffic_generator: t.Optional[TrafficGenerator] = None
         self.test_bed_chunker: t.Any = None
@@ -157,6 +169,724 @@ class TestSetupOrchestrator:
     @property
     def ixia_candidates_to_try(self) -> t.Tuple[IxiaCandidate, ...]:
         return self._ixia_candidates_to_try
+
+    @staticmethod
+    def _resolve_endpoint_reference(
+        value: t.Optional[str],
+        bindings: t.Mapping[str, str],
+    ) -> t.Optional[str]:
+        if value is None:
+            return None
+        for logical_name, hostname in bindings.items():
+            if value == logical_name:
+                return hostname
+            prefix = f"{logical_name}:"
+            if value.startswith(prefix):
+                return f"{hostname}{value[len(logical_name) :]}"
+        return value
+
+    @classmethod
+    def _resolve_jq_endpoint_references(
+        cls,
+        expression: str,
+        bindings: t.Mapping[str, str],
+    ) -> str:
+        def replace_endpoint_access(match: re.Match[str]) -> str:
+            quoted_key = match.group("dot_key") or match.group("bracket_key")
+            logical_name = json.loads(quoted_key)
+            hostname = bindings.get(logical_name)
+            if hostname is None:
+                return match.group(0)
+            resolved_key = json.dumps(hostname)
+            if match.group("dot") is not None:
+                return f".{resolved_key}"
+            return f"{match.group('bracket')}{resolved_key}{match.group('close')}"
+
+        return _JQ_ENDPOINT_ACCESS_PATTERN.sub(replace_endpoint_access, expression)
+
+    @classmethod
+    def _resolve_json_endpoint_references(
+        cls,
+        value: t.Any,
+        bindings: t.Mapping[str, str],
+    ) -> t.Any:
+        if isinstance(value, str):
+            return cls._resolve_endpoint_reference(value, bindings)
+        if isinstance(value, list):
+            return [
+                cls._resolve_json_endpoint_references(item, bindings) for item in value
+            ]
+        if isinstance(value, dict):
+            return {
+                key: cls._resolve_json_endpoint_references(item, bindings)
+                for key, item in value.items()
+            }
+        return value
+
+    @classmethod
+    def _resolve_param_value(
+        cls,
+        value: taac_types.ParamValue,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.ParamValue:
+        if value.get_type() == taac_types.ParamValue.Type.string_value:
+            return taac_types.ParamValue(
+                string_value=none_throws(
+                    cls._resolve_endpoint_reference(value.string_value, bindings)
+                )
+            )
+        if value.get_type() == taac_types.ParamValue.Type.string_list:
+            return taac_types.ParamValue(
+                string_list=[
+                    none_throws(cls._resolve_endpoint_reference(item, bindings))
+                    for item in value.string_list
+                ]
+            )
+        return value
+
+    @classmethod
+    def _resolve_json_params(
+        cls,
+        json_params: t.Optional[str],
+        bindings: t.Mapping[str, str],
+    ) -> t.Optional[str]:
+        if not json_params:
+            return json_params
+        return json.dumps(
+            cls._resolve_json_endpoint_references(json.loads(json_params), bindings)
+        )
+
+    @classmethod
+    def _resolve_params(
+        cls,
+        params: t.Optional[taac_types.Params],
+        bindings: t.Mapping[str, str],
+    ) -> t.Optional[taac_types.Params]:
+        if params is None:
+            return None
+        static_params = params.static_params
+        if static_params is not None:
+            static_params = {
+                name: cls._resolve_param_value(value, bindings)
+                for name, value in static_params.items()
+            }
+        jq_params = params.jq_params
+        if jq_params is not None:
+            jq_params = {
+                name: cls._resolve_jq_endpoint_references(expression, bindings)
+                for name, expression in jq_params.items()
+            }
+        transform_params = params.transform_params
+        if transform_params is not None:
+            transform_params = {
+                name: [
+                    transform(
+                        static_params=(
+                            {
+                                key: cls._resolve_param_value(value, bindings)
+                                for key, value in transform.static_params.items()
+                            }
+                            if transform.static_params is not None
+                            else None
+                        ),
+                        json_params=cls._resolve_json_params(
+                            transform.json_params, bindings
+                        ),
+                    )
+                    for transform in transforms
+                ]
+                for name, transforms in transform_params.items()
+            }
+        return params(
+            static_params=static_params,
+            json_params=cls._resolve_json_params(params.json_params, bindings),
+            jq_params=jq_params,
+            transform_params=transform_params,
+        )
+
+    @classmethod
+    def _resolve_task_endpoint_references(
+        cls,
+        task: taac_types.Task,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.Task:
+        return task(
+            hostname=cls._resolve_endpoint_reference(task.hostname, bindings),
+            params=cls._resolve_params(task.params, bindings),
+        )
+
+    @classmethod
+    def _resolve_step_endpoint_references(
+        cls,
+        step: taac_types.Step,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.Step:
+        return step(
+            input_json=cls._resolve_json_params(step.input_json, bindings),
+            step_params=cls._resolve_params(step.step_params, bindings),
+            device_regexes=(
+                [
+                    none_throws(cls._resolve_endpoint_reference(value, bindings))
+                    for value in step.device_regexes
+                ]
+                if step.device_regexes is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def _resolve_health_check_endpoint_references(
+        cls,
+        health_check: t.Any,
+        bindings: t.Mapping[str, str],
+    ) -> t.Any:
+        return health_check(
+            input_json=cls._resolve_json_params(health_check.input_json, bindings),
+            check_params=cls._resolve_params(health_check.check_params, bindings),
+        )
+
+    @classmethod
+    def _resolve_periodic_task_endpoint_references(
+        cls,
+        periodic_task: taac_types.PeriodicTask,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.PeriodicTask:
+        return periodic_task(
+            task=cls._resolve_task_endpoint_references(periodic_task.task, bindings),
+            params_list=(
+                [
+                    none_throws(cls._resolve_params(params, bindings))
+                    for params in params_list
+                ]
+                if (params_list := periodic_task.params_list) is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def _resolve_stage_endpoint_references(
+        cls,
+        stage: taac_types.Stage,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.Stage:
+        return stage(
+            steps=[
+                cls._resolve_step_endpoint_references(step, bindings)
+                for step in stage.steps
+            ],
+            concurrent_steps=(
+                [
+                    concurrent_step(
+                        steps=[
+                            cls._resolve_step_endpoint_references(step, bindings)
+                            for step in concurrent_step.steps
+                        ]
+                    )
+                    for concurrent_step in concurrent_steps
+                ]
+                if (concurrent_steps := stage.concurrent_steps) is not None
+                else None
+            ),
+            device_regexes=(
+                [
+                    none_throws(cls._resolve_endpoint_reference(value, bindings))
+                    for value in stage.device_regexes
+                ]
+                if stage.device_regexes is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def _resolve_playbook_endpoint_references(
+        cls,
+        playbook: taac_types.Playbook,
+        bindings: t.Mapping[str, str],
+    ) -> taac_types.Playbook:
+        def resolve_health_checks(checks: t.Any) -> t.Any:
+            return (
+                [
+                    cls._resolve_health_check_endpoint_references(check, bindings)
+                    for check in checks
+                ]
+                if checks is not None
+                else None
+            )
+
+        def resolve_steps(steps: t.Any) -> t.Any:
+            return (
+                [
+                    cls._resolve_step_endpoint_references(step, bindings)
+                    for step in steps
+                ]
+                if steps is not None
+                else None
+            )
+
+        return playbook(
+            stages=[
+                cls._resolve_stage_endpoint_references(stage, bindings)
+                for stage in playbook.stages
+            ],
+            prechecks=resolve_health_checks(playbook.prechecks),
+            postchecks=resolve_health_checks(playbook.postchecks),
+            snapshot_checks=resolve_health_checks(playbook.snapshot_checks),
+            cleanup_steps=resolve_steps(playbook.cleanup_steps),
+            setup_steps=resolve_steps(playbook.setup_steps),
+            periodic_tasks=(
+                [
+                    cls._resolve_periodic_task_endpoint_references(task, bindings)
+                    for task in periodic_tasks
+                ]
+                if (periodic_tasks := playbook.periodic_tasks) is not None
+                else None
+            ),
+            device_regexes=(
+                [
+                    none_throws(cls._resolve_endpoint_reference(value, bindings))
+                    for value in playbook.device_regexes
+                ]
+                if playbook.device_regexes is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _resolve_hostname_keyed_map(
+        values: t.Optional[t.Mapping[str, t.Any]],
+        bindings: t.Mapping[str, str],
+        field_name: str,
+    ) -> t.Optional[t.Dict[str, t.Any]]:
+        if values is None:
+            return None
+        resolved = {}
+        for key, value in values.items():
+            resolved_key = bindings.get(key, key)
+            if resolved_key in resolved:
+                raise ValueError(
+                    f"Resolving Basset endpoints creates duplicate {field_name} "
+                    f"key {resolved_key!r}"
+                )
+            resolved[resolved_key] = value
+        return resolved
+
+    @classmethod
+    def _resolve_ptp_config(
+        cls,
+        config: t.Any,
+        bindings: t.Mapping[str, str],
+    ) -> t.Any:
+        def resolve_endpoint(endpoint: t.Any) -> t.Any:
+            return endpoint(
+                name=none_throws(
+                    cls._resolve_endpoint_reference(endpoint.name, bindings)
+                )
+            )
+
+        return config(
+            server_endpoint=resolve_endpoint(config.server_endpoint),
+            client_endpoints=[
+                resolve_endpoint(endpoint) for endpoint in config.client_endpoints
+            ],
+            server_port_name=cls._resolve_endpoint_reference(
+                config.server_port_name, bindings
+            ),
+            client_port_name_list=(
+                [
+                    none_throws(cls._resolve_endpoint_reference(name, bindings))
+                    for name in config.client_port_name_list
+                ]
+                if config.client_port_name_list is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def _resolve_candidate_endpoints(
+        cls,
+        candidate: IxiaCandidate,
+        bindings: t.Mapping[str, str],
+    ) -> IxiaCandidate:
+        def resolve_port_config(
+            config: t.Optional[taac_types.BasicPortConfig],
+        ) -> t.Optional[taac_types.BasicPortConfig]:
+            if config is None:
+                return None
+            return config(
+                endpoint=cls._resolve_endpoint_reference(config.endpoint, bindings)
+            )
+
+        def resolve_traffic_endpoint(
+            endpoint: taac_types.TrafficEndpoint,
+        ) -> taac_types.TrafficEndpoint:
+            return endpoint(
+                name=none_throws(
+                    cls._resolve_endpoint_reference(endpoint.name, bindings)
+                )
+            )
+
+        def resolve_ixia_endpoint(endpoint: t.Any) -> t.Any:
+            return endpoint(
+                port_name=none_throws(
+                    cls._resolve_endpoint_reference(endpoint.port_name, bindings)
+                )
+            )
+
+        return dataclasses.replace(
+            candidate,
+            endpoints=tuple(
+                endpoint(
+                    name=bindings.get(endpoint.name, endpoint.name),
+                    basset_query=None,
+                )
+                for endpoint in candidate.endpoints
+            ),
+            setup_tasks=tuple(
+                cls._resolve_task_endpoint_references(task, bindings)
+                for task in candidate.setup_tasks
+            ),
+            teardown_tasks=tuple(
+                cls._resolve_task_endpoint_references(task, bindings)
+                for task in candidate.teardown_tasks
+            ),
+            basic_port_configs=tuple(
+                none_throws(resolve_port_config(config))
+                for config in candidate.basic_port_configs
+            ),
+            basic_traffic_item_configs=tuple(
+                config(
+                    src_endpoints=[
+                        resolve_traffic_endpoint(endpoint)
+                        for endpoint in config.src_endpoints
+                    ],
+                    dest_endpoints=[
+                        resolve_traffic_endpoint(endpoint)
+                        for endpoint in config.dest_endpoints
+                    ],
+                )
+                for config in candidate.basic_traffic_item_configs
+            ),
+            default_basic_port_config=resolve_port_config(
+                candidate.default_basic_port_config
+            ),
+            user_defined_traffic_items=tuple(
+                item(
+                    source_endpoints=[
+                        resolve_ixia_endpoint(endpoint)
+                        for endpoint in item.source_endpoints
+                    ],
+                    dest_endpoints=[
+                        resolve_ixia_endpoint(endpoint)
+                        for endpoint in item.dest_endpoints
+                    ],
+                )
+                for item in candidate.user_defined_traffic_items
+            ),
+            snake_configs=tuple(
+                config(
+                    source=none_throws(
+                        cls._resolve_endpoint_reference(config.source, bindings)
+                    ),
+                    destination=none_throws(
+                        cls._resolve_endpoint_reference(config.destination, bindings)
+                    ),
+                )
+                for config in candidate.snake_configs
+            ),
+            ptp_configs=tuple(
+                cls._resolve_ptp_config(config, bindings)
+                for config in candidate.ptp_configs
+            ),
+        )
+
+    @classmethod
+    def _resolve_ixia_profile_endpoint_references(
+        cls,
+        profile: taac_types.IxiaSetupProfile,
+        bindings: t.Mapping[str, str],
+        candidate: t.Optional[IxiaCandidate] = None,
+    ) -> taac_types.IxiaSetupProfile:
+        if candidate is None:
+            candidate = cls._resolve_candidate_endpoints(
+                IxiaCandidate(
+                    name=profile.name,
+                    api_server_ip=profile.api_server_ip,
+                    endpoints=tuple(profile.endpoints),
+                    setup_tasks=tuple(profile.setup_tasks),
+                    teardown_tasks=tuple(profile.teardown_tasks),
+                    basic_port_configs=tuple(profile.basic_port_configs),
+                    basic_traffic_item_configs=tuple(
+                        profile.basic_traffic_item_configs
+                    ),
+                    default_basic_port_config=profile.default_basic_port_config,
+                    user_defined_traffic_items=tuple(
+                        profile.user_defined_traffic_items
+                    ),
+                    snake_configs=tuple(profile.snake_configs),
+                    ptp_configs=tuple(profile.ptp_configs),
+                ),
+                bindings,
+            )
+        return profile(
+            endpoints=list(candidate.endpoints),
+            setup_tasks=list(candidate.setup_tasks),
+            teardown_tasks=list(candidate.teardown_tasks),
+            basic_port_configs=list(candidate.basic_port_configs),
+            basic_traffic_item_configs=list(candidate.basic_traffic_item_configs),
+            default_basic_port_config=candidate.default_basic_port_config,
+            user_defined_traffic_items=list(candidate.user_defined_traffic_items),
+            snake_configs=list(candidate.snake_configs),
+            ptp_configs=[
+                cls._resolve_ptp_config(ptp_config, bindings)
+                for ptp_config in profile.ptp_configs
+            ],
+        )
+
+    async def _async_release_query_resources(
+        self,
+        basset_butler: t.Any,
+        resources: t.Iterable[t.Any],
+    ) -> t.List[Exception]:
+        errors = []
+        released = set()
+        for resource in resources:
+            resource_key = id(resource)
+            if resource_key in released:
+                continue
+            released.add(resource_key)
+            try:
+                await basset_butler.async_release(resource)
+            except Exception as error:
+                self.logger.exception(
+                    f"Failed to release query-backed Basset resource {resource!r}"
+                )
+                errors.append(error)
+        return errors
+
+    async def async_resolve_basset_endpoints(  # noqa: C901
+        self,
+    ) -> t.Dict[str, str]:
+        """Reserve query-backed endpoints and bind every IXIA profile."""
+        primary_endpoints = self.ixia_candidates[0].endpoints
+        query_endpoints = [
+            endpoint
+            for endpoint in primary_endpoints
+            if endpoint.basset_query is not None
+        ]
+        if not query_endpoints:
+            if any(
+                endpoint.basset_query is not None
+                for candidate in self.ixia_candidates[1:]
+                for endpoint in candidate.endpoints
+            ):
+                raise ValueError("Basset queries must be declared on primary endpoints")
+            return {}
+        if not TAAC_OSS:
+            from taac.internal.internal_utils import (
+                async_reserve_basset_queries,
+            )
+        else:
+            raise ValueError("Basset-backed endpoints are not supported in OSS mode")
+        if self._skip_basset_reservation:
+            raise ValueError(
+                "Basset-backed endpoints cannot be used with --skip-basset-reservation"
+            )
+        if any(
+            not none_throws(endpoint.basset_query).strip()
+            for endpoint in query_endpoints
+        ):
+            raise ValueError("Endpoint Basset queries must not be empty")
+
+        queries = {
+            endpoint.name: none_throws(endpoint.basset_query)
+            for endpoint in query_endpoints
+        }
+        if len(queries) != len(query_endpoints):
+            raise ValueError("Basset-backed endpoint names must be unique")
+        for candidate in self.ixia_candidates[1:]:
+            for endpoint in candidate.endpoints:
+                if endpoint.basset_query is not None and endpoint.basset_query != (
+                    queries.get(endpoint.name)
+                ):
+                    raise ValueError(
+                        "IXIA profiles must use the same Basset query for endpoint "
+                        f"{endpoint.name!r}"
+                    )
+
+        (
+            bindings,
+            basset_butler,
+            reserved_resources,
+        ) = await async_reserve_basset_queries(
+            queries,
+            self.test_config.basset_reservation_time_hr * 3600,
+            self.logger,
+        )
+        resolved_names = {hostname.casefold() for hostname in bindings.values()}
+        if len(resolved_names) != len(bindings):
+            await self._async_release_query_resources(basset_butler, reserved_resources)
+            raise ValueError("Basset queries selected the same endpoint more than once")
+        static_names = {
+            endpoint.name.casefold()
+            for endpoint in primary_endpoints
+            if endpoint.basset_query is None
+        }
+        overlap = static_names & resolved_names
+        if overlap:
+            await self._async_release_query_resources(basset_butler, reserved_resources)
+            raise ValueError(
+                "A Basset query selected an explicitly configured endpoint: "
+                f"{sorted(overlap)}"
+            )
+
+        candidate_indices = {
+            id(candidate): index for index, candidate in enumerate(self.ixia_candidates)
+        }
+        config = self.test_config
+        try:
+            resolved_candidates = tuple(
+                self._resolve_candidate_endpoints(candidate, bindings)
+                for candidate in self.ixia_candidates
+            )
+            resolved_candidates_to_try = tuple(
+                resolved_candidates[candidate_indices[id(candidate)]]
+                for candidate in self._ixia_candidates_to_try
+            )
+            primary_candidate = resolved_candidates[0]
+            secondary_profile = config.secondary_ixia_profile
+            if secondary_profile is not None:
+                secondary_profile = self._resolve_ixia_profile_endpoint_references(
+                    secondary_profile,
+                    bindings,
+                    resolved_candidates[1] if len(resolved_candidates) > 1 else None,
+                )
+            oss_mock_device_data = self._resolve_hostname_keyed_map(
+                config.oss_mock_device_data,
+                bindings,
+                "oss_mock_device_data",
+            )
+            if oss_mock_device_data is not None:
+                oss_mock_device_data = {
+                    hostname: device_info(
+                        name=bindings.get(device_info.name, device_info.name)
+                    )
+                    for hostname, device_info in oss_mock_device_data.items()
+                }
+            resolved_config = config(
+                endpoints=list(primary_candidate.endpoints),
+                setup_tasks=list(primary_candidate.setup_tasks),
+                teardown_tasks=list(primary_candidate.teardown_tasks),
+                basic_port_configs=list(primary_candidate.basic_port_configs),
+                basic_traffic_item_configs=list(
+                    primary_candidate.basic_traffic_item_configs
+                ),
+                default_basic_port_config=(primary_candidate.default_basic_port_config),
+                user_defined_traffic_items=list(
+                    primary_candidate.user_defined_traffic_items
+                ),
+                snake_configs=list(primary_candidate.snake_configs),
+                ptp_configs=(
+                    [
+                        self._resolve_ptp_config(ptp_config, bindings)
+                        for ptp_config in config.ptp_configs
+                    ]
+                    if config.ptp_configs is not None
+                    else None
+                ),
+                playbooks=[
+                    self._resolve_playbook_endpoint_references(playbook, bindings)
+                    for playbook in config.playbooks
+                ],
+                periodic_tasks=(
+                    [
+                        self._resolve_periodic_task_endpoint_references(
+                            periodic_task, bindings
+                        )
+                        for periodic_task in config.periodic_tasks
+                    ]
+                    if config.periodic_tasks is not None
+                    else None
+                ),
+                prechecks=(
+                    [
+                        self._resolve_health_check_endpoint_references(
+                            health_check, bindings
+                        )
+                        for health_check in config.prechecks
+                    ]
+                    if config.prechecks is not None
+                    else None
+                ),
+                postchecks=(
+                    [
+                        self._resolve_health_check_endpoint_references(
+                            health_check, bindings
+                        )
+                        for health_check in config.postchecks
+                    ]
+                    if config.postchecks is not None
+                    else None
+                ),
+                snapshot_checks=(
+                    [
+                        self._resolve_health_check_endpoint_references(
+                            health_check, bindings
+                        )
+                        for health_check in config.snapshot_checks
+                    ]
+                    if config.snapshot_checks is not None
+                    else None
+                ),
+                startup_checks=(
+                    [
+                        self._resolve_health_check_endpoint_references(
+                            health_check, bindings
+                        )
+                        for health_check in config.startup_checks
+                    ]
+                    if config.startup_checks is not None
+                    else None
+                ),
+                oss_setup_tasks=(
+                    [
+                        self._resolve_task_endpoint_references(task, bindings)
+                        for task in config.oss_setup_tasks
+                    ]
+                    if config.oss_setup_tasks is not None
+                    else None
+                ),
+                rsyslog_services_overrides=self._resolve_hostname_keyed_map(
+                    config.rsyslog_services_overrides,
+                    bindings,
+                    "rsyslog_services_overrides",
+                ),
+                host_os_type_map=self._resolve_hostname_keyed_map(
+                    config.host_os_type_map, bindings, "host_os_type_map"
+                ),
+                host_driver_args=self._resolve_hostname_keyed_map(
+                    config.host_driver_args, bindings, "host_driver_args"
+                ),
+                oss_mock_device_data=oss_mock_device_data,
+                secondary_ixia_profile=secondary_profile,
+            )
+        except Exception:
+            await self._async_release_query_resources(basset_butler, reserved_resources)
+            raise
+
+        self._query_basset_butler = basset_butler
+        self._query_basset_resources = reserved_resources
+        self._query_reserved_device_names = set(bindings.values())
+        self.ixia_candidates = resolved_candidates
+        self._ixia_candidates_to_try = resolved_candidates_to_try
+        self.test_config = resolved_config
+        self.devices_under_test = [
+            endpoint.name for endpoint in primary_candidate.endpoints if endpoint.dut
+        ]
+        for logical_name, hostname in bindings.items():
+            self.logger.info(
+                f"Resolved Basset endpoint {logical_name!r} to {hostname!r}"
+            )
+        return bindings
 
     async def async_setUp(self) -> None:
         test_device_names = [
@@ -209,7 +939,9 @@ class TestSetupOrchestrator:
             self.logger.info("  Waiting 180s for interfaces to stabilize after boot...")
             await asyncio.sleep(180)
 
-    async def _async_setUp_internal(self, test_device_names: t.List[str]) -> None:
+    async def _async_setUp_internal(  # noqa: C901
+        self, test_device_names: t.List[str]
+    ) -> None:
         """
         Internal (Meta) test setup path:
         1. Reserve devices in Basset
@@ -233,14 +965,25 @@ class TestSetupOrchestrator:
 
         # Step 1: Basset device reservation
         if not self._skip_basset_reservation:
-            _log("\033[36m[SETUP]\033[0m Phase 1: Reserving devices in Basset...")
-            with timed_phase("Basset device reservation", logger=self.logger):
-                success, self.basset_butler = await async_reserve_devices_in_basset(
-                    self.test_config, test_device_names, self.logger
+            static_device_names = [
+                name
+                for name in test_device_names
+                if name not in self._query_reserved_device_names
+            ]
+            if not static_device_names:
+                _log(
+                    "\033[32m[SETUP]\033[0m Phase 1: Basset reservation "
+                    "completed during endpoint resolution"
                 )
-                if not success:
-                    raise Exception("Failed to reserve test devices in Basset")
-            _log("\033[32m[SETUP]\033[0m Phase 1: Basset reservation complete")
+            else:
+                _log("\033[36m[SETUP]\033[0m Phase 1: Reserving devices in Basset...")
+                with timed_phase("Basset device reservation", logger=self.logger):
+                    success, self.basset_butler = await async_reserve_devices_in_basset(
+                        self.test_config, static_device_names, self.logger
+                    )
+                    if not success:
+                        raise Exception("Failed to reserve test devices in Basset")
+                _log("\033[32m[SETUP]\033[0m Phase 1: Basset reservation complete")
         else:
             _log("\033[2m[SETUP] Phase 1: Skipping Basset reservation\033[0m")
 
@@ -442,7 +1185,9 @@ class TestSetupOrchestrator:
         """
         await self.async_teardown_ixia_setup(strict=strict_ixia_cleanup)
 
-    async def _async_tearDown_internal(self, strict_ixia_cleanup: bool) -> None:
+    async def _async_tearDown_internal(  # noqa: C901
+        self, strict_ixia_cleanup: bool
+    ) -> None:
         """
         Internal (Meta) teardown path:
         1. Restore test bed connectivity
@@ -465,6 +1210,15 @@ class TestSetupOrchestrator:
                 await async_release_devices_in_basset(self.basset_butler, self.logger)
             except Exception as error:
                 errors.append(error)
+
+        if not self._skip_basset_reservation and self._query_basset_butler:
+            errors.extend(
+                await self._async_release_query_resources(
+                    self._query_basset_butler,
+                    self._query_basset_resources,
+                )
+            )
+            self._query_basset_resources = []
 
         try:
             await self.async_teardown_ixia_setup(strict=strict_ixia_cleanup)

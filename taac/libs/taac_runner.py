@@ -657,6 +657,14 @@ class TaacRunner:
     async def async_test_setUp(self) -> None:
         setup_start_time = int(time.time())
         try:
+            endpoint_bindings = (
+                await self.test_setup_orchestrator.async_resolve_basset_endpoints()
+            )
+            if endpoint_bindings:
+                self.test_config = self.test_setup_orchestrator.test_config
+                self.ixia_candidates = self.test_setup_orchestrator.ixia_candidates
+                self.duts[:] = self.test_setup_orchestrator.devices_under_test
+                self.dynamic_vars.update(endpoint_bindings)
             await self._async_run_test_setup()
         except BaseException as error:
             # The setup slice is the only record of what the chassis was
