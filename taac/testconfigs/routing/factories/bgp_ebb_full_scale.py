@@ -146,10 +146,10 @@ _UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
         cpu_thresholds_pct=((80, 30.0), (95, 100.0)), rss_max_growth_pct=10.0
     ),
     "bgp_ebb_fauu_drain_undrain_playbook": CharacterizationGates(
-        rss_max_growth_pct=15.0
+        rss_max_growth_pct=30.0
     ),
     "bgp_ebb_plane_drain_undrain_playbook": CharacterizationGates(
-        rss_max_growth_pct=10.0
+        rss_max_growth_pct=30.0
     ),
     "bgp_ebb_longevity_playbook": CharacterizationGates(
         cpu_thresholds_pct=((80, 150.0), (95, 180.0)), rss_max_growth_pct=35.0

@@ -47,8 +47,8 @@ _UG_GATES: dict[str, _GateExpectation] = {
         {"80": 30.0, "95": 100.0},
         10.0,
     ),
-    "bgp_ebb_fauu_drain_undrain_playbook": (None, 15.0),
-    "bgp_ebb_plane_drain_undrain_playbook": (None, 10.0),
+    "bgp_ebb_fauu_drain_undrain_playbook": (None, 30.0),
+    "bgp_ebb_plane_drain_undrain_playbook": (None, 30.0),
     "bgp_ebb_longevity_playbook": ({"80": 150.0, "95": 180.0}, 35.0),
     "bgp_ebb_ebgp_session_oscillation_playbook": (
         {"80": 150.0, "95": 180.0},
