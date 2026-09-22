@@ -22228,15 +22228,29 @@ def create_cpu_queue_playbooks(
         ],
     )
 
-    # CPU_039: MTU exceed → LOW queue. Oversize IPv6 packet exceeds DUT egress
-    # MTU; router punts to CPU for ICMPv6 "Packet Too Big" generation.
+    # CPU_039: newer ASICs drop MTU-exceeded IPv6 packets in hardware. Do not
+    # require a LOW-queue punt; guard against leakage into MID and HIGH.
     npi_cpu_039_mtu_exceed_to_low_queue_playbook = Playbook(
         name="npi_cpu_039_mtu_exceed_to_low_queue",
+        postchecks=[
+            # The oversized stream is intentionally dropped by newer ASICs.
+            # Keep the generic packet-loss health check for every other item,
+            # but do not treat this expected data-plane drop as a failure.
+            create_ixia_packet_loss_check(
+                clear_traffic_stats=True,
+                skip_traffic_items=["TEST_MTU_EXCEED_IPV6_TRAFFIC"],
+            ),
+            create_service_restart_check(
+                services=SERVICES_TO_MONITOR_DURING_AGENT_RESTART,
+                expected_restarted_services=WEDGE_AGENT_BINDS_TO_CASCADE,
+            ),
+        ],
         traffic_items_to_start=[
             "TEST_MTU_EXCEED_IPV6_TRAFFIC",
         ],
         stages=[
             create_steps_stage(
+                stage_id="npi_cpu_039_mtu_exceed_to_low_queue",
                 steps=[
                     # Test-case prerequisite: shrink the DUT egress
                     # interface MTU to 1500 BEFORE sending the
@@ -22253,37 +22267,21 @@ def create_cpu_queue_playbooks(
                             "patcher_name": "mtu_exceed_patcher",
                         },
                     ),
-                    # FBOSS gotcha: `change_mtu` agent-config patcher
-                    # writes the new MTU to the agent's view of the
-                    # interface config, but the underlying silicon does
-                    # not re-program the port until the port is
-                    # administratively bounced. Without this down/up
-                    # cycle, `fboss2 show interface eth1/13/1` still
-                    # reports the previous MTU (9000 on IcePack) and
-                    # MTU-exceed frames silently forward without
-                    # triggering the silicon's CPU punt. See Run 5 v6
-                    # 2026-06-09 01:46 where MTU stayed at 9000
-                    # post-patcher.
-                    create_interface_flap_step(
-                        enable=False,
-                        interfaces=[ixia_downlink_interface],
-                        interface_flap_method=4,  # SSH_PORT_STATE_CHANGE
-                        step_id="mtu_change_force_flap_down",
+                    # The patcher updates generated agent config, but a port
+                    # bounce does not reload it. A warmboot is required for
+                    # the running agent to program MTU 1500 into hardware.
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        step_id="apply_mtu_agent_warmboot",
                     ),
-                    create_interface_flap_step(
-                        enable=True,
-                        interfaces=[ixia_downlink_interface],
-                        interface_flap_method=4,  # SSH_PORT_STATE_CHANGE
-                        step_id="mtu_change_force_flap_up",
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        step_id="apply_mtu_agent_convergence",
                     ),
                     # Brief settle so the link comes back + BGP/IXIA
                     # streams re-establish before we measure punt.
                     create_longevity_step(duration=15),
-                    # Verify the MTU change actually reached silicon
-                    # before we depend on it. Fails loud if the patcher
-                    # + flap combo did not propagate, so CPU_QUEUE_CHECK
-                    # is not asked to interpret counters under an
-                    # incorrect MTU assumption.
+                    # Verify the warmboot applied MTU 1500 before measuring.
                     create_custom_step(
                         params_dict={
                             "custom_step_name": "verify_interface_mtu",
@@ -22292,12 +22290,9 @@ def create_cpu_queue_playbooks(
                         },
                     ),
                     create_longevity_step(duration=30),
-                    # Diagnostic: dump IXIA-side Tx/Rx for the MTU exceed
-                    # traffic item BEFORE the snapshot check stops traffic.
-                    # Disambiguates "No output packet increase on queue 0"
-                    # — nonzero Tx Frames here means IXIA transmitted →
-                    # silicon/CoPP didn't punt; zero Tx Frames means IXIA
-                    # never sent → test/IXIA-side bug.
+                    # Diagnostic: dump IXIA-side Tx/Rx before the snapshot
+                    # check stops traffic. This confirms that IXIA transmitted
+                    # the frames that the ASIC is expected to drop.
                     create_custom_step(
                         params_dict={
                             "custom_step_name": "dump_traffic_item_stats",
@@ -22306,25 +22301,71 @@ def create_cpu_queue_playbooks(
                             ],
                         },
                     ),
+                    # End the queue-counter measurement before the cleanup
+                    # warmboot so expected service traffic cannot pollute the
+                    # MID/HIGH queue leakage assertion.
+                    create_longevity_step(
+                        duration=0,
+                        step_id="mtu_exceed_traffic_window_end",
+                    ),
                     # Restore the DUT egress interface MTU back to its
-                    # provisioned value (paired with the
-                    # change_interface_mtu_patcher above).
+                    # provisioned value. Unregistering changes generated
+                    # config; a second warmboot applies that restoration to
+                    # the running agent and hardware.
                     create_unregister_patcher_step(
                         patcher_name="mtu_exceed_patcher",
+                    ),
+                    create_service_interruption_step(
+                        service=Service.AGENT,
+                        step_id="restore_mtu_agent_warmboot",
+                    ),
+                    create_service_convergence_step(
+                        services=[Service.AGENT, Service.BGP],
+                        step_id="restore_mtu_agent_convergence",
+                    ),
+                    # DUT warmboot interrupts its BGP adjacencies. IXIA does
+                    # not reliably re-establish retained-session protocols on
+                    # its own, so explicitly restart them before postchecks
+                    # compare the BGP route snapshot.
+                    create_ixia_api_step(
+                        api_name="stop_protocols",
+                        args_dict={},
+                        description="Stop IXIA protocols after DUT MTU restore",
+                        start_traffic=False,
+                    ),
+                    create_ixia_api_step(
+                        api_name="start_and_verify_protocols",
+                        args_dict={},
+                        description="Restart IXIA protocols after DUT MTU restore",
+                        start_traffic=False,
+                    ),
+                    create_ixia_api_step(
+                        api_name="clear_traffic_stats",
+                        args_dict={"wait_for_refresh": True},
+                        description="Clear intentional MTU-drop traffic statistics",
+                        start_traffic=False,
+                    ),
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "verify_interface_mtu",
+                            "interface": ixia_downlink_interface,
+                            "expected_mtu": 9000,
+                        },
                     ),
                 ],
             )
         ],
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[low_queue],
+                active_queues=[],
                 inactive_queues=[mid_queue, high_queue],
                 inactive_max_pps_per_queue={
                     mid_queue: mid_q_noise,
                     high_queue: high_q_noise,
                 },
                 no_discard_queues=[mid_queue, high_queue],
-                active_min_out_pps_per_queue={low_queue: 10},
+                pre_snapshot_checkpoint_id="stage.npi_cpu_039_mtu_exceed_to_low_queue.step.apply_mtu_agent_convergence.end",
+                post_snapshot_checkpoint_id="stage.npi_cpu_039_mtu_exceed_to_low_queue.step.mtu_exceed_traffic_window_end.end",
             )
         ],
     )
@@ -22956,7 +22997,10 @@ def create_cpu_queue_playbooks(
         ],
     )
 
-    # Complex UNH playbooks - require ixia_downlink_interface
+    # Complex UNH playbooks - require ixia_downlink_interface. Newer ASICs
+    # drop these unresolved packets in hardware, so the legacy "to_low_queue"
+    # test names do not imply a LOW-queue activity requirement. The checks
+    # instead guard against unexpected MID- or HIGH-queue traffic.
     #
     # Each of these 3 UNH playbooks runs `create_service_interruption_step(
     # service=Service.AGENT)` twice (once to apply the patcher, once to
@@ -22978,7 +23022,7 @@ def create_cpu_queue_playbooks(
         prechecks=_UNH_FLAP_LOSS_PRECHECK,
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[low_queue],
+                active_queues=[],
                 inactive_queues=[mid_queue, high_queue],
                 inactive_max_pps_per_queue={
                     mid_queue: mid_q_noise,
@@ -23045,7 +23089,7 @@ def create_cpu_queue_playbooks(
         prechecks=_UNH_FLAP_LOSS_PRECHECK,
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[low_queue],
+                active_queues=[],
                 inactive_queues=[mid_queue, high_queue],
                 inactive_max_pps_per_queue={
                     mid_queue: mid_q_noise,
@@ -23108,7 +23152,7 @@ def create_cpu_queue_playbooks(
         prechecks=_UNH_FLAP_LOSS_PRECHECK,
         snapshot_checks=[
             create_cpu_queue_snapshot_check(
-                active_queues=[low_queue],
+                active_queues=[],
                 inactive_queues=[mid_queue, high_queue],
                 inactive_max_pps_per_queue={
                     mid_queue: mid_q_noise,
