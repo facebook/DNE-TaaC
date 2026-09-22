@@ -22,8 +22,11 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.tasks.periodic_tasks import (
+    _bgp_high_watermark_verdict,
     _converged_verdict,
     _DEFAULT_CONVERGED_WINDOW_SAMPLES,
+    _NexthopGroupPollSample,
+    _parse_bgp_nexthop_group_sizes,
     _unprogrammed_verdict,
     NexthopGroupPoll,
 )
@@ -32,6 +35,8 @@ from taac.health_check.health_check import types as hc_types
 
 # Defined in the task's own module, so patch it there.
 _PLOT = "neteng.test_infra.dne.taac.tasks.periodic_tasks._generate_multi_series_plot"
+_DRIVER = "neteng.test_infra.dne.taac.tasks.periodic_tasks.async_get_device_driver"
+_SUMMARY = "neteng.test_infra.dne.taac.tasks.periodic_tasks.get_nexthop_group_summary"
 
 
 def _summary(configured: int, unprogrammed: int = 0) -> NexthopGroupSummary:
@@ -40,6 +45,13 @@ def _summary(configured: int, unprogrammed: int = 0) -> NexthopGroupSummary:
         num_unprogrammed_groups=unprogrammed,
         nexthop_group_sizes={128: configured} if configured else {},
         nexthop_group_types={"IP": configured},
+    )
+
+
+def _bgp_sample(groups: int, width: int = 8) -> _NexthopGroupPollSample:
+    return _NexthopGroupPollSample(
+        summary=_summary(groups),
+        bgp_group_sizes={f"bgpgrp_{index}": width for index in range(groups)},
     )
 
 
@@ -491,6 +503,112 @@ class NexthopGroupVacuityGuardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
         self.assertIn("observation OK", result.message)
+
+    async def test_same_sample_trigger_requires_sustained_multipath(self) -> None:
+        self._params(
+            threshold=8192,
+            min_ecmp_width=2,
+            min_observed_groups=1000,
+            min_observed_multiway_groups=1,
+            min_observed_groups_consecutive_samples=3,
+        )
+        self.task.add_data(_sized({140: 2}), timestamp=1)
+        for timestamp in (2, 3, 4):
+            self.task.add_data(_sized({133: 1000, 134: 500}), timestamp=timestamp)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("device NHG trigger ACKNOWLEDGED", result.message)
+        self.assertIn("peak 1500 configured groups", result.message)
+        self.assertIn("including 1500 groups >= 2-wide", result.message)
+        self.assertIn("longest consecutive run 3", result.message)
+
+    async def test_same_sample_trigger_rejects_uncorrelated_peaks(self) -> None:
+        self._params(
+            threshold=8192,
+            min_ecmp_width=2,
+            min_observed_groups=1000,
+            min_observed_multiway_groups=1,
+        )
+        self.task.add_data(_sized({140: 2}), timestamp=1)
+        self.task.add_data(_sized({1: 1500}), timestamp=2)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("device NHG trigger BREACH", result.message)
+        self.assertIn("including 0 groups >= 2-wide", result.message)
+
+    async def test_same_sample_trigger_requires_consecutive_samples(self) -> None:
+        self._params(
+            threshold=8192,
+            min_ecmp_width=2,
+            min_observed_groups=1000,
+            min_observed_multiway_groups=1,
+            min_observed_groups_consecutive_samples=3,
+        )
+        self.task.add_data(_sized({133: 1000}), timestamp=1)
+        self.task.add_data(_sized({133: 1000}), timestamp=2)
+        self.task.add_data(_sized({140: 2}), timestamp=3)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("device NHG trigger BREACH", result.message)
+        self.assertIn("longest consecutive run 2", result.message)
+
+    async def test_same_sample_trigger_rejects_partial_histogram(self) -> None:
+        self._params(
+            threshold=8192,
+            min_ecmp_width=2,
+            min_observed_groups=1000,
+            min_observed_multiway_groups=1,
+        )
+        self.task.add_data(
+            NexthopGroupSummary(
+                num_groups_configured=1000,
+                num_unprogrammed_groups=0,
+                nexthop_group_sizes={133: 999},
+                nexthop_group_types={"IP": 1000},
+            ),
+            timestamp=1,
+        )
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("device NHG trigger NOT EVALUATED", result.message)
+
+    async def test_same_sample_multiway_floor_requires_width_and_count_floor(
+        self,
+    ) -> None:
+        self._params(min_observed_multiway_groups=1)
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("without min_observed_groups", result.message)
+        self.assertIn("without min_ecmp_width", result.message)
+
+    async def test_same_sample_trigger_rejects_nonpositive_group_floor(self) -> None:
+        self._params(min_observed_groups=0)
+        self.task.add_data(_sized({4: 1}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("min_observed_groups must be >= 1", result.message)
+
+    async def test_same_sample_trigger_rejects_nonpositive_width(self) -> None:
+        self._params(min_ecmp_width=0)
+        self.task.add_data(_sized({4: 1}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("min_ecmp_width must be >= 1", result.message)
 
 
 class NexthopGroupRecoveryDirectionTest(unittest.IsolatedAsyncioTestCase):
@@ -1270,3 +1388,288 @@ class NexthopGroupUnprogrammedToleranceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("without max_unprogrammed", result.message)
+
+
+class BgpNexthopGroupParsingTest(unittest.TestCase):
+    def test_keeps_only_named_bgp_groups_and_their_widths(self) -> None:
+        data = {
+            "nexthopGroups": {
+                "1": {"nexthopGroupName": "bgpgrp_1", "size": 8},
+                "2": {"nexthopGroupName": "lspgrp_1", "size": 128},
+                "3": {"nexthopGroupName": "sid_1", "size": 1},
+                "4": {"nexthopGroupName": "bgpgrp_2", "size": 17},
+            }
+        }
+
+        self.assertEqual(
+            {"bgpgrp_1": 8, "bgpgrp_2": 17},
+            _parse_bgp_nexthop_group_sizes(data),
+        )
+
+    def test_missing_group_table_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing nexthopGroups"):
+            _parse_bgp_nexthop_group_sizes({})
+
+    def test_matching_group_without_a_numeric_width_is_rejected(self) -> None:
+        data = {
+            "nexthopGroups": {"1": {"nexthopGroupName": "bgpgrp_1", "size": "eight"}}
+        }
+
+        with self.assertRaisesRegex(ValueError, "invalid size"):
+            _parse_bgp_nexthop_group_sizes(data)
+
+
+class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.task = NexthopGroupPoll(hostname="bag012.ash6", logger=MagicMock())
+        self.plot = AsyncMock(return_value=None)
+        plot_patch = patch(_PLOT, new=self.plot)
+        plot_patch.start()
+        self.addCleanup(plot_patch.stop)
+
+    def _params(self, **kwargs) -> None:
+        self.task._params.clear()
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_ecmp_width": 2,
+                "min_bgp_multiway_groups": 121,
+                "min_bgp_multiway_consecutive_samples": 3,
+                **kwargs,
+            }
+        )
+
+    def _collect(self, values: list[int]) -> None:
+        for index, value in enumerate(values):
+            self.task.add_data(_bgp_sample(value), timestamp=1000 + 5 * index)
+
+    async def _final_check(self):
+        result = await self.task.run_final_check()
+        assert result is not None
+        return result
+
+    async def test_three_consecutive_samples_acknowledge_crossing_120(self) -> None:
+        self._params()
+        self._collect([2, 121, 135, 128, 2])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("bgp-nhg trigger ACKNOWLEDGED", result.message)
+        self.assertIn("3/5 samples reached the floor 121", result.message)
+        self.assertIn("longest consecutive run 3", result.message)
+        self.assertIn("timestamp 1010", result.message)
+        self.assertIn("peak width distribution {8: 135}", result.message)
+        series = self.plot.call_args.kwargs["data_series"]
+        self.assertEqual(
+            {1000: 2, 1005: 121, 1010: 135, 1015: 128, 1020: 2},
+            series["bgpgrp_groups_>=2_wide"],
+        )
+
+    async def test_isolated_crossings_do_not_acknowledge_sustained_churn(self) -> None:
+        self._params()
+        self._collect([121, 2, 130, 2, 125])
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("bgp-nhg trigger BREACH", result.message)
+        self.assertIn("longest consecutive run 1", result.message)
+
+    async def test_width_one_bgp_groups_do_not_count_as_multipath(self) -> None:
+        self._params()
+        for index in range(3):
+            sample = _NexthopGroupPollSample(
+                summary=_summary(130),
+                bgp_group_sizes={
+                    **{f"bgpgrp_single_{i}": 1 for i in range(125)},
+                    **{f"bgpgrp_multi_{i}": 8 for i in range(5)},
+                },
+            )
+            self.task.add_data(sample, timestamp=1000 + 5 * index)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("peak 5 bgpgrp_* groups >= 2-wide", result.message)
+
+    async def test_all_width_gate_counts_named_singletons_at_watermark(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_bgp_groups": 1000,
+                "min_bgp_groups_consecutive_samples": 1,
+            }
+        )
+        self.task.add_data(
+            _NexthopGroupPollSample(
+                summary=_summary(1000),
+                bgp_group_sizes={
+                    **{f"bgpgrp_single_{i}": 1 for i in range(999)},
+                    "bgpgrp_multi": 8,
+                },
+            ),
+            timestamp=1000,
+        )
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("bgp-nhg all-width trigger ACKNOWLEDGED", result.message)
+        self.assertIn("peak 1000 bgpgrp_* groups across all widths", result.message)
+        series = self.plot.call_args.kwargs["data_series"]
+        self.assertEqual({1000: 1000}, series["bgpgrp_groups_all_widths"])
+
+    async def test_all_width_gate_breaches_below_watermark(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_bgp_groups": 1000,
+                "min_bgp_groups_consecutive_samples": 1,
+            }
+        )
+        self.task.add_data(_bgp_sample(999, width=1), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("bgp-nhg all-width trigger BREACH", result.message)
+
+    async def test_gate_without_detailed_samples_fails_as_unevaluated(self) -> None:
+        self._params()
+        self.task.add_data(_summary(200), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("bgp-nhg trigger NOT EVALUATED", result.message)
+
+    async def test_sample_count_without_floor_is_a_config_breach(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_ecmp_width": 2,
+                "min_bgp_multiway_consecutive_samples": 3,
+            }
+        )
+        self.task.add_data(_summary(2), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("without min_bgp_multiway_groups", result.message)
+
+    async def test_all_width_sample_count_without_floor_is_a_config_breach(
+        self,
+    ) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_bgp_groups_consecutive_samples": 1,
+            }
+        )
+        self.task.add_data(_summary(2), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("without min_bgp_groups", result.message)
+
+    @patch(_SUMMARY, new_callable=AsyncMock)
+    @patch(_DRIVER, new_callable=AsyncMock)
+    async def test_collection_preserves_named_widths(
+        self, mock_get_driver: AsyncMock, mock_get_summary: AsyncMock
+    ) -> None:
+        mock_get_summary.return_value = _summary(3)
+        mock_get_driver.return_value.get_nexthop_group_data = AsyncMock(
+            return_value={
+                "nexthopGroups": {
+                    "1": {"nexthopGroupName": "bgpgrp_1", "size": 4},
+                    "2": {"nexthopGroupName": "lspgrp_1", "size": 128},
+                    "3": {"nexthopGroupName": "bgpgrp_2", "size": 7},
+                }
+            }
+        )
+
+        await self.task._run(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_ecmp_width": 2,
+                "min_bgp_multiway_groups": 2,
+            }
+        )
+
+        sample = next(iter(self.task._data.values()))
+        self.assertIsInstance(sample, _NexthopGroupPollSample)
+        self.assertEqual({"bgpgrp_1": 4, "bgpgrp_2": 7}, sample.bgp_group_sizes)
+
+    @patch(_SUMMARY, new_callable=AsyncMock)
+    @patch(_DRIVER, new_callable=AsyncMock)
+    async def test_all_width_gate_requests_detailed_collection(
+        self, mock_get_driver: AsyncMock, mock_get_summary: AsyncMock
+    ) -> None:
+        mock_get_summary.return_value = _summary(1)
+        mock_get_driver.return_value.get_nexthop_group_data = AsyncMock(
+            return_value={
+                "nexthopGroups": {
+                    "1": {"nexthopGroupName": "bgpgrp_single", "size": 1},
+                }
+            }
+        )
+
+        await self.task._run(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_bgp_groups": 1,
+            }
+        )
+
+        sample = next(iter(self.task._data.values()))
+        self.assertIsInstance(sample, _NexthopGroupPollSample)
+        self.assertEqual({"bgpgrp_single": 1}, sample.bgp_group_sizes)
+
+    @patch(_SUMMARY, new_callable=AsyncMock)
+    @patch(_DRIVER, new_callable=AsyncMock)
+    async def test_aggregate_trigger_does_not_request_detailed_collection(
+        self, mock_get_driver: AsyncMock, mock_get_summary: AsyncMock
+    ) -> None:
+        summary = _sized({133: 1000, 134: 500})
+        mock_get_summary.return_value = summary
+        get_detailed = AsyncMock()
+        mock_get_driver.return_value.get_nexthop_group_data = get_detailed
+
+        await self.task._run(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 8192,
+                "min_ecmp_width": 2,
+                "min_observed_groups": 1000,
+                "min_observed_multiway_groups": 1,
+                "min_observed_groups_consecutive_samples": 1,
+            }
+        )
+
+        sample = next(iter(self.task._data.values()))
+        self.assertIs(summary, sample)
+        get_detailed.assert_not_awaited()
+
+
+class BgpNexthopGroupVerdictTest(unittest.TestCase):
+    def test_helper_handles_string_timestamp_keys(self) -> None:
+        series = {"1000": 121, "1005": 122, "1010": 123}
+        sizes = {
+            timestamp: {f"bgpgrp_{index}": 8 for index in range(group_count)}
+            for timestamp, group_count in series.items()
+        }
+
+        failed, message = _bgp_high_watermark_verdict(series, sizes, 121, 3, 2)
+
+        self.assertFalse(failed, message)
+        self.assertIn("timestamp 1010", message)

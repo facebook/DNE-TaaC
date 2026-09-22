@@ -13,6 +13,8 @@ from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
     EBB_EBGP_V4_PREFIX_SET,
     EBB_EBGP_V6_PREFIX_SET,
+    EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
+    EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
     EBB_FULL_SCALE_PORT_MAP,
     EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
     ebb_full_scale_topology,
@@ -101,7 +103,8 @@ from taac.test_as_a_config.types import (
 
 
 _LONGEVITY_DURATION_SECONDS = 14400
-_NEXTHOP_GROUP_THRESHOLD = 100
+_NEXTHOP_GROUP_AGGREGATE_GUARDRAIL = 8192
+_NHG_STORM_PLAYBOOK_NAME = "bgp_ebb_nexthop_group_count_threshold_playbook"
 _DEFAULT_EBGP_PREFIX_COUNT = 750
 _RUNTIME_UPDATE_EBGP_PREFIX_COUNT = 850
 _TC7_STATIC_EBGP_PREFIX_COUNT = 650
@@ -128,6 +131,69 @@ _UG_2_7_2_EBGP_POOLS = (
     rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V4}$",
     rf"^{_TC7_SHARED_EBGP_RUNTIME_POOL_V6}$",
 )
+
+
+def _nhg_storm_ixia_items(
+    bound: BoundTopology,
+) -> dict[str, dict[str, t.Any]]:
+    """Lower every topology-authored eBGP IXIA item into the C16 contract."""
+    groups = [group for group in bound.device_groups if group.role == "uplink"]
+    if {group.afi for group in groups} != {"v4", "v6"} or len(groups) != 2:
+        raise ValueError(
+            "CICD-EBB-16 requires exactly the topology's v4 and v6 uplink groups"
+        )
+
+    items: dict[str, dict[str, t.Any]] = {}
+    for group in groups:
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"CICD-EBB-16 group {group.name!r} must expose one route item"
+            )
+        advertisement = group.prefix_advertisements[0]
+        peer_item = group.legacy_ixia_bgp_peer_name or group.legacy_ixia_tag_name
+        device_group_item = group.legacy_ixia_device_group_name
+        route_item = advertisement.spec.legacy_ixia_name
+        missing = [
+            label
+            for label, value in (
+                ("device-group", device_group_item),
+                ("peer", peer_item),
+                ("route", route_item),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"CICD-EBB-16 group {group.name!r} is missing topology-authored "
+                f"IXIA items: {missing}"
+            )
+        route_counts = {len(paths) for paths in advertisement.paths_by_peer}
+        if (
+            len(advertisement.paths_by_peer) != group.peer_count
+            or len(route_counts) != 1
+        ):
+            raise ValueError(
+                f"CICD-EBB-16 group {group.name!r} has inconsistent peer/route rows"
+            )
+        routes_per_peer = route_counts.pop()
+        if routes_per_peer < _DEFAULT_EBGP_PREFIX_COUNT:
+            raise ValueError(
+                f"CICD-EBB-16 group {group.name!r} exposes {routes_per_peer} "
+                f"prefixes per peer; requires at least {_DEFAULT_EBGP_PREFIX_COUNT}"
+            )
+        afi = "ipv4" if group.afi == "v4" else "ipv6"
+        items[afi] = {
+            "logical_device_group": group.name,
+            "logical_route_advertisement": advertisement.spec.name,
+            "device_group_item": device_group_item,
+            "peer_item": peer_item,
+            "route_item": route_item,
+            "expected_peer_count": group.peer_count,
+            "expected_routes_per_peer": routes_per_peer,
+            "target_prefix_count": _DEFAULT_EBGP_PREFIX_COUNT,
+        }
+    return items
+
 
 _UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
     "bgp_ebb_attribute_churn_playbook": CharacterizationGates(
@@ -713,7 +779,27 @@ def _get_bgp_ebb_full_scale_playbooks(
     route_storm_cycles: int = 60,
     route_storm_quiet_window_seconds: int = 120,
     route_storm_bounded_validation: bool = False,
+    nhg_storm_epoch_count: int = 48,
+    nhg_storm_epoch_interval_seconds: int = 25,
+    nhg_storm_soak_seconds: int = 300,
+    nhg_storm_poll_interval_seconds: int = 60,
+    nhg_storm_min_eos_samples: int = 6,
+    nhg_storm_min_eos_consecutive_samples: int = 3,
+    nhg_storm_min_observed_bgp_multiway_memberships: int = (
+        EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH + 1
+    ),
+    nhg_storm_min_paused_fibagent_samples: int = 1,
 ) -> list[Playbook]:
+    device_config = bound.device_config
+    if device_config is None:
+        raise ValueError("CICD-EBB-16 requires a bound routing device config")
+    fibagent_bgp_nhg_watermark_high = device_config.fibagent_bgp_nhg_watermark_high
+    fibagent_bgp_nhg_watermark_low = device_config.fibagent_bgp_nhg_watermark_low
+    if (
+        fibagent_bgp_nhg_watermark_high is None
+        or fibagent_bgp_nhg_watermark_low is None
+    ):
+        raise ValueError("CICD-EBB-16 requires finite FibAgentBgp NHG watermarks")
     if selected_tc7_playbooks:
         playbooks = []
         if _TC7_LINK_FLAP_NAME in selected_tc7_playbooks:
@@ -994,12 +1080,27 @@ def _get_bgp_ebb_full_scale_playbooks(
             device_name=device_name,
             expected_established_sessions=session_count,
             route_count_expected=ebgp_prefix_count,
-            nexthop_group_threshold=_NEXTHOP_GROUP_THRESHOLD,
+            ixia_items_by_afi=_nhg_storm_ixia_items(bound),
+            nexthop_group_threshold=_NEXTHOP_GROUP_AGGREGATE_GUARDRAIL,
+            epoch_count=nhg_storm_epoch_count,
+            epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
+            soak_duration=nhg_storm_soak_seconds,
+            nexthop_group_poll_interval_seconds=(nhg_storm_poll_interval_seconds),
+            nexthop_group_min_samples=nhg_storm_min_eos_samples,
+            nexthop_group_min_consecutive_samples=(
+                nhg_storm_min_eos_consecutive_samples
+            ),
+            minimum_observed_bgp_multiway_memberships=(
+                nhg_storm_min_observed_bgp_multiway_memberships
+            ),
+            minimum_paused_fibagent_samples=(nhg_storm_min_paused_fibagent_samples),
+            fibagent_nhg_watermark_high=fibagent_bgp_nhg_watermark_high,
+            fibagent_nhg_watermark_low=fibagent_bgp_nhg_watermark_low,
             enable_update_group=enable_update_group,
             bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
-                "bgp_ebb_nexthop_group_count_threshold_playbook",
+                _NHG_STORM_PLAYBOOK_NAME,
                 enable_update_group,
             ),
         ),
@@ -1024,6 +1125,14 @@ def create_bgp_ebb_full_scale_test_config(
     route_storm_cycles: int = 60,
     route_storm_quiet_window_seconds: int = 120,
     route_storm_bounded_validation: bool = False,
+    nhg_storm_epoch_count: int = 48,
+    nhg_storm_epoch_interval_seconds: int = 25,
+    nhg_storm_soak_seconds: int = 300,
+    nhg_storm_poll_interval_seconds: int = 60,
+    nhg_storm_min_eos_samples: int = 6,
+    nhg_storm_min_eos_consecutive_samples: int = 3,
+    fibagent_bgp_nhg_watermark_high: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
+    fibagent_bgp_nhg_watermark_low: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
 ) -> TestConfig:
     """Build one selectable test suite on the canonical EBB full-scale topology.
 
@@ -1126,6 +1235,8 @@ def create_bgp_ebb_full_scale_test_config(
             openr_mode=openr_mode,
             update_group_enable=enable_update_group,
             bgpcpp_logging_config_override=bgpcpp_logging_config_override,
+            fibagent_bgp_nhg_watermark_high=fibagent_bgp_nhg_watermark_high,
+            fibagent_bgp_nhg_watermark_low=fibagent_bgp_nhg_watermark_low,
         ),
     )
     if selected_tc7_playbooks:
@@ -1144,6 +1255,15 @@ def create_bgp_ebb_full_scale_test_config(
         route_storm_cycles=route_storm_cycles,
         route_storm_quiet_window_seconds=route_storm_quiet_window_seconds,
         route_storm_bounded_validation=route_storm_bounded_validation,
+        nhg_storm_epoch_count=nhg_storm_epoch_count,
+        nhg_storm_epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
+        nhg_storm_soak_seconds=nhg_storm_soak_seconds,
+        nhg_storm_poll_interval_seconds=nhg_storm_poll_interval_seconds,
+        nhg_storm_min_eos_samples=nhg_storm_min_eos_samples,
+        nhg_storm_min_eos_consecutive_samples=(nhg_storm_min_eos_consecutive_samples),
+        nhg_storm_min_observed_bgp_multiway_memberships=(
+            fibagent_bgp_nhg_watermark_high + 1
+        ),
     )
     if playbooks_selected:
         playbooks_by_name = {playbook.name: playbook for playbook in playbooks}

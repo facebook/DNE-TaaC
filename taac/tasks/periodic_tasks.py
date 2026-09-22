@@ -561,6 +561,93 @@ def _count_multiway_groups(sizes: t.Dict[int, int], min_width: int) -> int:
     return sum(count for width, count in sizes.items() if width >= min_width)
 
 
+_BGP_NEXTHOP_GROUP_PREFIX = "bgpgrp_"
+
+
+class _NexthopGroupPollSample(t.NamedTuple):
+    summary: NexthopGroupSummary
+    bgp_group_sizes: t.Dict[str, int]
+
+
+def _parse_bgp_nexthop_group_sizes(data: t.Any) -> t.Dict[str, int]:
+    """Return the exact ``bgpgrp_*`` name-to-width map from EOS JSON."""
+    if not isinstance(data, dict) or not isinstance(data.get("nexthopGroups"), dict):
+        raise ValueError("show nexthop-group JSON is missing nexthopGroups")
+
+    result: t.Dict[str, int] = {}
+    for group in data["nexthopGroups"].values():
+        if not isinstance(group, dict):
+            continue
+        name = group.get("nexthopGroupName")
+        if not isinstance(name, str) or not name.startswith(_BGP_NEXTHOP_GROUP_PREFIX):
+            continue
+        size = group.get("size")
+        if not isinstance(size, int):
+            raise ValueError(f"BGP nexthop group {name!r} has invalid size {size!r}")
+        result[name] = size
+    return result
+
+
+def _width_histogram(group_sizes: t.Mapping[str, int]) -> t.Dict[int, int]:
+    histogram: t.Dict[int, int] = {}
+    for width in group_sizes.values():
+        histogram[width] = histogram.get(width, 0) + 1
+    return histogram
+
+
+def _bgp_high_watermark_verdict(
+    series: t.Mapping[t.Any, int],
+    group_sizes: t.Mapping[t.Any, t.Mapping[str, int]],
+    minimum_groups: int,
+    minimum_consecutive_samples: int,
+    min_ecmp_width: t.Optional[int],
+) -> t.Tuple[bool, str]:
+    """Require a sustained, named BGP-NHG high-water mark."""
+    trigger_name = (
+        "bgp-nhg all-width trigger" if min_ecmp_width is None else "bgp-nhg trigger"
+    )
+    group_scope = (
+        "across all widths" if min_ecmp_width is None else f">= {min_ecmp_width}-wide"
+    )
+    if not series:
+        return True, (
+            f"{trigger_name} NOT EVALUATED: no detailed bgpgrp_* samples were recorded"
+        )
+
+    ordered = sorted(series, key=float)
+    longest = current = 0
+    crossing: t.List[t.Any] = []
+    for timestamp in ordered:
+        if series[timestamp] >= minimum_groups:
+            crossing.append(timestamp)
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+
+    peak_timestamp = max(ordered, key=lambda timestamp: series[timestamp])
+    peak = series[peak_timestamp]
+    peak_widths = _width_histogram(group_sizes[peak_timestamp])
+    detail = (
+        f"peak {peak} bgpgrp_* groups {group_scope} at timestamp "
+        f"{peak_timestamp}, peak width distribution {dict(sorted(peak_widths.items()))}; "
+        f"{len(crossing)}/{len(ordered)} samples reached the floor "
+        f"{minimum_groups}, longest consecutive run {longest}"
+    )
+    if longest >= minimum_consecutive_samples:
+        return (
+            False,
+            f"{trigger_name} ACKNOWLEDGED: {detail} (required "
+            f"{minimum_consecutive_samples} consecutive samples)",
+        )
+    return (
+        True,
+        f"{trigger_name} BREACH: {detail}; required "
+        f"{minimum_consecutive_samples} consecutive samples -- the requested "
+        f"NHG churn was not observed on the device",
+    )
+
+
 def _series_window(series: t.Dict[float, t.Any], count: int, last: bool) -> t.List:
     """First or last ``count`` values of a timestamp-keyed series, in time order."""
     ordered = [series[ts] for ts in sorted(series)]
@@ -601,7 +688,42 @@ def _checked_int(
     return coerced
 
 
-def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
+def _aggregate_nhg_trigger_param_problems(
+    params: t.Mapping[str, t.Any],
+) -> t.List[str]:
+    problems: t.List[str] = []
+    _checked_int(params, "min_observed_groups", problems, minimum=1)
+    _checked_int(params, "min_ecmp_width", problems, minimum=1)
+    if params.get("min_observed_multiway_groups") is not None:
+        if params.get("min_observed_groups") is None:
+            problems.append(
+                "min_observed_multiway_groups was set without "
+                "min_observed_groups, so there is no configured-group floor "
+                "for the same-sample trigger"
+            )
+        if params.get("min_ecmp_width") is None:
+            problems.append(
+                "min_observed_multiway_groups was set without min_ecmp_width, "
+                "so the same-sample multipath floor cannot be evaluated"
+            )
+    if params.get("min_observed_groups_consecutive_samples") is not None and (
+        params.get("min_observed_groups") is None
+    ):
+        problems.append(
+            "min_observed_groups_consecutive_samples was set without "
+            "min_observed_groups, so there is no observation floor to sustain"
+        )
+    _checked_int(params, "min_observed_multiway_groups", problems, minimum=1)
+    _checked_int(
+        params,
+        "min_observed_groups_consecutive_samples",
+        problems,
+        minimum=1,
+    )
+    return problems
+
+
+def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:  # noqa: C901
     """Opt-in params that were requested but cannot produce a verdict.
 
     Silence is the wrong response to a misconfigured gate: the caller asked for
@@ -615,6 +737,42 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:
             "max_multiway_groups was set without min_ecmp_width, so the "
             "ECMP-set ceiling cannot be evaluated"
         )
+    if params.get("min_bgp_multiway_groups") is not None and (
+        params.get("min_ecmp_width") is None
+    ):
+        problems.append(
+            "min_bgp_multiway_groups was set without min_ecmp_width, so the "
+            "BGP multipath-NHG trigger cannot be evaluated"
+        )
+    if params.get("min_bgp_multiway_consecutive_samples") is not None and (
+        params.get("min_bgp_multiway_groups") is None
+    ):
+        problems.append(
+            "min_bgp_multiway_consecutive_samples was set without "
+            "min_bgp_multiway_groups, so there is no trigger floor to sustain"
+        )
+    _checked_int(params, "min_bgp_multiway_groups", problems, minimum=1)
+    _checked_int(
+        params,
+        "min_bgp_multiway_consecutive_samples",
+        problems,
+        minimum=1,
+    )
+    if params.get("min_bgp_groups_consecutive_samples") is not None and (
+        params.get("min_bgp_groups") is None
+    ):
+        problems.append(
+            "min_bgp_groups_consecutive_samples was set without "
+            "min_bgp_groups, so there is no all-width BGP-group floor to sustain"
+        )
+    _checked_int(params, "min_bgp_groups", problems, minimum=1)
+    _checked_int(
+        params,
+        "min_bgp_groups_consecutive_samples",
+        problems,
+        minimum=1,
+    )
+    problems.extend(_aggregate_nhg_trigger_param_problems(params))
     if params.get("recovery_window_samples") is not None and (
         params.get("recovery_tolerance") is None
     ):
@@ -700,6 +858,112 @@ def _observation_verdict(observed_max: int, floor: int) -> t.Tuple[bool, str]:
         f"reached the expected floor ({floor}) -- the metric is reporting "
         f"values but they are implausible for this topology, so any ceiling "
         f"above it is vacuous",
+    )
+
+
+def _aggregate_nhg_trigger_verdict(
+    group_counts: t.Mapping[t.Any, int],
+    sizes_data: t.Mapping[t.Any, t.Dict[int, int]],
+    minimum_groups: int,
+    minimum_consecutive_samples: int,
+    min_ecmp_width: t.Optional[int],
+    minimum_multiway_groups: t.Optional[int],
+) -> t.Tuple[bool, str]:
+    """Require an EOS summary sample to satisfy the count and width floors."""
+    ordered = sorted(group_counts, key=float)
+    if minimum_multiway_groups is not None:
+        inconsistent = [
+            timestamp
+            for timestamp in ordered
+            if timestamp not in sizes_data
+            or sum(sizes_data[timestamp].values()) != group_counts[timestamp]
+        ]
+        if inconsistent:
+            return True, (
+                "device NHG trigger NOT EVALUATED: the nexthop-group size "
+                "histogram did not account for every configured group in "
+                f"{len(inconsistent)}/{len(ordered)} samples"
+            )
+
+    multiway_by_timestamp = {
+        timestamp: (
+            _count_multiway_groups(sizes_data[timestamp], min_ecmp_width)
+            if minimum_multiway_groups is not None and min_ecmp_width is not None
+            else 0
+        )
+        for timestamp in ordered
+    }
+    qualifying: t.List[t.Any] = []
+    longest = current = 0
+    for timestamp in ordered:
+        meets_floor = group_counts[timestamp] >= minimum_groups
+        if minimum_multiway_groups is not None:
+            meets_floor = meets_floor and (
+                multiway_by_timestamp[timestamp] >= minimum_multiway_groups
+            )
+        if meets_floor:
+            qualifying.append(timestamp)
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+
+    peak_timestamp = max(
+        ordered,
+        key=lambda timestamp: (
+            group_counts[timestamp],
+            multiway_by_timestamp[timestamp],
+        ),
+    )
+    detail = (
+        f"peak {group_counts[peak_timestamp]} configured groups at timestamp "
+        f"{peak_timestamp}"
+    )
+    if minimum_multiway_groups is not None and min_ecmp_width is not None:
+        detail += (
+            f", including {multiway_by_timestamp[peak_timestamp]} groups "
+            f">= {min_ecmp_width}-wide, width distribution "
+            f"{dict(sorted(sizes_data[peak_timestamp].items()))}"
+        )
+    detail += (
+        f"; {len(qualifying)}/{len(ordered)} samples satisfied the same-sample "
+        f"floor, longest consecutive run {longest}"
+    )
+    if longest >= minimum_consecutive_samples:
+        return False, (
+            f"device NHG trigger ACKNOWLEDGED: {detail} (required "
+            f"{minimum_consecutive_samples} consecutive samples)"
+        )
+    return True, (
+        f"device NHG trigger BREACH: {detail}; required "
+        f"{minimum_consecutive_samples} consecutive samples with at least "
+        f"{minimum_groups} configured groups"
+        + (
+            f" and {minimum_multiway_groups} groups >= {min_ecmp_width}-wide"
+            if minimum_multiway_groups is not None
+            else ""
+        )
+    )
+
+
+def _observed_group_floor_verdict(
+    params: t.Mapping[str, t.Any],
+    group_counts: t.Mapping[t.Any, int],
+    sizes_data: t.Mapping[t.Any, t.Dict[int, int]],
+    min_ecmp_width: t.Optional[int],
+) -> t.Tuple[bool, str]:
+    minimum_groups = int(params["min_observed_groups"])
+    minimum_multiway_groups = params.get("min_observed_multiway_groups")
+    consecutive_samples = params.get("min_observed_groups_consecutive_samples")
+    if minimum_multiway_groups is None and consecutive_samples is None:
+        return _observation_verdict(max(group_counts.values()), minimum_groups)
+    return _aggregate_nhg_trigger_verdict(
+        group_counts,
+        sizes_data,
+        minimum_groups,
+        int(consecutive_samples or 1),
+        min_ecmp_width,
+        (None if minimum_multiway_groups is None else int(minimum_multiway_groups)),
     )
 
 
@@ -953,14 +1217,29 @@ class NexthopGroupPoll(PeriodicTask):
             else:
                 self.logger.info("No nexthop group sizes data available")
 
-            self.add_data(output)
+            sample: NexthopGroupSummary | _NexthopGroupPollSample = output
+            if (
+                params.get("min_bgp_groups") is not None
+                or params.get("min_bgp_multiway_groups") is not None
+            ):
+                group_data = await driver.get_nexthop_group_data()
+                bgp_group_sizes = _parse_bgp_nexthop_group_sizes(group_data)
+                sample = _NexthopGroupPollSample(output, bgp_group_sizes)
+                self.logger.info(
+                    "BGP nexthop-group width distribution: "
+                    f"{dict(sorted(_width_histogram(bgp_group_sizes).items()))}"
+                )
+
+            self.add_data(sample)
 
             # Display max num_groups_configured across all collected data
             if self._data:
                 max_num_groups = max(
-                    summary.num_groups_configured
-                    for summary in self._data.values()
-                    if isinstance(summary, NexthopGroupSummary)
+                    value.summary.num_groups_configured
+                    if isinstance(value, _NexthopGroupPollSample)
+                    else value.num_groups_configured
+                    for value in self._data.values()
+                    if isinstance(value, (NexthopGroupSummary, _NexthopGroupPollSample))
                 )
                 self.logger.info(
                     f"Current max num_groups_configured across all samples: {max_num_groups}"
@@ -989,7 +1268,12 @@ class NexthopGroupPoll(PeriodicTask):
            ``max_multiway_groups``).
         5. the settled multi-way count (``expected_converged_multiway_groups``).
         6. a floor on what was observed at all (``min_observed_groups``).
-        7. recovery to the opening baseline (``recovery_tolerance``).
+        7. an optional same-sample aggregate count and multipath floor.
+        8. recovery to the opening baseline (``recovery_tolerance``).
+        9. BGP-only named-NHG creation across every width
+           (``min_bgp_groups``).
+        10. sustained BGP-only multipath-NHG creation
+           (``min_bgp_multiway_groups``).
 
         Collecting no data is a FAILURE, not a SKIP. ``run`` swallows every
         collection exception, so an empty series means every single poll failed
@@ -1033,8 +1317,13 @@ class NexthopGroupPoll(PeriodicTask):
         # from width-1 groups. Without it the count conflates the two -- see
         # _count_multiway_groups.
         sizes_data: t.Dict[float, t.Dict[int, int]] = {}
+        bgp_group_sizes_data: t.Dict[float, t.Dict[str, int]] = {}
 
-        for timestamp, summary in self._data.items():
+        for timestamp, value in self._data.items():
+            summary = value
+            if isinstance(value, _NexthopGroupPollSample):
+                summary = value.summary
+                bgp_group_sizes_data[timestamp] = value.bgp_group_sizes
             if isinstance(summary, NexthopGroupSummary):
                 num_groups_configured_data[timestamp] = summary.num_groups_configured
                 num_unprogrammed_groups_data[timestamp] = (
@@ -1153,6 +1442,83 @@ class NexthopGroupPoll(PeriodicTask):
             )
             (failures if failed else verdicts).append(text)
 
+        # Opt-in trigger acknowledgement for C16-style NHG churn. The summary's
+        # raw total includes lspgrp_/sid_ groups, and even its width histogram
+        # cannot correlate a width with a group type. Polling the detailed EOS
+        # table lets these gates count only named bgpgrp_* groups. The all-width
+        # gate matches FibAgent's programmed-NHG watermark domain; the multi-way
+        # gate separately proves that at least some ECMP structure survived.
+        bgp_group_series: t.Optional[t.Dict[float, int]] = None
+        bgp_multiway_series: t.Optional[t.Dict[float, int]] = None
+        min_bgp_groups = self._params.get("min_bgp_groups")
+        min_bgp_multiway_groups = self._params.get("min_bgp_multiway_groups")
+        detailed_bgp_requested = (
+            min_bgp_groups is not None or min_bgp_multiway_groups is not None
+        )
+        if detailed_bgp_requested:
+            if len(bgp_group_sizes_data) != len(num_groups_configured_data):
+                failures.append(
+                    "bgp-nhg trigger NOT EVALUATED: detailed bgpgrp_* data was "
+                    f"recorded for {len(bgp_group_sizes_data)} of "
+                    f"{len(num_groups_configured_data)} nexthop-group samples"
+                )
+            else:
+                if min_bgp_groups is not None:
+                    bgp_group_series = {
+                        ts: len(named_sizes)
+                        for ts, named_sizes in bgp_group_sizes_data.items()
+                    }
+                    required_samples = int(
+                        self._params.get("min_bgp_groups_consecutive_samples", 1)
+                    )
+                    failed, text = _bgp_high_watermark_verdict(
+                        bgp_group_series,
+                        bgp_group_sizes_data,
+                        int(min_bgp_groups),
+                        required_samples,
+                        None,
+                    )
+                    (failures if failed else verdicts).append(text)
+                if min_bgp_multiway_groups is not None and min_ecmp_width is not None:
+                    bgp_multiway_series = {
+                        ts: sum(
+                            1
+                            for width in named_sizes.values()
+                            if width >= min_ecmp_width
+                        )
+                        for ts, named_sizes in bgp_group_sizes_data.items()
+                    }
+                    required_samples = int(
+                        self._params.get(
+                            "min_bgp_multiway_consecutive_samples",
+                            1,
+                        )
+                    )
+                    failed, text = _bgp_high_watermark_verdict(
+                        bgp_multiway_series,
+                        bgp_group_sizes_data,
+                        int(min_bgp_multiway_groups),
+                        required_samples,
+                        int(min_ecmp_width),
+                    )
+                    (failures if failed else verdicts).append(text)
+                raw_evidence = [
+                    {
+                        "timestamp": str(ts),
+                        "all_width_groups": len(bgp_group_sizes_data[ts]),
+                        **(
+                            {"multiway_groups": bgp_multiway_series[ts]}
+                            if bgp_multiway_series is not None
+                            else {}
+                        ),
+                        "width_distribution": dict(
+                            sorted(_width_histogram(bgp_group_sizes_data[ts]).items())
+                        ),
+                    }
+                    for ts in sorted(bgp_group_sizes_data, key=float)
+                ]
+                self.logger.info(f"BGP nexthop-group raw samples: {raw_evidence}")
+
         # Opt-in: the STEADY STATE, as opposed to every other verdict here,
         # which is a maximum over the whole run.
         expected_converged = self._params.get("expected_converged_multiway_groups")
@@ -1177,8 +1543,11 @@ class NexthopGroupPoll(PeriodicTask):
         # suite passed 11 times on a gate that was structurally blind.
         min_observed = self._params.get("min_observed_groups")
         if min_observed is not None:
-            failed, text = _observation_verdict(
-                max(num_groups_configured_data.values()), min_observed
+            failed, text = _observed_group_floor_verdict(
+                self._params,
+                num_groups_configured_data,
+                sizes_data,
+                None if min_ecmp_width is None else int(min_ecmp_width),
             )
             (failures if failed else verdicts).append(text)
 
@@ -1270,12 +1639,24 @@ class NexthopGroupPoll(PeriodicTask):
         # was simply never plotted.
         if multiway_series is not None:
             data_series[f"groups_>={min_ecmp_width}_wide"] = multiway_series
+        if bgp_group_series is not None:
+            data_series["bgpgrp_groups_all_widths"] = bgp_group_series
+        if bgp_multiway_series is not None:
+            data_series[f"bgpgrp_groups_>={min_ecmp_width}_wide"] = bgp_multiway_series
 
         # Create annotations with max num_groups_configured value
         plot_annotations = {
             "Max Groups Configured": max_num_groups_configured,
             "Samples Collected": len(self._data),
         }
+        if bgp_multiway_series:
+            plot_annotations["Max BGP Multiway Groups"] = max(
+                bgp_multiway_series.values()
+            )
+        if bgp_group_series:
+            plot_annotations["Max BGP Groups (All Widths)"] = max(
+                bgp_group_series.values()
+            )
 
         plot_path = await _generate_multi_series_plot(
             data_series=data_series,

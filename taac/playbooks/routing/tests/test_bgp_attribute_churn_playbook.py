@@ -28,28 +28,37 @@ from taac.abstractions.churn.specs import (
     ChurnScenario,
     ChurnWorkload,
 )
+from taac.abstractions.topology.model import (
+    BoundTopology,
+    RoutingDeviceConfig,
+)
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     _ebb_drained_prefix_descriptors,
     get_bgp_ebb_attribute_churn_playbook,
     get_bgp_ebb_fauu_drain_undrain_playbook,
+    get_bgp_ebb_nexthop_group_count_threshold_playbook,
     get_bgp_ebb_plane_drain_undrain_playbook,
 )
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
+    create_bgp_nhg_random_storm_stage,
     create_fauu_drain_undrain_stage,
     create_plane_drain_undrain_stage,
 )
 from taac.steps.step_definitions import (
     create_bgp_attribute_churn_step,
+    create_bgp_nhg_random_storm_step,
 )
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _DEFAULT_EBGP_PREFIX_COUNT,
     _get_bgp_ebb_full_scale_playbooks,
+    _nhg_storm_ixia_items,
     _TC7_PLAYBOOK_NAMES,
     create_bgp_ebb_full_scale_test_config,
 )
@@ -88,6 +97,24 @@ EXPECTED_MATRIX = {
         "plane_1_nonpreferred": "incomplete",
     },
 }
+
+_EBB16_IXIA_ITEMS = {
+    afi: {
+        "logical_device_group": f"dg_ebgp_{suffix}",
+        "logical_route_advertisement": f"dg_ebgp_{suffix}_routes",
+        "device_group_item": f"DEVICE_GROUP_{afi.upper()}_EBGP",
+        "peer_item": f"BGP_PEER_{afi.upper()}_EBGP",
+        "route_item": f"PREFIX_POOL_{afi.upper()}_EBGP",
+        "expected_peer_count": 140,
+        "expected_routes_per_peer": 750,
+        "target_prefix_count": 750,
+    }
+    for afi, suffix in (("ipv4", "v4"), ("ipv6", "v6"))
+}
+_EBB16_ITEMS_TARGET = (
+    "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+    "bgp_ebb_full_scale._nhg_storm_ixia_items"
+)
 
 
 # The complete flat CustomStep payload the production Playbook serializes.
@@ -1068,12 +1095,20 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "bgp_ebb_full_scale.get_bgp_ebb_attribute_churn_playbook"
         )
 
-        with patch(target) as playbook_factory:
+        with (
+            patch(target) as playbook_factory,
+            patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+        ):
             playbook_factory.return_value = MagicMock()
+            bound = MagicMock()
+            bound.device_config = RoutingDeviceConfig(
+                fibagent_bgp_nhg_watermark_high=1000,
+                fibagent_bgp_nhg_watermark_low=1000,
+            )
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                bound=MagicMock(),
+                bound=bound,
                 ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                 selected_tc7_playbooks=set(),
             )
@@ -1147,7 +1182,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "bgp_ebb_full_scale.get_bgp_ebb_nexthop_group_count_threshold_playbook"
         )
 
-        with patch(target, return_value=MagicMock()) as playbook_factory:
+        with (
+            patch(target, return_value=MagicMock()) as playbook_factory,
+            patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+        ):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
@@ -1158,6 +1196,212 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             )
 
         self.assertFalse(playbook_factory.call_args.kwargs["enable_update_group"])
+        self.assertEqual(
+            _EBB16_IXIA_ITEMS,
+            playbook_factory.call_args.kwargs["ixia_items_by_afi"],
+        )
+
+    def test_ebb16_items_are_derived_from_every_topology_handle(self) -> None:
+        groups = []
+        for afi, suffix in (("v4", "v4"), ("v6", "v6")):
+            advertisement = SimpleNamespace(
+                spec=SimpleNamespace(
+                    name=f"dg_ebgp_{suffix}_routes",
+                    legacy_ixia_name=f"PREFIX_POOL_IPV{4 if afi == 'v4' else 6}_EBGP",
+                ),
+                paths_by_peer=(tuple(object() for _ in range(850)),) * 2,
+            )
+            groups.append(
+                SimpleNamespace(
+                    role="uplink",
+                    afi=afi,
+                    name=f"dg_ebgp_{suffix}",
+                    peer_count=2,
+                    legacy_ixia_bgp_peer_name=(
+                        f"BGP_PEER_IPV{4 if afi == 'v4' else 6}_EBGP"
+                    ),
+                    legacy_ixia_tag_name=None,
+                    legacy_ixia_device_group_name=(
+                        f"DEVICE_GROUP_IPV{4 if afi == 'v4' else 6}_EBGP"
+                    ),
+                    prefix_advertisements=(advertisement,),
+                )
+            )
+
+        items = _nhg_storm_ixia_items(
+            t.cast(BoundTopology, SimpleNamespace(device_groups=groups))
+        )
+
+        self.assertEqual({"ipv4", "ipv6"}, set(items))
+        self.assertEqual("BGP_PEER_IPV4_EBGP", items["ipv4"]["peer_item"])
+        self.assertEqual("PREFIX_POOL_IPV6_EBGP", items["ipv6"]["route_item"])
+        self.assertEqual(2, items["ipv4"]["expected_peer_count"])
+        self.assertEqual(850, items["ipv6"]["expected_routes_per_peer"])
+        self.assertEqual(750, items["ipv4"]["target_prefix_count"])
+        self.assertEqual(750, items["ipv6"]["target_prefix_count"])
+
+    def test_ebb16_step_stage_and_playbook_lock_random_storm_contract(self) -> None:
+        step = create_bgp_nhg_random_storm_step(
+            hostname="dut.example.com",
+            ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+            epoch_count=2,
+            epoch_interval_seconds=1,
+        )
+        payload = _step_payload(step)
+        self.assertEqual("bgp_nhg_random_storm", payload["custom_step_name"])
+        self.assertEqual(_EBB16_IXIA_ITEMS, payload["ixia_items_by_afi"])
+        self.assertEqual(3_000, payload["inactive_paths_per_afi"])
+        self.assertEqual(750, payload["minimum_distinct_memberships_per_afi"])
+        self.assertEqual(1001, payload["minimum_observed_bgp_multiway_memberships"])
+        self.assertEqual(1000, payload["fibagent_nhg_watermark_high"])
+        self.assertEqual(1000, payload["fibagent_nhg_watermark_low"])
+
+        stage = create_bgp_nhg_random_storm_stage(
+            hostname="dut.example.com",
+            ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+            epoch_count=2,
+            epoch_interval_seconds=1,
+        )
+        self.assertEqual(1, len(stage.steps))
+        self.assertEqual(
+            "bgp_nhg_random_storm",
+            _step_payload(stage.steps[0])["custom_step_name"],
+        )
+        self.assertEqual(
+            3_000,
+            _step_payload(stage.steps[0])["inactive_paths_per_afi"],
+        )
+        self.assertEqual(
+            1001,
+            _step_payload(stage.steps[0])["minimum_observed_bgp_multiway_memberships"],
+        )
+        self.assertEqual(
+            1000,
+            _step_payload(stage.steps[0])["fibagent_nhg_watermark_high"],
+        )
+        self.assertEqual(
+            1000,
+            _step_payload(stage.steps[0])["fibagent_nhg_watermark_low"],
+        )
+
+        playbook = get_bgp_ebb_nexthop_group_count_threshold_playbook(
+            device_name="dut.example.com",
+            expected_established_sessions=1272,
+            route_count_expected=750,
+            ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+            epoch_count=2,
+            epoch_interval_seconds=1,
+            soak_duration=1,
+        )
+        storm = _step_payload(playbook.stages[0].steps[0])
+        self.assertEqual(_EBB16_IXIA_ITEMS, storm["ixia_items_by_afi"])
+        self.assertEqual(3_000, storm["inactive_paths_per_afi"])
+        self.assertEqual(1001, storm["minimum_observed_bgp_multiway_memberships"])
+        self.assertEqual(1, storm["minimum_paused_fibagent_samples"])
+        self.assertEqual(1000, storm["fibagent_nhg_watermark_high"])
+        self.assertEqual(1000, storm["fibagent_nhg_watermark_low"])
+        expanded_items = {
+            afi: {**items, "expected_routes_per_peer": 850}
+            for afi, items in _EBB16_IXIA_ITEMS.items()
+        }
+        expanded_playbook = get_bgp_ebb_nexthop_group_count_threshold_playbook(
+            device_name="dut.example.com",
+            expected_established_sessions=1272,
+            route_count_expected=850,
+            ixia_items_by_afi=expanded_items,
+            epoch_count=2,
+            epoch_interval_seconds=1,
+            soak_duration=1,
+        )
+        self.assertEqual(
+            3_000,
+            _step_payload(expanded_playbook.stages[0].steps[0])[
+                "inactive_paths_per_afi"
+            ],
+        )
+        self.assertEqual(
+            {"ipv4": 750, "ipv6": 750},
+            {
+                afi: items["target_prefix_count"]
+                for afi, items in _step_payload(expanded_playbook.stages[0].steps[0])[
+                    "ixia_items_by_afi"
+                ].items()
+            },
+        )
+        periodic_tasks = playbook.periodic_tasks
+        if periodic_tasks is None:
+            self.fail("CICD-EBB-16 must install its NHG periodic observer")
+        nhg_task = next(
+            task for task in periodic_tasks if task.name == "nexthop_group_check"
+        )
+        params_list = nhg_task.params_list
+        if params_list is None or params_list[0].json_params is None:
+            self.fail("CICD-EBB-16 NHG observer must carry JSON parameters")
+        nhg_params = json.loads(params_list[0].json_params)
+        self.assertEqual(8192, nhg_params["threshold"])
+        self.assertEqual(60, nhg_task.interval)
+        self.assertNotIn("max_unprogrammed", nhg_params)
+        self.assertEqual(1000, nhg_params["min_observed_groups"])
+        self.assertEqual(1, nhg_params["min_observed_multiway_groups"])
+        self.assertEqual(3, nhg_params["min_observed_groups_consecutive_samples"])
+        self.assertNotIn("min_bgp_groups", nhg_params)
+        self.assertNotIn("min_bgp_groups_consecutive_samples", nhg_params)
+        self.assertNotIn("min_bgp_multiway_groups", nhg_params)
+        self.assertNotIn("min_bgp_multiway_consecutive_samples", nhg_params)
+
+    def test_ebb16_step_rejects_desired_floor_at_high_watermark(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "minimum_observed_bgp_multiway_memberships must be >= "
+            "fibagent_nhg_watermark_high \\+ 1",
+        ):
+            create_bgp_nhg_random_storm_step(
+                hostname="dut.example.com",
+                ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+                minimum_observed_bgp_multiway_memberships=1000,
+                fibagent_nhg_watermark_high=1000,
+                fibagent_nhg_watermark_low=1000,
+            )
+
+    def test_scheduled_ebb16_uses_canonical_48_epoch_contract(self) -> None:
+        playbook = next(
+            playbook
+            for playbook in BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
+            if playbook.name == "bgp_ebb_nexthop_group_count_threshold_playbook"
+        )
+        payloads = [
+            _step_payload(step)
+            for stage in playbook.stages or []
+            for step in stage.steps or []
+        ]
+        storm = next(
+            payload
+            for payload in payloads
+            if payload.get("custom_step_name") == "bgp_nhg_random_storm"
+        )
+
+        self.assertEqual(48, storm["epoch_count"])
+        self.assertEqual(25, storm["epoch_interval_seconds"])
+        self.assertEqual(3_000, storm["inactive_paths_per_afi"])
+        self.assertEqual(750, storm["minimum_distinct_memberships_per_afi"])
+        self.assertEqual(1001, storm["minimum_observed_bgp_multiway_memberships"])
+        self.assertEqual(1000, storm["fibagent_nhg_watermark_high"])
+        self.assertEqual(1000, storm["fibagent_nhg_watermark_low"])
+        self.assertEqual(
+            {"ipv4": 750, "ipv6": 750},
+            {
+                afi: items["expected_routes_per_peer"]
+                for afi, items in storm["ixia_items_by_afi"].items()
+            },
+        )
+        self.assertEqual(
+            {"ipv4": 750, "ipv6": 750},
+            {
+                afi: items["target_prefix_count"]
+                for afi, items in storm["ixia_items_by_afi"].items()
+            },
+        )
+        self.assertIn(300, [payload.get("duration") for payload in payloads])
 
     def test_full_scale_factory_wires_optional_bgp_monitor_port(self) -> None:
         fauu_target = (
@@ -1185,11 +1429,17 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 self.subTest(port_count=len(ports)),
                 patch(fauu_target, return_value=MagicMock()) as fauu_factory,
                 patch(plane_target, return_value=MagicMock()) as plane_factory,
+                patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
             ):
+                bound = MagicMock()
+                bound.device_config = RoutingDeviceConfig(
+                    fibagent_bgp_nhg_watermark_high=1000,
+                    fibagent_bgp_nhg_watermark_low=1000,
+                )
                 _get_bgp_ebb_full_scale_playbooks(
                     inventory,
                     BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                    bound=MagicMock(),
+                    bound=bound,
                     ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                     selected_tc7_playbooks=set(),
                 )

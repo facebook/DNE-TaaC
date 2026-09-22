@@ -1213,6 +1213,85 @@ def create_bgp_route_storm_step(
     )
 
 
+def create_bgp_nhg_random_storm_step(
+    *,
+    hostname: str,
+    ixia_items_by_afi: t.Mapping[str, t.Mapping[str, t.Any]],
+    seed: int = 160016,
+    inactive_paths_per_afi: int = 3_000,
+    minimum_distinct_memberships_per_afi: int = 750,
+    minimum_observed_bgp_multiway_memberships: int = 1001,
+    minimum_paused_fibagent_samples: int = 1,
+    fibagent_nhg_watermark_high: int = 1000,
+    fibagent_nhg_watermark_low: int = 1000,
+    minimum_changed_paths_per_epoch: int = 5_000,
+    epoch_count: int = 48,
+    epoch_interval_seconds: int = 25,
+    description: str | None = None,
+) -> Step:
+    """Create the topology-bound CICD-EBB-16 peer-by-prefix random storm."""
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    if set(ixia_items_by_afi) != {"ipv4", "ipv6"}:
+        raise ValueError("ixia_items_by_afi must contain exactly ipv4 and ipv6")
+    required = {
+        "logical_device_group",
+        "logical_route_advertisement",
+        "device_group_item",
+        "peer_item",
+        "route_item",
+        "expected_peer_count",
+        "expected_routes_per_peer",
+        "target_prefix_count",
+    }
+    items = {afi: dict(value) for afi, value in ixia_items_by_afi.items()}
+    for afi, value in items.items():
+        if set(value) != required or any(value[key] in (None, "") for key in required):
+            raise ValueError(f"{afi} IXIA item contract is incomplete")
+    numeric = {
+        "inactive_paths_per_afi": inactive_paths_per_afi,
+        "minimum_distinct_memberships_per_afi": minimum_distinct_memberships_per_afi,
+        "minimum_observed_bgp_multiway_memberships": (
+            minimum_observed_bgp_multiway_memberships
+        ),
+        "minimum_paused_fibagent_samples": minimum_paused_fibagent_samples,
+        "fibagent_nhg_watermark_high": fibagent_nhg_watermark_high,
+        "fibagent_nhg_watermark_low": fibagent_nhg_watermark_low,
+        "minimum_changed_paths_per_epoch": minimum_changed_paths_per_epoch,
+        "epoch_count": epoch_count,
+        "epoch_interval_seconds": epoch_interval_seconds,
+    }
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in numeric.values()):
+        raise ValueError("NHG random-storm numeric parameters must be positive integers")
+    if (
+        fibagent_nhg_watermark_low > fibagent_nhg_watermark_high
+        or fibagent_nhg_watermark_high > (1 << 31) - 1
+    ):
+        raise ValueError(
+            "FibAgentBgp NHG watermarks require low <= high <= INT32_MAX"
+        )
+    if (
+        minimum_observed_bgp_multiway_memberships
+        < fibagent_nhg_watermark_high + 1
+    ):
+        raise ValueError(
+            "minimum_observed_bgp_multiway_memberships must be >= "
+            "fibagent_nhg_watermark_high + 1"
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("NHG random-storm seed must be an integer")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_nhg_random_storm",
+            "hostname": hostname,
+            "ixia_items_by_afi": items,
+            "seed": seed,
+            **numeric,
+        },
+        description=description or "Run seeded dual-stack peer-by-prefix NHG storm",
+    )
+
+
 def create_bgp_multipath_oscillation_step(
     *,
     hostname: str,

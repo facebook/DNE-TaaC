@@ -3513,9 +3513,15 @@ def create_nexthop_group_poll_periodic_task(
     recovery_tolerance: t.Optional[float] = None,
     recovery_window_samples: t.Optional[int] = None,
     min_observed_groups: t.Optional[int] = None,
+    min_observed_multiway_groups: t.Optional[int] = None,
+    min_observed_groups_consecutive_samples: t.Optional[int] = None,
     expected_converged_multiway_groups: t.Optional[int] = None,
     converged_window_samples: t.Optional[int] = None,
     min_samples: t.Optional[int] = None,
+    min_bgp_groups: t.Optional[int] = None,
+    min_bgp_groups_consecutive_samples: t.Optional[int] = None,
+    min_bgp_multiway_groups: t.Optional[int] = None,
+    min_bgp_multiway_consecutive_samples: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
@@ -3605,6 +3611,28 @@ def create_nexthop_group_poll_periodic_task(
             (e.g. `1`) asserts the metric actually observed something. Not
             hypothetical: on bag012 this metric read 0 for all 884 samples and
             the suite passed repeatedly on a structurally blind gate.
+        min_observed_multiway_groups: Optional minimum number of groups at
+            least `min_ecmp_width` wide that must be present in the same sample
+            that reaches `min_observed_groups`. Requires both parameters.
+        min_observed_groups_consecutive_samples: Number of consecutive summary
+            samples that must satisfy the configured-group floor and, when
+            configured, its same-sample multiway floor. Defaults to `1`.
+        min_bgp_groups: Optional trigger-acknowledgement floor for all named
+            `bgpgrp_*` groups, including width-1 groups. Unlike the summary
+            total, this excludes unrelated `lspgrp_*` and `sid_*` groups. This
+            is the EOS count domain corresponding to FibAgent's programmed-NHG
+            watermark.
+        min_bgp_groups_consecutive_samples: Number of consecutive detailed
+            samples that must reach `min_bgp_groups`. Defaults to `1` when the
+            floor is configured.
+        min_bgp_multiway_groups: Optional trigger-acknowledgement floor for the
+            number of named `bgpgrp_*` groups whose width is at least
+            `min_ecmp_width`. Unlike the summary total, this excludes unrelated
+            `lspgrp_*` and `sid_*` groups. Requires `min_ecmp_width`.
+        min_bgp_multiway_consecutive_samples: Number of consecutive detailed
+            samples that must reach `min_bgp_multiway_groups`. Defaults to `1`
+            when the floor is configured. Use more than one to reject a
+            one-poll artifact.
 
     Returns:
         A `PeriodicTask` named `"nexthop_group_check"` wrapping
@@ -3625,9 +3653,24 @@ def create_nexthop_group_poll_periodic_task(
         ("recovery_tolerance", recovery_tolerance),
         ("recovery_window_samples", recovery_window_samples),
         ("min_observed_groups", min_observed_groups),
+        ("min_observed_multiway_groups", min_observed_multiway_groups),
+        (
+            "min_observed_groups_consecutive_samples",
+            min_observed_groups_consecutive_samples,
+        ),
         ("expected_converged_multiway_groups", expected_converged_multiway_groups),
         ("converged_window_samples", converged_window_samples),
         ("min_samples", min_samples),
+        ("min_bgp_groups", min_bgp_groups),
+        (
+            "min_bgp_groups_consecutive_samples",
+            min_bgp_groups_consecutive_samples,
+        ),
+        ("min_bgp_multiway_groups", min_bgp_multiway_groups),
+        (
+            "min_bgp_multiway_consecutive_samples",
+            min_bgp_multiway_consecutive_samples,
+        ),
     ):
         if value is not None:
             json_payload[key] = value

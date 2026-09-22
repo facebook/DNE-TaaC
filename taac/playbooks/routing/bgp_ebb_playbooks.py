@@ -83,6 +83,7 @@ from taac.playbooks.routing.dice_churn import (
 from taac.stages.stage_definitions import (
     create_bgp_ebb_attribute_churn_stage,
     create_bgp_ebb_route_storm_stage,
+    create_bgp_nhg_random_storm_stage,
     create_bgp_restart_test_stage,
     create_characterization_bracket_stages,
     create_cold_start_test_stage,
@@ -2309,27 +2310,51 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     device_name: str,
     expected_established_sessions: int,
     route_count_expected: int,
-    nexthop_group_threshold: int = 100,
-    prefix_pool_regex: str = ".*EBGP.*",
-    prefix_start_index: int = 0,
-    prefix_end_index: int = 5000,
-    test_duration_seconds: int = 1200,
+    ixia_items_by_afi: t.Mapping[str, t.Mapping[str, t.Any]],
+    nexthop_group_threshold: int = 8192,
+    seed: int = 160016,
+    minimum_distinct_memberships_per_afi: int = 750,
+    minimum_changed_paths_per_epoch: int = 5_000,
+    epoch_count: int = 48,
+    epoch_interval_seconds: int = 25,
     soak_duration: int = 300,
     convergence_threshold: int = 600,
+    minimum_observed_bgp_multiway_memberships: int = 1001,
+    minimum_paused_fibagent_samples: int = 1,
+    minimum_observed_multiway_groups: int = 1,
+    nexthop_group_poll_interval_seconds: int = 60,
+    nexthop_group_min_samples: int = 6,
+    nexthop_group_min_consecutive_samples: int = 3,
+    fibagent_nhg_watermark_high: int = 1000,
+    fibagent_nhg_watermark_low: int = 1000,
     enable_update_group: bool = True,
     exclude_bgp_mon: bool = True,
     bgp_mon_parent_network: str | None = None,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
 ) -> Playbook:
-    """
-    Build CICD-EBB-16: Nexthop-group count threshold.
+    """Build CICD-EBB-16: High-cardinality nexthop-group random storm.
 
     See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and triage guidance.
 
-    Monitors nexthop group counts during eBGP route oscillations and fails
-    if the count meets or exceeds the configured threshold.
+    Creates independent selected-path membership per prefix, proves the DUT
+    sustained the requested BGP multipath NHG floor, then verifies recovery.
     """
+    target_prefix_counts = tuple(
+        items.get("target_prefix_count") for items in ixia_items_by_afi.values()
+    )
+    if (
+        not target_prefix_counts
+        or len(set(target_prefix_counts)) != 1
+        or isinstance(target_prefix_counts[0], bool)
+        or not isinstance(target_prefix_counts[0], int)
+        or target_prefix_counts[0] <= 0
+    ):
+        raise ValueError(
+            "CICD-EBB-16 requires one positive target prefix count per AFI"
+        )
+    target_prefix_count = t.cast(int, target_prefix_counts[0])
+    inactive_paths_per_afi = 4 * target_prefix_count
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
     )
@@ -2363,18 +2388,36 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
             create_nexthop_group_poll_periodic_task(
                 device_name=device_name,
                 threshold=nexthop_group_threshold,
+                interval=nexthop_group_poll_interval_seconds,
+                min_ecmp_width=2,
+                min_observed_groups=fibagent_nhg_watermark_high,
+                min_observed_multiway_groups=minimum_observed_multiway_groups,
+                min_observed_groups_consecutive_samples=(
+                    nexthop_group_min_consecutive_samples
+                ),
+                min_samples=nexthop_group_min_samples,
             ),
         ],
         postchecks=soak_checks.postchecks,
         stages=_characterized(
             [
-                create_route_oscillations_stage(
-                    device_name=device_name,
-                    prefix_pool_regex=prefix_pool_regex,
-                    prefix_start_index=prefix_start_index,
-                    prefix_end_index=prefix_end_index,
-                    test_duration_seconds=test_duration_seconds,
-                    spread=True,
+                create_bgp_nhg_random_storm_stage(
+                    hostname=device_name,
+                    ixia_items_by_afi=ixia_items_by_afi,
+                    seed=seed,
+                    inactive_paths_per_afi=inactive_paths_per_afi,
+                    minimum_distinct_memberships_per_afi=(
+                        minimum_distinct_memberships_per_afi
+                    ),
+                    minimum_observed_bgp_multiway_memberships=(
+                        minimum_observed_bgp_multiway_memberships
+                    ),
+                    minimum_paused_fibagent_samples=(minimum_paused_fibagent_samples),
+                    fibagent_nhg_watermark_high=fibagent_nhg_watermark_high,
+                    fibagent_nhg_watermark_low=fibagent_nhg_watermark_low,
+                    minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
+                    epoch_count=epoch_count,
+                    epoch_interval_seconds=epoch_interval_seconds,
                 ),
                 create_steps_stage(
                     steps=[

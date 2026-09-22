@@ -33,7 +33,7 @@ import json
 import random
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from taac.abstractions.churn.attribute import AttributeChurn
 from neteng.test_infra.dne.taac.abstractions.churn.route import RouteChurn, RouteStorm
@@ -57,6 +57,7 @@ from taac.steps.step_definitions import (
     create_advertise_withdraw_prefixes_step,
     create_bgp_attribute_churn_step,
     create_bgp_lifecycle_convergence_step,
+    create_bgp_nhg_random_storm_step,
     create_bgp_prefixes_med_value_step,
     create_bgp_restoration_baseline_step,
     create_bgp_restoration_probe_step,
@@ -2007,6 +2008,46 @@ def _create_route_oscillation_cycle_steps_spread(
         )
     )
     return steps
+
+
+def create_bgp_nhg_random_storm_stage(
+    *,
+    hostname: str,
+    ixia_items_by_afi: Mapping[str, Mapping[str, Any]],
+    seed: int = 160016,
+    inactive_paths_per_afi: int = 3_000,
+    minimum_distinct_memberships_per_afi: int = 750,
+    minimum_observed_bgp_multiway_memberships: int = 1001,
+    minimum_paused_fibagent_samples: int = 1,
+    fibagent_nhg_watermark_high: int = 1000,
+    fibagent_nhg_watermark_low: int = 1000,
+    minimum_changed_paths_per_epoch: int = 5_000,
+    epoch_count: int = 48,
+    epoch_interval_seconds: int = 25,
+) -> Stage:
+    """Create C16 as one failure-safe, topology-bound random-storm step."""
+    return Stage(
+        steps=[
+            create_bgp_nhg_random_storm_step(
+                hostname=hostname,
+                ixia_items_by_afi=ixia_items_by_afi,
+                seed=seed,
+                inactive_paths_per_afi=inactive_paths_per_afi,
+                minimum_distinct_memberships_per_afi=(
+                    minimum_distinct_memberships_per_afi
+                ),
+                minimum_observed_bgp_multiway_memberships=(
+                    minimum_observed_bgp_multiway_memberships
+                ),
+                minimum_paused_fibagent_samples=minimum_paused_fibagent_samples,
+                fibagent_nhg_watermark_high=fibagent_nhg_watermark_high,
+                fibagent_nhg_watermark_low=fibagent_nhg_watermark_low,
+                minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
+                epoch_count=epoch_count,
+                epoch_interval_seconds=epoch_interval_seconds,
+            )
+        ]
+    )
 
 
 def create_route_oscillations_stage(
