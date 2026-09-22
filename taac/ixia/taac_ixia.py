@@ -725,6 +725,15 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             # e2e 2026-06-05 when Tier 2 LoadConfig succeeded but protocol
             # start failed.
             self.session.Ixnetwork.AssignPorts(True)
+            try:
+                self.rehydrate_vport_indices(none_throws(self.ixia_config).port_configs)
+            except IxiaSetupError as e:
+                self.logger.warning(
+                    "Cached IXIA topology is incompatible with the requested "
+                    f"declarative config: {e}. Rejecting the cache hit so the "
+                    "caller can rebuild from scratch."
+                )
+                return False
             self.start_and_verify_protocols()
             return True
         except Exception as e:

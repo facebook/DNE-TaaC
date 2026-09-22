@@ -263,11 +263,10 @@ class TrafficGenerator:
 
     async def async_create_ixia_setup(self) -> None:
         try:
-            # Build the IxiaConfig once — used both for the TaacIxia constructor
-            # AND for computing the cache key (if cache is enabled).
-            built_ixia_config: t.Optional[ixia_types.IxiaConfig] = None
-            if not self.session_id or self.override_traffic_items:
-                built_ixia_config = await self.async_create_ixia_config()
+            # Always provide the declarative config to TaacIxia. Retained
+            # sessions need its port/device-group structure to rehydrate the
+            # process-local vport index even when traffic items are reused.
+            built_ixia_config = await self.async_create_ixia_config()
 
             self.ixia = TaacIxia(
                 ixia_config=built_ixia_config,
@@ -296,16 +295,16 @@ class TrafficGenerator:
                 trace_api_calls=self.trace_api_calls,
             )
 
-            # Topology cache — only when (a) cache is enabled in TestConfig AND
-            # (b) we have an IxiaConfig to hash. Without an IxiaConfig (session
-            # reuse path) there's nothing to key on.
+            # Topology cache is only for newly-created sessions. An explicit
+            # session ID always wins and is rehydrated directly from that
+            # session instead of loading a cached topology over it.
             cache_mgr = None
             cache_key = None
             cache_hit = False
             if (
                 self.ixia_config_cache
                 and self.ixia_config_cache.enabled
-                and built_ixia_config is not None
+                and not self.session_id
             ):
                 # Best-effort: catch any unexpected exception during cache
                 # lookup so cache bugs degrade to cold setup, never fail the

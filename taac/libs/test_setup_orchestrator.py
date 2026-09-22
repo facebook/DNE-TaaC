@@ -21,6 +21,9 @@ from taac.libs.ixia_candidate import (
     normalize_ixia_candidates,
     select_ixia_candidates,
 )
+from taac.libs.ixia_config_cache_manager import (
+    DEFAULT_IXIA_CONFIG_CACHE,
+)
 from taac.libs.oss_test_bed_chunker import OssTestBedChunker
 from taac.libs.otg_traffic_generator import OtgTrafficGenerator
 from taac.libs.traffic_generator import TrafficGenerator
@@ -53,20 +56,6 @@ if not TAAC_OSS:
         DnePackageFetcher,
     )
     from taac.internal.test_bed_chunker import TestBedChunker
-
-
-# IIE-2 260605 two-tier IXIA topology cache: default-on for every TestConfig
-# that does not opt out via an explicit `ixia_config_cache=IxiaConfigCache(...)`
-# override (e.g. `enabled=False`). bag011 BGP_RESTART + bag013 EBB full scale
-# both measured ~4x setup time reduction on warm runs (15m cold → 4m warm).
-# Tier 1 path is the IxNetwork API server's documented persistent storage dir
-# (survives session teardown — confirmed on bag011/012/013 chassis). Tier 2 is
-# omitted in OSS builds because the Manifold helper is internal-only.
-_DEFAULT_IXIA_CONFIG_CACHE: taac_types.IxiaConfigCache = taac_types.IxiaConfigCache(
-    enabled=True,
-    chassis_local_dir="/root/.local/share/Ixia/sdmStreamManager/common/taac_ixia_configs",
-    manifold_bucket=None if TAAC_OSS else "taac_ixia_topology_cache",
-)
 
 
 # IIE-2 260610 soft recovery of the IXIA REST API tier (`ixnetworkweb`
@@ -1290,17 +1279,15 @@ class TestSetupOrchestrator:
         )
         _log(f"\033[36m[IXIA]\033[0m {session_info} | {chassis_info}")
 
-        # IIE-2 260605: two-tier IXIA topology cache. Default-on for every
-        # TestConfig that has no explicit `ixia_config_cache` (see
-        # `_DEFAULT_IXIA_CONFIG_CACHE` above). TestConfigs that intentionally
-        # need cold setup (snake tests, anything probing `create_basic_setup`
-        # itself) must opt out by setting `ixia_config_cache=IxiaConfigCache(
-        # enabled=False)`. Cache misses fall through to cold setup; cache
-        # exceptions are swallowed in `TrafficGenerator.async_create_ixia_setup`
-        # so a broken cache never reds a green test.
+        # IIE-2 260605: two-tier IXIA topology cache. The default is disabled,
+        # so TestConfigs must explicitly opt in with
+        # `ixia_config_cache=IxiaConfigCache(enabled=True)`. Cache misses and
+        # rehydration failures fall through to cold setup; cache exceptions are
+        # swallowed in `TrafficGenerator.async_create_ixia_setup` so a broken
+        # cache never reds a green test.
         ixia_config_cache = (
             getattr(self.test_config, "ixia_config_cache", None)
-            or _DEFAULT_IXIA_CONFIG_CACHE
+            or DEFAULT_IXIA_CONFIG_CACHE
         )
         # IIE-2 260610: default-on soft recovery of the ixnetworkweb platform
         # app when SessionAssistant creation fails with 5xx. TestConfigs that

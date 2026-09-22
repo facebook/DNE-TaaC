@@ -366,17 +366,9 @@ def create_npi_cpu_queue_test_config(
         name=test_config_name,
         ixia_protocol_verification_timeout=600,
         basset_pool=basset_pool or "dne.test",
-        # Tier 1 IXIA cache LoadConfig restores server-side vports but does
-        # NOT rehydrate the Python-side `self.vport_indices` dict (see
-        # `assign_ports` gate at `ixia/ixia.py:4566` skipped when
-        # `is_existing_session=True`). The UNH playbooks
-        # (npi_cpu_036/037/038) read `vport_indices` from
-        # `register_cpu_queue_static_route_patcher` to install a DUT-side
-        # static route to an IXIA-mimic next hop, and KeyError on cache
-        # hit. Other CPU queue playbooks don't touch `vport_indices` so
-        # they were unaffected. Opt out of the cache here until the
-        # rehydration gap is fixed in `taac_ixia.load_config_from_chassis`
-        # / `ixia_config_cache_manager.try_load_from_manifold`.
+        # Keep CPU-queue qualification on the deterministic cold path while
+        # retained-session/cache rehydration receives broader hardware
+        # coverage. Explicit session attachment remains supported.
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
         endpoints=[
             taac_types.Endpoint(

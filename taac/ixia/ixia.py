@@ -1246,17 +1246,9 @@ class Ixia:
         self.skip_advertised_prefixes_check = skip_advertised_prefixes_check
         self.skip_ixia_protocol_verification = skip_ixia_protocol_verification
         self.ixia_protocol_verification_timeout = ixia_protocol_verification_timeout
-        # Python-side index of vport metadata, populated ONLY by
-        # `assign_ports()` (gated by `is_existing_session` — see
-        # `create_basic_setup`). On IXIA topology-cache HIT (Tier 1
-        # LoadConfig / Tier 2 Manifold via `taac_ixia.load_config_from_chassis`
-        # or `ixia_config_cache_manager.try_load_from_manifold`) the server-
-        # side vports are restored but this dict stays empty. Any TAAC step,
-        # health check, or helper that reads `vport_indices` (e.g.
-        # `register_cpu_queue_static_route_patcher`) will KeyError on cache
-        # hit — the owning TestConfig MUST opt out of the cache via
-        # `ixia_config_cache=taac_types.IxiaConfigCache(enabled=False)`
-        # until the cache layer learns to rehydrate this dict.
+        # Python-side index of vport metadata. Fresh topologies populate it in
+        # `assign_ports` / `create_device_groups`; retained sessions and cache
+        # hits rebuild it with `rehydrate_vport_indices`.
         self.vport_indices: t.Dict[str, VportIndex] = {}
         self._traffic_start_time: float = 0.0
         self.cfgr_client = ConfigeratorClient()
@@ -1569,10 +1561,10 @@ class Ixia:
     def _trace_port_mappings(self) -> t.Tuple[IxiaTracePortMapping, ...]:
         """Slot/port to vport to DUT interface, from the declarative config.
 
-        Read from `ixia_config` rather than `vport_indices` because a topology
-        cache hit skips `assign_ports` and leaves `vport_indices` empty while
-        the ports themselves are very much mapped. The vport name is the same
-        deterministic `DESIRED_VPORT_NAME` render `assign_ports` uses.
+        Read from `ixia_config` so trace preamble construction does not depend
+        on whether fresh setup or retained-session rehydration has completed.
+        The vport name is the same deterministic `DESIRED_VPORT_NAME` render
+        used by both paths.
         """
         config = self.ixia_config
         port_configs = getattr(config, "port_configs", None) if config else None
@@ -2256,18 +2248,9 @@ class Ixia:
             port_configs: t.List of type PortConfig containing port config
                 details.
 
-        WARNING — Cache caveat:
-            This method is the ONLY producer of `self.vport_indices`. It is
-            skipped by `create_basic_setup` when `is_existing_session=True`,
-            which is the state after an IXIA topology-cache HIT
-            (`taac_ixia.load_config_from_chassis` /
-            `ixia_config_cache_manager.try_load_from_manifold`). On cache
-            hit the server-side vports are restored but `vport_indices`
-            stays empty — any downstream API that traverses through
-            `vport_indices` will KeyError. TestConfigs that use such APIs
-            (e.g. `register_cpu_queue_static_route_patcher`) MUST opt out
-            of the cache via
-            `ixia_config_cache=taac_types.IxiaConfigCache(enabled=False)`.
+        Existing sessions and cached configurations use
+        `rehydrate_vport_indices` instead, because their server-side objects
+        already exist and must not be recreated.
         """
 
         portmap_obj = self.session.PortMapAssistant()
@@ -2335,6 +2318,184 @@ class Ixia:
         self.logger.info(
             f"{_GREEN}{_BOLD}[IXIA]{_RESET} All ports reserved in "
             f"{_YELLOW}{elapsed_time:.1f}s{_RESET}"
+        )
+
+    def rehydrate_vport_indices(
+        self, port_configs: t.Sequence[ixia_types.PortConfig]
+    ) -> None:
+        """Rebuild the local object index for an existing IXIA topology.
+
+        An ``.ixncfg`` load or explicit ``--ixia-session-id`` restores the
+        IxNetwork object graph, but not this Python process's object index.
+        Resolve configured objects by their deterministic names without
+        mutating the retained session. Missing objects fail closed so a cache
+        hit can fall back to a clean build and a retained-session attach gets
+        an actionable error instead of a later ``KeyError``.
+        """
+
+        def required(obj: t.Any, description: str) -> t.Any:
+            if not obj:
+                raise IxiaSetupError(
+                    f"Cannot rehydrate IXIA session: missing {description}"
+                )
+            return obj
+
+        def network_group_name(
+            network_group_index: int,
+            device_group_identifier: str,
+            address_family: ixia_types.IpAddressFamily,
+        ) -> str:
+            identifier = f"N{network_group_index}_{device_group_identifier}"
+            template = (
+                DESIRED_V4_BGP_PREFIX_NAME
+                if address_family == ixia_types.IpAddressFamily.IPV4
+                else DESIRED_V6_BGP_PREFIX_NAME
+            )
+            return template.format(port_identifier=identifier)
+
+        self.vport_indices = {}
+        self.tag_name_to_device_group_name_list = defaultdict(list)
+        for port_config in port_configs:
+            port_identifier = self.get_port_identifier(port_config.port_name)
+            desired_vport_name = DESIRED_VPORT_NAME.format(
+                port_identifier=port_identifier
+            )
+            required(
+                self.ixnetwork.Vport.find(Name=desired_vport_name),
+                f"vport {desired_vport_name!r}",
+            )
+            desired_topology_name = DESIRED_TOPOLOGY_NAME.format(
+                port_identifier=port_identifier
+            )
+            topology = required(
+                self.ixnetwork.Topology.find(Name=desired_topology_name),
+                f"topology {desired_topology_name!r}",
+            )
+            vport_index = VportIndex(
+                name=desired_vport_name,
+                topology_name=topology.Name,
+            )
+            self.vport_indices[port_identifier] = vport_index
+            created_device_groups: t.Dict[int, "DeviceGroup"] = {}
+
+            for device_group_config in port_config.device_group_configs or ():
+                device_group_identifier = (
+                    f"D{device_group_config.device_group_index}_{port_identifier}"
+                )
+                if device_group_config.tag_name:
+                    device_group_identifier += (
+                        f"_{device_group_config.tag_name.upper()}"
+                    )
+                    self.tag_name_to_device_group_name_list[
+                        device_group_config.tag_name
+                    ].append(device_group_identifier)
+
+                container = topology
+                tag_upper = (device_group_config.tag_name or "").upper()
+                if match := re.search(r"CHAINED_(\d+)", tag_upper):
+                    parent_index = int(match.group(1))
+                    container = required(
+                        created_device_groups.get(parent_index),
+                        f"parent device group index {parent_index} for "
+                        f"{device_group_identifier!r}",
+                    )
+
+                desired_device_group_name = (
+                    device_group_config.device_group_name
+                    or DESIRED_DEVICE_GROUP_NAME.format(
+                        port_identifier=device_group_identifier
+                    )
+                )
+                device_group = required(
+                    container.DeviceGroup.find(Name=desired_device_group_name),
+                    f"device group {desired_device_group_name!r}",
+                )
+                created_device_groups[device_group_config.device_group_index] = (
+                    device_group
+                )
+                device_group_index = DeviceGroupIndex(device_group=device_group)
+                vport_index.device_group_indices[
+                    device_group_config.device_group_index
+                ] = device_group_index
+
+                desired_ethernet_name = DESIRED_ETHERNET_NAME.format(
+                    port_identifier=device_group_identifier
+                )
+                ethernet = required(
+                    device_group.Ethernet.find(Name=desired_ethernet_name),
+                    f"Ethernet stack {desired_ethernet_name!r}",
+                )
+                device_group_index.ethernet = ethernet
+                device_group_index.ipv4 = ethernet.Ipv4.find(
+                    Name=DESIRED_IPV4_NAME.format(
+                        port_identifier=device_group_identifier
+                    )
+                ) or None
+                device_group_index.ipv6 = ethernet.Ipv6.find(
+                    Name=DESIRED_IPV6_NAME.format(
+                        port_identifier=device_group_identifier
+                    )
+                ) or None
+
+                bgp_config_info = device_group_config.bgp_config
+                if not bgp_config_info:
+                    continue
+                for bgp_config in (
+                    bgp_config_info.bgp_v4_config,
+                    bgp_config_info.bgp_v6_config,
+                ):
+                    if not bgp_config:
+                        continue
+                    custom_network_groups = (
+                        bgp_config.custom_network_group_configs or ()
+                    )
+                    if custom_network_groups:
+                        for config in custom_network_groups:
+                            network_group = required(
+                                device_group.NetworkGroup.find(
+                                    Name=config.network_group_name
+                                ),
+                                f"network group {config.network_group_name!r}",
+                            )
+                            device_group_index.network_group_indices[
+                                config.network_group_index
+                            ] = NetworkGroupIndex(network_group=network_group)
+                    else:
+                        for config in bgp_config.bgp_prefix_configs or ():
+                            address_family = (
+                                config.ip_address_family
+                                or bgp_config.ip_address_family
+                            )
+                            desired_name = network_group_name(
+                                config.network_group_index,
+                                device_group_identifier,
+                                address_family,
+                            )
+                            network_group = required(
+                                device_group.NetworkGroup.find(Name=desired_name),
+                                f"network group {desired_name!r}",
+                            )
+                            device_group_index.network_group_indices[
+                                config.network_group_index
+                            ] = NetworkGroupIndex(network_group=network_group)
+
+                    for config in bgp_config.import_bgp_routes_params_list or ():
+                        desired_name = network_group_name(
+                            config.network_group_index,
+                            device_group_identifier,
+                            bgp_config.ip_address_family,
+                        )
+                        network_group = required(
+                            device_group.NetworkGroup.find(Name=desired_name),
+                            f"network group {desired_name!r}",
+                        )
+                        device_group_index.network_group_indices[
+                            config.network_group_index
+                        ] = NetworkGroupIndex(network_group=network_group)
+
+        self.logger.info(
+            "Rehydrated IXIA vport index for existing session: "
+            f"{sorted(self.vport_indices)}"
         )
 
     def create_topology(self, port_identifier: str, vport: "Vport") -> "Topology":
@@ -7151,9 +7312,18 @@ class Ixia:
                 f"{_GREEN}[IXIA]{_RESET} Chassis configured in {time.time() - _step_start:.0f}s"
             )
         else:
+            try:
+                port_configs = none_throws(self.ixia_config).port_configs
+                self.rehydrate_vport_indices(port_configs)
+            except Exception as exc:
+                raise IxiaSetupError(
+                    f"Retained IXIA session {self.session_id} does not match "
+                    f"the requested topology: {exc}"
+                ) from exc
             _log(
                 f"{_DIM}[IXIA] Steps 2-4 skipped — "
-                f"reusing existing session ID {self.session_id}{_RESET}"
+                f"reusing existing session ID {self.session_id}; local topology "
+                f"index rehydrated{_RESET}"
             )
 
         # ── Step 5: Verify & start protocols ─────────────────────

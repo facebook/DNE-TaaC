@@ -76,6 +76,15 @@ from thrift.py3.serializer import Protocol, serialize as thrift_serialize
 # through it.
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_-]")
 
+# Keep topology caching out of the default setup path while the opt-in path is
+# validated across the IXIA chassis fleet. Keeping this lightweight constant in
+# the cache module also lets cache tests avoid importing the full orchestrator.
+DEFAULT_IXIA_CONFIG_CACHE: taac_types.IxiaConfigCache = taac_types.IxiaConfigCache(
+    enabled=False,
+    chassis_local_dir="/root/.local/share/Ixia/sdmStreamManager/common/taac_ixia_configs",
+    manifold_bucket=None if TAAC_OSS else "taac_ixia_topology_cache",
+)
+
 # Cache version: bump ONLY when Python topology-generation logic changes in a
 # way that would affect the saved `.ixncfg` but that doesn't surface in the
 # hashed declarative thrift inputs (rare under v3 — most topology drift is
@@ -375,6 +384,9 @@ class IxiaConfigCacheManager:
             # clear ownership first to handle any stale grabs from prior
             # sessions. Same fix as `taac_ixia.load_config_from_chassis`.
             self._ixia.session.Ixnetwork.AssignPorts(True)
+            self._ixia.rehydrate_vport_indices(
+                none_throws(self._ixia.ixia_config).port_configs
+            )
             self._ixia.start_and_verify_protocols()
             elapsed = time.monotonic() - t0
             self._logger.info(

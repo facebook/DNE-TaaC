@@ -432,7 +432,7 @@ def gen_snake_test_config(
         # Deprecated - define at playbook level
         # prechecks=common_hcs,
         playbooks=playbooks,
-        # Opt out of the two-tier IXIA topology cache (default-on per D107780401).
+        # Explicitly retain the cache-free IXIA setup path.
         # Snake tests do single-DUT loopback bring-up that exercises
         # `create_basic_setup` itself (per-loop SnakeConfig + PTP unicast
         # endpoints) -- caching the post-setup ixncfg would obscure regressions

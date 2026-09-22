@@ -6,7 +6,9 @@ import typing as t
 import unittest
 from unittest.mock import MagicMock, patch
 
+from ixia.ixia import types as ixia_types
 from neteng.test_infra.dne.taac.ixia import taac_ixia as taac_ixia_module
+from taac.ixia.ixia import IxiaSetupError
 from taac.ixia.taac_ixia import TaacIxia
 
 
@@ -25,6 +27,44 @@ def _make_ixia() -> tuple[TaacIxia, MagicMock, MagicMock]:
 
 
 class ConfigTransferTelemetryTest(unittest.TestCase):
+    def test_cached_config_rehydrates_local_index_before_protocol_start(self) -> None:
+        ixia, _resource_manager, logger = _make_ixia()
+        ixnetwork = MagicMock()
+        t.cast(t.Any, ixia.session).Ixnetwork = ixnetwork
+        port_configs = [ixia_types.PortConfig(port_name="test-port")]
+        ixia.ixia_config = ixia_types.IxiaConfig(port_configs=port_configs)
+        ixia.rehydrate_vport_indices = MagicMock()
+        ixia.start_and_verify_protocols = MagicMock()
+
+        loaded = ixia.load_config_from_chassis("/tmp/cached.ixncfg")
+
+        self.assertTrue(loaded)
+        ixnetwork.AssignPorts.assert_called_once_with(True)
+        ixia.rehydrate_vport_indices.assert_called_once_with(port_configs)
+        ixia.start_and_verify_protocols.assert_called_once_with()
+
+    def test_rehydration_failure_turns_cache_hit_into_cold_setup_miss(self) -> None:
+        ixia, _resource_manager, logger = _make_ixia()
+        ixnetwork = MagicMock()
+        t.cast(t.Any, ixia.session).Ixnetwork = ixnetwork
+        ixia.ixia_config = ixia_types.IxiaConfig(
+            port_configs=[ixia_types.PortConfig(port_name="test-port")]
+        )
+        ixia.rehydrate_vport_indices = MagicMock(
+            side_effect=IxiaSetupError("missing topology metadata")
+        )
+        ixia.start_and_verify_protocols = MagicMock()
+
+        loaded = ixia.load_config_from_chassis("/tmp/cached.ixncfg")
+
+        self.assertFalse(loaded)
+        ixia.start_and_verify_protocols.assert_not_called()
+        logger.warning.assert_called_once_with(
+            "Cached IXIA topology is incompatible with the requested "
+            "declarative config: missing topology metadata. Rejecting the "
+            "cache hit so the caller can rebuild from scratch."
+        )
+
     def test_export_logs_duration(self) -> None:
         ixia, resource_manager, logger = _make_ixia()
         resource_manager.ExportConfig.return_value = '{"name":"baseline"}'
