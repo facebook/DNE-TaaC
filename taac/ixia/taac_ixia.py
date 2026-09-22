@@ -1937,6 +1937,12 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 self.start()
             else:
                 self.paused = False
+        else:
+            self.logger.info(
+                "TaacIxia periodic stat sampler DISABLED "
+                "(sample_time=0; using direct live statistics reads)"
+            )
+            self.capturing = False
 
     def end_test_case(self, traffic_regexes=None) -> None:
         self.paused = True

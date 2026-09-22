@@ -114,6 +114,22 @@ class GetOrCreateStatViewTest(unittest.TestCase):
         mock_get_loss.assert_called_once_with(self.ixia.traffic_item_view_assistant)
         self.ixia.logger.warning.assert_called_once()
 
+    def test_live_only_mode_does_not_start_thread_between_test_cases(self):
+        self.ixia.sample_time = 0
+        self.ixia.capturing = False
+        self.ixia.paused = False
+        self.ixia._current_playbook_name = None
+        self.ixia.rotate_api_trace_phase = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.prepare_traffic = MagicMock()
+        self.ixia.start = MagicMock()
+
+        self.ixia.begin_test_case("first-test")
+        self.ixia.begin_test_case("second-test")
+
+        self.ixia.start.assert_not_called()
+        self.assertEqual("second-test", self.ixia.test_case_uuid)
+
     def test_packet_loss_freshness_is_scoped_to_test_case(self):
         self.ixia.test_case_uuid = "current-test"
         self.ixia.capturing = True

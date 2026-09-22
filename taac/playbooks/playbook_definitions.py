@@ -11848,7 +11848,14 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
     """BGP_DC longevity playbook: cold-start with prefix + session oscillations."""
     return Playbook(
         name="test_longevity_cold_start_with_prefix_and_session_oscillations",
-        cleanup_steps=ROGUE_PREFIX_SESSION_FLAP_STEPS
+        cleanup_steps=[
+            create_ixia_api_step(
+                api_name="start_protocols",
+                args_dict={},
+                description="Cleanup: ensure all IXIA protocols are running",
+            ),
+        ]
+        + ROGUE_PREFIX_SESSION_FLAP_STEPS
         + [
             create_ixia_api_step(
                 api_name="rename_device_groups",
@@ -11957,6 +11964,18 @@ def create_longevity_cold_start_with_prefix_and_session_oscillations_playbook(
                             create_longevity_step(duration=oscillation_hold_s),
                         ]
                     )
+                ]
+            ),
+            # Session-flap oscillations are persistent IXIA configuration.
+            # Stop them before postchecks so BGP health is measured after the
+            # injected fault has been removed, not while it is still active.
+            DISABLE_SESSION_FLAPS_STAGE,
+            create_steps_stage(
+                steps=[
+                    create_service_convergence_step(
+                        services=[Service.BGP],
+                        description="Wait for BGP convergence after session oscillations",
+                    ),
                 ]
             ),
         ],
