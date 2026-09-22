@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import base64
+import json
 import math
 import unittest
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import later.unittest
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
+    ConfigureParallelBgpPeers,
     IxiaStopTrafficAndWaitTask,
     RunCommandsOnShell,
     ValidateBgpcppUpdateGroupState,
@@ -17,6 +19,197 @@ from taac.tasks.all import (
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
 RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
+
+
+class ConfigureParallelBgpPeersTest(later.unittest.TestCase):
+    async def test_default_behavior_uses_live_vlan_and_retains_addresses(self) -> None:
+        driver = MagicMock()
+        driver.async_get_all_port_info = AsyncMock(
+            return_value={10: SimpleNamespace(name="eth2/1/1", portId=10, vlans=[3000])}
+        )
+        driver.async_get_vlan_addresses = AsyncMock(
+            return_value=["2401:db00:abcd::a/64"]
+        )
+        driver.async_register_python_patcher = AsyncMock()
+        task = ConfigureParallelBgpPeers(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "fsw.example",
+                    "config_json": json.dumps(
+                        {
+                            "eth2/1/1": [
+                                {
+                                    "starting_ip": "2401:db00:abcd::10",
+                                    "increment_ip": "::2",
+                                    "prefix_length": 127,
+                                    "description": "default",
+                                    "peer_group_name": "TEST",
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": 65000,
+                                    "gateway_starting_ip": "2401:db00:abcd::11",
+                                    "gateway_increment_ip": "::2",
+                                }
+                            ]
+                        }
+                    ),
+                }
+            )
+
+        driver.async_get_vlan_addresses.assert_awaited_once_with(3000, global_only=True)
+        vlan_call = next(
+            call
+            for call in driver.async_register_python_patcher.await_args_list
+            if call.kwargs["config_name"] == "agent"
+        )
+        vlan_config = json.loads(vlan_call.kwargs["patcher_args"]["vlan3000"])
+        self.assertEqual(vlan_config["vlan_id"], 3000)
+        self.assertCountEqual(
+            vlan_config["ip_addresses"],
+            ["2401:db00:abcd::a/64", "2401:db00:abcd::10/127"],
+        )
+
+    async def test_explicit_vlan_split_replaces_existing_vlan_addresses(self) -> None:
+        driver = MagicMock()
+        driver.async_get_all_port_info = AsyncMock(
+            return_value={
+                129: SimpleNamespace(name="eth1/17/1", portId=129, vlans=[2000]),
+                137: SimpleNamespace(name="eth1/18/1", portId=137, vlans=[2000]),
+            }
+        )
+        driver.async_get_vlan_addresses = AsyncMock(
+            return_value=["2401:db00:501c::a/64"]
+        )
+        driver.async_register_python_patcher = AsyncMock()
+        task = ConfigureParallelBgpPeers(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "rsw001.p001.f01.qzd1",
+                    "shared_vlan_id": 2000,
+                    "configure_vlans_patcher_name": "configure_vlans_reboot_test",
+                    "add_bgp_peers_patcher_name": "add_bgp_peers_reboot_test",
+                    "config_json": json.dumps(
+                        {
+                            "eth1/17/1": [
+                                {
+                                    "starting_ip": "2401:db00:501c::10",
+                                    "increment_ip": "::2",
+                                    "prefix_length": 127,
+                                    "description": "primary",
+                                    "peer_group_name": "TAAC_REBOOT_IXIA_V6",
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": 65000,
+                                    "gateway_starting_ip": "2401:db00:501c::11",
+                                    "gateway_increment_ip": "::2",
+                                    "vlan_id": 2000,
+                                    "retain_existing_vlan_addresses": False,
+                                }
+                            ],
+                            "eth1/18/1": [
+                                {
+                                    "starting_ip": "2401:db00:e50d:11:18::10",
+                                    "increment_ip": "::2",
+                                    "prefix_length": 127,
+                                    "description": "secondary",
+                                    "peer_group_name": "TAAC_REBOOT_IXIA_V6",
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": 6016,
+                                    "gateway_starting_ip": "2401:db00:e50d:11:18::11",
+                                    "gateway_increment_ip": "::2",
+                                    "vlan_id": 4016,
+                                    "retain_existing_vlan_addresses": False,
+                                }
+                            ],
+                        }
+                    ),
+                }
+            )
+
+        vlan_call = next(
+            call
+            for call in driver.async_register_python_patcher.await_args_list
+            if call.kwargs["config_name"] == "agent"
+        )
+        vlan_args = vlan_call.kwargs["patcher_args"]
+        primary = json.loads(vlan_args["vlan2000"])
+        secondary = json.loads(vlan_args["vlan4016"])
+        self.assertEqual(primary["ports"], [129])
+        self.assertEqual(primary["ip_addresses"], ["2401:db00:501c::10/127"])
+        self.assertEqual(secondary["ports"], [137])
+        self.assertEqual(
+            secondary["ip_addresses"],
+            ["2401:db00:e50d:11:18::10/127"],
+        )
+        driver.async_get_vlan_addresses.assert_not_awaited()
+
+        bgp_call = next(
+            call
+            for call in driver.async_register_python_patcher.await_args_list
+            if call.kwargs["config_name"] == "bgpcpp"
+        )
+        peer_configs = json.loads(bgp_call.kwargs["patcher_args"]["peer_configs"])
+        self.assertEqual(
+            [peer["remote_as_4_byte"] for peer in peer_configs],
+            ["65000", "6016"],
+        )
+
+    async def test_shared_vlan_split_rejects_non_lowest_primary(self) -> None:
+        driver = MagicMock()
+        driver.async_get_all_port_info = AsyncMock(
+            return_value={
+                129: SimpleNamespace(name="eth1/17/1", portId=129, vlans=[2000]),
+                137: SimpleNamespace(name="eth1/18/1", portId=137, vlans=[2000]),
+            }
+        )
+        task = ConfigureParallelBgpPeers(logger=MagicMock())
+        config = {
+            interface: [
+                {
+                    "starting_ip": f"2401:db00:501c::{host}",
+                    "increment_ip": "::2",
+                    "prefix_length": 127,
+                    "description": "bad split",
+                    "peer_group_name": "TEST",
+                    "num_sessions": 1,
+                    "remote_as_4_byte": 65000,
+                    "gateway_starting_ip": f"2401:db00:501c::{host + 1}",
+                    "gateway_increment_ip": "::2",
+                    "vlan_id": vlan_id,
+                    "retain_existing_vlan_addresses": False,
+                }
+            ]
+            for interface, host, vlan_id in (
+                ("eth1/17/1", 10, 4016),
+                ("eth1/18/1", 12, 2000),
+            )
+        }
+
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            self.assertRaisesRegex(ValueError, "lowest IXIA interface eth1/17/1"),
+        ):
+            await task.run(
+                {
+                    "hostname": "rsw001.p001.f01.qzd1",
+                    "shared_vlan_id": 2000,
+                    "config_json": json.dumps(config),
+                }
+            )
 
 
 class IxiaStopTrafficAndWaitTaskTest(later.unittest.TestCase):

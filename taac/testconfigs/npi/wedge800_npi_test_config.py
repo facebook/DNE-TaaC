@@ -697,7 +697,6 @@ W800_THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening_test_config(
     ixia_uplink_communities=w800.W800_IXIA_UPLINK_COMMUNITIES,
     uplink_peer_tag=w800.W800_UPLINK_PEER_TAG,
     downlink_peer_tag=w800.W800_DOWNLINK_PEER_TAG,
-    stsw_flap_ports=w800.W800_STSW_FLAP_PORTS,
     basset_pool=w800.W800_BASSET_POOL,
     service_restart_services=w800.W800_SERVICE_RESTART_SERVICES,
     # w800 is not yet in netwhoami inventory -> skip the live platform assert.

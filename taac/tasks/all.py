@@ -290,6 +290,58 @@ class ConfigureParallelBgpPeers(BaseTask):
     DEFAULT_CONFIGURE_VLANS_PATCHER_NAME = "configure_vlans"
     DEFAULT_ADD_BGP_PEERS_PATCHER_NAME = "add_bgp_peers"
 
+    @staticmethod
+    def _interface_sort_key(interface: str) -> t.Tuple[int, ...]:
+        values = tuple(int(value) for value in re.findall(r"\d+", interface))
+        if not values:
+            raise ValueError(f"Interface has no numeric components: {interface}")
+        return values
+
+    def _validate_shared_vlan_split(
+        self,
+        config_json: t.Dict[str, t.List[t.Dict[str, t.Any]]],
+        interface_to_port_info: t.Dict[str, PortInfoThrift],
+        shared_vlan_id: int,
+    ) -> None:
+        interfaces = sorted(config_json, key=self._interface_sort_key)
+        primary = interfaces[0]
+        currently_shared = [
+            interface
+            for interface in interfaces
+            if shared_vlan_id in interface_to_port_info[interface].vlans
+        ]
+        if not currently_shared:
+            raise ValueError(
+                f"None of the selected IXIA ports is in shared VLAN {shared_vlan_id}"
+            )
+        if len(currently_shared) == 1 and currently_shared[0] != primary:
+            raise ValueError(
+                f"Only {primary} may remain in shared VLAN {shared_vlan_id}; "
+                f"found {currently_shared[0]}"
+            )
+
+        target_shared = [
+            interface
+            for interface, configs in config_json.items()
+            if any(config.get("vlan_id") == shared_vlan_id for config in configs)
+        ]
+        if target_shared != [primary]:
+            raise ValueError(
+                f"Shared VLAN {shared_vlan_id} must target only the lowest "
+                f"IXIA interface {primary}; got {target_shared}"
+            )
+        for interface, configs in config_json.items():
+            for config in configs:
+                if "vlan_id" not in config:
+                    raise ValueError(
+                        f"Explicit vlan_id is required for shared-VLAN split on {interface}"
+                    )
+                if config.get("retain_existing_vlan_addresses", True):
+                    raise ValueError(
+                        "Shared-VLAN split must replace existing VLAN addresses on "
+                        f"{interface}"
+                    )
+
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         """
         example params:
@@ -309,6 +361,10 @@ class ConfigureParallelBgpPeers(BaseTask):
                             "remote_as_4_byte_step": 1, # optional. defaults to 0
                             "peer_group_name": "PEERGROUP_FSW_RSW_V4",
                             "prefix_length": 127,
+                            # Optional. Defaults to the port's current VLAN.
+                            "vlan_id": 4016,
+                            # Optional. Defaults to preserving live VLAN IPs.
+                            "retain_existing_vlan_addresses": false,
                         },
                     ]
                 }
@@ -354,6 +410,13 @@ class ConfigureParallelBgpPeers(BaseTask):
         interface_to_port_info = {
             port_info.name: port_info for port_info in all_port_info.values()
         }
+        shared_vlan_id = params.get("shared_vlan_id")
+        if shared_vlan_id is not None:
+            self._validate_shared_vlan_split(
+                config_json,
+                interface_to_port_info,
+                shared_vlan_id,
+            )
         for interface, configs in config_json.items():
             for config in configs:
                 config_only_interface_ip = config.get("config_only_interface_ip", False)
@@ -368,6 +431,10 @@ class ConfigureParallelBgpPeers(BaseTask):
                 gateway_starting_ip = config["gateway_starting_ip"]
                 gateway_increment_ip = config["gateway_increment_ip"]
                 interface_port_info = interface_to_port_info[interface]
+                vlan_id = config.get("vlan_id", interface_port_info.vlans[0])
+                retain_existing_vlan_addresses = config.get(
+                    "retain_existing_vlan_addresses", True
+                )
                 increment_ip_int = int(ipaddress.ip_address(increment_ip))
                 starting_ip_int = int(ipaddress.ip_address(starting_ip))
                 gateway_ip_int = int(ipaddress.ip_address(gateway_starting_ip))
@@ -400,25 +467,27 @@ class ConfigureParallelBgpPeers(BaseTask):
                                 description,
                             )
                         )
+                existing_vlan_addresses = []
+                if retain_existing_vlan_addresses:
+                    # pyre-fixme[16]: `AbstractSwitch` has no attribute
+                    #  `async_get_vlan_addresses`.
+                    existing_vlan_addresses = await driver.async_get_vlan_addresses(
+                        vlan_id, global_only=True
+                    )
                 vlan_ip_addresses = list(
                     set(
-                        (
-                            # pyre-fixme[16]: `AbstractSwitch` has no attribute
-                            #  `async_get_vlan_addresses`.
-                            await driver.async_get_vlan_addresses(
-                                interface_port_info.vlans[0], global_only=True
-                            )
-                            + [
-                                f"{ip_address}/{prefix_length}"
-                                for ip_address in local_addresses
-                            ]
-                        )
+                        existing_vlan_addresses
+                        + [
+                            f"{ip_address}/{prefix_length}"
+                            for ip_address in local_addresses
+                        ]
                     )
                 )
-                configure_vlan_configs[f"vlan{interface_port_info.vlans[0]}"].append(
+                configure_vlan_configs[f"vlan{vlan_id}"].append(
                     await self.create_configure_vlan_config(
                         vlan_ip_addresses,
                         interface_port_info,
+                        vlan_id,
                     )
                 )
         await self.register_patchers_to_configure_vlans(
@@ -513,9 +582,10 @@ class ConfigureParallelBgpPeers(BaseTask):
         self,
         ip_addresses: t.List[str],
         port_info: PortInfoThrift,
+        vlan_id: t.Optional[int] = None,
     ) -> t.Dict[str, t.Any]:
         return {
-            "vlan_id": port_info.vlans[0],
+            "vlan_id": vlan_id if vlan_id is not None else port_info.vlans[0],
             "ports": [port_info.portId],
             "ip_addresses": ip_addresses,
             "mtu": 9000,

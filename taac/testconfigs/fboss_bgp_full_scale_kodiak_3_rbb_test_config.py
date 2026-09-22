@@ -338,14 +338,13 @@ FBOSS_THRIFT_HARDENING_KODIAK_3_RBB_TEST_CONFIG_QXS1 = (
             "65446:30",  # live
         ],
         basset_pool="dne.test",
-        # Disruption
-        stsw_flap_ports=KODIAK3_RBB_QXS1_FABRIC_FLAP_PORTS,
+        # Disruption interfaces are discovered from non-IXIA LLDP neighbors.
         test_duration_s=14400,  # THFT_001 = 4 hr prod (override to 600 for smoke)
         restart_test_duration_s=3600,  # THFT_002..005 = 1 hr each -> 4 hr total
         requests_per_burst=10000,
         # Thrift storm and qsfp flap run as two SEPARATE periodic tasks, so
-        # each gets a timeout matched to its own runtime. Both left at the
-        # factory defaults: 60s for the rate-limited thrift burst, 900s for
-        # the flap (~7.2s per flap measured on this DUT x 100 = ~720s).
+        # each gets a timeout matched to its own runtime. Both use the factory
+        # default of 60s; the dynamic QSFP worker now performs one six-second
+        # all-non-IXIA-interface cycle per invocation.
     )
 )

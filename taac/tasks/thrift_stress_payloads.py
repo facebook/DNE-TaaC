@@ -109,7 +109,7 @@ READ_ONLY_FBOSS_APIS: t.List[ThriftStressCall] = [
 
 def fboss_qsfp_flaps_only(
     interfaces: t.Sequence[str],
-    interval_to_link_up: int = 4,
+    interval_to_link_up: int = 6,
     total_flaps: int = 100,
 ) -> t.List[ThriftStressCall]:
     """The qsfp-flap entry, with NO read-only thrift baseline attached.
@@ -138,7 +138,7 @@ def fboss_qsfp_flaps_only(
         interfaces: DUT-side ports to flap. EXCLUDE ports carrying test IXIA
             traffic — flapping those breaks the IxiaPacketLossCheck postcheck.
         interval_to_link_up: Sleep inside the flap method between consecutive
-            flap iterations. Default 4 matches Pavan's original.
+            flap iterations. THFT uses 6 seconds for both NPI and CI/CD.
         total_flaps: Flap iterations executed by ONE driver call. Default 100
             matches Pavan's original.
     """

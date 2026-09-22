@@ -1505,10 +1505,10 @@ def _scale_payload_per_call(
 
 def _build_thft_periodic_tasks(
     device_name: str,
-    stsw_flap_ports: list[str],
     requests_per_burst: int,
     burst_timeout_s: float,
     flap_burst_timeout_s: float,
+    active_duration_s: int = 600,
 ) -> list[PeriodicTask]:
     """Build the THFT background as TWO independent periodic tasks.
 
@@ -1519,18 +1519,18 @@ def _build_thft_periodic_tasks(
       - the read-only thrift calls are capped by the agent's
         `thriftApiToRateLimitInQps` (1-2 qps for most APIs), so the excess is
         rejected in microseconds and a burst finishes in seconds;
-      - the flap needs `total_flaps` x (interval_to_link_up + wedge_qsfp_util
-        runtime), measured at ~7.2s per flap = ~720s for the default 100.
-
-    Sized for the thrift calls (the old 60s default) every burst was
-    cancelled mid-flap-loop: the storm never completed a cycle and only ~15
-    of the 100 flaps landed, while all postchecks still passed. Sized for the
-    flap, the thrift cadence collapses to one burst per ~12 min.
+      - the flap task performs one six-second cycle per invocation after
+        resolving all non-IXIA LLDP interfaces. This keeps the selection fresh
+        on every iteration and bounds any in-flight work at stage completion.
 
     `PeriodicTaskExecutor.create_periodic_tasks` starts each entry in its own
     `multiprocessing.Process`, so two tasks run concurrently and neither can
     cancel the other.
     """
+    # The flap scope and count are runtime-driven. Each cycle refreshes LLDP,
+    # excludes IXIA neighbors, and flaps all remaining interfaces once.
+    # Bounding both workers to the stress stage leaves the final five-minute
+    # stage completely disruption-free.
     return [
         create_thrift_stress_periodic_task(
             device_name=device_name,
@@ -1540,35 +1540,71 @@ def _build_thft_periodic_tasks(
             interval=5,
             burst_timeout_s=burst_timeout_s,
             name="thrift_stress_check",
+            max_runtime=active_duration_s,
         ),
         create_thrift_stress_periodic_task(
             device_name=device_name,
-            calls=fboss_qsfp_flaps_only(stsw_flap_ports),
-            interval=5,
+            calls=fboss_qsfp_flaps_only([], total_flaps=1),
+            interval=0,
             burst_timeout_s=flap_burst_timeout_s,
             name="qsfp_flap_check",
+            max_runtime=active_duration_s,
+            resolve_flap_interfaces_from_lldp=True,
         ),
     ]
 
 
-def create_thft_baseline_playbook(
+def create_thft_kitchen_sink_playbook(
     device_name: str,
-    stsw_flap_ports: list[str],
     test_duration_s: int = 600,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
-    flap_burst_timeout_s: float = 900.0,
+) -> Playbook:
+    """THFT_001 read-only kitchen-sink thrift stress without port flaps."""
+    return Playbook(
+        name="npi_thft_001_kitchen_sink",
+        description=(
+            f"THFT_001 — read-only FBOSS kitchen-sink thrift stress for "
+            f"{test_duration_s}s on {device_name} "
+            f"(requests_per_burst={requests_per_burst})."
+        ),
+        periodic_tasks=[
+            create_thrift_stress_periodic_task(
+                device_name=device_name,
+                calls=_scale_payload_per_call(
+                    list(READ_ONLY_FBOSS_APIS), requests_per_burst
+                ),
+                interval=5,
+                burst_timeout_s=burst_timeout_s,
+                name="thrift_stress_check",
+                max_runtime=test_duration_s,
+            )
+        ],
+        stages=[
+            create_longevity_stage(duration=test_duration_s),
+            create_longevity_stage(duration=300),
+        ],
+    )
+
+
+def create_thft_baseline_playbook(
+    device_name: str,
+    test_duration_s: int = 600,
+    requests_per_burst: int = 10000,
+    burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 60.0,
+    playbook_number: int = 1,
 ) -> Playbook:
     """THFT_001 baseline — Pavan-design thrift stress (qsfp port flap is
-    assumed in the background and always present in the periodic-task
-    payload; to disable, omit `stsw_flap_ports`).
+    present in the background and always resolved from LLDP at runtime.
 
     Faithful to `scripts/pavanpatil/thrift_call_disruptive.py`, but split
     across TWO periodic tasks so the flap and the thrift storm no longer
     share a burst timeout — see `_build_thft_periodic_tasks`. One task fires
-    `requests_per_burst` each of the read-only APIs; the other runs
-    `async_do_rapid_interface_flaps(stsw_flap_ports, 4, 100)`. Both loop with
-    `interval=5` between bursts, in separate processes.
+    `requests_per_burst` each of the read-only APIs; the other resolves all
+    non-IXIA LLDP interfaces and performs one six-second flap cycle. They run
+    in separate processes and stop before the final five-minute observation
+    stage.
 
     THFT_002..005 layer foreground per-daemon restart triggers on top of
     this same background — see `create_thft_restart_playbook` +
@@ -1577,7 +1613,6 @@ def create_thft_baseline_playbook(
     Args:
         device_name: DUT hostname (FBOSS-only — `_get_qsfp_info_map` and
             `async_do_rapid_interface_flaps` are FBOSS-only).
-        stsw_flap_ports: DUT-side ports to flap. EXCLUDE IXIA-facing ports.
         test_duration_s: Longevity stage duration. Default 600s (10 min
             smoke). Prod runs use 14400 (4 hr).
         requests_per_burst: Concurrent calls per read-only API per burst.
@@ -1587,36 +1622,38 @@ def create_thft_baseline_playbook(
             calls are rate-limited server-side and return in microseconds, so
             60s is generous; if the agent stops responding the gather is
             cancelled, a timed-out burst recorded, and the worker continues.
-        flap_burst_timeout_s: Wall-clock cap on the FLAP burst's gather().
-            Must exceed `total_flaps` x per-flap time (~7.2s measured), so
-            the 100-flap default needs ~720s. Default 900s adds ~25% headroom.
+        flap_burst_timeout_s: Wall-clock cap on one dynamic FLAP cycle.
 
     Returns:
         Single `Playbook` for THFT_001.
     """
     return Playbook(
-        name="npi_thft_001_baseline_thrift_stress",
+        name=f"npi_thft_{playbook_number:03d}_baseline_thrift_stress",
         description=(
-            f"THFT_001 baseline — Pavan-design thrift stress + qsfp port "
-            f"flap background for {test_duration_s}s on {device_name} "
+            f"THFT_{playbook_number:03d} baseline — Pavan-design thrift "
+            f"stress + qsfp port flap background for {test_duration_s}s "
+            f"on {device_name} "
             f"(requests_per_burst={requests_per_burst}). Mirrors "
             f"scripts/pavanpatil/thrift_call_disruptive.py."
         ),
         periodic_tasks=_build_thft_periodic_tasks(
             device_name=device_name,
-            stsw_flap_ports=stsw_flap_ports,
             requests_per_burst=requests_per_burst,
             burst_timeout_s=burst_timeout_s,
             flap_burst_timeout_s=flap_burst_timeout_s,
+            active_duration_s=test_duration_s,
         ),
-        stages=[create_longevity_stage(duration=test_duration_s)],
+        stages=[
+            create_longevity_stage(duration=test_duration_s),
+            create_longevity_stage(duration=300),
+        ],
     )
 
 
 # =============================================================================
 # THFT 002-005 — restart-trigger variants on top of THFT_001 background.
 # Each variant shares the same `_build_thft_periodic_tasks` background (a
-# thrift-storm task and a 100-flap qsfp task, running as two independent
+# thrift-storm task and a dynamic LLDP-selected qsfp task, running as two independent
 # periodic tasks), and adds a FOREGROUND sequence of
 # `systemctl restart <service>` triggers fired every 5 min.
 # Concurrency model:
@@ -1682,7 +1719,6 @@ def _build_periodic_restart_stages(
 
 def create_thft_restart_playbook(
     device_name: str,
-    stsw_flap_ports: list[str],
     playbook_number: int,
     service: Service,
     service_label: str,
@@ -1690,18 +1726,17 @@ def create_thft_restart_playbook(
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
-    flap_burst_timeout_s: float = 900.0,
+    flap_burst_timeout_s: float = 60.0,
 ) -> Playbook:
     """THFT_002..005 — THFT_001 background + 5-min systemctl-restart trigger.
 
-    Same two-task periodic background as THFT_001 (thrift storm + 100-flap
-    qsfp burst, each on its own 5s loop — see `_build_thft_periodic_tasks`).
+    Same two-task periodic background as THFT_001 (thrift storm + dynamic
+    non-IXIA LLDP flap cycles — see `_build_thft_periodic_tasks`).
     Adds a foreground sequence of `systemctl restart <service>` triggers
     fired every `restart_period_s` for the full `test_duration_s` window.
 
     Args:
         device_name: DUT hostname (FBOSS-only).
-        stsw_flap_ports: DUT-side ports for the qsfp flap entry.
         playbook_number: 2 / 3 / 4 / 5 — sets the THFT_NNN prefix.
         service: `Service.AGENT` / `BGP` / `QSFP_SERVICE` / `FSDB`.
         service_label: human-readable name used in the playbook name +
@@ -1725,36 +1760,39 @@ def create_thft_restart_playbook(
         description=description,
         periodic_tasks=_build_thft_periodic_tasks(
             device_name=device_name,
-            stsw_flap_ports=stsw_flap_ports,
             requests_per_burst=requests_per_burst,
             burst_timeout_s=burst_timeout_s,
             flap_burst_timeout_s=flap_burst_timeout_s,
+            active_duration_s=test_duration_s,
         ),
-        stages=_build_periodic_restart_stages(
-            service=service,
-            service_label=service_label,
-            period_s=restart_period_s,
-            total_duration_s=test_duration_s,
-        ),
+        stages=[
+            *_build_periodic_restart_stages(
+                service=service,
+                service_label=service_label,
+                period_s=restart_period_s,
+                total_duration_s=test_duration_s,
+            ),
+            create_longevity_stage(duration=300),
+        ],
     )
 
 
 def create_thft_playbooks(
     device_name: str,
-    stsw_flap_ports: list[str],
     test_duration_s: int = 14400,
     restart_test_duration_s: int = 3600,
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
-    flap_burst_timeout_s: float = 900.0,
+    flap_burst_timeout_s: float = 60.0,
+    include_kitchen_sink: bool = False,
 ) -> list[Playbook]:
-    """Return the full THFT_001..005 playbook list — standard NPI THFT
-    testcase set for any FBOSS DUT.
+    """Return the standard NPI THFT playbook set for any FBOSS DUT.
 
-    Order matters: THFT_001 (no restart trigger) runs first to establish
-    the device tolerates the background storm alone. THFT_002..005 then
-    layer on the per-daemon restart trigger one at a time.
+    By default this preserves the original THFT_001..005 naming. When
+    ``include_kitchen_sink`` is true, a read-only kitchen-sink case becomes
+    THFT_001, the baseline becomes THFT_002, and the four restart cases become
+    THFT_003..006.
 
     Per-playbook duration is split so the campaign wall time stays
     bounded: `test_duration_s` drives THFT_001 (default 4hr prod);
@@ -1762,16 +1800,27 @@ def create_thft_playbooks(
     each = 4hr total across the 4 restart variants, matching the
     baseline's 4hr soak).
     """
-    playbooks: list[Playbook] = [
+    playbook_number_offset = 1 if include_kitchen_sink else 0
+    playbooks: list[Playbook] = []
+    if include_kitchen_sink:
+        playbooks.append(
+            create_thft_kitchen_sink_playbook(
+                device_name=device_name,
+                test_duration_s=test_duration_s,
+                requests_per_burst=requests_per_burst,
+                burst_timeout_s=burst_timeout_s,
+            )
+        )
+    playbooks.append(
         create_thft_baseline_playbook(
             device_name=device_name,
-            stsw_flap_ports=stsw_flap_ports,
             test_duration_s=test_duration_s,
             requests_per_burst=requests_per_burst,
             burst_timeout_s=burst_timeout_s,
             flap_burst_timeout_s=flap_burst_timeout_s,
+            playbook_number=1 + playbook_number_offset,
         )
-    ]
+    )
     for (
         playbook_number,
         _suffix,
@@ -1781,8 +1830,7 @@ def create_thft_playbooks(
         playbooks.append(
             create_thft_restart_playbook(
                 device_name=device_name,
-                stsw_flap_ports=stsw_flap_ports,
-                playbook_number=playbook_number,
+                playbook_number=playbook_number + playbook_number_offset,
                 service=service,
                 service_label=service_label,
                 test_duration_s=restart_test_duration_s,
@@ -1798,6 +1846,9 @@ def create_thft_playbooks(
 def add_common_checks_to_thft_playbooks(
     playbooks: list[Playbook],
     service_restart_services: list[str] | None = None,
+    require_all_bgp_sessions_established: bool = True,
+    expected_established_bgp_sessions: int | None = None,
+    compare_bgp_peer_routes: bool = True,
 ) -> list[Playbook]:
     """Add THFT validation chain (BGP-only mirror of cpu_queue's chain).
 
@@ -1843,7 +1894,19 @@ def add_common_checks_to_thft_playbooks(
     """
     common_prechecks = [
         create_drain_state_check(),
-        create_bgp_session_establish_check(),
+        *(
+            [
+                create_bgp_session_establish_check(
+                    expected_established_sessions=expected_established_bgp_sessions
+                )
+            ]
+            if expected_established_bgp_sessions is not None
+            else (
+                [create_bgp_session_establish_check()]
+                if require_all_bgp_sessions_established
+                else []
+            )
+        ),
         create_systemctl_active_state_check(),
         create_memory_utilization_check(
             threshold=5 * (1024**3),  # 5 GiB
@@ -1851,10 +1914,15 @@ def add_common_checks_to_thft_playbooks(
         ),
         create_port_state_check(),
         create_lldp_check(),
+        create_unclean_exit_check(),
     ]
     common_snapshot_checks = [
         create_core_dumps_snapshot_check(),
-        create_bgp_peer_route_snapshot_check(),
+        *(
+            [create_bgp_peer_route_snapshot_check()]
+            if compare_bgp_peer_routes
+            else []
+        ),
     ]
     # Suffix → expected-restarted-daemons mapping for the targeted-restart
     # exclusion. Keys MUST match the suffix used by `create_thft_restart_playbook`.
@@ -1881,6 +1949,20 @@ def add_common_checks_to_thft_playbooks(
                 expected_restarted = list(daemons)
                 break
         per_playbook_postchecks = [
+            *(
+                [
+                    create_bgp_session_establish_check(
+                        expected_established_sessions=expected_established_bgp_sessions
+                    )
+                ]
+                if expected_established_bgp_sessions is not None
+                else (
+                    [create_bgp_session_establish_check()]
+                    if require_all_bgp_sessions_established
+                    else []
+                )
+            ),
+            create_port_state_check(),
             create_service_restart_check(
                 services=service_restart_services,
                 expected_restarted_services=expected_restarted,
@@ -14814,6 +14896,81 @@ def gen_cross_device_half_interface_toggle_playbook(
             )
         ],
     )
+
+
+def create_system_reboot_playbooks(
+    *,
+    name: str,
+    trigger: SystemRebootTrigger,
+    is_rsw: bool,
+    iteration: int = 1,
+    recovery_prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    recovery_postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    stability_prechecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    stability_postchecks: t.Optional[t.List[PointInTimeHealthCheck]] = None,
+    stability_snapshot_checks: t.Optional[t.List[SnapshotHealthCheck]] = None,
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
+    recovery_duration_s: int = 240,
+    stability_duration_s: int = 300,
+    use_ipv6: bool = True,
+) -> t.List[Playbook]:
+    """Build a reboot/recovery case and its isolated stability window.
+
+    Reboot-time crashes and unclean exits are intentionally outside the second
+    playbook's observation window. Non-RSW devices must return drained (hard or
+    soft drain) and are locally undrained before the recovery wait. RSWs omit
+    both drain operations because they are not expected to reboot drained.
+    """
+    recovery_steps = [
+        create_system_reboot_step(
+            trigger=trigger,
+            use_ipv6=use_ipv6,
+        ),
+        create_service_convergence_step(
+            services=[Service.AGENT, Service.BGP],
+        ),
+    ]
+    if not is_rsw:
+        recovery_steps.extend(
+            [
+                create_validation_step(
+                    point_in_time_checks=[
+                        create_dsf_drain_state_check(is_drained=True),
+                    ],
+                    stage=ValidationStage.MID_TEST,
+                ),
+                create_drain_undrain_step(
+                    drain=False,
+                    drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
+                    description="Undrain the recovered non-RSW device",
+                ),
+            ]
+        )
+    recovery_steps.append(create_longevity_step(duration=recovery_duration_s))
+
+    return [
+        Playbook(
+            name=name,
+            iteration=iteration,
+            prechecks=recovery_prechecks or [],
+            postchecks=recovery_postchecks or [],
+            traffic_items_to_start=traffic_items_to_start or [],
+            stages=[create_steps_stage(steps=recovery_steps)],
+        ),
+        Playbook(
+            name=f"{name}_stability",
+            iteration=iteration,
+            prechecks=stability_prechecks or [],
+            postchecks=stability_postchecks or [],
+            snapshot_checks=stability_snapshot_checks or [],
+            traffic_items_to_start=traffic_items_to_start or [],
+            stages=[
+                create_steps_stage(
+                    steps=[create_longevity_step(duration=stability_duration_s)]
+                )
+            ],
+        ),
+    ]
 
 
 def gen_snake_playbooks(

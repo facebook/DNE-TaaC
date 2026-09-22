@@ -3,10 +3,10 @@
 """
 NPI Thrift Hardening (THFT) Test Configuration
 
-Drives a Pavan-design thrift-stress + qsfp-flap background on a FBOSS DUT
-for `test_duration_s` seconds via `create_thrift_stress_periodic_task`. No
-foreground triggers in THFT_000 — THFT_001..004 will layer process-restart
-steps on top of this same background in a future diff.
+Drives a Pavan-design thrift-stress + dynamic LLDP-selected qsfp-flap background
+on a FBOSS DUT
+for `test_duration_s` seconds via `create_thrift_stress_periodic_task`.
+Restart variants layer a daemon restart cadence over the same background.
 
 Mirrors (does NOT import from) the NPI CPU-queue TestConfig's BGP peer
 scaffolding so the validation chain has BGP sessions to assert against
@@ -54,6 +54,7 @@ def _assert_fboss_platform(hostname: str) -> None:
             "MINIPACK3BA",  # Minipack3BA
             "ICECUBE800BC",  # IcePack TH6
             "MORGAN800CC",  # Kodiak3 (TH4)
+            "WEDGE400C",  # Wedge400C / Gibraltar RSW
         ):
             raise ValueError(
                 f"Unsupported hardware '{hardware}' for {hostname}. "
@@ -100,13 +101,13 @@ def create_npi_thrift_hardening_test_config(
     ixia_uplink_communities: list,
     uplink_peer_tag: str,
     downlink_peer_tag: str,
-    stsw_flap_ports: list,
     test_duration_s: int = 600,
     restart_test_duration_s: int = 3600,
     restart_period_s: int = 300,
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
-    flap_burst_timeout_s: float = 900.0,
+    flap_burst_timeout_s: float = 60.0,
+    include_kitchen_sink: bool = False,
     direct_ixia_connections=None,
     basset_pool: str | None = None,
     service_restart_services: list | None = None,
@@ -133,14 +134,9 @@ def create_npi_thrift_hardening_test_config(
         ixia_*_prefix_count_v6 / _v4: Prefix counts per direction + AFI.
         ixia_*_communities: BGP communities the IXIA mimics advertise.
         uplink_peer_tag / downlink_peer_tag: peer_tag values on the v4 groups.
-        stsw_flap_ports: DUT-side ports the qsfp-flap entry will tx_disable/
-            tx_enable. Caller-owned (e.g. STSW-adjacent uplinks for a GTSW,
-            GTSW-adjacent uplinks for an STSW, etc.). EXCLUDE IXIA-facing
-            ports — flapping those breaks IXIA peering and would invalidate
-            the BGP_SESSION_ESTABLISH precheck.
-        test_duration_s: THFT_001 baseline longevity duration (default 600s =
-            10 min smoke). Production passes 14400 (4 hr).
-        restart_test_duration_s: Per-playbook duration for THFT_002..005
+        test_duration_s: Baseline longevity duration (default 600s = 10 min
+            smoke). Production passes 14400 (4 hr).
+        restart_test_duration_s: Per-playbook duration for restart variants
             (each restart-variant). Default 3600s (1 hr) so the 4 restart
             variants total ~4hr — matches the THFT_001 4hr soak instead of
             blowing the campaign wall-time up to 5×4=20hr.
@@ -150,9 +146,7 @@ def create_npi_thrift_hardening_test_config(
             generous.
         flap_burst_timeout_s: Wall-clock cap on the QSFP-FLAP burst, which
             runs as a SEPARATE periodic task so it cannot cancel the thrift
-            storm (and vice versa). Must exceed total_flaps x per-flap time
-            (~7.2s measured on Kodiak3 = ~720s for the 100-flap default);
-            900s adds ~25% headroom.
+            storm (and vice versa).
         direct_ixia_connections: Optional explicit direct-IXIA mapping.
         basset_pool: Optional override pool selection. Default "dne.test".
         service_restart_services: Override default service-restart-check list.
@@ -559,166 +553,77 @@ def create_npi_thrift_hardening_test_config(
         playbooks=add_common_checks_to_thft_playbooks(
             create_thft_playbooks(
                 device_name=device_name,
-                stsw_flap_ports=stsw_flap_ports,
                 test_duration_s=test_duration_s,
                 restart_test_duration_s=restart_test_duration_s,
                 restart_period_s=restart_period_s,
                 requests_per_burst=requests_per_burst,
                 burst_timeout_s=burst_timeout_s,
                 flap_burst_timeout_s=flap_burst_timeout_s,
+                include_kitchen_sink=include_kitchen_sink,
             ),
             service_restart_services=service_restart_services,
         ),
     )
 
 
+def create_npi_device_only_thrift_hardening_test_config(
+    test_config_name: str,
+    device_name: str,
+    test_duration_s: int = 600,
+    restart_test_duration_s: int = 3600,
+    restart_period_s: int = 300,
+    requests_per_burst: int = 10000,
+    burst_timeout_s: float = 60.0,
+    flap_burst_timeout_s: float = 60.0,
+    include_kitchen_sink: bool = False,
+    basset_pool: str | None = None,
+    service_restart_services: list | None = None,
+    expected_established_bgp_sessions: int | None = None,
+) -> TestConfig:
+    """Build THFT coverage that needs no IXIA protocol scaffolding.
+
+    This variant is for devices whose IXIA-facing ports share one routed
+    interface, making the two-subnet topology used by the full NPI factory
+    invalid. It retains device/service/core checks and can assert an exact
+    established-session count without requiring intentionally idle production
+    peers to establish or comparing ambient per-peer route placement.
+    """
+    _assert_fboss_platform(device_name)
+    return TestConfig(
+        name=test_config_name,
+        basset_pool=basset_pool or "dne.test",
+        endpoints=[
+            taac_types.Endpoint(
+                name=device_name,
+                dut=True,
+                ixia_needed=False,
+            )
+        ],
+        setup_tasks=[
+            create_assert_thrift_rate_limit_enabled_task(device_name),
+            create_coop_unregister_patchers_task(device_name),
+            create_coop_apply_patchers_task(hostnames=[device_name]),
+        ],
+        playbooks=add_common_checks_to_thft_playbooks(
+            create_thft_playbooks(
+                device_name=device_name,
+                test_duration_s=test_duration_s,
+                restart_test_duration_s=restart_test_duration_s,
+                restart_period_s=restart_period_s,
+                requests_per_burst=requests_per_burst,
+                burst_timeout_s=burst_timeout_s,
+                flap_burst_timeout_s=flap_burst_timeout_s,
+                include_kitchen_sink=include_kitchen_sink,
+            ),
+            service_restart_services=service_restart_services,
+            require_all_bgp_sessions_established=False,
+            expected_established_bgp_sessions=expected_established_bgp_sessions,
+            compare_bgp_peer_routes=False,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
-# IcePack GTSW STSW-adjacent flap port list (128 ports across 8 STSW peers).
-# Discovered live on `gtsw001.l1001.c085.ash6` via `fboss2 show interface`
-# (rows with Description starting with `stsw001.s00X.l201.ash6`).
-# ---------------------------------------------------------------------------
-
-ICEPACK_GTSW_STSW_FLAP_PORTS = [
-    # stsw001.s001.l201.ash6 — 16 ports
-    "eth1/3/1",
-    "eth1/3/3",
-    "eth1/3/5",
-    "eth1/3/7",
-    "eth1/4/1",
-    "eth1/4/3",
-    "eth1/4/5",
-    "eth1/4/7",
-    "eth1/7/1",
-    "eth1/7/3",
-    "eth1/7/5",
-    "eth1/7/7",
-    "eth1/8/1",
-    "eth1/8/3",
-    "eth1/8/5",
-    "eth1/8/7",
-    # stsw001.s002.l201.ash6 — 16 ports
-    "eth1/11/1",
-    "eth1/11/3",
-    "eth1/11/5",
-    "eth1/11/7",
-    "eth1/12/1",
-    "eth1/12/3",
-    "eth1/12/5",
-    "eth1/12/7",
-    "eth1/15/1",
-    "eth1/15/3",
-    "eth1/15/5",
-    "eth1/15/7",
-    "eth1/16/1",
-    "eth1/16/3",
-    "eth1/16/5",
-    "eth1/16/7",
-    # stsw001.s003.l201.ash6 — 16 ports
-    "eth1/19/1",
-    "eth1/19/3",
-    "eth1/19/5",
-    "eth1/19/7",
-    "eth1/20/1",
-    "eth1/20/3",
-    "eth1/20/5",
-    "eth1/20/7",
-    "eth1/23/1",
-    "eth1/23/3",
-    "eth1/23/5",
-    "eth1/23/7",
-    "eth1/24/1",
-    "eth1/24/3",
-    "eth1/24/5",
-    "eth1/24/7",
-    # stsw001.s004.l201.ash6 — 16 ports
-    "eth1/27/1",
-    "eth1/27/3",
-    "eth1/27/5",
-    "eth1/27/7",
-    "eth1/28/1",
-    "eth1/28/3",
-    "eth1/28/5",
-    "eth1/28/7",
-    "eth1/31/1",
-    "eth1/31/3",
-    "eth1/31/5",
-    "eth1/31/7",
-    "eth1/32/1",
-    "eth1/32/3",
-    "eth1/32/5",
-    "eth1/32/7",
-    # stsw001.s005.l201.ash6 — 16 ports
-    "eth1/35/1",
-    "eth1/35/3",
-    "eth1/35/5",
-    "eth1/35/7",
-    "eth1/36/1",
-    "eth1/36/3",
-    "eth1/36/5",
-    "eth1/36/7",
-    "eth1/39/1",
-    "eth1/39/3",
-    "eth1/39/5",
-    "eth1/39/7",
-    "eth1/40/1",
-    "eth1/40/3",
-    "eth1/40/5",
-    "eth1/40/7",
-    # stsw001.s006.l201.ash6 — 16 ports
-    "eth1/43/1",
-    "eth1/43/3",
-    "eth1/43/5",
-    "eth1/43/7",
-    "eth1/44/1",
-    "eth1/44/3",
-    "eth1/44/5",
-    "eth1/44/7",
-    "eth1/47/1",
-    "eth1/47/3",
-    "eth1/47/5",
-    "eth1/47/7",
-    "eth1/48/1",
-    "eth1/48/3",
-    "eth1/48/5",
-    "eth1/48/7",
-    # stsw001.s007.l201.ash6 — 16 ports
-    "eth1/51/1",
-    "eth1/51/3",
-    "eth1/51/5",
-    "eth1/51/7",
-    "eth1/52/1",
-    "eth1/52/3",
-    "eth1/52/5",
-    "eth1/52/7",
-    "eth1/55/1",
-    "eth1/55/3",
-    "eth1/55/5",
-    "eth1/55/7",
-    "eth1/56/1",
-    "eth1/56/3",
-    "eth1/56/5",
-    "eth1/56/7",
-    # stsw001.s008.l201.ash6 — 16 ports
-    "eth1/59/1",
-    "eth1/59/3",
-    "eth1/59/5",
-    "eth1/59/7",
-    "eth1/60/1",
-    "eth1/60/3",
-    "eth1/60/5",
-    "eth1/60/7",
-    "eth1/63/1",
-    "eth1/63/3",
-    "eth1/63/5",
-    "eth1/63/7",
-    "eth1/64/1",
-    "eth1/64/3",
-    "eth1/64/5",
-    "eth1/64/7",
-]
-assert len(ICEPACK_GTSW_STSW_FLAP_PORTS) == 128
-
-
 # ---------------------------------------------------------------------------
 # TestConfig instantiations
 #
@@ -770,7 +675,6 @@ NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening
     ixia_uplink_communities=["65446:30", "65441:323", "65456:323"],
     downlink_peer_tag="HOST",
     uplink_peer_tag="STSW",
-    stsw_flap_ports=ICEPACK_GTSW_STSW_FLAP_PORTS,
     test_duration_s=14400,  # THFT_001 = 4 hr prod (override to 600 = 10 min for smoke)
     restart_test_duration_s=3600,  # THFT_002..005 = 1 hr each → 4hr total
     # Scaled back to Pavan's original 10000 per API (= 70K concurrent calls

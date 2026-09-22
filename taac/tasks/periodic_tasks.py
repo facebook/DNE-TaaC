@@ -2002,10 +2002,10 @@ class ThriftStressPeriodicTask(PeriodicTask):
     in which case each api name is wrapped in a default `ThriftStressCall`
     with the legacy `requests_per_api` request count (default 10000).
 
-    `run_final_check()` always returns PASS — thrift exceptions are expected
-    during the process-restart THFT variants (THFT_001-004) and the per-burst
-    success/exception counts are logged for forensic review, not used to gate
-    the test verdict.
+    For read-only workloads, `run_final_check()` treats rate-limit exceptions
+    as forensic signal because the stress intentionally exceeds the configured
+    QPS. For dynamic flap workloads, an RPC failure/timeout or a target that is
+    still down after the stability stage fails the test.
     """
 
     NAME = "thrift_stress"
@@ -2064,6 +2064,10 @@ class ThriftStressPeriodicTask(PeriodicTask):
                     wrapped in a default `ThriftStressCall`.
                 - requests_per_api: Legacy. Only consulted when `apis` is set.
                     Default 10000.
+                - resolve_flap_interfaces_from_lldp: Replace the interface list
+                    of every rapid-flap call with the sorted local interfaces
+                    whose LLDP neighbor name does not contain ``ixia``. LLDP is
+                    queried anew for every invocation.
         """
         hostname = params["hostname"]
         calls = self._resolve_calls(params)
@@ -2076,6 +2080,35 @@ class ThriftStressPeriodicTask(PeriodicTask):
                 exc_info=True,
             )
             return
+
+        flap_interfaces: t.List[str] = []
+        if params.get("resolve_flap_interfaces_from_lldp", False):
+            lldp_neighbors = await driver.async_get_lldp_neighbors()
+            flap_interfaces = sorted(
+                interface
+                for interface, neighbor in lldp_neighbors.items()
+                if "ixia"
+                not in str(getattr(neighbor, "remote_device_name", "")).lower()
+            )
+            if not flap_interfaces:
+                raise RuntimeError(
+                    f"thrift_stress: {hostname} has no non-IXIA LLDP interfaces "
+                    "eligible for the dynamic flap"
+                )
+            self.logger.info(
+                f"thrift_stress: dynamically selected {len(flap_interfaces)} "
+                f"non-IXIA LLDP interfaces for this flap cycle: {flap_interfaces}"
+            )
+            calls = [
+                ThriftStressCall(
+                    method=call.method,
+                    args=(flap_interfaces, *call.args[1:]),
+                    requests_per_burst=call.requests_per_burst,
+                )
+                if call.method == "async_do_rapid_interface_flaps"
+                else call
+                for call in calls
+            ]
 
         coros: t.List[t.Coroutine] = []
         skipped: t.List[str] = []
@@ -2131,6 +2164,8 @@ class ThriftStressPeriodicTask(PeriodicTask):
             )
             self.add_data(
                 {
+                    "hostname": hostname,
+                    "flap_interfaces": flap_interfaces,
                     "total": len(coros),
                     "success": 0,
                     "failures": 0,
@@ -2145,6 +2180,8 @@ class ThriftStressPeriodicTask(PeriodicTask):
         failures = len(results) - success
         self.add_data(
             {
+                "hostname": hostname,
+                "flap_interfaces": flap_interfaces,
                 "total": len(results),
                 "success": success,
                 "failures": failures,
@@ -2158,11 +2195,12 @@ class ThriftStressPeriodicTask(PeriodicTask):
         )
 
     async def run_final_check(self) -> t.Optional[PeriodicCheckResult]:
-        """Summarize total/success/exception counts across all bursts.
+        """Summarize bursts and verify every dynamically flapped port recovered.
 
-        Returns PASS unconditionally: thrift exceptions during the
-        process-restart THFT variants are expected (the restarting service
-        drops in-flight calls). The forensic counts go in the result message.
+        Thrift exceptions remain forensic-only because restart variants
+        deliberately drop in-flight calls. The write worker additionally
+        records the union of interfaces it actually flapped and fails when any
+        of those interfaces is not operational after the final stability stage.
         """
         if not self._data:
             return PeriodicCheckResult(
@@ -2191,6 +2229,67 @@ class ThriftStressPeriodicTask(PeriodicTask):
             f"{failures} exceptions, {timed_out} timed-out calls, "
             f"avg burst {avg_elapsed:.1f}s"
         )
+
+        flap_interfaces = sorted(
+            {
+                interface
+                for data in self._data.values()
+                for interface in data.get("flap_interfaces", [])
+            }
+        )
+        if flap_interfaces:
+            if failures or timed_out:
+                return PeriodicCheckResult(
+                    # pyrefly: ignore [bad-argument-type]
+                    name=self.NAME,
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"{message}; dynamic flap RPC failed or timed out, so "
+                        "the requested write workload did not complete"
+                    ),
+                )
+            hostname = next(
+                (
+                    str(data.get("hostname"))
+                    for data in self._data.values()
+                    if data.get("hostname")
+                ),
+                "",
+            )
+            try:
+                driver = await async_get_device_driver(hostname)
+                interfaces_oper_state = (
+                    await driver.async_get_all_interfaces_operational_status()
+                )
+            except Exception as e:
+                return PeriodicCheckResult(
+                    # pyrefly: ignore [bad-argument-type]
+                    name=self.NAME,
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"{message}; failed to verify dynamically flapped "
+                        f"interfaces on {hostname}: {e}"
+                    ),
+                )
+            down_interfaces = [
+                interface
+                for interface in flap_interfaces
+                if not interfaces_oper_state.get(interface, False)
+            ]
+            if down_interfaces:
+                return PeriodicCheckResult(
+                    # pyrefly: ignore [bad-argument-type]
+                    name=self.NAME,
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        f"{message}; dynamically flapped interfaces still DOWN "
+                        f"after stability stage: {down_interfaces}"
+                    ),
+                )
+            message += (
+                f"; all {len(flap_interfaces)} dynamically flapped interfaces "
+                "are UP after the stability stage"
+            )
 
         return PeriodicCheckResult(
             # pyrefly: ignore [bad-argument-type]

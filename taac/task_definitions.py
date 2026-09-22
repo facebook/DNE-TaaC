@@ -472,6 +472,7 @@ def create_configure_parallel_bgp_peers_task(
     configure_vlans_patcher_name: t.Optional[str] = None,
     add_bgp_peers_patcher_name: t.Optional[str] = None,
     config_json: t.Optional[str] = None,
+    shared_vlan_id: t.Optional[int] = None,
 ) -> Task:
     """
     Create a task to configure parallel BGP peers.
@@ -482,6 +483,8 @@ def create_configure_parallel_bgp_peers_task(
         configure_vlans_patcher_name: Name of the VLAN patcher to use
         add_bgp_peers_patcher_name: Name of the BGP peers patcher to use
         config_json: JSON string with per-interface peer configurations
+        shared_vlan_id: When set, validate that the numerically lowest selected
+            interface is the sole interface that remains in this VLAN.
 
     Returns:
         Task object to configure BGP peers
@@ -497,6 +500,8 @@ def create_configure_parallel_bgp_peers_task(
         params["add_bgp_peers_patcher_name"] = add_bgp_peers_patcher_name
     if config_json is not None:
         params["config_json"] = config_json
+    if shared_vlan_id is not None:
+        params["shared_vlan_id"] = shared_vlan_id
 
     return Task(
         task_name="configure_parallel_bgp_peers",
@@ -3695,6 +3700,8 @@ def create_thrift_stress_periodic_task(
     apis: t.Optional[t.List[str]] = None,
     burst_timeout_s: float = 60.0,
     name: str = "thrift_stress_check",
+    max_runtime: t.Optional[int] = None,
+    resolve_flap_interfaces_from_lldp: bool = False,
 ) -> PeriodicTask:
     """Periodic task that drives a sustained thrift workload.
 
@@ -3734,6 +3741,11 @@ def create_thrift_stress_periodic_task(
             label. Override when a playbook attaches MORE THAN ONE of these
             (e.g. THFT runs a thrift-storm task and a qsfp-flap task side by
             side) so the two are distinguishable in the logs.
+        max_runtime: Optional wall-clock limit for the periodic worker. THFT
+            uses this to stop disruptive load before its final longevity stage.
+        resolve_flap_interfaces_from_lldp: Before every rapid-flap invocation,
+            discover all LLDP interfaces and exclude neighbors whose system
+            name contains ``ixia`` (case-insensitive).
 
     Returns:
         A `PeriodicTask` named `name` (default `"thrift_stress_check"`)
@@ -3750,6 +3762,8 @@ def create_thrift_stress_periodic_task(
         "hostname": device_name,
         "burst_timeout_s": burst_timeout_s,
     }
+    if resolve_flap_interfaces_from_lldp:
+        params["resolve_flap_interfaces_from_lldp"] = True
     if calls is not None:
         params["calls"] = [c.to_dict() for c in calls]
     elif apis is not None:
@@ -3760,6 +3774,7 @@ def create_thrift_stress_periodic_task(
     return PeriodicTask(
         name=name,
         interval=interval,
+        max_runtime=max_runtime,
         task=Task(task_name="thrift_stress"),
         retryable=False,
         terminate_on_error=False,

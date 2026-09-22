@@ -169,6 +169,9 @@ def gen_snake_test_config(
     rapid_a_end_flap_neighbor_hostnames: t.Optional[t.List[str]] = None,
     flap_recovery_check_retry_count: t.Optional[int] = None,
     flap_recovery_check_retry_delay_seconds: float = 10.0,
+    include_ptp: bool = True,
+    skip_ixia_protocol_verification: bool = False,
+    ixia_protocol_verification_timeout: int = 90,
 ) -> taac_types.TestConfig:
     """Build a snake/loopback ``TestConfig``.
 
@@ -257,6 +260,12 @@ def gen_snake_test_config(
             manual_test_interfaces: Optional explicit interface list
                 forwarded to ``gen_snake_playbooks`` for tests that
                 need an operator-pinned target set.
+            include_ptp: Whether to create per-loop IXIA PTP master/slave
+                stacks. Defaults to True to preserve existing snake configs.
+            skip_ixia_protocol_verification: Skip IXIA's protocol-summary gate.
+                The traffic precheck still verifies end-to-end forwarding.
+            ixia_protocol_verification_timeout: Settle time used when protocol
+                verification is skipped.
 
     Returns:
         A ``TestConfig`` ready to slot into ``SNAKE_TEST_CONFIGS``.
@@ -344,23 +353,27 @@ def gen_snake_test_config(
             common_postchecks, clear_traffic_stats=True
         )
 
-    ptp_configs = [
-        ixia_types.PTPConfig(
-            server_endpoint=ixia_types.PTPEndpoint(
-                name=snake_config.source,
-                device_group_index=0,
-            ),
-            client_endpoints=[
-                ixia_types.PTPEndpoint(
-                    name=snake_config.destination,
+    ptp_configs = (
+        [
+            ixia_types.PTPConfig(
+                server_endpoint=ixia_types.PTPEndpoint(
+                    name=snake_config.source,
                     device_group_index=0,
                 ),
-            ],
-            communication_mode=ixia_types.PTPCommunicationMode.UNICAST,
-            step_mode=ixia_types.PTPStepMode.TWO_STEP,
-        )
-        for snake_config in snake_configs
-    ]
+                client_endpoints=[
+                    ixia_types.PTPEndpoint(
+                        name=snake_config.destination,
+                        device_group_index=0,
+                    ),
+                ],
+                communication_mode=ixia_types.PTPCommunicationMode.UNICAST,
+                step_mode=ixia_types.PTPStepMode.TWO_STEP,
+            )
+            for snake_config in snake_configs
+        ]
+        if include_ptp
+        else []
+    )
 
     playbooks = gen_snake_playbooks(
         "{dut}" if additional_dut_hostnames else hostname,
@@ -407,6 +420,8 @@ def gen_snake_test_config(
     test_config = taac_types.TestConfig(
         name=name,
         basset_pool=basset_pool,
+        skip_ixia_protocol_verification=skip_ixia_protocol_verification,
+        ixia_protocol_verification_timeout=ixia_protocol_verification_timeout,
         snake_configs=snake_configs,
         basic_traffic_item_configs=basic_traffic_item_configs,
         ptp_configs=ptp_configs,
