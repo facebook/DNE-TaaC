@@ -175,6 +175,7 @@ def _partitioned_leaf(
         ),
         route_attributes=route_attributes,
         legacy_ixia_name=_legacy_prefix_name(legacy_device_group_name),
+        peer_prefix_activation=None,
         requires_route_mutation=True,
     )
     return replace(

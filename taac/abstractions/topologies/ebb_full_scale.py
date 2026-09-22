@@ -91,7 +91,9 @@ from taac.abstractions.topology import (
     NextHopIntent,
     NextHopMode,
     OpenRMode,
+    PeerPrefixActivation,
     PeerPrefixDistribution,
+    PeerPrefixExclusionBlock,
     PrefixAdvertisement,
     PrefixAllocation,
     PrefixMembership,
@@ -195,6 +197,15 @@ EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW = 1000
 EBB_ROUTE_STORM_SHARD_PEER_COUNTS = (21, 21, 20)
 EBB_ROUTE_STORM_SHARD_ROUTE_COUNTS = tuple(
     peer_count * 750 for peer_count in EBB_ROUTE_STORM_SHARD_PEER_COUNTS
+)
+
+EBB_DIVERSE_NHG_GROUP_COUNT = 25
+EBB_DIVERSE_NHG_PREFIXES_PER_GROUP = 30
+EBB_DIVERSE_NHG_EXCLUDED_PEERS_PER_GROUP = 2
+_EBB_DIVERSE_NHG_FIRST_EXCLUDED_PEER = 90
+_EBB_DIVERSE_NHG_REQUIRED_PEER_COUNT = (
+    _EBB_DIVERSE_NHG_FIRST_EXCLUDED_PEER
+    + EBB_DIVERSE_NHG_GROUP_COUNT * EBB_DIVERSE_NHG_EXCLUDED_PEERS_PER_GROUP
 )
 
 EBGP_V6_PEER_GROUP = BgpPeerGroup(
@@ -639,6 +650,56 @@ def _ebb_plane_number(device_group: DeviceGroupSpec) -> int:
     return plane
 
 
+def _ebb_diverse_nhg_activation(
+    prefix_count: int,
+    *,
+    peer_count: int,
+) -> PeerPrefixActivation:
+    if peer_count != _EBB_DIVERSE_NHG_REQUIRED_PEER_COUNT:
+        raise ValueError(
+            "EBB diverse-NHG activation requires exactly "
+            f"{_EBB_DIVERSE_NHG_REQUIRED_PEER_COUNT} peers; got {peer_count}"
+        )
+    canonical_prefix_count = min(
+        prefix_count,
+        EBB_DIVERSE_NHG_GROUP_COUNT * EBB_DIVERSE_NHG_PREFIXES_PER_GROUP,
+    )
+    segments = (
+        (0, canonical_prefix_count),
+        (canonical_prefix_count, prefix_count - canonical_prefix_count),
+    )
+    blocks = []
+    for segment_start, segment_count in segments:
+        prefixes_per_group, extra_prefixes = divmod(
+            segment_count,
+            EBB_DIVERSE_NHG_GROUP_COUNT,
+        )
+        prefix_start = segment_start
+        for group in range(EBB_DIVERSE_NHG_GROUP_COUNT):
+            group_prefix_count = prefixes_per_group + (group < extra_prefixes)
+            if group_prefix_count == 0:
+                continue
+            first_excluded_peer = (
+                _EBB_DIVERSE_NHG_FIRST_EXCLUDED_PEER
+                + group * EBB_DIVERSE_NHG_EXCLUDED_PEERS_PER_GROUP
+            )
+            blocks.append(
+                PeerPrefixExclusionBlock(
+                    prefix_start_index=prefix_start,
+                    prefix_count=group_prefix_count,
+                    peer_indices=tuple(
+                        range(
+                            first_excluded_peer,
+                            first_excluded_peer
+                            + EBB_DIVERSE_NHG_EXCLUDED_PEERS_PER_GROUP,
+                        )
+                    ),
+                )
+            )
+            prefix_start += group_prefix_count
+    return PeerPrefixActivation(exclusion_blocks=tuple(blocks))
+
+
 def _ebb_advertisement(
     device_group: DeviceGroupSpec,
     openr_mode: OpenRMode,
@@ -699,6 +760,14 @@ def _ebb_advertisement(
         ),
         policy=EBB_ACCEPT_POLICY if device_group.role == "uplink" else None,
         attributes=EBB_BASELINE_ATTRIBUTES,
+        peer_prefix_activation=(
+            _ebb_diverse_nhg_activation(
+                advertised_prefix_count,
+                peer_count=device_group.peer_count,
+            )
+            if device_group.role == "uplink"
+            else None
+        ),
         route_attributes=(
             _EBB_IBGP_ROUTE_ATTRIBUTES
             if include_legacy_community_rows
@@ -1368,6 +1437,9 @@ __all__ = (
     "EBB_AS_NUMBERS",
     "EBB_BASELINE_ATTRIBUTES",
     "EBB_DEVICE_CONFIG",
+    "EBB_DIVERSE_NHG_EXCLUDED_PEERS_PER_GROUP",
+    "EBB_DIVERSE_NHG_GROUP_COUNT",
+    "EBB_DIVERSE_NHG_PREFIXES_PER_GROUP",
     "EBB_EBGP_V4_PREFIX_SET",
     "EBB_EBGP_V6_PREFIX_SET",
     "EBB_FULL_SCALE_NO_BGPMON",

@@ -202,7 +202,12 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
 
         for enable_update_group in (False, True):
             with self.subTest(enable_update_group=enable_update_group):
-                config = self._config(enable_update_group)
+                config = create_bgp_ebb_full_scale_test_config(
+                    BAG011_ASH6,
+                    name="BAG011_CANONICAL_EBGP_BASELINE_TEST",
+                    playbooks_selected=["bgp_ebb_daemon_restart_playbook"],
+                    enable_update_group=enable_update_group,
+                )
                 matching_tasks = [
                     task
                     for task in config.setup_tasks or []
@@ -211,3 +216,36 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
                     in json.loads(task.params.json_params or "{}").get("cmds", ())
                 ]
                 self.assertEqual(1, len(matching_tasks))
+
+    def test_both_modes_use_50_nhg_ebgp_baseline(self) -> None:
+        for enable_update_group in (False, True):
+            with self.subTest(enable_update_group=enable_update_group):
+                config = create_bgp_ebb_full_scale_test_config(
+                    BAG011_ASH6,
+                    name="BAG011_CANONICAL_EBGP_BASELINE_TEST",
+                    playbooks_selected=["bgp_ebb_daemon_restart_playbook"],
+                    enable_update_group=enable_update_group,
+                )
+                route_tasks = [
+                    json.loads(task.params.json_params or "{}")
+                    for task in config.setup_tasks or []
+                    if task.task_name == "invoke_ixia_api"
+                    and json.loads(task.params.json_params or "{}").get("api_name")
+                    == "configure_formulaic_bgp_routes"
+                ]
+                self.assertEqual(1, len(route_tasks))
+                mutations = json.loads(route_tasks[0]["args_json"])["mutations"]
+                primary_ebgp = [
+                    mutation
+                    for mutation in mutations
+                    if mutation.get("prefix_pool_name")
+                    in {"PREFIX_POOL_IPV4_EBGP", "PREFIX_POOL_IPV6_EBGP"}
+                ]
+                self.assertEqual(2, len(primary_ebgp))
+                self.assertEqual(
+                    [25, 25],
+                    [
+                        len(mutation["inactive_peer_prefix_blocks"])
+                        for mutation in primary_ebgp
+                    ],
+                )
