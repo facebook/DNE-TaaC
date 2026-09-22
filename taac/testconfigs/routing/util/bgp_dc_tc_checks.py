@@ -187,6 +187,12 @@ def _apply_tc_checks_to_playbooks(
                 else check
                 for check in prechecks
             ]
+            postchecks = [
+                _set_clear_traffic_stats(check)
+                if check.name == hc_types.CheckName.IXIA_PACKET_LOSS_CHECK
+                else check
+                for check in postchecks
+            ]
         if expected_unclean:
             prechecks = _replace_or_append_check(
                 prechecks,
