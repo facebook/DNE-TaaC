@@ -20,7 +20,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_systemctl_active_state_check,
 )
 from taac.packet_headers import DSF_RDMA_IB_PACKET_HEADERS
-from taac.playbooks.dlb_platform_constants import DlbAsic
+from taac.playbooks.dlb_ecmp_platform_constants import DlbAsic
 from taac.playbooks.playbook_definitions import (
     create_ecmp_groups_playbooks,
     create_ecmp_members_playbooks,

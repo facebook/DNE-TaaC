@@ -90,6 +90,12 @@ class EcmpAsic(Enum):
 
     G200 = "g200"  # Kodiak-3 (KO3) — ECMP only, no DLB
     TOMAHAWK4 = "tomahawk4"  # Elbert / Minipack2 — has DLB, tested ECMP-only here
+    # The two members below are named after the PLATFORM, not an ASIC family:
+    # neither box is in the lab yet and neither part is confirmed. Renaming to
+    # the real family later is a one-line change, whereas guessing a family now
+    # would attach that family's real numbers to the wrong silicon.
+    WEDGE800 = "wedge800"  # Wedge800 (w800) NPI — ASIC TBD
+    AC100T = "ac100t"  # Steller Eagle 100T air-cooled NPI — ASIC TBD
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,52 @@ ECMP_RESOURCE_PROFILES: dict = {
         member_util_counts={"total": 329, "max_next_hops": 128},
         # 900 groups @ width 27. Main + Rouge = 2436 groups / 66,300 members,
         # over both derated ceilings -> Rouge rejected in the overcommit runs.
+        rouge_network_group_multiplier=24300,
+        rouge_ecmp_width=27,
+        ndp_pool_multiplier=512,
+    ),
+    # ---------------------------------------------------------------------
+    # PLACEHOLDERS. w800 and ac100t are pre-hardware NPI platforms (every
+    # device value in w800_constants.py / ac100t_constants.py is likewise a
+    # TODO). Both profiles below are VERBATIM COPIES OF TOMAHAWK4, chosen only
+    # because that set is already internally consistent, so the CSV generator
+    # and the factory's pool-size assertion pass and the testconfigs stay
+    # importable before the silicon exists. They describe TH4 — every count
+    # they drive is meaningless until replaced.
+    #
+    # Two constraints are not obvious when re-deriving them:
+    #   * `max_unique_next_hops` must equal the platform's EcmpNhPool `size`
+    #     (test_config_for_ecmp_only_resource_testing raises otherwise).
+    #   * avoid a value where (max_unique_next_hops - 56) is divisible by
+    #     gen_ecmp_csv._BODY_STRIDE (37) — that collapses the CSV body window,
+    #     which is why TH4 uses 512 rather than 500.
+    # ---------------------------------------------------------------------
+    # TODO(w800): replace with the real derated ceilings (raw
+    # getMaxEcmpGroups/getMaxEcmpMembers x the 75% ecmp_resource_percentage)
+    # and re-derive widths, counts and the Rouge multiplier from them.
+    EcmpAsic.WEDGE800: EcmpResourceProfile(
+        max_ecmp_groups=1536,
+        max_ecmp_members=42000,
+        max_group_width=128,
+        max_unique_next_hops=512,
+        group_util_width=27,
+        group_util_counts={"total": 1536, "max_next_hops": 28},
+        member_util_width=128,
+        member_util_counts={"total": 329, "max_next_hops": 128},
+        rouge_network_group_multiplier=24300,
+        rouge_ecmp_width=27,
+        ndp_pool_multiplier=512,
+    ),
+    # TODO(ac100t): same — replace with real Steller Eagle silicon limits.
+    EcmpAsic.AC100T: EcmpResourceProfile(
+        max_ecmp_groups=1536,
+        max_ecmp_members=42000,
+        max_group_width=128,
+        max_unique_next_hops=512,
+        group_util_width=27,
+        group_util_counts={"total": 1536, "max_next_hops": 28},
+        member_util_width=128,
+        member_util_counts={"total": 329, "max_next_hops": 128},
         rouge_network_group_multiplier=24300,
         rouge_ecmp_width=27,
         ndp_pool_multiplier=512,

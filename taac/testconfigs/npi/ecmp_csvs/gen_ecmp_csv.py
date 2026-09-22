@@ -22,7 +22,7 @@ Semantics enforced by ``ixia/taac_ixia.py::apply_pool_mutations``:
     that share an identical NH set into ONE group).
 
 Per-platform budgets live in ``ECMP_RESOURCE_PROFILES`` in
-``playbooks/dlb_platform_constants.py``; each entry supplies max ECMP groups,
+``playbooks/dlb_ecmp_platform_constants.py``; each entry supplies max ECMP groups,
 max ECMP members (sum of widths across all groups), max group width, and the
 device-wide unique-NH cap. Example (KO3 / G200): 768 / 13,629 / 128 / 500.
 
@@ -76,7 +76,7 @@ NH_HOST_START = 0xA001  # first NH host -> ::a001
 PREFIX_BASE = "5000:dd::"  # advertised ECMP prefixes -> 5000:dd:0:N::
 
 # KO3 (G200) silicon budget — mirrored here as generator defaults. The source of
-# truth is ECMP_RESOURCE_PROFILES[EcmpAsic.G200] in dlb_platform_constants.py.
+# truth is ECMP_RESOURCE_PROFILES[EcmpAsic.G200] in dlb_ecmp_platform_constants.py.
 MAX_GROUPS = 768
 MAX_MEMBERS = 13629
 MAX_WIDTH = 128

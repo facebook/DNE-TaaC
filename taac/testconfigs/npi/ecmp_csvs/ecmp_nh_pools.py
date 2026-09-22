@@ -92,3 +92,38 @@ FUJI_SSW_MAIN_ECMP_POOL: EcmpNhPool = EcmpNhPool(
     pool_name="MAIN_ECMP_PREFIXES",
     csv_prefix="fuji_ssw",
 )
+
+
+# Wedge800 (w800) NPI Main ECMP pool. `nh_network` is a COPY of
+# `W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6` in w800_constants.py rather than an
+# import: pool fields become `apply_pool_mutations` step arguments and are
+# therefore part of the TestConfig golden hash, so they stay pinned literals.
+# `size=512` matches `ECMP_RESOURCE_PROFILES[EcmpAsic.WEDGE800]`, itself a
+# TH4-shaped placeholder.
+# TODO(w800): re-point `nh_network` at the real rogue-port parent network and
+# `size` at the real unique-NH cap once the DUT is racked; both change together
+# with w800_constants.py and the ASIC profile.
+W800_MAIN_ECMP_POOL: EcmpNhPool = EcmpNhPool(
+    name="w800_main",
+    prefix_base="5002:dd::",
+    nh_network="2001:db8:0:110a",
+    nh_host_start=0xA001,
+    size=512,
+    pool_name="MAIN_ECMP_PREFIXES",
+    csv_prefix="w800",
+)
+
+
+# Steller Eagle 100T air-cooled (ac100t) NPI Main ECMP pool, on the CPU-queue
+# DUT (DUT2). Same placeholder caveats as the w800 pool above; `nh_network`
+# copies `AC100T_IXIA_ROGUE_IC_PARENT_NETWORK_V6` from ac100t_constants.py.
+# TODO(ac100t): re-point once the DUTs are racked and cabled.
+AC100T_MAIN_ECMP_POOL: EcmpNhPool = EcmpNhPool(
+    name="ac100t_main",
+    prefix_base="5003:dd::",
+    nh_network="2001:db8:0:1bff",
+    nh_host_start=0xA001,
+    size=512,
+    pool_name="MAIN_ECMP_PREFIXES",
+    csv_prefix="ac100t",
+)

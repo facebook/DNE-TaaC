@@ -40,7 +40,7 @@ from taac.health_checks.constants import (
     SERVICES_TO_MONITOR_DURING_OPENR_RESTART,
     SERVICES_TO_MONITOR_DURING_QSFP_SERVICE_RESTART,
 )
-from taac.playbooks.dlb_platform_constants import (
+from taac.playbooks.dlb_ecmp_platform_constants import (
     DLB_RESOURCE_PROFILES,
     DlbAsic,
     ECMP_RESOURCE_PROFILES,
@@ -11390,7 +11390,7 @@ def create_ecmp_groups_playbooks(
                 ]
             ),
             # Combined DLB check: counts unique ECMP groups per prefix
-            # category. Sizing is platform-aware — see dlb_platform_constants.py
+            # category. Sizing is platform-aware — see dlb_ecmp_platform_constants.py
             # (Tomahawk3/Wedge400 dlb cap = 10, Tomahawk5/Minipack3 = 94).
             _create_dlb_steady_check(),
             create_cpu_utilization_check(
@@ -11457,7 +11457,7 @@ def create_ecmp_groups_playbooks(
                 ]
             ),
             # Combined DLB check: counts unique ECMP groups per prefix
-            # category. Sizing is platform-aware — see dlb_platform_constants.py
+            # category. Sizing is platform-aware — see dlb_ecmp_platform_constants.py
             # (Tomahawk3/Wedge400 dlb cap = 10, Tomahawk5/Minipack3 = 94).
             _create_dlb_steady_check(),
             create_ixia_packet_loss_check(
@@ -11505,7 +11505,7 @@ def create_ecmp_groups_playbooks(
             ),
             # Combined DLB check: counts unique ECMP groups per prefix
             # category. Overcommit (Rouge enabled) — platform-aware sizing
-            # via dlb_platform_constants.py (TH3 asserts a spill floor,
+            # via dlb_ecmp_platform_constants.py (TH3 asserts a spill floor,
             # TH5 asserts the full silver total).
             _create_dlb_overcommit_check(),
             create_cpu_utilization_check(
@@ -12173,7 +12173,7 @@ def create_ecmp_members_playbooks(
     """
     # Platform-aware DLB group ceiling (expected_totals["dlb"]). The prefix
     # counts below are test-traffic design (identical across platforms); only
-    # the DLB group ceiling is ASIC-specific. See dlb_platform_constants.py.
+    # the DLB group ceiling is ASIC-specific. See dlb_ecmp_platform_constants.py.
     max_dlb_groups = DLB_RESOURCE_PROFILES[asic].max_dlb_groups
 
     def _create_common_postchecks(
@@ -12329,7 +12329,7 @@ def create_ecmp_members_playbooks(
             ),
             # Combined DLB check for Overcommit Members. Prefix counts
             # (5000:dd = 70, 5000:ee = 173) are test-traffic design; the DLB
-            # group ceiling is platform-aware (dlb_platform_constants.py).
+            # group ceiling is platform-aware (dlb_ecmp_platform_constants.py).
             create_dlb_resource_stickiness_check(
                 json_params={
                     "prefix_patterns": ["5000:dd::", "5000:ee::"],
@@ -13001,7 +13001,7 @@ def create_spillover_testing_playbooks(
         A list containing the Spillover_Testing playbook
     """
     # Platform-aware DLB group ceiling (expected_totals["dlb"]); see
-    # dlb_platform_constants.py. Prefix counts below are test-traffic design.
+    # dlb_ecmp_platform_constants.py. Prefix counts below are test-traffic design.
     max_dlb_groups = DLB_RESOURCE_PROFILES[asic].max_dlb_groups
 
     def _create_spillover_postchecks_both_enabled(
@@ -13379,7 +13379,7 @@ def create_ecmp_only_groups_playbooks(
     CustomNetworkGroupConfig is a minimal shell that this overwrites).
 
     Expected group/width counts are platform-aware via ``ECMP_RESOURCE_PROFILES``
-    (see dlb_platform_constants.py).
+    (see dlb_ecmp_platform_constants.py).
     """
     profile = ECMP_RESOURCE_PROFILES[asic]
     main_traffic = f"{source_interface.upper().replace('/', '_')}_TO_MAIN_ECMP_TRAFFIC"
@@ -13733,7 +13733,7 @@ def create_ecmp_only_members_playbooks(
     widen).
 
     Expected group/width counts are platform-aware via ``ECMP_RESOURCE_PROFILES``
-    (see dlb_platform_constants.py).
+    (see dlb_ecmp_platform_constants.py).
     """
     profile = ECMP_RESOURCE_PROFILES[asic]
     main_traffic = f"{source_interface.upper().replace('/', '_')}_TO_MAIN_ECMP_TRAFFIC"

@@ -20,6 +20,7 @@ Classes of tests planned for w800 (per the w800 test plan):
     - FE QoS scheduling and buffering      <-- implemented below
     - Prefix profiling & overload tests    <-- implemented below
     - Interface flaps                      <-- implemented below
+    - ECMP-only resource testing           <-- implemented below
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
       OSS; feasible subset reuses existing speed_flip_test_configs.py)
@@ -30,6 +31,7 @@ registration pattern).
 """
 
 from ixia.ixia import types as ixia_types
+from taac.playbooks.dlb_ecmp_platform_constants import EcmpAsic
 from taac.playbooks.playbook_definitions import (
     get_critical_services_single_box_playbooks,
     get_drain_playbooks,
@@ -56,6 +58,12 @@ from taac.testconfigs.npi import (  # oss-rewrite-touch
 )
 from taac.testconfigs.npi.cpu_queue_test_config import (
     create_npi_cpu_queue_test_config,
+)
+from taac.testconfigs.npi.ecmp_csvs.ecmp_nh_pools import (
+    W800_MAIN_ECMP_POOL,
+)
+from taac.testconfigs.npi.ecmp_only_resource_testing_config import (
+    test_config_for_ecmp_only_resource_testing,
 )
 from taac.testconfigs.npi.thrift_hardening_test_config import (
     create_npi_thrift_hardening_test_config,
@@ -729,6 +737,67 @@ W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG = build_subsume_churn_test_config(
 
 
 # ===========================================================================
+# ECMP-only resource testing
+# ===========================================================================
+# 2-port ECMP group/member table stress, no DLB exercised: the uplink port is a
+# pure L3 traffic source and the rogue port carries the Main (in-budget) +
+# Rouge (overflow) eBGP sessions plus the NDP-supporting next-hop group. Shape,
+# playbooks and sizing law come from the shared factory.
+#
+# Device scaffolding comes from `w800_constants.py` like every other class here
+# -- the uplink/rogue pair and their parent networks are the same ones
+# `_W800_HARDENING_PARAMS` uses, so a device value cannot drift between classes.
+#
+# ALL SIZING IS A PLACEHOLDER -- the DUT is not in the lab, and
+# `EcmpAsic.WEDGE800` currently carries Tomahawk4's ECMP ceilings, so every
+# group/member count this config asserts is meaningless until it is retuned.
+# TODO(w800): once the DUT is racked and wired to IXIA, update together:
+#   1. w800_constants.py                   -- hostname / ports / networks / ASN
+#   2. ecmp_csvs/ecmp_nh_pools.py          -- W800_MAIN_ECMP_POOL nh_network + size
+#                                             (nh_network must equal
+#                                             W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6)
+#   3. playbooks/dlb_ecmp_platform_constants.py -- ECMP_RESOURCE_PROFILES[EcmpAsic.WEDGE800]
+W800_ECMP_ONLY_RESOURCE_TEST_CONFIG = test_config_for_ecmp_only_resource_testing(
+    test_config_name="W800_ECMP_ONLY_RESOURCE_TEST_CONFIG",
+    device_name=w800.W800_RSW_DUT_DEVICE_NAME,
+    ixia_source_interface=w800.W800_IXIA_UPLINK_INTERFACE,
+    ixia_rogue_interface=w800.W800_IXIA_ROGUE_INTERFACE,
+    # The factory CREATES this peer group, so it is a dedicated AddPath group
+    # rather than one of the w800 mimic peer groups the hardening classes reuse.
+    peergroup_uplink_mimic_v6="PEERGROUP_W800_IXIA_V6",
+    peer_group_description="eBGP peering from Wedge800 to IXIA, IPv6 sessions",
+    configure_vlans_patcher_name="configure_w800_ixia_rif_ips",
+    ixia_source_ic_parent_network_v6=w800.W800_IXIA_UPLINK_IC_PARENT_NETWORK_V6,
+    ixia_rogue_ic_parent_network_v6=w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6,
+    # The rogue port's ::a is the DUT RIF, ::b/::c the Main/Rouge peers, so the
+    # NDP-supporting next-hop pool starts clear of them at ::a001.
+    ixia_nexthop_supporting_ndp_network=f"{w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6}::a001",
+    ixia_nexthop_supporting_ndp_gateway=f"{w800.W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6}::a",
+    remote_uplink_as_4byte=w800.W800_REMOTE_UPLINK_AS_4BYTE,
+    is_uplink_peer_confed=w800.W800_IS_UPLINK_PEER_CONFED,
+    prefix_limit=w800.W800_BGP_PREFIX_LIMIT,
+    basset_pool=w800.W800_BASSET_POOL,
+    # TODO(w800): PLACEHOLDER ASIC DATA. `ECMP_RESOURCE_PROFILES[WEDGE800]` in
+    # playbooks/dlb_ecmp_platform_constants.py is a verbatim copy of Tomahawk4 --
+    # replace it with the real w800 ECMP ceilings (group/member limits, widths,
+    # Rouge multiplier, NDP pool) before trusting any count this config asserts.
+    asic=EcmpAsic.WEDGE800,
+    # TODO(w800): PLACEHOLDER POOL. `W800_MAIN_ECMP_POOL` in
+    # ecmp_csvs/ecmp_nh_pools.py carries a documentation-range `nh_network` and
+    # a `size` copied from the TH4 profile. Update it with the ASIC profile
+    # above -- `size` must equal that profile's `max_unique_next_hops` or the
+    # factory raises, and `nh_network` must equal
+    # W800_IXIA_ROGUE_IC_PARENT_NETWORK_V6.
+    pool=W800_MAIN_ECMP_POOL,
+    # Minimal Main NetworkGroup shell. Every playbook overwrites it via
+    # `apply_pool_mutations` before traffic, and 1/1 avoids the IxNetwork commit
+    # failure the 100/group_util_width default hit on Elbert.
+    baseline_network_group_multiplier=1,
+    baseline_ecmp_width=1,
+)
+
+
+# ===========================================================================
 # Registry
 # ===========================================================================
 # The ONE symbol the central registry (testconfigs/internal/__init__.py and
@@ -753,6 +822,7 @@ W800_TEST_CONFIGS = [
     W800_SNAKE_400G_TEST_CONFIG,
     W800_THRIFT_HARDENING_TEST_CONFIG,
     W800_SPEED_FLIP_SUBSUME_CHURN_TEST_CONFIG,
+    W800_ECMP_ONLY_RESOURCE_TEST_CONFIG,
 ]
 
 

@@ -36,7 +36,7 @@ from taac.packet_headers import (
     DSF_NC_PACKET_HEADERS,
     DSF_RDMA_IB_PACKET_HEADERS,
 )
-from taac.playbooks.dlb_platform_constants import DlbAsic
+from taac.playbooks.dlb_ecmp_platform_constants import DlbAsic
 from taac.playbooks.playbook_definitions import (
     create_pfc_rdma_only_with_clear_counters_playbook,
     create_w400_agent_crash_playbook,
