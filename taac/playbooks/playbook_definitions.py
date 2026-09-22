@@ -21501,11 +21501,12 @@ TEST_BGP_CP_V4_DSCP0_TRAFFIC_PUNTED_TO_CPU_HIGH_QUEUE = (
 # selected playbook or residue from an earlier one, and all ride that port.
 # Give every present item the intentional-loss allowance while also marking
 # the names optional so a fresh single-playbook run does not fail when the
-# other two items have no IXIA statistics row.
+# other traffic items have no IXIA statistics row.
 _UNH_TRAFFIC_ITEMS = [
     "BGP_PREFIX_TRAFFIC",
     "BGP_PREFIX_TRAFFIC_V4",
     "IPV6_TRAFFIC",
+    "TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC",
 ]
 
 _UNH_FLAP_LOSS_PRECHECK = [
@@ -23099,14 +23100,10 @@ def create_cpu_queue_playbooks(
     )
 
     npi_cpu_036_unh_dir_conn_host_to_low_queue_playbook = Playbook(
-        postchecks=[
-            *_UNH_FLAP_LOSS_POSTCHECK,
-            create_service_restart_check(
-                services=SERVICES_TO_MONITOR_DURING_AGENT_RESTART,
-                expected_restarted_services=WEDGE_AGENT_BINDS_TO_CASCADE,
-            ),
+        postchecks=[*_UNH_FLAP_LOSS_POSTCHECK],
+        traffic_items_to_start=[
+            "TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC"
         ],
-        traffic_items_to_start=["IPV6_TRAFFIC"],
         name=NPI_CPU_036_UNH_DIR_CONN_HOST_TO_LOW_QUEUE.name,
         prechecks=_UNH_FLAP_LOSS_PRECHECK,
         snapshot_checks=[
@@ -23131,16 +23128,6 @@ def create_cpu_queue_playbooks(
             create_steps_stage(
                 stage_id=NPI_CPU_036_UNH_DIR_CONN_HOST_TO_LOW_QUEUE.name,
                 steps=[
-                    create_custom_step(
-                        params_dict={
-                            "custom_step_name": "register_cpu_queue_static_route_patcher",
-                            "static_route_mask": 64,
-                            "next_hop_egress_port": ixia_downlink_interface,
-                            "patcher_name": "cpu_queue_static_route_patcher",
-                        },
-                    ),
-                    create_service_interruption_step(service=Service.AGENT),
-                    create_service_convergence_step(),
                     create_interface_flap_step(
                         enable=False,
                         interfaces=[ixia_downlink_interface],
@@ -23148,6 +23135,14 @@ def create_cpu_queue_playbooks(
                         step_id="disable_next_hop_egress_port",
                     ),
                     create_longevity_step(duration=60),
+                    create_custom_step(
+                        params_dict={
+                            "custom_step_name": "dump_traffic_item_stats",
+                            "traffic_item_names": [
+                                "TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC"
+                            ],
+                        },
+                    ),
                     create_interface_flap_step(
                         enable=True,
                         interfaces=[ixia_downlink_interface],
@@ -23155,11 +23150,6 @@ def create_cpu_queue_playbooks(
                         step_id="enable_next_hop_egress_port",
                     ),
                     create_longevity_step(duration=60),
-                    create_unregister_patcher_step(
-                        patcher_name="cpu_queue_static_route_patcher",
-                    ),
-                    create_service_interruption_step(service=Service.AGENT),
-                    create_service_convergence_step(),
                 ],
             )
         ],

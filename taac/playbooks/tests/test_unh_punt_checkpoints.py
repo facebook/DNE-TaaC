@@ -18,6 +18,35 @@ UNH = {
 
 
 class UnhPuntCheckpointTest(unittest.TestCase):
+    def test_cpu_036_targets_the_directly_connected_host_without_static_route(
+        self,
+    ) -> None:
+        (playbook,) = [
+            pb
+            for pb in create_cpu_queue_playbooks(0, 2, 9, "eth1/32/1")
+            if pb.name == "npi_cpu_036_unh_dir_conn_host_to_low_queue"
+        ]
+
+        self.assertEqual(
+            playbook.traffic_items_to_start,
+            ["TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC"],
+        )
+        custom_step_names = []
+        for stage in playbook.stages:
+            for step in stage.steps:
+                if (
+                    step.step_params is not None
+                    and step.step_params.json_params is not None
+                ):
+                    params = json.loads(step.step_params.json_params)
+                    if custom_step_name := params.get("custom_step_name"):
+                        custom_step_names.append(custom_step_name)
+        self.assertNotIn(
+            "register_cpu_queue_static_route_patcher",
+            custom_step_names,
+        )
+        self.assertIn("dump_traffic_item_stats", custom_step_names)
+
     def test_checkpoints_reference_the_playbook_stage(self) -> None:
         pbs = [
             pb
@@ -51,7 +80,12 @@ class UnhPuntCheckpointTest(unittest.TestCase):
             self.assertEqual([t["str_value"] for t in thresholds], ["90000"], pb.name)
             self.assertCountEqual(
                 thresholds[0]["names"],
-                ["BGP_PREFIX_TRAFFIC", "BGP_PREFIX_TRAFFIC_V4", "IPV6_TRAFFIC"],
+                [
+                    "BGP_PREFIX_TRAFFIC",
+                    "BGP_PREFIX_TRAFFIC_V4",
+                    "IPV6_TRAFFIC",
+                    "TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC",
+                ],
                 pb.name,
             )
             check_params = loss[0].check_params
@@ -78,7 +112,12 @@ class UnhPuntCheckpointTest(unittest.TestCase):
             names = json.loads(input_json)["thresholds"][0]["names"]
             self.assertCountEqual(
                 names,
-                ["BGP_PREFIX_TRAFFIC", "BGP_PREFIX_TRAFFIC_V4", "IPV6_TRAFFIC"],
+                [
+                    "BGP_PREFIX_TRAFFIC",
+                    "BGP_PREFIX_TRAFFIC_V4",
+                    "IPV6_TRAFFIC",
+                    "TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC",
+                ],
                 pb.name,
             )
             self.assertCountEqual(

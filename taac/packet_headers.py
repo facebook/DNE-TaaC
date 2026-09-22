@@ -3853,15 +3853,33 @@ ICMP_V6_TIME_EXCEEDED_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS: t.List[
 
 
 def _create_unh_ipv6_packet_headers(
-    destination_ipv6: str,
+    destination_ipv6: t.Optional[str] = None,
 ) -> t.List[taac_types.PacketHeader]:
-    # Used by the test_fboss_cpu_*_unh playbooks. `destination_ipv6` must fall
-    # within the prefix that `register_cpu_queue_static_route_patcher`
-    # installs (currently derived from the IXIA downlink network group
-    # `9000:1::`). The destination MAC resolves to the switch's gateway MAC
-    # so the packet is L3-routed; when the egress interface is later
-    # disabled the static route's next hop becomes unreachable, which is the
-    # condition the playbook's CPU_QUEUE_CHECK is verifying.
+    # Fixed destinations must fall within the static route installed by the
+    # remote-UNH playbooks. With no fixed destination, use the IXIA downlink
+    # device address to target a directly connected host.
+    destination_field = (
+        taac_types.Field(
+            query=ixia_types.Query(regex="Destination Address"),
+            attrs_json=json.dumps(
+                {
+                    "ValueType": "singleValue",
+                    "SingleValue": destination_ipv6,
+                }
+            ),
+        )
+        if destination_ipv6 is not None
+        else taac_types.Field(
+            query=ixia_types.Query(regex="Destination Address"),
+            attrs_json=json.dumps({"ValueType": "valueList"}),
+            references={
+                "ValueList": taac_types.Reference(
+                    type=taac_types.ReferenceType.DST_IPV6_ADDRESS,
+                    data_type=taac_types.DataType.LIST,
+                ),
+            },
+        )
+    )
     return [
         taac_types.PacketHeader(
             query=ixia_types.Query(
@@ -3919,19 +3937,15 @@ def _create_unh_ipv6_packet_headers(
                         ),
                     },
                 ),
-                taac_types.Field(
-                    query=ixia_types.Query(regex="Destination Address"),
-                    attrs_json=json.dumps(
-                        {
-                            "ValueType": "singleValue",
-                            "SingleValue": destination_ipv6,
-                        }
-                    ),
-                ),
+                destination_field,
             ],
         ),
     ]
 
+
+UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC_PACKET_HEADERS: t.List[
+    taac_types.PacketHeader
+] = _create_unh_ipv6_packet_headers()
 
 UNH_REMOTE_SUBNET_IPV6_TRAFFIC_PACKET_HEADERS: t.List[taac_types.PacketHeader] = (
     _create_unh_ipv6_packet_headers("9000:1::1")

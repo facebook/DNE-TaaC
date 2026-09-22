@@ -64,6 +64,7 @@ from taac.packet_headers import (
     NDP_RS_UNICAST_TRAFFIC_PACKET_HEADERS,
     TTL_0_IPV4_TRAFFIC_PACKET_HEADERS,
     TTL_1_IPV4_TRAFFIC_PACKET_HEADERS,
+    UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC_PACKET_HEADERS,
     UNH_REMOTE_SUBNET_128_IPV6_TRAFFIC_PACKET_HEADERS,
     UNH_REMOTE_SUBNET_IPV6_TRAFFIC_PACKET_HEADERS,
 )
@@ -1957,13 +1958,34 @@ def create_npi_cpu_queue_test_config(
                 bidirectional=False,
                 packet_headers=DHCP_V6_TRAFFIC_PACKET_HEADERS,
             ),
-            # UNH (Unreachable Next Hop) traffic items — RAW IPv6 destined
-            # to the prefix that register_cpu_queue_static_route_patcher
-            # installs as a static route. Keeps frames sourcing into the
-            # switch after the downlink BGP session drops (which stops
-            # BGP_PREFIX_TRAFFIC / IPV6_TRAFFIC), so the
-            # test_fboss_cpu_*_unh playbooks can observe punts on the CPU
-            # low queue during the disable→enable window.
+            # UNH (Unreachable Next Hop) traffic items — RAW IPv6 traffic
+            # keeps entering the switch after the downlink BGP session drops
+            # (which stops BGP_PREFIX_TRAFFIC / IPV6_TRAFFIC). CPU_036 targets
+            # the directly connected downlink host; CPU_037 and CPU_038 target
+            # prefixes installed by register_cpu_queue_static_route_patcher.
+            taac_types.BasicTrafficItemConfig(
+                src_endpoints=[
+                    taac_types.TrafficEndpoint(
+                        name=f"{device_name}:{ixia_uplink_interface}",
+                        device_group_index=0,
+                    ),
+                ],
+                dest_endpoints=[
+                    taac_types.TrafficEndpoint(
+                        name=f"{device_name}:{ixia_downlink_interface}",
+                        device_group_index=0,
+                    ),
+                ],
+                name="TEST_RAW_UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC",
+                line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
+                line_rate=2000,
+                traffic_type=ixia_types.TrafficType.RAW,
+                bidirectional=False,
+                packet_headers=UNH_DIRECT_CONNECTED_HOST_IPV6_TRAFFIC_PACKET_HEADERS,
+                tracking_types=[
+                    ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                ],
+            ),
             taac_types.BasicTrafficItemConfig(
                 src_endpoints=[
                     taac_types.TrafficEndpoint(
