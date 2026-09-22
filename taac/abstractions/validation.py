@@ -65,6 +65,36 @@ VALID_LEGACY_PROFILES = frozenset(
 )
 IXIA_MAX_4BYTE_ASN = (1 << 32) - 1
 BGP_STANDARD_COMMUNITY_FIELD_MAX = (1 << 16) - 1
+_THRIFT_I32_MAX = (1 << 31) - 1
+
+
+def validate_fibagent_bgp_nhg_watermarks(
+    high: int | None,
+    low: int | None,
+) -> tuple[int, int] | None:
+    if high is None and low is None:
+        return None
+    if high is None or low is None:
+        raise ValueError("FibAgentBgp NHG watermarks must be supplied together")
+    if (
+        isinstance(high, bool)
+        or not isinstance(high, int)
+        or isinstance(low, bool)
+        or not isinstance(low, int)
+    ):
+        raise ValueError("FibAgentBgp NHG watermarks must be supplied as integers")
+    if (
+        low <= 0
+        or high <= 0
+        or low > high
+        or high > _THRIFT_I32_MAX
+        or (high == _THRIFT_I32_MAX and low != _THRIFT_I32_MAX)
+    ):
+        raise ValueError(
+            "FibAgentBgp NHG watermarks require 0 < low <= high <= INT32_MAX; "
+            "the INT32_MAX unlimited sentinel must be supplied as INT32_MAX/INT32_MAX"
+        )
+    return high, low
 
 
 @dataclass(frozen=True)
@@ -2432,6 +2462,36 @@ def collect_routing_device_config_issues(
     return issues
 
 
+def _validate_fibagent_bgp_nhg_watermarks(
+    config: RoutingDeviceConfig,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    high = config.fibagent_bgp_nhg_watermark_high
+    low = config.fibagent_bgp_nhg_watermark_low
+    if (high is None) != (low is None):
+        issues.append(
+            _issue(
+                f"{path}.fibagent_bgp_nhg_watermark",
+                "incomplete_nhg_watermark",
+                "FibAgentBgp NHG high and low watermarks must be set together",
+            )
+        )
+        return
+    try:
+        validate_fibagent_bgp_nhg_watermarks(high, low)
+    except ValueError:
+        issues.append(
+            _issue(
+                f"{path}.fibagent_bgp_nhg_watermark",
+                "invalid_nhg_watermark",
+                "FibAgentBgp NHG watermarks require integer "
+                "0 < low <= high <= INT32_MAX; the INT32_MAX unlimited "
+                "sentinel must be supplied as INT32_MAX/INT32_MAX",
+            )
+        )
+
+
 def _validate_routing_device_config(
     config: RoutingDeviceConfig,
     path: str,
@@ -2474,6 +2534,7 @@ def _validate_routing_device_config(
                 ),
             )
         )
+    _validate_fibagent_bgp_nhg_watermarks(config, path, issues)
     for attr in ("route_limit", "prefix_limit", "per_peer_max_route_limit"):
         value = getattr(config, attr)
         if isinstance(value, bool):

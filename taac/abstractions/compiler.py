@@ -14,6 +14,9 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     ACL_COMMANDS,
     ADD_INTERN_USER_IDS_CMD,
     BGPCPP_DAEMONS,
+    build_fibagent_bgp_config_deploy_cmd,
+    build_fibagent_bgp_config_restore_cmd,
+    build_fibagent_bgp_config_verify_cmd,
     build_update_group_setting_override_cmd,
     FIBAGENT_BGP_CONF_DEPLOY_CMD,
     FIBAGENT_CONF_DEPLOY_CMD,
@@ -88,6 +91,7 @@ from taac.abstractions.topology.prefix import (
 )
 from taac.abstractions.validation import (
     TopologyValidationError,
+    validate_fibagent_bgp_nhg_watermarks,
     ValidationIssue,
 )
 from taac.task_definitions import (
@@ -589,6 +593,8 @@ class _EbbFullScaleSetupArgs:
     bgpcpp_configerator_path: str
     enable_update_group: bool
     bgpcpp_logging_config_override: str | None = None
+    fibagent_bgp_nhg_watermark_high: int | None = None
+    fibagent_bgp_nhg_watermark_low: int | None = None
 
 
 @dataclass(frozen=True)
@@ -804,14 +810,39 @@ def _ebb_full_scale_bgpcpp_deployment_tasks(
             ]
         )
 
+    fibagent_bgp_watermarks = validate_fibagent_bgp_nhg_watermarks(
+        args.fibagent_bgp_nhg_watermark_high,
+        args.fibagent_bgp_nhg_watermark_low,
+    )
+    if fibagent_bgp_watermarks is not None:
+        high_watermark, low_watermark = fibagent_bgp_watermarks
+        fibagent_bgp_config_task = create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[
+                build_fibagent_bgp_config_deploy_cmd(
+                    next_hop_group_watermark_high=high_watermark,
+                    next_hop_group_watermark_low=low_watermark,
+                ),
+                build_fibagent_bgp_config_verify_cmd(
+                    next_hop_group_watermark_high=high_watermark,
+                    next_hop_group_watermark_low=low_watermark,
+                ),
+            ],
+            set_outer_hostname=True,
+            ixia_needed=True,
+            validate_output=True,
+        )
+    else:
+        fibagent_bgp_config_task = create_run_commands_on_shell_task(
+            hostname=device_name,
+            cmds=[FIBAGENT_BGP_CONF_DEPLOY_CMD],
+            set_outer_hostname=True,
+            ixia_needed=True,
+        )
+
     tasks.extend(
         [
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=[FIBAGENT_BGP_CONF_DEPLOY_CMD],
-                set_outer_hostname=True,
-                ixia_needed=True,
-            ),
+            fibagent_bgp_config_task,
             create_run_commands_on_shell_task(
                 hostname=device_name,
                 cmds=[FIBAGENT_CONF_DEPLOY_CMD],
@@ -4669,8 +4700,20 @@ def _eos_bgpcpp_teardown_plan(
         return TeardownPlan(tasks=())
 
     hostname = _teardown_hostname(bound)
+    tasks: list[t.Any] = []
+    device_config = bound.device_config
+    fibagent_bgp_watermarks = (
+        None
+        if device_config is None
+        else validate_fibagent_bgp_nhg_watermarks(
+            device_config.fibagent_bgp_nhg_watermark_high,
+            device_config.fibagent_bgp_nhg_watermark_low,
+        )
+    )
+    restore_fibagent_config = fibagent_bgp_watermarks is not None
     openr_tasks = _openr_teardown_tasks(bound, openr_inputs)
-    tasks = [] if openr_tasks is None else [openr_tasks.route_withdrawal]
+    if openr_tasks is not None:
+        tasks.append(openr_tasks.route_withdrawal)
     enabled_components = _enabled_teardown_components(
         bound,
         component_runtime_plan,
@@ -4683,6 +4726,20 @@ def _eos_bgpcpp_teardown_plan(
                 daemon_name=component_name,
                 action="disable",
                 ixia_needed=True,
+            )
+        )
+
+    if restore_fibagent_config:
+        tasks.append(
+            create_run_commands_on_shell_task(
+                hostname=hostname,
+                cmds=[
+                    build_fibagent_bgp_config_restore_cmd(),
+                    build_fibagent_bgp_config_verify_cmd(),
+                ],
+                set_outer_hostname=True,
+                ixia_needed=True,
+                validate_output=True,
             )
         )
 
@@ -6021,6 +6078,8 @@ def _ebb_full_scale_setup_args(bound: BoundTopology) -> _EbbFullScaleSetupArgs:
         bgpcpp_configerator_path=bgpcpp_configerator_path,
         enable_update_group=device_config.update_group_enable,
         bgpcpp_logging_config_override=device_config.bgpcpp_logging_config_override,
+        fibagent_bgp_nhg_watermark_high=(device_config.fibagent_bgp_nhg_watermark_high),
+        fibagent_bgp_nhg_watermark_low=(device_config.fibagent_bgp_nhg_watermark_low),
     )
 
 

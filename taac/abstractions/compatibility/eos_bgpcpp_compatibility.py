@@ -2,8 +2,13 @@
 """EOS/BGP++ spelling and command compatibility data."""
 
 import base64
+import json
 import shlex
 import typing as t
+
+from taac.abstractions.validation import (
+    validate_fibagent_bgp_nhg_watermarks,
+)
 
 
 # =============================================================================
@@ -244,6 +249,136 @@ FIBAGENT_BGP_CONF_B64 = "eyIxIjp7InJlYyI6eyIxIjp7ImkzMiI6NjAxMDB9LCIyIjp7ImkzMiI
 FIBAGENT_BGP_CONF_DEPLOY_CMD = (
     f"bash echo '{FIBAGENT_BGP_CONF_B64}' | base64 -d > {FIBAGENT_BGP_CONF_DEVICE_PATH}"
 )
+
+
+def _build_atomic_config_replace_cmd(
+    *,
+    path: str,
+    content: bytes,
+    success_message: str,
+) -> str:
+    encoded_content = base64.b64encode(content).decode("ascii")
+    script = "\n".join(
+        [
+            "import base64",
+            "import os",
+            "import shutil",
+            "import tempfile",
+            "from pathlib import Path",
+            f"path = Path({path!r})",
+            f"updated_content = base64.b64decode({encoded_content!r})",
+            "metadata = path.stat() if path.exists() else None",
+            "fd, temporary_name = tempfile.mkstemp(",
+            "    dir=path.parent, prefix=f'.{path.name}.'",
+            ")",
+            "temporary_path = Path(temporary_name)",
+            "try:",
+            "    with os.fdopen(fd, 'wb') as temporary_file:",
+            "        temporary_file.write(updated_content)",
+            "        temporary_file.flush()",
+            "        os.fsync(temporary_file.fileno())",
+            "    if metadata is None:",
+            "        os.chmod(temporary_path, 0o644)",
+            "    else:",
+            "        temporary_metadata = temporary_path.stat()",
+            "        if (temporary_metadata.st_uid, temporary_metadata.st_gid) != (",
+            "            metadata.st_uid, metadata.st_gid",
+            "        ):",
+            "            os.chown(temporary_path, metadata.st_uid, metadata.st_gid)",
+            "        shutil.copymode(path, temporary_path)",
+            "    os.replace(temporary_path, path)",
+            "    directory_fd = os.open(path.parent, os.O_RDONLY)",
+            "    try:",
+            "        os.fsync(directory_fd)",
+            "    finally:",
+            "        os.close(directory_fd)",
+            "finally:",
+            "    temporary_path.unlink(missing_ok=True)",
+            "if path.read_bytes() != updated_content:",
+            "    raise RuntimeError('failed to verify atomic config replacement')",
+            f"print({success_message!r})",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
+
+
+def build_fibagent_bgp_config_deploy_cmd(
+    *,
+    next_hop_group_watermark_high: int | None = None,
+    next_hop_group_watermark_low: int | None = None,
+) -> str:
+    watermarks = validate_fibagent_bgp_nhg_watermarks(
+        next_hop_group_watermark_high,
+        next_hop_group_watermark_low,
+    )
+    if watermarks is None:
+        return FIBAGENT_BGP_CONF_DEPLOY_CMD
+    next_hop_group_watermark_high, next_hop_group_watermark_low = watermarks
+
+    config = _fibagent_bgp_config(
+        next_hop_group_watermark_high,
+        next_hop_group_watermark_low,
+    )
+    return _build_atomic_config_replace_cmd(
+        path=FIBAGENT_BGP_CONF_DEVICE_PATH,
+        content=(json.dumps(config, separators=(",", ":")) + "\n").encode("utf-8"),
+        success_message="Atomically installed FibAgentBgp NHG watermark config",
+    )
+
+
+def build_fibagent_bgp_config_restore_cmd() -> str:
+    return _build_atomic_config_replace_cmd(
+        path=FIBAGENT_BGP_CONF_DEVICE_PATH,
+        content=base64.b64decode(FIBAGENT_BGP_CONF_B64),
+        success_message="Atomically restored default FibAgentBgp config",
+    )
+
+
+def build_fibagent_bgp_config_verify_cmd(
+    *,
+    next_hop_group_watermark_high: int | None = None,
+    next_hop_group_watermark_low: int | None = None,
+) -> str:
+    watermarks = validate_fibagent_bgp_nhg_watermarks(
+        next_hop_group_watermark_high,
+        next_hop_group_watermark_low,
+    )
+    expected = (
+        _fibagent_bgp_config(*watermarks)
+        if watermarks is not None
+        else _fibagent_bgp_config()
+    )
+    script = "\n".join(
+        [
+            "import json",
+            "from pathlib import Path",
+            f"path = Path({FIBAGENT_BGP_CONF_DEVICE_PATH!r})",
+            f"expected = {expected!r}",
+            "actual = json.loads(path.read_text())",
+            "if actual != expected:",
+            "    raise RuntimeError(",
+            "        f'FibAgentBgp config readback mismatch: {actual!r}'",
+            "    )",
+            "print('Verified FibAgentBgp config readback')",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
+
+
+def _fibagent_bgp_config(high: int | None = None, low: int | None = None) -> t.Any:
+    config = json.loads(base64.b64decode(FIBAGENT_BGP_CONF_B64))
+    if high is None or low is None:
+        return config
+    config["10"] = {
+        "rec": {
+            "1": {"i32": high},
+            "2": {"i32": low},
+        }
+    }
+    return config
+
 
 FIBAGENT_CONF_DEVICE_PATH = "/mnt/fb/agent_configs/fib_agent.conf"
 FIBAGENT_CONF_B64 = "eyIxIjp7InJlYyI6eyIxIjp7ImkzMiI6NjAxMDB9LCIyIjp7ImkzMiI6NDh9LCIzIjp7ImkzMiI6NX0sIjQiOnsiaTMyIjoxNX0sIjUiOnsic3RyIjoiIn0sIjYiOnsic3RyIjoiL3BlcnNpc3Qvc2VjdXJlL2NhcGkucGVtIn0sIjciOnsic3RyIjoiL3BlcnNpc3Qvc2VjdXJlL2NhcGlrZXkucGVtIn0sIjgiOnsic3RyIjoiL21udC9mYi9jZXJ0cy9BcmlzdGFGaWJBZ2VudF9zZXJ2ZXIucGVtIn0sIjkiOnsiaTMyIjo1OTEyfSwiMTAiOnsic3RyIjoiL3Zhci9mYWNlYm9vay9yb290Y2FuYWwvY2EucGVtIn0sIjExIjp7InRmIjoxfSwiMTIiOnsidGYiOjF9LCIxMyI6eyJzdHIiOiJGaWJTZXJ2aWNlIn0sIjE0Ijp7ImkzMiI6MX0sIjE1Ijp7ImkzMiI6MX0sIjE2Ijp7InRmIjoxfSwiMTciOnsidGYiOjF9LCIxOCI6eyJzdHIiOiIvdXNyL2ZhY2Vib29rL3RocmlmdF9hY2xzL0ZpYkFnZW50X2xhYi5qc29uIn0sIjE5Ijp7InN0ciI6Ii91c3IvZmFjZWJvb2svdGhyaWZ0X2FjbHMvYXV0aF9raWxsX3N3aXRjaF9maWxlIn0sIjIwIjp7InRmIjowfSwiMjEiOnsiaTMyIjo3MjAwfSwiMjIiOnsidGYiOjF9LCIyMyI6eyJ0ZiI6MX0sIjI0Ijp7ImkzMiI6LTF9LCIyNSI6eyJzdHIiOiJGaWIgYWdlbnQgaXMgZGVzaWduZWQgdG8gZXhlY3V0ZSByZW1vdGUgcHJvZ3JhbW1pbmcgcmVxdWVzdHMgZnJvbSBPcGVuL1IgdG8gY2hhbmdlIE9wZW4vUiByb3V0ZXMgYWRtaW4gZGlzdGFuY2VzIHRvIGluZmx1ZW5jZSBiZXN0IHBhdGggc2VsZWN0aW9ucy4ifSwiMjYiOnsiaTMyIjo5NTQ0fSwiMjciOnsic3RyIjoiIn19fSwiMiI6eyJ0ZiI6MH0sIjMiOnsidGYiOjF9LCI0Ijp7ImkzMiI6Nzg2fSwiNSI6eyJpMzIiOjEwfSwiNiI6eyJpMzIiOjQwfSwiNyI6eyJ0ZiI6MH19"  # noqa: E501
