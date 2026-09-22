@@ -189,6 +189,9 @@ EBB_BASELINE_ATTRIBUTES = (
     ("origin", "igp"),
 )
 
+EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH = 1000
+EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW = 1000
+
 EBB_ROUTE_STORM_SHARD_PEER_COUNTS = (21, 21, 20)
 EBB_ROUTE_STORM_SHARD_ROUTE_COUNTS = tuple(
     peer_count * 750 for peer_count in EBB_ROUTE_STORM_SHARD_PEER_COUNTS
@@ -258,6 +261,8 @@ EBB_DEVICE_CONFIG = RoutingDeviceConfig(
     route_limit=EBB_DEVICE_ROUTE_LIMIT,
     bgp_hold_timer_s=EBB_BGP_HOLD_TIMER_S,
     bgp_keepalive_timer_s=EBB_BGP_KEEPALIVE_TIMER_S,
+    fibagent_bgp_nhg_watermark_high=EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
+    fibagent_bgp_nhg_watermark_low=EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
 )
 
 EBB_EBGP_V6_PREFIX_SET = PrefixSet(

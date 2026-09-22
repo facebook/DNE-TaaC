@@ -3,7 +3,14 @@
 import json
 import unittest
 
+from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
+    build_fibagent_bgp_config_deploy_cmd,
+)
 from taac.abstractions.physical_inventory import BAG011_ASH6
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
+    EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
+)
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     create_bgp_ebb_full_scale_test_config,
 )
@@ -186,3 +193,21 @@ class BgpEbbCharacterizationGatesTest(unittest.TestCase):
 
     def test_non_update_group_gates_only_measured_playbooks(self) -> None:
         self._assert_gates(False, _NON_UG_GATES)
+
+    def test_both_modes_deploy_ebb_nhg_watermarks(self) -> None:
+        expected_command = build_fibagent_bgp_config_deploy_cmd(
+            next_hop_group_watermark_high=EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
+            next_hop_group_watermark_low=EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
+        )
+
+        for enable_update_group in (False, True):
+            with self.subTest(enable_update_group=enable_update_group):
+                config = self._config(enable_update_group)
+                matching_tasks = [
+                    task
+                    for task in config.setup_tasks or []
+                    if task.task_name == "run_commands_on_shell"
+                    and expected_command
+                    in json.loads(task.params.json_params or "{}").get("cmds", ())
+                ]
+                self.assertEqual(1, len(matching_tasks))
