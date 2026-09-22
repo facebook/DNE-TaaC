@@ -341,6 +341,31 @@ def _group_exceptions(message: str, errors: t.Sequence[BaseException]) -> BaseEx
     return BaseExceptionGroup(message, list(errors))
 
 
+def _raise_primary_with_failures(
+    primary: BaseException,
+    failures: t.Sequence[BaseException],
+    *,
+    message: str,
+) -> t.NoReturn:
+    secondary: list[BaseException] = []
+    cause = primary.__cause__
+    if isinstance(cause, BaseExceptionGroup):
+        secondary.extend(cause.exceptions)
+    elif cause is not None:
+        secondary.append(cause)
+    secondary.extend(failures)
+    seen = {id(primary)}
+    unique_secondary = []
+    for error in secondary:
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        unique_secondary.append(error)
+    if not unique_secondary:
+        raise primary
+    raise primary from _group_exceptions(message, unique_secondary)
+
+
 def _contains_baseline_capture_timeout(error: BaseException) -> bool:
     if isinstance(error, BaselineOperationTimeoutError):
         return error.operation == "capture"
@@ -357,6 +382,29 @@ _BASELINE_CAPTURE_TIMEOUT_SECONDS = 300
 _BASELINE_RESTORE_TIMEOUT_SECONDS = 900
 _BASELINE_VERIFY_TIMEOUT_SECONDS = 300
 _BASELINE_RELEASE_TIMEOUT_SECONDS = 30
+_CLEANUP_CANCELLATION_GRACE_SECONDS = 30
+_TASK_ATTEMPTS = 2
+_TASK_RETRY_SLEEP_SECONDS = 60
+_TEARDOWN_TASK_FAILURE_GROUP_MESSAGE = "TAAC test-config teardown tasks failed"
+
+
+class _TeardownTaskFailureGroup(ExceptionGroup):
+    pass
+
+
+@dataclass
+class _CleanupCancellationBudget:
+    deadline: float | None = None
+
+    def arm(self, grace_seconds: float) -> None:
+        if self.deadline is None:
+            self.deadline = time.monotonic() + grace_seconds
+
+
+@dataclass
+class _TeardownCleanupState:
+    errors: list[Exception]
+    cancellation: asyncio.CancelledError | None = None
 
 
 class TaacRunner:
@@ -594,26 +642,308 @@ class TaacRunner:
             pass
         return " | ".join(desc_parts)
 
-    @async_retryable(retries=2, sleep_time=60, exceptions=(Exception,))
+    async def _run_task_once(
+        self,
+        task: taac_types.Task,
+        *,
+        index: int,
+        total: int,
+    ) -> None:
+        task_desc = task.description or task.task_name
+        self.logger.warning(
+            f"[Task {index}/{total}] Running: {task_desc} (host: {task.hostname})"
+        )
+        start = time.time()
+        dict_params = self.parameter_evaluator.evaluate(task.params)
+        await run_task(
+            task,
+            dict_params,
+            t.cast(TaacIxia, self.ixia),
+            self.logger,
+            self.shared_task_data,
+        )
+        elapsed = time.time() - start
+        self.logger.warning(
+            f"[Task {index}/{total}] Completed: {task_desc} ({elapsed:.1f}s)"
+        )
+
+    @async_retryable(
+        retries=_TASK_ATTEMPTS,
+        sleep_time=_TASK_RETRY_SLEEP_SECONDS,
+        exceptions=(Exception,),
+    )
     async def run_tasks(self, tasks: t.Sequence[taac_types.Task]) -> None:
         total = len(tasks)
         for idx, task in enumerate(tasks, 1):
-            task_desc = task.description or task.task_name
-            self.logger.warning(
-                f"[Task {idx}/{total}] Running: {task_desc} (host: {task.hostname})"
+            await self._run_task_once(task, index=idx, total=total)
+
+    async def _await_cleanup_to_completion(  # noqa: C901
+        self,
+        cleanup: t.Awaitable[t.Any],
+        *,
+        phase: str,
+        cancellation_grace_seconds: float = _CLEANUP_CANCELLATION_GRACE_SECONDS,
+        cancellation_budget: _CleanupCancellationBudget | None = None,
+    ) -> tuple[asyncio.CancelledError | None, Exception | None]:
+        try:
+            cleanup_task = asyncio.ensure_future(cleanup)
+        except Exception as error:
+            return None, error
+        cancellation: asyncio.CancelledError | None = None
+        budget = cancellation_budget or _CleanupCancellationBudget()
+        while not cleanup_task.done():
+            try:
+                if budget.deadline is None:
+                    await asyncio.shield(cleanup_task)
+                else:
+                    remaining = budget.deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.wait_for(
+                        asyncio.shield(cleanup_task), timeout=remaining
+                    )
+            except asyncio.CancelledError as error:
+                externally_cancelled = self._consume_current_task_cancellation()
+                if cancellation is None:
+                    cancellation = error
+                else:
+                    if externally_cancelled:
+                        cancellation.add_note(
+                            f"Additional cancellation arrived during {phase}"
+                        )
+                    else:
+                        cancellation.add_note(
+                            f"{phase} raised cancellation while still running"
+                        )
+                if externally_cancelled:
+                    budget.arm(cancellation_grace_seconds)
+                if cleanup_task.done():
+                    break
+            except TimeoutError:
+                break
+            except Exception as error:
+                if cleanup_task.done():
+                    break
+                cleanup_task.cancel()
+                cleanup_task.add_done_callback(
+                    lambda task: self._log_abandoned_cleanup_result(task, phase=phase)
+                )
+                return cancellation, error
+
+        if not cleanup_task.done():
+            cleanup_task.cancel()
+            cleanup_task.add_done_callback(
+                lambda task: self._log_abandoned_cleanup_result(task, phase=phase)
             )
-            start = time.time()
-            dict_params = self.parameter_evaluator.evaluate(task.params)
-            await run_task(
-                task,
-                dict_params,
-                t.cast(TaacIxia, self.ixia),
-                self.logger,
-                self.shared_task_data,
+            timeout_error = TimeoutError(
+                f"{phase} did not finish before the teardown cancellation deadline"
             )
-            elapsed = time.time() - start
-            self.logger.warning(
-                f"[Task {idx}/{total}] Completed: {task_desc} ({elapsed:.1f}s)"
+            return cancellation, timeout_error
+
+        try:
+            cleanup_task.result()
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+            else:
+                cancellation.add_note(f"{phase} was itself cancelled")
+        except Exception as error:
+            return cancellation, error
+        return cancellation, None
+
+    async def _run_cleanup_phase(
+        self,
+        cleanup_factory: t.Callable[[], t.Awaitable[t.Any]],
+        *,
+        phase: str,
+        cancellation_budget: _CleanupCancellationBudget,
+    ) -> tuple[asyncio.CancelledError | None, Exception | None]:
+        try:
+            cleanup = cleanup_factory()
+        except asyncio.CancelledError as error:
+            if self._consume_current_task_cancellation():
+                cancellation_budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+            return error, None
+        except Exception as error:
+            return None, error
+        return await self._await_cleanup_to_completion(
+            cleanup,
+            phase=phase,
+            cancellation_budget=cancellation_budget,
+        )
+
+    def _log_abandoned_cleanup_result(
+        self, task: asyncio.Future[t.Any], *, phase: str
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            self.logger.exception(f"{phase} failed after TAAC stopped waiting for it")
+
+    @staticmethod
+    def _consume_current_task_cancellation() -> bool:
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            current_task.uncancel()
+            return True
+        return False
+
+    @staticmethod
+    def _new_cleanup_budget(
+        previous_budget: _CleanupCancellationBudget,
+    ) -> _CleanupCancellationBudget:
+        budget = _CleanupCancellationBudget()
+        if previous_budget.deadline is not None:
+            budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+        return budget
+
+    @staticmethod
+    def _record_teardown_cancellation(
+        current: asyncio.CancelledError | None,
+        new: asyncio.CancelledError | None,
+        *,
+        phase: str,
+    ) -> asyncio.CancelledError | None:
+        if new is None:
+            return current
+        if current is None:
+            return new
+        current.add_note(f"Additional cancellation arrived during {phase}")
+        return current
+
+    @staticmethod
+    def _render_teardown_failure_details(
+        cancellation: asyncio.CancelledError | None,
+        errors: t.Sequence[Exception],
+    ) -> str:
+        details = []
+        if cancellation is not None:
+            details.append(
+                str(cancellation) or "TAAC test-config teardown was cancelled"
+            )
+        details.extend(f"{type(error).__name__}: {error}" for error in errors)
+        return "; ".join(details)
+
+    async def run_teardown_tasks(
+        self,
+        tasks: t.Sequence[taac_types.Task],
+        *,
+        cancellation_budget: _CleanupCancellationBudget | None = None,
+    ) -> None:
+        budget = cancellation_budget or _CleanupCancellationBudget()
+        pending = list(enumerate(tasks, 1))
+        total = len(pending)
+        failures_by_index: dict[int, tuple[int, taac_types.Task, Exception]] = {}
+        for attempt in range(_TASK_ATTEMPTS):
+            (
+                failures,
+                cancellation,
+                successful_indices,
+            ) = await self._attempt_teardown_tasks(
+                pending,
+                total=total,
+                cancellation_budget=budget,
+            )
+            for index in successful_indices:
+                failures_by_index.pop(index, None)
+            for failure in failures:
+                failures_by_index[failure[0]] = failure
+            cumulative_failures = [
+                failures_by_index[index] for index in sorted(failures_by_index)
+            ]
+            if cancellation is not None:
+                self._raise_teardown_task_failures(
+                    cumulative_failures,
+                    cancellation,
+                )
+                return
+            if not failures:
+                return
+            if attempt + 1 == _TASK_ATTEMPTS or budget.deadline is not None:
+                self._raise_teardown_task_failures(
+                    cumulative_failures,
+                    cancellation,
+                )
+                return
+
+            try:
+                await asyncio.sleep(_TASK_RETRY_SLEEP_SECONDS)
+            except asyncio.CancelledError as error:
+                if self._consume_current_task_cancellation():
+                    budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+                self._raise_teardown_task_failures(cumulative_failures, error)
+                return
+            pending = [(index, task) for index, task, _error in failures]
+
+    async def _attempt_teardown_tasks(
+        self,
+        indexed_tasks: t.Sequence[tuple[int, taac_types.Task]],
+        *,
+        total: int,
+        cancellation_budget: _CleanupCancellationBudget,
+    ) -> tuple[
+        list[tuple[int, taac_types.Task, Exception]],
+        asyncio.CancelledError | None,
+        set[int],
+    ]:
+        failures: list[tuple[int, taac_types.Task, Exception]] = []
+        cancellation: asyncio.CancelledError | None = None
+        successful_indices: set[int] = set()
+        for idx, task in indexed_tasks:
+            description = self._get_task_description(task)
+            task_cancellation, error = await self._run_cleanup_phase(
+                lambda task=task, idx=idx: self._run_task_once(
+                    task,
+                    index=idx,
+                    total=total,
+                ),
+                phase=f"test-config teardown task {idx}/{total}: {description}",
+                cancellation_budget=cancellation_budget,
+            )
+            cancellation = self._record_teardown_cancellation(
+                cancellation,
+                task_cancellation,
+                phase=f"test-config teardown task {idx}/{total}: {description}",
+            )
+            if error is not None:
+                error.add_note(
+                    f"Test-config teardown task {idx}/{total} failed: {description}"
+                )
+                self.logger.error(
+                    f"[Teardown task {idx}/{total}] Failed: {description}",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                failures.append((idx, task, error))
+            elif task_cancellation is None:
+                successful_indices.add(idx)
+
+        return failures, cancellation, successful_indices
+
+    @staticmethod
+    def _raise_teardown_task_failures(
+        failures: t.Sequence[tuple[int, taac_types.Task, Exception]],
+        cancellation: asyncio.CancelledError | None,
+    ) -> None:
+        errors = [error for _index, _task, error in failures]
+        if cancellation is not None:
+            if errors:
+                cancellation.add_note(
+                    "Test-config teardown also failed: "
+                    + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+                )
+                raise cancellation from _TeardownTaskFailureGroup(
+                    _TEARDOWN_TASK_FAILURE_GROUP_MESSAGE,
+                    errors,
+                )
+            raise cancellation
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise _TeardownTaskFailureGroup(
+                _TEARDOWN_TASK_FAILURE_GROUP_MESSAGE,
+                errors,
             )
 
     async def _async_run_oss_setup_tasks(self) -> None:
@@ -3840,11 +4170,125 @@ class TaacRunner:
         )
         self.logger.info(f"IXIA REST trace:\n {trace_table}")
 
-    async def async_test_tearDown(self) -> None:
-        log_section("TEST CONFIG TEARDOWN", logger=self.logger)
+    async def async_test_tearDown(self) -> None:  # noqa: C901
         teardown_start = time.time()
-        teardown_section = self.test_summary.start_section("TEST CONFIG TEARDOWN")
-        _teardown_error = None
+        teardown_section: SectionResult | None = None
+        teardown_failure: BaseException | None = None
+        summary_cleanup_error: BaseException | None = None
+        entry_cleanup_failures: list[BaseException] = []
+        entry_cleanup_cancellation: asyncio.CancelledError | None = None
+        implementation_started = False
+        try:
+            try:
+                log_section("TEST CONFIG TEARDOWN", logger=self.logger)
+                teardown_section = self.test_summary.start_section(
+                    "TEST CONFIG TEARDOWN"
+                )
+                implementation_started = True
+                await self._async_test_tearDown_impl(
+                    teardown_start,
+                    teardown_section,
+                )
+            except BaseException as error:  # noqa: B036
+                teardown_failure = error
+        finally:
+            if not implementation_started:
+                try:
+                    (
+                        release_cancellation,
+                        release_error,
+                    ) = await self._run_cleanup_phase(
+                        lambda: self.test_setup_orchestrator.async_tearDown(
+                            strict_ixia_cleanup=self.setup_only
+                        ),
+                        phase="TAAC entry-failure resource cleanup",
+                        cancellation_budget=_CleanupCancellationBudget(),
+                    )
+                    if release_cancellation is not None:
+                        entry_cleanup_cancellation = release_cancellation
+                    if release_error is not None:
+                        entry_cleanup_failures.append(release_error)
+                except BaseException as error:  # noqa: B036
+                    entry_cleanup_failures.append(error)
+            try:
+                self.test_summary.cleanup()
+            except BaseException as error:  # noqa: B036
+                error.add_note("TAAC test-summary cleanup failed")
+                summary_cleanup_error = error
+
+        if summary_cleanup_error is not None:
+            if teardown_section is not None:
+                existing_details = teardown_section.error_message
+                cleanup_detail = (
+                    f"{type(summary_cleanup_error).__name__}: {summary_cleanup_error}"
+                )
+                teardown_section.duration_secs = time.time() - teardown_start
+                teardown_section.status = SectionStatus.FAIL
+                teardown_section.error_message = "; ".join(
+                    detail
+                    for detail in (
+                        existing_details if isinstance(existing_details, str) else "",
+                        cleanup_detail,
+                    )
+                    if detail
+                )
+            entry_cleanup_failures.append(summary_cleanup_error)
+
+        if entry_cleanup_cancellation is not None:
+            secondary_failures = list(entry_cleanup_failures)
+            if teardown_failure is not None:
+                secondary_failures.insert(0, teardown_failure)
+            _raise_primary_with_failures(
+                entry_cleanup_cancellation,
+                secondary_failures,
+                message="TAAC entry cleanup was cancelled",
+            )
+
+        if teardown_failure is None:
+            if len(entry_cleanup_failures) == 1:
+                raise entry_cleanup_failures[0]
+            if entry_cleanup_failures:
+                raise _group_exceptions(
+                    "TAAC teardown finalization failed",
+                    entry_cleanup_failures,
+                )
+            return
+
+        if entry_cleanup_failures:
+            if isinstance(teardown_failure, ExceptionGroup) and all(
+                isinstance(error, Exception) for error in entry_cleanup_failures
+            ):
+                raise ExceptionGroup(
+                    "TAAC teardown failed",
+                    [
+                        *teardown_failure.exceptions,
+                        *t.cast(list[Exception], entry_cleanup_failures),
+                    ],
+                )
+            if isinstance(teardown_failure, Exception) and all(
+                isinstance(error, Exception) for error in entry_cleanup_failures
+            ):
+                raise ExceptionGroup(
+                    "TAAC teardown failed",
+                    [
+                        teardown_failure,
+                        *t.cast(list[Exception], entry_cleanup_failures),
+                    ],
+                )
+            _raise_primary_with_failures(
+                teardown_failure,
+                entry_cleanup_failures,
+                message="TAAC teardown failed",
+            )
+
+        raise teardown_failure
+
+    async def _async_run_pre_release_teardown(  # noqa: C901
+        self,
+        *,
+        state: _TeardownCleanupState,
+        cancellation_budget: _CleanupCancellationBudget,
+    ) -> None:
         try:
             with suppress_console_logs(self.logger):
                 await self.teardown_period_task_executor_if_exists(
@@ -3861,66 +4305,326 @@ class TaacRunner:
                 # `self.ixia` None while the orchestrator still holds a traced
                 # Ixia.
                 await self._async_publish_ixia_api_trace(final=True)
-                await self.run_tasks(
+        except asyncio.CancelledError as error:
+            externally_cancelled = self._consume_current_task_cancellation()
+            state.cancellation = error
+            if externally_cancelled:
+                cancellation_budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+        except Exception as error:
+            state.errors.append(error)
+
+        try:
+            with suppress_console_logs(self.logger):
+                await self.run_teardown_tasks(
                     (
                         self.selected_ixia_candidate.teardown_tasks
                         if self.selected_ixia_candidate is not None
                         else self.ixia_candidates[0].teardown_tasks
                     )
                     if not (self.skip_all_tasks or self.skip_teardown_tasks)
-                    else []
+                    else [],
+                    cancellation_budget=cancellation_budget,
                 )
-                for handler in self.custom_test_handlers:
-                    await handler._async_test_tearDown()
-        except Exception as e:
-            _teardown_error = e
+        except asyncio.CancelledError as error:
+            externally_cancelled = self._consume_current_task_cancellation()
+            cause = error.__cause__
+            if isinstance(cause, _TeardownTaskFailureGroup):
+                state.errors.extend(
+                    child for child in cause.exceptions if isinstance(child, Exception)
+                )
+            state.cancellation = self._record_teardown_cancellation(
+                state.cancellation,
+                error,
+                phase="test-config teardown tasks",
+            )
+            if externally_cancelled:
+                cancellation_budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+        except _TeardownTaskFailureGroup as error:
+            state.errors.extend(error.exceptions)
+        except Exception as error:
+            state.errors.append(error)
+
+        for idx, handler in enumerate(self.custom_test_handlers, 1):
+            handler_phase = (
+                "custom test handler teardown "
+                f"{idx}/{len(self.custom_test_handlers)}: "
+                f"{type(handler).__name__}"
+            )
+            with suppress_console_logs(self.logger):
+                (
+                    handler_cancellation,
+                    handler_error,
+                ) = await self._run_cleanup_phase(
+                    lambda handler=handler: handler._async_test_tearDown(),
+                    phase=handler_phase,
+                    cancellation_budget=cancellation_budget,
+                )
+            state.cancellation = self._record_teardown_cancellation(
+                state.cancellation,
+                handler_cancellation,
+                phase=handler_phase,
+            )
+            if handler_error is not None:
+                handler_error.add_note(f"{handler_phase} failed")
+                state.errors.append(handler_error)
+
+    async def _async_test_tearDown_impl(  # noqa: C901
+        self,
+        teardown_start: float,
+        teardown_section: SectionResult,
+    ) -> None:
+        state = _TeardownCleanupState(errors=[])
+        teardown_errors = state.errors
+        pre_release_failure: BaseException | None = None
+        pre_release_budget = _CleanupCancellationBudget()
+        resource_release_budget = _CleanupCancellationBudget()
+        try:
+            try:
+                await self._async_run_pre_release_teardown(
+                    state=state,
+                    cancellation_budget=pre_release_budget,
+                )
+            except BaseException as error:  # noqa: B036
+                pre_release_failure = error
         finally:
+            if pre_release_budget.deadline is not None:
+                resource_release_budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
             try:
                 with suppress_console_logs(self.logger):
-                    await self.test_setup_orchestrator.async_tearDown(
-                        strict_ixia_cleanup=self.setup_only
+                    (
+                        orchestrator_cancellation,
+                        orchestrator_error,
+                    ) = await self._run_cleanup_phase(
+                        lambda: self.test_setup_orchestrator.async_tearDown(
+                            strict_ixia_cleanup=self.setup_only
+                        ),
+                        phase="TAAC resource cleanup",
+                        cancellation_budget=resource_release_budget,
                     )
-            except Exception as cleanup_error:
-                if _teardown_error:
-                    _teardown_error = ExceptionGroup(
-                        "TAAC teardown tasks and resource cleanup both failed",
-                        [_teardown_error, cleanup_error],
+            except BaseException as resource_release_failure:  # noqa: B036
+                if pre_release_failure is None:
+                    secondary_failures: list[BaseException] = list(teardown_errors)
+                    if state.cancellation is not None:
+                        secondary_failures.append(state.cancellation)
+                    _raise_primary_with_failures(
+                        resource_release_failure,
+                        secondary_failures,
+                        message="TAAC resource cleanup failed",
                     )
-                else:
-                    _teardown_error = cleanup_error
+                _raise_primary_with_failures(
+                    pre_release_failure,
+                    [
+                        *teardown_errors,
+                        *(
+                            [state.cancellation]
+                            if state.cancellation is not None
+                            else []
+                        ),
+                        resource_release_failure,
+                    ],
+                    message="TAAC pre-release and resource cleanup failed",
+                )
+
+        cancellation = self._record_teardown_cancellation(
+            state.cancellation,
+            orchestrator_cancellation,
+            phase="TAAC resource cleanup",
+        )
+        if orchestrator_error is not None:
+            orchestrator_error.add_note("TAAC resource cleanup failed")
+            teardown_errors.append(orchestrator_error)
+
+        if pre_release_failure is not None:
+            secondary_failures: list[BaseException] = list(teardown_errors)
+            if cancellation is not None:
+                secondary_failures.append(cancellation)
+            _raise_primary_with_failures(
+                pre_release_failure,
+                secondary_failures,
+                message="TAAC pre-release cleanup failed",
+            )
+
+        reporting_budget = self._new_cleanup_budget(resource_release_budget)
+
+        if len(teardown_errors) == 1:
+            teardown_error: Exception | None = teardown_errors[0]
+        elif teardown_errors:
+            teardown_error = ExceptionGroup(
+                "TAAC teardown cleanup failed",
+                teardown_errors,
+            )
+        else:
+            teardown_error = None
+        investigated_error_count = 0
+
+        try:
             log_phase_end(
                 "TEST CONFIG TEARDOWN",
                 duration_secs=time.time() - teardown_start,
                 logger=self.logger,
             )
-            if _teardown_error:
+            if cancellation is not None or teardown_errors:
                 self.test_summary.end_section(
-                    teardown_section, SectionStatus.FAIL, str(_teardown_error)
+                    teardown_section,
+                    SectionStatus.FAIL,
+                    self._render_teardown_failure_details(
+                        cancellation,
+                        teardown_errors,
+                    ),
                 )
             else:
                 self.test_summary.end_section(teardown_section, SectionStatus.PASS)
-            if _teardown_error:
-                await self._async_run_lifecycle_investigation_if_enabled(
-                    phase=trr_types.InvestigationPhase.TEST_CONFIG_TEARDOWN,
-                    error=_teardown_error,
-                    start_time=int(teardown_start),
+            if teardown_error is not None:
+                (
+                    investigation_cancellation,
+                    investigation_error,
+                ) = await self._run_cleanup_phase(
+                    lambda: self._async_run_lifecycle_investigation_if_enabled(
+                        phase=trr_types.InvestigationPhase.TEST_CONFIG_TEARDOWN,
+                        error=teardown_error,
+                        start_time=int(teardown_start),
+                    ),
+                    phase="teardown investigation",
+                    cancellation_budget=reporting_budget,
                 )
-            # Generate and upload test execution summary - always print even on errors
-            try:
-                await self.test_summary.async_upload_and_log_summary(
-                    self.investigation_artifacts
+                cancellation = self._record_teardown_cancellation(
+                    cancellation,
+                    investigation_cancellation,
+                    phase="teardown investigation",
                 )
-            except Exception as e:
-                self.logger.error(f"Failed to generate test summary: {e}")
-            # Trigger triage minion if enabled and there were failures
-            has_failures = _teardown_error is not None or bool(
-                self._failed_section_names()
+                if investigation_error is not None:
+                    investigation_error.add_note("TAAC teardown investigation failed")
+                    teardown_errors.append(investigation_error)
+                investigated_error_count = len(teardown_errors)
+                teardown_section.status = SectionStatus.FAIL
+                teardown_section.error_message = self._render_teardown_failure_details(
+                    cancellation,
+                    teardown_errors,
+                )
+        except asyncio.CancelledError as error:
+            externally_cancelled = self._consume_current_task_cancellation()
+            cancellation = self._record_teardown_cancellation(
+                cancellation,
+                error,
+                phase="test-config teardown reporting",
             )
-            if self.call_triage_minion and has_failures:
-                await self._async_trigger_triage_minion()
-            self.test_summary.cleanup()
-        if _teardown_error:
-            raise _teardown_error
+            if externally_cancelled:
+                reporting_budget.arm(_CLEANUP_CANCELLATION_GRACE_SECONDS)
+        except Exception as error:
+            error.add_note("TAAC test-config teardown reporting failed")
+            teardown_errors.append(error)
+
+        late_teardown_errors = teardown_errors[investigated_error_count:]
+        if late_teardown_errors:
+            if len(late_teardown_errors) == 1:
+                late_teardown_error: Exception = late_teardown_errors[0]
+            else:
+                late_teardown_error = ExceptionGroup(
+                    "Late TAAC teardown reporting failed",
+                    late_teardown_errors,
+                )
+            (
+                late_cancellation,
+                late_investigation_error,
+            ) = await self._run_cleanup_phase(
+                lambda: self._async_run_lifecycle_investigation_if_enabled(
+                    phase=trr_types.InvestigationPhase.TEST_CONFIG_TEARDOWN,
+                    error=late_teardown_error,
+                    start_time=int(teardown_start),
+                ),
+                phase="late teardown investigation",
+                cancellation_budget=reporting_budget,
+            )
+            cancellation = self._record_teardown_cancellation(
+                cancellation,
+                late_cancellation,
+                phase="late teardown investigation",
+            )
+            if late_investigation_error is not None:
+                late_investigation_error.add_note(
+                    "Late TAAC teardown investigation failed"
+                )
+                teardown_errors.append(late_investigation_error)
+
+        has_failures = (
+            cancellation is not None
+            or bool(teardown_errors)
+            or bool(self._failed_section_names())
+        )
+        if self.call_triage_minion and has_failures:
+            triage_cancellation, triage_error = await self._run_cleanup_phase(
+                self._async_trigger_triage_minion,
+                phase="teardown triage",
+                cancellation_budget=reporting_budget,
+            )
+            cancellation = self._record_teardown_cancellation(
+                cancellation,
+                triage_cancellation,
+                phase="teardown triage",
+            )
+            if triage_error is not None:
+                triage_error.add_note("TAAC teardown triage failed")
+                teardown_errors.append(triage_error)
+
+        if cancellation is not None or teardown_errors:
+            teardown_section.duration_secs = time.time() - teardown_start
+            teardown_section.status = SectionStatus.FAIL
+            teardown_section.error_message = self._render_teardown_failure_details(
+                cancellation,
+                teardown_errors,
+            )
+
+        # Publish last so every failure knowable before upload is represented in
+        # the persisted section. An upload failure necessarily has no artifact to
+        # update, but it is still retained in the final raised error below.
+        upload_cancellation, upload_error = await self._run_cleanup_phase(
+            lambda: self.test_summary.async_upload_and_log_summary(
+                self.investigation_artifacts
+            ),
+            phase="test-summary upload",
+            cancellation_budget=self._new_cleanup_budget(reporting_budget),
+        )
+        cancellation = self._record_teardown_cancellation(
+            cancellation,
+            upload_cancellation,
+            phase="test-summary upload",
+        )
+        if upload_error is not None:
+            upload_error.add_note("TAAC test-summary upload failed")
+            self.logger.error(
+                f"Failed to generate test summary: {upload_error}",
+                exc_info=(
+                    type(upload_error),
+                    upload_error,
+                    upload_error.__traceback__,
+                ),
+            )
+            teardown_errors.append(upload_error)
+        if upload_cancellation is not None or upload_error is not None:
+            teardown_section.duration_secs = time.time() - teardown_start
+            teardown_section.status = SectionStatus.FAIL
+            teardown_section.error_message = self._render_teardown_failure_details(
+                cancellation,
+                teardown_errors,
+            )
+
+        if cancellation is not None and teardown_errors:
+            cancellation.add_note(
+                "TAAC teardown also failed: "
+                + "; ".join(
+                    f"{type(error).__name__}: {error}" for error in teardown_errors
+                )
+            )
+        if cancellation is not None:
+            _raise_primary_with_failures(
+                cancellation,
+                teardown_errors,
+                message="TAAC teardown failed",
+            )
+        if len(teardown_errors) == 1:
+            raise teardown_errors[0]
+        if teardown_errors:
+            raise ExceptionGroup("TAAC teardown failed", teardown_errors)
 
     def get_checks_to_run(
         self,
