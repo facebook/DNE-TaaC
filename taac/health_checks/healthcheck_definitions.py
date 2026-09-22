@@ -101,6 +101,7 @@ def create_device_core_dumps_check(
     core_dumps_to_ignore: t.Optional[t.List[str]] = None,
     use_start_time: bool = True,
     use_end_time: bool = False,
+    start_time_jq_var: str = "test_case_start_time",
 ) -> PointInTimeHealthCheck:
     """DEVICE_CORE_DUMPS_CHECK — detects new device core dumps.
 
@@ -114,8 +115,8 @@ def create_device_core_dumps_check(
         core_dumps_to_ignore: Process names whose core dumps should NOT cause
             the check to fail (e.g. ``["bgpd_main"]`` for force-kill tests).
         use_start_time: When True (default), scopes the check to dumps after
-            ``.test_case_start_time``. Set False for the bare variant (no
-            check_params).
+            the jq timestamp named by ``start_time_jq_var``. Set False for the
+            bare variant (no check_params).
         use_end_time: When True, additionally emits ``end_time`` from
             ``.test_case_end_time`` to bound the upper edge of the window.
             Note: ``test_case_end_time`` is not yet populated in the jq context
@@ -130,7 +131,7 @@ def create_device_core_dumps_check(
         json_payload["core_dumps_to_ignore"] = core_dumps_to_ignore
     jq_params: t.Dict[str, str] = {}
     if use_start_time:
-        jq_params["start_time"] = ".test_case_start_time"
+        jq_params["start_time"] = f".{start_time_jq_var}"
     if use_end_time:
         jq_params["end_time"] = ".test_case_end_time"
     return PointInTimeHealthCheck(
@@ -904,6 +905,27 @@ def create_log_parsing_check(
             jq_params=jq if jq else None,
             json_params=json.dumps(json_params) if json_params else None,
         ),
+        check_id=check_id,
+    )
+
+
+def create_resource_accountant_activation_check(
+    start_time_jq_var: str = "test_case_start_time",
+    retry_count: int = 4,
+    retry_delay_seconds: float = 10.0,
+    retry_delay_multiplier: float = 1.0,
+    check_id: t.Optional[str] = None,
+) -> PointInTimeHealthCheck:
+    """Require a canonical ResourceAccountant rejection in a bounded window."""
+    return create_log_parsing_check(
+        json_params={
+            "log_file_path": "/var/facebook/logs/fboss/wedge_agent.log",
+            "resource_accountant_activation": True,
+            "retry_count": retry_count,
+            "retry_delay_seconds": retry_delay_seconds,
+            "retry_delay_multiplier": retry_delay_multiplier,
+        },
+        start_time_jq_var=start_time_jq_var,
         check_id=check_id,
     )
 
@@ -2585,6 +2607,13 @@ def create_l2_entry_threshold_check(
     ndp_entry_upper_lower_threshold: t.Optional[t.Sequence[int]] = None,
     arp_entry_upper_lower_threshold: t.Optional[t.Sequence[int]] = None,
     mac_entry_upper_lower_threshold: t.Optional[t.Sequence[int]] = None,
+    ndp_entry_observe_only: bool = False,
+    arp_entry_observe_only: bool = False,
+    mac_entry_observe_only: bool = False,
+    retry_count: int = 0,
+    retry_delay_seconds: float = 5.0,
+    retry_delay_multiplier: float = 1.5,
+    check_id: t.Optional[str] = None,
 ) -> PointInTimeHealthCheck:
     """L2_ENTRY_THRESHOLD_CHECK — verifies NDP/ARP/MAC entry counts stay within bounds.
 
@@ -2604,9 +2633,24 @@ def create_l2_entry_threshold_check(
         json_payload["mac_entry_upper_lower_threshold"] = (
             mac_entry_upper_lower_threshold
         )
+    if ndp_entry_observe_only:
+        json_payload["ndp_entry_observe_only"] = True
+    if arp_entry_observe_only:
+        json_payload["arp_entry_observe_only"] = True
+    if mac_entry_observe_only:
+        json_payload["mac_entry_observe_only"] = True
+    if retry_count:
+        json_payload.update(
+            {
+                "retry_count": retry_count,
+                "retry_delay_seconds": retry_delay_seconds,
+                "retry_delay_multiplier": retry_delay_multiplier,
+            }
+        )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.L2_ENTRY_THRESHOLD_CHECK,
         check_params=Params(json_params=json.dumps(json_payload)),
+        check_id=check_id,
     )
 
 

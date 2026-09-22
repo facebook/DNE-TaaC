@@ -323,6 +323,46 @@ class SourceConstantsTest(unittest.TestCase):
         )
 
 
+class RetainedSessionPendingChangesTest(_RecoveryTestBase):
+    def test_applies_pending_changes_once_and_retries_protocol_start(self):
+        ix = self._make_ixia()
+        ix.is_existing_session = True
+        ix.start_and_verify_protocols = MagicMock(
+            side_effect=[RuntimeError("Apply Changes is required"), None]
+        )
+        ix.apply_changes = MagicMock()
+
+        ix._start_protocols_with_retained_session_recovery()
+
+        self.assertEqual(ix.start_and_verify_protocols.call_count, 2)
+        ix.apply_changes.assert_called_once_with()
+
+    def test_new_session_preserves_pending_changes_error(self):
+        ix = self._make_ixia()
+        ix.is_existing_session = False
+        error = RuntimeError("Apply Changes is required")
+        ix.start_and_verify_protocols = MagicMock(side_effect=error)
+        ix.apply_changes = MagicMock()
+
+        with self.assertRaisesRegex(RuntimeError, "Apply Changes is required"):
+            ix._start_protocols_with_retained_session_recovery()
+
+        ix.apply_changes.assert_not_called()
+
+    def test_retained_session_preserves_unrelated_start_error(self):
+        ix = self._make_ixia()
+        ix.is_existing_session = True
+        ix.start_and_verify_protocols = MagicMock(
+            side_effect=RuntimeError("BGP peer did not establish")
+        )
+        ix.apply_changes = MagicMock()
+
+        with self.assertRaisesRegex(RuntimeError, "BGP peer did not establish"):
+            ix._start_protocols_with_retained_session_recovery()
+
+        ix.apply_changes.assert_not_called()
+
+
 class BudgetGatingTest(_RecoveryTestBase):
     """The per-RPC wrapper must NOT share the connect-time
     `_ixia_recovery_attempts_remaining` budget. A single connect-time

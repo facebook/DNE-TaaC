@@ -751,6 +751,46 @@ def get_bgp_peer_config_tasks(
     return tasks
 
 
+_DUAL_ENDED_INTERFACE_FLAP_PLAYBOOK = "test_flap_half_uplinks_dut_and_half_nbr"
+
+
+def _validate_neighbor_interface_flap_params(
+    *,
+    playbooks_selected,
+    neighbor_dut_name,
+    neighbor_dut_interfaces_to_flap,
+    neighbor_interfaces_to_flap,
+) -> None:
+    requested = (
+        playbooks_selected is not None
+        and _DUAL_ENDED_INTERFACE_FLAP_PLAYBOOK in playbooks_selected
+    )
+    neighbor_args = (
+        neighbor_dut_name,
+        neighbor_dut_interfaces_to_flap,
+        neighbor_interfaces_to_flap,
+    )
+    if requested and not all(neighbor_args):
+        raise ValueError(
+            f"{_DUAL_ENDED_INTERFACE_FLAP_PLAYBOOK} requires neighbor_dut_name, "
+            "neighbor_dut_interfaces_to_flap, and neighbor_interfaces_to_flap"
+        )
+    if any(neighbor_args) and not all(neighbor_args):
+        raise ValueError(
+            "Remote interface-flap configuration must provide "
+            "neighbor_dut_name, neighbor_dut_interfaces_to_flap, and "
+            "neighbor_interfaces_to_flap together"
+        )
+    if neighbor_dut_interfaces_to_flap and (
+        len(neighbor_dut_interfaces_to_flap) != len(neighbor_interfaces_to_flap)
+    ):
+        raise ValueError(
+            "DUT and neighbor LLDP port-pair lists must have equal length, got "
+            f"{len(neighbor_dut_interfaces_to_flap)} DUT vs "
+            f"{len(neighbor_interfaces_to_flap)} neighbor interfaces"
+        )
+
+
 def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     test_config_name,
     device_name,
@@ -819,6 +859,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     wedge_agent_restart_no_of_interations=1,
     direct_ixia_connections=None,
     basset_pool=None,
+    ixia_protocol_verification_timeout=1200,
     ecmp_group_overflow_prefix="7000",  # 7000:1:f::/64
     v6_uplink_prefix="6000",
     v6_session_flapping_prefix="6000",
@@ -830,11 +871,13 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     ecmp_member_test_member_limit=11950,
     ecmp_member_test_group_limit=1300,
     uplink_interfaces_to_flap=None,
-    nbr_device_name=None,
-    nbr_interfaces_to_flap=None,
+    neighbor_dut_name=None,
+    neighbor_dut_interfaces_to_flap=None,
+    neighbor_interfaces_to_flap=None,
     uplink_flap_iterations=50,
     uplink_flap_interval_s=30,
     uplink_flap_settle_s=30,
+    uplink_flap_batch_size=2,
     include_bgp_longevity_playbooks=False,
     playbooks_selected=None,
     bgp_longevity_prefix_pool_regex=".*",
@@ -900,17 +943,32 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         uplink_interfaces_to_flap: DUT uplink ports for the UCMP-disabled port-flap
             playbooks (TC1 single / TC2 N/2 / TC3 N-1). Left unset on callers that
             do not want those playbooks, which keeps their playbook list unchanged.
-        nbr_device_name / nbr_interfaces_to_flap: Neighbor hostname and its
-            index-aligned far-end ports, enabling the TC4 DUT+NBR simultaneous
-            flap. ``nbr_interfaces_to_flap[i]`` must be the far end of
-            ``uplink_interfaces_to_flap[i]``.
+        neighbor_dut_name: Explicit control-only neighbor endpoint used by the
+            TC4 dual-ended flap. It has no IXIA ports or traffic endpoint.
+        neighbor_dut_interfaces_to_flap / neighbor_interfaces_to_flap:
+            Index-aligned DUT and neighbor port lists obtained from
+            bidirectional LLDP discovery for ``neighbor_dut_name``.
         uplink_flap_iterations / uplink_flap_interval_s / uplink_flap_settle_s:
             Flap cycles per playbook, seconds between interface operations, and
             the post-recovery settle window before the zero-loss assertion.
+        uplink_flap_batch_size: Maximum simultaneous Thrift port-state RPCs for
+            the N/2 and N-1 flap playbooks.
 
     Returns:
         TestConfig: The two-IXIA-chassis hardening conveyor TestConfig.
     """
+    _validate_neighbor_interface_flap_params(
+        playbooks_selected=playbooks_selected,
+        neighbor_dut_name=neighbor_dut_name,
+        neighbor_dut_interfaces_to_flap=neighbor_dut_interfaces_to_flap,
+        neighbor_interfaces_to_flap=neighbor_interfaces_to_flap,
+    )
+    neighbor_args = (
+        neighbor_dut_name,
+        neighbor_dut_interfaces_to_flap,
+        neighbor_interfaces_to_flap,
+    )
+
     ptp_configs = [
         ixia_types.PTPConfig(
             server_endpoint=ixia_types.PTPEndpoint(
@@ -1003,6 +1061,38 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     # it); stats are then cleared so the up-stage check can assert zero loss on
     # the recovered path alone.
     _uplink_flap_traffic_items = directional_traffic_items
+    _flap_prechecks = [
+        create_ixia_packet_loss_check(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=_uplink_flap_traffic_items,
+                    str_value="0.1",
+                    expect_packet_loss=False,
+                ),
+            ],
+        ),
+        create_prefix_limit_check(prefix_limit=prefix_limit),
+        create_memory_utilization_check(
+            threshold=10 * (1024**3), start_time_jq_var="test_case_start_time"
+        ),
+    ]
+    _flap_postchecks = [
+        create_device_core_dumps_check(),
+        create_ixia_packet_loss_check(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=_uplink_flap_traffic_items,
+                    expect_packet_loss=False,
+                ),
+            ],
+        ),
+        create_prefix_limit_check(prefix_limit=prefix_limit),
+        create_unclean_exit_check(),
+        create_cpu_utilization_check(
+            threshold=400.0, start_time_jq_var="test_case_start_time"
+        ),
+        create_service_restart_check(),
+    ]
     _flap_down_stage_checks = [
         create_ixia_packet_loss_check(
             thresholds=[
@@ -1033,9 +1123,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         "post_enable_settle_s": uplink_flap_settle_s,
         "down_stage_checks": _flap_down_stage_checks,
         "up_stage_checks": _flap_up_stage_checks,
-        "prechecks": _tc_prechecks,
-        "postchecks": _tc_postchecks,
+        "prechecks": _flap_prechecks,
+        "postchecks": _flap_postchecks,
         "snapshot_checks": _tc_snapshot_checks,
+        "traffic_items_to_start": _uplink_flap_traffic_items,
     }
     _uplink_flap_playbooks = []
     if uplink_interfaces_to_flap:
@@ -1050,10 +1141,12 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             [
                 create_ucmp_disabled_half_uplinks_flap_playbook(
                     uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    interface_batch_size=uplink_flap_batch_size,
                     **_flap_playbook_kwargs,
                 ),
                 create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
                     uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    interface_batch_size=uplink_flap_batch_size,
                     **_flap_playbook_kwargs,
                 ),
                 # Same N-1 shape driven through the optics instead of the ASIC,
@@ -1072,13 +1165,13 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 ),
             ]
         )
-        if nbr_device_name and nbr_interfaces_to_flap:
+        if all(neighbor_args):
             _uplink_flap_playbooks.append(
                 create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
                     dut_device_name=device_name,
-                    nbr_device_name=nbr_device_name,
-                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
-                    nbr_interfaces_to_flap=nbr_interfaces_to_flap,
+                    neighbor_dut_name=neighbor_dut_name,
+                    uplink_interfaces_to_flap=neighbor_dut_interfaces_to_flap,
+                    neighbor_interfaces_to_flap=neighbor_interfaces_to_flap,
                     **_flap_playbook_kwargs,
                 )
             )
@@ -1116,14 +1209,12 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     # TC4 drives thrift flaps on the neighbor, so it needs its own Endpoint for
     # the runner to build a driver for it.
     _nbr_endpoints = (
-        [taac_types.Endpoint(name=nbr_device_name)]
-        if nbr_device_name and nbr_interfaces_to_flap and uplink_interfaces_to_flap
-        else []
+        [taac_types.Endpoint(name=neighbor_dut_name)] if all(neighbor_args) else []
     )
 
     test_config = TestConfig(
         name=test_config_name,
-        ixia_protocol_verification_timeout=1200,  # todo remove this (should be 300)
+        ixia_protocol_verification_timeout=ixia_protocol_verification_timeout,
         skip_ixia_protocol_verification=True,
         basset_pool=basset_pool,
         ptp_configs=ptp_configs,

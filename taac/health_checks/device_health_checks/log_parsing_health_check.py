@@ -2,6 +2,7 @@
 
 # pyre-unsafe
 import re
+import shlex
 import time
 import typing as t
 
@@ -14,6 +15,54 @@ from taac.utils import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     log_parsing_utils,
 )
 from taac.health_check.health_check import types as hc_types
+
+
+_RESOURCE_ACCOUNTANT_REJECTION_RE = re.compile(
+    r"(?:"
+    r"Total (?:NDP|ARP|l2|unified neighbor) entries in new switchState: "
+    r"\d+ exceeds the limit: \d+"
+    r"|Invalid route update - exceeding (?:DLB|route or ECMP) resource limits"
+    r"|State updated rejected by resource accountant"
+    r")",
+    re.IGNORECASE,
+)
+_AGENT_LOG_TIMESTAMP_RE = re.compile(r"\b[A-Z]\d{4} \d{2}:\d{2}:\d{2}")
+_RESOURCE_ACCOUNTANT_GREP_PATTERN = (
+    "Total (NDP|ARP|l2|unified neighbor) entries in new switchState: "
+    "[0-9]+ exceeds the limit: [0-9]+|"
+    "Invalid route update - exceeding (DLB|route or ECMP) resource limits|"
+    "State updated rejected by resource accountant"
+)
+
+
+def find_resource_accountant_rejections(
+    log_content: str,
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> list[str]:
+    """Return canonical ResourceAccountant rejection lines in the time window."""
+    current_year = time.localtime().tm_year
+    matching_lines = []
+    for line in log_content.splitlines():
+        if not _RESOURCE_ACCOUNTANT_REJECTION_RE.search(line):
+            continue
+        if start_time is not None:
+            # A windowed assertion must never accept an undated continuation or
+            # a historical line merely because it contains the class name.
+            # NetOS journald output prepends a syslog date/host/process prefix
+            # before the embedded FBOSS timestamp, so parse from that marker.
+            timestamp_match = _AGENT_LOG_TIMESTAMP_RE.search(line)
+            if timestamp_match is None:
+                continue
+            if not log_parsing_utils.is_agent_log_line_in_time_range(
+                line[timestamp_match.start() :],
+                start_time,
+                end_time if end_time is not None else int(time.time()),
+                current_year,
+            ):
+                continue
+        matching_lines.append(line)
+    return matching_lines
 
 
 class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
@@ -33,6 +82,36 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         start_time = check_params.get("start_time")
         end_time = int(check_params.get("end_time") or time.time())
         log_file_path = check_params["log_file_path"]
+        if check_params.get("resource_accountant_activation"):
+            # Reading the full agent log can exceed NetOS command framing and
+            # discard its start sentinel. Limit remote output to the canonical
+            # rejection lines, then apply the exact timestamp window locally.
+            cmd = (
+                f"grep -Eia {shlex.quote(_RESOURCE_ACCOUNTANT_GREP_PATTERN)} "
+                f"{shlex.quote(log_file_path)} | tail -n 200"
+            )
+            # pyrefly: ignore [missing-attribute]
+            log_content = await self.driver.async_run_cmd_on_shell(cmd)
+            matching_lines = find_resource_accountant_rejections(
+                log_content,
+                int(start_time) if start_time is not None else None,
+                end_time,
+            )
+            if not matching_lines:
+                return hc_types.HealthCheckResult(
+                    status=hc_types.HealthCheckStatus.FAIL,
+                    message=(
+                        "No ResourceAccountant rejection was logged in the "
+                        "requested validation window"
+                    ),
+                )
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=(
+                    f"Found {len(matching_lines)} ResourceAccountant rejection "
+                    f"line(s): {matching_lines[:3]}"
+                ),
+            )
         include_regex = check_params.get("include_regex")
         exclude_regex = check_params.get("exclude_regex")
         assert bool(include_regex) ^ bool(exclude_regex), (

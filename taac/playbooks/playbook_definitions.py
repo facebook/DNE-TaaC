@@ -82,6 +82,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_port_transceiver_check,
     create_port_tx_rx_check,
     create_prefix_limit_check,
+    create_resource_accountant_activation_check,
     create_service_restart_check,
     create_systemctl_active_state_check,
     create_unclean_exit_check,
@@ -147,6 +148,7 @@ from taac.steps.step_definitions import (
     create_run_ssh_command_step,
     create_run_task_step,
     create_randomize_prefix_local_preference_step,
+    create_record_jq_timestamp_step,
     create_service_convergence_step,
     create_set_bgp_prefixes_local_preference_step,
     create_service_interruption_step,
@@ -7077,9 +7079,42 @@ def _uplink_flap_note(
     )
 
 
+def _partition_interfaces(
+    interfaces: list[str], batch_size: int | None
+) -> list[list[str]]:
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("interface_batch_size must be positive")
+    if batch_size is None:
+        return [interfaces]
+    return [
+        interfaces[index : index + batch_size]
+        for index in range(0, len(interfaces), batch_size)
+    ]
+
+
+def _build_uplink_flap_cleanup_steps(
+    interfaces_to_flap: list[str],
+    interface_batch_size: int | None,
+    interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
+) -> list[Step]:
+    """Restore all flapped ports without an unbounded Thrift RPC burst."""
+    return [
+        create_interface_flap_step(
+            enable=True,
+            interfaces=batch,
+            interface_flap_method=interface_flap_method,
+            sequential=False,
+            start_traffic=False,
+            description=f"Restore {len(batch)} flapped DUT port(s)",
+        )
+        for batch in _partition_interfaces(interfaces_to_flap, interface_batch_size)
+    ]
+
+
 def _build_uplink_flap_cycle_steps(
     interfaces_to_flap: list[str],
     flap_interval_s: int,
+    interface_batch_size: int | None = None,
     down_stage_checks: list[PointInTimeHealthCheck] | None = None,
     up_stage_checks: list[PointInTimeHealthCheck] | None = None,
     post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
@@ -7092,8 +7127,10 @@ def _build_uplink_flap_cycle_steps(
     ``interface_flap_method`` selects how the bounce is driven — thrift port-state
     change, ``wedge_qsfp_util -tx_disable/-tx_enable``, or
     ``wedge_qsfp_util -set_low_power/-clear_low_power``. ``flap_interval_s`` is
-    handed to the flap step as its inter-operation delay, so successive port
-    operations are spaced by that many seconds regardless of method.
+    handed to the flap step as its inter-operation delay. When
+    ``interface_batch_size`` is set, each batch is changed concurrently and the
+    next batch starts only after that delay. This bounds Thrift RPC concurrency
+    without changing the set of ports covered by one iteration.
 
     Two levels of IXIA validation bracket the cycle. While the ports are down the
     ``down_stage_checks`` run and the traffic stats are then cleared, so the
@@ -7103,6 +7140,8 @@ def _build_uplink_flap_cycle_steps(
     Args:
         interfaces_to_flap: Interfaces bounced together in this cycle.
         flap_interval_s: Seconds between interface operations.
+        interface_batch_size: Maximum interfaces changed concurrently. ``None``
+            preserves the original all-at-once behavior.
         down_stage_checks: Checks evaluated while the ports are down.
         up_stage_checks: Checks evaluated after the ports recover.
         post_enable_settle_s: Seconds to let traffic re-settle after enable before
@@ -7116,21 +7155,25 @@ def _build_uplink_flap_cycle_steps(
     Returns:
         The ordered Steps for a single flap cycle.
     """
+    interface_batches = _partition_interfaces(
+        interfaces_to_flap, interface_batch_size
+    )
     method_label = _UPLINK_FLAP_METHOD_LABELS.get(
         interface_flap_method, interface_flap_method.name
     )
     steps = [
         create_interface_flap_step(
             enable=False,
-            interfaces=interfaces_to_flap,
+            interfaces=batch,
             interface_flap_method=interface_flap_method,
             delay=flap_interval_s,
             device_name=device_name,
             description=(
-                f"Disable {len(interfaces_to_flap)} port(s) via {method_label} "
+                f"Disable {len(batch)} port(s) via {method_label} "
                 f"on {device_name or 'DUT'}"
             ),
-        ),
+        )
+        for batch in interface_batches
     ]
     if verify_port_state:
         steps.append(
@@ -7157,18 +7200,21 @@ def _build_uplink_flap_cycle_steps(
                 description="Clear IXIA traffic stats before re-enabling port(s)",
             )
         )
-    steps.append(
-        create_interface_flap_step(
-            enable=True,
-            interfaces=interfaces_to_flap,
-            interface_flap_method=interface_flap_method,
-            delay=flap_interval_s,
-            device_name=device_name,
-            description=(
-                f"Enable {len(interfaces_to_flap)} port(s) via {method_label} "
-                f"on {device_name or 'DUT'}"
-            ),
-        )
+    steps.extend(
+        [
+            create_interface_flap_step(
+                enable=True,
+                interfaces=batch,
+                interface_flap_method=interface_flap_method,
+                delay=flap_interval_s,
+                device_name=device_name,
+                description=(
+                    f"Enable {len(batch)} port(s) via {method_label} "
+                    f"on {device_name or 'DUT'}"
+                ),
+            )
+            for batch in interface_batches
+        ]
     )
     if verify_port_state:
         steps.append(
@@ -7207,6 +7253,7 @@ def _build_uplink_flap_playbook(
     postchecks: list[PointInTimeHealthCheck] | None,
     snapshot_checks: list[SnapshotHealthCheck] | None,
     traffic_items_to_start: list[str] | None,
+    interface_batch_size: int | None = None,
     interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
 ) -> Playbook:
     """Wrap a single-device flap cycle in an iterating Stage plus playbook checks."""
@@ -7220,12 +7267,18 @@ def _build_uplink_flap_playbook(
         postchecks=postchecks,
         snapshot_checks=snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
+        cleanup_steps=_build_uplink_flap_cleanup_steps(
+            interfaces_to_flap=interfaces_to_flap,
+            interface_batch_size=interface_batch_size,
+            interface_flap_method=interface_flap_method,
+        ),
         stages=[
             create_steps_stage(
                 iteration=iterations,
                 steps=_build_uplink_flap_cycle_steps(
                     interfaces_to_flap=interfaces_to_flap,
                     flap_interval_s=flap_interval_s,
+                    interface_batch_size=interface_batch_size,
                     down_stage_checks=down_stage_checks,
                     up_stage_checks=up_stage_checks,
                     post_enable_settle_s=post_enable_settle_s,
@@ -7297,6 +7350,7 @@ def create_ucmp_disabled_half_uplinks_flap_playbook(
     postchecks: list[PointInTimeHealthCheck] | None = None,
     snapshot_checks: list[SnapshotHealthCheck] | None = None,
     traffic_items_to_start: list[str] | None = None,
+    interface_batch_size: int | None = None,
     interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
     playbook_name: str = "test_flap_half_uplink_ports",
 ) -> Playbook:
@@ -7310,6 +7364,7 @@ def create_ucmp_disabled_half_uplinks_flap_playbook(
             recovery.
         prechecks / postchecks / snapshot_checks: Playbook-level checks.
         traffic_items_to_start: IXIA traffic items to run for this playbook.
+        interface_batch_size: Maximum interfaces changed concurrently.
         playbook_name: Test-case id used by ``--regex`` selection.
 
     Returns:
@@ -7341,6 +7396,7 @@ def create_ucmp_disabled_half_uplinks_flap_playbook(
         postchecks=postchecks,
         snapshot_checks=snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
+        interface_batch_size=interface_batch_size,
         interface_flap_method=interface_flap_method,
     )
 
@@ -7356,6 +7412,7 @@ def create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
     postchecks: list[PointInTimeHealthCheck] | None = None,
     snapshot_checks: list[SnapshotHealthCheck] | None = None,
     traffic_items_to_start: list[str] | None = None,
+    interface_batch_size: int | None = None,
     interface_flap_method: taac_types.InterfaceFlapMethod = DEFAULT_UPLINK_FLAP_METHOD,
     playbook_name: str = "test_flap_n_minus_1_uplink_ports",
 ) -> Playbook:
@@ -7372,6 +7429,7 @@ def create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
             recovery.
         prechecks / postchecks / snapshot_checks: Playbook-level checks.
         traffic_items_to_start: IXIA traffic items to run for this playbook.
+        interface_batch_size: Maximum interfaces changed concurrently.
         playbook_name: Test-case id used by ``--regex`` selection.
 
     Returns:
@@ -7402,15 +7460,16 @@ def create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
         postchecks=postchecks,
         snapshot_checks=snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
+        interface_batch_size=interface_batch_size,
         interface_flap_method=interface_flap_method,
     )
 
 
 def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
     dut_device_name: str,
-    nbr_device_name: str,
+    neighbor_dut_name: str,
     uplink_interfaces_to_flap: list[str],
-    nbr_interfaces_to_flap: list[str],
+    neighbor_interfaces_to_flap: list[str],
     iterations: int = DEFAULT_UPLINK_FLAP_ITERATIONS,
     flap_interval_s: int = DEFAULT_UPLINK_FLAP_INTERVAL_S,
     post_enable_settle_s: int = DEFAULT_UPLINK_FLAP_SETTLE_S,
@@ -7426,10 +7485,10 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
     """TC4 — flap N/2 uplinks on the DUT while the NBR flaps the remaining N/2.
 
     The two interface lists must be index-aligned: position ``i`` in
-    ``uplink_interfaces_to_flap`` and position ``i`` in ``nbr_interfaces_to_flap``
-    are the two ends of the same physical link. The DUT drives the first half and
-    the neighbor drives the complementary half, so every link in the bundle is
-    bounced each cycle but from opposite ends.
+    ``uplink_interfaces_to_flap`` and position ``i`` in
+    ``neighbor_interfaces_to_flap`` are the two ends of the same physical link.
+    The DUT drives the first half and the neighbor drives the complementary half,
+    so every link in the bundle is bounced each cycle but from opposite ends.
 
     Both legs run in a concurrent Stage so the two sides flap simultaneously
     rather than in the runner's sequential per-device order. Port-state
@@ -7438,10 +7497,12 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
 
     Args:
         dut_device_name: DUT hostname (drives the first N/2).
-        nbr_device_name: Neighbor hostname (drives the remaining N/2). Must be an
-            Endpoint on the TestConfig or the runner cannot build its driver.
+        neighbor_dut_name: Neighbor hostname (drives the remaining N/2). Must be
+            an explicit non-DUT Endpoint on the TestConfig so the runner can
+            reserve it and build its driver.
         uplink_interfaces_to_flap: DUT-side ports, index-aligned with the NBR list.
-        nbr_interfaces_to_flap: NBR-side ports, index-aligned with the DUT list.
+        neighbor_interfaces_to_flap: Neighbor-side ports, index-aligned with the
+            DUT list from bidirectional LLDP discovery.
         iterations / flap_interval_s / post_enable_settle_s: Cycle shape.
         down_stage_checks / up_stage_checks: IXIA validation while down / after
             recovery. Attached to the DUT leg so they are evaluated once.
@@ -7455,11 +7516,11 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
     Raises:
         ValueError: If the two lists differ in length or hold fewer than two links.
     """
-    if len(uplink_interfaces_to_flap) != len(nbr_interfaces_to_flap):
+    if len(uplink_interfaces_to_flap) != len(neighbor_interfaces_to_flap):
         raise ValueError(
             "DUT and NBR interface lists must be index-aligned per link, got "
             f"{len(uplink_interfaces_to_flap)} DUT vs "
-            f"{len(nbr_interfaces_to_flap)} NBR interfaces"
+            f"{len(neighbor_interfaces_to_flap)} NBR interfaces"
         )
     if len(uplink_interfaces_to_flap) < 2:
         raise ValueError(
@@ -7468,19 +7529,39 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
         )
     split = len(uplink_interfaces_to_flap) // 2
     dut_half = uplink_interfaces_to_flap[:split]
-    nbr_half = nbr_interfaces_to_flap[split:]
+    nbr_half = neighbor_interfaces_to_flap[split:]
     return build_2_ixia_hardening_playbook(
         name=playbook_name,
         description=(
             f"With UCMP disabled - flap N/2 uplink ports ({len(dut_half)}) "
             f"{iterations} times on DUT and simultaneously flap remaining N/2 "
-            f"ports ({len(nbr_half)}) from NBR side ({nbr_device_name}). "
+            f"ports ({len(nbr_half)}) from NBR side ({neighbor_dut_name}). "
             f"{_uplink_flap_note(interface_flap_method, flap_interval_s)}"
         ),
         prechecks=prechecks,
         postchecks=postchecks,
         snapshot_checks=snapshot_checks,
         traffic_items_to_start=traffic_items_to_start,
+        cleanup_steps=[
+            create_interface_flap_step(
+                enable=True,
+                interfaces=dut_half,
+                interface_flap_method=interface_flap_method,
+                device_name=dut_device_name,
+                sequential=True,
+                start_traffic=False,
+                description="Restore all flapped DUT ports sequentially",
+            ),
+            create_interface_flap_step(
+                enable=True,
+                interfaces=nbr_half,
+                interface_flap_method=interface_flap_method,
+                device_name=neighbor_dut_name,
+                sequential=True,
+                start_traffic=False,
+                description="Restore all flapped neighbor ports sequentially",
+            ),
+        ],
         stages=[
             create_steps_stage(
                 iteration=iterations,
@@ -7502,7 +7583,7 @@ def create_ucmp_disabled_dut_and_nbr_uplink_flap_playbook(
                             interfaces_to_flap=nbr_half,
                             flap_interval_s=flap_interval_s,
                             post_enable_settle_s=post_enable_settle_s,
-                            device_name=nbr_device_name,
+                            device_name=neighbor_dut_name,
                             verify_port_state=False,
                             interface_flap_method=interface_flap_method,
                         )
@@ -9120,6 +9201,243 @@ def create_cgroup_system_slice_oom_kill_policy_playbook() -> Playbook:
     )
 
 
+class L2HardeningTimingProfile(t.TypedDict):
+    ixia_toggle_all_ip_only_protocols: bool
+    ixia_toggle_matching_device_group: bool
+    ixia_toggle_sleep_s: int
+    base_overload_settle_s: int
+    mac_overload_settle_s: int
+    churn_inject_settle_s: int
+    restart_period_s: int
+    restart_duration_s: int
+    flap_iterations: int
+    flap_down_duration_s: int
+    flap_recovery_duration_s: int
+    coldboot_iterations: int
+    coldboot_recovery_duration_s: int
+    post_churn_settle_duration_s: int
+    table_clear_inject_settle_s: int
+    table_relearn_duration_s: int
+    table_clear_post_settle_s: int
+
+
+class _L2ChurnKwargs(t.TypedDict):
+    restart_period_s: int
+    restart_duration_s: int
+    flap_iterations: int
+    flap_down_duration_s: int
+    flap_recovery_duration_s: int
+    coldboot_iterations: int
+    coldboot_recovery_duration_s: int
+    inject_settle_duration_s: int
+    post_churn_settle_duration_s: int
+    include_ixia_stable_state_check: bool
+    reapply_agent_patchers_after_coldboot: bool
+
+
+class _L2IpToggleKwargs(t.TypedDict):
+    toggle_all_ipv6_ipv4_only_protocol: bool
+    toggle_matching_device_group: bool
+    sleep_time_between_toggle_s: int
+
+
+class _L2TableClearKwargs(t.TypedDict):
+    inject_settle_duration_s: int
+    table_relearn_duration_s: int
+    post_clear_settle_duration_s: int
+    toggle_all_ipv6_ipv4_only_protocol: bool
+    toggle_matching_device_group: bool
+    sleep_time_between_toggle_s: int
+    include_ixia_stable_state_check: bool
+
+
+L2_HARDENING_TIMING_PROFILES: dict[str, L2HardeningTimingProfile] = {
+    "npi": {
+        "ixia_toggle_all_ip_only_protocols": True,
+        "ixia_toggle_matching_device_group": False,
+        "ixia_toggle_sleep_s": 30,
+        "base_overload_settle_s": 600,
+        "mac_overload_settle_s": 100,
+        "churn_inject_settle_s": 300,
+        "restart_period_s": 300,
+        "restart_duration_s": 1800,
+        "flap_iterations": 3,
+        "flap_down_duration_s": 30,
+        "flap_recovery_duration_s": 180,
+        "coldboot_iterations": 2,
+        "coldboot_recovery_duration_s": 180,
+        "post_churn_settle_duration_s": 180,
+        "table_clear_inject_settle_s": 600,
+        "table_relearn_duration_s": 300,
+        "table_clear_post_settle_s": 120,
+    },
+    "cicd": {
+        "ixia_toggle_all_ip_only_protocols": False,
+        "ixia_toggle_matching_device_group": True,
+        "ixia_toggle_sleep_s": 5,
+        "base_overload_settle_s": 180,
+        "mac_overload_settle_s": 120,
+        "churn_inject_settle_s": 120,
+        "restart_period_s": 300,
+        "restart_duration_s": 300,
+        "flap_iterations": 1,
+        "flap_down_duration_s": 8,
+        "flap_recovery_duration_s": 60,
+        "coldboot_iterations": 1,
+        "coldboot_recovery_duration_s": 90,
+        "post_churn_settle_duration_s": 90,
+        "table_clear_inject_settle_s": 180,
+        "table_relearn_duration_s": 120,
+        "table_clear_post_settle_s": 90,
+    },
+}
+
+L2_TABLE_RPC_RETRY_COUNT: int = 2
+L2_TABLE_RPC_RETRY_DELAY_S: float = 5.0
+L2_RECOVERY_LONGEVITY_S: int = 300
+
+
+def _l2_table_observation_checks(
+    *,
+    observe_ndp: bool = True,
+    observe_arp: bool = False,
+    observe_mac: bool = False,
+) -> list[PointInTimeHealthCheck]:
+    """Read L2 tables without turning overload-time counts into verdicts."""
+    checks = []
+    if observe_ndp:
+        checks.append(
+            create_l2_entry_threshold_check(
+                ndp_entry_observe_only=True,
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+            )
+        )
+    if observe_arp:
+        checks.append(
+            create_l2_entry_threshold_check(
+                arp_entry_observe_only=True,
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+            )
+        )
+    if observe_mac:
+        checks.append(
+            create_l2_entry_threshold_check(
+                mac_entry_observe_only=True,
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+            )
+        )
+    return checks
+
+
+def _l2_overload_safety_checks(
+    *,
+    start_time_jq_var: str,
+    observe_ndp: bool = True,
+    observe_arp: bool = False,
+    observe_mac: bool = False,
+    require_resource_accountant: bool = True,
+    expected_restarted_services: t.Optional[list[str]] = None,
+) -> list[PointInTimeHealthCheck]:
+    checks = [
+        *_l2_table_observation_checks(
+            observe_ndp=observe_ndp,
+            observe_arp=observe_arp,
+            observe_mac=observe_mac,
+        ),
+        create_systemctl_active_state_check(
+            retry_count=2,
+            retry_delay_seconds=5,
+            retry_delay_multiplier=1.0,
+        ),
+        create_wedge_agent_configured_check(),
+        create_device_core_dumps_check(start_time_jq_var=start_time_jq_var),
+        create_unclean_exit_check(start_time_jq_var=start_time_jq_var),
+        create_service_restart_check(
+            services=DEFAULT_SERVICE_NAMES,
+            start_time_jq_var=start_time_jq_var,
+            expected_restarted_services=expected_restarted_services,
+        ),
+        create_cpu_utilization_check(
+            threshold=400.0,
+            start_time_jq_var=start_time_jq_var,
+        ),
+        create_memory_utilization_check(
+            threshold=5 * (1024**3),
+            start_time_jq_var=start_time_jq_var,
+        ),
+    ]
+    if require_resource_accountant:
+        checks.append(
+            create_resource_accountant_activation_check(
+                start_time_jq_var=start_time_jq_var,
+            )
+        )
+    return checks
+
+
+def _l2_overload_validation_stage(
+    *,
+    stage_id: str,
+    start_time_jq_var: str,
+    observe_arp: bool = False,
+    observe_mac: bool = False,
+    require_resource_accountant: bool = True,
+    expected_restarted_services: t.Optional[list[str]] = None,
+) -> Stage:
+    return create_steps_stage(
+        stage_id=stage_id,
+        steps=[
+            create_validation_step(
+                point_in_time_checks=_l2_overload_safety_checks(
+                    start_time_jq_var=start_time_jq_var,
+                    observe_arp=observe_arp,
+                    observe_mac=observe_mac,
+                    require_resource_accountant=require_resource_accountant,
+                    expected_restarted_services=expected_restarted_services,
+                ),
+                description="Validate L2 RPC availability and device safety",
+                start_traffic=False,
+            )
+        ],
+    )
+
+
+def _l2_recovery_stages(
+    *,
+    label: str,
+    normalization_steps: list[Step],
+    recovery_longevity_s: int,
+) -> list[Stage]:
+    return [
+        create_steps_stage(
+            stage_id=f"{label}_normalize",
+            steps=[
+                *normalization_steps,
+                create_record_jq_timestamp_step(
+                    var_name="l2_recovery_start_time",
+                    description="Start strict post-overload recovery window",
+                ),
+                create_clear_traffic_stats_step(start_traffic=False),
+            ],
+        ),
+        create_steps_stage(
+            stage_id=f"{label}_recovery_longevity",
+            steps=[
+                create_longevity_step(
+                    duration=recovery_longevity_s,
+                    description="Validate five minutes of stable recovery",
+                )
+            ],
+        ),
+    ]
+
+
 def create_hardening_of_ndp_overload_entries_playbook(
     device_name,
     downlink_iface: str,
@@ -9129,6 +9447,11 @@ def create_hardening_of_ndp_overload_entries_playbook(
     rogue_ndp_entries: int,
     ndp_entry_limit: int = NDP_SOFT_LIMIT,
     sleep_time_between_toggle_s: t.Optional[int] = None,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = False,
+    settle_duration_s: int = 600,
+    include_ixia_stable_state_check: bool = True,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
 ) -> Playbook:
     """Platform hardening playbook: NDP overload table test."""
     # None keeps configure_ipv*_entries' default toggle sleeps. On
@@ -9148,54 +9471,117 @@ def create_hardening_of_ndp_overload_entries_playbook(
                 args_dict={
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": good_ndp_entries_downlink,
-                    "toggle_all_ipv6_ipv4_only_protocol": True,
+                    "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                    "toggle_matching_device_group": toggle_matching_device_group,
                     **toggle_kwargs,
                 },
+                start_traffic=False,
             ),
         ],
         stages=[
             create_steps_stage(
+                stage_id="ndp_overload_inject",
                 steps=[
                     create_ixia_api_step(
                         api_name="configure_ipv6_entries",
                         args_dict={
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": good_ndp_entries_downlink,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
                     create_ixia_api_step(
                         api_name="configure_ipv6_entries",
                         args_dict={
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_ndp_entries_uplink,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
                     create_ixia_api_step(
                         api_name="configure_ipv6_entries",
                         args_dict={
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_ndp_entries,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
-                    create_longevity_step(duration=600),
+                    create_longevity_step(duration=settle_duration_s),
                 ]
-            )
+            ),
+            create_steps_stage(
+                stage_id="ndp_overload_mid_validation",
+                steps=[
+                    create_validation_step(
+                        point_in_time_checks=_l2_overload_safety_checks(
+                            start_time_jq_var="test_case_start_time",
+                        ),
+                        description=(
+                            "Validate ResourceAccountant and device safety while "
+                            "NDP overload remains active"
+                        ),
+                        start_traffic=False,
+                    )
+                ],
+            ),
+            create_steps_stage(
+                stage_id="ndp_normalize",
+                steps=[
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        good_ndp_entries_downlink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=(
+                            sleep_time_between_toggle_s
+                            if sleep_time_between_toggle_s is not None
+                            else 30
+                        ),
+                    ),
+                    create_clear_traffic_stats_step(start_traffic=False),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="ndp_recovery_longevity",
+                steps=[
+                    create_longevity_step(
+                        duration=recovery_longevity_s,
+                        description="Validate five minutes of stable recovery",
+                    )
+                ],
+            ),
         ],
         postchecks=[
             create_l2_entry_threshold_check(
                 ndp_entry_upper_lower_threshold=(
                     ndp_entry_limit,
                     good_ndp_entries_uplink + good_ndp_entries_downlink,
-                )
+                ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_ndp_threshold",
             ),
-            get_ixia_healthcheck_stable_state(device_name),
-        ],
+            *_l2_overload_safety_checks(
+                start_time_jq_var="test_case_start_time",
+                observe_ndp=False,
+                require_resource_accountant=False,
+            ),
+        ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        ),
     )
 
 
@@ -9206,6 +9592,10 @@ def create_hardening_of_arp_overload_entries_playbook(
     rogue_arp_entries: int,
     arp_entry_limit: int = ARP_SOFT_LIMIT,
     sleep_time_between_toggle_s: t.Optional[int] = None,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = True,
+    settle_duration_s: int = 600,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
 ) -> Playbook:
     """Platform hardening playbook: ARP overload table test."""
     # None keeps configure_ipv*_entries' default toggle sleeps. On
@@ -9225,51 +9615,110 @@ def create_hardening_of_arp_overload_entries_playbook(
                 args_dict={
                     "device_group_regex": f".*{downlink_iface}.*",
                     "prefix_count": 1,
-                    "toggle_all_ipv6_ipv4_only_protocol": True,
+                    "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                    "toggle_matching_device_group": toggle_matching_device_group,
                     **toggle_kwargs,
                 },
+                start_traffic=False,
             ),
         ],
         stages=[
             create_steps_stage(
+                stage_id="arp_overload_inject",
                 steps=[
                     create_ixia_api_step(
                         api_name="configure_ipv4_entries",
                         args_dict={
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": 1,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
                     create_ixia_api_step(
                         api_name="configure_ipv4_entries",
                         args_dict={
                             "device_group_regex": f".*{uplink_iface}.*",
                             "prefix_count": good_arp_entries,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
                     create_ixia_api_step(
                         api_name="configure_ipv4_entries",
                         args_dict={
                             "device_group_regex": f".*{downlink_iface}.*",
                             "prefix_count": rogue_arp_entries,
-                            "toggle_all_ipv6_ipv4_only_protocol": True,
-                    **toggle_kwargs,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
                         },
+                        start_traffic=False,
                     ),
-                    create_longevity_step(duration=600),
+                    create_longevity_step(duration=settle_duration_s),
                 ]
-            )
+            ),
+            create_steps_stage(
+                stage_id="arp_overload_mid_validation",
+                steps=[
+                    create_validation_step(
+                        point_in_time_checks=_l2_overload_safety_checks(
+                            start_time_jq_var="test_case_start_time",
+                            observe_arp=True,
+                        ),
+                        description=(
+                            "Validate ResourceAccountant and device safety while "
+                            "ARP overload remains active"
+                        ),
+                        start_traffic=False,
+                    )
+                ],
+            ),
+            create_steps_stage(
+                stage_id="arp_normalize",
+                steps=[
+                    create_ixia_api_step(
+                        api_name="configure_ipv4_entries",
+                        args_dict={
+                            "device_group_regex": f".*{downlink_iface}.*",
+                            "prefix_count": 1,
+                            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+                            "toggle_matching_device_group": toggle_matching_device_group,
+                            **toggle_kwargs,
+                        },
+                        start_traffic=False,
+                    ),
+                    create_clear_traffic_stats_step(start_traffic=False),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="arp_recovery_longevity",
+                steps=[
+                    create_longevity_step(
+                        duration=recovery_longevity_s,
+                        description="Validate five minutes of stable recovery",
+                    )
+                ],
+            ),
         ],
         postchecks=[
             create_l2_entry_threshold_check(
                 arp_entry_upper_lower_threshold=(
                     arp_entry_limit,
                     good_arp_entries,
-                )
+                ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_arp_threshold",
+            ),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="test_case_start_time",
+                require_resource_accountant=False,
             ),
         ],
     )
@@ -9283,8 +9732,14 @@ def create_hardening_of_mac_overload_entries_playbook(
     good_ndp_entries_downlink: int,
     good_arp_entries: int,
     mac_entry_limit: int = MAC_SOFT_LIMIT,
+    settle_duration_s: int = 100,
+    traffic_item_regex: str | None = None,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
 ) -> Playbook:
     """Platform hardening playbook: MAC overload table test."""
+    traffic_item_regex = (
+        traffic_item_regex or f".*_{downlink_iface.upper()}_.*"
+    )
     return Playbook(
         name="test_hardening_of_mac_overload_entries",
         cleanup_steps=[
@@ -9292,33 +9747,72 @@ def create_hardening_of_mac_overload_entries_playbook(
                 api_name="configure_traffic_item_src_mac_entry_count",
                 args_dict={
                     "src_mac_entry_count": 1,
-                    "traffic_item_regex": f".*_{downlink_iface}_.*",
+                    "traffic_item_regex": traffic_item_regex,
                 },
+                start_traffic=False,
             ),
         ],
         stages=[
             create_steps_stage(
+                stage_id="mac_overload_inject",
                 steps=[
                     create_ixia_api_step(
                         api_name="configure_traffic_item_src_mac_entry_count",
                         args_dict={
                             "src_mac_entry_count": rogue_mac_entry_count,
-                            "traffic_item_regex": f".*_{downlink_iface}_.*",
+                            "traffic_item_regex": traffic_item_regex,
                         },
+                        start_traffic=False,
                     ),
-                    create_longevity_step(duration=100),
+                    create_longevity_step(duration=settle_duration_s),
                 ],
-            )
+            ),
+            create_steps_stage(
+                stage_id="mac_overload_mid_validation",
+                steps=[
+                    create_validation_step(
+                        point_in_time_checks=_l2_overload_safety_checks(
+                            start_time_jq_var="test_case_start_time",
+                            observe_mac=True,
+                            # L2-only learning is disabled on these devices,
+                            # so MAC source churn is not expected to activate
+                            # ResourceAccountant admission rejection.
+                            require_resource_accountant=False,
+                        ),
+                        description="Validate device safety during MAC-only load",
+                        start_traffic=False,
+                    )
+                ],
+            ),
+            create_steps_stage(
+                stage_id="mac_normalize",
+                steps=[
+                    _configure_rogue_src_mac_step(1, traffic_item_regex),
+                    create_clear_traffic_stats_step(start_traffic=False),
+                ],
+            ),
+            create_steps_stage(
+                stage_id="mac_recovery_longevity",
+                steps=[
+                    create_longevity_step(
+                        duration=recovery_longevity_s,
+                        description="Validate five minutes of stable recovery",
+                    )
+                ],
+            ),
         ],
         postchecks=[
             create_l2_entry_threshold_check(
-                mac_entry_upper_lower_threshold=(
-                    mac_entry_limit,
-                    good_mac_entry_count
-                    + good_ndp_entries_uplink
-                    + good_ndp_entries_downlink
-                    + good_arp_entries,
-                )
+                mac_entry_observe_only=True,
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_mac_observation",
+            ),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="test_case_start_time",
+                observe_mac=False,
+                require_resource_accountant=False,
             ),
         ],
     )
@@ -9354,7 +9848,14 @@ def create_hardening_of_mac_overload_entries_playbook(
 L2_OVERLOAD_10X_MULTIPLIER: int = 10
 
 
-def _configure_ndp_entries_step(iface: str, prefix_count: int) -> Step:
+def _configure_ndp_entries_step(
+    iface: str,
+    prefix_count: int,
+    *,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = False,
+    sleep_time_between_toggle_s: int = 30,
+) -> Step:
     """Set the NDP (v6) device-group multiplier on `iface` to `prefix_count`.
 
     `iface` is the DUT-side port name; IXIA device groups are named with the
@@ -9365,20 +9866,33 @@ def _configure_ndp_entries_step(iface: str, prefix_count: int) -> Step:
         args_dict={
             "device_group_regex": f".*{iface.upper()}.*",
             "prefix_count": prefix_count,
-            "toggle_all_ipv6_ipv4_only_protocol": True,
+            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+            "toggle_matching_device_group": toggle_matching_device_group,
+            "sleep_time_between_toggle_s": sleep_time_between_toggle_s,
         },
+        start_traffic=False,
     )
 
 
-def _configure_arp_entries_step(iface: str, prefix_count: int) -> Step:
+def _configure_arp_entries_step(
+    iface: str,
+    prefix_count: int,
+    *,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = True,
+    sleep_time_between_toggle_s: int = 30,
+) -> Step:
     """Set the ARP (v4) device-group multiplier on `iface` to `prefix_count`."""
     return create_ixia_api_step(
         api_name="configure_ipv4_entries",
         args_dict={
             "device_group_regex": f".*{iface.upper()}.*",
             "prefix_count": prefix_count,
-            "toggle_all_ipv6_ipv4_only_protocol": True,
+            "toggle_all_ipv6_ipv4_only_protocol": toggle_all_ipv6_ipv4_only_protocol,
+            "toggle_matching_device_group": toggle_matching_device_group,
+            "sleep_time_between_toggle_s": sleep_time_between_toggle_s,
         },
+        start_traffic=False,
     )
 
 
@@ -9399,6 +9913,7 @@ def _configure_rogue_src_mac_step(
             "src_mac_entry_count": src_mac_entry_count,
             "traffic_item_regex": rogue_traffic_item_regex,
         },
+        start_traffic=False,
     )
 
 
@@ -9414,6 +9929,13 @@ def _l2_overload_agent_churn_stages(
     coldboot_iterations: int,
     coldboot_recovery_duration_s: int,
     settle_duration_s: int,
+    normalization_steps: list[Step],
+    recovery_longevity_s: int,
+    observe_arp: bool = False,
+    observe_mac: bool = False,
+    require_resource_accountant: bool = True,
+    post_coldboot_steps: t.Optional[list[Step]] = None,
+    relearn_steps: t.Optional[list[Step]] = None,
 ) -> list[Stage]:
     """Disruption tail shared by the three agent-churn overload playbooks.
 
@@ -9440,10 +9962,27 @@ def _l2_overload_agent_churn_stages(
             of the AGENT/BGP convergence wait.
         settle_duration_s: Clean measurement window after the counters are
             zeroed, sized so the packet-loss postchecks see only steady state.
+        post_coldboot_steps: Optional steps that restore ephemeral DUT config
+            after the final coldboot. COOP agent patchers are registered
+            persistently but their runtime output is not automatically
+            re-applied when the agent coldboots.
+        relearn_steps: Optional IXIA protocol refreshes that force neighbors to
+            announce again after the final coldboot. This is required for
+            IP-only topologies, where no BGP traffic exists to trigger fresh
+            ARP/NDP resolution.
     """
     flap_interfaces = [downlink_iface, uplink_iface]
     flap_method = taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
     return [
+        create_steps_stage(
+            stage_id=f"{label}_disruption_window_start",
+            steps=[
+                create_record_jq_timestamp_step(
+                    var_name="l2_disruption_start_time",
+                    description="Start intentional L2 disruption window",
+                )
+            ],
+        ),
         *_build_periodic_restart_stages(
             service=Service.AGENT,
             service_label="wedge_agent",
@@ -9480,6 +10019,7 @@ def _l2_overload_agent_churn_stages(
                     create_cold_boot_file=True,
                     description="wedge_agent coldboot",
                 ),
+                *(post_coldboot_steps or []),
                 create_service_convergence_step(
                     services=[Service.AGENT, Service.BGP],
                 ),
@@ -9493,9 +10033,22 @@ def _l2_overload_agent_churn_stages(
         create_steps_stage(
             stage_id=f"{label}_overload_post_churn_settle",
             steps=[
-                create_clear_traffic_stats_step(),
+                *(relearn_steps or []),
                 create_longevity_step(duration=settle_duration_s),
             ],
+        ),
+        _l2_overload_validation_stage(
+            stage_id=f"{label}_post_disruption_mid_validation",
+            start_time_jq_var="l2_disruption_start_time",
+            observe_arp=observe_arp,
+            observe_mac=observe_mac,
+            require_resource_accountant=require_resource_accountant,
+            expected_restarted_services=SERVICES_EXPECTED_TO_RESTART_DURING_AGENT_WARMBOOT,
+        ),
+        *_l2_recovery_stages(
+            label=label,
+            normalization_steps=normalization_steps,
+            recovery_longevity_s=recovery_longevity_s,
         ),
     ]
 
@@ -9511,7 +10064,18 @@ def create_hardening_of_ndp_overload_with_agent_churn_playbook(
     restart_period_s: int = 300,
     restart_duration_s: int = 1800,
     flap_iterations: int = 3,
+    flap_down_duration_s: int = 30,
+    flap_recovery_duration_s: int = 180,
     coldboot_iterations: int = 2,
+    coldboot_recovery_duration_s: int = 180,
+    inject_settle_duration_s: int = 300,
+    post_churn_settle_duration_s: int = 180,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = False,
+    sleep_time_between_toggle_s: int = 30,
+    include_ixia_stable_state_check: bool = True,
+    reapply_agent_patchers_after_coldboot: bool = False,
     prechecks: t.Optional[list] = None,
     extra_postchecks: t.Optional[list] = None,
     snapshot_checks: t.Optional[list] = None,
@@ -9522,7 +10086,13 @@ def create_hardening_of_ndp_overload_with_agent_churn_playbook(
         prechecks=prechecks,
         snapshot_checks=snapshot_checks,
         cleanup_steps=[
-            _configure_ndp_entries_step(downlink_iface, good_ndp_entries_downlink),
+            _configure_ndp_entries_step(
+                downlink_iface,
+                good_ndp_entries_downlink,
+                toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                toggle_matching_device_group=toggle_matching_device_group,
+                sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+            ),
         ],
         stages=[
             create_steps_stage(
@@ -9530,13 +10100,33 @@ def create_hardening_of_ndp_overload_with_agent_churn_playbook(
                 steps=[
                     # Ensuring the protocol is up
                     _configure_ndp_entries_step(
-                        downlink_iface, good_ndp_entries_downlink
+                        downlink_iface,
+                        good_ndp_entries_downlink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
                     ),
-                    _configure_ndp_entries_step(uplink_iface, good_ndp_entries_uplink),
+                    _configure_ndp_entries_step(
+                        uplink_iface,
+                        good_ndp_entries_uplink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
                     # Now overshoot the rogue entries
-                    _configure_ndp_entries_step(downlink_iface, rogue_ndp_entries),
-                    create_longevity_step(duration=300),
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        rogue_ndp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=inject_settle_duration_s),
                 ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="ndp_overload_mid_validation",
+                start_time_jq_var="test_case_start_time",
             ),
             *_l2_overload_agent_churn_stages(
                 label="ndp",
@@ -9545,11 +10135,51 @@ def create_hardening_of_ndp_overload_with_agent_churn_playbook(
                 restart_period_s=restart_period_s,
                 restart_duration_s=restart_duration_s,
                 flap_iterations=flap_iterations,
-                flap_down_duration_s=30,
-                flap_recovery_duration_s=180,
+                flap_down_duration_s=flap_down_duration_s,
+                flap_recovery_duration_s=flap_recovery_duration_s,
                 coldboot_iterations=coldboot_iterations,
-                coldboot_recovery_duration_s=180,
-                settle_duration_s=180,
+                coldboot_recovery_duration_s=coldboot_recovery_duration_s,
+                settle_duration_s=post_churn_settle_duration_s,
+                normalization_steps=[
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        good_ndp_entries_downlink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    )
+                ],
+                recovery_longevity_s=recovery_longevity_s,
+                post_coldboot_steps=(
+                    [
+                        create_run_task_step(
+                            task_name="coop_apply_patchers",
+                            params_dict={
+                                "hostnames": [device_name],
+                                "config_names": ["agent"],
+                            },
+                            description="Re-apply agent patchers after coldboot",
+                        )
+                    ]
+                    if reapply_agent_patchers_after_coldboot
+                    else []
+                ),
+                relearn_steps=[
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        rogue_ndp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_ndp_entries_step(
+                        uplink_iface,
+                        good_ndp_entries_uplink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                ],
             ),
         ],
         postchecks=[
@@ -9558,10 +10188,22 @@ def create_hardening_of_ndp_overload_with_agent_churn_playbook(
                     ndp_entry_limit,
                     good_ndp_entries_uplink + good_ndp_entries_downlink,
                 ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_ndp_threshold",
             ),
-            AGENT_WARMBOOT_SERVICE_CHECK,
-            get_ixia_healthcheck_stable_state(device_name),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="l2_recovery_start_time",
+                observe_ndp=False,
+                require_resource_accountant=False,
+            ),
         ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        )
         + (extra_postchecks or []),
     )
 
@@ -9574,6 +10216,14 @@ def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
     good_ndp_entries_uplink: int,
     rogue_ndp_entries_10x: t.Optional[int] = None,
     ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    inject_settle_duration_s: int = 600,
+    table_relearn_duration_s: int = 300,
+    post_clear_settle_duration_s: int = 120,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = False,
+    sleep_time_between_toggle_s: int = 30,
+    include_ixia_stable_state_check: bool = True,
     prechecks: t.Optional[list] = None,
     extra_postchecks: t.Optional[list] = None,
     snapshot_checks: t.Optional[list] = None,
@@ -9595,7 +10245,13 @@ def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
         prechecks=prechecks,
         snapshot_checks=snapshot_checks,
         cleanup_steps=[
-            _configure_ndp_entries_step(downlink_iface, good_ndp_entries_downlink),
+            _configure_ndp_entries_step(
+                downlink_iface,
+                good_ndp_entries_downlink,
+                toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                toggle_matching_device_group=toggle_matching_device_group,
+                sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+            ),
         ],
         stages=[
             create_steps_stage(
@@ -9603,12 +10259,40 @@ def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
                 steps=[
                     # Ensuring the protocol is up
                     _configure_ndp_entries_step(
-                        downlink_iface, good_ndp_entries_downlink
+                        downlink_iface,
+                        good_ndp_entries_downlink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
                     ),
-                    _configure_ndp_entries_step(uplink_iface, good_ndp_entries_uplink),
+                    _configure_ndp_entries_step(
+                        uplink_iface,
+                        good_ndp_entries_uplink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
                     # Now overshoot the rogue entries to 10x the table limit
-                    _configure_ndp_entries_step(downlink_iface, rogue_ndp_entries_10x),
-                    create_longevity_step(duration=600),
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        rogue_ndp_entries_10x,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=inject_settle_duration_s),
+                ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="ndp_overload_mid_validation",
+                start_time_jq_var="test_case_start_time",
+            ),
+            create_steps_stage(
+                stage_id="ndp_disruption_window_start",
+                steps=[
+                    create_record_jq_timestamp_step(
+                        var_name="l2_disruption_start_time",
+                    )
                 ],
             ),
             create_steps_stage(
@@ -9618,10 +10302,41 @@ def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
                         cmd="fboss2 clear ndp",
                         description="Flush the NDP table while overloaded",
                     ),
-                    create_longevity_step(duration=300),
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        rogue_ndp_entries_10x,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_ndp_entries_step(
+                        uplink_iface,
+                        good_ndp_entries_uplink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=table_relearn_duration_s),
                     create_clear_traffic_stats_step(),
-                    create_longevity_step(duration=120),
+                    create_longevity_step(duration=post_clear_settle_duration_s),
                 ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="ndp_post_disruption_mid_validation",
+                start_time_jq_var="l2_disruption_start_time",
+            ),
+            *_l2_recovery_stages(
+                label="ndp",
+                normalization_steps=[
+                    _configure_ndp_entries_step(
+                        downlink_iface,
+                        good_ndp_entries_downlink,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    )
+                ],
+                recovery_longevity_s=recovery_longevity_s,
             ),
         ],
         postchecks=[
@@ -9630,9 +10345,22 @@ def create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
                     ndp_entry_limit,
                     good_ndp_entries_uplink + good_ndp_entries_downlink,
                 ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_ndp_threshold",
             ),
-            get_ixia_healthcheck_stable_state(device_name),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="l2_recovery_start_time",
+                observe_ndp=False,
+                require_resource_accountant=False,
+            ),
         ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        )
         + (extra_postchecks or []),
     )
 
@@ -9647,7 +10375,18 @@ def create_hardening_of_arp_overload_with_agent_churn_playbook(
     restart_period_s: int = 300,
     restart_duration_s: int = 1800,
     flap_iterations: int = 3,
+    flap_down_duration_s: int = 30,
+    flap_recovery_duration_s: int = 180,
     coldboot_iterations: int = 2,
+    coldboot_recovery_duration_s: int = 180,
+    inject_settle_duration_s: int = 300,
+    post_churn_settle_duration_s: int = 180,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = True,
+    sleep_time_between_toggle_s: int = 30,
+    include_ixia_stable_state_check: bool = True,
+    reapply_agent_patchers_after_coldboot: bool = False,
     prechecks: t.Optional[list] = None,
     extra_postchecks: t.Optional[list] = None,
     snapshot_checks: t.Optional[list] = None,
@@ -9663,18 +10402,47 @@ def create_hardening_of_arp_overload_with_agent_churn_playbook(
         prechecks=prechecks,
         snapshot_checks=snapshot_checks,
         cleanup_steps=[
-            _configure_arp_entries_step(downlink_iface, 1),
+            _configure_arp_entries_step(
+                downlink_iface,
+                1,
+                toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                toggle_matching_device_group=toggle_matching_device_group,
+                sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+            ),
         ],
         stages=[
             create_steps_stage(
                 stage_id="arp_overload_inject",
                 steps=[
-                    _configure_arp_entries_step(downlink_iface, 1),
-                    _configure_arp_entries_step(uplink_iface, good_arp_entries),
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        1,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_arp_entries_step(
+                        uplink_iface,
+                        good_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
                     # Now overshoot the rogue entries
-                    _configure_arp_entries_step(downlink_iface, rogue_arp_entries),
-                    create_longevity_step(duration=300),
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        rogue_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=inject_settle_duration_s),
                 ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="arp_overload_mid_validation",
+                start_time_jq_var="test_case_start_time",
+                observe_arp=True,
             ),
             *_l2_overload_agent_churn_stages(
                 label="arp",
@@ -9683,11 +10451,52 @@ def create_hardening_of_arp_overload_with_agent_churn_playbook(
                 restart_period_s=restart_period_s,
                 restart_duration_s=restart_duration_s,
                 flap_iterations=flap_iterations,
-                flap_down_duration_s=30,
-                flap_recovery_duration_s=180,
+                flap_down_duration_s=flap_down_duration_s,
+                flap_recovery_duration_s=flap_recovery_duration_s,
                 coldboot_iterations=coldboot_iterations,
-                coldboot_recovery_duration_s=180,
-                settle_duration_s=180,
+                coldboot_recovery_duration_s=coldboot_recovery_duration_s,
+                settle_duration_s=post_churn_settle_duration_s,
+                normalization_steps=[
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        1,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    )
+                ],
+                recovery_longevity_s=recovery_longevity_s,
+                observe_arp=True,
+                post_coldboot_steps=(
+                    [
+                        create_run_task_step(
+                            task_name="coop_apply_patchers",
+                            params_dict={
+                                "hostnames": [device_name],
+                                "config_names": ["agent"],
+                            },
+                            description="Re-apply agent patchers after coldboot",
+                        )
+                    ]
+                    if reapply_agent_patchers_after_coldboot
+                    else []
+                ),
+                relearn_steps=[
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        rogue_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_arp_entries_step(
+                        uplink_iface,
+                        good_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                ],
             ),
         ],
         postchecks=[
@@ -9696,10 +10505,21 @@ def create_hardening_of_arp_overload_with_agent_churn_playbook(
                     arp_entry_limit,
                     good_arp_entries,
                 ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_arp_threshold",
             ),
-            AGENT_WARMBOOT_SERVICE_CHECK,
-            get_ixia_healthcheck_stable_state(device_name),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="l2_recovery_start_time",
+                require_resource_accountant=False,
+            ),
         ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        )
         + (extra_postchecks or []),
     )
 
@@ -9711,6 +10531,14 @@ def create_hardening_of_arp_overload_10x_with_table_clear_playbook(
     good_arp_entries: int,
     rogue_arp_entries_10x: t.Optional[int] = None,
     arp_entry_limit: int = ARP_SOFT_LIMIT,
+    inject_settle_duration_s: int = 600,
+    table_relearn_duration_s: int = 300,
+    post_clear_settle_duration_s: int = 120,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
+    toggle_all_ipv6_ipv4_only_protocol: bool = True,
+    toggle_matching_device_group: bool = True,
+    sleep_time_between_toggle_s: int = 30,
+    include_ixia_stable_state_check: bool = True,
     prechecks: t.Optional[list] = None,
     extra_postchecks: t.Optional[list] = None,
     snapshot_checks: t.Optional[list] = None,
@@ -9726,17 +10554,54 @@ def create_hardening_of_arp_overload_10x_with_table_clear_playbook(
         prechecks=prechecks,
         snapshot_checks=snapshot_checks,
         cleanup_steps=[
-            _configure_arp_entries_step(downlink_iface, 1),
+            _configure_arp_entries_step(
+                downlink_iface,
+                1,
+                toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                toggle_matching_device_group=toggle_matching_device_group,
+                sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+            ),
         ],
         stages=[
             create_steps_stage(
                 stage_id="arp_overload_10x_inject",
                 steps=[
-                    _configure_arp_entries_step(downlink_iface, 1),
-                    _configure_arp_entries_step(uplink_iface, good_arp_entries),
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        1,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_arp_entries_step(
+                        uplink_iface,
+                        good_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
                     # Now overshoot the rogue entries to 10x the table limit
-                    _configure_arp_entries_step(downlink_iface, rogue_arp_entries_10x),
-                    create_longevity_step(duration=600),
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        rogue_arp_entries_10x,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=inject_settle_duration_s),
+                ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="arp_overload_mid_validation",
+                start_time_jq_var="test_case_start_time",
+                observe_arp=True,
+            ),
+            create_steps_stage(
+                stage_id="arp_disruption_window_start",
+                steps=[
+                    create_record_jq_timestamp_step(
+                        var_name="l2_disruption_start_time",
+                    )
                 ],
             ),
             create_steps_stage(
@@ -9746,10 +10611,42 @@ def create_hardening_of_arp_overload_10x_with_table_clear_playbook(
                         cmd="fboss2 clear arp",
                         description="Flush the ARP table while overloaded",
                     ),
-                    create_longevity_step(duration=300),
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        rogue_arp_entries_10x,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    _configure_arp_entries_step(
+                        uplink_iface,
+                        good_arp_entries,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    ),
+                    create_longevity_step(duration=table_relearn_duration_s),
                     create_clear_traffic_stats_step(),
-                    create_longevity_step(duration=120),
+                    create_longevity_step(duration=post_clear_settle_duration_s),
                 ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="arp_post_disruption_mid_validation",
+                start_time_jq_var="l2_disruption_start_time",
+                observe_arp=True,
+            ),
+            *_l2_recovery_stages(
+                label="arp",
+                normalization_steps=[
+                    _configure_arp_entries_step(
+                        downlink_iface,
+                        1,
+                        toggle_all_ipv6_ipv4_only_protocol=toggle_all_ipv6_ipv4_only_protocol,
+                        toggle_matching_device_group=toggle_matching_device_group,
+                        sleep_time_between_toggle_s=sleep_time_between_toggle_s,
+                    )
+                ],
+                recovery_longevity_s=recovery_longevity_s,
             ),
         ],
         postchecks=[
@@ -9758,9 +10655,21 @@ def create_hardening_of_arp_overload_10x_with_table_clear_playbook(
                     arp_entry_limit,
                     good_arp_entries,
                 ),
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_arp_threshold",
             ),
-            get_ixia_healthcheck_stable_state(device_name),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="l2_recovery_start_time",
+                require_resource_accountant=False,
+            ),
         ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        )
         + (extra_postchecks or []),
     )
 
@@ -9779,7 +10688,15 @@ def create_hardening_of_mac_overload_with_agent_churn_playbook(
     restart_period_s: int = 300,
     restart_duration_s: int = 1800,
     flap_iterations: int = 3,
+    flap_down_duration_s: int = 30,
+    flap_recovery_duration_s: int = 180,
     coldboot_iterations: int = 2,
+    coldboot_recovery_duration_s: int = 180,
+    inject_settle_duration_s: int = 300,
+    post_churn_settle_duration_s: int = 180,
+    recovery_longevity_s: int = L2_RECOVERY_LONGEVITY_S,
+    include_ixia_stable_state_check: bool = True,
+    reapply_agent_patchers_after_coldboot: bool = False,
     prechecks: t.Optional[list] = None,
     extra_postchecks: t.Optional[list] = None,
     snapshot_checks: t.Optional[list] = None,
@@ -9804,8 +10721,16 @@ def create_hardening_of_mac_overload_with_agent_churn_playbook(
                     _configure_rogue_src_mac_step(
                         rogue_mac_entry_count, rogue_traffic_item_regex
                     ),
-                    create_longevity_step(duration=300),
+                    create_longevity_step(duration=inject_settle_duration_s),
                 ],
+            ),
+            _l2_overload_validation_stage(
+                stage_id="mac_overload_mid_validation",
+                start_time_jq_var="test_case_start_time",
+                observe_mac=True,
+                # L2-only learning is disabled; retain the device-safety
+                # checks without requiring an RA rejection signal.
+                require_resource_accountant=False,
             ),
             *_l2_overload_agent_churn_stages(
                 label="mac",
@@ -9814,28 +10739,208 @@ def create_hardening_of_mac_overload_with_agent_churn_playbook(
                 restart_period_s=restart_period_s,
                 restart_duration_s=restart_duration_s,
                 flap_iterations=flap_iterations,
-                flap_down_duration_s=30,
-                flap_recovery_duration_s=180,
+                flap_down_duration_s=flap_down_duration_s,
+                flap_recovery_duration_s=flap_recovery_duration_s,
                 coldboot_iterations=coldboot_iterations,
-                coldboot_recovery_duration_s=180,
-                settle_duration_s=180,
+                coldboot_recovery_duration_s=coldboot_recovery_duration_s,
+                settle_duration_s=post_churn_settle_duration_s,
+                normalization_steps=[
+                    _configure_rogue_src_mac_step(1, rogue_traffic_item_regex)
+                ],
+                recovery_longevity_s=recovery_longevity_s,
+                observe_mac=True,
+                # The post-churn overload window has the same MAC-only
+                # semantics as the initial overload window.
+                require_resource_accountant=False,
+                post_coldboot_steps=(
+                    [
+                        create_run_task_step(
+                            task_name="coop_apply_patchers",
+                            params_dict={
+                                "hostnames": [device_name],
+                                "config_names": ["agent"],
+                            },
+                            description="Re-apply agent patchers after coldboot",
+                        )
+                    ]
+                    if reapply_agent_patchers_after_coldboot
+                    else []
+                ),
+                relearn_steps=[
+                    _configure_rogue_src_mac_step(
+                        rogue_mac_entry_count,
+                        rogue_traffic_item_regex,
+                    ),
+                ],
             ),
         ],
         postchecks=[
             create_l2_entry_threshold_check(
-                mac_entry_upper_lower_threshold=(
-                    mac_entry_limit,
-                    good_mac_entry_count
-                    + good_ndp_entries_uplink
-                    + good_ndp_entries_downlink
-                    + good_arp_entries,
-                ),
+                mac_entry_observe_only=True,
+                retry_count=L2_TABLE_RPC_RETRY_COUNT,
+                retry_delay_seconds=L2_TABLE_RPC_RETRY_DELAY_S,
+                retry_delay_multiplier=1.0,
+                check_id="l2_recovery_mac_observation",
             ),
-            AGENT_WARMBOOT_SERVICE_CHECK,
-            get_ixia_healthcheck_stable_state(device_name),
+            *_l2_overload_safety_checks(
+                start_time_jq_var="l2_recovery_start_time",
+                require_resource_accountant=False,
+            ),
         ]
+        + (
+            [get_ixia_healthcheck_stable_state(device_name)]
+            if include_ixia_stable_state_check
+            else []
+        )
         + (extra_postchecks or []),
     )
+
+
+def create_l2_hardening_playbooks(
+    device_name: str,
+    downlink_iface: str,
+    uplink_iface: str,
+    good_ndp_entries_downlink: int,
+    good_ndp_entries_uplink: int,
+    rogue_ndp_entries: int,
+    good_arp_entries: int,
+    rogue_arp_entries: int,
+    good_mac_entry_count: int,
+    rogue_mac_entry_count: int,
+    ndp_entry_limit: int = NDP_SOFT_LIMIT,
+    arp_entry_limit: int = ARP_SOFT_LIMIT,
+    mac_entry_limit: int = MAC_SOFT_LIMIT,
+    mac_traffic_item_regex: str = ".*LOSSY_ROGUE_NDP_TRAFFIC.*",
+    include_ixia_stable_state_checks: bool = True,
+    reapply_agent_patchers_after_coldboot: bool = False,
+    timing_profile: L2HardeningTimingProfile | None = None,
+) -> list[Playbook]:
+    """Build the seven LNAR overload cases with one shared timing profile.
+
+    The default preserves the qualification-duration NPI behavior. Callers for
+    CI/CD DUTs can pass ``L2_HARDENING_TIMING_PROFILES["cicd"]`` to keep every
+    individual case bounded while retaining the same overload and disruption
+    sequence.
+    """
+    profile = timing_profile or L2_HARDENING_TIMING_PROFILES["npi"]
+    common_churn_kwargs: _L2ChurnKwargs = {
+        "restart_period_s": profile["restart_period_s"],
+        "restart_duration_s": profile["restart_duration_s"],
+        "flap_iterations": profile["flap_iterations"],
+        "flap_down_duration_s": profile["flap_down_duration_s"],
+        "flap_recovery_duration_s": profile["flap_recovery_duration_s"],
+        "coldboot_iterations": profile["coldboot_iterations"],
+        "coldboot_recovery_duration_s": profile["coldboot_recovery_duration_s"],
+        "inject_settle_duration_s": profile["churn_inject_settle_s"],
+        "post_churn_settle_duration_s": profile[
+            "post_churn_settle_duration_s"
+        ],
+        "include_ixia_stable_state_check": include_ixia_stable_state_checks,
+        "reapply_agent_patchers_after_coldboot": reapply_agent_patchers_after_coldboot,
+    }
+    common_ip_toggle_kwargs: _L2IpToggleKwargs = {
+        "toggle_all_ipv6_ipv4_only_protocol": profile[
+            "ixia_toggle_all_ip_only_protocols"
+        ],
+        "toggle_matching_device_group": profile[
+            "ixia_toggle_matching_device_group"
+        ],
+        "sleep_time_between_toggle_s": profile["ixia_toggle_sleep_s"],
+    }
+    common_table_clear_kwargs: _L2TableClearKwargs = {
+        "inject_settle_duration_s": profile["table_clear_inject_settle_s"],
+        "table_relearn_duration_s": profile["table_relearn_duration_s"],
+        "post_clear_settle_duration_s": profile["table_clear_post_settle_s"],
+        "toggle_all_ipv6_ipv4_only_protocol": profile[
+            "ixia_toggle_all_ip_only_protocols"
+        ],
+        "toggle_matching_device_group": profile[
+            "ixia_toggle_matching_device_group"
+        ],
+        "sleep_time_between_toggle_s": profile["ixia_toggle_sleep_s"],
+        "include_ixia_stable_state_check": include_ixia_stable_state_checks,
+    }
+    return [
+        create_hardening_of_arp_overload_entries_playbook(
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_arp_entries=good_arp_entries,
+            rogue_arp_entries=rogue_arp_entries,
+            arp_entry_limit=arp_entry_limit,
+            toggle_all_ipv6_ipv4_only_protocol=profile[
+                "ixia_toggle_all_ip_only_protocols"
+            ],
+            toggle_matching_device_group=profile[
+                "ixia_toggle_matching_device_group"
+            ],
+            sleep_time_between_toggle_s=profile["ixia_toggle_sleep_s"],
+            settle_duration_s=profile["base_overload_settle_s"],
+        ),
+        create_hardening_of_mac_overload_entries_playbook(
+            downlink_iface=downlink_iface,
+            rogue_mac_entry_count=rogue_mac_entry_count,
+            good_mac_entry_count=good_mac_entry_count,
+            good_ndp_entries_uplink=good_ndp_entries_uplink,
+            good_ndp_entries_downlink=good_ndp_entries_downlink,
+            good_arp_entries=good_arp_entries,
+            mac_entry_limit=mac_entry_limit,
+            settle_duration_s=profile["mac_overload_settle_s"],
+            traffic_item_regex=mac_traffic_item_regex,
+        ),
+        create_hardening_of_ndp_overload_with_agent_churn_playbook(
+            device_name=device_name,
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_ndp_entries_downlink=good_ndp_entries_downlink,
+            good_ndp_entries_uplink=good_ndp_entries_uplink,
+            rogue_ndp_entries=rogue_ndp_entries,
+            ndp_entry_limit=ndp_entry_limit,
+            **common_churn_kwargs,
+            **common_ip_toggle_kwargs,
+        ),
+        create_hardening_of_ndp_overload_10x_with_table_clear_playbook(
+            device_name=device_name,
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_ndp_entries_downlink=good_ndp_entries_downlink,
+            good_ndp_entries_uplink=good_ndp_entries_uplink,
+            rogue_ndp_entries_10x=rogue_ndp_entries,
+            ndp_entry_limit=ndp_entry_limit,
+            **common_table_clear_kwargs,
+        ),
+        create_hardening_of_arp_overload_with_agent_churn_playbook(
+            device_name=device_name,
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_arp_entries=good_arp_entries,
+            rogue_arp_entries=rogue_arp_entries,
+            arp_entry_limit=arp_entry_limit,
+            **common_churn_kwargs,
+            **common_ip_toggle_kwargs,
+        ),
+        create_hardening_of_arp_overload_10x_with_table_clear_playbook(
+            device_name=device_name,
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_arp_entries=good_arp_entries,
+            rogue_arp_entries_10x=rogue_arp_entries,
+            arp_entry_limit=arp_entry_limit,
+            **common_table_clear_kwargs,
+        ),
+        create_hardening_of_mac_overload_with_agent_churn_playbook(
+            device_name=device_name,
+            downlink_iface=downlink_iface,
+            uplink_iface=uplink_iface,
+            good_mac_entry_count=good_mac_entry_count,
+            rogue_mac_entry_count=rogue_mac_entry_count,
+            good_ndp_entries_uplink=good_ndp_entries_uplink,
+            good_ndp_entries_downlink=good_ndp_entries_downlink,
+            good_arp_entries=good_arp_entries,
+            mac_entry_limit=mac_entry_limit,
+            rogue_traffic_item_regex=mac_traffic_item_regex,
+            **common_churn_kwargs,
+        ),
+    ]
 
 
 def create_bgp_malformed_packet_test_playbook(

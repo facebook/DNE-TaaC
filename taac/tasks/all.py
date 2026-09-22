@@ -494,9 +494,13 @@ class ConfigureParallelBgpPeers(BaseTask):
             hostname, configure_vlan_configs, configure_vlans_patcher_name
         )
 
-        await self.register_patchers_to_add_bgp_peers(
-            hostname, add_bgp_peer_configs, add_bgp_peers_patcher_name
-        )
+        # An interface-only topology deliberately has no BGP peers.  Do not
+        # register an empty bgpcpp patcher: besides being unnecessary, it makes
+        # a pure L2/NDP/ARP test depend on bgpd configuration and restarts.
+        if add_bgp_peer_configs:
+            await self.register_patchers_to_add_bgp_peers(
+                hostname, add_bgp_peer_configs, add_bgp_peers_patcher_name
+            )
 
     async def register_patchers_to_add_bgp_peers(
         self,
@@ -736,9 +740,12 @@ class CoopApplyPatchersTask(BaseTask):
             )
             return
         hostnames = params["hostnames"]
-        config_names = params.get(
-            "config_names",
-        )
+        config_names = params.get("config_names")
+        if config_names is None and params.get("config_name") is not None:
+            # ``create_coop_apply_patchers_task`` historically serializes the
+            # singular key. Honor it so an agent-only apply does not silently
+            # fall back to every default config and restart bgpd as well.
+            config_names = [params["config_name"]]
 
         do_warmboot = params.get("do_warmboot", False)
         do_coldboot = params.get("do_coldboot", False)

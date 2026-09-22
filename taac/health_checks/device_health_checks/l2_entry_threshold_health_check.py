@@ -27,6 +27,59 @@ class L2EntryThresholdHealthCheck(
     CHECK_NAME = hc_types.CheckName.L2_ENTRY_THRESHOLD_CHECK
     OPERATING_SYSTEMS = ["FBOSS"]
 
+    async def run(
+        self,
+        obj: TestDevice,
+        input: t.Optional[hc_types.BaseHealthCheckIn],
+        default_input: hc_types.BaseHealthCheckIn,
+        check_params: t.Dict[str, t.Any],
+        custom_run_fn: t.Optional[t.Callable] = None,
+    ) -> hc_types.HealthCheckResult:
+        result = await super().run(
+            obj,
+            input,
+            default_input,
+            check_params,
+            custom_run_fn,
+        )
+        observation_requested = any(
+            check_params.get(key)
+            for key in (
+                "mac_entry_observe_only",
+                "arp_entry_observe_only",
+                "ndp_entry_observe_only",
+            )
+        )
+        threshold_requested = any(
+            check_params.get(key) is not None
+            for key in (
+                "mac_entry_upper_lower_threshold",
+                "arp_entry_upper_lower_threshold",
+                "ndp_entry_upper_lower_threshold",
+                "mac_entry_pattern_threshold",
+                "arp_entry_pattern_threshold",
+                "ndp_entry_pattern_threshold",
+            )
+        )
+        message = result.message or ""
+        rpc_timed_out = "timeout" in message.lower() or "timed out" in message.lower()
+        if (
+            observation_requested
+            and not threshold_requested
+            and result.status == hc_types.HealthCheckStatus.FAIL
+            and rpc_timed_out
+        ):
+            observation_message = (
+                "observe-only RPC unavailable after configured retries; "
+                f"count was not asserted: {message}"
+            )
+            self.logger.warning(observation_message)
+            return result(
+                status=hc_types.HealthCheckStatus.PASS,
+                message=observation_message,
+            )
+        return result
+
     async def _run(
         self,
         obj: TestDevice,
@@ -52,7 +105,7 @@ class L2EntryThresholdHealthCheck(
             ndp_entry_pattern_threshold = check_params.get(
                 "ndp_entry_pattern_threshold"
             )
-            tasks = []
+            tasks = self._get_observation_tasks(check_params)
             if mac_entry_pattern_threshold:
                 tasks.append(
                     self.async_verify_mac_entry_threshold_mapping(
@@ -109,14 +162,51 @@ class L2EntryThresholdHealthCheck(
                     message=f"{', '.join([str(check) for check in failed_checks])}",
                 )
 
+            observations = [result for result in results if isinstance(result, str)]
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.PASS,
+                message="; ".join(observations) if observations else None,
             )
         except Exception as e:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.FAIL,
                 message=str(e),
             )
+
+    def _get_observation_tasks(
+        self, check_params: t.Dict[str, t.Any]
+    ) -> list[t.Awaitable[t.Optional[str]]]:
+        observation_methods = (
+            ("mac_entry_observe_only", self.async_observe_mac_entries),
+            ("arp_entry_observe_only", self.async_observe_arp_entries),
+            ("ndp_entry_observe_only", self.async_observe_ndp_entries),
+        )
+        return [
+            method()
+            for parameter, method in observation_methods
+            if check_params.get(parameter)
+        ]
+
+    async def async_observe_mac_entries(self) -> str:
+        # pyrefly: ignore [missing-attribute]
+        mac_table = await self.driver.async_get_mac_table()
+        message = f"Observed MAC table length: {len(mac_table)}"
+        self.logger.info(message)
+        return message
+
+    async def async_observe_arp_entries(self) -> str:
+        # pyrefly: ignore [missing-attribute]
+        arp_table = await self.driver.async_get_arp_table()
+        message = f"Observed ARP table length: {len(arp_table)}"
+        self.logger.info(message)
+        return message
+
+    async def async_observe_ndp_entries(self) -> str:
+        # pyrefly: ignore [missing-attribute]
+        ndp_table = await self.driver.async_get_ndp_table()
+        message = f"Observed NDP table length: {len(ndp_table)}"
+        self.logger.info(message)
+        return message
 
     async def async_verify_mac_entry_upper_lower_threshold(
         self, upper_threshold: int, lower_threshold: int

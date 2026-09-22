@@ -11,6 +11,7 @@ import later.unittest
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
     ConfigureParallelBgpPeers,
+    CoopApplyPatchersTask,
     IxiaStopTrafficAndWaitTask,
     RunCommandsOnShell,
     ValidateBgpcppUpdateGroupState,
@@ -21,7 +22,73 @@ ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
 RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
 
 
+class CoopApplyPatchersTaskTest(later.unittest.TestCase):
+    async def test_singular_agent_config_does_not_restart_bgpd(self) -> None:
+        driver = MagicMock()
+        driver.async_agent_config_reload = AsyncMock()
+        driver.async_restart_service = AsyncMock()
+        task = CoopApplyPatchersTask(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run({"hostnames": ["fsw.example"], "config_name": "agent"})
+
+        driver.async_agent_config_reload.assert_awaited_once_with()
+        driver.async_restart_service.assert_not_awaited()
+
+
 class ConfigureParallelBgpPeersTest(later.unittest.TestCase):
+    async def test_interface_only_config_does_not_register_bgp_patcher(self) -> None:
+        driver = MagicMock()
+        driver.async_get_all_port_info = AsyncMock(
+            return_value={10: SimpleNamespace(name="eth2/1/1", portId=10, vlans=[3000])}
+        )
+        driver.async_get_vlan_addresses = AsyncMock(return_value=[])
+        driver.async_register_python_patcher = AsyncMock()
+        task = ConfigureParallelBgpPeers(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "fsw.example",
+                    "config_json": json.dumps(
+                        {
+                            "eth2/1/1": [
+                                {
+                                    "starting_ip": "2401:db00:abcd::1",
+                                    "increment_ip": "::0",
+                                    "prefix_length": 80,
+                                    "description": "NDP stressor RIF",
+                                    "peer_group_name": "UNUSED",
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": 65000,
+                                    "gateway_starting_ip": "2401:db00:abcd::2",
+                                    "gateway_increment_ip": "::0",
+                                    "config_only_interface_ip": True,
+                                }
+                            ]
+                        }
+                    ),
+                }
+            )
+
+        self.assertEqual(driver.async_register_python_patcher.await_count, 1)
+        patcher_call = driver.async_register_python_patcher.await_args
+        self.assertIsNotNone(patcher_call)
+        if patcher_call is None:
+            self.fail("async_register_python_patcher was not awaited")
+        self.assertEqual(
+            patcher_call.kwargs["config_name"],
+            "agent",
+        )
+
     async def test_default_behavior_uses_live_vlan_and_retains_addresses(self) -> None:
         driver = MagicMock()
         driver.async_get_all_port_info = AsyncMock(

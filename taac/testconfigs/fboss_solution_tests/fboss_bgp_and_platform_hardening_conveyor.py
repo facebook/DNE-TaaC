@@ -1216,6 +1216,264 @@ def build_bgp_dc_basic_port_configs(
     ]
 
 
+def build_l2_overload_only_setup_tasks(
+    *,
+    device_name,
+    ixia_downlink_interface,
+    ixia_uplink_interface,
+    ixia_downlink_good_ndp_network,
+    ixia_uplink_good_ndp_network,
+    rogue_arp_entry_network_v4,
+    good_arp_entry_network_v4,
+    remote_downlink_as_4byte,
+    remote_uplink_as_4byte,
+    additional_setup_tasks,
+):
+    """Configure only the RIFs needed by the L2 entry generators.
+
+    The ARP/NDP/MAC overload cases do not need synthetic BGP peers. Keeping
+    bgpcpp out of this path prevents L2 coverage from depending on BGP peer
+    generation and leaves the DUT's production BGP configuration untouched.
+    ``config_only_interface_ip`` makes the common parallel-peer task register
+    only its agent VLAN patcher.
+    """
+
+    def _rif_config(
+        *,
+        starting_ip,
+        gateway_starting_ip,
+        prefix_length,
+        peer_group_name,
+        remote_as_4byte,
+        description,
+    ):
+        return {
+            "starting_ip": starting_ip,
+            "increment_ip": "::0" if ":" in starting_ip else "0.0.0.0",
+            "prefix_length": prefix_length,
+            "description": description,
+            # Required by the shared task schema but unused in interface-only mode.
+            "peer_group_name": peer_group_name,
+            "num_sessions": 1,
+            "remote_as_4_byte": remote_as_4byte,
+            "remote_as_4_byte_step": 0,
+            "gateway_starting_ip": gateway_starting_ip,
+            "gateway_increment_ip": "::0" if ":" in gateway_starting_ip else "0.0.0.0",
+            "config_only_interface_ip": True,
+        }
+
+    return [
+        create_coop_unregister_patchers_task(device_name),
+        create_coop_apply_patchers_task(
+            hostnames=[device_name],
+            config_name="agent",
+        ),
+        create_wait_for_agent_convergence_task([device_name]),
+        create_coop_register_patcher_task(
+            hostname=device_name,
+            config_name="agent",
+            patcher_name="enable_port_all_ixia_ports",
+            task_name="coop_register_patcher",
+            patcher_args={
+                ixia_uplink_interface: "enable",
+                ixia_downlink_interface: "enable",
+            },
+            py_func_name="change_port_admin_state",
+        ),
+        create_configure_parallel_bgp_peers_task(
+            hostname=device_name,
+            configure_vlans_patcher_name="configure_l2_stressor_rifs_downlink",
+            add_bgp_peers_patcher_name="unused_l2_only_bgp_downlink",
+            config_json=json.dumps(
+                {
+                    ixia_downlink_interface: [
+                        _rif_config(
+                            starting_ip=f"{ixia_downlink_good_ndp_network}::1",
+                            gateway_starting_ip=f"{ixia_downlink_good_ndp_network}::a000",
+                            prefix_length=80,
+                            peer_group_name="UNUSED_L2_NDP_DOWNLINK",
+                            remote_as_4byte=remote_downlink_as_4byte,
+                            description="Downlink NDP stressor RIF",
+                        ),
+                        _rif_config(
+                            starting_ip=f"{rogue_arp_entry_network_v4}.0.1",
+                            gateway_starting_ip=f"{rogue_arp_entry_network_v4}.0.100",
+                            prefix_length=16,
+                            peer_group_name="UNUSED_L2_ARP_DOWNLINK",
+                            remote_as_4byte=remote_downlink_as_4byte,
+                            description="Downlink ARP stressor RIF",
+                        ),
+                    ]
+                }
+            ),
+        ),
+        create_configure_parallel_bgp_peers_task(
+            hostname=device_name,
+            configure_vlans_patcher_name="configure_l2_stressor_rifs_uplink",
+            add_bgp_peers_patcher_name="unused_l2_only_bgp_uplink",
+            config_json=json.dumps(
+                {
+                    ixia_uplink_interface: [
+                        _rif_config(
+                            starting_ip=f"{ixia_uplink_good_ndp_network}::1",
+                            gateway_starting_ip=f"{ixia_uplink_good_ndp_network}::a000",
+                            prefix_length=80,
+                            peer_group_name="UNUSED_L2_NDP_UPLINK",
+                            remote_as_4byte=remote_uplink_as_4byte,
+                            description="Uplink NDP stressor RIF",
+                        ),
+                        _rif_config(
+                            starting_ip=f"{good_arp_entry_network_v4}.0.1",
+                            gateway_starting_ip=f"{good_arp_entry_network_v4}.0.100",
+                            prefix_length=16,
+                            peer_group_name="UNUSED_L2_ARP_UPLINK",
+                            remote_as_4byte=remote_uplink_as_4byte,
+                            description="Uplink ARP stressor RIF",
+                        ),
+                    ]
+                }
+            ),
+        ),
+        *(additional_setup_tasks or []),
+        create_coop_apply_patchers_task(
+            hostnames=[device_name],
+            config_name="agent",
+        ),
+        create_wait_for_agent_convergence_task([device_name]),
+    ]
+
+
+def build_l2_overload_only_port_configs(
+    *,
+    device_name,
+    ixia_downlink_interface,
+    ixia_uplink_interface,
+    ixia_downlink_good_ndp_network,
+    ixia_uplink_good_ndp_network,
+    rogue_arp_entry_network_v4,
+    good_arp_entry_network_v4,
+    good_ndp_entries_downlink,
+    good_ndp_entries_uplink,
+    good_arp_entries,
+):
+    """Build IXIA IP-only stacks for ARP/NDP/MAC overload coverage."""
+    return [
+        taac_types.BasicPortConfig(
+            endpoint=f"{device_name}:{ixia_downlink_interface}",
+            device_group_configs=[
+                taac_types.DeviceGroupConfig(
+                    device_group_index=0,
+                    tag_name="DOWNLINK_NDP_STRESSOR",
+                    multiplier=good_ndp_entries_downlink,
+                    v6_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{ixia_downlink_good_ndp_network}::a000",
+                        increment_ip="::1",
+                        gateway_starting_ip=f"{ixia_downlink_good_ndp_network}::1",
+                        mask=80,
+                    ),
+                ),
+                taac_types.DeviceGroupConfig(
+                    device_group_index=1,
+                    tag_name="DOWNLINK_ARP_STRESSOR",
+                    multiplier=1,
+                    v4_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{rogue_arp_entry_network_v4}.0.100",
+                        increment_ip="0.0.0.1",
+                        gateway_starting_ip=f"{rogue_arp_entry_network_v4}.0.1",
+                        mask=16,
+                    ),
+                ),
+            ],
+        ),
+        taac_types.BasicPortConfig(
+            endpoint=f"{device_name}:{ixia_uplink_interface}",
+            device_group_configs=[
+                taac_types.DeviceGroupConfig(
+                    device_group_index=0,
+                    tag_name="UPLINK_NDP_STRESSOR",
+                    multiplier=good_ndp_entries_uplink,
+                    v6_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{ixia_uplink_good_ndp_network}::a000",
+                        increment_ip="::1",
+                        gateway_starting_ip=f"{ixia_uplink_good_ndp_network}::1",
+                        mask=80,
+                    ),
+                ),
+                taac_types.DeviceGroupConfig(
+                    device_group_index=1,
+                    tag_name="UPLINK_ARP_STRESSOR",
+                    multiplier=good_arp_entries,
+                    v4_addresses_config=taac_types.IpAddressesConfig(
+                        starting_ip=f"{good_arp_entry_network_v4}.0.100",
+                        increment_ip="0.0.0.1",
+                        gateway_starting_ip=f"{good_arp_entry_network_v4}.0.1",
+                        mask=16,
+                    ),
+                ),
+            ],
+        ),
+    ]
+
+
+def build_l2_overload_only_traffic_items(
+    *, device_name, ixia_downlink_interface, good_mac_entry_count
+):
+    """Build the one raw stream used to learn and overload the MAC table."""
+    return [
+        taac_types.BasicTrafficItemConfig(
+            src_endpoints=[
+                taac_types.TrafficEndpoint(
+                    name=f"{device_name}:{ixia_downlink_interface}",
+                ),
+            ],
+            dest_endpoints=[
+                taac_types.TrafficEndpoint(
+                    name=f"{device_name}:{ixia_downlink_interface}",
+                ),
+            ],
+            name=f"{device_name.upper()}_L2_MAC_LEARNING_TRAFFIC",
+            line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
+            line_rate=2000,
+            tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+            traffic_type=ixia_types.TrafficType.RAW,
+            allow_self_destined=True,
+            bidirectional=False,
+            packet_headers=[
+                taac_types.PacketHeader(
+                    query=ixia_types.Query(
+                        regex="^ethernet$",
+                        query_type=ixia_types.QueryType.STACK_TYPE_ID,
+                    ),
+                    fields=[
+                        taac_types.Field(
+                            query=ixia_types.Query(regex="Destination MAC Address"),
+                            attrs_json=json.dumps(
+                                {
+                                    "ValueType": "increment",
+                                    "StartValue": BROADCAST_DST_MAC_ADDRESS,
+                                    "StepValue": "00:00:00:00:00:00",
+                                    "CountValue": 1,
+                                }
+                            ),
+                        ),
+                        taac_types.Field(
+                            query=ixia_types.Query(regex="Source MAC Address"),
+                            attrs_json=json.dumps(
+                                {
+                                    "ValueType": "increment",
+                                    "StartValue": DEFAULT_SRC_MAC_ADDRESS,
+                                    "StepValue": "00:00:00:00:00:01",
+                                    "CountValue": good_mac_entry_count,
+                                }
+                            ),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ]
+
+
 def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     test_config_name,
     device_name,
@@ -1286,6 +1544,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     wedge_agent_restart_no_of_interations=1,
     direct_ixia_connections=None,
     basset_pool=None,
+    ixia_protocol_verification_timeout=300,
     ecmp_group_overflow_prefix="7000",  # 7000:1:f::/64
     v6_uplink_prefix="6000",
     v4_session_flapping_prefix="103",
@@ -1300,6 +1559,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     additional_setup_tasks=None,
     allow_all_v4_policies=False,
     uplink_bgp_peer_type=None,
+    l2_overload_only=False,
     skip_playbooks=None,
     playbooks_selected=None,
 ):
@@ -1371,6 +1631,10 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         allow_all_v4_policies: When ``True``, all V4 traffic is accepted (used for
             pre-V4-policy DUTs).
         uplink_bgp_peer_type: Optional override for uplink BGP peer type (e.g., RSW).
+        l2_overload_only: Build a pure L2/IP topology containing only the DUT
+            RIFs and IXIA ARP/NDP/MAC generators. No synthetic BGP config or
+            BGP protocol stack is created. Defaults to ``False`` so existing
+            NPI callers are unchanged.
         skip_playbooks: Optional set of playbook names to skip.
         playbooks_selected: Optional allowlist of playbook names to KEEP. When
             ``None`` (the default) every generated playbook is kept, so
@@ -1385,22 +1649,26 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         TestConfig: The fully-built conveyor TestConfig.
     """
     ixia_downlink_source_ipv6 = f"{ixia_downlink_ic_parent_network_v6}::11"
-    ptp_configs = [
-        ixia_types.PTPConfig(
-            server_endpoint=ixia_types.PTPEndpoint(
-                name=f"{device_name}:{ixia_uplink_interface}",
-                device_group_index=0,
-            ),
-            client_endpoints=[
-                ixia_types.PTPEndpoint(
-                    name=f"{device_name}:{ixia_downlink_interface}",
+    ptp_configs = (
+        []
+        if l2_overload_only
+        else [
+            ixia_types.PTPConfig(
+                server_endpoint=ixia_types.PTPEndpoint(
+                    name=f"{device_name}:{ixia_uplink_interface}",
                     device_group_index=0,
                 ),
-            ],
-            communication_mode=ixia_types.PTPCommunicationMode.UNICAST,
-            step_mode=ixia_types.PTPStepMode.TWO_STEP,
-        ),
-    ]
+                client_endpoints=[
+                    ixia_types.PTPEndpoint(
+                        name=f"{device_name}:{ixia_downlink_interface}",
+                        device_group_index=0,
+                    ),
+                ],
+                communication_mode=ixia_types.PTPCommunicationMode.UNICAST,
+                step_mode=ixia_types.PTPStepMode.TWO_STEP,
+            ),
+        ]
+    )
 
     # TestConfig-level checks moved to playbook level
     tc_snapshot_checks = [
@@ -1409,9 +1677,15 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     tc_postchecks = [
         create_systemctl_active_state_check(),
         create_device_core_dumps_check(),
-        get_ixia_healthcheck_stable_state(device_name),
-        create_prefix_limit_check(prefix_limit=prefix_limit),
-        BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
+        *(
+            []
+            if l2_overload_only
+            else [
+                get_ixia_healthcheck_stable_state(device_name),
+                create_prefix_limit_check(prefix_limit=prefix_limit),
+                BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
+            ]
+        ),
         create_unclean_exit_check(),
         create_memory_utilization_check(
             threshold=5 * (1024**3),
@@ -1431,8 +1705,14 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     ]
     tc_prechecks = [
         create_systemctl_active_state_check(),
-        get_ixia_healthcheck_stable_state(device_name),
-        create_prefix_limit_check(prefix_limit=prefix_limit),
+        *(
+            []
+            if l2_overload_only
+            else [
+                get_ixia_healthcheck_stable_state(device_name),
+                create_prefix_limit_check(prefix_limit=prefix_limit),
+            ]
+        ),
         create_unclean_exit_check(),
         create_memory_utilization_check(
             threshold=5 * (1024**3),
@@ -1445,12 +1725,12 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
             },
             start_time_jq_var="test_case_start_time",
         ),
-        BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED,
+        *([] if l2_overload_only else [BGP_SESSION_HEALTHCHECK_NO_V6_LOSS_EXPECTED]),
     ]
 
     return TestConfig(
         name=test_config_name,
-        ixia_protocol_verification_timeout=300,  # todo remove this (should be 300)
+        ixia_protocol_verification_timeout=ixia_protocol_verification_timeout,
         skip_ixia_protocol_verification=True,
         basset_pool=basset_pool,
         ptp_configs=ptp_configs,
@@ -1468,446 +1748,479 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                 else [],
             ),
         ],
-        setup_tasks=[
-            create_coop_unregister_patchers_task(device_name),
-            create_coop_apply_patchers_task(
-                hostnames=[device_name],
-            ),
-            create_wait_for_agent_convergence_task([device_name]),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name="a_remove_bgp_peers",
-                task_name="coop_register_patcher",
-                patcher_args={"delete_all": "True"},
-                py_func_name="remove_bgp_peers",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name="configure_bgp_switch_limit",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "prefix_limit": prefix_limit,
-                },
-                py_func_name="configure_bgp_switch_limit",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="agent",
-                patcher_name="enable_port_all_ixia_ports",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    f"{ixia_uplink_interface}": "enable",
-                    f"{ixia_downlink_interface}": "enable",
-                },
-                py_func_name="change_port_admin_state",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="agent",
-                patcher_name="configure_sflow_mirror_sampling",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": "sflow_mirror",
-                    "destination_ip": ixia_downlink_source_ipv6,
-                    "sample_rate": "100",
-                    "udp_src_port": "6343",
-                    "udp_dst_port": "6343",
-                },
-                py_func_name="configure_ingress_sflow_mirror_sampling",
-            ),
-            # PROPAGATE_EVERYTHING ingress/egress policies for downlink
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
-                    "description": "Ingress policy - accept all prefixes",
-                    "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                },
-                py_func_name="add_bgp_policy_statement",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
-                    "description": "Egress policy - advertise all prefixes",
-                    "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                },
-                py_func_name="add_bgp_policy_statement",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name="update_peer_group_patcher_V6_Downlink",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": peergroup_downlink_mimic_v6,
-                    "attributes_to_update_json": json.dumps(
+        setup_tasks=(
+            build_l2_overload_only_setup_tasks(
+                device_name=device_name,
+                ixia_downlink_interface=ixia_downlink_interface,
+                ixia_uplink_interface=ixia_uplink_interface,
+                ixia_downlink_good_ndp_network=ixia_downlink_good_ndp_network,
+                ixia_uplink_good_ndp_network=ixia_uplink_good_ndp_network,
+                rogue_arp_entry_network_v4=rogue_arp_entry_network_v4,
+                good_arp_entry_network_v4=good_arp_entry_network_v4,
+                remote_downlink_as_4byte=remote_downlink_as_4byte,
+                remote_uplink_as_4byte=remote_uplink_as_4byte,
+                additional_setup_tasks=additional_setup_tasks,
+            )
+            if l2_overload_only
+            else [
+                create_coop_unregister_patchers_task(device_name),
+                create_coop_apply_patchers_task(
+                    hostnames=[device_name],
+                ),
+                create_wait_for_agent_convergence_task([device_name]),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name="a_remove_bgp_peers",
+                    task_name="coop_register_patcher",
+                    patcher_args={"delete_all": "True"},
+                    py_func_name="remove_bgp_peers",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name="configure_bgp_switch_limit",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "prefix_limit": prefix_limit,
+                    },
+                    py_func_name="configure_bgp_switch_limit",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="agent",
+                    patcher_name="enable_port_all_ixia_ports",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        f"{ixia_uplink_interface}": "enable",
+                        f"{ixia_downlink_interface}": "enable",
+                    },
+                    py_func_name="change_port_admin_state",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="agent",
+                    patcher_name="configure_sflow_mirror_sampling",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": "sflow_mirror",
+                        "destination_ip": ixia_downlink_source_ipv6,
+                        "sample_rate": "100",
+                        "udp_src_port": "6343",
+                        "udp_dst_port": "6343",
+                    },
+                    py_func_name="configure_ingress_sflow_mirror_sampling",
+                ),
+                # PROPAGATE_EVERYTHING ingress/egress policies for downlink
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
+                        "description": "Ingress policy - accept all prefixes",
+                        "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    },
+                    py_func_name="add_bgp_policy_statement",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
+                        "description": "Egress policy - advertise all prefixes",
+                        "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    },
+                    py_func_name="add_bgp_policy_statement",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name="update_peer_group_patcher_V6_Downlink",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": peergroup_downlink_mimic_v6,
+                        "attributes_to_update_json": json.dumps(
+                            {
+                                "disable_ipv4_afi": "True",
+                                "v4_over_v6_nexthop": "False",
+                                "is_passive": "False",
+                                "is_confed_peer": is_downlink_peer_confed,
+                                "max_routes": per_peer_max_route_limit,
+                                "ingress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
+                                "egress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
+                            }
+                        ),
+                    },
+                    py_func_name="configure_bgp_peer_group",
+                ),
+                # PROPAGATE_EVERYTHING ingress/egress policies for uplink
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
+                        "description": "Ingress policy - accept all prefixes",
+                        "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    },
+                    py_func_name="add_bgp_policy_statement",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
+                        "description": "Egress policy - advertise all prefixes",
+                        "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    },
+                    py_func_name="add_bgp_policy_statement",
+                ),
+                create_coop_register_patcher_task(
+                    hostname=device_name,
+                    config_name="bgpcpp",
+                    patcher_name=f"update_peer_group_patcher_{peergroup_uplink_mimic_v6}_Uplink",
+                    task_name="coop_register_patcher",
+                    patcher_args={
+                        "name": peergroup_uplink_mimic_v6,
+                        "attributes_to_update_json": json.dumps(
+                            {
+                                "disable_ipv4_afi": "True",
+                                "v4_over_v6_nexthop": "False",
+                                "is_passive": "False",
+                                "is_confed_peer": is_uplink_peer_confed,
+                                "max_routes": per_peer_max_route_limit,
+                                "ingress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
+                                "egress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
+                            }
+                        ),
+                    },
+                    py_func_name="configure_bgp_peer_group",
+                ),
+                *(
+                    create_allow_all_v4_peer_group_patcher_tasks(
+                        hostname=device_name,
+                        peer_group_name=peergroup_uplink_mimic_v4,
+                        peer_tag=uplink_peer_tag,
+                        is_confed_peer=is_uplink_peer_confed,
+                        per_peer_max_route_limit=per_peer_max_route_limit,
+                        policy_entries_json=json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    )
+                    + create_allow_all_v4_peer_group_patcher_tasks(
+                        hostname=device_name,
+                        peer_group_name=peergroup_downlink_mimic_v4,
+                        peer_tag=downlink_peer_tag,
+                        is_confed_peer=is_downlink_peer_confed,
+                        per_peer_max_route_limit=per_peer_max_route_limit,
+                        policy_entries_json=json.dumps([_PERMIT_ALL_POLICY_TERM]),
+                    )
+                    if allow_all_v4_policies
+                    else [
+                        create_coop_register_patcher_task(
+                            hostname=device_name,
+                            config_name="bgpcpp",
+                            patcher_name=f"add_peer_group_patcher_{peergroup_uplink_mimic_v4}",
+                            task_name="coop_register_patcher",
+                            patcher_args={
+                                "name": peergroup_uplink_mimic_v4,
+                                "description": "BGP peering from SSW to FSW, IPv4 sessions",
+                                "next_hop_self": "True",
+                                "disable_ipv4_afi": "False",
+                                "disable_ipv6_afi": "True",
+                                "is_confed_peer": is_uplink_peer_confed,
+                                "peer_tag": uplink_peer_tag,
+                                "ingress_policy_name": route_map_uplink_ingress,
+                                "egress_policy_name": route_map_uplink_egress,
+                                "bgp_peer_timers_hold_time_seconds": "30",
+                                "bgp_peer_timers_keep_alive_seconds": "10",
+                                "bgp_peer_timers_out_delay_seconds": "7",
+                                "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
+                                "max_routes": per_peer_max_route_limit,
+                                "warning_only": "True",
+                                "warning_limit": "0",
+                                "link_bandwidth_bps": "auto",
+                                "v4_over_v6_nexthop": "False",
+                                "is_passive": "False",
+                            },
+                            py_func_name="add_peer_group_patcher",
+                        ),
+                        create_coop_register_patcher_task(
+                            hostname=device_name,
+                            config_name="bgpcpp",
+                            patcher_name=f"add_peer_group_patcher_{peergroup_downlink_mimic_v4}",
+                            task_name="coop_register_patcher",
+                            patcher_args={
+                                "name": peergroup_downlink_mimic_v4,
+                                "description": "BGP peering from RSW to FSW, IPv4 sessions",
+                                "next_hop_self": "True",
+                                "disable_ipv4_afi": "False",
+                                "disable_ipv6_afi": "True",
+                                "is_confed_peer": is_downlink_peer_confed,
+                                "ingress_policy_name": route_map_downlink_ingress,
+                                "egress_policy_name": route_map_downlink_egress,
+                                "bgp_peer_timers_hold_time_seconds": "30",
+                                "bgp_peer_timers_keep_alive_seconds": "10",
+                                "bgp_peer_timers_out_delay_seconds": "7",
+                                "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
+                                "peer_tag": downlink_peer_tag,
+                                "max_routes": per_peer_max_route_limit,
+                                "warning_only": "True",
+                                "warning_limit": "0",
+                                "link_bandwidth_bps": "auto",
+                                "v4_over_v6_nexthop": "False",
+                                "is_passive": "False",
+                            },
+                            py_func_name="add_peer_group_patcher",
+                        ),
+                        create_coop_register_patcher_task(
+                            hostname=device_name,
+                            config_name="bgpcpp",
+                            patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{route_map_downlink_ingress}",
+                            task_name="coop_register_patcher",
+                            patcher_args={
+                                "matching_prefix": f"{ecmp_group_overflow_prefix}::/16",
+                                "in_stmt_name": route_map_downlink_ingress,
+                                "out_stmt_name": "RANDOM",
+                            },
+                            py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
+                        ),
+                        create_coop_register_patcher_task(
+                            hostname=device_name,
+                            config_name="bgpcpp",
+                            patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{route_map_uplink_ingress}",
+                            task_name="coop_register_patcher",
+                            patcher_args={
+                                "matching_prefix": f"{ecmp_group_overflow_prefix}::/16",
+                                "in_stmt_name": route_map_uplink_ingress,
+                                "out_stmt_name": "RANDOM",
+                            },
+                            py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
+                        ),
+                    ]
+                ),
+                *(
+                    []
+                    if l2_overload_only
+                    else [
+                        create_add_stress_static_routes_task(
+                            hostname=device_name,
+                            max_ecmp_group=ecmp_group_limit,
+                            max_ecmp_members=ecmp_member_limit,
+                            nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
+                            lb_prefix_agg="6000:ab::/32",
+                            device_group_count=good_ndp_entries_uplink,
+                        )
+                    ]
+                ),
+                create_configure_parallel_bgp_peers_task(
+                    hostname=device_name,
+                    configure_vlans_patcher_name="configure_vlans_patcher_name_downlink",
+                    add_bgp_peers_patcher_name="add_bgp_peers_patcher_name_downlink",
+                    config_json=json.dumps(
                         {
-                            "disable_ipv4_afi": "True",
-                            "v4_over_v6_nexthop": "False",
-                            "is_passive": "False",
-                            "is_confed_peer": is_downlink_peer_confed,
-                            "max_routes": per_peer_max_route_limit,
-                            "ingress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_IN",
-                            "egress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_downlink_mimic_v6}_OUT",
+                            ixia_downlink_interface: [
+                                {
+                                    "starting_ip": f"{ixia_downlink_ic_parent_network_v6}::10",
+                                    "increment_ip": "0:0:0:0::2",
+                                    "prefix_length": 127,
+                                    "description": "Downlink IPv6 Peers",
+                                    "peer_group_name": peergroup_downlink_mimic_v6,
+                                    "num_sessions": downlink_peer_count,
+                                    "remote_as_4_byte": remote_downlink_as_4byte,
+                                    "remote_as_4_byte_step": 1,
+                                    "gateway_starting_ip": f"{ixia_downlink_ic_parent_network_v6}::11",
+                                    "gateway_increment_ip": "0:0:0:0::2",
+                                },
+                                {
+                                    "starting_ip": f"{ixia_downlink_good_ndp_network}::1",
+                                    "increment_ip": "0:0:0:0::0",
+                                    "prefix_length": 80,
+                                    "description": "Downlink IPv6 NDP Peers",
+                                    "peer_group_name": peergroup_downlink_mimic_v6,
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": remote_downlink_as_4byte,
+                                    "remote_as_4_byte_step": 0,
+                                    "gateway_starting_ip": f"{ixia_downlink_good_ndp_network}::2",
+                                    "gateway_increment_ip": "0:0:0:0::2",
+                                    "config_only_interface_ip": True,
+                                },
+                                {
+                                    "starting_ip": f"{ixia_downlink_ic_parent_network_v4}.0",
+                                    "increment_ip": "0.0.0.2",
+                                    "prefix_length": 31,
+                                    "description": "Downlink IPv4 Peers",
+                                    "peer_group_name": peergroup_downlink_mimic_v4,
+                                    "num_sessions": downlink_peer_count,
+                                    "remote_as_4_byte": remote_downlink_as_4byte,
+                                    "remote_as_4_byte_step": 1,
+                                    "gateway_starting_ip": f"{ixia_downlink_ic_parent_network_v4}.1",
+                                    "gateway_increment_ip": "0.0.0.2",
+                                },
+                                {
+                                    "starting_ip": f"{rogue_arp_entry_network_v4}.0.1",
+                                    "increment_ip": "0.0.0.1",
+                                    "prefix_length": 16,
+                                    "description": "Downlink IPv4 Address Creation for ROGUE ARP",
+                                    "peer_group_name": peergroup_downlink_mimic_v4,
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": remote_downlink_as_4byte,
+                                    "gateway_starting_ip": f"{rogue_arp_entry_network_v4}.0.1",
+                                    "gateway_increment_ip": "0.0.0.1",
+                                    "config_only_interface_ip": True,
+                                },
+                            ]
                         }
                     ),
-                },
-                py_func_name="configure_bgp_peer_group",
-            ),
-            # PROPAGATE_EVERYTHING ingress/egress policies for uplink
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
-                    "description": "Ingress policy - accept all prefixes",
-                    "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                },
-                py_func_name="add_bgp_policy_statement",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"a_add_bgp_policy_statement_PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
-                    "description": "Egress policy - advertise all prefixes",
-                    "policy_entries": json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                },
-                py_func_name="add_bgp_policy_statement",
-            ),
-            create_coop_register_patcher_task(
-                hostname=device_name,
-                config_name="bgpcpp",
-                patcher_name=f"update_peer_group_patcher_{peergroup_uplink_mimic_v6}_Uplink",
-                task_name="coop_register_patcher",
-                patcher_args={
-                    "name": peergroup_uplink_mimic_v6,
-                    "attributes_to_update_json": json.dumps(
+                ),
+                create_configure_parallel_bgp_peers_task(
+                    hostname=device_name,
+                    configure_vlans_patcher_name="configure_vlans_patcher_name_uplink",
+                    add_bgp_peers_patcher_name="add_bgp_peers_patcher_name_uplink",
+                    config_json=json.dumps(
                         {
-                            "disable_ipv4_afi": "True",
-                            "v4_over_v6_nexthop": "False",
-                            "is_passive": "False",
-                            "is_confed_peer": is_uplink_peer_confed,
-                            "max_routes": per_peer_max_route_limit,
-                            "ingress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_IN",
-                            "egress_policy_name": f"PROPAGATE_EVERYTHING_{peergroup_uplink_mimic_v6}_OUT",
+                            ixia_uplink_interface: [
+                                {
+                                    "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::10",
+                                    "increment_ip": "0:0:0:0::2",
+                                    "prefix_length": 127,
+                                    "description": "Uplink IPv6 Peers",
+                                    "peer_group_name": peergroup_uplink_mimic_v6,
+                                    "num_sessions": uplink_peer_count,
+                                    "remote_as_4_byte": remote_uplink_as_4byte,
+                                    "remote_as_4_byte_step": 0,
+                                    "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::11",
+                                    "gateway_increment_ip": "0:0:0:0::2",
+                                },
+                                {
+                                    "starting_ip": f"{ixia_uplink_good_ndp_network}::1",
+                                    "increment_ip": "0:0:0:0::0",
+                                    "prefix_length": 80,
+                                    "description": "NDP stressor",
+                                    "peer_group_name": peergroup_uplink_mimic_v6,
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": remote_uplink_as_4byte,
+                                    "remote_as_4_byte_step": 0,
+                                    "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::2",
+                                    "gateway_increment_ip": "0:0:0:0::0",
+                                    "config_only_interface_ip": True,
+                                },
+                                *(
+                                    []
+                                    if l2_overload_only
+                                    else [
+                                        {
+                                            "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::400",
+                                            "increment_ip": "0:0:0:0::2",
+                                            "prefix_length": 127,
+                                            "description": "Uplink IPv6 Peers - for BGP Induced ECMP - 1 ",
+                                            "peer_group_name": peergroup_uplink_mimic_v6,
+                                            "num_sessions": bgp_induced_ecmp_group_count,
+                                            "remote_as_4_byte": remote_uplink_as_4byte,
+                                            "remote_as_4_byte_step": 0,
+                                            "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::401",
+                                            "gateway_increment_ip": "0:0:0:0::2",
+                                        },
+                                        {
+                                            "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::500",
+                                            "increment_ip": "0:0:0:0::2",
+                                            "prefix_length": 127,
+                                            "description": "Uplink IPv6 Peers - for BGP Induced ECMP - 2",
+                                            "peer_group_name": peergroup_uplink_mimic_v6,
+                                            "num_sessions": bgp_induced_ecmp_group_count,
+                                            "remote_as_4_byte": remote_uplink_as_4byte,
+                                            "remote_as_4_byte_step": 0,
+                                            "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::501",
+                                            "gateway_increment_ip": "0:0:0:0::2",
+                                        },
+                                    ]
+                                ),
+                                {
+                                    "starting_ip": f"{ixia_uplink_ic_parent_network_v4}.0",
+                                    "increment_ip": "0.0.0.2",
+                                    "prefix_length": 31,
+                                    "description": "Uplink IPv4 Peers",
+                                    "peer_group_name": peergroup_uplink_mimic_v4,
+                                    "num_sessions": uplink_peer_count,
+                                    "remote_as_4_byte": remote_uplink_as_4byte,
+                                    "remote_as_4_byte_step": 0,
+                                    "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v4}.1",
+                                    "gateway_increment_ip": "0.0.0.2",
+                                },
+                                {
+                                    "starting_ip": f"{good_arp_entry_network_v4}.0.1",
+                                    "increment_ip": "0.0.0.1",
+                                    "prefix_length": 16,
+                                    "description": "Downlink IPv4 Address Creation for GOOD ARP",
+                                    "peer_group_name": peergroup_uplink_mimic_v4,
+                                    "num_sessions": 1,
+                                    "remote_as_4_byte": remote_uplink_as_4byte,
+                                    "gateway_starting_ip": f"{good_arp_entry_network_v4}.0.1",
+                                    "gateway_increment_ip": "0.0.0.1",
+                                    "config_only_interface_ip": True,
+                                },
+                                *(
+                                    []
+                                    if l2_overload_only
+                                    else [
+                                        {
+                                            "starting_ip": f"{ixia_rogue_ic_parent_network_v6}::10",
+                                            "increment_ip": "0:0:0:0::2",
+                                            "prefix_length": 127,
+                                            "description": "Rogue IPv6 Peers",
+                                            "peer_group_name": peergroup_rogue_mimic_v6,
+                                            "num_sessions": rogue_peer_count,
+                                            "remote_as_4_byte": remote_rogue_as_4byte,
+                                            "remote_as_4_byte_step": 1,
+                                            "gateway_starting_ip": f"{ixia_rogue_ic_parent_network_v6}::11",
+                                            "gateway_increment_ip": "0:0:0:0::2",
+                                        },
+                                        {
+                                            "starting_ip": f"{ixia_rogue_ic_parent_network_v4}.0",
+                                            "increment_ip": "0.0.0.2",
+                                            "prefix_length": 31,
+                                            "description": "Rogue IPv4 Peers",
+                                            "peer_group_name": peergroup_rogue_mimic_v4,
+                                            "num_sessions": rogue_peer_count,
+                                            "remote_as_4_byte": remote_rogue_as_4byte,
+                                            "remote_as_4_byte_step": 1,
+                                            "gateway_starting_ip": f"{ixia_rogue_ic_parent_network_v4}.1",
+                                            "gateway_increment_ip": "0.0.0.2",
+                                        },
+                                    ]
+                                ),
+                            ]
                         }
                     ),
-                },
-                py_func_name="configure_bgp_peer_group",
-            ),
-            *(
-                create_allow_all_v4_peer_group_patcher_tasks(
-                    hostname=device_name,
-                    peer_group_name=peergroup_uplink_mimic_v4,
-                    peer_tag=uplink_peer_tag,
-                    is_confed_peer=is_uplink_peer_confed,
-                    per_peer_max_route_limit=per_peer_max_route_limit,
-                    policy_entries_json=json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                )
-                + create_allow_all_v4_peer_group_patcher_tasks(
-                    hostname=device_name,
-                    peer_group_name=peergroup_downlink_mimic_v4,
-                    peer_tag=downlink_peer_tag,
-                    is_confed_peer=is_downlink_peer_confed,
-                    per_peer_max_route_limit=per_peer_max_route_limit,
-                    policy_entries_json=json.dumps([_PERMIT_ALL_POLICY_TERM]),
-                )
-                if allow_all_v4_policies
-                else [
-                    create_coop_register_patcher_task(
-                        hostname=device_name,
-                        config_name="bgpcpp",
-                        patcher_name=f"add_peer_group_patcher_{peergroup_uplink_mimic_v4}",
-                        task_name="coop_register_patcher",
-                        patcher_args={
-                            "name": peergroup_uplink_mimic_v4,
-                            "description": "BGP peering from SSW to FSW, IPv4 sessions",
-                            "next_hop_self": "True",
-                            "disable_ipv4_afi": "False",
-                            "disable_ipv6_afi": "True",
-                            "is_confed_peer": is_uplink_peer_confed,
-                            "peer_tag": uplink_peer_tag,
-                            "ingress_policy_name": route_map_uplink_ingress,
-                            "egress_policy_name": route_map_uplink_egress,
-                            "bgp_peer_timers_hold_time_seconds": "30",
-                            "bgp_peer_timers_keep_alive_seconds": "10",
-                            "bgp_peer_timers_out_delay_seconds": "7",
-                            "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
-                            "max_routes": per_peer_max_route_limit,
-                            "warning_only": "True",
-                            "warning_limit": "0",
-                            "link_bandwidth_bps": "auto",
-                            "v4_over_v6_nexthop": "False",
-                            "is_passive": "False",
-                        },
-                        py_func_name="add_peer_group_patcher",
-                    ),
-                    create_coop_register_patcher_task(
-                        hostname=device_name,
-                        config_name="bgpcpp",
-                        patcher_name=f"add_peer_group_patcher_{peergroup_downlink_mimic_v4}",
-                        task_name="coop_register_patcher",
-                        patcher_args={
-                            "name": peergroup_downlink_mimic_v4,
-                            "description": "BGP peering from RSW to FSW, IPv4 sessions",
-                            "next_hop_self": "True",
-                            "disable_ipv4_afi": "False",
-                            "disable_ipv6_afi": "True",
-                            "is_confed_peer": is_downlink_peer_confed,
-                            "ingress_policy_name": route_map_downlink_ingress,
-                            "egress_policy_name": route_map_downlink_egress,
-                            "bgp_peer_timers_hold_time_seconds": "30",
-                            "bgp_peer_timers_keep_alive_seconds": "10",
-                            "bgp_peer_timers_out_delay_seconds": "7",
-                            "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
-                            "peer_tag": downlink_peer_tag,
-                            "max_routes": per_peer_max_route_limit,
-                            "warning_only": "True",
-                            "warning_limit": "0",
-                            "link_bandwidth_bps": "auto",
-                            "v4_over_v6_nexthop": "False",
-                            "is_passive": "False",
-                        },
-                        py_func_name="add_peer_group_patcher",
-                    ),
-                    create_coop_register_patcher_task(
-                        hostname=device_name,
-                        config_name="bgpcpp",
-                        patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{route_map_downlink_ingress}",
-                        task_name="coop_register_patcher",
-                        patcher_args={
-                            "matching_prefix": f"{ecmp_group_overflow_prefix}::/16",
-                            "in_stmt_name": route_map_downlink_ingress,
-                            "out_stmt_name": "RANDOM",
-                        },
-                        py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
-                    ),
-                    create_coop_register_patcher_task(
-                        hostname=device_name,
-                        config_name="bgpcpp",
-                        patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{route_map_uplink_ingress}",
-                        task_name="coop_register_patcher",
-                        patcher_args={
-                            "matching_prefix": f"{ecmp_group_overflow_prefix}::/16",
-                            "in_stmt_name": route_map_uplink_ingress,
-                            "out_stmt_name": "RANDOM",
-                        },
-                        py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
-                    ),
-                ]
-            ),
-            create_add_stress_static_routes_task(
-                hostname=device_name,
-                max_ecmp_group=ecmp_group_limit,
-                max_ecmp_members=ecmp_member_limit,
-                nh_prefix_1=f"{ixia_uplink_good_ndp_network}::/80",
-                lb_prefix_agg="6000:ab::/32",
-                device_group_count=good_ndp_entries_uplink,
-            ),
-            create_configure_parallel_bgp_peers_task(
-                hostname=device_name,
-                configure_vlans_patcher_name="configure_vlans_patcher_name_downlink",
-                add_bgp_peers_patcher_name="add_bgp_peers_patcher_name_downlink",
-                config_json=json.dumps(
-                    {
-                        ixia_downlink_interface: [
-                            {
-                                "starting_ip": f"{ixia_downlink_ic_parent_network_v6}::10",
-                                "increment_ip": "0:0:0:0::2",
-                                "prefix_length": 127,
-                                "description": "Downlink IPv6 Peers",
-                                "peer_group_name": peergroup_downlink_mimic_v6,
-                                "num_sessions": downlink_peer_count,
-                                "remote_as_4_byte": remote_downlink_as_4byte,
-                                "remote_as_4_byte_step": 1,
-                                "gateway_starting_ip": f"{ixia_downlink_ic_parent_network_v6}::11",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                            },
-                            {
-                                "starting_ip": f"{ixia_downlink_good_ndp_network}::1",
-                                "increment_ip": "0:0:0:0::0",
-                                "prefix_length": 80,
-                                "description": "Downlink IPv6 NDP Peers",
-                                "peer_group_name": peergroup_downlink_mimic_v6,
-                                "num_sessions": 1,
-                                "remote_as_4_byte": remote_downlink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_downlink_good_ndp_network}::2",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                                "config_only_interface_ip": True,
-                            },
-                            {
-                                "starting_ip": f"{ixia_downlink_ic_parent_network_v4}.0",
-                                "increment_ip": "0.0.0.2",
-                                "prefix_length": 31,
-                                "description": "Downlink IPv4 Peers",
-                                "peer_group_name": peergroup_downlink_mimic_v4,
-                                "num_sessions": downlink_peer_count,
-                                "remote_as_4_byte": remote_downlink_as_4byte,
-                                "remote_as_4_byte_step": 1,
-                                "gateway_starting_ip": f"{ixia_downlink_ic_parent_network_v4}.1",
-                                "gateway_increment_ip": "0.0.0.2",
-                            },
-                            {
-                                "starting_ip": f"{rogue_arp_entry_network_v4}.0.1",
-                                "increment_ip": "0.0.0.1",
-                                "prefix_length": 16,
-                                "description": "Downlink IPv4 Address Creation for ROGUE ARP",
-                                "peer_group_name": peergroup_downlink_mimic_v4,
-                                "num_sessions": 1,
-                                "remote_as_4_byte": remote_downlink_as_4byte,
-                                "gateway_starting_ip": f"{rogue_arp_entry_network_v4}.0.1",
-                                "gateway_increment_ip": "0.0.0.1",
-                                "config_only_interface_ip": True,
-                            },
-                        ]
-                    }
                 ),
-            ),
-            create_configure_parallel_bgp_peers_task(
-                hostname=device_name,
-                configure_vlans_patcher_name="configure_vlans_patcher_name_uplink",
-                add_bgp_peers_patcher_name="add_bgp_peers_patcher_name_uplink",
-                config_json=json.dumps(
-                    {
-                        ixia_uplink_interface: [
-                            {
-                                "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::10",
-                                "increment_ip": "0:0:0:0::2",
-                                "prefix_length": 127,
-                                "description": "Uplink IPv6 Peers",
-                                "peer_group_name": peergroup_uplink_mimic_v6,
-                                "num_sessions": uplink_peer_count,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::11",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                            },
-                            {
-                                "starting_ip": f"{ixia_uplink_good_ndp_network}::1",
-                                "increment_ip": "0:0:0:0::0",
-                                "prefix_length": 80,
-                                "description": "NDP stressor",
-                                "peer_group_name": peergroup_uplink_mimic_v6,
-                                "num_sessions": 1,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::2",
-                                "gateway_increment_ip": "0:0:0:0::0",
-                                "config_only_interface_ip": True,
-                            },
-                            {
-                                "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::400",
-                                "increment_ip": "0:0:0:0::2",
-                                "prefix_length": 127,
-                                "description": "Uplink IPv6 Peers - for BGP Induced ECMP - 1 ",
-                                "peer_group_name": peergroup_uplink_mimic_v6,
-                                "num_sessions": bgp_induced_ecmp_group_count,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::401",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                            },
-                            {
-                                "starting_ip": f"{ixia_uplink_ic_parent_network_v6}::500",
-                                "increment_ip": "0:0:0:0::2",
-                                "prefix_length": 127,
-                                "description": "Uplink IPv6 Peers - for BGP Induced ECMP - 2",
-                                "peer_group_name": peergroup_uplink_mimic_v6,
-                                "num_sessions": bgp_induced_ecmp_group_count,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v6}::501",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                            },
-                            {
-                                "starting_ip": f"{ixia_uplink_ic_parent_network_v4}.0",
-                                "increment_ip": "0.0.0.2",
-                                "prefix_length": 31,
-                                "description": "Uplink IPv4 Peers",
-                                "peer_group_name": peergroup_uplink_mimic_v4,
-                                "num_sessions": uplink_peer_count,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "remote_as_4_byte_step": 0,
-                                "gateway_starting_ip": f"{ixia_uplink_ic_parent_network_v4}.1",
-                                "gateway_increment_ip": "0.0.0.2",
-                            },
-                            {
-                                "starting_ip": f"{good_arp_entry_network_v4}.0.1",
-                                "increment_ip": "0.0.0.1",
-                                "prefix_length": 16,
-                                "description": "Downlink IPv4 Address Creation for GOOD ARP",
-                                "peer_group_name": peergroup_uplink_mimic_v4,
-                                "num_sessions": 1,
-                                "remote_as_4_byte": remote_uplink_as_4byte,
-                                "gateway_starting_ip": f"{good_arp_entry_network_v4}.0.1",
-                                "gateway_increment_ip": "0.0.0.1",
-                                "config_only_interface_ip": True,
-                            },
-                            {
-                                "starting_ip": f"{ixia_rogue_ic_parent_network_v6}::10",
-                                "increment_ip": "0:0:0:0::2",
-                                "prefix_length": 127,
-                                "description": "Rogue IPv6 Peers",
-                                "peer_group_name": peergroup_rogue_mimic_v6,
-                                "num_sessions": rogue_peer_count,
-                                "remote_as_4_byte": remote_rogue_as_4byte,
-                                "remote_as_4_byte_step": 1,
-                                "gateway_starting_ip": f"{ixia_rogue_ic_parent_network_v6}::11",
-                                "gateway_increment_ip": "0:0:0:0::2",
-                            },
-                            {
-                                "starting_ip": f"{ixia_rogue_ic_parent_network_v4}.0",
-                                "increment_ip": "0.0.0.2",
-                                "prefix_length": 31,
-                                "description": "Rogue IPv4 Peers",
-                                "peer_group_name": peergroup_rogue_mimic_v4,
-                                "num_sessions": rogue_peer_count,
-                                "remote_as_4_byte": remote_rogue_as_4byte,
-                                "remote_as_4_byte_step": 1,
-                                "gateway_starting_ip": f"{ixia_rogue_ic_parent_network_v4}.1",
-                                "gateway_increment_ip": "0.0.0.2",
-                            },
-                        ]
-                    }
+                *(additional_setup_tasks or []),
+                create_coop_apply_patchers_task(
+                    hostnames=[device_name],
                 ),
-            ),
-            *(additional_setup_tasks or []),
-            create_coop_apply_patchers_task(
-                hostnames=[device_name],
-            ),
-            create_wait_for_agent_convergence_task([device_name]),
-            # Task(
-            #     task_name="wait_for_bgp_convergence",
-            #     params=Params(
-            #         json_params=json.dumps(
-            #             {
-            #                 "hostnames": [device_name],
-            #             }
-            #         ),
-            #     ),
-            # ),
-            create_allocate_cgroup_slice_memory_task(
-                hostname=device_name,
-                slice_name="workload",
-                run_post_ixia_setup=True,
-                workload_slice_based_total_memory_decimal=0.25,
-            ),
-        ],
+                create_wait_for_agent_convergence_task([device_name]),
+                # Task(
+                #     task_name="wait_for_bgp_convergence",
+                #     params=Params(
+                #         json_params=json.dumps(
+                #             {
+                #                 "hostnames": [device_name],
+                #             }
+                #         ),
+                #     ),
+                # ),
+                create_allocate_cgroup_slice_memory_task(
+                    hostname=device_name,
+                    slice_name="workload",
+                    run_post_ixia_setup=True,
+                    workload_slice_based_total_memory_decimal=0.25,
+                ),
+            ]
+        ),
         teardown_tasks=[
             create_coop_unregister_patchers_task(device_name),
             create_run_commands_on_shell_task(
@@ -1943,549 +2256,601 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
         #                 ),
         #             ),
         #         ),
-        basic_port_configs=[
-            taac_types.BasicPortConfig(
-                endpoint=f"{device_name}:{ixia_downlink_interface}",
-                device_group_configs=[
-                    # downlink Ipv6
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=0,
-                        tag_name="NO_V6_PACKET_LOSS_EXPECTED",
-                        multiplier=downlink_peer_count,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=ixia_downlink_source_ipv6,
-                            increment_ip="0:0:0:0::2",
-                            gateway_starting_ip=f"{ixia_downlink_ic_parent_network_v6}::10",
-                            gateway_increment_ip="0:0:0:0::2",
-                            mask=127,
-                        ),
-                        v6_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_downlink_as_4byte,
-                            local_as_increment=1,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_downlink_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v6_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_downlink_prefix_count_v6,
-                                        prefix_length=64,
-                                        starting_prefixes=f"{v6_downlink_prefix}:1::",
-                                        prefix_step="0:0:0:0::0",
-                                        bgp_communities=ixia_downlink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    # Downlink IPv4
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=1,
-                        tag_name="NO_PACKET_LOSS_EXPECTED",
-                        multiplier=downlink_peer_count,
-                        v4_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_downlink_ic_parent_network_v4}.1",
-                            increment_ip="0.0.0.2",
-                            gateway_starting_ip=f"{ixia_downlink_ic_parent_network_v4}.0",
-                            gateway_increment_ip="0.0.0.2",
-                            mask=31,
-                        ),
-                        v4_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_downlink_as_4byte,
-                            local_as_increment=1,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_downlink_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v4_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_downlink_prefix_count_v4,
-                                        prefix_length=24,
-                                        starting_prefixes=f"{v4_downlink_prefix}.1.0.0",
-                                        prefix_step="0.0.0.0",
-                                        bgp_communities=ixia_downlink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV4,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    # NDP stessor downlink
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=2,
-                        tag_name="DOWNLINK_NDP_STRESSOR",
-                        multiplier=good_ndp_entries_downlink,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_downlink_good_ndp_network}::a000",
-                            increment_ip="::1",
-                            gateway_starting_ip=f"{ixia_downlink_good_ndp_network}::1",
-                            mask=80,
-                        ),
-                    ),
-                    # Arp stress downlink
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=3,
-                        tag_name="DOWNLINK_ARP_STRESSOR",
-                        multiplier=1,
-                        v4_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{rogue_arp_entry_network_v4}.0.100",
-                            increment_ip="0.0.0.1",
-                            gateway_starting_ip=f"{rogue_arp_entry_network_v4}.0.1",
-                            mask=16,
-                        ),
-                    ),
-                ],
-            ),
-            taac_types.BasicPortConfig(
-                endpoint=f"{device_name}:{ixia_uplink_interface}",
-                device_group_configs=[
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=0,
-                        tag_name="NO_V6_PACKET_LOSS_EXPECTED",
-                        multiplier=uplink_peer_count,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_uplink_ic_parent_network_v6}::11",
-                            increment_ip="0:0:0:0::2",
-                            gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::10",
-                            gateway_increment_ip="0:0:0:0::2",
-                            mask=127,
-                        ),
-                        v6_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_uplink_as_4byte,
-                            local_as_increment=0,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_uplink_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            bgp_peer_type=uplink_bgp_peer_type,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v6_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_uplink_prefix_count_v6,
-                                        prefix_length=64,
-                                        starting_prefixes=f"{v6_uplink_prefix}:1::",
-                                        prefix_step="0:0:0:0::0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=1,
-                        tag_name="NO_PACKET_LOSS_EXPECTED",
-                        multiplier=uplink_peer_count,
-                        v4_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_uplink_ic_parent_network_v4}.1",
-                            increment_ip="0.0.0.2",
-                            gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v4}.0",
-                            gateway_increment_ip="0.0.0.2",
-                            mask=31,
-                        ),
-                        v4_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_uplink_as_4byte,
-                            local_as_increment=0,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_uplink_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            bgp_peer_type=uplink_bgp_peer_type,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v4_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_uplink_prefix_count_v4,
-                                        prefix_length=24,
-                                        starting_prefixes=f"{v4_uplink_prefix}.1.0.0",
-                                        prefix_step="0.0.0.0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV4,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=2,
-                        tag_name="UPLINK_NDP_STRESSOR",
-                        multiplier=good_ndp_entries_uplink,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_uplink_good_ndp_network}::a000",
-                            increment_ip="::1",
-                            gateway_starting_ip=f"{ixia_uplink_good_ndp_network}::1",
-                            mask=80,
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=3,
-                        tag_name="UPLINK_ARP_STRESSOR",
-                        multiplier=good_arp_entries,
-                        v4_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{good_arp_entry_network_v4}.0.100",
-                            increment_ip="0.0.0.1",
-                            gateway_starting_ip=f"{good_arp_entry_network_v4}.0.1",
-                            mask=16,
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=4,
-                        tag_name="UPLINK_BGP_INDUCED_ECMP_1",
-                        enable=True,
-                        multiplier=bgp_induced_ecmp_group_count,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_uplink_ic_parent_network_v6}::401",
-                            increment_ip="0:0:0:0::2",
-                            gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::400",
-                            gateway_increment_ip="0:0:0:0::2",
-                            mask=80,
-                        ),
-                        v6_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_uplink_as_4byte,
-                            local_as_increment=0,
-                            enable_4_byte_local_as=True,
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            bgp_peer_type=uplink_bgp_peer_type,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v6_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=1,
-                                        prefix_length=64,
-                                        starting_prefixes=f"{ecmp_group_overflow_prefix}:1:f::",
-                                        prefix_step="0:0:0:1::0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=5,
-                        tag_name="UPLINK_BGP_INDUCED_ECMP_2",
-                        enable=False,
-                        multiplier=bgp_induced_ecmp_group_count,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_uplink_ic_parent_network_v6}::501",
-                            increment_ip="0:0:0:0::2",
-                            gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::500",
-                            gateway_increment_ip="0:0:0:0::2",
-                            mask=80,
-                        ),
-                        v6_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_uplink_as_4byte,
-                            local_as_increment=0,
-                            enable_4_byte_local_as=True,
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            bgp_peer_type=uplink_bgp_peer_type,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v6_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=1,
-                                        prefix_length=64,
-                                        starting_prefixes=f"{ecmp_group_overflow_prefix}:1:f::",
-                                        prefix_step="0:0:0:1::0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=6,
-                        tag_name="ROGUE_PREFIX_FLAP",
-                        multiplier=rogue_peer_count,
-                        v6_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_rogue_ic_parent_network_v6}::11",
-                            increment_ip="0:0:0:0::2",
-                            gateway_starting_ip=f"{ixia_rogue_ic_parent_network_v6}::10",
-                            gateway_increment_ip="0:0:0:0::2",
-                            mask=127,
-                        ),
-                        # Prefix flaps
-                        v6_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_rogue_as_4byte,
-                            local_as_increment=1,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_rogue_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v6_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_rogue_prefix_count_v6,
-                                        prefix_length=64,
-                                        starting_prefixes=f"{v6_prefix_flapping_prefix}:f::",
-                                        prefix_step="0:0:0:0::0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV6,
-                                        prefix_flap_config=ixia_types.BgpFlapConfig(
-                                            uptime_in_sec=15, downtime_in_sec=15
+        basic_port_configs=(
+            build_l2_overload_only_port_configs(
+                device_name=device_name,
+                ixia_downlink_interface=ixia_downlink_interface,
+                ixia_uplink_interface=ixia_uplink_interface,
+                ixia_downlink_good_ndp_network=ixia_downlink_good_ndp_network,
+                ixia_uplink_good_ndp_network=ixia_uplink_good_ndp_network,
+                rogue_arp_entry_network_v4=rogue_arp_entry_network_v4,
+                good_arp_entry_network_v4=good_arp_entry_network_v4,
+                good_ndp_entries_downlink=good_ndp_entries_downlink,
+                good_ndp_entries_uplink=good_ndp_entries_uplink,
+                good_arp_entries=good_arp_entries,
+            )
+            if l2_overload_only
+            else [
+                taac_types.BasicPortConfig(
+                    endpoint=f"{device_name}:{ixia_downlink_interface}",
+                    device_group_configs=[
+                        # downlink Ipv6
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=0,
+                            tag_name="NO_V6_PACKET_LOSS_EXPECTED",
+                            multiplier=downlink_peer_count,
+                            v6_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=ixia_downlink_source_ipv6,
+                                increment_ip="0:0:0:0::2",
+                                gateway_starting_ip=f"{ixia_downlink_ic_parent_network_v6}::10",
+                                gateway_increment_ip="0:0:0:0::2",
+                                mask=127,
+                            ),
+                            v6_bgp_config=taac_types.BgpConfig(
+                                local_as_4_bytes=remote_downlink_as_4byte,
+                                local_as_increment=1,
+                                enable_4_byte_local_as=True,
+                                is_confed=is_downlink_peer_confed == "True",
+                                bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
+                                hold_timer=30,
+                                keepalive_timer=10,
+                                route_scales=[
+                                    taac_types.RouteScaleSpec(
+                                        network_group_index=0,
+                                        v6_route_scale=taac_types.RouteScale(
+                                            multiplier=1,
+                                            prefix_count=ixia_downlink_prefix_count_v6,
+                                            prefix_length=64,
+                                            starting_prefixes=f"{v6_downlink_prefix}:1::",
+                                            prefix_step="0:0:0:0::0",
+                                            bgp_communities=ixia_downlink_communities,
+                                            ip_address_family=ixia_types.IpAddressFamily.IPV6,
                                         ),
                                     ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    taac_types.DeviceGroupConfig(
-                        device_group_index=7,
-                        tag_name="ROGUE_SESSION_FLAP",
-                        multiplier=rogue_peer_count,
-                        v4_addresses_config=taac_types.IpAddressesConfig(
-                            starting_ip=f"{ixia_rogue_ic_parent_network_v4}.1",
-                            increment_ip="0.0.0.2",
-                            gateway_starting_ip=f"{ixia_rogue_ic_parent_network_v4}.0",
-                            gateway_increment_ip="0.0.0.2",
-                            mask=31,
-                        ),
-                        # Session flaps
-                        v4_bgp_config=taac_types.BgpConfig(
-                            local_as_4_bytes=remote_rogue_as_4byte,
-                            local_as_increment=1,
-                            enable_4_byte_local_as=True,
-                            is_confed=is_rogue_peer_confed == "True",
-                            bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
-                            hold_timer=30,
-                            keepalive_timer=10,
-                            peer_flap_config=ixia_types.BgpFlapConfig(
-                                uptime_in_sec=120, downtime_in_sec=15
+                                ],
                             ),
-                            route_scales=[
-                                taac_types.RouteScaleSpec(
-                                    network_group_index=0,
-                                    v4_route_scale=taac_types.RouteScale(
-                                        multiplier=1,
-                                        prefix_count=ixia_rogue_prefix_count_v4,
-                                        prefix_length=24,
-                                        starting_prefixes=f"{v4_session_flapping_prefix}.1.0.0",
-                                        prefix_step="0.0.0.0",
-                                        bgp_communities=ixia_uplink_communities,
-                                        ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                        ),
+                        # Downlink IPv4
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=1,
+                            tag_name="NO_PACKET_LOSS_EXPECTED",
+                            multiplier=downlink_peer_count,
+                            v4_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{ixia_downlink_ic_parent_network_v4}.1",
+                                increment_ip="0.0.0.2",
+                                gateway_starting_ip=f"{ixia_downlink_ic_parent_network_v4}.0",
+                                gateway_increment_ip="0.0.0.2",
+                                mask=31,
+                            ),
+                            v4_bgp_config=taac_types.BgpConfig(
+                                local_as_4_bytes=remote_downlink_as_4byte,
+                                local_as_increment=1,
+                                enable_4_byte_local_as=True,
+                                is_confed=is_downlink_peer_confed == "True",
+                                bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
+                                hold_timer=30,
+                                keepalive_timer=10,
+                                route_scales=[
+                                    taac_types.RouteScaleSpec(
+                                        network_group_index=0,
+                                        v4_route_scale=taac_types.RouteScale(
+                                            multiplier=1,
+                                            prefix_count=ixia_downlink_prefix_count_v4,
+                                            prefix_length=24,
+                                            starting_prefixes=f"{v4_downlink_prefix}.1.0.0",
+                                            prefix_step="0.0.0.0",
+                                            bgp_communities=ixia_downlink_communities,
+                                            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # NDP stessor downlink
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=2,
+                            tag_name="DOWNLINK_NDP_STRESSOR",
+                            multiplier=good_ndp_entries_downlink,
+                            v6_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{ixia_downlink_good_ndp_network}::a000",
+                                increment_ip="::1",
+                                gateway_starting_ip=f"{ixia_downlink_good_ndp_network}::1",
+                                mask=80,
+                            ),
+                        ),
+                        # Arp stress downlink
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=3,
+                            tag_name="DOWNLINK_ARP_STRESSOR",
+                            multiplier=1,
+                            v4_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{rogue_arp_entry_network_v4}.0.100",
+                                increment_ip="0.0.0.1",
+                                gateway_starting_ip=f"{rogue_arp_entry_network_v4}.0.1",
+                                mask=16,
+                            ),
+                        ),
+                    ],
+                ),
+                taac_types.BasicPortConfig(
+                    endpoint=f"{device_name}:{ixia_uplink_interface}",
+                    device_group_configs=[
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=0,
+                            tag_name="NO_V6_PACKET_LOSS_EXPECTED",
+                            multiplier=uplink_peer_count,
+                            v6_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{ixia_uplink_ic_parent_network_v6}::11",
+                                increment_ip="0:0:0:0::2",
+                                gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::10",
+                                gateway_increment_ip="0:0:0:0::2",
+                                mask=127,
+                            ),
+                            v6_bgp_config=taac_types.BgpConfig(
+                                local_as_4_bytes=remote_uplink_as_4byte,
+                                local_as_increment=0,
+                                enable_4_byte_local_as=True,
+                                is_confed=is_uplink_peer_confed == "True",
+                                bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
+                                hold_timer=30,
+                                keepalive_timer=10,
+                                bgp_peer_type=uplink_bgp_peer_type,
+                                route_scales=[
+                                    taac_types.RouteScaleSpec(
+                                        network_group_index=0,
+                                        v6_route_scale=taac_types.RouteScale(
+                                            multiplier=1,
+                                            prefix_count=ixia_uplink_prefix_count_v6,
+                                            prefix_length=64,
+                                            starting_prefixes=f"{v6_uplink_prefix}:1::",
+                                            prefix_step="0:0:0:0::0",
+                                            bgp_communities=ixia_uplink_communities,
+                                            ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=1,
+                            tag_name="NO_PACKET_LOSS_EXPECTED",
+                            multiplier=uplink_peer_count,
+                            v4_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{ixia_uplink_ic_parent_network_v4}.1",
+                                increment_ip="0.0.0.2",
+                                gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v4}.0",
+                                gateway_increment_ip="0.0.0.2",
+                                mask=31,
+                            ),
+                            v4_bgp_config=taac_types.BgpConfig(
+                                local_as_4_bytes=remote_uplink_as_4byte,
+                                local_as_increment=0,
+                                enable_4_byte_local_as=True,
+                                is_confed=is_uplink_peer_confed == "True",
+                                bgp_capabilities=[ixia_types.BgpCapability.IpV4Unicast],
+                                hold_timer=30,
+                                keepalive_timer=10,
+                                bgp_peer_type=uplink_bgp_peer_type,
+                                route_scales=[
+                                    taac_types.RouteScaleSpec(
+                                        network_group_index=0,
+                                        v4_route_scale=taac_types.RouteScale(
+                                            multiplier=1,
+                                            prefix_count=ixia_uplink_prefix_count_v4,
+                                            prefix_length=24,
+                                            starting_prefixes=f"{v4_uplink_prefix}.1.0.0",
+                                            prefix_step="0.0.0.0",
+                                            bgp_communities=ixia_uplink_communities,
+                                            ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=2,
+                            tag_name="UPLINK_NDP_STRESSOR",
+                            multiplier=good_ndp_entries_uplink,
+                            v6_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{ixia_uplink_good_ndp_network}::a000",
+                                increment_ip="::1",
+                                gateway_starting_ip=f"{ixia_uplink_good_ndp_network}::1",
+                                mask=80,
+                            ),
+                        ),
+                        taac_types.DeviceGroupConfig(
+                            device_group_index=3,
+                            tag_name="UPLINK_ARP_STRESSOR",
+                            multiplier=good_arp_entries,
+                            v4_addresses_config=taac_types.IpAddressesConfig(
+                                starting_ip=f"{good_arp_entry_network_v4}.0.100",
+                                increment_ip="0.0.0.1",
+                                gateway_starting_ip=f"{good_arp_entry_network_v4}.0.1",
+                                mask=16,
+                            ),
+                        ),
+                        *(
+                            []
+                            if l2_overload_only
+                            else [
+                                taac_types.DeviceGroupConfig(
+                                    device_group_index=4,
+                                    tag_name="UPLINK_BGP_INDUCED_ECMP_1",
+                                    enable=True,
+                                    multiplier=bgp_induced_ecmp_group_count,
+                                    v6_addresses_config=taac_types.IpAddressesConfig(
+                                        starting_ip=f"{ixia_uplink_ic_parent_network_v6}::401",
+                                        increment_ip="0:0:0:0::2",
+                                        gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::400",
+                                        gateway_increment_ip="0:0:0:0::2",
+                                        mask=80,
+                                    ),
+                                    v6_bgp_config=taac_types.BgpConfig(
+                                        local_as_4_bytes=remote_uplink_as_4byte,
+                                        local_as_increment=0,
+                                        enable_4_byte_local_as=True,
+                                        bgp_capabilities=[
+                                            ixia_types.BgpCapability.IpV6Unicast
+                                        ],
+                                        hold_timer=30,
+                                        keepalive_timer=10,
+                                        bgp_peer_type=uplink_bgp_peer_type,
+                                        route_scales=[
+                                            taac_types.RouteScaleSpec(
+                                                network_group_index=0,
+                                                v6_route_scale=taac_types.RouteScale(
+                                                    multiplier=1,
+                                                    prefix_count=1,
+                                                    prefix_length=64,
+                                                    starting_prefixes=f"{ecmp_group_overflow_prefix}:1:f::",
+                                                    prefix_step="0:0:0:1::0",
+                                                    bgp_communities=ixia_uplink_communities,
+                                                    ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                                taac_types.DeviceGroupConfig(
+                                    device_group_index=5,
+                                    tag_name="UPLINK_BGP_INDUCED_ECMP_2",
+                                    enable=False,
+                                    multiplier=bgp_induced_ecmp_group_count,
+                                    v6_addresses_config=taac_types.IpAddressesConfig(
+                                        starting_ip=f"{ixia_uplink_ic_parent_network_v6}::501",
+                                        increment_ip="0:0:0:0::2",
+                                        gateway_starting_ip=f"{ixia_uplink_ic_parent_network_v6}::500",
+                                        gateway_increment_ip="0:0:0:0::2",
+                                        mask=80,
+                                    ),
+                                    v6_bgp_config=taac_types.BgpConfig(
+                                        local_as_4_bytes=remote_uplink_as_4byte,
+                                        local_as_increment=0,
+                                        enable_4_byte_local_as=True,
+                                        bgp_capabilities=[
+                                            ixia_types.BgpCapability.IpV6Unicast
+                                        ],
+                                        hold_timer=30,
+                                        keepalive_timer=10,
+                                        bgp_peer_type=uplink_bgp_peer_type,
+                                        route_scales=[
+                                            taac_types.RouteScaleSpec(
+                                                network_group_index=0,
+                                                v6_route_scale=taac_types.RouteScale(
+                                                    multiplier=1,
+                                                    prefix_count=1,
+                                                    prefix_length=64,
+                                                    starting_prefixes=f"{ecmp_group_overflow_prefix}:1:f::",
+                                                    prefix_step="0:0:0:1::0",
+                                                    bgp_communities=ixia_uplink_communities,
+                                                    ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                            ]
+                        ),
+                        *(
+                            []
+                            if l2_overload_only
+                            else [
+                                taac_types.DeviceGroupConfig(
+                                    device_group_index=6,
+                                    tag_name="ROGUE_PREFIX_FLAP",
+                                    multiplier=rogue_peer_count,
+                                    v6_addresses_config=taac_types.IpAddressesConfig(
+                                        starting_ip=f"{ixia_rogue_ic_parent_network_v6}::11",
+                                        increment_ip="0:0:0:0::2",
+                                        gateway_starting_ip=f"{ixia_rogue_ic_parent_network_v6}::10",
+                                        gateway_increment_ip="0:0:0:0::2",
+                                        mask=127,
+                                    ),
+                                    # Prefix flaps
+                                    v6_bgp_config=taac_types.BgpConfig(
+                                        local_as_4_bytes=remote_rogue_as_4byte,
+                                        local_as_increment=1,
+                                        enable_4_byte_local_as=True,
+                                        is_confed=is_rogue_peer_confed == "True",
+                                        bgp_capabilities=[
+                                            ixia_types.BgpCapability.IpV6Unicast
+                                        ],
+                                        hold_timer=30,
+                                        keepalive_timer=10,
+                                        route_scales=[
+                                            taac_types.RouteScaleSpec(
+                                                network_group_index=0,
+                                                v6_route_scale=taac_types.RouteScale(
+                                                    multiplier=1,
+                                                    prefix_count=ixia_rogue_prefix_count_v6,
+                                                    prefix_length=64,
+                                                    starting_prefixes=f"{v6_prefix_flapping_prefix}:f::",
+                                                    prefix_step="0:0:0:0::0",
+                                                    bgp_communities=ixia_uplink_communities,
+                                                    ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                                                    prefix_flap_config=ixia_types.BgpFlapConfig(
+                                                        uptime_in_sec=15,
+                                                        downtime_in_sec=15,
+                                                    ),
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                                taac_types.DeviceGroupConfig(
+                                    device_group_index=7,
+                                    tag_name="ROGUE_SESSION_FLAP",
+                                    multiplier=rogue_peer_count,
+                                    v4_addresses_config=taac_types.IpAddressesConfig(
+                                        starting_ip=f"{ixia_rogue_ic_parent_network_v4}.1",
+                                        increment_ip="0.0.0.2",
+                                        gateway_starting_ip=f"{ixia_rogue_ic_parent_network_v4}.0",
+                                        gateway_increment_ip="0.0.0.2",
+                                        mask=31,
+                                    ),
+                                    # Session flaps
+                                    v4_bgp_config=taac_types.BgpConfig(
+                                        local_as_4_bytes=remote_rogue_as_4byte,
+                                        local_as_increment=1,
+                                        enable_4_byte_local_as=True,
+                                        is_confed=is_rogue_peer_confed == "True",
+                                        bgp_capabilities=[
+                                            ixia_types.BgpCapability.IpV4Unicast
+                                        ],
+                                        hold_timer=30,
+                                        keepalive_timer=10,
+                                        peer_flap_config=ixia_types.BgpFlapConfig(
+                                            uptime_in_sec=120, downtime_in_sec=15
+                                        ),
+                                        route_scales=[
+                                            taac_types.RouteScaleSpec(
+                                                network_group_index=0,
+                                                v4_route_scale=taac_types.RouteScale(
+                                                    multiplier=1,
+                                                    prefix_count=ixia_rogue_prefix_count_v4,
+                                                    prefix_length=24,
+                                                    starting_prefixes=f"{v4_session_flapping_prefix}.1.0.0",
+                                                    prefix_step="0.0.0.0",
+                                                    bgp_communities=ixia_uplink_communities,
+                                                    ip_address_family=ixia_types.IpAddressFamily.IPV4,
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                            ]
+                        ),
+                    ],
+                ),
+            ]
+        ),
+        traffic_items_to_start=(
+            [f"{device_name.upper()}_L2_MAC_LEARNING_TRAFFIC"]
+            if l2_overload_only
+            else [f"(?!{device_name.upper()}_HIGH_QUEUE_BGP_CP_TRAFFIC)"]
+        ),
+        basic_traffic_item_configs=(
+            build_l2_overload_only_traffic_items(
+                device_name=device_name,
+                ixia_downlink_interface=ixia_downlink_interface,
+                good_mac_entry_count=good_mac_entry_count,
+            )
+            if l2_overload_only
+            else [
+                taac_types.BasicTrafficItemConfig(
+                    name=f"{device_name.upper()}_V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
+                    bidirectional=True,
+                    merge_destinations=True,
+                    line_rate=10,
+                    src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_uplink_interface}",
+                            device_group_index=2,
+                        )
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                            device_group_index=2,
+                        )
+                    ],
+                    traffic_type=ixia_types.TrafficType.IPV6,
+                    tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+                ),
+                taac_types.BasicTrafficItemConfig(
+                    name=f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+                    bidirectional=True,
+                    merge_destinations=True,
+                    line_rate=10,
+                    src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_uplink_interface}",
+                            network_group_index=0,
+                            device_group_index=0,
+                        )
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                            network_group_index=0,
+                            device_group_index=0,
+                        )
+                    ],
+                    traffic_type=ixia_types.TrafficType.IPV6,
+                    tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+                ),
+                taac_types.BasicTrafficItemConfig(
+                    name=f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+                    bidirectional=True,
+                    merge_destinations=True,
+                    line_rate=10,
+                    src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_uplink_interface}",
+                            network_group_index=0,
+                            device_group_index=1,
+                        )
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                            network_group_index=0,
+                            device_group_index=1,
+                        )
+                    ],
+                    traffic_type=ixia_types.TrafficType.IPV4,
+                    tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+                ),
+                taac_types.BasicTrafficItemConfig(
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_uplink_interface}",
+                        )
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                        ),
+                    ],
+                    name=f"{device_name.upper()}_HIGH_QUEUE_BGP_CP_TRAFFIC",
+                    line_rate=70,
+                    traffic_type=ixia_types.TrafficType.RAW,
+                    bidirectional=False,
+                    packet_headers=BGP_CP_TRAFFIC_PACKET_HEADERS,
+                ),
+                taac_types.BasicTrafficItemConfig(
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                        ),
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
+                        ),
+                    ],
+                    name=f"{device_name.upper()}_GOOD_BUT_LOSSY_NDP_TRAFFIC",
+                    line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
+                    line_rate=2000,
+                    tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+                    # traffic_type=ixia_types.TrafficType.RAW,
+                    traffic_type=ixia_types.TrafficType.RAW,
+                    allow_self_destined=True,
+                    bidirectional=False,
+                    packet_headers=[
+                        taac_types.PacketHeader(
+                            query=ixia_types.Query(
+                                regex="^ethernet$",
+                                query_type=ixia_types.QueryType.STACK_TYPE_ID,
+                            ),
+                            fields=[
+                                taac_types.Field(
+                                    query=ixia_types.Query(
+                                        regex="Destination MAC Address"
+                                    ),
+                                    attrs_json=json.dumps(
+                                        {
+                                            "ValueType": "increment",
+                                            "StartValue": BROADCAST_DST_MAC_ADDRESS,
+                                            "StepValue": "00:00:00:00:00:00",
+                                            "CountValue": 1,
+                                        }
+                                    ),
+                                ),
+                                taac_types.Field(
+                                    query=ixia_types.Query(regex="Source MAC Address"),
+                                    attrs_json=json.dumps(
+                                        {
+                                            "ValueType": "increment",
+                                            "StartValue": DEFAULT_SRC_MAC_ADDRESS,
+                                            "StepValue": "00:00:00:00:00:01",
+                                            "CountValue": good_mac_entry_count,
+                                        }
                                     ),
                                 ),
                             ],
                         ),
-                    ),
-                ],
-            ),
-        ],
-        traffic_items_to_start=[f"(?!{device_name.upper()}_HIGH_QUEUE_BGP_CP_TRAFFIC)"],
-        basic_traffic_item_configs=[
-            taac_types.BasicTrafficItemConfig(
-                name=f"{device_name.upper()}_V6_LAYER3_TRAFFIC_DOWNLINK_AND_UPLINK",
-                bidirectional=True,
-                merge_destinations=True,
-                line_rate=10,
-                src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_uplink_interface}",
-                        device_group_index=2,
-                    )
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                        device_group_index=2,
-                    )
-                ],
-                traffic_type=ixia_types.TrafficType.IPV6,
-                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
-            ),
-            taac_types.BasicTrafficItemConfig(
-                name=f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                bidirectional=True,
-                merge_destinations=True,
-                line_rate=10,
-                src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_uplink_interface}",
-                        network_group_index=0,
-                        device_group_index=0,
-                    )
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                        network_group_index=0,
-                        device_group_index=0,
-                    )
-                ],
-                traffic_type=ixia_types.TrafficType.IPV6,
-                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
-            ),
-            taac_types.BasicTrafficItemConfig(
-                name=f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-                bidirectional=True,
-                merge_destinations=True,
-                line_rate=10,
-                src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_uplink_interface}",
-                        network_group_index=0,
-                        device_group_index=1,
-                    )
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                        network_group_index=0,
-                        device_group_index=1,
-                    )
-                ],
-                traffic_type=ixia_types.TrafficType.IPV4,
-                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
-            ),
-            taac_types.BasicTrafficItemConfig(
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_uplink_interface}",
-                    )
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                    ),
-                ],
-                name=f"{device_name.upper()}_HIGH_QUEUE_BGP_CP_TRAFFIC",
-                line_rate=70,
-                traffic_type=ixia_types.TrafficType.RAW,
-                bidirectional=False,
-                packet_headers=BGP_CP_TRAFFIC_PACKET_HEADERS,
-            ),
-            taac_types.BasicTrafficItemConfig(
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                    ),
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                    ),
-                ],
-                name=f"{device_name.upper()}_GOOD_BUT_LOSSY_NDP_TRAFFIC",
-                line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
-                line_rate=2000,
-                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
-                # traffic_type=ixia_types.TrafficType.RAW,
-                traffic_type=ixia_types.TrafficType.RAW,
-                allow_self_destined=True,
-                bidirectional=False,
-                packet_headers=[
-                    taac_types.PacketHeader(
-                        query=ixia_types.Query(
-                            regex="^ethernet$",
-                            query_type=ixia_types.QueryType.STACK_TYPE_ID,
+                    ],
+                ),
+                taac_types.BasicTrafficItemConfig(
+                    src_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
                         ),
-                        fields=[
-                            taac_types.Field(
-                                query=ixia_types.Query(regex="Destination MAC Address"),
-                                attrs_json=json.dumps(
-                                    {
-                                        "ValueType": "increment",
-                                        "StartValue": BROADCAST_DST_MAC_ADDRESS,
-                                        "StepValue": "00:00:00:00:00:00",
-                                        "CountValue": 1,
-                                    }
-                                ),
-                            ),
-                            taac_types.Field(
-                                query=ixia_types.Query(regex="Source MAC Address"),
-                                attrs_json=json.dumps(
-                                    {
-                                        "ValueType": "increment",
-                                        "StartValue": DEFAULT_SRC_MAC_ADDRESS,
-                                        "StepValue": "00:00:00:00:00:01",
-                                        "CountValue": good_mac_entry_count,
-                                    }
-                                ),
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-            taac_types.BasicTrafficItemConfig(
-                src_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                    ),
-                ],
-                dest_endpoints=[
-                    taac_types.TrafficEndpoint(
-                        name=f"{device_name}:{ixia_downlink_interface}",
-                    ),
-                ],
-                name=f"{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC",
-                line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
-                line_rate=2000,
-                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
-                # ip_address_family=ixia_types.IpAddrFamily.RAW,
-                traffic_type=ixia_types.TrafficType.RAW,
-                allow_self_destined=True,
-                bidirectional=False,
-                packet_headers=[
-                    taac_types.PacketHeader(
-                        query=ixia_types.Query(
-                            regex="^ethernet$",
-                            query_type=ixia_types.QueryType.STACK_TYPE_ID,
+                    ],
+                    dest_endpoints=[
+                        taac_types.TrafficEndpoint(
+                            name=f"{device_name}:{ixia_downlink_interface}",
                         ),
-                        fields=[
-                            taac_types.Field(
-                                query=ixia_types.Query(regex="Destination MAC Address"),
-                                attrs_json=json.dumps(
-                                    {
-                                        "ValueType": "increment",
-                                        "StartValue": BROADCAST_DST_MAC_ADDRESS,
-                                        "StepValue": "00:00:00:00:00:00",
-                                        "CountValue": 1,
-                                    }
-                                ),
+                    ],
+                    name=f"{device_name.upper()}_LOSSY_ROGUE_NDP_TRAFFIC",
+                    line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
+                    line_rate=2000,
+                    tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+                    # ip_address_family=ixia_types.IpAddrFamily.RAW,
+                    traffic_type=ixia_types.TrafficType.RAW,
+                    allow_self_destined=True,
+                    bidirectional=False,
+                    packet_headers=[
+                        taac_types.PacketHeader(
+                            query=ixia_types.Query(
+                                regex="^ethernet$",
+                                query_type=ixia_types.QueryType.STACK_TYPE_ID,
                             ),
-                            taac_types.Field(
-                                query=ixia_types.Query(regex="Source MAC Address"),
-                                attrs_json=json.dumps(
-                                    {
-                                        "ValueType": "increment",
-                                        "StartValue": ROGUE_SRC_MAC_ADDRESS,
-                                        "StepValue": "00:00:00:00:00:01",
-                                        "CountValue": 1,
-                                    }
+                            fields=[
+                                taac_types.Field(
+                                    query=ixia_types.Query(
+                                        regex="Destination MAC Address"
+                                    ),
+                                    attrs_json=json.dumps(
+                                        {
+                                            "ValueType": "increment",
+                                            "StartValue": BROADCAST_DST_MAC_ADDRESS,
+                                            "StepValue": "00:00:00:00:00:00",
+                                            "CountValue": 1,
+                                        }
+                                    ),
                                 ),
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-        ],
+                                taac_types.Field(
+                                    query=ixia_types.Query(regex="Source MAC Address"),
+                                    attrs_json=json.dumps(
+                                        {
+                                            "ValueType": "increment",
+                                            "StartValue": ROGUE_SRC_MAC_ADDRESS,
+                                            "StepValue": "00:00:00:00:00:01",
+                                            "CountValue": 1,
+                                        }
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+            ]
+        ),
         # Deprecated - define at playbook level
         # snapshot_checks=tc_snapshot_checks,
         # Deprecated - define at playbook level
@@ -2644,7 +3009,15 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                                     api_name="configure_traffic_item_src_mac_entry_count",
                                     args_dict={
                                         "src_mac_entry_count": 1,
-                                        "traffic_item_regex": f".*_{ixia_downlink_interface.upper()}_.*",
+                                        **(
+                                            {
+                                                "traffic_item_name": f"{device_name.upper()}_L2_MAC_LEARNING_TRAFFIC"
+                                            }
+                                            if l2_overload_only
+                                            else {
+                                                "traffic_item_regex": f".*_{ixia_downlink_interface.upper()}_.*"
+                                            }
+                                        ),
                                     },
                                 ),
                             ],
@@ -2655,7 +3028,15 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                                             api_name="configure_traffic_item_src_mac_entry_count",
                                             args_dict={
                                                 "src_mac_entry_count": rogue_mac_entry_count,
-                                                "traffic_item_regex": f".*_{ixia_downlink_interface.upper()}_.*",
+                                                **(
+                                                    {
+                                                        "traffic_item_name": f"{device_name.upper()}_L2_MAC_LEARNING_TRAFFIC"
+                                                    }
+                                                    if l2_overload_only
+                                                    else {
+                                                        "traffic_item_regex": f".*_{ixia_downlink_interface.upper()}_.*"
+                                                    }
+                                                ),
                                             },
                                         ),
                                         create_longevity_step(duration=100),

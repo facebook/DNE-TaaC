@@ -4,7 +4,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import call, MagicMock, patch
 
 from taac.ixia.ixia import Ixia
 
@@ -40,6 +40,20 @@ def _device_group(
     )
 
 
+def _restartable_device_group(name: str = "ndp") -> SimpleNamespace:
+    network_group = SimpleNamespace(Start=MagicMock())
+    ipv6 = SimpleNamespace(BgpIpv6Peer=SimpleNamespace(find=MagicMock(return_value=[])))
+    ethernet = SimpleNamespace(
+        Ipv6=SimpleNamespace(find=MagicMock(return_value=[ipv6]))
+    )
+    group = _device_group(name, [True])
+    group.NetworkGroup = SimpleNamespace(find=MagicMock(return_value=[network_group]))
+    group.Ethernet = SimpleNamespace(find=MagicMock(return_value=[ethernet]))
+    group.Start = MagicMock()
+    group.update = MagicMock()
+    return group
+
+
 class _IntegerLikeReadback:
     def __init__(self, value: int) -> None:
         self.value = value
@@ -51,6 +65,46 @@ class _IntegerLikeReadback:
 class ToggleDeviceGroupsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.ixia, self.apply_changes = _ixia()
+
+    @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
+    def test_single_group_toggle_applies_each_state_and_restarts_protocols(
+        self, sleep: MagicMock
+    ) -> None:
+        group = _restartable_device_group()
+        self.ixia._send_arp_ns_on_device_group = MagicMock()
+
+        self.ixia.toggle_device_group(group, 5)
+
+        self.assertEqual([call(False), call(True)], group.Enabled.Single.call_args_list)
+        self.assertEqual(2, self.apply_changes.call_count)
+        group.NetworkGroup.find.return_value[0].Start.assert_called_once_with()
+        group.Start.assert_called_once_with()
+        self.assertEqual([call(5), call(5)], sleep.call_args_list)
+        self.ixia._send_arp_ns_on_device_group.assert_called_once_with(group)
+
+    @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
+    def test_ipv6_resize_is_applied_before_group_restart(
+        self, _sleep: MagicMock
+    ) -> None:
+        group = _restartable_device_group("downlink-ndp")
+        events: list[object] = []
+        group.update.side_effect = lambda **kwargs: events.append(("update", kwargs))
+        self.apply_changes.side_effect = lambda: events.append("apply")
+        self.ixia.toggle_device_group = MagicMock(
+            side_effect=lambda _group, _sleep_s: events.append("restart")
+        )
+        self.ixia.find_device_groups = MagicMock(return_value=[group])
+
+        self.ixia.configure_ipv6_entries(
+            device_group_regex="downlink",
+            prefix_count=40_000,
+            toggle_matching_device_group=True,
+            sleep_time_between_toggle_s=0,
+        )
+
+        self.assertEqual(
+            [("update", {"Multiplier": 40_000}), "apply", "restart"], events
+        )
 
     @patch("neteng.test_infra.dne.taac.ixia.ixia.time.sleep")
     def test_validated_toggle_requires_match(self, sleep: MagicMock) -> None:

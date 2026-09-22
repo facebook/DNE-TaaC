@@ -36,6 +36,12 @@ from taac.testconfigs.npi.dlb_hardening_test_config import (
     NPI_DVT_ICEPACK_GTSW__DLB_HARDENING,
     NPI_DVT_ICEPACK_GTSW__DLB_LONGEVITY,
 )
+from taac.testconfigs.npi.fsw003_p003_qzd1_hardening_test_config import (
+    FSW003_P003_QZD1_INTERFACE_FLAP_TEST_CONFIG,
+    FSW003_P003_QZD1_L2_HARDENING_TEST_CONFIG,
+    FSW003_P003_QZD1_NEIGHBOR_INTERFACE_FLAP_TEST_CONFIG,
+    FSW003_P003_QZD1_TEST_CONFIGS,
+)
 from taac.testconfigs.npi.icepack_ecmp_resource_testing_config import (
     NPI_DVT_ICEPACK_GTSW__ECMP_RESOURCE_TESTING,
     test_config_for_icepack_ecmp_resource_testing,
@@ -86,6 +92,10 @@ from taac.testconfigs.npi.wedge800_npi_test_config import (
 __all__ = [
     "AC100T_CPU_QUEUE_TEST_CONFIG",
     "AC100T_TEST_CONFIGS",
+    "FSW003_P003_QZD1_INTERFACE_FLAP_TEST_CONFIG",
+    "FSW003_P003_QZD1_L2_HARDENING_TEST_CONFIG",
+    "FSW003_P003_QZD1_NEIGHBOR_INTERFACE_FLAP_TEST_CONFIG",
+    "FSW003_P003_QZD1_TEST_CONFIGS",
     "NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG",
     "NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG",
     "NPI_DVT_ICEPACK_GTSW__CPU_QUEUE_TEST_CONFIG",

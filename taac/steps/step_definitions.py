@@ -5054,6 +5054,7 @@ def create_interface_flap_step(
     interface_flap_method: t.Optional[int] = None,
     delay: t.Optional[int] = None,
     device_name: t.Optional[str] = None,
+    sequential: bool = False,
     step_id: t.Optional[str] = None,
     start_traffic: bool = True,
     tolerate_failures: bool = False,
@@ -5071,6 +5072,8 @@ def create_interface_flap_step(
         interface_flap_method: Optional interface flap method (e.g., 1 for thrift API, 4 for SSH)
         delay: Optional delay between interface operations in seconds
         device_name: Optional device name for the interface flap (used with SSH method)
+        sequential: Issue per-interface operations one at a time. This is useful
+            for cleanup after a concurrent stress action has partially failed.
         step_id: Optional step ID
         start_traffic: Whether the generic step pre-hook should start IXIA.
         tolerate_failures: Log rather than raise when the flap cannot be
@@ -5091,6 +5094,8 @@ def create_interface_flap_step(
         params_dict["delay"] = delay
     if device_name is not None:
         params_dict["device_name"] = device_name
+    if sequential:
+        params_dict["sequential"] = True
     _add_skip_start_traffic_param(params_dict, start_traffic)
 
     params = Params(
@@ -9183,7 +9188,7 @@ def create_traffic_duration_step(duration_seconds: int = 300) -> Step:
     )
 
 
-def create_clear_traffic_stats_step() -> Step:
+def create_clear_traffic_stats_step(*, start_traffic: bool = True) -> Step:
     """Zero out IXIA traffic counters before a measurement window.
 
     Wraps the IXIA `clear_traffic_stats` API. Run after a topology change
@@ -9199,6 +9204,7 @@ def create_clear_traffic_stats_step() -> Step:
         api_name="clear_traffic_stats",
         args_dict={},
         description="Clear traffic statistics",
+        start_traffic=start_traffic,
     )
 
 

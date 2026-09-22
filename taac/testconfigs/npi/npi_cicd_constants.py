@@ -6,6 +6,7 @@ NPI_CICD_DUT_NAMES: frozenset[str] = frozenset(
     {
         "fsw004.p003.f01.qzd1",
         "fsw004.p004.f01.qzd1",
+        "fsw003.p003.f01.qzd1",
         "rsw001.p001.f01.qzd1",
     }
 )
@@ -15,6 +16,7 @@ NPI_CICD_THRIFT_RESTART_DURATION_S = 480
 NPI_CICD_THRIFT_RESTART_PERIOD_S = 240
 NPI_CICD_THRIFT_REQUESTS_PER_BURST = 100
 NPI_CICD_REBOOT_ITERATIONS = 1
+NPI_CICD_INTERFACE_FLAP_ITERATIONS = 1
 
 
 def is_npi_cicd_dut(device_name: str) -> bool:

@@ -5470,17 +5470,31 @@ class Ixia:
         self.apply_changes()
 
     def toggle_device_group(self, device_group, sleep_time_between_toggle_s) -> None:
+        """Restart a device group and resolve its neighbors.
+
+        Device-group ``Enabled`` is a staged multivalue. Writing False and
+        True before an apply collapses to the final True value, so the old
+        implementation never actually stopped the running group. This is
+        particularly important after resizing a group: newly-created sessions
+        remain down until the resized configuration is applied and the group
+        is explicitly restarted.
+        """
         device_group.Enabled.Single(False)
+        self.apply_changes()
         self.logger.info(
             f"Waiting {sleep_time_between_toggle_s} seconds for {device_group.Name} to disable"
         )
         time.sleep(sleep_time_between_toggle_s)
-        # enable device group
         device_group.Enabled.Single(True)
+        self.apply_changes()
+        for network_group in device_group.NetworkGroup.find():
+            network_group.Start()
+        device_group.Start()
         self.logger.info(
-            f"Waiting {sleep_time_between_toggle_s} seconds for {device_group.Name} to ena"
+            f"Waiting {sleep_time_between_toggle_s} seconds for {device_group.Name} to enable"
         )
         time.sleep(sleep_time_between_toggle_s)
+        self._send_arp_ns_on_device_group(device_group)
 
     def get_bgp_device_group_name(
         self, all_device_groups: t.List["DeviceGroup"]
@@ -5506,9 +5520,11 @@ class Ixia:
         device_group_regex: t.Optional[str] = None,
         prefix_count: t.Optional[int] = None,
         toggle_all_ipv6_ipv4_only_protocol: bool = False,
+        toggle_matching_device_group: bool = False,
         sleep_time_between_toggle_s: int = 30,
     ) -> None:
         """API to configure IPv6 entries"""
+        matching_device_groups = []
         if device_group_regex:
             # ignore_case: same trap as configure_ipv4_entries — callers pass
             # DUT interface names but device groups are named with upper-cased
@@ -5524,9 +5540,20 @@ class Ixia:
                             # Skip updating the ipv6 stack which has bgp sessions in it
                             continue
                         if prefix_count:
-                            f"Updating {device_group.Name} device multiplier to {prefix_count}"
+                            self.logger.info(
+                                f"Updating {device_group.Name} device multiplier to {prefix_count}"
+                            )
                             device_group.update(Multiplier=prefix_count)
+                            matching_device_groups.append(device_group)
+            # Commit the resized topology before restarting it. Otherwise the
+            # toggle targets the old session population and newly-added IPv6
+            # sessions never send NS.
             self.apply_changes()
+            if toggle_matching_device_group:
+                for device_group in matching_device_groups:
+                    self.toggle_device_group(
+                        device_group, sleep_time_between_toggle_s
+                    )
 
         if not toggle_all_ipv6_ipv4_only_protocol:
             return
@@ -5544,9 +5571,11 @@ class Ixia:
         device_group_regex: str,
         prefix_count: t.Optional[int] = None,
         toggle_all_ipv6_ipv4_only_protocol: bool = False,
+        toggle_matching_device_group: bool = True,
         sleep_time_between_toggle_s: int = 30,
     ) -> None:
         """API to configure IPv6 entries"""
+        matching_device_groups = []
         # ignore_case: callers pass DUT interface names (e.g. "eth1/31/1")
         # but device groups are named with upper-cased port identifiers
         # ("DEVICE_GROUP_D1_<DUT>:ETH1/31/1") — a case-sensitive match makes
@@ -5565,11 +5594,14 @@ class Ixia:
                             f"Updating {device_group.Name} device multiplier to {prefix_count}"
                         )
                         device_group.update(Multiplier=prefix_count)
-                        self.toggle_device_group(
-                            device_group, sleep_time_between_toggle_s
-                        )
+                        matching_device_groups.append(device_group)
 
+        # Apply the new population before restarting the group so every newly
+        # created IPv4 session participates in ARP resolution.
         self.apply_changes()
+        if toggle_matching_device_group:
+            for device_group in matching_device_groups:
+                self.toggle_device_group(device_group, sleep_time_between_toggle_s)
         if not toggle_all_ipv6_ipv4_only_protocol:
             return
         all_device_groups = self.find_device_groups(
@@ -7217,6 +7249,26 @@ class Ixia:
             + f" — clean up manually via /api/v1/sessions/{orphan_id}."
         )
 
+    def _start_protocols_with_retained_session_recovery(self) -> None:
+        try:
+            self.start_and_verify_protocols()
+        except Exception as exc:
+            # An interrupted mutation can leave a retained IxNetwork session
+            # with unapplied changes. Starting protocols then fails with this
+            # explicit CPF response even though the topology is otherwise
+            # reusable. Commit that pending state once and retry; preserve all
+            # other setup errors unchanged.
+            if not self.is_existing_session or "Apply Changes is required" not in str(
+                exc
+            ):
+                raise
+            self.logger.warning(
+                "[IXIA] Retained session has pending changes; applying them "
+                "before retrying protocol startup"
+            )
+            self.apply_changes()
+            self.start_and_verify_protocols()
+
     @timeit
     @retryable(num_tries=3, sleep_time=30, print_ex=True)
     def _create_basic_setup(
@@ -7335,7 +7387,7 @@ class Ixia:
             f"{time.time() - _step_start:.0f}s"
         )
         _step_start = time.time()
-        self.start_and_verify_protocols()
+        self._start_protocols_with_retained_session_recovery()
         _log(
             f"{_GREEN}[IXIA]{_RESET} Protocols started and verified in "
             f"{time.time() - _step_start:.0f}s"

@@ -3,6 +3,8 @@
 # pyre-unsafe
 """Unit tests for LogParsingHealthCheck (FBOSS `_run` path)."""
 
+import json
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,7 +14,11 @@ from taac.health_checks.device_health_checks import (
     log_parsing_health_check as log_parsing_health_check_module,
 )
 from taac.health_checks.device_health_checks.log_parsing_health_check import (
+    find_resource_accountant_rejections,
     LogParsingHealthCheck,
+)
+from taac.health_checks.healthcheck_definitions import (
+    create_resource_accountant_activation_check,
 )
 from taac.health_check.health_check import types as hc_types
 
@@ -84,6 +90,116 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         result = await self.health_check._run(self.device, self.input, check_params)
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("matching criteria", result.message)
+
+    async def test_resource_accountant_mode_accepts_canonical_in_window_event(self):
+        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        content = (
+            "E0920 10:01:02.123456 1234 ResourceAccountant.cpp:1026] "
+            "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
+            "for switchId: 0\n"
+        )
+        self.health_check.driver.async_run_cmd_on_shell.return_value = content
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "log_file_path": "/var/facebook/logs/fboss/wedge_agent.log",
+                "include_regex": "ResourceAccountant",
+                "resource_accountant_activation": True,
+                "start_time": start_time,
+                "end_time": start_time + 120,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        self.assertIn("NDP", result.message)
+        self.health_check.driver.async_run_cmd_on_shell.assert_awaited_once()
+        command = self.health_check.driver.async_run_cmd_on_shell.await_args.args[0]
+        self.assertIn("| tail -n 200", command)
+        self.health_check.driver.async_read_file.assert_not_awaited()
+
+    def test_resource_accountant_accepts_netos_syslog_prefixed_event(self) -> None:
+        start_time = int(time.mktime((2026, 9, 20, 23, 20, 0, 0, 0, -1)))
+        content = (
+            "Sep 20 23:20:25 fsw003.p003.f01.qzd1.tfbnw.net "
+            "fboss_sw_agent[50780]: E0920 23:20:25.062138 51089 "
+            "ResourceAccountant.cpp:1041] Total ARP entries in new switchState: "
+            "1281 exceeds the limit: 1280 for switchId: 0\n"
+        )
+
+        self.assertEqual(
+            [content.rstrip()],
+            find_resource_accountant_rejections(
+                content,
+                start_time=start_time,
+                end_time=start_time + 60,
+            ),
+        )
+
+    async def test_resource_accountant_mode_rejects_historical_event(self):
+        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        self.health_check.driver.async_read_file.return_value = (
+            "E0920 09:59:59.123456 1234 ResourceAccountant.cpp:1026] "
+            "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
+            "for switchId: 0\n"
+        )
+        self.health_check.driver.async_run_cmd_on_shell.return_value = (
+            self.health_check.driver.async_read_file.return_value
+        )
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "log_file_path": "/var/facebook/logs/fboss/wedge_agent.log",
+                "include_regex": "ResourceAccountant",
+                "resource_accountant_activation": True,
+                "start_time": start_time,
+                "end_time": start_time + 120,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("No ResourceAccountant rejection", result.message)
+
+    async def test_resource_accountant_mode_rejects_name_only_false_positive(self):
+        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        content = (
+            "I0920 10:01:02.123456 1234 ResourceAccountant.cpp:70] "
+            "ResourceAccountant initialized\n"
+        )
+        self.health_check.driver.async_read_file.return_value = content
+        self.health_check.driver.async_run_cmd_on_shell.return_value = content
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "log_file_path": "/var/facebook/logs/fboss/wedge_agent.log",
+                "include_regex": "ResourceAccountant",
+                "resource_accountant_activation": True,
+                "start_time": start_time,
+                "end_time": start_time + 120,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("No ResourceAccountant rejection", result.message)
+
+    def test_resource_accountant_factory_uses_requested_time_anchor_and_retries(self):
+        check = create_resource_accountant_activation_check(
+            start_time_jq_var="post_disruption_start_time",
+            retry_count=4,
+            retry_delay_seconds=3,
+        )
+
+        self.assertEqual(hc_types.CheckName.LOG_PARSING_CHECK, check.name)
+        self.assertEqual(
+            {"start_time": ".post_disruption_start_time"},
+            check.check_params.jq_params,
+        )
+        params = json.loads(check.check_params.json_params)
+        self.assertTrue(params["resource_accountant_activation"])
+        self.assertEqual(4, params["retry_count"])
+        self.assertEqual(3, params["retry_delay_seconds"])
 
     async def test_both_regexes_provided_raises(self):
         """Providing both include_regex and exclude_regex is an assertion error."""

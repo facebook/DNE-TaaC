@@ -360,8 +360,9 @@ AC100T_INTERFACE_FLAP_TEST_CONFIG = (
         },
         ecmp_member_limit=ac100t.AC100T_ECMP_MEMBER_LIMIT,
         uplink_interfaces_to_flap=ac100t.AC100T_STSW_FLAP_PORTS,
-        nbr_device_name=ac100t.AC100T_INTERFACE_FLAP_NBR_DEVICE_NAME,
-        nbr_interfaces_to_flap=ac100t.AC100T_INTERFACE_FLAP_NBR_PORTS,
+        neighbor_dut_name=ac100t.AC100T_INTERFACE_FLAP_NBR_DEVICE_NAME,
+        neighbor_dut_interfaces_to_flap=ac100t.AC100T_STSW_FLAP_PORTS,
+        neighbor_interfaces_to_flap=ac100t.AC100T_INTERFACE_FLAP_NBR_PORTS,
         uplink_flap_iterations=50,
         uplink_flap_interval_s=8,
         playbooks_selected=[
