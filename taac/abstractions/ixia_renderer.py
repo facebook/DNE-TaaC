@@ -1969,6 +1969,15 @@ def _partitioned_route_mutation(
     route_attributes = _partitioned_route_attribute_mutation(advertisement)
     if route_attributes is not None:
         mutation["route_attributes"] = route_attributes
+    if advertisement.peer_prefix_exclusion_blocks:
+        mutation["inactive_peer_prefix_blocks"] = [
+            {
+                "prefix_start_index": block.prefix_start_index,
+                "prefix_count": block.prefix_count,
+                "peer_indices": list(block.peer_indices),
+            }
+            for block in advertisement.peer_prefix_exclusion_blocks
+        ]
     return mutation
 
 

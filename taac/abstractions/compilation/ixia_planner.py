@@ -25,6 +25,7 @@ from taac.abstractions.compilation.model import (
     IxiaNextHopMode,
     IxiaNextHopPlan,
     IxiaPeerPrefixDistribution,
+    IxiaPeerPrefixExclusionBlock,
     IxiaPlan,
     IxiaPortPlan,
     IxiaPrefixWindowPlan,
@@ -64,7 +65,11 @@ from taac.abstractions.topology.model import (
     ResolvedPeer,
     ResolvedPrefixAdvertisementLike,
 )
-from taac.abstractions.topology.prefix import NextHopIntent
+from taac.abstractions.topology.prefix import (
+    NextHopIntent,
+    PeerPrefixDistribution,
+    RouteScaleMode,
+)
 
 
 @dataclass(frozen=True)
@@ -438,6 +443,18 @@ def _advertisement_plan(
             f"{membership_start_index} is outside its {len(prefixes)} "
             "materialized prefixes"
         )
+    if spec.peer_prefix_activation is not None:
+        if (
+            allocation.peer_distribution is not PeerPrefixDistribution.SHARED
+            or allocation.route_scale_mode is not RouteScaleMode.FLAT
+        ):
+            raise ValueError(
+                "IXIA peer-prefix activation requires flat shared route geometry"
+            )
+        spec.peer_prefix_activation.validate_geometry(
+            peer_count=len(instance.peers),
+            prefixes_per_peer=allocation.prefixes_per_peer,
+        )
     return IxiaAdvertisementPlan(
         resource_id=advertisement_id,
         device_group_id=device_group_id,
@@ -468,6 +485,18 @@ def _advertisement_plan(
             tuple(policy.communities) if isinstance(policy, BgpPolicy) else ()
         ),
         requires_route_mutation=spec.requires_route_mutation,
+        peer_prefix_exclusion_blocks=(
+            tuple(
+                IxiaPeerPrefixExclusionBlock(
+                    prefix_start_index=block.prefix_start_index,
+                    prefix_count=block.prefix_count,
+                    peer_indices=block.peer_indices,
+                )
+                for block in spec.peer_prefix_activation.exclusion_blocks
+            )
+            if spec.peer_prefix_activation is not None
+            else ()
+        ),
     )
 
 

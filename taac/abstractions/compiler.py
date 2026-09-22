@@ -88,6 +88,7 @@ from taac.abstractions.topology.model import (
 from taac.abstractions.topology.prefix import (
     NextHopMode,
     PeerPrefixDistribution,
+    RouteScaleMode,
 )
 from taac.abstractions.validation import (
     TopologyValidationError,
@@ -1443,14 +1444,49 @@ def _route_communities_for_advertisement(
     return []
 
 
-def _uses_flat_ebb_prefix_geometry(
+def _uses_flat_prefix_geometry(advertisement: t.Any) -> bool:
+    return advertisement.spec.allocation.route_scale_mode is RouteScaleMode.FLAT
+
+
+def _legacy_peer_prefix_activation_advertisements(
     bound: BoundTopology,
-    advertisement: t.Any,
-) -> bool:
-    """Keep primary full-scale EBB pools addressable by logical prefix index."""
-    return (
-        _is_ebb_full_scale(bound) or _is_profile_free_ebb_full_scale(bound)
-    ) and advertisement.spec.allocation.network_group_index == 0
+) -> t.Iterator[tuple[str, t.Any]]:
+    for device_group in bound.device_groups:
+        if device_group.ixia_children:
+            for child in device_group.ixia_children:
+                for advertisement in child.prefix_advertisements:
+                    yield (
+                        f"device_groups.{device_group.name}.ixia_children."
+                        f"{child.name}.prefix_advertisements."
+                        f"{advertisement.spec.name}.peer_prefix_activation",
+                        advertisement,
+                    )
+            continue
+        for advertisement in device_group.prefix_advertisements:
+            yield (
+                f"device_groups.{device_group.name}.prefix_advertisements."
+                f"{advertisement.spec.name}.peer_prefix_activation",
+                advertisement,
+            )
+
+
+def _validate_legacy_peer_prefix_activation_support(bound: BoundTopology) -> None:
+    if _is_ebb_full_scale(bound):
+        return
+    issues = [
+        ValidationIssue(
+            path=path,
+            code="unsupported_peer_prefix_activation",
+            message=(
+                "peer-prefix activation requires native IXIA compilation or "
+                "the EBB full-scale route-mutation path"
+            ),
+        )
+        for path, advertisement in _legacy_peer_prefix_activation_advertisements(bound)
+        if advertisement.spec.peer_prefix_activation is not None
+    ]
+    if issues:
+        raise TopologyValidationError(bound.logical_topology.name, issues)
 
 
 def _route_scale_for_advertisement(
@@ -1527,7 +1563,7 @@ def _route_scale_for_advertisement(
             else source_step * spec.allocation.prefixes_per_peer
         )
     )
-    flat_prefix_geometry = _uses_flat_ebb_prefix_geometry(bound, advertisement)
+    flat_prefix_geometry = _uses_flat_prefix_geometry(advertisement)
     route_multiplier = spec.allocation.prefixes_per_peer if flat_prefix_geometry else 1
     route_prefix_count = (
         1 if flat_prefix_geometry else spec.allocation.prefixes_per_peer
@@ -1792,7 +1828,7 @@ def _ebb_route_mutation(
         "afi": device_group.afi,
         "peer_count": peer_count,
         "prefixes_per_peer": spec.allocation.prefixes_per_peer,
-        "flat_prefix_geometry": _uses_flat_ebb_prefix_geometry(bound, advertisement),
+        "flat_prefix_geometry": _uses_flat_prefix_geometry(advertisement),
         "prefix": _formulaic_prefix_mutation(advertisement),
         "next_hop": next_hop,
         "attributes": dict(spec.attributes),
@@ -1800,6 +1836,53 @@ def _ebb_route_mutation(
     route_attributes = _route_attribute_mutation_for_advertisement(advertisement)
     if route_attributes is not None:
         mutation["route_attributes"] = route_attributes
+    activation = spec.peer_prefix_activation
+    if activation is not None:
+        activation_path = (
+            f"device_groups.{device_group.name}."
+            f"prefix_advertisements.{spec.name}.peer_prefix_activation"
+        )
+        if (
+            spec.allocation.peer_distribution is not PeerPrefixDistribution.SHARED
+            or spec.allocation.route_scale_mode is not RouteScaleMode.FLAT
+        ):
+            raise TopologyValidationError(
+                bound.logical_topology.name,
+                [
+                    ValidationIssue(
+                        path=activation_path,
+                        code="invalid_peer_prefix_activation_geometry",
+                        message=(
+                            "IXIA peer-prefix activation requires flat shared "
+                            "route geometry"
+                        ),
+                    )
+                ],
+            )
+        try:
+            activation.validate_geometry(
+                peer_count=peer_count,
+                prefixes_per_peer=spec.allocation.prefixes_per_peer,
+            )
+        except ValueError as error:
+            raise TopologyValidationError(
+                bound.logical_topology.name,
+                [
+                    ValidationIssue(
+                        path=activation_path,
+                        code="invalid_peer_prefix_activation_geometry",
+                        message=str(error),
+                    )
+                ],
+            ) from error
+        mutation["inactive_peer_prefix_blocks"] = [
+            {
+                "prefix_start_index": block.prefix_start_index,
+                "prefix_count": block.prefix_count,
+                "peer_indices": list(block.peer_indices),
+            }
+            for block in activation.exclusion_blocks
+        ]
     return mutation
 
 
@@ -4837,6 +4920,7 @@ class EosBgpCppCompiler(TopologyCompiler):
     def build_device_plan(self, bound: BoundTopology) -> EosBgpCppDevicePlan:
         _validate_bound_provenance_for_compile(bound)
         _validate_route_attributes_for_compile(bound)
+        _validate_legacy_peer_prefix_activation_support(bound)
         openr = _eos_bgpcpp_openr_inputs(bound)
         endpoints = self.build_endpoints(bound)
         host_os_type_map = self.build_host_os_type_map(bound)

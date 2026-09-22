@@ -8,6 +8,25 @@ from enum import Enum
 _MAX_TCP_WINDOW_SIZE_BYTES = (1 << 16) - 1
 
 
+def validate_ixia_peer_prefix_exclusion_ranges(
+    ranges: tuple[tuple[int, int], ...],
+    *,
+    prefixes_per_peer: int | None = None,
+) -> None:
+    ordered = tuple(sorted(ranges, key=lambda prefix_range: prefix_range[0]))
+    if ordered != ranges:
+        raise ValueError("peer-prefix exclusion blocks must be ordered")
+    for previous, current in zip(ranges, ranges[1:]):
+        if previous[0] + previous[1] > current[0]:
+            raise ValueError("peer-prefix exclusion blocks must not overlap")
+    if prefixes_per_peer is not None and any(
+        start + count > prefixes_per_peer for start, count in ranges
+    ):
+        raise ValueError(
+            "peer-prefix exclusion block exceeds the advertisement prefix window"
+        )
+
+
 def validate_ixia_bgp_tcp_window_size_bytes(value: object) -> None:
     """Validate the TCP receive-window value for an IXIA BGP session.
 
@@ -41,4 +60,5 @@ __all__ = (
     "IxiaBgpCapability",
     "IxiaEndpointPortLabelStyle",
     "validate_ixia_bgp_tcp_window_size_bytes",
+    "validate_ixia_peer_prefix_exclusion_ranges",
 )

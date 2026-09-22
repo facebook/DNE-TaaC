@@ -29,6 +29,7 @@ from taac.abstractions.topology.attributes import (
 )
 from taac.abstractions.topology.prefix import (
     NextHopIntent,
+    PeerPrefixActivation,
     PrefixAllocation,
     PrefixMembership,
     PrefixSet,
@@ -278,6 +279,7 @@ class PrefixAdvertisement:
     route_attributes: RouteAttributePool | None = None
     legacy_ixia_name: str | None = None
     requires_route_mutation: bool = False
+    peer_prefix_activation: PeerPrefixActivation | None = None
 
 
 @dataclass(frozen=True)

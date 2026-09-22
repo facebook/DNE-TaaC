@@ -20,6 +20,7 @@ from taac.abstractions.ixia_semantics import (
     IxiaBgpCapability,
     IxiaEndpointPortLabelStyle,
     validate_ixia_bgp_tcp_window_size_bytes,
+    validate_ixia_peer_prefix_exclusion_ranges,
 )
 from taac.abstractions.physical_interface_semantics import (
     PhysicalInterfaceGroupKind,
@@ -619,6 +620,38 @@ class IxiaBgpSessionPlan:
 
 
 @dataclass(frozen=True)
+class IxiaPeerPrefixExclusionBlock:
+    prefix_start_index: int
+    prefix_count: int
+    peer_indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.prefix_start_index, bool) or not isinstance(
+            self.prefix_start_index, int
+        ):
+            raise TypeError("IXIA exclusion prefix_start_index must be an integer")
+        if isinstance(self.prefix_count, bool) or not isinstance(
+            self.prefix_count, int
+        ):
+            raise TypeError("IXIA exclusion prefix_count must be an integer")
+        _require_non_negative(self.prefix_start_index, "prefix_start_index")
+        _require_positive(self.prefix_count, "prefix_count")
+        if not self.peer_indices:
+            raise ValueError("IXIA peer-prefix exclusion block requires peers")
+        if any(
+            isinstance(peer_index, bool) or not isinstance(peer_index, int)
+            for peer_index in self.peer_indices
+        ):
+            raise TypeError("IXIA exclusion peer indices must be integers")
+        if tuple(sorted(set(self.peer_indices))) != self.peer_indices:
+            raise ValueError(
+                "IXIA peer-prefix exclusion peers must be sorted and unique"
+            )
+        for peer_index in self.peer_indices:
+            _require_non_negative(peer_index, "peer_index")
+
+
+@dataclass(frozen=True)
 class IxiaAdvertisementPlan:
     resource_id: ResourceId
     device_group_id: ResourceId
@@ -632,6 +665,7 @@ class IxiaAdvertisementPlan:
     route_attributes: IxiaRouteAttributePoolPlan | None = None
     policy_communities: tuple[str, ...] = ()
     requires_route_mutation: bool = False
+    peer_prefix_exclusion_blocks: tuple[IxiaPeerPrefixExclusionBlock, ...] = ()
 
     def __post_init__(self) -> None:
         _require_kind(self.resource_id, ResourceKind.IXIA_ADVERTISEMENT)
@@ -643,6 +677,23 @@ class IxiaAdvertisementPlan:
             raise ValueError("IXIA policy communities must be nonempty")
         if not isinstance(self.requires_route_mutation, bool):
             raise TypeError("IXIA route-mutation intent must be a bool")
+        blocks = self.peer_prefix_exclusion_blocks
+        if not isinstance(blocks, tuple) or any(
+            not isinstance(block, IxiaPeerPrefixExclusionBlock) for block in blocks
+        ):
+            raise TypeError("IXIA peer-prefix exclusion blocks must be typed")
+        if blocks and (
+            self.prefix_window.peer_distribution
+            is not IxiaPeerPrefixDistribution.SHARED
+            or self.prefix_window.route_scale_mode is not IxiaRouteScaleMode.FLAT
+        ):
+            raise ValueError(
+                "IXIA peer-prefix exclusion requires flat shared route geometry"
+            )
+        validate_ixia_peer_prefix_exclusion_ranges(
+            tuple((block.prefix_start_index, block.prefix_count) for block in blocks),
+            prefixes_per_peer=self.prefix_window.prefixes_per_peer,
+        )
 
     @property
     def prefixes_per_peer(self) -> int:
@@ -1107,6 +1158,18 @@ def _validate_ixia_advertisement_internal_references(
                 f"{expected_route_count} prefixes but its membership contains "
                 f"{advertisement.prefix_window.membership_prefix_count}"
             )
+        for block in advertisement.peer_prefix_exclusion_blocks:
+            if block.peer_indices[-1] >= device_group.peer_count:
+                raise ValueError(
+                    f"IXIA advertisement {advertisement.resource_id} has a "
+                    "peer-prefix exclusion index outside device group "
+                    f"{device_group.resource_id}"
+                )
+            if len(block.peer_indices) >= device_group.peer_count:
+                raise ValueError(
+                    f"IXIA advertisement {advertisement.resource_id} peer-prefix "
+                    "exclusion must leave at least one active peer"
+                )
 
 
 def _validate_ixia_topology_references(plan: TopologyCompilationPlan) -> None:

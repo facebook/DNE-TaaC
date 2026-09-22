@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import ipaddress
+import logging
 import os
 import threading
 import time
@@ -16,6 +17,9 @@ from ixnetwork_restpy.assistants.statistics.statviewassistant import (
     StatViewAssistant as IxnStatViewAssistant,
 )
 from ixnetwork_restpy.files import Files
+from taac.abstractions.ixia_semantics import (
+    validate_ixia_peer_prefix_exclusion_ranges,
+)
 from taac.ixia.abstract_traffic_generator import (
     AbstractTrafficGenerator,
 )
@@ -81,6 +85,8 @@ PTP_DEVICE_NUM = "Device#"
 PTP_OFFSET_NS = "Offset [ns]"
 
 _DIRECT_STATS_LOCK_TIMEOUT_MAX_S = 30
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
@@ -998,10 +1004,117 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 values.append(address_at(index))
         return values
 
+    @staticmethod
+    def _formulaic_active_values(
+        mutation: t.Dict[str, t.Any],
+        *,
+        flatten_prefix_pool: bool,
+    ) -> t.Optional[t.List[bool]]:
+        if "inactive_peer_prefix_blocks" not in mutation:
+            return None
+        blocks = mutation["inactive_peer_prefix_blocks"]
+        if not isinstance(blocks, list):
+            raise ValueError("inactive_peer_prefix_blocks must be a list")
+        if not flatten_prefix_pool:
+            raise ValueError(
+                "inactive_peer_prefix_blocks requires flat prefix geometry"
+            )
+        if mutation["prefix"]["distribution"] != "shared":
+            raise ValueError(
+                "inactive_peer_prefix_blocks requires shared prefix distribution"
+            )
+
+        peer_count = mutation["peer_count"]
+        prefixes_per_peer = mutation["prefixes_per_peer"]
+        if not blocks:
+            return [True] * (peer_count * prefixes_per_peer)
+        ranges = []
+        validated_blocks = []
+        for block_index, block in enumerate(blocks):
+            validated_block = TaacIxia._validate_formulaic_inactive_block(
+                block,
+                block_index=block_index,
+                peer_count=peer_count,
+                prefixes_per_peer=prefixes_per_peer,
+            )
+            prefix_start_index, prefix_end_index, _peer_indices = validated_block
+            ranges.append((prefix_start_index, prefix_end_index - prefix_start_index))
+            validated_blocks.append(validated_block)
+        validate_ixia_peer_prefix_exclusion_ranges(
+            tuple(ranges),
+            prefixes_per_peer=prefixes_per_peer,
+        )
+
+        active_values = [True] * (peer_count * prefixes_per_peer)
+        for prefix_start_index, prefix_end_index, peer_indices in validated_blocks:
+            for peer_index in peer_indices:
+                peer_offset = peer_index * prefixes_per_peer
+                for prefix_index in range(prefix_start_index, prefix_end_index):
+                    active_values[peer_offset + prefix_index] = False
+        return active_values
+
+    @staticmethod
+    def _validate_formulaic_inactive_block(
+        block: t.Any,
+        *,
+        block_index: int,
+        peer_count: int,
+        prefixes_per_peer: int,
+    ) -> t.Tuple[int, int, t.List[int]]:
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} must be an object"
+            )
+        prefix_start_index = block.get("prefix_start_index")
+        prefix_count = block.get("prefix_count")
+        peer_indices = block.get("peer_indices")
+        if type(prefix_start_index) is not int:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} has a non-integer "
+                "prefix_start_index"
+            )
+        if type(prefix_count) is not int or prefix_count <= 0:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} must have a positive "
+                "integer prefix_count"
+            )
+        prefix_end_index = prefix_start_index + prefix_count
+        if prefix_start_index < 0 or prefix_end_index > prefixes_per_peer:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} prefix range "
+                f"[{prefix_start_index}, {prefix_end_index}) is outside "
+                f"[0, {prefixes_per_peer})"
+            )
+        if not isinstance(peer_indices, list) or not peer_indices:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} must have nonempty "
+                "peer_indices"
+            )
+        if any(type(peer_index) is not int for peer_index in peer_indices):
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} has a non-integer peer index"
+            )
+        if peer_indices != sorted(set(peer_indices)):
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} peer_indices must be "
+                "sorted and unique"
+            )
+        if peer_indices[-1] >= peer_count or peer_indices[0] < 0:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} has a peer index outside "
+                f"[0, {peer_count})"
+            )
+        if len(peer_indices) >= peer_count:
+            raise ValueError(
+                f"inactive peer-prefix block {block_index} must leave at least "
+                "one active peer"
+            )
+        return prefix_start_index, prefix_end_index, peer_indices
+
     def _prepare_formulaic_bgp_routes(
         self,
         mutations: t.List[t.Dict[str, t.Any]],
-    ) -> t.List[t.Tuple[t.Any, t.Any, t.Any, t.Any]]:
+    ) -> t.List[t.Tuple[t.Any, t.Any, t.Any, t.Any, t.Any]]:
         prepared = []
         seen = set()
         for mutation in mutations:
@@ -1083,7 +1196,13 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 key,
                 mutation.get("route_attributes"),
             )
-            prepared.append((mutation, shell, prefix_values, next_hop_values))
+            active_values = self._formulaic_active_values(
+                mutation,
+                flatten_prefix_pool=flatten_prefix_pool,
+            )
+            prepared.append(
+                (mutation, shell, prefix_values, next_hop_values, active_values)
+            )
         return prepared
 
     def _apply_formulaic_bgp_route(
@@ -1170,40 +1289,281 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 )
             stopped.pop()
 
+    @staticmethod
+    def _formulaic_bgp_component_key(
+        component_name: str,
+        component: t.Any,
+    ) -> t.Tuple[str, str]:
+        href = getattr(component, "href", None)
+        if not isinstance(href, str) or not href:
+            raise RuntimeError(
+                f"formulaic BGP {component_name} lacks a stable IXIA href"
+            )
+        return component_name, href
+
+    @staticmethod
+    def _normalize_formulaic_active_value(value: object, *, index: int) -> bool:
+        """Decode RestPy's documented bool text; reject undocumented aliases."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "true":
+                return True
+            if normalized == "false":
+                return False
+        raise ValueError(f"unsupported IXIA boolean value at index {index}: {value!r}")
+
+    def _verify_formulaic_bgp_active_mask(
+        self,
+        mutation: t.Dict[str, t.Any],
+        active_values: t.List[bool],
+    ) -> t.Tuple[str, str, str]:
+        key = (
+            mutation["device_group_name"],
+            mutation["prefix_pool_name"],
+            mutation["afi"],
+        )
+        try:
+            fresh_route = self._find_formulaic_bgp_route_shell(*key)[3]
+            fresh_route.refresh()
+            raw_readback = list(fresh_route.Active.Values)
+            readback = [
+                self._normalize_formulaic_active_value(active, index=index)
+                for index, active in enumerate(raw_readback)
+            ]
+        except Exception as error:
+            raise RuntimeError(
+                f"formulaic BGP Active readback failed for {key!r}: {error!r}"
+            ) from error
+        if readback != active_values:
+            mismatch_index = next(
+                (
+                    index
+                    for index, (actual, expected) in enumerate(
+                        zip(readback, active_values)
+                    )
+                    if actual != expected
+                ),
+                min(len(readback), len(active_values)),
+            )
+            actual_value = (
+                raw_readback[mismatch_index]
+                if mismatch_index < len(raw_readback)
+                else "<missing>"
+            )
+            expected_value = (
+                active_values[mismatch_index]
+                if mismatch_index < len(active_values)
+                else "<missing>"
+            )
+            raise RuntimeError(
+                f"formulaic BGP Active readback mismatch for {key!r}: "
+                f"expected {len(active_values)} cells, got "
+                f"{len(readback)}; first mismatch at {mismatch_index}: "
+                f"expected {expected_value!r}, got {actual_value!r}"
+            )
+        return key
+
     def configure_formulaic_bgp_routes(
         self,
         mutations: t.List[t.Dict[str, t.Any]],
     ) -> None:
-        """Apply formulaic route intent using each mutation's requested geometry."""
+        """Apply formulaic route intent using each mutation's requested geometry.
+
+        After an Active-mask write, failed verification leaves only components
+        with unverified route keys stopped and quarantines the session.
+        """
+        with self.mutation_transaction():
+            self._configure_formulaic_bgp_routes_in_transaction(mutations)
+
+    def _configure_formulaic_bgp_routes_in_transaction(  # noqa: C901
+        self,
+        mutations: t.List[t.Dict[str, t.Any]],
+    ) -> None:
         prepared = self._prepare_formulaic_bgp_routes(mutations)
         if not prepared:
             return
 
+        component_keys_by_route_key: t.Dict[
+            t.Tuple[str, str, str],
+            t.Tuple[
+                t.Tuple[str, t.Union[str, int]],
+                t.Tuple[str, t.Union[str, int]],
+            ],
+        ] = {}
+        for mutation, shell, _prefixes, _next_hops, _active_values in prepared:
+            route_key = (
+                mutation["device_group_name"],
+                mutation["prefix_pool_name"],
+                mutation["afi"],
+            )
+            component_keys = []
+            for component_name, component in (
+                ("device group", shell[0]),
+                ("network group", shell[1]),
+            ):
+                component_key = self._formulaic_bgp_component_key(
+                    component_name,
+                    component,
+                )
+                component_keys.append(component_key)
+            component_keys_by_route_key[route_key] = (
+                component_keys[0],
+                component_keys[1],
+            )
         stopped = []
+        stopped_key_set = set()
+        pending_route_keys: t.Dict[
+            t.Tuple[str, t.Union[str, int]], t.Set[t.Tuple[str, str, str]]
+        ] = {}
         try:
             for (
                 _mutation,
                 (device_group, network_group, _pool, _route),
                 _prefix_values,
                 _next_hop_values,
+                _active_values,
             ) in prepared:
-                device_group.Stop()
-                stopped.append(("device group", device_group))
-                network_group.Stop()
-                stopped.append(("network group", network_group))
+                for component_name, component in (
+                    ("device group", device_group),
+                    ("network group", network_group),
+                ):
+                    component_key = self._formulaic_bgp_component_key(
+                        component_name,
+                        component,
+                    )
+                    if component_key in stopped_key_set:
+                        continue
+                    component.Stop()
+                    stopped.append((component_name, component))
+                    stopped_key_set.add(component_key)
 
-            for mutation, shell, prefix_values, next_hop_values in prepared:
+            for (
+                mutation,
+                shell,
+                prefix_values,
+                next_hop_values,
+                active_values,
+            ) in prepared:
                 self._apply_formulaic_bgp_route(
                     mutation,
                     shell,
                     prefix_values,
                     next_hop_values,
                 )
+                if active_values is not None:
+                    route_key = (
+                        mutation["device_group_name"],
+                        mutation["prefix_pool_name"],
+                        mutation["afi"],
+                    )
+                    for component_key in component_keys_by_route_key[route_key]:
+                        pending_route_keys.setdefault(component_key, set()).add(
+                            route_key
+                        )
+                    shell[3].Active.ValueList(active_values)
 
             self.apply_changes()
+            if pending_route_keys:
+                verification_errors = []
+                for mutation, _shell, _prefixes, _next_hops, active_values in prepared:
+                    if active_values is None:
+                        continue
+                    route_key = (
+                        mutation["device_group_name"],
+                        mutation["prefix_pool_name"],
+                        mutation["afi"],
+                    )
+                    try:
+                        self._verify_formulaic_bgp_active_mask(
+                            mutation,
+                            active_values,
+                        )
+                        for component_key in component_keys_by_route_key[route_key]:
+                            pending_route_keys[component_key].discard(route_key)
+                        inactive_count = sum(not active for active in active_values)
+                        operation_logger = getattr(self, "logger", None) or logger
+                        operation_logger.info(
+                            "Verified formulaic BGP Active mask for %r: "
+                            "%d active, %d inactive cells across %d peers and "
+                            "%d prefixes",
+                            route_key,
+                            len(active_values) - inactive_count,
+                            inactive_count,
+                            mutation["peer_count"],
+                            mutation["prefixes_per_peer"],
+                        )
+                    except Exception as error:
+                        error.add_note(
+                            f"formulaic BGP Active verification failed for "
+                            f"{route_key!r}"
+                        )
+                        verification_errors.append(error)
+                if len(verification_errors) == 1:
+                    raise verification_errors[0]
+                if verification_errors:
+                    raise ExceptionGroup(
+                        "formulaic BGP Active verification failed",
+                        verification_errors,
+                    )
             self._restart_formulaic_bgp_routes(stopped, best_effort=False)
-        except Exception:
-            self._restart_formulaic_bgp_routes(stopped, best_effort=True)
+        except Exception as error:
+            pending_component_keys = {
+                component_key
+                for component_key, route_keys in pending_route_keys.items()
+                if route_keys
+            }
+            if pending_component_keys:
+                restartable = [
+                    item
+                    for item in stopped
+                    if self._formulaic_bgp_component_key(*item)
+                    not in pending_component_keys
+                ]
+                retained = [
+                    item
+                    for item in stopped
+                    if self._formulaic_bgp_component_key(*item)
+                    in pending_component_keys
+                ]
+                retained_descriptions = []
+                for component_name, component in retained:
+                    component_key = self._formulaic_bgp_component_key(
+                        component_name,
+                        component,
+                    )
+                    retained_descriptions.append(
+                        f"{component_name} {component_key[1]!r} "
+                        f"for {sorted(pending_route_keys[component_key])!r}"
+                    )
+                retained_components = ", ".join(retained_descriptions)
+                reason = (
+                    "formulaic BGP Active mutation failed verification; "
+                    f"unverified route components remain stopped: {retained_components}"
+                )
+                # Quarantine is persistent session state checked by subsequent
+                # mutation transactions; retained components require explicit
+                # session recovery before any further programming can proceed.
+                self._quarantine_session(reason)
+                error.add_note(reason)
+                self._restart_formulaic_bgp_routes(
+                    restartable,
+                    best_effort=True,
+                )
+                operation_logger = getattr(self, "logger", None) or logger
+                for retained_description in retained_descriptions:
+                    operation_logger.error(
+                        "Formulaic BGP component retained stopped after session "
+                        "quarantine: %s",
+                        retained_description,
+                    )
+                operation_logger.exception(reason)
+            else:
+                self._restart_formulaic_bgp_routes(
+                    stopped,
+                    best_effort=True,
+                )
             raise
 
     # DLB hardening helpers used by its existing CSV injection workflows.
