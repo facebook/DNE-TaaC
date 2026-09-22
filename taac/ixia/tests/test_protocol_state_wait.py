@@ -1,6 +1,5 @@
-# pyre-unsafe
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-"""Unit tests for the protocol-state settle wait shared by the pool configurators.
+"""Unit tests for IXIA protocol control and stopped-state settling.
 
 ``StopAllProtocols(Arg1="sync")`` returns once the stop is QUEUED, not once it
 has been applied. A property write issued in that window is rejected by
@@ -62,6 +61,37 @@ def _with_device_groups(ixia: Ixia, groups: t.Sequence[MagicMock]) -> None:
     topology = MagicMock()
     topology.DeviceGroup.find.return_value = list(groups)
     ixia.ixnetwork.Topology.find.return_value = [topology]
+
+
+class StartProtocolsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ixia = _create_ixia()
+        self.start_all_protocols = t.cast(
+            MagicMock, self.ixia.ixnetwork.StartAllProtocols
+        )
+
+    def test_starts_protocols_before_requested_settle(self) -> None:
+        events = []
+        self.start_all_protocols.side_effect = lambda **kwargs: events.append(
+            ("start", kwargs)
+        )
+        with patch(
+            f"{_MODULE}.time.sleep",
+            side_effect=lambda seconds: events.append(("sleep", seconds)),
+        ):
+            self.ixia.start_protocols(sleep_timer=30)
+
+        self.assertEqual(
+            [("start", {"Arg1": "sync"}), ("sleep", 30)],
+            events,
+        )
+
+    def test_defaults_to_zero_second_settle(self) -> None:
+        with patch(f"{_MODULE}.time.sleep") as mock_sleep:
+            self.ixia.start_protocols()
+
+        self.start_all_protocols.assert_called_once_with(Arg1="sync")
+        mock_sleep.assert_called_once_with(0)
 
 
 class WaitForProtocolsStoppedTest(unittest.TestCase):

@@ -2763,13 +2763,15 @@ class Ixia:
         return IpAddressResult(ipv4=ipv4_addr, ipv6=ipv6_addr)
 
     @external_api
-    def start_protocols(self) -> None:
-        """Used to start all the protocols synchronously"""
+    def start_protocols(self, sleep_timer: int = 0) -> None:
+        """Start all protocols synchronously, then wait for them to settle."""
 
         self.ixnetwork.StartAllProtocols(Arg1="sync")
         self.logger.info(
             "[GLOBAL] Successfully started all the protocols in the IXIA setup"
         )
+
+        time.sleep(sleep_timer)
 
     @external_api
     def stop_protocols(self, sleep_timer: int = 0) -> None:
