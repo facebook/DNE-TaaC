@@ -20550,7 +20550,9 @@ TEST_FBOSS_SW_AGENT_WARMBOOT_PLAYBOOK = Playbook(
                     service=Service.FBOSS_SW_AGENT,
                     trigger=ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
                 ),
-                create_service_convergence_step(),
+                create_service_convergence_step(
+                    services=[Service.AGENT, Service.BGP],
+                ),
             ]
         )
     ],
