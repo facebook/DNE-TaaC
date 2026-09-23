@@ -5,14 +5,18 @@ import unittest
 
 from taac.abstractions.physical_inventory import (
     BAG010_ASH6,
+    BAG011_ASH6,
     BAG012_ASH6,
+    BAG013_ASH6,
 )
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
+    create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
@@ -80,6 +84,47 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
             config.name,
             "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP",
         )
+
+    def test_name_override_is_authoritative_for_scheduled_bindings(self) -> None:
+        cases = (
+            (
+                create_bgp_ebb_characteristic_performance_scaling_test_config,
+                BAG012_ASH6,
+                "BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+                "bag012.ash6",
+            ),
+            (
+                create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
+                BAG010_ASH6,
+                "BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+                "bag010.ash6",
+            ),
+            (
+                create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
+                BAG011_ASH6,
+                "BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
+                "bag011.ash6",
+            ),
+            (
+                create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
+                BAG013_ASH6,
+                "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+                "bag013.ash6",
+            ),
+        )
+
+        for factory, inventory, expected_name, expected_dut in cases:
+            with self.subTest(expected_name=expected_name):
+                config = factory(
+                    inventory,
+                    enable_update_group=True,
+                    name_override=expected_name,
+                )
+                self.assertEqual(expected_name, config.name)
+                self.assertEqual(
+                    [expected_dut],
+                    [endpoint.name for endpoint in config.endpoints if endpoint.dut],
+                )
 
     def test_explicit_empty_ixia_overrides_are_preserved(self) -> None:
         config = create_bgp_ebb_scaling_performance_test_config(

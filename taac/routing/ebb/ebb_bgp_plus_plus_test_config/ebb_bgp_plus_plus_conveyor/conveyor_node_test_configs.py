@@ -16,10 +16,10 @@ free; consumers that need the aggregated list import it from this
 module directly.
 """
 
-# bag010 SC1 egress peer-scale + SC2 constant attribute storage — ad-hoc
-# scale-&-characteristics sweeps, runnable via --test-config but not scheduled
-# on a conveyor node. Re-homed to testconfigs/routing/adhoc_bgp_ebb_characteristic.py
-# after D111520998 pruned cicd_ebb_int_tc.py to the conveyor-scheduled configs only.
+# Durable ad-hoc scale-and-characteristic selectors. The BAG010 variants remain
+# registered for manual comparison after the first scheduled wave was added to
+# ``cicd_ebb_int_tc.py``; their runtime names are distinct from the Conveyor
+# selectors.
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
@@ -27,22 +27,25 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
-    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
 )
 
-# The four conveyor bindings and retained Stage 1 UG and scale counterparts live in
+# The Conveyor bindings and retained Stage 1 UG and scale counterparts live in
 # ``cicd_ebb_int_tc.py``. Every scheduled entry has an inline
 # ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
+    BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
+    BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
@@ -81,12 +84,12 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 
 # Aggregated list of every TestConfig registered with the routing framework's
 # Netcastle registry. Three groups:
-#   1. CONVEYOR configs — the 4 Stage 1 configs from ``cicd_ebb_int_tc.py``
-#      that are scheduled
-#      by ``dne_routing.conveyor_config.cconf`` (see the ``CONVEYOR:`` markers
-#      in that file for the per-node mapping).
-#   2. RETAINED configs — the 4 Stage 1 UG counterparts and 4
-#      scale-and-characteristic configs held for later onboarding.
+#   1. CONVEYOR configs — the 8 Stage 1 configs (UG and non-UG) and 4
+#      first-wave scale-and-characteristic configs from ``cicd_ebb_int_tc.py``
+#      that are scheduled by ``dne_routing.conveyor_config.cconf`` (see the
+#      ``CONVEYOR:`` markers in that file for the per-node mapping).
+#   2. RETAINED configs — 3 scale-and-characteristic configs held for later
+#      onboarding.
 #   3. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
 #      via Netcastle CLI but not (yet) wired into a conveyor node.
 EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
@@ -95,12 +98,18 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    # Retained Stage 1 UG counterparts for qualification and A/B comparison.
+    # Stage 1 UG counterparts for promotion gating and A/B comparison.
     BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    # Retained scale-and-characteristic configs for later onboarding.
+    # First promotion-gating scale-and-characteristic wave — one node per BAG.
+    BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
+    BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
+    BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
+    BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    # Legacy retained scale-and-characteristic selectors; these are not the
+    # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
@@ -174,7 +183,6 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # (global bgp_setting_config flag; persisted peers are re-grouped on restart).
     # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
-    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag013.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6

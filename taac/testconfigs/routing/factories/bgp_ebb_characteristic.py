@@ -738,6 +738,7 @@ def test_config_sc3_transient_memory_route_scale_on_eos(
 def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
+    name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """SC3 transient-memory route-scale test config (testbed-driven).
 
@@ -754,7 +755,8 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     Mirrors the SC1 perf-scaling factory: the DUT is provisioned via
     ``get_update_packing_setup_tasks`` and the name derives from
     ``testbed.device_name`` as ``{DEVICE}_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST``
-    (+ ``_UPDATE_GROUP``).
+    (+ ``_UPDATE_GROUP``). ``name_override`` provides a stable lifecycle
+    selector when the same factory is rebound to another physical inventory.
 
     All SC tests run with update-group enabled, so ``enable_update_group=True``
     is the variant that is actually run; the non-UG form does not work and is
@@ -768,11 +770,11 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     # router_id is optional: bag010 relies on the device-default router-id, which
     # the setup helpers preserve when router_id is None.
 
-    name = (
+    name = name_override or (
         f"{testbed.device_name.upper().replace('.', '_')}"
         "_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST"
     )
-    if enable_update_group:
+    if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
 
     return test_config_sc3_transient_memory_route_scale_on_eos(
@@ -1806,6 +1808,7 @@ def create_bgp_ebb_update_packing_test_config(
 def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
+    name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """SC2 constant-attribute-storage INGRESS-ONLY test config (testbed-driven).
 
@@ -1836,7 +1839,8 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     requires zero unresolved nexthops.
 
     All SC tests run with update-group enabled; only the ``_UPDATE_GROUP``
-    variant is registered.
+    variant is registered. ``name_override`` provides a stable lifecycle
+    selector when the same factory is rebound to another physical inventory.
     """
     assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
     assert testbed.bgpcpp_configerator_path, (
@@ -1850,11 +1854,11 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     # ibgp_peer_count=0 it lays zero iBGP peers (eBGP-only device config).
     ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
 
-    name = (
+    name = name_override or (
         f"{device_name.upper().replace('.', '_')}"
         "_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST"
     )
-    if enable_update_group:
+    if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
 
     # Ingress-only device setup: eBGP peers only (ibgp_peer_count=0), IPv6-only.
@@ -2035,6 +2039,7 @@ def create_bgp_ebb_queue_memory_monitor_test_config(
 def create_bgp_ebb_characteristic_performance_scaling_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
+    name_override: str | None = None,
 ) -> taac_types.TestConfig:
     """Performance-scaling egress IBGP peer-sweep test config (physical-inventory-driven).
 
@@ -2046,10 +2051,11 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     measured. A final aggregator Stage produces one consolidated everpaste
     plot.
 
-    The internal ``TestConfig.name`` is derived from ``physical_inventory.device_name`` as
-    ``{DEVICE}_BGP_PERFORMANCE_SCALING_CONVEYOR_TEST`` (+ ``_UPDATE_GROUP``); for
-    bag012 this reproduces the grandfathered name byte-for-byte, so its golden
-    manifest hash is unchanged.
+    The default internal ``TestConfig.name`` is derived from
+    ``physical_inventory.device_name`` as
+    ``{DEVICE}_SC1_EGRESS_PEER_SCALE_TEST`` (+ ``_UPDATE_GROUP``).
+    ``name_override`` provides a stable lifecycle selector when the same
+    factory is rebound to another physical inventory.
     """
     assert physical_inventory.ixia_ports, (
         "factory requires IXIA port map on physical_inventory"
@@ -2066,11 +2072,13 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
 
     device_name = physical_inventory.device_name
     # Derived from the physical_inventory device name. SC1 = the first "scale &
-    # characteristics" test (egress peer-scale). The legacy
-    # `_BGP_PERFORMANCE_SCALING_CONVEYOR_TEST` suffix was dropped: CONVEYOR
-    # overclaimed (this is an ad-hoc test, not conveyor-scheduled).
-    name = f"{physical_inventory.device_name.upper().replace('.', '_')}_SC1_EGRESS_PEER_SCALE_TEST"
-    if enable_update_group:
+    # characteristics" test (egress peer-scale). Lifecycle bindings that need a
+    # stable scheduler selector provide an explicit override.
+    name = (
+        name_override
+        or f"{physical_inventory.device_name.upper().replace('.', '_')}_SC1_EGRESS_PEER_SCALE_TEST"
+    )
+    if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
 
     bound = EGRESS_PEER_SCALE.bind_to_inventory(

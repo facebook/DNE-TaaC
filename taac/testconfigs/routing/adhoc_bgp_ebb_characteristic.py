@@ -1,13 +1,14 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 # pyre-unsafe
-"""BGP++ EBB characteristic ad-hoc testconfigs (SC1/SC2/SC3/SC4/SC6/SC9).
+"""BGP++ EBB characteristic ad-hoc and compatibility TestConfigs.
 
-Re-homed here after D111520998 consolidated ``cicd_ebb_int_tc.py`` down to the
-8 conveyor-scheduled configs. The bag010 egress peer-scale (perf-scaling case1)
-sweep is runnable via the Netcastle CLI (``--test-config``) but is not (yet)
-wired into a ``dne_routing`` conveyor node, so it belongs in this ad-hoc
-lifecycle binding module rather than in ``cicd_ebb_int_tc.py`` (which is now
-the scheduled-only source of truth).
+Re-homed here after D111520998 made ``cicd_ebb_int_tc.py`` the scheduled-only
+binding module. The bag010 egress peer-scale (perf-scaling case1) sweep is
+runnable via the Netcastle CLI (``--test-config``) but is not wired into a
+``dne_routing`` Conveyor node, so it belongs in this ad-hoc lifecycle binding
+module. The BAG013 SC9 constant remains here for Python import compatibility
+while its runtime selector is registered and scheduled from
+``cicd_ebb_int_tc.py``.
 
 External consumers import from this member module directly; see
 ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
@@ -30,7 +31,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# bag010.ash6 — SC1/SC2/SC3/SC4/SC6/SC9 characteristic tests (re-homed from
+# bag010.ash6 — SC1/SC2/SC3/SC4/SC5/SC6 characteristic tests (re-homed from
 # the retired bag010 bindings). Each factory derives TestConfig.name from
 # ``testbed.device_name`` (→ ``BAG010_ASH6_SC*_*``) and threads the lab SSH
 # auth + mock device data from the BAG010_ASH6 inventory (2-port: eBGP
@@ -187,8 +188,8 @@ BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 # ``--test-config``, not scheduled on a conveyor node.
 #
 # Known deviations from the spec, inherited from the BAG012 test: 10 senders x
-# 100K routes rather than the doc's 100 peers x 50K, and "no room for NLRI" is
-# approximated by a byte floor rather than a true max-fill check.
+# 10K routes rather than the doc's 100 peers totaling 50K routes, and "no room
+# for NLRI" is approximated by a byte floor rather than a true max-fill check.
 BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_update_packing_test_config(
         BAG010_ASH6,
@@ -251,15 +252,19 @@ BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
 #           delta bounded by the topology's structural max of 128*2+2 = 258;
 #           recovery to the discovered baseline (postcheck); and instrument
 #           liveness (min_observed_groups) so an all-zero series cannot pass.
-#   NOTE  : ad-hoc, not conveyor-scheduled. The retained
-#           BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG is untouched.
+#   NOTE  : retained as a Python import alias for compatibility. The same
+#           runtime selector is scheduled through ``cicd_ebb_int_tc.py`` and
+#           is registered there, so this object is not separately aggregated.
+#           BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG remains untouched.
 #   name  : BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG
 #           (DERIVED by _derive_test_config_name as
 #           "{SHORT_NAME}_{workflow}_TEST_CONFIG{_UG}" -- it is NOT the Python
 #           constant below, and it is the value --test-config takes.)
 BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
-        BAG013_ASH6, enable_update_group=True
+        BAG013_ASH6,
+        enable_update_group=True,
+        name_override="BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
     )
 )
 
