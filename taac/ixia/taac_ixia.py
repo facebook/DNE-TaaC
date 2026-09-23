@@ -85,6 +85,8 @@ PTP_DEVICE_NUM = "Device#"
 PTP_OFFSET_NS = "Offset [ns]"
 
 _DIRECT_STATS_LOCK_TIMEOUT_MAX_S = 30
+_CONFIG_FILE_REMOVE_MAX_ATTEMPTS = 3
+_CONFIG_FILE_REMOVE_RETRY_DELAY_SECONDS = 1.0
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -670,21 +672,19 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         significantly reducing IXIA setup time.
 
         Args:
-            config_path: Full path on chassis where to save the config
-                         (e.g., "/root/taac_configs/bag002_snc1.ixncfg")
+            config_path: Logical server-side path. RestPy stores its basename
+                in the API server's common file store.
 
         Returns:
             True if save was successful, False otherwise
         """
         try:
             self.logger.info(f"Saving IXIA config to chassis: {config_path}")
-            # `SaveConfig(Arg1)` expects a `Files` handle, not a raw string.
-            # Passing a bare string causes IxNetwork to fall back to its default
-            # storage location with just the basename — the directory part of
-            # our absolute path is silently dropped. Wrap with
-            # `Files(path, local_file=False)` so the server treats the value
-            # as an absolute server-side write target.
-            self.session.Ixnetwork.SaveConfig(Files(config_path, local_file=False))
+            # RestPy serializes a `Files` handle as its basename and stores it
+            # in the API server's common file store. Normalize explicitly so
+            # save, load, and removal always address the same server-side file.
+            remote_filename = os.path.basename(config_path)
+            self.session.Ixnetwork.SaveConfig(Files(remote_filename, local_file=False))
             self.logger.info(f"Successfully saved IXIA config: {config_path}")
             return True
         except Exception as e:
@@ -699,21 +699,19 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         setting up IXIA from scratch (~1-2 min vs ~10-15 min).
 
         Args:
-            config_path: Full path on chassis to load config from
-                         (e.g., "/root/taac_configs/bag002_snc1.ixncfg")
+            config_path: Logical server-side path. RestPy loads its basename
+                from the API server's common file store.
 
         Returns:
-            True if load was successful, False otherwise (fallback to full setup)
+            True only after the config is loaded, ports are assigned, and
+            protocols are started and verified; False otherwise.
         """
         try:
             self.logger.info(
                 f"Attempting to load IXIA config from chassis: {config_path}"
             )
-            # `LoadConfig(Arg1)` expects a `Files` handle — see SaveConfig
-            # comment above. `local_file=False` tells the server to read from
-            # the exact absolute path provided (not upload from client + load
-            # from server default).
-            self.session.Ixnetwork.LoadConfig(Files(config_path, local_file=False))
+            remote_filename = os.path.basename(config_path)
+            self.session.Ixnetwork.LoadConfig(Files(remote_filename, local_file=False))
             self.logger.info(f"Successfully loaded IXIA config: {config_path}")
 
             # LoadConfig restores vport definitions and their `location`
@@ -737,11 +735,31 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             self.start_and_verify_protocols()
             return True
         except Exception as e:
-            self.logger.info(
-                f"Could not load IXIA config from {config_path}: {e}. "
-                "Will fall back to full setup."
-            )
+            self.logger.info(f"Could not load IXIA config from {config_path}: {e}")
             return False
+
+    def remove_config_from_chassis(self, config_path: str) -> bool:
+        """Remove an IXIA configuration saved in the API server file store."""
+        remote_filename = os.path.basename(config_path)
+        for attempt in range(1, _CONFIG_FILE_REMOVE_MAX_ATTEMPTS + 1):
+            try:
+                self.logger.info(f"Removing IXIA config from chassis: {config_path}")
+                self.session.Session.RemoveFile(remote_filename=remote_filename)
+                self.logger.info(f"Successfully removed IXIA config: {config_path}")
+                return True
+            except Exception as error:
+                if attempt == _CONFIG_FILE_REMOVE_MAX_ATTEMPTS:
+                    self.logger.error(
+                        f"Failed to remove IXIA config from chassis after "
+                        f"{attempt} attempts: {error}"
+                    )
+                    return False
+                self.logger.warning(
+                    f"Failed to remove IXIA config from chassis on attempt "
+                    f"{attempt}/{_CONFIG_FILE_REMOVE_MAX_ATTEMPTS}: {error}; retrying"
+                )
+                time.sleep(_CONFIG_FILE_REMOVE_RETRY_DELAY_SECONDS)
+        return False
 
     def enable_protocol(self, enable: bool = True) -> None:
         if enable:

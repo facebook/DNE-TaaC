@@ -1819,9 +1819,12 @@ class TaacRunner:
             raise TestCaseFailure(
                 "restore_topology_baseline requires an IXIA traffic generator"
             )
-        if not hasattr(ixia, "export_json_config") or not hasattr(
-            ixia, "import_json_config"
-        ):
+        required_methods = (
+            "save_config_to_chassis",
+            "load_config_from_chassis",
+            "remove_config_from_chassis",
+        )
+        if not all(hasattr(ixia, method) for method in required_methods):
             raise TestCaseFailure(
                 "restore_topology_baseline is not supported by the selected "
                 "traffic generator backend"
@@ -1838,7 +1841,7 @@ class TaacRunner:
         errors = await self._baseline_lifecycle.restore(BaselineScope.TOPOLOGY, context)
         if not errors:
             log_phase_end(
-                "Topology baseline restored and verified | "
+                "Topology baseline restored | verification=load_completed | "
                 "participant=ixia_topology | "
                 f"invocation={context.invocation_id}",
                 logger=self.logger,
