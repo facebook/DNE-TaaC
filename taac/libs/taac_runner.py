@@ -555,6 +555,7 @@ class TaacRunner:
 
         self.jq_vars: t.Dict[str, t.Any] = {}
         self.dynamic_vars: t.Dict[str, str] = {}
+        self._basset_endpoint_bindings: t.Dict[str, str] = {}
         self.parameter_evaluator = ParameterEvaluator(self.jq_vars, self.dynamic_vars)
         self.periodic_task_executor: t.Optional[PeriodicTaskExecutor] = None
         self.test_case_periodic_task_executor: t.Optional[PeriodicTaskExecutor] = None
@@ -994,6 +995,7 @@ class TaacRunner:
                 self.test_config = self.test_setup_orchestrator.test_config
                 self.ixia_candidates = self.test_setup_orchestrator.ixia_candidates
                 self.duts[:] = self.test_setup_orchestrator.devices_under_test
+                self._basset_endpoint_bindings = endpoint_bindings
                 self.dynamic_vars.update(endpoint_bindings)
             await self._async_run_test_setup()
         except BaseException as error:
@@ -2423,6 +2425,33 @@ class TaacRunner:
 
         return [config_playbooks[name] for name in target_playbook_names]
 
+    def _resolve_selected_playbooks(
+        self,
+        playbooks: t.Optional[t.List[t.Union[str, taac_types.Playbook]]],
+    ) -> t.List[taac_types.Playbook]:
+        """Return post-binding copies of playbooks selected before setup."""
+        configured_playbooks = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+        selected_playbooks = playbooks or self.test_config.playbooks
+        resolved_playbooks = []
+        for playbook in selected_playbooks:
+            if isinstance(playbook, str):
+                resolved_playbook = configured_playbooks.get(playbook)
+                if resolved_playbook is None:
+                    raise ValueError(
+                        f"Playbook {playbook!r} is not present in the current "
+                        f"TestConfig {self.test_config.name!r}"
+                    )
+                resolved_playbooks.append(resolved_playbook)
+            elif self._basset_endpoint_bindings:
+                resolved_playbooks.append(
+                    configured_playbooks.get(playbook.name, playbook)
+                )
+            else:
+                resolved_playbooks.append(playbook)
+        return resolved_playbooks
+
     async def run_tests(
         self,
         playbooks: t.Optional[t.List[t.Union[str, taac_types.Playbook]]] = None,
@@ -2450,21 +2479,12 @@ class TaacRunner:
             if not npi_playbooks:
                 self.logger.warning("No playbooks to run from NPI selection.")
                 return
-            # pyre-fixme[9]: playbooks has type `Optional[List[Union[str,
-            #  Playbook]]]`; used as `List[Playbook]`.
-            playbooks = npi_playbooks
+            resolved_playbooks = npi_playbooks
             # Fall through to normal execution with resolved playbooks
         else:
-            all_playbooks = {
-                playbook.name: playbook for playbook in self.test_config.playbooks
-            }
-            playbooks = [
-                (all_playbooks[playbook] if isinstance(playbook, str) else playbook)
-                for playbook in playbooks or self.test_config.playbooks
-            ]
+            resolved_playbooks = self._resolve_selected_playbooks(playbooks)
         duts = none_throws(duts or self.duts)
-        # pyre-fixme[16]: `Optional` has no attribute `__iter__`.
-        enabled_playbooks = [p for p in playbooks if p.enabled]
+        enabled_playbooks = [p for p in resolved_playbooks if p.enabled]
         failed_playbooks: t.List[t.Tuple[str, str, Exception]] = []
         for dut in duts:
             # pyrefly: ignore [missing-attribute]
