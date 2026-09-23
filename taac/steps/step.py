@@ -258,6 +258,7 @@ class Step(t.Generic[StepInput], ABC):
 
     def raise_failure_if_exists(self) -> None:
         if self.failures:
+            failure_text = "\n".join(self.failures)
             raise TestCaseFailure(
-                f"Test case failed with the following failures: {'\n'.join(self.failures)}"
+                f"Test case failed with the following failures: {failure_text}"
             )
