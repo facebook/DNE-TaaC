@@ -482,6 +482,7 @@ class TaacRunner:
         self.skip_oss_setup_tasks = skip_oss_setup_tasks
         self.skip_teardown_tasks = skip_teardown_tasks
         self.skip_all_tasks = skip_all_tasks
+        self._skip_test_config_teardown_tasks = False
         self.skip_periodic_tasks = skip_periodic_tasks
         # EOS image ID for Arista device image deployment
         self.eos_image_id = eos_image_id or ""
@@ -988,6 +989,7 @@ class TaacRunner:
     async def async_test_setUp(self) -> None:
         setup_start_time = int(time.time())
         try:
+            self._skip_test_config_teardown_tasks = True
             endpoint_bindings = (
                 await self.test_setup_orchestrator.async_resolve_basset_endpoints()
             )
@@ -997,6 +999,7 @@ class TaacRunner:
                 self.duts[:] = self.test_setup_orchestrator.devices_under_test
                 self._basset_endpoint_bindings = endpoint_bindings
                 self.dynamic_vars.update(endpoint_bindings)
+            self._skip_test_config_teardown_tasks = False
             await self._async_run_test_setup()
         except BaseException as error:
             # The setup slice is the only record of what the chassis was
@@ -4336,6 +4339,11 @@ class TaacRunner:
         except Exception as error:
             state.errors.append(error)
 
+        if self._skip_test_config_teardown_tasks:
+            self.logger.info(
+                "Skipping test-config teardown tasks because endpoint resolution "
+                "did not complete"
+            )
         try:
             with suppress_console_logs(self.logger):
                 await self.run_teardown_tasks(
@@ -4344,7 +4352,11 @@ class TaacRunner:
                         if self.selected_ixia_candidate is not None
                         else self.ixia_candidates[0].teardown_tasks
                     )
-                    if not (self.skip_all_tasks or self.skip_teardown_tasks)
+                    if not (
+                        self.skip_all_tasks
+                        or self.skip_teardown_tasks
+                        or self._skip_test_config_teardown_tasks
+                    )
                     else [],
                     cancellation_budget=cancellation_budget,
                 )
