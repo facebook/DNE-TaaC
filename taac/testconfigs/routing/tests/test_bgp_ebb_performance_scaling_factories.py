@@ -17,6 +17,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
+    create_bgp_ebb_update_packing_test_config,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
@@ -111,6 +112,12 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                 "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
                 "bag013.ash6",
             ),
+            (
+                create_bgp_ebb_update_packing_test_config,
+                BAG012_ASH6,
+                "BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+                "bag012.ash6",
+            ),
         )
 
         for factory, inventory, expected_name, expected_dut in cases:
@@ -125,6 +132,79 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                     [expected_dut],
                     [endpoint.name for endpoint in config.endpoints if endpoint.dut],
                 )
+
+    def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
+        config = create_bgp_ebb_update_packing_test_config(
+            BAG012_ASH6,
+            enable_update_group=True,
+            name_override="BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+            min_advertised_nlri=50000,
+        )
+
+        self.assertEqual(
+            ["bgp_ebb_update_packing_playbook"],
+            [playbook.name for playbook in config.playbooks or []],
+        )
+        update_group_validators = [
+            _task_json_params(task)
+            for task in config.setup_tasks or []
+            if task.task_name == "validate_bgpcpp_update_group_state"
+        ]
+        self.assertEqual(
+            [{"hostname": "bag012.ash6", "expect_enabled": True}],
+            update_group_validators,
+        )
+        startup_flags = [
+            _task_json_params(task)["flags"]
+            for task in config.setup_tasks or []
+            if task.task_name == "configure_bgpcpp_startup"
+        ]
+        self.assertEqual(
+            [{"bgp_resolve_nexthops_from_interface_state": "true"}],
+            startup_flags,
+        )
+        lifecycle_tasks = [
+            *(config.setup_tasks or []),
+            *(config.teardown_tasks or []),
+        ]
+        self.assertFalse(
+            any(
+                "bag013.ash6" in (task.params.json_params or "")
+                for task in lifecycle_tasks
+            ),
+            "the no-OpenR Conveyor binding must not mutate a helper device",
+        )
+        self.assertNotIn(
+            "openr_route_action",
+            [task.task_name for task in lifecycle_tasks],
+        )
+        direct_connections = config.endpoints[0].direct_ixia_connections or []
+        self.assertEqual(
+            [
+                (
+                    "Ethernet3/36/1",
+                    "2401:db00:2066:303b::3001",
+                    "8/1",
+                ),
+                (
+                    "Ethernet3/36/2",
+                    "2401:db00:2066:303b::3001",
+                    "8/2",
+                ),
+            ],
+            [
+                (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
+                for connection in direct_connections
+            ],
+        )
+        packing_steps = [
+            params
+            for params in _custom_step_params(config)
+            if params.get("custom_step_name")
+            == "test_bgp_update_packing_eos_bgp_plus_plus"
+        ]
+        self.assertEqual(1, len(packing_steps))
+        self.assertEqual(50000, packing_steps[0].get("min_advertised_nlri"))
 
     def test_explicit_empty_ixia_overrides_are_preserved(self) -> None:
         config = create_bgp_ebb_scaling_performance_test_config(

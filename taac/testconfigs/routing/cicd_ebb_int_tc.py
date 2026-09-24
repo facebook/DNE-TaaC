@@ -179,6 +179,19 @@ BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
     BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG
 )
 
+# Second characteristic promotion-gating wave. EBB-21 has its own logical
+# topology and TestConfig so Conveyor can schedule it independently after the
+# BAG012 Wave 1 node. The no-OpenR profile keeps this binding on one device;
+# directly connected IXIA next hops are resolved from interface state.
+# CONVEYOR: dne_routing / bag012_characteristics_wave2_node
+BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config(
+    BAG012_ASH6,
+    enable_update_group=True,
+    name_override="BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+    profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    min_advertised_nlri=50000,
+)
+
 
 # Legacy retained scale-and-characteristic selectors. They stay registered for
 # compatibility but are not the first-wave Conveyor bindings above.
@@ -217,6 +230,7 @@ __all__ = [
     "BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+    "BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
     "BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG012_UPDATE_PACKING_TEST_CONFIG_UG",

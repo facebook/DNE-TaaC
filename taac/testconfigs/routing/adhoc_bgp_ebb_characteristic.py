@@ -199,7 +199,8 @@ BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
         # (99,875 advertised). Deliberately not an UPDATE-count floor: UPDATE
         # count falls as packing improves, so that would fail a better-packing
         # device. Opt-in per config -- the step defaults to 0 so this bag010
-        # number cannot gate the CI-scheduled bag012 run, which is uncalibrated.
+        # number cannot silently gate another binding. The dedicated BAG012
+        # Conveyor selector opts in to the same anti-vacuity floor explicitly.
         min_advertised_nlri=50000,
     )
 )

@@ -41,6 +41,7 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
+    BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
@@ -84,10 +85,11 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 
 # Aggregated list of every TestConfig registered with the routing framework's
 # Netcastle registry. Three groups:
-#   1. CONVEYOR configs — the 8 Stage 1 configs (UG and non-UG) and 4
-#      first-wave scale-and-characteristic configs from ``cicd_ebb_int_tc.py``
-#      that are scheduled by ``dne_routing.conveyor_config.cconf`` (see the
-#      ``CONVEYOR:`` markers in that file for the per-node mapping).
+#   1. CONVEYOR configs — the 8 Stage 1 configs (UG and non-UG), 4 first-wave
+#      scale-and-characteristic configs, and the EBB-21 second-wave config from
+#      ``cicd_ebb_int_tc.py`` that are scheduled by
+#      ``dne_routing.conveyor_config.cconf`` (see the ``CONVEYOR:`` markers in
+#      that file for the per-node mapping).
 #   2. RETAINED configs — 3 scale-and-characteristic configs held for later
 #      onboarding.
 #   3. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
@@ -108,6 +110,8 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
     BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    # Second promotion-gating wave; serialized after EBB-17 on BAG012.
+    BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     # Legacy retained scale-and-characteristic selectors; these are not the
     # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
