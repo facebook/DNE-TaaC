@@ -21,6 +21,7 @@ from taac.constants import (
     ROGUE_SRC_MAC_ADDRESS,
 )
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_peer_route_snapshot_check,
     create_bgp_session_snapshot_check,
     create_core_dumps_snapshot_check,
     create_cpu_utilization_check,
@@ -1562,6 +1563,8 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     l2_overload_only=False,
     skip_playbooks=None,
     playbooks_selected=None,
+    include_cgroup_memory_setup=True,
+    include_bgp_peer_route_snapshot_check=False,
 ):
     """Build the conveyor TestConfig for combined BGP++ and FBOSS platform hardening.
 
@@ -1644,6 +1647,10 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
             which would silently absorb any playbook added here later. Mirrors
             ``playbooks_selected`` on ``build_bgp_dc_test_config``. Applied
             after ``skip_playbooks``.
+        include_cgroup_memory_setup: Install and clean up the memory-pressure helper
+            required by ``test_cgroup_system_slice_oom_kill_policy``.
+        include_bgp_peer_route_snapshot_check: Add a per-peer route snapshot check,
+            excluding the intentionally flapping rogue peers and prefixes.
 
     Returns:
         TestConfig: The fully-built conveyor TestConfig.
@@ -1673,6 +1680,22 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     # TestConfig-level checks moved to playbook level
     tc_snapshot_checks = [
         create_core_dumps_snapshot_check(),
+        *(
+            [
+                create_bgp_peer_route_snapshot_check(
+                    parent_peers_to_ignore=[
+                        f"{ixia_rogue_ic_parent_network_v6}::/80",
+                        f"{ixia_rogue_ic_parent_network_v4}.0/24",
+                    ],
+                    parent_prefixes_to_ignore=[
+                        f"{v6_prefix_flapping_prefix}:f::/32",
+                        f"{v4_session_flapping_prefix}.0.0.0/8",
+                    ],
+                )
+            ]
+            if include_bgp_peer_route_snapshot_check
+            else []
+        ),
     ]
     tc_postchecks = [
         create_systemctl_active_state_check(),
@@ -2213,19 +2236,31 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                 #         ),
                 #     ),
                 # ),
-                create_allocate_cgroup_slice_memory_task(
-                    hostname=device_name,
-                    slice_name="workload",
-                    run_post_ixia_setup=True,
-                    workload_slice_based_total_memory_decimal=0.25,
+                *(
+                    [
+                        create_allocate_cgroup_slice_memory_task(
+                            hostname=device_name,
+                            slice_name="workload",
+                            run_post_ixia_setup=True,
+                            workload_slice_based_total_memory_decimal=0.25,
+                        )
+                    ]
+                    if include_cgroup_memory_setup
+                    else []
                 ),
             ]
         ),
         teardown_tasks=[
             create_coop_unregister_patchers_task(device_name),
-            create_run_commands_on_shell_task(
-                hostname=device_name,
-                cmds=["pkill memory_pressure"],
+            *(
+                [
+                    create_run_commands_on_shell_task(
+                        hostname=device_name,
+                        cmds=["pkill memory_pressure"],
+                    )
+                ]
+                if include_cgroup_memory_setup
+                else []
             ),
         ],
         # Deprecated - define at playbook level

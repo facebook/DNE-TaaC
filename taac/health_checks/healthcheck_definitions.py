@@ -2267,17 +2267,41 @@ def create_next_hop_count_snapshot_check() -> SnapshotHealthCheck:
     return SnapshotHealthCheck(name=hc_types.CheckName.NEXT_HOP_COUNT_CHECK)
 
 
-def create_bgp_peer_route_snapshot_check() -> SnapshotHealthCheck:
-    """Create a bare snapshot check that BGP per-peer route counts are unchanged across the playbook.
+def create_bgp_peer_route_snapshot_check(
+    parent_peers_to_ignore: t.Optional[t.List[str]] = None,
+    parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
+) -> SnapshotHealthCheck:
+    """Create a snapshot check that BGP per-peer route counts are unchanged across the playbook.
 
     Captures advertised/received route counts per peer at pre/post checkpoints
     and asserts no churn. Used as a blanket guard around stages that should
     not affect peer-route exchange.
 
+    Bare by default. Both ignore lists are CIDR prefixes matched by subnet
+    containment, and they filter at different levels:
+        parent_peers_to_ignore: drop matching PEERS from the snapshot entirely.
+            Also suppresses the spurious "new peer" a churn peer produces when
+            it is down at one checkpoint and Established at the other.
+        parent_prefixes_to_ignore: keep every peer, but strip matching PREFIXES
+            out of each peer's counts. Needed when churned routes propagate to
+            otherwise-steady peers. NOTE this switches the check off the cheap
+            session counters onto per-peer post-filter RIB dumps.
+
     Returns:
-        A bare `SnapshotHealthCheck` with `name=BGP_PEER_ROUTE_CHECK`.
+        A `SnapshotHealthCheck` with `name=BGP_PEER_ROUTE_CHECK`, carrying
+        `check_params` only when an ignore list is supplied.
     """
-    return SnapshotHealthCheck(name=hc_types.CheckName.BGP_PEER_ROUTE_CHECK)
+    json_payload: t.Dict[str, t.Any] = {}
+    if parent_peers_to_ignore is not None:
+        json_payload["parent_peers_to_ignore"] = parent_peers_to_ignore
+    if parent_prefixes_to_ignore is not None:
+        json_payload["parent_prefixes_to_ignore"] = parent_prefixes_to_ignore
+    return SnapshotHealthCheck(
+        name=hc_types.CheckName.BGP_PEER_ROUTE_CHECK,
+        check_params=(
+            Params(json_params=json.dumps(json_payload)) if json_payload else None
+        ),
+    )
 
 
 def create_cpu_queue_snapshot_check(
