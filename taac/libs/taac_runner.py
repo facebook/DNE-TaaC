@@ -1657,7 +1657,11 @@ class TaacRunner:
                     self._raise_test_case_cleanup_errors(_stage_exc, _cleanup_errors)
 
                 self._record_playbook_result(
-                    playbook, test_device, _npi_iteration_count, test_case_results
+                    playbook,
+                    test_device,
+                    _npi_iteration_count,
+                    test_case_results,
+                    empty_status=hc_types.HealthCheckStatus.PASS,
                 )
                 recorded_iterations = _npi_iteration_count
         except Exception as e:
@@ -1700,13 +1704,15 @@ class TaacRunner:
         test_device: TestDevice,
         iteration: int,
         results: t.Sequence[trr_types.CheckResult],
+        *,
+        empty_status: hc_types.HealthCheckStatus = hc_types.HealthCheckStatus.UNKNOWN,
     ) -> None:
         self.playbook_results.append(
             trr_types.PlaybookResult(
                 playbook_name=playbook.name,
                 dut=test_device.name,
                 iteration=iteration,
-                status=worst_check_status(results),
+                status=worst_check_status(results) if results else empty_status,
                 results=list(results),
             )
         )
