@@ -43,6 +43,22 @@ class TestSystemctlActiveStateHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("not active", result.message)
 
+    async def test_services_from_check_params_are_used(self):
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            return_value="LoadState=loaded\nActiveState=active\n"
+        )
+
+        result = await self.health_check._run(
+            self.device,
+            hc_types.SystemctlActiveStateHealthCheckIn(),
+            {"services": ["bgpd"]},
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
+        self.health_check.driver.async_run_cmd_on_shell.assert_awaited_once_with(
+            "systemctl show bgpd --no-page"
+        )
+
     async def test_disabled_service_is_skipped(self):
         """A disabled service (UnitFileState=disabled) should be treated as active."""
         self.health_check.driver.async_run_cmd_on_shell = AsyncMock(

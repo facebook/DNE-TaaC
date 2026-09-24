@@ -37,6 +37,8 @@ class SystemctlActiveStateHealthCheck(
             service_names = [
                 hc_types.SERVICE_NAME_MAP[service] for service in input.services
             ]
+        elif check_params.get("services"):
+            service_names = check_params["services"]
         else:
             service_names = DEFAULT_SERVICE_NAMES
 
