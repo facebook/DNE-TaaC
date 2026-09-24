@@ -518,7 +518,7 @@ class FbossSwitch(AbstractSwitch):
                     f"Successfully reloaded the agent config on {self.hostname} "
                 )
         except Exception:
-            self.async_restart_service(FbossSystemctlServiceName.AGENT)
+            await self.async_restart_service(FbossSystemctlServiceName.AGENT)
         await self.async_wait_for_agent_state_configured()
 
     @async_retryable(retries=30, sleep_time=6, exceptions=(Exception,))
