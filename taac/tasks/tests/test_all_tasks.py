@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import later.unittest
+from taac.task_definitions import create_coop_apply_patchers_task
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
     ConfigureParallelBgpPeers,
@@ -38,6 +39,28 @@ class CoopApplyPatchersTaskTest(later.unittest.TestCase):
 
         driver.async_agent_config_reload.assert_awaited_once_with()
         driver.async_restart_service.assert_not_awaited()
+
+    async def test_default_task_reloads_agent_and_restarts_bgpd(self) -> None:
+        driver = MagicMock()
+        driver.async_agent_config_reload = AsyncMock()
+        driver.async_restart_service = AsyncMock()
+        task = CoopApplyPatchersTask(logger=MagicMock())
+        json_params = create_coop_apply_patchers_task(
+            ["fsw.example"]
+        ).params.json_params
+        if json_params is None:
+            self.fail("create_coop_apply_patchers_task produced no json_params")
+        params = json.loads(json_params)
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(params)
+
+        driver.async_agent_config_reload.assert_awaited_once_with()
+        driver.async_restart_service.assert_awaited_once()
 
 
 class ConfigureParallelBgpPeersTest(later.unittest.TestCase):

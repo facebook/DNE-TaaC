@@ -741,11 +741,14 @@ class CoopApplyPatchersTask(BaseTask):
             return
         hostnames = params["hostnames"]
         config_names = params.get("config_names")
-        if config_names is None and params.get("config_name") is not None:
-            # ``create_coop_apply_patchers_task`` historically serializes the
-            # singular key. Honor it so an agent-only apply does not silently
-            # fall back to every default config and restart bgpd as well.
-            config_names = [params["config_name"]]
+        config_name = params.get("config_name")
+        # ``create_coop_apply_patchers_task`` serializes ``config_name="bgpcpp"``
+        # by default, and its callers expect every default config to apply,
+        # including the agent reload that picks up agent patchers such as the
+        # VLAN interfaces from ``configure_parallel_bgp_peers``. Only a
+        # non-default value (e.g. an agent-only apply) narrows the set.
+        if config_names is None and config_name not in (None, "bgpcpp"):
+            config_names = [config_name]
 
         do_warmboot = params.get("do_warmboot", False)
         do_coldboot = params.get("do_coldboot", False)
