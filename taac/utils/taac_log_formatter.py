@@ -131,6 +131,7 @@ def log_results_table(
 
     passed = 0
     failed = 0
+    skipped = 0
     for result in results:
         check_name = result.get("check_name", "Unknown")
         status = result.get("status", "UNKNOWN")
@@ -138,11 +139,15 @@ def log_results_table(
         _logger.info(f"  {check_name:<35} {status:<10} {message}")
         if status.upper() in ("PASS", "PASSED", "SUCCESS"):
             passed += 1
+        elif status.upper() in ("SKIP", "SKIPPED"):
+            skipped += 1
         else:
             failed += 1
 
     _logger.info("  " + "-" * (width - 4))
     overall = f"Overall: {passed} PASSED, {failed} FAILED"
+    if skipped:
+        overall += f", {skipped} SKIPPED"
     _logger.info(f"  {overall}")
     _logger.info("")
 
