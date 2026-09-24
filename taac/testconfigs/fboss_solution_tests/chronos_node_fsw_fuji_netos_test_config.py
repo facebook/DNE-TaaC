@@ -106,7 +106,7 @@ CHRONOS_NODE_FSW_FUJI_NETOS_TEST_CONFIG = (
         good_mac_entry_count=100,
         rogue_mac_entry_count=200,
         bgp_induced_ecmp_group_count=50,
-        basset_pool="dne.test",
+        basset_pool="dne.regression",
         include_bgp_peer_route_snapshot_check=True,
         include_cgroup_memory_setup=False,
         playbooks=[
@@ -123,5 +123,9 @@ CHRONOS_NODE_FSW_FUJI_NETOS_TEST_CONFIG = (
         # A cached ixncfg can retain unresolved destination MAC state and load
         # the item with no valid packets, so rebuild the IXIA session each run.
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
+        # TAAC does not renew reservations, the 14 playbooks take more than the
+        # 4 hour default, and Lab Doctor strips TAAC's COOP patchers from any
+        # device whose reservation has lapsed.
+        basset_reservation_time_hr=6,
     )
 )
