@@ -2,10 +2,11 @@
 # pyre-unsafe
 """Physical inventories for routing EBB testbeds.
 
-This module holds the ``PhysicalInventory`` artifacts for the ASH6 BAG
-conveyor pair-of-pairs (``bag010 / bag011 / bag012 / bag013``), the
-historical SNC1 BAG (``bag002``), the EB0x lab boxes, the per-developer
-``bgp.eb.test.ash6`` box, and the SNC1 Arista ``jsw002``.
+This module holds the ``PhysicalInventory`` artifacts for the ASH6 BAG conveyor
+pair-of-pairs (``bag010`` through ``bag013``) and the NRQEB pair-of-pairs
+(``nrqeb006`` through ``nrqeb009``), the historical SNC1 BAG (``bag002``), the
+EB0x lab boxes, the per-developer ``bgp.eb.test.ash6`` box, and the SNC1 Arista
+``jsw002``.
 
 The topology figures and naming conventions below describe the ASH6-
 specific wiring. The general OpenR-standalone mode contract (approach,
@@ -24,11 +25,12 @@ sibling ``README.md`` — do not clone this file's shape ad-hoc.
 ──────────────────────────────────────────────────────────────────────────
     Chassis            Address                            Use
     ─────────────────  ─────────────────────────────────  ─────────────────
-    IXIA11_ASH6        2401:db00:2066:303b::3001          Primary chassis
-                                                          for ALL ASH6 BAGs
-                                                          and EB0x lab boxes
-    IXIA03_ASH6        2401:db00:2066:3036::3003          Secondary fallback
-                                                          for ALL ASH6 BAGs
+    IXIA11_ASH6        2401:db00:2066:303b::3001          Primary for ASH6 BAGs
+                                                          and EB0x; secondary
+                                                          for ASH6 NRQEBs
+    IXIA03_ASH6        2401:db00:2066:3036::3003          Secondary for ASH6
+                                                          BAGs; primary for
+                                                          ASH6 NRQEBs
     ares1-my24520014   (SNC1 chassis, non-IPv6 handle)    Primary for bag002.snc1
 
 ──────────────────────────────────────────────────────────────────────────
@@ -44,6 +46,13 @@ mesh.
     7/{5..8} ── Eth3/36/{1..4} bag011       1/{53..56} ── Eth3/35/{1..4} bag011
     8/{1..4} ── Eth3/36/{1..4} bag012       1/{57..60} ── Eth3/35/{1..4} bag012
     8/{5..8} ── Eth3/36/{1..4} bag013       1/{61..64} ── Eth3/35/{1..4} bag013
+
+    IXIA03_ASH6 (NRQEB primary)            IXIA11_ASH6 (NRQEB secondary)
+    ───────────────────────────            ─────────────────────────────
+    1/{81..84} ── Eth3/35/{1..4} nrqeb006  9/{1..4}  ── Eth3/36/{1..4} nrqeb006
+    1/{85..88} ── Eth3/35/{1..4} nrqeb007  9/{5..8}  ── Eth3/36/{1..4} nrqeb007
+    1/{89..92} ── Eth3/35/{1..4} nrqeb008  10/{1..4} ── Eth3/36/{1..4} nrqeb008
+    1/{93..96} ── Eth3/35/{1..4} nrqeb009  10/{5..8} ── Eth3/36/{1..4} nrqeb009
 
             BAG cross-cables
             ────────────────
@@ -64,6 +73,13 @@ mesh.
             │ Eth3/1/1 ●──┼──┼──● Eth3/1/1 │      po100312 members
             │ Eth3/2/1 ●──┼──┼──● Eth3/2/1 │      po100313 members
             └─────────────┘  └─────────────┘
+
+            NRQEB cross-cables
+            ──────────────────
+            nrqeb006 Eth3/1/1 ── Eth3/1/1 nrqeb007   po100306 members
+            nrqeb006 Eth3/2/1 ── Eth3/2/1 nrqeb007   po100307 members
+            nrqeb008 Eth3/1/1 ── Eth3/1/1 nrqeb009   po100308 members
+            nrqeb008 Eth3/2/1 ── Eth3/2/1 nrqeb009   po100309 members
 
 ──────────────────────────────────────────────────────────────────────────
  §4  Figure B — ownership-pair zoom (bag010 ↔ bag011)
@@ -92,13 +108,15 @@ approach and component call-chain.
 ──────────────────────────────────────────────────────────────────────────
  §5  Naming convention
 ──────────────────────────────────────────────────────────────────────────
-``port_channel_id = 1003NN  ⇔  owner hostname = bag0NN.ash6``
+``port_channel_id = 1003NN  ⇔  owner hostname ends in NN``
 
-``NN`` is the two-digit token equal to the last two digits of the owner's
-``bag0NN`` hostname:
+``NN`` is the two-digit token equal to the last two digits of the owner's BAG
+or NRQEB hostname:
 
     po100310 → bag010        po100312 → bag012
     po100311 → bag011        po100313 → bag013
+    po100306 → nrqeb006      po100308 → nrqeb008
+    po100307 → nrqeb007      po100309 → nrqeb009
 
 ──────────────────────────────────────────────────────────────────────────
  §6  See also
@@ -388,6 +406,192 @@ BAG013_ASH6 = PhysicalInventory(
     bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
     openr_configerator_path="taac/ebb_ci_cd_configs/bag013_ash6_openr_config",
     openr_standalone_link=_BAG013_OPENR_LINK,
+    peer_groups=_ebb_peer_groups(),
+)
+
+
+# ─── nrqeb006 ↔ nrqeb007 OpenR-standalone pair ───────────────────────────
+
+_NRQEB006_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100306,
+    owner=OpenRStandaloneEndpoint(
+        hostname="nrqeb006.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.6.6/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3060/127",
+        link_local_cidr="fe80::100:306:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="nrqeb007.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.6.7/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3061/127",
+        link_local_cidr="fe80::100:306:1/64",
+    ),
+    speed="400g",
+)
+
+NRQEB006_ASH6 = PhysicalInventory(
+    device_name="nrqeb006.ash6",
+    network_role=NetworkRole.EB,
+    default_physical_interface_profile=_EBB_PHYSICAL_INTERFACE_PROFILE,
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA03_ASH6,
+    secondary_ixia_chassis_ip=IXIA11_ASH6,
+    ixia_ports=[
+        ("Ethernet3/35/1", "1/81"),
+        ("Ethernet3/35/2", "1/82"),
+        ("Ethernet3/35/3", "1/83"),
+        ("Ethernet3/35/4", "1/84"),
+    ],
+    secondary_ixia_ports=[
+        ("Ethernet3/36/1", "9/1"),
+        ("Ethernet3/36/2", "9/2"),
+        ("Ethernet3/36/3", "9/3"),
+        ("Ethernet3/36/4", "9/4"),
+    ],
+    dut_bgp_as=65006,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/nrqeb006_ash6_openr_config",
+    openr_standalone_link=_NRQEB006_OPENR_LINK,
+    peer_groups=_ebb_peer_groups(),
+)
+
+_NRQEB007_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100307,
+    owner=OpenRStandaloneEndpoint(
+        hostname="nrqeb007.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.7.7/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3071/127",
+        link_local_cidr="fe80::100:307:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="nrqeb006.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.7.6/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3070/127",
+        link_local_cidr="fe80::100:307:0/64",
+    ),
+    speed="400g",
+)
+
+NRQEB007_ASH6 = PhysicalInventory(
+    device_name="nrqeb007.ash6",
+    network_role=NetworkRole.EB,
+    default_physical_interface_profile=_EBB_PHYSICAL_INTERFACE_PROFILE,
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA03_ASH6,
+    secondary_ixia_chassis_ip=IXIA11_ASH6,
+    ixia_ports=[
+        ("Ethernet3/35/1", "1/85"),
+        ("Ethernet3/35/2", "1/86"),
+        ("Ethernet3/35/3", "1/87"),
+        ("Ethernet3/35/4", "1/88"),
+    ],
+    secondary_ixia_ports=[
+        ("Ethernet3/36/1", "9/5"),
+        ("Ethernet3/36/2", "9/6"),
+        ("Ethernet3/36/3", "9/7"),
+        ("Ethernet3/36/4", "9/8"),
+    ],
+    dut_bgp_as=65007,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/nrqeb007_ash6_openr_config",
+    openr_standalone_link=_NRQEB007_OPENR_LINK,
+    peer_groups=_ebb_peer_groups(),
+)
+
+
+# ─── nrqeb008 ↔ nrqeb009 OpenR-standalone pair ───────────────────────────
+
+_NRQEB008_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100308,
+    owner=OpenRStandaloneEndpoint(
+        hostname="nrqeb008.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.8.8/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3080/127",
+        link_local_cidr="fe80::100:308:0/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="nrqeb009.ash6",
+        member_interface="Ethernet3/1/1",
+        ipv4_cidr="10.217.8.9/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3081/127",
+        link_local_cidr="fe80::100:308:1/64",
+    ),
+    speed="400g",
+)
+
+NRQEB008_ASH6 = PhysicalInventory(
+    device_name="nrqeb008.ash6",
+    network_role=NetworkRole.EB,
+    default_physical_interface_profile=_EBB_PHYSICAL_INTERFACE_PROFILE,
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA03_ASH6,
+    secondary_ixia_chassis_ip=IXIA11_ASH6,
+    ixia_ports=[
+        ("Ethernet3/35/1", "1/89"),
+        ("Ethernet3/35/2", "1/90"),
+        ("Ethernet3/35/3", "1/91"),
+        ("Ethernet3/35/4", "1/92"),
+    ],
+    secondary_ixia_ports=[
+        ("Ethernet3/36/1", "10/1"),
+        ("Ethernet3/36/2", "10/2"),
+        ("Ethernet3/36/3", "10/3"),
+        ("Ethernet3/36/4", "10/4"),
+    ],
+    dut_bgp_as=65008,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/nrqeb008_ash6_openr_config",
+    openr_standalone_link=_NRQEB008_OPENR_LINK,
+    peer_groups=_ebb_peer_groups(),
+)
+
+_NRQEB009_OPENR_LINK = OpenRStandaloneLink(
+    port_channel_id=100309,
+    owner=OpenRStandaloneEndpoint(
+        hostname="nrqeb009.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.9.9/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3091/127",
+        link_local_cidr="fe80::100:309:1/64",
+    ),
+    helper=OpenRStandaloneEndpoint(
+        hostname="nrqeb008.ash6",
+        member_interface="Ethernet3/2/1",
+        ipv4_cidr="10.217.9.8/31",
+        ipv6_cidr="2620:0:1cff:dead:bef1:100:13:3090/127",
+        link_local_cidr="fe80::100:309:0/64",
+    ),
+    speed="400g",
+)
+
+NRQEB009_ASH6 = PhysicalInventory(
+    device_name="nrqeb009.ash6",
+    network_role=NetworkRole.EB,
+    default_physical_interface_profile=_EBB_PHYSICAL_INTERFACE_PROFILE,
+    usage=frozenset({"cicd", "qual"}),
+    primary_ixia_chassis_ip=IXIA03_ASH6,
+    secondary_ixia_chassis_ip=IXIA11_ASH6,
+    ixia_ports=[
+        ("Ethernet3/35/1", "1/93"),
+        ("Ethernet3/35/2", "1/94"),
+        ("Ethernet3/35/3", "1/95"),
+        ("Ethernet3/35/4", "1/96"),
+    ],
+    secondary_ixia_ports=[
+        ("Ethernet3/36/1", "10/5"),
+        ("Ethernet3/36/2", "10/6"),
+        ("Ethernet3/36/3", "10/7"),
+        ("Ethernet3/36/4", "10/8"),
+    ],
+    dut_bgp_as=65009,
+    bgpcpp_configerator_path=_EBB_BGPCPP_PATH,
+    openr_configerator_path="taac/ebb_ci_cd_configs/nrqeb009_ash6_openr_config",
+    openr_standalone_link=_NRQEB009_OPENR_LINK,
     peer_groups=_ebb_peer_groups(),
 )
 
