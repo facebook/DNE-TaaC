@@ -835,6 +835,7 @@ FUJI_SSW_ECMP_ONLY_RESOURCE_TESTING: TestConfig = (
         # ecmp_resource_percentage) -- re-tune there after the first run.
         asic=EcmpAsic.TOMAHAWK4,
         pool=FUJI_SSW_MAIN_ECMP_POOL,
+        basset_pool="dne.test",
         # Matches the /80 the dne_lab_ixia override writes on these RIFs. Sets
         # the DUT RIF prefix_length and the IXIA device-group mask only -- the
         # ADVERTISED prefix length is MAIN_PREFIX_LENGTH (64) and is unaffected.
