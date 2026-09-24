@@ -3049,6 +3049,8 @@ class TaacRunner:
         end_timestamp: str,
     ) -> t.List[HostLog]:
         rsyslog_services = self.device_to_rsyslog_services.get(hostname, [])
+        if not rsyslog_services:
+            return []
         driver = await async_get_device_driver(hostname)
         # pyre-fixme[16]: `AbstractSwitch` has no attribute `async_is_netos`.
         is_netos = await driver.async_is_netos()
@@ -4766,13 +4768,17 @@ class TaacRunner:
                 if periodic_check_result:
                     # Append log URL to the message if available
                     message = periodic_check_result.message
+                    status = periodic_check_result.status
+                    if status == hc_types.HealthCheckStatus.SKIP:
+                        status = hc_types.HealthCheckStatus.ERROR
+                        message = f"Periodic task produced no usable data: {message}"
                     if periodic_task_worker._log_everpaste_url:
                         message += f"\nLog: {periodic_task_worker._log_everpaste_url}"
 
                     result = await async_write_test_result(
                         test_case_name,
                         devices=[test_device],
-                        test_status=periodic_check_result.status,
+                        test_status=status,
                         start_time=test_case_start_time,
                         check_name=periodic_check_result.name,
                         # async_write_test_result already everpaste-shortens long
