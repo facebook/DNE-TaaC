@@ -1205,7 +1205,7 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
         )
         logger = logging.getLogger("taac-fallback-selected-task-test")
         logger.setLevel(logging.INFO)
-        runner = TaacRunner(config, logger=logger)
+        runner = TaacRunner(config, logger=logger, skip_basset_reservation=True)
         runner.run_tasks = AsyncMock()
         runner._add_oss_mock_device_data = MagicMock()
         runner._add_host_to_device_os_type_data = MagicMock()

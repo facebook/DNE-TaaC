@@ -52,9 +52,6 @@ _JQ_ENDPOINT_ACCESS_PATTERN = re.compile(
 )
 
 if not TAAC_OSS:
-    from neteng.netcastle.teams.dne_regression.utils.package_fetcher_utils import (
-        DnePackageFetcher,
-    )
     from taac.internal.test_bed_chunker import TestBedChunker
 
 
@@ -655,7 +652,7 @@ class TestSetupOrchestrator:
     async def async_resolve_basset_endpoints(  # noqa: C901
         self,
     ) -> t.Dict[str, str]:
-        """Reserve query-backed endpoints and bind every IXIA profile."""
+        """Reserve endpoints and bind query-backed IXIA profiles."""
         primary_endpoints = self.ixia_candidates[0].endpoints
         query_endpoints = [
             endpoint
@@ -669,6 +666,7 @@ class TestSetupOrchestrator:
                 for endpoint in candidate.endpoints
             ):
                 raise ValueError("Basset queries must be declared on primary endpoints")
+            await self._async_reserve_static_endpoints()
             return {}
         if not TAAC_OSS:
             from taac.internal.internal_utils import (
@@ -875,7 +873,31 @@ class TestSetupOrchestrator:
             self.logger.info(
                 f"Resolved Basset endpoint {logical_name!r} to {hostname!r}"
             )
+        await self._async_reserve_static_endpoints()
         return bindings
+
+    async def _async_reserve_static_endpoints(self) -> None:
+        if TAAC_OSS or self._skip_basset_reservation or self.basset_butler is not None:
+            return
+        static_device_names = [
+            endpoint.name
+            for endpoint in self.ixia_candidates[0].endpoints
+            if endpoint.name not in self._query_reserved_device_names
+        ]
+        if not static_device_names:
+            return
+        if not self.test_config.basset_pool:
+            raise ValueError("Static Basset endpoints require a non-empty basset_pool")
+
+        from taac.internal.internal_utils import (
+            async_reserve_devices_in_basset,
+        )
+
+        success, self.basset_butler = await async_reserve_devices_in_basset(
+            self.test_config, static_device_names, self.logger
+        )
+        if not success:
+            raise Exception("Failed to reserve test devices in Basset")
 
     async def async_setUp(self) -> None:
         test_device_names = [
@@ -963,6 +985,11 @@ class TestSetupOrchestrator:
                 _log(
                     "\033[32m[SETUP]\033[0m Phase 1: Basset reservation "
                     "completed during endpoint resolution"
+                )
+            elif self.basset_butler is not None:
+                _log(
+                    "\033[32m[SETUP]\033[0m Phase 1: Static Basset reservation "
+                    "completed before setup tasks"
                 )
             else:
                 _log("\033[36m[SETUP]\033[0m Phase 1: Reserving devices in Basset...")
