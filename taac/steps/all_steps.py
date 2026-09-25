@@ -12,6 +12,7 @@ TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 # OSS_STEPS.append(CustomStep) below doesn't trip "may be uninitialized".
 if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.internal.steps.custom_step import CustomStep
+from taac.steps.oss_custom_step import OssCustomStep
 from taac.steps.step import Step
 from taac.steps.step_definitions import (
     AllocateCgroupSliceMemory,
@@ -68,9 +69,13 @@ OSS_STEPS: t.List[t.Type[Step]] = [
 ]
 
 # CustomStep lives under taac.internal — only add to OSS_STEPS when running
-# against the Meta-internal environment.
+# against the Meta-internal environment. Under OSS the same StepName is served
+# by OssCustomStep; leaving it out entirely made every playbook with a custom
+# step die on `NAME_TO_STEP[StepName.CUSTOM_STEP]`.
 if not TAAC_OSS:
     OSS_STEPS.append(CustomStep)
+else:
+    OSS_STEPS.append(OssCustomStep)
 
 if not TAAC_OSS:
     from taac.internal.steps.internal_steps import INTERNAL_STEPS
