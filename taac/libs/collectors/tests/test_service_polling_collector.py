@@ -47,6 +47,9 @@ def _make_driver(responses: t.Dict[str, str]) -> MagicMock:
         return "\n\n".join(blocks)
 
     driver.async_run_cmd_on_shell = AsyncMock(side_effect=_run)
+    driver.async_get_systemctl_service_name = AsyncMock(
+        side_effect=lambda service: service
+    )
     return driver
 
 
@@ -168,6 +171,37 @@ class TestServicePollingCollector(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.per_service["svcA"], 1)
         self.assertEqual(row.per_service["svcB"], 2)
         self.assertEqual(row.per_service["svcC"], 3)
+
+    async def test_native_units_are_resolved_but_results_keep_logical_names(
+        self,
+    ) -> None:
+        self.driver.async_get_systemctl_service_name = AsyncMock(
+            side_effect=lambda service: {
+                "bgpd": "netos.service.fboss_bgp",
+                "fsdb": "netos.service.fboss_fsdb",
+            }[service]
+        )
+        self.driver.async_run_cmd_on_shell = AsyncMock(
+            return_value=(
+                "Id=netos.service.fboss_bgp.service\n"
+                + LOADED_ACTIVE.format(value="100")
+                + "\n\nId=netos.service.fboss_fsdb.service\n"
+                + LOADED_ACTIVE.format(value="200")
+            )
+        )
+        self.collector.services = ["bgpd", "fsdb"]
+
+        await self.collector._poll_once()
+
+        run_args = self.driver.async_run_cmd_on_shell.await_args
+        assert run_args is not None
+        command = run_args.args[0]
+        self.assertIn("netos.service.fboss_bgp", command)
+        self.assertIn("netos.service.fboss_fsdb", command)
+        self.assertEqual(
+            {"bgpd": 100, "fsdb": 200},
+            self.collector.rows[0].per_service,
+        )
 
     async def test_ssh_error_marks_all_services_unmeasurable(self) -> None:
         self.driver.async_run_cmd_on_shell = AsyncMock(

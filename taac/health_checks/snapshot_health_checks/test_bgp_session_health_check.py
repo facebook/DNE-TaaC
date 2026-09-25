@@ -151,7 +151,10 @@ class TestBgpReconvergenceAssertion(unittest.IsolatedAsyncioTestCase):
     ):
         check = _make_check()
         check.driver = SimpleNamespace(
-            async_run_cmd_on_shell=AsyncMock(return_value=restart_epoch)
+            async_run_cmd_on_shell=AsyncMock(return_value=restart_epoch),
+            async_get_systemctl_service_name=AsyncMock(
+                side_effect=lambda service: service
+            ),
         )
         return await check.compare_snapshots(
             obj=SimpleNamespace(name=obj_name),

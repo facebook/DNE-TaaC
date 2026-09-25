@@ -22,6 +22,9 @@ class TestRouteConvergenceTimeHealthCheck(unittest.IsolatedAsyncioTestCase):
             logger=self.logger, ixia=self.mock_ixia
         )
         self.health_check.driver = AsyncMock()
+        self.health_check.driver.async_get_log_source_command = AsyncMock(
+            side_effect=lambda path, **_kwargs: f"zcat -f {path}"
+        )
 
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "rtsw002.l1003.c084.ash6"

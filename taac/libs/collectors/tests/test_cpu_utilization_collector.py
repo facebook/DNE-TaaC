@@ -30,6 +30,9 @@ def _make_driver(cpu_ns_by_service: t.Dict[str, t.Any]) -> MagicMock:
         return "\n\n".join(blocks)
 
     driver.async_run_cmd_on_shell = AsyncMock(side_effect=_run)
+    driver.async_get_systemctl_service_name = AsyncMock(
+        side_effect=lambda service: service
+    )
     return driver
 
 

@@ -19,6 +19,9 @@ class TestSystemctlActiveStateHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.logger = MagicMock(spec=ConsoleFileLogger)
         self.health_check = SystemctlActiveStateHealthCheck(logger=self.logger)
         self.health_check.driver = AsyncMock()
+        self.health_check.driver.async_get_systemctl_service_name = AsyncMock(
+            side_effect=lambda service: service
+        )
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "rsw001.p001.f01.ash6"
 
@@ -57,6 +60,24 @@ class TestSystemctlActiveStateHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
         self.health_check.driver.async_run_cmd_on_shell.assert_awaited_once_with(
             "systemctl show bgpd --no-page"
+        )
+
+    async def test_native_service_name_is_resolved_by_driver(self):
+        self.health_check.driver.async_get_systemctl_service_name = AsyncMock(
+            return_value="netos.service.fboss_bgp"
+        )
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            return_value="LoadState=loaded\nActiveState=active\n"
+        )
+
+        is_active = await self.health_check.async_is_systemctl_service_active(
+            self.device.name,
+            "bgpd",
+        )
+
+        self.assertTrue(is_active)
+        self.health_check.driver.async_run_cmd_on_shell.assert_awaited_once_with(
+            "systemctl show netos.service.fboss_bgp --no-page"
         )
 
     async def test_disabled_service_is_skipped(self):

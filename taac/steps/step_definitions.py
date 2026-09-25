@@ -4943,29 +4943,10 @@ def create_wedge_agent_crash_step(
     description: t.Optional[str] = None,
     step_id: t.Optional[str] = None,
 ) -> Step:
-    """Crash and verify replacement of the ``wedge_agent.service`` main process."""
-    return create_run_ssh_command_step(
-        cmd=(
-            "old_pid=$(systemctl show --property=MainPID --value "
-            "wedge_agent.service) || exit 1; "
-            "case \"$old_pid\" in ''|0|*[!0-9]*) "
-            "echo 'wedge_agent has no valid running MainPID' >&2; exit 1;; esac; "
-            "systemctl kill --kill-who=main --signal=SIGKILL "
-            "wedge_agent.service || exit 1; "
-            'attempt=0; while [ "$attempt" -lt 50 ]; do '
-            "new_pid=$(systemctl show --property=MainPID --value "
-            "wedge_agent.service) || exit 1; "
-            'case "$new_pid" in '
-            '0) echo "Verified wedge_agent MainPID transition: $old_pid -> 0"; '
-            "exit 0;; "
-            "''|*[!0-9]*) ;; "
-            '*) if [ "$new_pid" -ne "$old_pid" ]; then '
-            'echo "Verified wedge_agent MainPID transition: '
-            '$old_pid -> $new_pid"; exit 0; fi;; esac; '
-            "attempt=$((attempt + 1)); sleep 0.1; done; "
-            'echo "wedge_agent MainPID did not change from $old_pid after SIGKILL" '
-            ">&2; exit 1"
-        ),
+    """Crash Agent through the driver's OS-aware service-control API."""
+    return create_service_interruption_step(
+        service=taac_types.Service.AGENT,
+        trigger=taac_types.ServiceInterruptionTrigger.CRASH,
         description=description or "Crash the wedge_agent main process with SIGKILL",
         step_id=step_id,
         device_regexes=device_regexes,

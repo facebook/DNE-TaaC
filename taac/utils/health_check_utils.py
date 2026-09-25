@@ -261,17 +261,25 @@ async def async_query_journalctl_unclean_exits(
     """
     if not services:
         return {}
-    services_set = set(services)
-    unit_args = " ".join(f"-u {s}.service" for s in services)
-    # journalctl ``--since=@<epoch>`` / ``--until=@<epoch>`` are numeric
-    # timestamps. ``--until`` is inclusive to the second; add 1 so a Failed
-    # message logged AT window_end still lands inside the query.
-    cmd = (
-        f"journalctl {unit_args} "
-        f"--since=@{int(window_start)} --until=@{int(window_end) + 1} "
-        f"--no-pager --output=short-iso"
-    )
     try:
+        resolved_services = [
+            await driver.async_get_systemctl_service_name(service)
+            for service in services
+        ]
+        resolved_to_logical: t.Dict[str, t.List[str]] = {}
+        for logical, resolved in zip(services, resolved_services, strict=True):
+            resolved_to_logical.setdefault(
+                resolved.removesuffix(".service"), []
+            ).append(logical)
+        unit_args = " ".join(f"-u {service}.service" for service in resolved_to_logical)
+        # journalctl ``--since=@<epoch>`` / ``--until=@<epoch>`` are numeric
+        # timestamps. ``--until`` is inclusive to the second; add 1 so a Failed
+        # message logged AT window_end still lands inside the query.
+        cmd = (
+            f"journalctl {unit_args} "
+            f"--since=@{int(window_start)} --until=@{int(window_end) + 1} "
+            f"--no-pager --output=short-iso"
+        )
         output = await driver.async_run_cmd_on_shell(cmd) or ""
     except Exception:
         return {}
@@ -283,13 +291,13 @@ async def async_query_journalctl_unclean_exits(
         reason = m.group("reason")
         if reason not in _UNCLEAN_JOURNAL_RESULTS:
             continue
-        svc = m.group("svc")
+        resolved_service = m.group("svc")
         # Belt-and-suspenders on top of the ``systemd[<pid>]:`` regex
         # anchor: if a match somehow leaks through for a unit that isn't
         # in the caller's requested set (a related instance unit systemd
         # pulled in by ``Wants=``, an accidentally-broad regex match on a
         # future systemd version), don't attribute it to the check.
-        if svc not in services_set:
+        if resolved_service not in resolved_to_logical:
             continue
         # The line typically starts with an ISO timestamp; grab the first
         # whitespace-separated token as the timestamp string. If the line is
@@ -297,7 +305,8 @@ async def async_query_journalctl_unclean_exits(
         # is silently dropped.
         first_tok = line.split(" ", 1)[0] if line else ""
         timestamp = first_tok or line
-        result.setdefault(svc, []).append((timestamp, reason))
+        for service in resolved_to_logical[resolved_service]:
+            result.setdefault(service, []).append((timestamp, reason))
     return result
 
 

@@ -1178,8 +1178,8 @@ class ScpFile(BaseTask):
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         if TAAC_OSS:
             raise NotImplementedError(
-                "ScpFile requires the Meta-internal ConfigeratorClient and "
-                "ParamikoClient and cannot run under TAAC_OSS=1."
+                "ScpFile requires Meta-internal config sources and cannot run "
+                "under TAAC_OSS=1."
             )
         self.logger.info(f"Running {self.NAME} task with params: {params}")
         hostname = params["hostname"]
@@ -1206,16 +1206,18 @@ class ScpFile(BaseTask):
                 "One of 'configerator_path', 'file_template', or 'file_content' must be provided"
             )
 
-        with tempfile.NamedTemporaryFile(
-            dir=tempfile.gettempdir(), mode="w", delete=False, newline="\n"
-        ) as tmp_file:
-            tmp_file.write(file_content)
-            local_file_path = tmp_file.name
-        with ParamikoClient(hostname) as client:
-            client.scp(
-                local_path=local_file_path,
-                remote_path=remote_path,
-            )
+        driver = await async_get_device_driver(hostname)
+        write_file = getattr(driver, "async_write_file_on_device", None)
+        if write_file is not None:
+            await write_file(file_content, remote_path)
+        else:
+            # Preserve support for non-FBOSS drivers that used the original
+            # driver-independent SCP implementation.
+            with tempfile.NamedTemporaryFile(mode="w", newline="\n") as local_file:
+                local_file.write(file_content)
+                local_file.flush()
+                with ParamikoClient(hostname) as client:
+                    client.scp(local_path=local_file.name, remote_path=remote_path)
         self.logger.info(f"Successfully copied file to {hostname}:{remote_path}")
 
 

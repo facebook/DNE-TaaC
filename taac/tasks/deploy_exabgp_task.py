@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import typing as t
 
-from neteng.netcastle.utils.paramiko_utils import ParamikoClient
+from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.tasks.base_task import BaseTask
 
 
@@ -53,8 +53,7 @@ class DeployExaBGPTask(BaseTask):
                     f"Contents: {os.listdir(local_dir)}"
                 )
 
-            client = ParamikoClient(hostname)
-            client.scp(local_path=local_par, remote_path=remote_path)
+            await self.driver().async_copy_file_to_device(local_par, remote_path)
             self.logger.info(f"SCPed exabgpd.par to {hostname}:{remote_path}")
 
             await self.driver().async_run_cmd_on_shell(f"chmod +x {remote_path}")
@@ -68,7 +67,9 @@ class DeployExaBGPTask(BaseTask):
                         f"Skipping CLI deployment. Contents: {os.listdir(local_dir)}"
                     )
                 else:
-                    client.scp(local_path=local_cli, remote_path=cli_remote_path)
+                    await self.driver().async_copy_file_to_device(
+                        local_cli, cli_remote_path
+                    )
                     self.logger.info(
                         f"SCPed exabgpcli.par to {hostname}:{cli_remote_path}"
                     )
@@ -112,5 +113,5 @@ class CleanupExaBGPTask(BaseTask):
         self.logger.info("Cleaned up ExaBGP files")
 
         if restart_bgpd:
-            await self.driver().async_run_cmd_on_shell("sudo systemctl start bgpd")
+            await self.driver().async_start_service(FbossSystemctlServiceName.BGP)
             self.logger.info("Restarted BGP++ on device")

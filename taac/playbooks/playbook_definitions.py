@@ -205,6 +205,14 @@ from taac.test_as_a_config.types import (
 )
 
 
+def _resource_accountant_validation_step() -> Step:
+    """Validate Agent rejection logs through the OS-aware log health check."""
+    return create_validation_step(
+        point_in_time_checks=[create_resource_accountant_activation_check()],
+        description="Validate ResourceAccountant activation",
+    )
+
+
 def create_stable_state_validation_playbook(
     *,
     name: str,
@@ -13051,10 +13059,7 @@ def create_ecmp_groups_playbooks(
                         duration=120,
                         description="Run traffic for steady state measurement",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
         ],
@@ -13101,10 +13106,7 @@ def create_ecmp_groups_playbooks(
                         duration=60,
                         description="Wait for BGP routes to converge after enabling device groups",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -13193,10 +13195,7 @@ def create_ecmp_groups_playbooks(
                         duration=60,
                         description="Wait for BGP routes to converge after enabling device groups",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -13285,10 +13284,7 @@ def create_ecmp_groups_playbooks(
                         duration=60,
                         description="Wait for BGP routes to converge after enabling device groups",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -13894,10 +13890,7 @@ def create_ecmp_members_playbooks(
                         duration=120,
                         description="Run traffic for steady state measurement",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
         ],
@@ -13962,10 +13955,7 @@ def create_ecmp_members_playbooks(
                         duration=60,
                         description="Wait for BGP routes to converge",
                     ),
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -14036,10 +14026,7 @@ def create_ecmp_members_playbooks(
             create_steps_stage(
                 stage_id="validate_resource_accountant",
                 steps=[
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -14110,10 +14097,7 @@ def create_ecmp_members_playbooks(
             create_steps_stage(
                 stage_id="validate_resource_accountant",
                 steps=[
-                    # Validate ResourceAccountant in wedge_agent log - FAIL if not found
-                    create_run_ssh_command_step(
-                        cmd="cat /var/facebook/logs/fboss/wedge_agent.log | grep -i 'ResourceAccountant' | tail -50 || (echo 'FAILED: ResourceAccountant not found in wedge_agent log' && exit 1)"
-                    ),
+                    _resource_accountant_validation_step(),
                 ],
             ),
             create_steps_stage(
@@ -14745,14 +14729,7 @@ def create_ecmp_only_groups_playbooks(
         ]
 
     def _resource_accountant_check_step():
-        return create_run_ssh_command_step(
-            cmd=(
-                "cat /var/facebook/logs/fboss/wedge_agent.log "
-                "| grep -i 'ResourceAccountant' | tail -50 "
-                "|| (echo 'FAILED: ResourceAccountant not found in agent log' "
-                "&& exit 1)"
-            )
-        )
+        return _resource_accountant_validation_step()
 
     def _flap_step(enable: bool):
         # Whole-fabric prefix churn during the disruption. churn_mode MUST
@@ -15112,14 +15089,7 @@ def create_ecmp_only_members_playbooks(
         ]
 
     def _resource_accountant_check_step():
-        return create_run_ssh_command_step(
-            cmd=(
-                "cat /var/facebook/logs/fboss/wedge_agent.log "
-                "| grep -i 'ResourceAccountant' | tail -50 "
-                "|| (echo 'FAILED: ResourceAccountant not found in agent log' "
-                "&& exit 1)"
-            )
-        )
+        return _resource_accountant_validation_step()
 
     def _flap_step(enable: bool):
         # Whole-fabric prefix churn during the disruption. churn_mode MUST

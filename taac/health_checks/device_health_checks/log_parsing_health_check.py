@@ -2,7 +2,6 @@
 
 # pyre-unsafe
 import re
-import shlex
 import time
 import typing as t
 
@@ -83,15 +82,16 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         end_time = int(check_params.get("end_time") or time.time())
         log_file_path = check_params["log_file_path"]
         if check_params.get("resource_accountant_activation"):
-            # Reading the full agent log can exceed NetOS command framing and
-            # discard its start sentinel. Limit remote output to the canonical
-            # rejection lines, then apply the exact timestamp window locally.
-            cmd = (
-                f"grep -Eia {shlex.quote(_RESOURCE_ACCOUNTANT_GREP_PATTERN)} "
-                f"{shlex.quote(log_file_path)} | tail -n 200"
-            )
+            # The driver reads Classic/NSPAWN files and native NetOS journald,
+            # while bounding remote output before applying exact timestamps.
             # pyrefly: ignore [missing-attribute]
-            log_content = await self.driver.async_run_cmd_on_shell(cmd)
+            log_content = await self.driver.async_read_log_file(
+                log_file_path,
+                start_time=int(start_time) if start_time is not None else None,
+                end_time=end_time,
+                grep_pattern=_RESOURCE_ACCOUNTANT_GREP_PATTERN,
+                tail_lines=200,
+            )
             matching_lines = find_resource_accountant_rejections(
                 log_content,
                 int(start_time) if start_time is not None else None,
@@ -117,18 +117,17 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         assert bool(include_regex) ^ bool(exclude_regex), (
             "Please provide either include_regex or exclude_regex, but not both"
         )
-        if start_time and end_time:
-            formatted_times = [
-                time.strftime("%b %e %H:%M", time.localtime(t))
-                for t in range(start_time, end_time, 60)
-            ]
-            formatted_times_regex = r"\(" + r"\|".join(formatted_times) + r"\)"
-            cmd = f'cat {log_file_path} | grep -ia "{formatted_times_regex}"'
-            # pyrefly: ignore [missing-attribute]
-            log_content = await self.driver.async_run_cmd_on_shell(cmd)
-        else:
-            # pyrefly: ignore [missing-attribute]
-            log_content = await self.driver.async_read_file(log_file_path)
+        read_kwargs = {
+            "start_time": int(start_time) if start_time is not None else None,
+            "end_time": end_time if start_time is not None else None,
+        }
+        if check_params.get("tail_lines") is not None:
+            read_kwargs["tail_lines"] = int(check_params["tail_lines"])
+        # pyrefly: ignore [missing-attribute]
+        log_content = await self.driver.async_read_log_file(
+            log_file_path,
+            **read_kwargs,
+        )
         matching_lines = [
             line
             for line in log_content.splitlines()

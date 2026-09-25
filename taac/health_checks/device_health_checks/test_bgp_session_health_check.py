@@ -38,9 +38,28 @@ class TestBgpSessionEstablishedHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.logger = MagicMock(spec=ConsoleFileLogger)
         self.health_check = BgpSessionEstablishedHealthCheck(logger=self.logger)
         self.health_check.driver = AsyncMock()
+        self.health_check.driver.async_get_systemctl_service_name = AsyncMock(
+            side_effect=lambda service: service
+        )
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "rsw001.p001.f01.ash6"
         self.input = hc_types.BaseHealthCheckIn()
+
+    async def test_restart_epoch_uses_native_service_name(self):
+        self.health_check.driver.async_get_systemctl_service_name = AsyncMock(
+            return_value="netos.service.fboss_bgp"
+        )
+        self.health_check.driver.async_run_cmd_on_shell = AsyncMock(
+            return_value="1700000000\n"
+        )
+
+        epoch = await self.health_check._get_service_restart_epoch(
+            self.device.name, "bgpd"
+        )
+
+        self.assertEqual(epoch, 1700000000.0)
+        command = self.health_check.driver.async_run_cmd_on_shell.await_args.args[0]
+        self.assertIn("systemctl show netos.service.fboss_bgp", command)
 
     async def test_read_bgpcpp_config_uses_netos_runtime_path(self):
         self.health_check.driver.async_is_netos = AsyncMock(return_value=True)

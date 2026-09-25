@@ -396,6 +396,7 @@ class RouteConvergenceTimeHealthCheck(
                 operation_type=operation_type,
                 start_time_str=start_time_str,
                 time_threshold=time_threshold,
+                start_stamp=start_stamp,
             )
             route_count = self._route_count(latest_metrics, operation_type)
             if latest_metrics is not None and (
@@ -512,6 +513,7 @@ class RouteConvergenceTimeHealthCheck(
         operation_type: str,
         start_time_str: t.Optional[str],
         time_threshold: int,
+        start_stamp: t.Optional[str] = None,
     ) -> t.Optional[RouteConvergenceMetrics]:
         """
         Parse the given log files and calculate route convergence metrics.
@@ -536,14 +538,27 @@ class RouteConvergenceTimeHealthCheck(
         aggregated: t.Optional[RouteConvergenceMetrics] = None
 
         for log_file in log_files:
+            # The driver selects a file stream for Classic/NSPAWN and a
+            # service journal for native NetOS. FBOSS messages retain their
+            # glog timestamps, so the AWK parser remains common.
+            # pyrefly: ignore [missing-attribute]
+            log_source_command = await self.driver.async_get_log_source_command(
+                log_file, start_time=start_stamp
+            )
             # Build the AWK command based on operation type
             if operation_type == "ADD":
                 cmd = self._build_add_awk_command(
-                    log_file, start_time_str, time_threshold
+                    log_file,
+                    start_time_str,
+                    time_threshold,
+                    log_source_command=log_source_command,
                 )
             else:
                 cmd = self._build_delete_awk_command(
-                    log_file, start_time_str, time_threshold
+                    log_file,
+                    start_time_str,
+                    time_threshold,
+                    log_source_command=log_source_command,
                 )
 
             # pyrefly: ignore [missing-attribute]
@@ -569,6 +584,7 @@ class RouteConvergenceTimeHealthCheck(
         log_file: str,
         start_time_str: t.Optional[str],
         time_threshold: int,
+        log_source_command: t.Optional[str] = None,
     ) -> str:
         """
         Build AWK command for ADD operation analysis.
@@ -578,7 +594,8 @@ class RouteConvergenceTimeHealthCheck(
         """
         start_time = start_time_str or "00:00:00"
 
-        return f"""zcat -f {shlex.quote(log_file)} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
+        source_command = log_source_command or f"zcat -f {shlex.quote(log_file)}"
+        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
 function time_to_sec(t) {{
     split(t, a, ":");
     split(a[3], b, ".");
@@ -623,6 +640,7 @@ END {{
         log_file: str,
         start_time_str: t.Optional[str],
         time_threshold: int,
+        log_source_command: t.Optional[str] = None,
     ) -> str:
         """
         Build AWK command for DELETE operation analysis.
@@ -632,7 +650,8 @@ END {{
         """
         start_time = start_time_str or "00:00:00"
 
-        return f"""zcat -f {shlex.quote(log_file)} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
+        source_command = log_source_command or f"zcat -f {shlex.quote(log_file)}"
+        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
 function time_to_sec(t) {{
     split(t, a, ":");
     split(a[3], b, ".");

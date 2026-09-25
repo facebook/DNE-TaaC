@@ -15,12 +15,71 @@ from taac.tasks.all import (
     CoopApplyPatchersTask,
     IxiaStopTrafficAndWaitTask,
     RunCommandsOnShell,
+    ScpFile,
     ValidateBgpcppUpdateGroupState,
 )
 
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
 RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
+
+
+class ScpFileTest(later.unittest.TestCase):
+    async def test_writes_through_os_aware_driver(self) -> None:
+        driver = MagicMock()
+        driver.async_write_file_on_device = AsyncMock()
+        task = ScpFile(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "rsw.example",
+                    "remote_path": "/etc/example/config",
+                    "file_content": "payload",
+                }
+            )
+
+        driver.async_write_file_on_device.assert_awaited_once_with(
+            "payload",
+            "/etc/example/config",
+        )
+
+    async def test_preserves_scp_fallback_for_non_fboss_drivers(self) -> None:
+        driver = SimpleNamespace()
+        client = MagicMock()
+        client_context = MagicMock()
+        client_context.__enter__.return_value = client
+        task = ScpFile(logger=MagicMock())
+
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(
+                f"{ALL_PATH}.ParamikoClient",
+                return_value=client_context,
+            ) as paramiko_client,
+        ):
+            await task.run(
+                {
+                    "hostname": "eos.example",
+                    "remote_path": "/mnt/flash/config",
+                    "file_content": "payload",
+                }
+            )
+
+        paramiko_client.assert_called_once_with("eos.example")
+        client.scp.assert_called_once()
+        self.assertEqual(
+            "/mnt/flash/config",
+            client.scp.call_args.kwargs["remote_path"],
+        )
 
 
 class CoopApplyPatchersTaskTest(later.unittest.TestCase):

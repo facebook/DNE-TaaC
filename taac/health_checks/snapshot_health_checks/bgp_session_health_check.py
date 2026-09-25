@@ -257,11 +257,14 @@ class BgpSessionHealthCheck(
         Uses ``date -d`` on the device to convert the systemd timestamp to epoch,
         avoiding timezone parsing issues on the devserver side.
         """
-        cmd = (
-            f"ts=$(systemctl show {service} -p ActiveEnterTimestamp --value); "
-            f'date -d "$ts" +%s 2>/dev/null || echo ""'
-        )
         try:
+            # pyrefly: ignore [missing-attribute]
+            service_name = await self.driver.async_get_systemctl_service_name(service)
+            cmd = (
+                f"ts=$(systemctl show {service_name} "
+                "-p ActiveEnterTimestamp --value); "
+                f'date -d "$ts" +%s 2>/dev/null || echo ""'
+            )
             # pyrefly: ignore [missing-attribute]
             output = await self.driver.async_run_cmd_on_shell(cmd)
             epoch_str = output.strip()

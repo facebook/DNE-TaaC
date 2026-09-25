@@ -207,7 +207,12 @@ class SystemctlActiveStateHealthCheck(
     async def async_is_systemctl_service_active(
         self, hostname: str, service: str
     ) -> bool:
-        cmd = f"systemctl show {service} --no-page"
+        # FBOSS service names are stable inside Classic/NSPAWN, but native
+        # NetOS exposes units such as netos.service.fboss_bgp. Keep the health
+        # check on the driver's canonical service-name resolution path.
+        # pyrefly: ignore [missing-attribute]
+        service_name = await self.driver.async_get_systemctl_service_name(service)
+        cmd = f"systemctl show {service_name} --no-page"
         # pyrefly: ignore [missing-attribute]
         output = await self.driver.async_run_cmd_on_shell(cmd)
         systemctl_unit_data = {}

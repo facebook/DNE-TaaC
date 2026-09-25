@@ -30,6 +30,9 @@ def _make_driver(mem_by_service: t.Dict[str, t.Any]) -> MagicMock:
         return "\n\n".join(blocks)
 
     driver.async_run_cmd_on_shell = AsyncMock(side_effect=_run)
+    driver.async_get_systemctl_service_name = AsyncMock(
+        side_effect=lambda service: service
+    )
     return driver
 
 
@@ -52,6 +55,9 @@ class TestMemoryUtilizationCollector(unittest.IsolatedAsyncioTestCase):
                 "Id=agent.service\nLoadState=loaded\nActiveState=active\n"
                 "MemoryCurrent=[not set]"
             )
+        )
+        driver.async_get_systemctl_service_name = AsyncMock(
+            side_effect=lambda service: service
         )
         collector = MemoryUtilizationCollector(
             driver=driver, services=["agent"], host="dut1", tmp_path="/dev/null"

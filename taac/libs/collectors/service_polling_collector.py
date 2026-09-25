@@ -36,6 +36,7 @@ Optional hooks for stateful collectors (e.g. CPU delta computation):
 """
 
 import logging
+import shlex
 import time
 import typing as t
 from dataclasses import dataclass, field
@@ -193,11 +194,16 @@ class ServicePollingCollector(BaseCollector):
         # "Id" is always requested so each block can be matched back to the
         # unit it describes -- see _parse_blocks_by_unit.
         props = ",".join(["Id"] + [p for p in self._systemd_properties() if p != "Id"])
-        units = " ".join(self.services)
         raw_per_service: t.Dict[str, t.Any] = {}
         notes: t.List[str] = []
 
         try:
+            resolved_services = [
+                await self.driver.async_get_systemctl_service_name(service)
+                for service in self.services
+            ]
+            service_to_unit = dict(zip(self.services, resolved_services, strict=True))
+            units = " ".join(shlex.quote(unit) for unit in resolved_services)
             # `or ""` because a driver may return None rather than raise (OSS
             # FbossSwitch.async_run_cmd_on_shell is `result.stdout if result
             # else None`). Without it the parse below raises AttributeError,
@@ -218,10 +224,11 @@ class ServicePollingCollector(BaseCollector):
 
         blocks_by_unit = self._parse_blocks_by_unit(output)
         for service in self.services:
+            unit = service_to_unit[service]
             # systemd reports Id with the unit suffix applied ("bgpd" ->
             # "bgpd.service"), so accept the requested name either way.
-            unit_data = blocks_by_unit.get(service) or blocks_by_unit.get(
-                f"{service}.service"
+            unit_data = blocks_by_unit.get(unit) or blocks_by_unit.get(
+                f"{unit}.service"
             )
             if unit_data is None:
                 # No block for this unit at all -- truncated or garbled output,

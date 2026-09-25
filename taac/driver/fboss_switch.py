@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import socket
 import time
 import typing
@@ -161,6 +162,8 @@ from taac.driver.driver_constants import (
     EGRESS_RATE_KEY,
     FBOSS_CRITICAL_CORE_DUMPS,
     FBOSS_CRITICAL_CORE_NON_SELECTOR,
+    FbossOsType,
+    FBOSS_SYSTEMCTL_SERVICE_NAME_MAP,
     FbossSystemctlServiceName,
     FSDB_PORT,
     HW_AGENT_BASE_PORT,
@@ -284,6 +287,7 @@ class FbossSwitch(AbstractSwitch):
     ) -> None:
         super().__init__(hostname, logger)
         self._client_provider = client_provider
+        self._native_netos_wedge_agent_units: Optional[Tuple[str, ...]] = None
 
     def _get_fboss_agent_client(self) -> ContextManager[Any]:
         """
@@ -2197,7 +2201,10 @@ class FbossSwitch(AbstractSwitch):
         Raises:
             EmptyOutputReturnError: If the command fails or returns empty output
         """
-        systemctl_cmd = f"systemctl show {service} -p MainPID | awk -F= '{{print $2}}'"
+        service_name = await self.async_get_systemctl_service_name(service)
+        systemctl_cmd = (
+            f"systemctl show {service_name} -p MainPID | awk -F= '{{print $2}}'"
+        )
         cmd_output = await self.async_run_cmd_on_shell(systemctl_cmd)
 
         if not cmd_output or not cmd_output.strip():
@@ -3294,9 +3301,8 @@ class FbossSwitch(AbstractSwitch):
     ) -> None:
         """Write ``contents`` to ``remote_path`` on this device.
 
-        The OSS equivalent of the ``scp_file`` task, which cannot run under
-        TAAC_OSS because it needs netcastle's ParamikoClient. Use this whenever a
-        generated config has to land on a device.
+        Use this whenever generated text has to land in the device's active
+        FBOSS namespace.
 
         The write is atomic at the destination (staged sibling + rename), so a
         daemon reading ``remote_path`` concurrently sees either the old file or
@@ -3386,7 +3392,8 @@ class FbossSwitch(AbstractSwitch):
         Returns:
             Dictionary {"Type":"simple", "Restart:"always"}
         """
-        cmd = f"systemctl show {service.value} --no-page"
+        service_name = await self.async_get_systemctl_service_name(service)
+        cmd = f"systemctl show {service_name} --no-page"
         output = await self.async_run_cmd_on_shell(cmd)
         result: Dict[str, str] = {}
         for line in output.split("\n"):
@@ -3539,7 +3546,8 @@ class FbossSwitch(AbstractSwitch):
         self.logger.debug(
             f"Attempting to perform {service.value} restart on {self.hostname}..."
         )
-        cmd = f"systemctl restart {service.value}"
+        service_name = await self.async_get_systemctl_service_name(service)
+        cmd = f"systemctl restart {service_name}"
         await self.async_run_cmd_on_shell(cmd)
 
         self.logger.debug(
@@ -3603,7 +3611,8 @@ class FbossSwitch(AbstractSwitch):
             )
             return
 
-        cmd: str = f"systemctl stop {service.value}"
+        service_name = await self.async_get_systemctl_service_name(service)
+        cmd: str = f"systemctl stop {service_name}"
         self.logger.info(f"Attempting to stop {service.value} on {self.hostname}...")
         await self.async_run_cmd_on_shell(cmd)
         service_counters = await self.async_get_systemd_service_counters(service)
@@ -3632,7 +3641,8 @@ class FbossSwitch(AbstractSwitch):
         service: Service,
         agents: Optional[List[str]] = None,
     ) -> None:
-        cmd: str = f"systemctl start {service.value}"
+        service_name = await self.async_get_systemctl_service_name(service)
+        cmd: str = f"systemctl start {service_name}"
         self.logger.info(f"Attempting to start {service.value} on {self.hostname}...")
         await self.async_run_cmd_on_shell(cmd)
         # verifying if the service is now active
@@ -3690,6 +3700,49 @@ class FbossSwitch(AbstractSwitch):
                 f"While verfiying {file_location} on {self.hostname}, exception was raised: {ex}"
             )
             raise ex
+
+    async def async_read_log_file(
+        self,
+        log_file_path: str,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        grep_pattern: Optional[str] = None,
+        tail_lines: Optional[int] = None,
+    ) -> str:
+        """Read a Classic/NSPAWN FBOSS log with optional remote filtering."""
+        if start_time is None and grep_pattern is None and tail_lines is None:
+            return await self.async_read_file(log_file_path)
+
+        command = f"cat {shlex.quote(log_file_path)}"
+        if start_time is not None:
+            stop_time = end_time if end_time is not None else int(time.time())
+            formatted_times = []
+            first_minute = start_time - (start_time % 60)
+            last_minute = stop_time - (stop_time % 60)
+            for timestamp in range(first_minute, last_minute + 1, 60):
+                local_time = time.localtime(timestamp)
+                # FBOSS files contain both syslog-style timestamps
+                # ("Sep 23 19:03") and glog prefixes ("I0923 19:03").
+                formatted_times.extend(
+                    [
+                        time.strftime("%b %e %H:%M", local_time),
+                        f"[IWEF]{time.strftime('%m%d %H:%M', local_time)}",
+                    ]
+                )
+            time_pattern = "(" + "|".join(formatted_times) + ")"
+            command += f" | grep -Eia {shlex.quote(time_pattern)}"
+        if grep_pattern is not None:
+            command += f" | grep -Eia {shlex.quote(grep_pattern)}"
+        if tail_lines is not None:
+            command += f" | tail -n {tail_lines}"
+        return await self.async_run_cmd_on_shell(command)
+
+    async def async_get_log_source_command(
+        self, log_file_path: str, start_time: Optional[str] = None
+    ) -> str:
+        """Return a shell command that streams an FBOSS log to stdout."""
+        return f"zcat -f {shlex.quote(log_file_path)}"
 
     async def async_delete_file(self, file_location: str) -> None:
         """
@@ -4850,12 +4903,35 @@ class FbossSwitch(AbstractSwitch):
         async with self.async_agent_client as client:
             return await client.getMultiSwitchRunState()
 
+    async def async_get_fboss_os_type(self) -> FbossOsType:
+        """Return the FBOSS host OS type.
+
+        The OSS driver supports classic FBOSS only. The internal driver
+        overrides this method with live, on-device NetOS detection.
+        """
+        return FbossOsType.CLASSIC
+
+    async def async_get_systemctl_service_name(
+        self,
+        service: Union[Service, str],
+    ) -> str:
+        """Return the systemd unit name for a service on this FBOSS OS."""
+        if isinstance(service, str):
+            try:
+                service = FbossSystemctlServiceName(service)
+            except ValueError:
+                return service
+        if not isinstance(service, FbossSystemctlServiceName):
+            return service.value
+        os_type = await self.async_get_fboss_os_type()
+        return FBOSS_SYSTEMCTL_SERVICE_NAME_MAP[os_type][service]
+
     async def async_is_netos(self) -> bool:
         """
         Check if the device runs NetOS.
-        OSS default: returns False. Internal mixin overrides with NetWhoAmI check.
+        OSS defaults to classic FBOSS. The internal mixin detects NetOS locally.
         """
-        return False
+        return await self.async_get_fboss_os_type() is not FbossOsType.CLASSIC
 
     async def async_is_mnpu(self, check_smc_tiers: bool = False) -> bool:
         # TODO: Implement for OSS. Requires detecting multi-NPU configuration

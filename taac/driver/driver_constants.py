@@ -694,6 +694,12 @@ class OtherSystemctlServiceName(Enum):
     RSYSLOG = "rsyslog"
 
 
+class FbossOsType(Enum):
+    CLASSIC = "classic_os"
+    NETOS_NSPAWN = "nspawn_netos"
+    NETOS_NATIVE = "native_netos"
+
+
 class FbossSystemctlServiceName(Enum):
     AGENT = "wedge_agent"
     BGP = "bgpd"
@@ -707,6 +713,50 @@ class FbossSystemctlServiceName(Enum):
     FBOSS_HW_AGENT_0 = "fboss_hw_agent@0"
     FBOSS_HW_AGENT_1 = "fboss_hw_agent@1"
     COOP = "coop"
+
+
+FBOSS_SYSTEMCTL_SERVICE_NAME_MAP: Dict[
+    FbossOsType, Dict[FbossSystemctlServiceName, str]
+] = {
+    FbossOsType.CLASSIC: {
+        service: service.value for service in FbossSystemctlServiceName
+    },
+    FbossOsType.NETOS_NSPAWN: {
+        service: service.value for service in FbossSystemctlServiceName
+    },
+    FbossOsType.NETOS_NATIVE: {
+        **{service: service.value for service in FbossSystemctlServiceName},
+        FbossSystemctlServiceName.AGENT: (
+            "netos.service.fboss_wedge_agent_{vendor}_{index}"
+        ),
+        FbossSystemctlServiceName.BGP: "netos.service.fboss_bgp",
+        FbossSystemctlServiceName.QSFP: "netos.service.fboss_qsfp_service",
+        FbossSystemctlServiceName.OPENR: "netos.service.openr",
+        FbossSystemctlServiceName.FBOSS_SW_AGENT: ("netos.service.fboss_sw_agent"),
+        FbossSystemctlServiceName.FSDB: "netos.service.fboss_fsdb",
+        FbossSystemctlServiceName.FBOSS_HW_AGENT_0: (
+            "netos.service.fboss_wedge_agent_{vendor}_0"
+        ),
+        FbossSystemctlServiceName.FBOSS_HW_AGENT_1: (
+            "netos.service.fboss_wedge_agent_{vendor}_1"
+        ),
+        FbossSystemctlServiceName.COOP: "netos.service.fboss_coop",
+    },
+}
+
+# Classic and NSPAWN expose these as files. Native NetOS emits the same service
+# logs through journald, so the internal driver uses this basename mapping to
+# select the corresponding native systemd unit.
+FBOSS_LOG_FILE_TO_SERVICE: Dict[str, FbossSystemctlServiceName] = {
+    "wedge_agent.log": FbossSystemctlServiceName.AGENT,
+    "bgpd.log": FbossSystemctlServiceName.BGP,
+    "bgp.log": FbossSystemctlServiceName.BGP,
+    "qsfp_service.log": FbossSystemctlServiceName.QSFP,
+    "openr.log": FbossSystemctlServiceName.OPENR,
+    "fboss_sw_agent.log": FbossSystemctlServiceName.FBOSS_SW_AGENT,
+    "fsdb.log": FbossSystemctlServiceName.FSDB,
+    "coop.log": FbossSystemctlServiceName.COOP,
+}
 
 
 class ModuleType(Enum):

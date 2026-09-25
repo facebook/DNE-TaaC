@@ -43,6 +43,9 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.health_check.driver.async_read_file = AsyncMock(
             return_value=_SAMPLE_COOP_CONFIG
         )
+        self.health_check.driver.async_read_log_file = AsyncMock(
+            return_value=_SAMPLE_COOP_CONFIG
+        )
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "test-host"
         self.input = hc_types.BaseHealthCheckIn()
@@ -81,6 +84,27 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(exclude, result.message)
         self.assertNotIn("Found", result.message)
 
+    async def test_tail_lines_bounds_remote_log_output(self):
+        result = await self.health_check._run(
+            self.device,
+            self.input,
+            {
+                "log_file_path": "/var/facebook/logs/fboss/wedge_agent.log",
+                "exclude_regex": "never-match",
+                "start_time": 100,
+                "end_time": 200,
+                "tail_lines": 500,
+            },
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        self.health_check.driver.async_read_log_file.assert_awaited_once_with(
+            "/var/facebook/logs/fboss/wedge_agent.log",
+            start_time=100,
+            end_time=200,
+            tail_lines=500,
+        )
+
     async def test_exclude_regex_match_returns_fail(self):
         """exclude_regex with at least one match returns FAIL with the lines."""
         check_params = {
@@ -98,7 +122,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
             "for switchId: 0\n"
         )
-        self.health_check.driver.async_run_cmd_on_shell.return_value = content
+        self.health_check.driver.async_read_log_file.return_value = content
         result = await self.health_check._run(
             self.device,
             self.input,
@@ -113,9 +137,13 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
         self.assertIn("NDP", result.message)
-        self.health_check.driver.async_run_cmd_on_shell.assert_awaited_once()
-        command = self.health_check.driver.async_run_cmd_on_shell.await_args.args[0]
-        self.assertIn("| tail -n 200", command)
+        self.health_check.driver.async_read_log_file.assert_awaited_once_with(
+            "/var/facebook/logs/fboss/wedge_agent.log",
+            start_time=start_time,
+            end_time=start_time + 120,
+            grep_pattern=log_parsing_health_check_module._RESOURCE_ACCOUNTANT_GREP_PATTERN,
+            tail_lines=200,
+        )
         self.health_check.driver.async_read_file.assert_not_awaited()
 
     def test_resource_accountant_accepts_netos_syslog_prefixed_event(self) -> None:
@@ -143,7 +171,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
             "for switchId: 0\n"
         )
-        self.health_check.driver.async_run_cmd_on_shell.return_value = (
+        self.health_check.driver.async_read_log_file.return_value = (
             self.health_check.driver.async_read_file.return_value
         )
         result = await self.health_check._run(
@@ -168,7 +196,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             "ResourceAccountant initialized\n"
         )
         self.health_check.driver.async_read_file.return_value = content
-        self.health_check.driver.async_run_cmd_on_shell.return_value = content
+        self.health_check.driver.async_read_log_file.return_value = content
         result = await self.health_check._run(
             self.device,
             self.input,
