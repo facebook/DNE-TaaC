@@ -696,7 +696,7 @@ EB03_LAB_ASH6 = PhysicalInventory(
     primary_ixia_chassis_ip=IXIA11_ASH6,
     ixia_ports=[
         ("Ethernet3/1/3", "6/5"),
-        ("Ethernet3/1/5", "6/6"),
+        ("Ethernet3/36/3", "3/1"),
         ("Ethernet3/36/1", "2/8"),
     ],
     dut_bgp_as=64981,
