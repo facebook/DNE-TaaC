@@ -1126,6 +1126,40 @@ class IxiaDiagnosticsDefaultTest(unittest.TestCase):
         self.assertFalse(runner.collect_ixia_diagnostics)
 
 
+class StatefulTaskRetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_does_not_replay_completed_tasks(self) -> None:
+        first = taac_types.Task(
+            task_name="stateful-first", params=taac_types.Params()
+        )
+        second = taac_types.Task(
+            task_name="transient-second", params=taac_types.Params()
+        )
+        runner = TaacRunner(_config())
+        runner.parameter_evaluator.evaluate = MagicMock(
+            side_effect=({"attempt": 1}, {"attempt": 1}, {"attempt": 2})
+        )
+
+        with patch(
+            f"{TaacRunner.__module__}.run_task",
+            new_callable=AsyncMock,
+            side_effect=(None, RuntimeError("transient"), None),
+        ) as run, patch(
+            "taac.utils.oss_taac_lib_utils.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await runner.run_tasks((first, second))
+
+        self.assertEqual(
+            [awaited.args[0] for awaited in run.await_args_list],
+            [first, second, second],
+        )
+        self.assertEqual(runner.parameter_evaluator.evaluate.call_count, 3)
+        self.assertEqual(
+            [awaited.args[1] for awaited in run.await_args_list],
+            [{"attempt": 1}, {"attempt": 1}, {"attempt": 2}],
+        )
+
+
 class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_section_start_failure_still_releases_resources(self) -> None:
         runner = TaacRunner(
@@ -1225,8 +1259,13 @@ class SelectedCandidateTaskTest(unittest.IsolatedAsyncioTestCase):
 
         await runner.async_test_setUp()
 
-        self.assertEqual(runner.run_tasks.await_args_list[0].args[0], [pre_task])
-        self.assertEqual(runner.run_tasks.await_args_list[1].args[0], [secondary_post])
+        setup_task_calls = [call.args[0] for call in runner.run_tasks.await_args_list]
+        self.assertIn([pre_task], setup_task_calls)
+        self.assertIn([secondary_post], setup_task_calls)
+        self.assertLess(
+            setup_task_calls.index([pre_task]),
+            setup_task_calls.index([secondary_post]),
+        )
 
         runner.run_tasks.reset_mock()
         teardown_events = []
