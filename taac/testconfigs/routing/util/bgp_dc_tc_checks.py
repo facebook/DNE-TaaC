@@ -143,6 +143,8 @@ _PLAYBOOK_EXPECTED_UNCLEAN_EXIT_SERVICES = {
 _PLAYBOOKS_CLEAR_IXIA_TRAFFIC_STATS = {
     "test_agent_coldboot",
     "test_fboss_hw_agent_0_coldboot",
+    "test_fboss_hw_agent_0_crash",
+    "test_fboss_sw_agent_crash",
     "test_qsfp_service_warmboot_and_agent_coldboot",
 }
 
