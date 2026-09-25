@@ -144,6 +144,8 @@ from taac.steps.step_definitions import (
     create_mass_bgp_peer_toggle_step,
     create_performance_scaling_convergence_step,
     create_performance_scaling_egress_sweep_aggregator_step,
+    create_openr_scale_performance_cleanup_step,
+    create_openr_scale_performance_step,
     create_register_patcher_step,
     create_run_ssh_command_step,
     create_run_task_step,
@@ -3509,42 +3511,113 @@ def create_case2_tcp_socket_data_collection_playbook(
 
 
 def create_openr_subif_adjacency_scale_playbook(
+    dut_name: str,
+    peer_name: str,
+    port_channel: str,
+    setup_script_path: str,
+    num_subinterfaces: int,
+    start_vlan: int,
+    dut_octet: int,
+    peer_octet: int,
+    baseline_neighbor_count: int,
     expected_neighbor_count: int,
-    convergence_wait_seconds: int,
     postcheck_retry_count: int,
     postcheck_retry_delay_seconds: float,
 ) -> Playbook:
-    """Open/R sub-interface adjacency scaling playbook.
+    """Create and validate Open/R sub-interface adjacency scale in order.
 
-    Verifies Open/R responds, waits for convergence, then asserts the DUT has
-    exactly ``expected_neighbor_count`` ESTABLISHED Open/R Spark adjacencies.
+    Setup remains in the Playbook because the performance bracket measures
+    setup through the first successful adjacency-count match.
 
-    - precheck: Open/R Thrift is reachable on the EOS endpoints (allow_zero).
-    - stage: wait for adjacencies to form on the freshly-created sub-interfaces.
-    - postcheck: exactly ``expected_neighbor_count`` ESTABLISHED adjacencies,
-      retried to absorb convergence lag; a mismatch is a FAIL verdict.
+    Args:
+        dut_name: Device whose Open/R counters and adjacency count are validated.
+        peer_name: Peer device configured with matching subinterfaces.
+        port_channel: Existing parent port-channel on both devices.
+        setup_script_path: Device-local setup script paired with lifecycle cleanup.
+        num_subinterfaces: Number of dot1q subinterfaces to create on each device.
+        start_vlan: First VLAN passed to the setup script.
+        dut_octet: Address octet assigned to DUT subinterfaces.
+        peer_octet: Address octet assigned to peer subinterfaces.
+        baseline_neighbor_count: Exact adjacency count required before setup.
+        expected_neighbor_count: Exact adjacency count required after setup.
+        postcheck_retry_count: Number of post-setup adjacency retries.
+        postcheck_retry_delay_seconds: Base delay between adjacency retries.
+
     """
+    performance = {
+        "dut_name": dut_name,
+        "profile": "subif_adjacency",
+        "phase": "subif_adjacency",
+        "state_key": "openr_scale_test_1_subif_adjacency_performance",
+    }
+    steps = [
+        create_openr_scale_performance_step(
+            **performance,
+            action="start",
+        ),
+        create_run_task_step(
+            task_name="run_commands_on_shell",
+            params_dict={
+                "hostname": dut_name,
+                "cmds": [
+                    f"bash sudo timeout 600 bash {setup_script_path} "
+                    f"{port_channel} {num_subinterfaces} {start_vlan} "
+                    f"{dut_octet}"
+                ],
+                "validate_output": True,
+            },
+            set_outer_hostname=True,
+        ),
+        create_run_task_step(
+            task_name="run_commands_on_shell",
+            params_dict={
+                "hostname": peer_name,
+                "cmds": [
+                    f"bash sudo timeout 600 bash {setup_script_path} "
+                    f"{port_channel} {num_subinterfaces} {start_vlan} "
+                    f"{peer_octet}"
+                ],
+                "validate_output": True,
+            },
+            set_outer_hostname=True,
+        ),
+    ]
+    steps.extend(
+        [
+            create_validation_step(
+                point_in_time_checks=[
+                    create_openr_spark_neighbor_check(
+                        expected_neighbor_count=expected_neighbor_count,
+                        retry_count=postcheck_retry_count,
+                        retry_delay_seconds=postcheck_retry_delay_seconds,
+                        retry_delay_multiplier=1.0,
+                    )
+                ],
+                description=f"Verify exactly {expected_neighbor_count} Open/R adjacencies",
+            ),
+            create_openr_scale_performance_step(
+                **performance,
+                action="validate",
+            ),
+        ]
+    )
     return Playbook(
         name="openr_subif_adjacency_scale_playbook",
         prechecks=[
-            create_openr_spark_neighbor_check(allow_zero=True),
+            create_openr_spark_neighbor_check(
+                expected_neighbor_count=baseline_neighbor_count,
+            )
         ],
+        postchecks=[],
         stages=[
             create_steps_stage(
-                steps=[
-                    create_longevity_step(duration=convergence_wait_seconds),
-                ],
-                description=(
-                    "Wait for Open/R adjacencies to form on the new sub-interfaces"
-                ),
+                stage_id="openr_subif_adjacency_scale",
+                description="Create and validate Open/R sub-interface adjacencies",
+                steps=steps,
             ),
         ],
-        postchecks=[
-            create_openr_spark_neighbor_check(
-                expected_neighbor_count=expected_neighbor_count,
-                retry_count=postcheck_retry_count,
-                retry_delay_seconds=postcheck_retry_delay_seconds,
-            ),
+        cleanup_steps=[
+            create_openr_scale_performance_cleanup_step(**performance),
         ],
     )
 

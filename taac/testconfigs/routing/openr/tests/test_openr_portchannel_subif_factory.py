@@ -6,30 +6,19 @@ import unittest
 
 from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
     _CLEANUP_SCRIPT_PATH,
-    _script_setup_tasks,
     _script_teardown_tasks,
-    _SETUP_SCRIPT_PATH,
     create_openr_portchannel_subif_test_config,
 )
 
 _PC = "Port-Channel1910"
 
 
+def _task_params(task) -> dict:
+    return json.loads(task.params.json_params)
+
+
 def _cmds(task) -> list:
-    return json.loads(task.params.json_params)["cmds"]
-
-
-class ScriptSetupTasksTest(unittest.TestCase):
-    def test_single_task_with_full_args(self) -> None:
-        """One task that calls the pre-deployed setup script with pc/n/start/octet."""
-        tasks = _script_setup_tasks(
-            "eb04.lab.ash6", _PC, num_vlans=1024, start_vlan=1, octet=2
-        )
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(
-            _cmds(tasks[0]),
-            [f"bash sudo timeout 600 bash {_SETUP_SCRIPT_PATH} {_PC} 1024 1 2"],
-        )
+    return _task_params(task)["cmds"]
 
 
 class ScriptTeardownTasksTest(unittest.TestCase):
@@ -47,16 +36,33 @@ class ScriptTeardownTasksTest(unittest.TestCase):
 
 class TestConfigStructureTest(unittest.TestCase):
     def test_golden_structure(self) -> None:
-        """One setup + one teardown task per device, plus endpoints/playbook shape."""
+        """Setup runs in-playbook while teardown remains lifecycle-guaranteed."""
         config = create_openr_portchannel_subif_test_config(num_subinterfaces=4)
         self.assertEqual(config.name, "OPENR_PORTCHANNEL_SUBIF_SCALE_4")
-        self.assertEqual(len(config.setup_tasks or []), 2)
+        self.assertEqual([], list(config.setup_tasks or ()))
         self.assertEqual(len(config.teardown_tasks or []), 2)
+        for task in config.teardown_tasks or []:
+            self.assertEqual("run_commands_on_shell", task.task_name)
+            self.assertTrue(_task_params(task)["validate_output"])
+            self.assertIsNotNone(task.hostname)
+        self.assertEqual(
+            [
+                f"bash sudo timeout 600 bash {_CLEANUP_SCRIPT_PATH} {_PC} 4 1",
+            ],
+            _cmds((config.teardown_tasks or [])[0]),
+        )
+        self.assertEqual(
+            [
+                f"bash sudo timeout 600 bash {_CLEANUP_SCRIPT_PATH} {_PC} 4 1",
+            ],
+            _cmds((config.teardown_tasks or [])[1]),
+        )
         self.assertEqual(len(config.endpoints or []), 2)
         self.assertEqual(len(config.playbooks or []), 1)
         playbook = (config.playbooks or [])[0]
         self.assertEqual(playbook.name, "openr_subif_adjacency_scale_playbook")
-        self.assertEqual(len(playbook.postchecks or []), 1)
+        self.assertEqual([], list(playbook.postchecks or ()))
+        self.assertEqual(5, len(playbook.stages[0].steps))
 
     def test_skip_teardown_yields_no_teardown_tasks(self) -> None:
         """skip_teardown=True leaves the sub-interfaces in place."""
