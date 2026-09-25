@@ -115,6 +115,18 @@ class FbossPackage(Enum):
     QSFP = "fboss_qsfp_service"
     OPENR = "openr"
     FSDB = "fboss_fsdb"
+    # Deliberately absent, and do not re-add without field evidence that a
+    # successful `fboss-updater update stack` clears them:
+    #   fboss_forwarding_stack, fboss_forwarding_stack_disruptive
+    #     The spec, not installable components. Measured on
+    #     fsw004.p003.f01.qzd1 on 2026-09-24: a successful COLD update moved
+    #     agent, bgp, qsfp_service and fsdb to current, yet the disruptive
+    #     spec stayed `needed`. Either one parks the device DEAD for good on
+    #     the run that just fixed it.
+    #   fboss_qsfp_firmware
+    #     Installable by the updater, but whether it clears is untested: it
+    #     was already up to date on the device above, so the run proves
+    #     nothing, and it matched zero extra stale devices across 36 hosts.
     AGENT_CONFIG = "fboss_agent_config"
     AGENT_CONFIG_DISRUPTIVE = "fboss_agent_config_disruptive"
     BGP_CONFIG = "fboss_bgp_config"
