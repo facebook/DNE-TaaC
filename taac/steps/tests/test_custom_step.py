@@ -28,6 +28,35 @@ from taac.test_as_a_config.thrift_types import CustomStepInput, Step, TestConfig
 BASE_PATH = "neteng.test_infra.dne.taac.internal.steps.custom_step"
 
 
+class CustomStepSetupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_local_cleanup_skips_device_setup(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        parent_setup = AsyncMock()
+        with patch(f"{BASE_PATH}.Step.setUp", parent_setup):
+            for custom_step_name in (
+                "openr_scale_kvstore_state_cleanup",
+                "openr_scale_performance_cleanup",
+            ):
+                await step.setUp(
+                    MagicMock(spec=CustomStepInput),
+                    {"custom_step_name": custom_step_name},
+                )
+
+        parent_setup.assert_not_awaited()
+
+    async def test_performance_cleanup_dispatches_to_local_component(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        params = {
+            "custom_step_name": "openr_scale_performance_cleanup",
+            "action": "cleanup",
+        }
+        with patch(f"{BASE_PATH}.OpenRScalePerformanceCustomStep") as component:
+            component.return_value.run = AsyncMock()
+            await step.openr_scale_performance_cleanup(params)
+
+        component.return_value.run.assert_awaited_once_with(params)
+
+
 class TestNdpClear(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # Create mock objects for all required parameters

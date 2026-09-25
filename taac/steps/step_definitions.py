@@ -1535,6 +1535,53 @@ def create_openr_scale_injection_step(
     )
 
 
+def create_openr_scale_performance_step(
+    dut_name: str,
+    profile: str,
+    phase: str,
+    state_key: str,
+    action: t.Literal["start", "validate", "cleanup"],
+) -> Step:
+    """Create one side of an Open/R scale performance bracket."""
+    if action not in {"start", "validate", "cleanup"}:
+        raise ValueError(f"Unsupported performance action {action!r}")
+    if not profile or not dut_name or not phase or not state_key:
+        raise ValueError("performance step requires a profile, DUT, phase, and state key")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "openr_scale_performance",
+            "action": action,
+            "dut_name": dut_name,
+            "profile": profile,
+            "phase": phase,
+            "state_key": state_key,
+        },
+        description=f"{action.title()} Open/R scale performance {phase} on {dut_name}",
+    )
+
+
+def create_openr_scale_performance_cleanup_step(
+    dut_name: str,
+    profile: str,
+    phase: str,
+    state_key: str,
+) -> Step:
+    """Remove one exact performance bracket state during playbook cleanup."""
+    if not profile or not dut_name or not phase or not state_key:
+        raise ValueError("performance cleanup requires a profile, DUT, phase, and state key")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "openr_scale_performance_cleanup",
+            "action": "cleanup",
+            "dut_name": dut_name,
+            "profile": profile,
+            "phase": phase,
+            "state_key": state_key,
+        },
+        description=f"Cleanup Open/R scale performance {phase} on {dut_name}",
+    )
+
+
 def create_openr_scale_kvstore_state_step(  # noqa: C901
     dut_name: str,
     seeds: t.Sequence[int],
@@ -4752,6 +4799,7 @@ def create_run_task_step(
     description: t.Optional[str] = None,
     ixia_needed: bool = False,
     start_traffic: bool = True,
+    set_outer_hostname: bool = False,
 ) -> Step:
     """
     Create a generic step to run a task.
@@ -4763,6 +4811,8 @@ def create_run_task_step(
         ixia_needed: Whether the task requires Ixia
         start_traffic: Whether the generic step pre-hook should ensure IXIA
             traffic is running before the task.
+        set_outer_hostname: Also copy ``params_dict["hostname"]`` to the outer
+            Task field used by runner-side routing.
 
     Returns:
         Step object for running the task
@@ -4781,6 +4831,9 @@ def create_run_task_step(
                     task_name=task_name,
                     params_dict=params_dict,
                     ixia_needed=ixia_needed,
+                    hostname=(
+                        params_dict.get("hostname") if set_outer_hostname else None
+                    ),
                 )
             )
         ),

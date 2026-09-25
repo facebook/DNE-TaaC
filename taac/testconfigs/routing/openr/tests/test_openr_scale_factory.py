@@ -24,11 +24,11 @@ def _step_params(config, index: int) -> dict:
 
 
 def _injection_step_params(config) -> dict:
-    return _step_params(config, 0)
+    return _step_params(config, 1)
 
 
 def _validation_step_params(config) -> dict:
-    return _step_params(config, 1)
+    return _step_params(config, 3)
 
 
 def _wired_check_names(config) -> set:
@@ -122,10 +122,9 @@ class OpenRScaleTestConfigTest(unittest.TestCase):
         wired = _wired_check_names(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
         self.assertNotIn(hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK, wired)
 
-    def test_resource_ceilings_do_not_gate_the_run(self) -> None:
-        """A 4,068 key-value injection legitimately spikes Open/R CPU while flooding
-        converges; failing on an arbitrary ceiling would pre-empt the result this
-        test exists to produce."""
+    def test_generic_resource_health_checks_are_not_used(self) -> None:
+        """Performance is gated by the Configerator-backed bracket, not the
+        generic device-wide CPU and memory health checks."""
         wired = _wired_check_names(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
         self.assertNotIn(hc_types.CheckName.CPU_UTILIZATION_CHECK, wired)
         self.assertNotIn(hc_types.CheckName.MEMORY_UTILIZATION_CHECK, wired)
@@ -134,7 +133,29 @@ class OpenRScaleTestConfigTest(unittest.TestCase):
         """The counter gate acknowledges this run's injection; the next ordered
         step validates every expected resident Value and decoded payload."""
         playbook = OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG.playbooks[0]
-        self.assertEqual(2, len(playbook.stages[0].steps))
+        steps = playbook.stages[0].steps
+        self.assertEqual(4, len(steps))
+        self.assertEqual(
+            [
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+            ],
+            [
+                _step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG, index)[
+                    "custom_step_name"
+                ]
+                for index in range(len(steps))
+            ],
+        )
+        self.assertEqual(
+            ["start", "validate"],
+            [
+                _step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG, index)["action"]
+                for index in (0, 2)
+            ],
+        )
         injection = _injection_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
         validation = _validation_step_params(OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG)
         self.assertEqual("openr_scale_injection", injection["custom_step_name"])

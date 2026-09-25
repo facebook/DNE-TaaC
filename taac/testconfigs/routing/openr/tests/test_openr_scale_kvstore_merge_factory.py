@@ -67,7 +67,24 @@ class OpenRScaleKvStoreMergeTestConfigTest(unittest.TestCase):
     def test_injection_uses_helper_binary_and_dut_inband_path(self) -> None:
         config = OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG
         steps = config.playbooks[0].stages[0].steps
-        for step in (steps[0], steps[2]):
+        self.assertEqual(
+            [
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+            ],
+            [_step_params(step)["custom_step_name"] for step in steps],
+        )
+        self.assertEqual(
+            ["start", "validate", "start", "validate"],
+            [_step_params(steps[index])["action"] for index in (0, 2, 4, 6)],
+        )
+        for step in (steps[1], steps[5]):
             params = _step_params(step)
             self.assertEqual("eb02.lab.ash6", params["helper_name"])
             self.assertEqual("eb04.lab.ash6", params["dut_name"])
@@ -103,9 +120,23 @@ class OpenRScaleKvStoreMergeTestConfigTest(unittest.TestCase):
         playbook = config.playbooks[0]
         self.assertEqual("openr_scale_kvstore_injection_playbook", playbook.name)
         self.assertEqual(1, len(playbook.stages))
-        self.assertEqual(2, len(playbook.stages[0].steps))
-        injection = _step_params(playbook.stages[0].steps[0])
-        validation = _step_params(playbook.stages[0].steps[1])
+        steps = playbook.stages[0].steps
+        self.assertEqual(4, len(steps))
+        self.assertEqual(
+            [
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+            ],
+            [_step_params(step)["custom_step_name"] for step in steps],
+        )
+        self.assertEqual(
+            ["start", "validate"],
+            [_step_params(steps[index])["action"] for index in (0, 2)],
+        )
+        injection = _step_params(steps[1])
+        validation = _step_params(steps[3])
 
         self.assertEqual("openr_scale_injection", injection["custom_step_name"])
         self.assertEqual("eb02.lab.ash6", injection["helper_name"])

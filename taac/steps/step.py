@@ -1,13 +1,23 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
+import os
 import time
 import typing as t
 from abc import ABC, abstractmethod
 
 
-# TestbedError defined locally for OSS compatibility
-class TestbedError(Exception):
-    pass
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if t.TYPE_CHECKING:
+    from neteng.netcastle.exceptions import TestbedError
+elif not TAAC_OSS:
+    from neteng.netcastle.exceptions import TestbedError
+else:
+
+    class TestbedError(Exception):
+        """OSS stub - netcastle TestbedError isn't shipped."""
+
+        pass
 
 
 from taac.constants import (

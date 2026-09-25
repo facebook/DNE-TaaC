@@ -14,6 +14,8 @@ from taac.steps.step_definitions import (
     create_openr_scale_injection_step,
     create_openr_scale_kvstore_state_cleanup_step,
     create_openr_scale_kvstore_state_step,
+    create_openr_scale_performance_cleanup_step,
+    create_openr_scale_performance_step,
 )
 from openr.tests.scale.scripts.scale_key_names import (
     bbf_simple_node_names,
@@ -54,14 +56,18 @@ def get_openr_scale_kvstore_injection_playbook(
     for the test contract and triage guidance.
 
     Sequence:
-    1. Trigger: run ``scale_test_server`` on the helper, injecting a synthetic
+    1. Performance baseline: load the required Configerator thresholds, capture
+       pre-operation CPU/RSS, and reset the KvStore convergence maximum.
+    2. Trigger: run ``scale_test_server`` on the helper, injecting a synthetic
        ``num_spines``/``num_leaves`` fabric into the DUT's KvStore over the
        DUT's inband address.
-    2. Delivery acknowledgement: the injection step samples
+    3. Delivery acknowledgement: the injection step samples
        ``kvstore.received_key_vals`` on the DUT immediately before and after the
        injector runs, and fails unless the increase is exactly the number of
        key-values the fabric should have sent.
-    3. Semantic validation: the next ordered step derives every expected key
+    4. Performance validation: wait for a fresh Open/R counter publication and
+       enforce CPU, RSS, and convergence thresholds.
+    5. Semantic validation: the final ordered step derives every expected key
        and Value independently from the fixed seed and topology, reads only
        those keys, and compares the outer Value and decoded payload fields.
 
@@ -79,10 +85,8 @@ def get_openr_scale_kvstore_injection_playbook(
     itself: the counters are read over Open/R Thrift, so a daemon that died
     under the load fails the step.
 
-    Nothing else is gated. There are no resource ceilings -- a 4,068 key-value
-    injection legitimately spikes Open/R CPU while flooding converges, and an
-    arbitrary ceiling would pre-empt the result this test exists to produce --
-    and no core-dump snapshot, because a crash that matters here already breaks
+    60-second mean CPU, RSS, and convergence are gated by the runtime Configerator policy. There
+    is no core-dump snapshot, because a crash that matters here already breaks
     the measurement: a restarted KvStore full-syncs from its peer, which lands
     in the same receive counter and fails the exact-equality assertion.
 
@@ -125,6 +129,13 @@ def get_openr_scale_kvstore_injection_playbook(
                     f"fabric into {dut_name} and validate every expected Value"
                 ),
                 steps=[
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_injection",
+                        phase="single",
+                        state_key="openr_scale_test_2_performance",
+                        action="start",
+                    ),
                     create_openr_scale_injection_step(
                         helper_name=helper_name,
                         dut_name=dut_name,
@@ -144,6 +155,13 @@ def get_openr_scale_kvstore_injection_playbook(
                         run_duration_sec=injection_run_duration_sec,
                         run_timeout_sec=injection_timeout_sec,
                     ),
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_injection",
+                        phase="single",
+                        state_key="openr_scale_test_2_performance",
+                        action="validate",
+                    ),
                     create_openr_scale_kvstore_state_step(
                         dut_name=dut_name,
                         seeds=[prefix_seed],
@@ -159,6 +177,14 @@ def get_openr_scale_kvstore_injection_playbook(
                     ),
                 ],
             ),
+        ],
+        cleanup_steps=[
+            create_openr_scale_performance_cleanup_step(
+                dut_name=dut_name,
+                profile="kvstore_injection",
+                phase="single",
+                state_key="openr_scale_test_2_performance",
+            )
         ],
     )
 
@@ -245,22 +271,50 @@ def get_openr_scale_kvstore_merge_playbook(
                 stage_id="openr_scale_kvstore_merge",
                 description="Inject two deterministic fabrics and validate KvStore merge semantics",
                 steps=[
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_merge",
+                        phase="after_a",
+                        state_key=f"{state_key}_performance",
+                        action="start",
+                    ),
                     create_openr_scale_injection_step(
                         **common_injection,
                         prefix_seed=seed_a,
                         expected_updated_key_vals_delta=expected_updated_a,
                         jq_var_prefix="openr_scale_merge_a",
                     ),
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_merge",
+                        phase="after_a",
+                        state_key=f"{state_key}_performance",
+                        action="validate",
+                    ),
                     create_openr_scale_kvstore_state_step(
                         **common_validation,
                         seeds=[seed_a],
                         checkpoint="after_a",
+                    ),
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_merge",
+                        phase="after_b",
+                        state_key=f"{state_key}_performance",
+                        action="start",
                     ),
                     create_openr_scale_injection_step(
                         **common_injection,
                         prefix_seed=seed_b,
                         expected_updated_key_vals_delta=expected_updated_b,
                         jq_var_prefix="openr_scale_merge_b",
+                    ),
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_merge",
+                        phase="after_b",
+                        state_key=f"{state_key}_performance",
+                        action="validate",
                     ),
                     create_openr_scale_kvstore_state_step(
                         **common_validation,
@@ -270,5 +324,19 @@ def get_openr_scale_kvstore_merge_playbook(
                 ],
             )
         ],
-        cleanup_steps=[create_openr_scale_kvstore_state_cleanup_step(state_key)],
+        cleanup_steps=[
+            create_openr_scale_kvstore_state_cleanup_step(state_key),
+            create_openr_scale_performance_cleanup_step(
+                dut_name=dut_name,
+                profile="kvstore_merge",
+                phase="after_b",
+                state_key=f"{state_key}_performance",
+            ),
+            create_openr_scale_performance_cleanup_step(
+                dut_name=dut_name,
+                profile="kvstore_merge",
+                phase="after_a",
+                state_key=f"{state_key}_performance",
+            ),
+        ],
     )

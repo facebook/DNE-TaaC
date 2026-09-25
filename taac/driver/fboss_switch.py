@@ -5734,6 +5734,19 @@ class FbossSwitch(AbstractSwitch):
         )
         return counters
 
+    async def async_reset_openr_recv_to_advertise_max(self) -> None:
+        """Reset Open/R's maximum receive-to-advertise convergence counter."""
+        if TAAC_OSS:
+            raise NotImplementedError(
+                "OpenR reset operations require Meta-internal OpenR infrastructure. "
+                "Not available in OSS mode."
+            )
+        async with get_openr_ctrl_cpp_client(to_fb_fqdn(self.hostname)) as client:
+            await client.resetRecvToAdvertiseMax()
+        self.logger.info(
+            f"{self.hostname}: reset kvstore.recv_to_advertise_max_ms"
+        )
+
     # =========================================================================
     # Open/R Thrift Action Methods (write operations)
     # =========================================================================

@@ -23,17 +23,6 @@ TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 from urllib.parse import quote  # noqa: F401
 
-if not TAAC_OSS:
-    from neteng.netcastle.exceptions import TestbedError
-else:
-    # OSS stub — netcastle isn't shipped. The only use site is an
-    # `except TestbedError:` precheck-failure handler against Meta-internal
-    # testbeds; nothing under OSS raises this, so the handler simply never
-    # matches.
-    class TestbedError(Exception):
-        pass
-
-
 from taac.constants import (
     DNE_LOG_DIR,
     FAILED_HC_STATUSES,
@@ -121,7 +110,7 @@ from taac.steps.all_steps import (  # oss-rewrite (force ShipIt re-export to taa
     NAME_TO_STEP,
     STEP_NAME_TO_INPUT,
 )
-from taac.steps.step import Step
+from neteng.test_infra.dne.taac.steps.step import Step, TestbedError
 from taac.steps.step_definitions import ValidationStep
 from taac.tasks.utils import run_task
 from taac.test_configs import get_test_config

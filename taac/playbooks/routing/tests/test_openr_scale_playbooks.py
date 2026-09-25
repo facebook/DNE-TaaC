@@ -24,7 +24,7 @@ def _step_params(step: object) -> dict[str, t.Any]:
 
 
 class OpenRScalePlaybookTest(unittest.TestCase):
-    def test_injection_precedes_single_validation_with_shared_topology(self) -> None:
+    def test_performance_brackets_injection_before_semantic_validation(self) -> None:
         playbook = get_openr_scale_kvstore_injection_playbook(
             helper_name="helper.example.com",
             dut_name="dut.example.com",
@@ -43,9 +43,28 @@ class OpenRScalePlaybookTest(unittest.TestCase):
 
         self.assertEqual([], list(playbook.postchecks or ()))
         self.assertEqual(1, len(playbook.stages))
-        self.assertEqual(2, len(playbook.stages[0].steps))
-        injection = _step_params(playbook.stages[0].steps[0])
-        validation = _step_params(playbook.stages[0].steps[1])
+        self.assertEqual(4, len(playbook.stages[0].steps))
+        self.assertEqual(
+            [
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+            ],
+            [
+                _step_params(step)["custom_step_name"]
+                for step in playbook.stages[0].steps
+            ],
+        )
+        self.assertEqual(
+            ["start", "validate"],
+            [
+                _step_params(playbook.stages[0].steps[index])["action"]
+                for index in (0, 2)
+            ],
+        )
+        injection = _step_params(playbook.stages[0].steps[1])
+        validation = _step_params(playbook.stages[0].steps[3])
         self.assertEqual(
             {
                 "custom_step_name": "openr_scale_injection",
@@ -109,12 +128,25 @@ class OpenRScalePlaybookTest(unittest.TestCase):
         for merge_only_field in ("state_key", "action", "owner"):
             self.assertNotIn(merge_only_field, validation)
         self.assertFalse(any("fingerprint" in key for key in validation))
+        cleanup_steps = list(playbook.cleanup_steps or [])
+        self.assertEqual(1, len(cleanup_steps))
+        self.assertEqual(
+            {
+                "custom_step_name": "openr_scale_performance_cleanup",
+                "action": "cleanup",
+                "dut_name": "dut.example.com",
+                "profile": "kvstore_injection",
+                "phase": "single",
+                "state_key": "openr_scale_test_2_performance",
+            },
+            _step_params(cleanup_steps[0]),
+        )
 
 
-_HELPER = "eb02.lab.ash6"
-_DUT = "eb04.lab.ash6"
-_DUT_INBAND = "2401:db00:e50d:11:8::10"
-_MGMT_ADDRESSES = ["2401:db00:2066:304a::1005", "2401:db00:2066:304a::1003"]
+_HELPER = "helper.example.com"
+_DUT = "dut.example.com"
+_DUT_INBAND = "2001:db8::10"
+_MGMT_ADDRESSES = ["2001:db8::11", "2001:db8::12"]
 _REMOTE_PATH = "/mnt/flash/scale_test_server"
 _SEED_A = 20250903
 _SEED_B = 20250904
@@ -165,7 +197,7 @@ def _params(step: t.Any) -> dict[str, t.Any]:
 
 
 class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
-    def test_sequence_is_exactly_inject_validate_inject_validate(self) -> None:
+    def test_sequence_has_independent_performance_brackets_for_a_and_b(self) -> None:
         playbook = _playbook()
         self.assertEqual("openr_scale_kvstore_merge_playbook", playbook.name)
         self.assertEqual([], list(playbook.prechecks or []))
@@ -174,9 +206,13 @@ class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
         self.assertEqual(1, len(playbook.stages))
         self.assertEqual(
             [
+                "openr_scale_performance",
                 "openr_scale_injection",
+                "openr_scale_performance",
                 "openr_scale_kvstore_state",
+                "openr_scale_performance",
                 "openr_scale_injection",
+                "openr_scale_performance",
                 "openr_scale_kvstore_state",
             ],
             [_params(step)["custom_step_name"] for step in playbook.stages[0].steps],
@@ -185,14 +221,29 @@ class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
             ["after_a", "after_b"],
             [
                 _params(playbook.stages[0].steps[index])["checkpoint"]
-                for index in (1, 3)
+                for index in (3, 7)
+            ],
+        )
+        self.assertEqual(
+            [
+                ("start", "after_a"),
+                ("validate", "after_a"),
+                ("start", "after_b"),
+                ("validate", "after_b"),
+            ],
+            [
+                (
+                    _params(playbook.stages[0].steps[index])["action"],
+                    _params(playbook.stages[0].steps[index])["phase"],
+                )
+                for index in (0, 2, 4, 6)
             ],
         )
 
     def test_injections_use_distinct_identities_and_exact_runtime_flags(self) -> None:
         steps = _playbook().stages[0].steps
-        injection_a = _params(steps[0])
-        injection_b = _params(steps[2])
+        injection_a = _params(steps[1])
+        injection_b = _params(steps[5])
 
         self.assertEqual(
             [_SEED_A, _SEED_B], [injection_a["prefix_seed"], injection_b["prefix_seed"]]
@@ -225,29 +276,47 @@ class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
         self.assertEqual(3_729, len(expected_b - expected_a))
         self.assertEqual(
             len(expected_a),
-            _params(steps[0])["expected_updated_key_vals_delta"],
+            _params(steps[1])["expected_updated_key_vals_delta"],
         )
         self.assertEqual(
             len(expected_b - expected_a),
-            _params(steps[2])["expected_updated_key_vals_delta"],
+            _params(steps[5])["expected_updated_key_vals_delta"],
         )
 
     def test_state_barriers_share_one_local_identity_and_cleanup_is_local(self) -> None:
         playbook = _playbook()
         steps = playbook.stages[0].steps
-        state_a = _params(steps[1])
-        state_b = _params(steps[3])
+        state_a = _params(steps[3])
+        state_b = _params(steps[7])
         self.assertEqual([_SEED_A], state_a["seeds"])
         self.assertEqual([_SEED_A, _SEED_B], state_b["seeds"])
         self.assertEqual(_STATE_KEY, state_a["state_key"])
         self.assertEqual(_STATE_KEY, state_b["state_key"])
 
         cleanup_steps = list(playbook.cleanup_steps or [])
-        self.assertEqual(1, len(cleanup_steps))
+        self.assertEqual(3, len(cleanup_steps))
         self.assertEqual(
-            {
-                "custom_step_name": "openr_scale_kvstore_state_cleanup",
-                "state_key": _STATE_KEY,
-            },
-            _params(cleanup_steps[0]),
+            [
+                {
+                    "custom_step_name": "openr_scale_kvstore_state_cleanup",
+                    "state_key": _STATE_KEY,
+                },
+                {
+                    "custom_step_name": "openr_scale_performance_cleanup",
+                    "action": "cleanup",
+                    "dut_name": _DUT,
+                    "profile": "kvstore_merge",
+                    "phase": "after_b",
+                    "state_key": f"{_STATE_KEY}_performance",
+                },
+                {
+                    "custom_step_name": "openr_scale_performance_cleanup",
+                    "action": "cleanup",
+                    "dut_name": _DUT,
+                    "profile": "kvstore_merge",
+                    "phase": "after_a",
+                    "state_key": f"{_STATE_KEY}_performance",
+                },
+            ],
+            [_params(step) for step in cleanup_steps],
         )

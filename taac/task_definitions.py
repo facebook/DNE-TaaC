@@ -3036,14 +3036,17 @@ def create_run_task(
     task_name: str,
     params_dict: t.Optional[t.Dict[str, t.Any]] = None,
     ixia_needed: bool = False,
+    hostname: t.Optional[str] = None,
 ) -> Task:
     """Build a Task struct from a task_name + JSON-serializable params dict.
 
     Used by step factories (e.g. `create_run_task_step`) that wrap a Task
     into a Step's RunTaskInput.
+    ``hostname`` populates the outer Task field used by runner-side routing.
     """
     return Task(
         task_name=task_name,
+        hostname=hostname,
         ixia_needed=ixia_needed,
         params=Params(json_params=json.dumps(params_dict or {})),
     )
