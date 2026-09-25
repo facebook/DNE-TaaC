@@ -1389,6 +1389,9 @@ def create_openr_scale_injection_step(
     jq_var_prefix: str = "openr_scale",
     area: t.Optional[str] = None,
     areas: t.Optional[str] = None,
+    background: bool = False,
+    background_log_path: t.Optional[str] = None,
+    background_ready_timeout_sec: t.Optional[int] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Run the Open/R ``scale_test_server`` injector on ``helper_name``.
@@ -1473,6 +1476,11 @@ def create_openr_scale_injection_step(
             more replicate the topology into each area and patch the DUT in as an
             ABR; the binary treats one name as single-area. Distinct from
             ``area``, which only scopes counting.
+        background: leave the finite-duration injector running while later Steps
+            disrupt the physical test link. Foreground behavior remains the default.
+        background_log_path: absolute helper path used to capture detached injector
+            output. Required when ``background`` is true.
+        background_ready_timeout_sec: readiness budget for the detached injector.
     """
     if num_spines <= 0 or num_leaves <= 0:
         raise ValueError(
@@ -1489,6 +1497,13 @@ def create_openr_scale_injection_step(
             "expected_updated_key_vals_delta must be non-negative, got "
             f"{expected_updated_key_vals_delta}"
         )
+    if background and not background_log_path:
+        raise ValueError("background_log_path is required in background mode")
+    if (
+        background_ready_timeout_sec is not None
+        and background_ready_timeout_sec <= 0
+    ):
+        raise ValueError("background_ready_timeout_sec must be positive")
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "openr_scale_injection",
@@ -1508,6 +1523,8 @@ def create_openr_scale_injection_step(
         "restart_openr": restart_openr,
         "jq_var_prefix": jq_var_prefix,
     }
+    if background:
+        params["background"] = True
     for key, value in (
         ("forbidden_dut_hosts", forbidden_dut_hosts),
         ("topology_type", topology_type),
@@ -1521,6 +1538,8 @@ def create_openr_scale_injection_step(
         ("expected_updated_key_vals_delta", expected_updated_key_vals_delta),
         ("area", area),
         ("areas", areas),
+        ("background_log_path", background_log_path),
+        ("background_ready_timeout_sec", background_ready_timeout_sec),
     ):
         if value is not None:
             params[key] = value

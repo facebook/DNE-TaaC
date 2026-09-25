@@ -81,6 +81,50 @@ def create_openr_scale_isolation_task(
     )
 
 
+def create_openr_scale_link_fixture_task(
+    action: t.Literal["setup", "cleanup"],
+    ipv4_cidrs_by_device: t.Mapping[str, str],
+    member_interface: str = "Ethernet3/10/1",
+    original_port_channel_id: int = 1910,
+    test_port_channel_id: int = 1911,
+    description: str = "second eb02-eb04 OpenR test link",
+    timeout_seconds: int = 120,
+) -> Task:
+    """Create or remove the temporary second Open/R routed port-channel."""
+    if action not in {"setup", "cleanup"}:
+        raise ValueError(f"unsupported fixture action {action!r}")
+    devices = dict(ipv4_cidrs_by_device)
+    if len(devices) != 2 or any(not host or not cidr for host, cidr in devices.items()):
+        raise ValueError("ipv4_cidrs_by_device must contain exactly two endpoints")
+    if not member_interface or not description:
+        raise ValueError("member_interface and description must be nonempty")
+    if (
+        original_port_channel_id <= 0
+        or test_port_channel_id <= 0
+        or original_port_channel_id == test_port_channel_id
+    ):
+        raise ValueError("port-channel IDs must be distinct positive integers")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    return Task(
+        task_name="openr_scale_link_fixture",
+        description=f"{action.title()} temporary Open/R scale link fixture",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "action": action,
+                    "ipv4_cidrs_by_device": devices,
+                    "member_interface": member_interface,
+                    "original_port_channel_id": original_port_channel_id,
+                    "test_port_channel_id": test_port_channel_id,
+                    "description": description,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+        ),
+    )
+
+
 def create_fpf_ensure_interfaces_enabled_task(
     interfaces_by_device: t.Mapping[str, t.Sequence[str]],
 ) -> Task:

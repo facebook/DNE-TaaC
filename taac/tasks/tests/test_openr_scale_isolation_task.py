@@ -128,8 +128,11 @@ class OpenRScaleIsolationTaskTest(TestCase):
             await _task().run(dict(_PARAMS))
 
         self.assertEqual("cleanup", events[-1])
-        self.assertIn("pkill -f --", events[0])
+        self.assertIn("pkill -INT -f --", events[0])
+        self.assertIn("status=$?", events[0])
+        self.assertIn('"$status" -ne 1', events[0])
         self.assertIn("[/]mnt/flash/scale_test_server", events[0])
+        self.assertIn("pgrep -f --", events[1])
 
     async def test_waits_until_helper_process_is_gone_before_cleanup(self) -> None:
         commands: list[str] = []
@@ -138,9 +141,10 @@ class OpenRScaleIsolationTaskTest(TestCase):
 
         async def shell(command: str) -> str:
             commands.append(command)
-            if "pkill -f --" in command:
-                return ""
-            return f"{command}\n4321\n" if len(commands) == 2 else f"{command}\n"
+            if "pgrep -f --" in command:
+                pgrep_calls = sum("pgrep -f --" in item for item in commands)
+                return f"{command}\n4321\n" if pgrep_calls == 1 else f"{command}\n"
+            return ""
 
         async def cleanup(*_args: object, **_kwargs: object) -> CleanupSummary:
             self.assertEqual(3, len(commands))
@@ -156,6 +160,7 @@ class OpenRScaleIsolationTaskTest(TestCase):
             await _task().run(dict(_PARAMS))
 
         self.assertTrue(cleanup_started.is_set())
+        self.assertIn("pkill -INT -f --", commands[0])
         self.assertTrue(commands[1].startswith("bash pgrep -f -- "))
         self.assertEqual(commands[1], commands[2])
 
@@ -179,8 +184,6 @@ class OpenRScaleIsolationTaskTest(TestCase):
         driver = MagicMock()
 
         async def shell(command: str) -> str:
-            if "pkill -f --" in command:
-                return ""
             return f"eb02.lab.ash6# \x1b[15C{command}"
 
         driver.async_run_cmd_on_shell = AsyncMock(side_effect=shell)
@@ -189,6 +192,43 @@ class OpenRScaleIsolationTaskTest(TestCase):
             patch(f"{_MODULE}.async_get_device_driver", AsyncMock(return_value=driver)),
             patch(f"{_MODULE}.expire_scale_keys_and_verify", cleanup),
             patch(f"{_MODULE}._STOP_TIMEOUT_SECONDS", 0.0),
+        ):
+            await _task().run(dict(_PARAMS))
+
+        cleanup.assert_awaited_once()
+
+    async def test_ansi_decorated_pid_is_stopped_before_cleanup(self) -> None:
+        commands: list[str] = []
+        driver = MagicMock()
+
+        async def shell(command: str) -> str:
+            commands.append(command)
+            pgrep_calls = sum("pgrep -f --" in item for item in commands)
+            if "pgrep -f --" in command and pgrep_calls == 1:
+                decorated = command.replace("pgrep", "\x1b[15Cpgrep")
+                return f"eb02.lab.ash6# {decorated}\nwarning: locale\n\x1b[15C4321\n"
+            return ""
+
+        driver.async_run_cmd_on_shell = AsyncMock(side_effect=shell)
+        cleanup = AsyncMock(return_value=CleanupSummary({}, {}, {}))
+        with (
+            patch(f"{_MODULE}.async_get_device_driver", AsyncMock(return_value=driver)),
+            patch(f"{_MODULE}.expire_scale_keys_and_verify", cleanup),
+            patch(f"{_MODULE}.asyncio.sleep", AsyncMock()),
+        ):
+            await _task().run(dict(_PARAMS))
+
+        self.assertIn("pkill -INT -f --", commands[0])
+        self.assertTrue(commands[1].startswith("bash pgrep -f -- "))
+        cleanup.assert_awaited_once()
+
+    async def test_non_pid_shell_output_allows_cleanup(self) -> None:
+        driver = MagicMock()
+        driver.async_run_cmd_on_shell = AsyncMock(return_value="process unknown")
+        cleanup = AsyncMock(return_value=CleanupSummary({}, {}, {}))
+        with (
+            patch(f"{_MODULE}.async_get_device_driver", AsyncMock(return_value=driver)),
+            patch(f"{_MODULE}.expire_scale_keys_and_verify", cleanup),
         ):
             await _task().run(dict(_PARAMS))
 
@@ -217,9 +257,9 @@ class OpenRScaleIsolationTaskTest(TestCase):
             return driver
 
         async def shell(command: str) -> str:
-            if phase == "pkill" and "pkill -f --" in command:
-                return await hang()
             if phase == "pgrep" and "pgrep -f --" in command:
+                return await hang()
+            if phase == "kill" and "pkill -INT -f --" in command:
                 return await hang()
             return ""
 
@@ -277,9 +317,9 @@ class OpenRScaleIsolationTaskTest(TestCase):
             return driver
 
         async def shell(command: str) -> str:
-            if phase == "pkill" and "pkill -f --" in command:
-                return await hang()
             if phase == "pgrep" and "pgrep -f --" in command:
+                return await hang()
+            if phase == "kill" and "pkill -INT -f --" in command:
                 return await hang()
             return ""
 
@@ -313,8 +353,8 @@ class OpenRScaleIsolationTaskTest(TestCase):
     async def test_hung_driver_acquisition_times_out_and_runs_cleanup(self) -> None:
         await self._assert_hung_stop_phase_times_out_and_runs_cleanup("driver")
 
-    async def test_hung_pkill_times_out_and_runs_cleanup(self) -> None:
-        await self._assert_hung_stop_phase_times_out_and_runs_cleanup("pkill")
+    async def test_hung_kill_times_out_and_runs_cleanup(self) -> None:
+        await self._assert_hung_stop_phase_times_out_and_runs_cleanup("kill")
 
     async def test_hung_pgrep_times_out_and_runs_cleanup(self) -> None:
         await self._assert_hung_stop_phase_times_out_and_runs_cleanup("pgrep")
@@ -324,8 +364,8 @@ class OpenRScaleIsolationTaskTest(TestCase):
     ) -> None:
         await self._assert_cancellation_during_hung_stop_phase_joins_cleanup("driver")
 
-    async def test_cancellation_during_hung_pkill_joins_cleanup(self) -> None:
-        await self._assert_cancellation_during_hung_stop_phase_joins_cleanup("pkill")
+    async def test_cancellation_during_hung_kill_joins_cleanup(self) -> None:
+        await self._assert_cancellation_during_hung_stop_phase_joins_cleanup("kill")
 
     async def test_cancellation_during_hung_pgrep_joins_cleanup(self) -> None:
         await self._assert_cancellation_during_hung_stop_phase_joins_cleanup("pgrep")

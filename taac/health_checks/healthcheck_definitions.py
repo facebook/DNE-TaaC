@@ -1877,6 +1877,7 @@ def create_pfc_wd_check(
 
 def create_port_channel_expected_state_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
+    check_scope: t.Optional[hc_types.Scope] = None,
 ) -> PointInTimeHealthCheck:
     """Create a point-in-time check that port-channels (LAGs) are in their expected state.
 
@@ -1889,17 +1890,20 @@ def create_port_channel_expected_state_check(
         json_params: Opaque dict mapping port-channel name → expected state
             attributes (e.g. ``oper_state``, ``min_links``, ``active_members``).
             Bare check when omitted.
+        check_scope: Devices on which the health check runs.
 
     Returns:
         A `PointInTimeHealthCheck` with `name=PORT_CHANNEL_EXPECTED_STATE_CHECK`.
     """
     if json_params is None:
         return PointInTimeHealthCheck(
-            name=hc_types.CheckName.PORT_CHANNEL_EXPECTED_STATE_CHECK
+            name=hc_types.CheckName.PORT_CHANNEL_EXPECTED_STATE_CHECK,
+            check_scope=check_scope,
         )
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.PORT_CHANNEL_EXPECTED_STATE_CHECK,
         check_params=Params(json_params=json.dumps(json_params)),
+        check_scope=check_scope,
     )
 
 

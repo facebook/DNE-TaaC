@@ -24,6 +24,9 @@ Test Cases
   DUT's KvStore, and assert the DUT holds the full injected key population.
 - Test 3 (OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG): isolate both stores, inject
   two deterministic fabrics, and validate exact merge semantics in sequence.
+- Test 4 (OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG): temporarily split the
+  second physical member into Port-Channel1911 and validate one down/up cycle
+  while Scale Tester remains active through Port-Channel1910.
 
 All tests must run with ``--skip-testbed-isolation``: they depend on the
 pre-existing Port-Channel1910 interconnect, which testbed isolation shuts.
@@ -45,6 +48,9 @@ from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
 from taac.testconfigs.routing.openr.openr_scale_kvstore_merge_test_config import (
     OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG,
 )
+from taac.testconfigs.routing.openr.openr_scale_physical_link_flap_test_config import (
+    OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG,
+)
 from taac.testconfigs.routing.openr.openr_scale_test_config import (
     OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG,
 )
@@ -53,4 +59,5 @@ __all__ = [
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG",
+    "OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG",
 ]
