@@ -21614,7 +21614,9 @@ def create_openr_crash_playbook(iteration: int = 5) -> Playbook:
                         service=Service.OPENR,
                         trigger=ServiceInterruptionTrigger.CRASH,
                     ),
-                    create_service_convergence_step(),
+                    create_service_convergence_step(
+                        services=[Service.OPENR, Service.BGP]
+                    ),
                 ],
             ),
         ],
@@ -21651,7 +21653,9 @@ def create_qsfp_service_crash_playbook(iteration: int = 5) -> Playbook:
                         service=Service.QSFP_SERVICE,
                         trigger=ServiceInterruptionTrigger.CRASH,
                     ),
-                    create_service_convergence_step(),
+                    create_service_convergence_step(
+                        services=[Service.QSFP_SERVICE]
+                    ),
                 ],
             ),
         ],
@@ -22448,8 +22452,8 @@ def create_gtsw_service_restart_nbr_uplink_flap_playbook(
 def create_fsdb_crash_playbook(iteration: int = 5) -> Playbook:
     """Build the `test_fsdb_crash` Playbook.
 
-    Repeats `iteration` cycles of crashing fsdb followed by a 10s
-    longevity settle. Pre/postchecks exclude `fsdb` from the
+    Repeats `iteration` cycles of crashing fsdb plus service
+    convergence wait. Pre/postchecks exclude `fsdb` from the
     unclean-exit ledger.
 
     Args:
@@ -22475,7 +22479,7 @@ def create_fsdb_crash_playbook(iteration: int = 5) -> Playbook:
                         service=Service.FSDB,
                         trigger=ServiceInterruptionTrigger.CRASH,
                     ),
-                    create_longevity_step(duration=10),
+                    create_service_convergence_step(services=[Service.FSDB]),
                 ],
             ),
         ],

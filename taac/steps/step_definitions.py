@@ -91,6 +91,7 @@ from taac.driver.driver_constants import (
     FbossSystemctlServiceName,
     OtherSystemctlServiceName,
     Service as DriverService,
+    SystemctlServiceStatus,
 )
 from taac.driver.fboss_switch import FbossSwitch
 from taac.health_checks.abstract_health_check import (
@@ -10591,6 +10592,24 @@ class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
 class ServiceConvergenceStep(StepBase[taac_types.ServiceConvergenceInput]):
     STEP_NAME = taac_types.StepName.SERVICE_CONVERGENCE_STEP
 
+    async def _async_wait_for_systemd_active(
+        self,
+        driver: FbossSwitch,
+        service: FbossSystemctlServiceName,
+        timeout: int,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while True:
+            status = await driver.async_get_service_status(service)
+            if status == SystemctlServiceStatus.ACTIVE:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{service.value} did not reach systemd ACTIVE within "
+                    f"{timeout} seconds (last status: {status.name})"
+                )
+            await asyncio.sleep(2)
+
     async def run(
         self,
         input: taac_types.ServiceConvergenceInput,
@@ -10612,6 +10631,26 @@ class ServiceConvergenceStep(StepBase[taac_types.ServiceConvergenceInput]):
             end_time = time.time()
             self.logger.info(
                 f"Agent reached configured state in {end_time - start_time} seconds"
+            )
+        if taac_types.Service.OPENR in input.services and self.is_fboss:
+            fboss_driver = t.cast(FbossSwitch, self.driver)
+            start_time = time.time()
+            if TAAC_OSS:
+                # OpenR initialization events need the Meta-internal OpenR client.
+                timeout = (
+                    input.service_convergence_timeout.get(taac_types.Service.OPENR)
+                    or input.timeout
+                )
+                await self._async_wait_for_systemd_active(
+                    fboss_driver, FbossSystemctlServiceName.OPENR, timeout
+                )
+                openr_state = "systemd active"
+            else:
+                await fboss_driver.async_wait_for_openr_initialized()
+                openr_state = "initialized"
+            end_time = time.time()
+            self.logger.info(
+                f"OpenR reached {openr_state} state in {end_time - start_time} seconds"
             )
         if taac_types.Service.BGP in input.services:
             if self.ixia and "rsw" in self.hostname:

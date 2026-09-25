@@ -2,19 +2,24 @@
 
 # pyre-unsafe
 import time
-import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from later.unittest import TestCase
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     TestDevice,
     TestTopology,
 )
+from taac.driver.driver_constants import (
+    FbossSystemctlServiceName,
+    SystemctlServiceStatus,
+)
 from taac.libs.parameter_evaluator import ParameterEvaluator
+from taac.steps import step_definitions
 from taac.steps.step_definitions import ServiceConvergenceStep
 from taac.test_as_a_config import types as taac_types
 
 
-class TestServiceConvergenceStep(unittest.IsolatedAsyncioTestCase):
+class TestServiceConvergenceStep(TestCase):
     def setUp(self):
         self.name = "test_service_convergence"
         self.device = MagicMock(spec=TestDevice)
@@ -100,6 +105,81 @@ class TestServiceConvergenceStep(unittest.IsolatedAsyncioTestCase):
         )
         await self.sc_step.run(input_data, {})
         self.driver_mock.async_wait_for_fsdb_state_active.assert_called_once_with(120)
+
+    async def test_run_openr_convergence(self):
+        """Test convergence waiting for OpenR."""
+        input_data = taac_types.ServiceConvergenceInput(
+            services=[taac_types.Service.OPENR],
+            timeout=120,
+        )
+        await self.sc_step.run(input_data, {})
+        self.driver_mock.async_wait_for_openr_initialized.assert_called_once_with()
+
+    async def test_run_openr_before_bgp_convergence(self):
+        """Test that OpenR initializes before BGP convergence is checked."""
+        call_order = []
+
+        async def record_openr() -> None:
+            call_order.append(taac_types.Service.OPENR)
+
+        async def record_bgp(_timeout: int) -> None:
+            call_order.append(taac_types.Service.BGP)
+
+        self.driver_mock.async_wait_for_openr_initialized.side_effect = record_openr
+        self.driver_mock.async_wait_for_bgp_convergence.side_effect = record_bgp
+        input_data = taac_types.ServiceConvergenceInput(
+            services=[taac_types.Service.OPENR, taac_types.Service.BGP],
+            timeout=120,
+        )
+
+        await self.sc_step.run(input_data, {})
+
+        self.assertEqual(
+            call_order,
+            [taac_types.Service.OPENR, taac_types.Service.BGP],
+        )
+
+    async def test_run_openr_convergence_in_oss_waits_for_systemd_active(self):
+        """Test that OSS waits for openr to be systemd ACTIVE, then BGP."""
+        self.driver_mock.async_get_service_status.side_effect = [
+            SystemctlServiceStatus.TRANSITIONING,
+            SystemctlServiceStatus.ACTIVE,
+        ]
+        input_data = taac_types.ServiceConvergenceInput(
+            services=[taac_types.Service.OPENR, taac_types.Service.BGP],
+            timeout=120,
+        )
+
+        with (
+            patch.object(step_definitions, "TAAC_OSS", True),
+            patch.object(step_definitions.asyncio, "sleep", AsyncMock()),
+        ):
+            await self.sc_step.run(input_data, {})
+
+        self.driver_mock.async_wait_for_openr_initialized.assert_not_called()
+        self.driver_mock.async_get_service_status.assert_called_with(
+            FbossSystemctlServiceName.OPENR
+        )
+        self.assertEqual(2, self.driver_mock.async_get_service_status.call_count)
+        self.driver_mock.async_wait_for_bgp_convergence.assert_called_once_with(120)
+
+    async def test_run_openr_convergence_in_oss_times_out(self):
+        """Test that OSS fails when openr never reaches systemd ACTIVE."""
+        self.driver_mock.async_get_service_status.return_value = (
+            SystemctlServiceStatus.FAILED
+        )
+        input_data = taac_types.ServiceConvergenceInput(
+            services=[taac_types.Service.OPENR],
+            timeout=0,
+        )
+
+        with (
+            patch.object(step_definitions, "TAAC_OSS", True),
+            self.assertRaisesRegex(TimeoutError, "openr.*FAILED"),
+        ):
+            await self.sc_step.run(input_data, {})
+
+        self.driver_mock.async_wait_for_openr_initialized.assert_not_called()
 
     async def test_run_multiple_services(self):
         """Test convergence with multiple services."""
