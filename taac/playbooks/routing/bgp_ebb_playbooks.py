@@ -640,6 +640,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     peergroup_ibgp_v4: str,
     total_session_count: int,
     profile,  # BgpPlusPlusProfile
+    precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
     duration_seconds: int = DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
     transient_observation_logging: str = "off",
@@ -666,6 +667,7 @@ def get_bgp_ebb_attribute_churn_playbook(
             by precheck/postcheck health checks.
         profile: `BgpPlusPlusProfile` enum value; enables the IBGP-PNH
             precheck when the OpenR variant is selected.
+        precheck_thresholds: Custom precheck thresholds (uses defaults if None).
         duration_seconds: Active monotonic churn window, divided evenly
             across MED, origin, and local-pref.
         transient_observation_logging: `off` suppresses retryable convergence
@@ -687,6 +689,7 @@ def get_bgp_ebb_attribute_churn_playbook(
         ProfileContext(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=total_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
@@ -794,6 +797,7 @@ def get_bgp_ebb_route_storm_playbook(
     ixia_interface_mimic_ibgp: str,
     observer_peer_parent_prefix: str,
     profile,  # BgpPlusPlusProfile
+    precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
     cycles: int = 60,
     quiet_window_seconds: int = 120,
@@ -823,6 +827,7 @@ def get_bgp_ebb_route_storm_playbook(
             that are excluded from the fail-closed measured session count.
         profile: `BgpPlusPlusProfile` enum value; enables IBGP-PNH precheck
             when the OpenR variant is selected.
+        precheck_thresholds: Custom precheck thresholds (uses defaults if None).
 
     Returns:
         A `Playbook` named `bgp_ebb_route_storm_playbook` with standard
@@ -839,6 +844,7 @@ def get_bgp_ebb_route_storm_playbook(
         ProfileContext(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=total_session_count,
             check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
@@ -1398,6 +1404,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
     peergroup_ibgp_v4: str,
     expected_established_sessions: int = 0,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     memory_threshold: int = Gigabyte.GIG_5.value,
     cpu_util_terminate_on_error: bool = False,
     memory_terminate_on_error: bool = False,
@@ -1427,6 +1434,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
         peergroup_ibgp_v4: IPv4 iBGP peer group name for session checks
         expected_established_sessions: Expected number of established BGP sessions
         profile: BGP++ profile (with or without Open/R)
+        precheck_thresholds: Custom precheck thresholds (uses defaults if None)
         memory_threshold: Memory threshold in bytes (default: 5GB)
         cpu_util_terminate_on_error: Terminate test on CPU threshold breach
         memory_terminate_on_error: Terminate test on memory threshold breach
@@ -1448,6 +1456,7 @@ def get_bgp_ebb_fauu_drain_undrain_playbook(
         ProfileContext(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=expected_established_sessions,
             bgp_mon=BgpMonScope(
                 exclude=exclude_bgp_mon,
@@ -1498,6 +1507,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
     peergroup_ibgp_v4: str,
     expected_established_sessions: int = 0,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     memory_threshold: int = Gigabyte.GIG_5.value,
     cpu_util_terminate_on_error: bool = False,
     memory_terminate_on_error: bool = False,
@@ -1526,6 +1536,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
         peergroup_ibgp_v4: IPv4 iBGP peer group name for session checks
         expected_established_sessions: Expected number of established BGP sessions
         profile: BGP++ profile (with or without Open/R)
+        precheck_thresholds: Custom precheck thresholds (uses defaults if None)
         memory_threshold: Memory threshold in bytes (default: 5GB)
         cpu_util_terminate_on_error: Terminate test on CPU threshold breach
         memory_terminate_on_error: Terminate test on memory threshold breach
@@ -1546,6 +1557,7 @@ def get_bgp_ebb_plane_drain_undrain_playbook(
         ProfileContext(
             peergroup_ibgp_v6=peergroup_ibgp_v6,
             peergroup_ibgp_v4=peergroup_ibgp_v4,
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=expected_established_sessions,
             bgp_mon=BgpMonScope(
                 exclude=exclude_bgp_mon,

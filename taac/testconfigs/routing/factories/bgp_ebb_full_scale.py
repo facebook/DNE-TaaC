@@ -94,6 +94,9 @@ from taac.utils.characterization import (
     DISABLED,
     OBSERVE_ONLY_ON_DEVICE,
 )
+from taac.utils.hardware_capacity_utils import (
+    get_precheck_thresholds,
+)
 from taac.test_as_a_config.types import (
     Playbook,
     PointInTimeHealthCheck,
@@ -103,6 +106,7 @@ from taac.test_as_a_config.types import (
 
 
 _LONGEVITY_DURATION_SECONDS = 14400
+_FULL_SCALE_FEC_PRECHECK_THRESHOLD = 15_000
 _NEXTHOP_GROUP_AGGREGATE_GUARDRAIL = 8192
 _NHG_STORM_PLAYBOOK_NAME = "bgp_ebb_nexthop_group_count_threshold_playbook"
 _DEFAULT_EBGP_PREFIX_COUNT = 750
@@ -870,6 +874,10 @@ def _get_bgp_ebb_full_scale_playbooks(
     expected_peer_identity = build_expected_peer_identity(bound_parent_networks)
     local_link = _openr_owner_kv_link(physical_inventory)
     other_link = _openr_helper_kv_link(physical_inventory)
+    # The canonical 50-NHG topology consumes about 12.4K FEC entries before
+    # stimulus, so keep regression headroom without relaxing unrelated suites.
+    full_scale_precheck_thresholds = get_precheck_thresholds()
+    full_scale_precheck_thresholds.fec_threshold = _FULL_SCALE_FEC_PRECHECK_THRESHOLD
 
     playbooks = [
         get_bgp_ebb_attribute_churn_playbook(
@@ -878,6 +886,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             total_session_count=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_attribute_churn_playbook", enable_update_group
@@ -891,6 +900,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
             observer_peer_parent_prefix=bgp_mon_parent_prefix,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             cycles=route_storm_cycles,
             quiet_window_seconds=route_storm_quiet_window_seconds,
             bounded_validation=route_storm_bounded_validation,
@@ -905,6 +915,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_route_registry_runtime_update_playbook",
@@ -917,6 +928,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             test_duration_seconds=multipath_test_duration_seconds,
             oscillation_interval_seconds=multipath_oscillation_interval_seconds,
             cycle_count=multipath_cycle_count,
@@ -934,6 +946,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             other_link=other_link,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
@@ -947,6 +960,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
             bgp_mon_parent_network=bound_bgp_mon_network,
@@ -961,6 +975,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             tcp_dump_capture_interface_ebgp=ixia_interface_mimic_ebgp,
             tcp_dump_capture_interface_ibgp=ixia_interface_mimic_ibgp,
             bgp_mon_parent_network=bound_bgp_mon_network,
@@ -983,6 +998,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             # Deliberately unmeasured. Restarting bgpcpp replaces the PID
@@ -1002,6 +1018,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
         ),
@@ -1013,6 +1030,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             ipv6_session_count=EBGP_PEER_COUNT_V6,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
@@ -1026,6 +1044,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
@@ -1040,6 +1059,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             ipv6_sessions_per_plane=IBGP_PEER_SCALE_PER_PLANE,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
@@ -1054,6 +1074,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
             expected_established_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
@@ -1069,6 +1090,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             other_link=other_link,
             expected_in_scope_sessions=session_count,
             profile=profile,
+            precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
             bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,

@@ -28,6 +28,9 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     create_standard_prechecks,
     create_standard_snapshot_checks,
 )
+from taac.utils.hardware_capacity_utils import (
+    HardwareCapacityThresholds,
+)
 from taac.health_check.health_check import types as hc_types
 
 # The prefix a default (ixia11) BgpMonScope resolves to.
@@ -307,9 +310,11 @@ class CheckProfileRegistryTest(unittest.TestCase):
     def test_drain_undrain_matches_factory(self):
         """DRAIN_UNDRAIN reproduces the fauu/plane drain playbooks' calls
         (iBGP-PNH off, convergence OFF, snapshot skips flap only)."""
+        precheck_thresholds = HardwareCapacityThresholds(fec_threshold=15_000)
         ctx = ProfileContext(
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=12,
             bgp_mon=BgpMonScope(exclude=True),
         )
@@ -320,6 +325,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             create_standard_prechecks(
                 peergroup_ibgp_v6="PG_IBGP_V6",
                 peergroup_ibgp_v4="PG_IBGP_V4",
+                precheck_thresholds=precheck_thresholds,
                 expected_established_sessions=12,
                 check_ibgp_pnh=False,
                 bgp_mon=BgpMonScope(exclude=True),
@@ -342,9 +348,11 @@ class CheckProfileRegistryTest(unittest.TestCase):
 
     def test_churn_storm_route_storm_matches_factory(self):
         """CICD-EBB-11 uses final session checks and in-workflow stability gates."""
+        precheck_thresholds = HardwareCapacityThresholds(fec_threshold=15_000)
         ctx = ProfileContext(
             peergroup_ibgp_v6="PG_IBGP_V6",
             peergroup_ibgp_v4="PG_IBGP_V4",
+            precheck_thresholds=precheck_thresholds,
             expected_established_sessions=42,
             check_cpu_load_average=False,
             check_ibgp_pnh=True,
@@ -357,6 +365,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             create_standard_prechecks(
                 peergroup_ibgp_v6="PG_IBGP_V6",
                 peergroup_ibgp_v4="PG_IBGP_V4",
+                precheck_thresholds=precheck_thresholds,
                 expected_established_sessions=42,
                 check_cpu_load_average=False,
                 check_ibgp_pnh=True,

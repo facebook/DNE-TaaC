@@ -446,6 +446,7 @@ def _drain_undrain(ctx: ProfileContext) -> ProfileChecks:
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
             peergroup_ibgp_v4=ctx.peergroup_ibgp_v4,
+            precheck_thresholds=ctx.precheck_thresholds,
             expected_established_sessions=ctx.expected_established_sessions,
             check_ibgp_pnh=False,
             bgp_mon=ctx.bgp_mon,
@@ -473,6 +474,7 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
         prechecks=create_standard_prechecks(
             peergroup_ibgp_v6=ctx.peergroup_ibgp_v6,
             peergroup_ibgp_v4=ctx.peergroup_ibgp_v4,
+            precheck_thresholds=ctx.precheck_thresholds,
             expected_established_sessions=ctx.expected_established_sessions,
             check_cpu_load_average=ctx.check_cpu_load_average,
             check_ibgp_pnh=ctx.check_ibgp_pnh,

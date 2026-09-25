@@ -51,6 +51,8 @@ from taac.steps.step_definitions import (
     create_bgp_nhg_random_storm_step,
 )
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
+    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
@@ -62,6 +64,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _TC7_PLAYBOOK_NAMES,
     create_bgp_ebb_full_scale_test_config,
 )
+from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 
 
@@ -1115,6 +1118,50 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         self.assertNotIn(
             "observer_peer_parent_prefix", playbook_factory.call_args.kwargs
+        )
+
+    def test_scheduled_full_scale_playbooks_use_canonical_fec_baseline(
+        self,
+    ) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook
+            for test_config in (
+                BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+            )
+            for playbook in test_config.playbooks
+        }
+        expected_without_hardware_precheck = {
+            "bgp_ebb_longevity_playbook",
+            "bgp_ebb_nexthop_group_count_threshold_playbook",
+        }
+        without_hardware_precheck = set()
+
+        for name, playbook in playbooks_by_name.items():
+            hardware_prechecks = [
+                check
+                for check in playbook.prechecks or []
+                if check.name == hc_types.CheckName.HARDWARE_CAPACITY_CHECK
+            ]
+            if not hardware_prechecks:
+                without_hardware_precheck.add(name)
+                continue
+            self.assertEqual(1, len(hardware_prechecks), name)
+            check_params = hardware_prechecks[0].check_params
+            if check_params is None or check_params.json_params is None:
+                self.fail(f"{name} hardware precheck must carry JSON parameters")
+            self.assertEqual(
+                15_000,
+                json.loads(check_params.json_params)["fec_threshold"],
+                name,
+            )
+
+        self.assertEqual(16, len(playbooks_by_name))
+        self.assertEqual(
+            expected_without_hardware_precheck,
+            without_hardware_precheck,
         )
 
     def test_full_scale_factory_rejects_missing_port_map_roles(self) -> None:
