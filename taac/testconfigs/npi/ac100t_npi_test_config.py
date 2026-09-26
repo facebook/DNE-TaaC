@@ -21,8 +21,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - FE QoS scheduling and buffering      <-- implemented below
     - Prefix profiling & overload tests    <-- implemented below
     - Longevity tests                      <-- implemented below
-    - Thrift hardening tests               (TODO -- constants staged;
-      create_npi_thrift_hardening_test_config)
+    - Thrift hardening tests               <-- implemented below
     - Interface flaps                      <-- implemented below
     - ECMP-only resource testing           <-- implemented below
     - PTP tests                            (TODO -- deferred)
@@ -68,6 +67,9 @@ from taac.testconfigs.npi.ecmp_csvs.ecmp_nh_pools import (
 )
 from taac.testconfigs.npi.ecmp_only_resource_testing_config import (
     test_config_for_ecmp_only_resource_testing,
+)
+from taac.testconfigs.npi.thrift_hardening_test_config import (
+    create_npi_thrift_hardening_test_config,
 )
 from taac.testconfigs.snake.test_test_config import (
     gen_snake_test_config,
@@ -451,6 +453,60 @@ AC100T_LONGEVITY_TEST_CONFIG = gen_snake_test_config(
 
 
 # ===========================================================================
+# Thrift hardening tests (THFT_001..006)
+# ===========================================================================
+# Run the six requested cases on DUT2, using the same two-port BGP scaffolding
+# as the CPU-queue config: kitchen-sink thrift for one hour, a four-hour
+# thrift-stress + qsfp-flap baseline, and four one-hour service-restart
+# variants at a five-minute cadence. The Steller Eagle placeholder has no
+# netwhoami Hardware enum yet, so skip the live platform assertion.
+AC100T_THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening_test_config(
+    test_config_name="AC100T_THRIFT_HARDENING_TEST_CONFIG",
+    device_name=ac100t.AC100T_CPU_QUEUE_DUT,
+    local_mac_address=ac100t.AC100T_CPU_QUEUE_LOCAL_MAC_ADDRESS,
+    ixia_downlink_interface=ac100t.AC100T_CPU_QUEUE_IXIA_DOWNLINK_INTERFACE,
+    ixia_uplink_interface=ac100t.AC100T_CPU_QUEUE_IXIA_UPLINK_INTERFACE,
+    peergroup_uplink_mimic_v6=ac100t.AC100T_PEERGROUP_UPLINK_MIMIC_V6,
+    peergroup_uplink_mimic_v4=ac100t.AC100T_PEERGROUP_UPLINK_MIMIC_V4,
+    peergroup_downlink_mimic_v6=ac100t.AC100T_PEERGROUP_DOWNLINK_MIMIC_V6,
+    peergroup_downlink_mimic_v4=ac100t.AC100T_PEERGROUP_DOWNLINK_MIMIC_V4,
+    route_map_uplink_ingress=ac100t.AC100T_ROUTE_MAP_UPLINK_INGRESS,
+    route_map_uplink_egress=ac100t.AC100T_ROUTE_MAP_UPLINK_EGRESS,
+    route_map_downlink_ingress=ac100t.AC100T_ROUTE_MAP_DOWNLINK_INGRESS,
+    route_map_downlink_egress=ac100t.AC100T_ROUTE_MAP_DOWNLINK_EGRESS,
+    ixia_downlink_ic_parent_network_v6=ac100t.AC100T_IXIA_DOWNLINK_IC_PARENT_NETWORK_V6,
+    ixia_uplink_ic_parent_network_v6=ac100t.AC100T_IXIA_UPLINK_IC_PARENT_NETWORK_V6,
+    ixia_downlink_ic_parent_network_v4=ac100t.AC100T_IXIA_DOWNLINK_IC_PARENT_NETWORK_V4,
+    ixia_uplink_ic_parent_network_v4=ac100t.AC100T_IXIA_UPLINK_IC_PARENT_NETWORK_V4,
+    unique_prefix_limit=ac100t.AC100T_UNIQUE_PREFIX_LIMIT,
+    per_peer_max_route_limit=ac100t.AC100T_PER_PEER_MAX_ROUTE_LIMIT,
+    downlink_peer_count=ac100t.AC100T_DOWNLINK_PEER_COUNT,
+    uplink_peer_count=ac100t.AC100T_UPLINK_PEER_COUNT,
+    remote_uplink_as_4byte=ac100t.AC100T_REMOTE_UPLINK_AS_4BYTE,
+    remote_downlink_as_4byte=ac100t.AC100T_REMOTE_DOWNLINK_AS_4BYTE,
+    remote_as_4_byte_step=ac100t.AC100T_REMOTE_AS_4_BYTE_STEP,
+    is_uplink_peer_confed=ac100t.AC100T_IS_UPLINK_PEER_CONFED,
+    is_downlink_peer_confed=ac100t.AC100T_IS_DOWNLINK_PEER_CONFED,
+    ixia_downlink_prefix_count_v6=ac100t.AC100T_IXIA_DOWNLINK_PREFIX_COUNT_V6,
+    ixia_uplink_prefix_count_v6=ac100t.AC100T_IXIA_UPLINK_PREFIX_COUNT_V6,
+    ixia_downlink_prefix_count_v4=ac100t.AC100T_IXIA_DOWNLINK_PREFIX_COUNT_V4,
+    ixia_uplink_prefix_count_v4=ac100t.AC100T_IXIA_UPLINK_PREFIX_COUNT_V4,
+    ixia_downlink_communities=ac100t.AC100T_IXIA_DOWNLINK_COMMUNITIES,
+    ixia_uplink_communities=ac100t.AC100T_IXIA_UPLINK_COMMUNITIES,
+    uplink_peer_tag=ac100t.AC100T_UPLINK_PEER_TAG,
+    downlink_peer_tag=ac100t.AC100T_DOWNLINK_PEER_TAG,
+    test_duration_s=4 * 60 * 60,
+    restart_test_duration_s=60 * 60,
+    restart_period_s=300,
+    include_kitchen_sink=True,
+    kitchen_sink_test_duration_s=60 * 60,
+    basset_pool=ac100t.AC100T_BASSET_POOL,
+    service_restart_services=ac100t.AC100T_SERVICE_RESTART_SERVICES,
+    skip_platform_assert=True,
+)
+
+
+# ===========================================================================
 # System reboot tests (REBT_001..003)
 # ===========================================================================
 # Reuse the 800G single-DUT snake topology because the reboot behavior is
@@ -687,6 +743,7 @@ AC100T_TEST_CONFIGS = [
     AC100T_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_NON_CONTIGUOUS_TEST_CONFIG,
     AC100T_LONGEVITY_TEST_CONFIG,
+    AC100T_THRIFT_HARDENING_TEST_CONFIG,
     AC100T_PLATFORM_HARDENING_TEST_CONFIG,
     AC100T_SYSTEM_REBOOT_TEST_CONFIG,
     AC100T_SNAKE_800G_TEST_CONFIG,

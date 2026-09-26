@@ -656,13 +656,14 @@ W800_SNAKE_400G_TEST_CONFIG = gen_snake_test_config(
 
 
 # ===========================================================================
-# Thrift hardening tests (THFT_001..005)
+# Thrift hardening tests (THFT_001..006)
 # ===========================================================================
 # Built from the centralized create_npi_thrift_hardening_test_config factory
-# (the THFT_001..005 playbooks: thrift-stress + qsfp-flap background, with
-# per-service restart variants). Mirrors the CPU-queue BGP scaffolding (minus
-# the rogue interface). skip_platform_assert=True bypasses the factory's live
-# netwhoami FBOSS-platform check for the not-yet-in-inventory w800 stub.
+# (kitchen-sink thrift for one hour, a four-hour thrift-stress + qsfp-flap
+# baseline, and four one-hour service-restart variants at a five-minute
+# cadence). Mirrors the CPU-queue BGP scaffolding (minus the rogue interface).
+# skip_platform_assert=True bypasses the factory's live netwhoami FBOSS-platform
+# check for the not-yet-in-inventory w800 stub.
 W800_THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening_test_config(
     test_config_name="W800_THRIFT_HARDENING_TEST_CONFIG",
     device_name=w800.W800_DEVICE_NAME,
@@ -698,6 +699,11 @@ W800_THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening_test_config(
     ixia_uplink_communities=w800.W800_IXIA_UPLINK_COMMUNITIES,
     uplink_peer_tag=w800.W800_UPLINK_PEER_TAG,
     downlink_peer_tag=w800.W800_DOWNLINK_PEER_TAG,
+    test_duration_s=4 * 60 * 60,
+    restart_test_duration_s=60 * 60,
+    restart_period_s=300,
+    include_kitchen_sink=True,
+    kitchen_sink_test_duration_s=60 * 60,
     basset_pool=w800.W800_BASSET_POOL,
     service_restart_services=w800.W800_SERVICE_RESTART_SERVICES,
     # w800 is not yet in netwhoami inventory -> skip the live platform assert.

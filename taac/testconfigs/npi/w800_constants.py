@@ -277,7 +277,7 @@ W800_SNAKE_ITERATION = 10
 W800_SNAKE_IMIX_WEIGHT = {100: 1, 1500: 4, 4500: 5, 7000: 1, 9000: 1}
 
 # ===========================================================================
-# Thrift hardening tests (THFT_001..005)
+# Thrift hardening tests (THFT_001..006)
 # ===========================================================================
 # Consumed by wedge800_npi_test_config.py's W800_THRIFT_HARDENING_TEST_CONFIG.
 # ALL BGP scaffolding knobs are SHARED with the CPU-queue / BGP configs above

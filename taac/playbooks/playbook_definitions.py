@@ -1798,6 +1798,7 @@ def create_thft_playbooks(
     burst_timeout_s: float = 60.0,
     flap_burst_timeout_s: float = 60.0,
     include_kitchen_sink: bool = False,
+    kitchen_sink_test_duration_s: int | None = None,
 ) -> list[Playbook]:
     """Return the standard NPI THFT playbook set for any FBOSS DUT.
 
@@ -1806,11 +1807,12 @@ def create_thft_playbooks(
     THFT_001, the baseline becomes THFT_002, and the four restart cases become
     THFT_003..006.
 
-    Per-playbook duration is split so the campaign wall time stays
-    bounded: `test_duration_s` drives THFT_001 (default 4hr prod);
-    `restart_test_duration_s` drives THFT_002..005 (default 1hr prod
-    each = 4hr total across the 4 restart variants, matching the
-    baseline's 4hr soak).
+    Per-playbook duration is split so the campaign wall time stays bounded:
+    `test_duration_s` drives the baseline (default 4hr prod),
+    `restart_test_duration_s` drives each restart variant (default 1hr prod),
+    and `kitchen_sink_test_duration_s` can independently set the optional
+    kitchen-sink duration. Omitting it preserves the existing behavior of
+    using `test_duration_s` for the kitchen sink.
     """
     playbook_number_offset = 1 if include_kitchen_sink else 0
     playbooks: list[Playbook] = []
@@ -1818,7 +1820,11 @@ def create_thft_playbooks(
         playbooks.append(
             create_thft_kitchen_sink_playbook(
                 device_name=device_name,
-                test_duration_s=test_duration_s,
+                test_duration_s=(
+                    test_duration_s
+                    if kitchen_sink_test_duration_s is None
+                    else kitchen_sink_test_duration_s
+                ),
                 requests_per_burst=requests_per_burst,
                 burst_timeout_s=burst_timeout_s,
             )

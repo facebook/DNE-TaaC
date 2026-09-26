@@ -41,8 +41,7 @@ edits.
 
 The full constant set (CPU queue, BGP hardening, longevity, thrift hardening,
 speed flip) is staged here so later test classes can be bound without touching
-this file again. Only the CPU-queue block is consumed today; see
-`ac100t_npi_test_config.py`.
+this file again.
 """
 
 # ---------------------------------------------------------------------------
@@ -375,11 +374,12 @@ AC100T_SNAKE_ITERATION = 10
 AC100T_SNAKE_IMIX_WEIGHT = {100: 1, 1500: 4, 4500: 5, 7000: 1, 9000: 1}
 
 # ===========================================================================
-# Thrift hardening tests (THFT_001..005)
+# Thrift hardening tests (THFT_001..006)
 # ===========================================================================
-# For a future AC100T_THRIFT_HARDENING_TEST_CONFIG. ALL BGP scaffolding knobs
-# are SHARED with the CPU-queue / BGP configs above and are meant to be reused
-# directly; the only THFT-specific value is the flap-port list.
+# Consumed by ac100t_npi_test_config.py's
+# AC100T_THRIFT_HARDENING_TEST_CONFIG. ALL BGP scaffolding knobs are SHARED
+# with the CPU-queue / BGP configs above and reused directly; the only
+# THFT-specific value is the flap-port list.
 # flap_ports = DUT-side ports the qsfp-flap background will tx_disable /
 # tx_enable. MUST EXCLUDE the IXIA-facing ports (AC100T_DUT2_IXIA_INTERFACES) --
 # flapping those breaks IXIA peering and would invalidate the

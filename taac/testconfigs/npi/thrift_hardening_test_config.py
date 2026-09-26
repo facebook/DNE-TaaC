@@ -112,6 +112,7 @@ def create_npi_thrift_hardening_test_config(
     basset_pool: str | None = None,
     service_restart_services: list | None = None,
     skip_platform_assert: bool = False,
+    kitchen_sink_test_duration_s: int | None = None,
 ):
     """Build the NPI Thrift Hardening (THFT) TestConfig.
 
@@ -140,6 +141,9 @@ def create_npi_thrift_hardening_test_config(
             (each restart-variant). Default 3600s (1 hr) so the 4 restart
             variants total ~4hr — matches the THFT_001 4hr soak instead of
             blowing the campaign wall-time up to 5×4=20hr.
+        kitchen_sink_test_duration_s: Optional independent duration for the
+            kitchen-sink case. Defaults to `test_duration_s` to preserve
+            existing callers.
         burst_timeout_s: Wall-clock cap on the THRIFT burst. Those calls are
             rate-limited server-side (`thriftApiToRateLimitInQps` — 1-2 qps
             for most APIs), so excess is rejected in microseconds and 60s is
@@ -560,6 +564,7 @@ def create_npi_thrift_hardening_test_config(
                 burst_timeout_s=burst_timeout_s,
                 flap_burst_timeout_s=flap_burst_timeout_s,
                 include_kitchen_sink=include_kitchen_sink,
+                kitchen_sink_test_duration_s=kitchen_sink_test_duration_s,
             ),
             service_restart_services=service_restart_services,
         ),
@@ -579,6 +584,7 @@ def create_npi_device_only_thrift_hardening_test_config(
     basset_pool: str | None = None,
     service_restart_services: list | None = None,
     expected_established_bgp_sessions: int | None = None,
+    kitchen_sink_test_duration_s: int | None = None,
 ) -> TestConfig:
     """Build THFT coverage that needs no IXIA protocol scaffolding.
 
@@ -614,6 +620,7 @@ def create_npi_device_only_thrift_hardening_test_config(
                 burst_timeout_s=burst_timeout_s,
                 flap_burst_timeout_s=flap_burst_timeout_s,
                 include_kitchen_sink=include_kitchen_sink,
+                kitchen_sink_test_duration_s=kitchen_sink_test_duration_s,
             ),
             service_restart_services=service_restart_services,
             require_all_bgp_sessions_established=False,
