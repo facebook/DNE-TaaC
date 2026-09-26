@@ -516,7 +516,7 @@ ALLOWED_FBOSS_AGENTS = ["bgpd", "coop", "qsfp_service", "wedge_agent"]
 
 AGENT_CONFIG_PATCHER_NAME = "agent"
 
-BGP_CONFIG_PATCHER_NAME = "bgp"
+BGP_CONFIG_PATCHER_NAME = "bgpcpp"
 
 # A method in https://fburl.com/diffusion/316gf9z6
 CHANGE_PORT_ADMIN_PATCHER_METHOD_NAME = "change_port_admin_state"
