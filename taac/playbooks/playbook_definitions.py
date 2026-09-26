@@ -11432,7 +11432,7 @@ def create_agent_and_fsdb_restart_playbook(iteration: int = 5) -> Playbook:
     return _create_repeated_concurrent_service_restart_playbook(
         name="test_agent_and_fsdb_restart",
         services=[Service.AGENT, Service.FSDB],
-        convergence_services=[Service.AGENT, Service.FSDB],
+        convergence_services=[Service.AGENT, Service.BGP, Service.FSDB],
         expected_restarted_services=[
             "wedge_agent",
             "fsdb",
@@ -11450,7 +11450,7 @@ def create_agent_and_qsfp_service_restart_playbook(iteration: int = 5) -> Playbo
     return _create_repeated_concurrent_service_restart_playbook(
         name="test_agent_and_qsfp_service_restart",
         services=[Service.AGENT, Service.QSFP_SERVICE],
-        convergence_services=[Service.AGENT, Service.QSFP_SERVICE],
+        convergence_services=[Service.AGENT, Service.BGP, Service.QSFP_SERVICE],
         expected_restarted_services=[
             "wedge_agent",
             "qsfp_service",
