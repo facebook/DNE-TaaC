@@ -88,7 +88,47 @@ WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_400G = gen_snake_test_config(
 )
 
 
+# Full-suite variants: no playbooks_to_include, so gen_snake_playbooks emits its
+# whole default set -- the 15 core playbooks plus test_72hr_longevity and the
+# three system-reboot playbooks. The 72-hour soak alone puts a complete run at
+# roughly 3.5 days, and the reboot playbooks need BMC reachability from the test
+# host, which is why these live as separate TestConfigs rather than replacing the
+# core ones. Select a subset at run time with --regex.
+WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = gen_snake_test_config(
+    name="WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss338726358.ash6:eth1/1/1",
+            destination="fboss338726358.ash6:eth1/32/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss338726358.ash6",
+    line_rate=99,
+)
+
+
+WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = gen_snake_test_config(
+    name="WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss338826479.ash6:eth1/1/1",
+            destination="fboss338826479.ash6:eth1/32/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    hostname="fboss338826479.ash6",
+    line_rate=99,
+)
+
+
 W800_NPI_SNAKE_TEST_CONFIGS = [
     WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_400G,
     WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_400G,
+    WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
+    WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
 ]
