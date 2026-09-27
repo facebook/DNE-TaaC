@@ -53,6 +53,12 @@ _W800_NPI_CORE_PLAYBOOKS = [
     "test_snake_fsdb_crash",
 ]
 
+# FR4 optics on these beds do not relink within a single postcheck sample after a
+# hard disruption, so the default single-shot port-state and flap-recovery checks
+# race the recovery. 6 retries at the 10s default delay gives ~60s of headroom,
+# matching what the shipped Icepack FR4 snake configs use.
+_W800_RECOVERY_RETRY_COUNT = 6
+
 
 WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_400G = gen_snake_test_config(
     name="WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_400G",
@@ -68,6 +74,8 @@ WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_400G = gen_snake_test_config(
     hostname="fboss338726358.ash6",
     line_rate=99,
     playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
+    postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
+    flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
 )
 
 
@@ -85,6 +93,8 @@ WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_400G = gen_snake_test_config(
     hostname="fboss338826479.ash6",
     line_rate=99,
     playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
+    postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
+    flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
 )
 
 
@@ -107,6 +117,8 @@ WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = gen_snake_test_config(
     ],
     hostname="fboss338726358.ash6",
     line_rate=99,
+    postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
+    flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
 )
 
 
@@ -123,6 +135,8 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = gen_snake_test_config(
     ],
     hostname="fboss338826479.ash6",
     line_rate=99,
+    postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
+    flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
 )
 
 
