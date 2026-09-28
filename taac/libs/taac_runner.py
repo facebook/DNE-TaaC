@@ -3355,7 +3355,7 @@ class TaacRunner:
 
         with _console_visible(self.logger):
             self._log_investigation_event(f"  Running {label}...")
-            report, transcript = await run_agent(
+            run = await run_agent(
                 task=task,
                 prompt=prompt,
                 tools=tools,
@@ -3363,13 +3363,13 @@ class TaacRunner:
                 on_event=self._log_investigation_event,
                 timeout_sec=timeout_sec,
             )
-            self._log_investigation_report(report)
-        transcript_url = await async_everpaste_str(transcript.text)
+            self._log_investigation_report(run.output)
+        transcript_url = await async_everpaste_str(run.transcript.text)
         self._record_investigation_artifact(
             phase=phase,
             label=label,
             transcript_url=transcript_url,
-            report=report,
+            report=run.output,
             playbook_name=playbook_name,
             dut=dut,
         )
