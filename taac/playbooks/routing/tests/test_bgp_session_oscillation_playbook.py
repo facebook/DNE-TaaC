@@ -15,6 +15,10 @@ from taac.stages.stage_definitions import (
 from taac.test_as_a_config import types as taac_types
 
 
+DEFAULT_BGP_MON_PREFIX = "2401:db00:e50d:22:a::/80"
+CUSTOM_PARENT_PREFIX = "2001:db8:ffff::/80"
+
+
 def _step_payload(step: taac_types.Step) -> dict:
     params = step.step_params
     if params is None or params.json_params is None:
@@ -24,6 +28,10 @@ def _step_payload(step: taac_types.Step) -> dict:
 
 class BgpSessionOscillationPlaybookTest(unittest.TestCase):
     def test_ebgp_playbook_matches_legacy_stage_for_odd_width(self) -> None:
+        expected_parent_prefixes_to_ignore = [
+            CUSTOM_PARENT_PREFIX,
+            DEFAULT_BGP_MON_PREFIX,
+        ]
         playbook = get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name="dut.example.com",
             peergroup_ibgp_v6="IBGP_V6",
@@ -32,7 +40,7 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
             ipv6_session_count=140,
             expected_established_sessions=1272,
             sessions_per_cycle=71,
-            parent_prefixes_to_ignore=["2001:db8:ffff::/80"],
+            parent_prefixes_to_ignore=[CUSTOM_PARENT_PREFIX],
         )
         legacy = create_validated_ebgp_session_oscillation_stage(
             device_name="dut.example.com",
@@ -42,7 +50,7 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
             ipv6_session_count=140,
             expected_established_sessions=1272,
             sessions_per_cycle=71,
-            parent_prefixes_to_ignore=["2001:db8:ffff::/80"],
+            parent_prefixes_to_ignore=expected_parent_prefixes_to_ignore,
         )
 
         self.assertEqual(1, len(playbook.stages))
@@ -50,10 +58,12 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
         self.assertEqual(
             legacy.steps[0].description, playbook.stages[0].steps[0].description
         )
+        payload = _step_payload(playbook.stages[0].steps[0])
         self.assertEqual(
-            _step_payload(legacy.steps[0]),
-            _step_payload(playbook.stages[0].steps[0]),
+            expected_parent_prefixes_to_ignore,
+            payload["parent_prefixes_to_ignore"],
         )
+        self.assertEqual(_step_payload(legacy.steps[0]), payload)
 
     def test_ebgp_playbook_rejects_width_that_cannot_cover_both_families(
         self,
@@ -69,6 +79,10 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
             )
 
     def test_ibgp_playbook_matches_legacy_stage_for_odd_width(self) -> None:
+        expected_parent_prefixes_to_ignore = [
+            CUSTOM_PARENT_PREFIX,
+            DEFAULT_BGP_MON_PREFIX,
+        ]
         playbook = get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name="dut.example.com",
             peergroup_ibgp_v6="IBGP_V6",
@@ -79,7 +93,10 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
             sessions_per_plane=15,
             tornado_planes=[1, 3],
             session_type="both",
-            parent_prefixes_to_ignore=["2001:db8:ffff::/80"],
+            parent_prefixes_to_ignore=[
+                CUSTOM_PARENT_PREFIX,
+                DEFAULT_BGP_MON_PREFIX,
+            ],
         )
         legacy = create_validated_plane_bgp_session_oscillation_stage(
             device_name="dut.example.com",
@@ -91,7 +108,7 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
             sessions_per_cycle=15,
             tornado_planes=[1, 3],
             session_type="both",
-            parent_prefixes_to_ignore=["2001:db8:ffff::/80"],
+            parent_prefixes_to_ignore=expected_parent_prefixes_to_ignore,
         )
 
         self.assertEqual(1, len(playbook.stages))
@@ -99,10 +116,12 @@ class BgpSessionOscillationPlaybookTest(unittest.TestCase):
         self.assertEqual(
             legacy.steps[0].description, playbook.stages[0].steps[0].description
         )
+        payload = _step_payload(playbook.stages[0].steps[0])
         self.assertEqual(
-            _step_payload(legacy.steps[0]),
-            _step_payload(playbook.stages[0].steps[0]),
+            expected_parent_prefixes_to_ignore,
+            payload["parent_prefixes_to_ignore"],
         )
+        self.assertEqual(_step_payload(legacy.steps[0]), payload)
 
     def test_ibgp_playbook_rejects_width_that_cannot_cover_both_families(
         self,

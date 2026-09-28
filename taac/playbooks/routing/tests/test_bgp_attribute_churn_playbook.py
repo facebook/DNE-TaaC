@@ -57,7 +57,11 @@ from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     _ebb_drained_prefix_descriptors,
     get_bgp_ebb_attribute_churn_playbook,
+    get_bgp_ebb_ebgp_route_oscillation_playbook,
+    get_bgp_ebb_ebgp_session_oscillation_playbook,
     get_bgp_ebb_fauu_drain_undrain_playbook,
+    get_bgp_ebb_ibgp_plane_session_oscillation_playbook,
+    get_bgp_ebb_ibgp_route_oscillation_playbook,
     get_bgp_ebb_nexthop_group_count_threshold_playbook,
     get_bgp_ebb_plane_drain_undrain_playbook,
 )
@@ -205,6 +209,11 @@ _EBB_EXCLUSION_BLOCKS = {
     "PREFIX_POOL_IPV4_EBGP": [],
     "PREFIX_POOL_IPV6_EBGP": [],
 }
+_TEST_BGP_MON_PARENT_NETWORK = "2001:db8:ffff:1"
+_TEST_PARENT_NETWORKS = {
+    **EBB_PARENT_NETWORKS,
+    "bgpmon_v6": _TEST_BGP_MON_PARENT_NETWORK,
+}
 
 
 # The complete flat CustomStep payload the production Playbook serializes.
@@ -311,6 +320,16 @@ def _locked_step_kwargs() -> dict:
         "max_lookup_concurrency": 8,
         "openr_mode": "standalone",
     }
+
+
+def _full_scale_bound() -> BoundTopology:
+    bound = MagicMock()
+    bound.device_config = RoutingDeviceConfig(
+        fibagent_bgp_nhg_watermark_high=1000,
+        fibagent_bgp_nhg_watermark_low=1000,
+    )
+    bound.parent_networks = dict(_TEST_PARENT_NETWORKS)
+    return t.cast(BoundTopology, bound)
 
 
 # The fauu captures assert ORIGIN and LOCAL_PREF on the drained prefixes, so the
@@ -1180,6 +1199,149 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         self.assertTrue(get_checks.call_args.args[1].check_ibgp_pnh)
 
+    def test_ebb05_checks_and_workload_share_merged_prefix_exclusions(
+        self,
+    ) -> None:
+        target = (
+            "neteng.test_infra.dne.taac.playbooks.routing."
+            "bgp_ebb_playbooks.get_profile_checks"
+        )
+        expected_ignored_prefixes = [
+            "2001:db8:feed::/64",
+            "2001:db8:44:a::/80",
+        ]
+        with patch(target) as get_checks:
+            get_checks.return_value = SimpleNamespace(
+                prechecks=[],
+                postchecks=[],
+                snapshot_checks=[],
+            )
+            playbook = get_bgp_ebb_ebgp_route_oscillation_playbook(
+                device_name="dut.example.com",
+                peergroup_ibgp_v6="IBGP_V6",
+                peergroup_ibgp_v4="IBGP_V4",
+                parent_prefixes_to_ignore=["2001:db8:feed::/64"],
+                bgp_mon_parent_network="2001:db8:44:a",
+            )
+
+        workload = next(
+            _step_payload(step)
+            for step in _sequential_steps(playbook)
+            if step.step_params is not None
+            and step.step_params.json_params is not None
+            and _step_payload(step).get("custom_step_name") == "bgp_route_oscillation"
+        )
+        self.assertEqual(
+            expected_ignored_prefixes,
+            get_checks.call_args.args[1].parent_prefixes_to_ignore,
+        )
+        self.assertEqual(
+            expected_ignored_prefixes,
+            workload["parent_prefixes_to_ignore"],
+        )
+
+    def test_ebb06_checks_and_workload_share_merged_prefix_exclusions(
+        self,
+    ) -> None:
+        target = (
+            "neteng.test_infra.dne.taac.playbooks.routing."
+            "bgp_ebb_playbooks.get_profile_checks"
+        )
+        expected_ignored_prefixes = [
+            "2001:db8:feed::/64",
+            "2001:db8:44:a::/80",
+        ]
+        with patch(target) as get_checks:
+            get_checks.return_value = SimpleNamespace(
+                prechecks=[],
+                postchecks=[],
+                snapshot_checks=[],
+            )
+            playbook = get_bgp_ebb_ibgp_route_oscillation_playbook(
+                device_name="dut.example.com",
+                peergroup_ibgp_v6="IBGP_V6",
+                peergroup_ibgp_v4="IBGP_V4",
+                parent_prefixes_to_ignore=["2001:db8:feed::/64"],
+                bgp_mon_parent_network="2001:db8:44:a",
+            )
+
+        workload = next(
+            _step_payload(step)
+            for step in _sequential_steps(playbook)
+            if step.step_params is not None
+            and step.step_params.json_params is not None
+            and _step_payload(step).get("custom_step_name") == "bgp_route_oscillation"
+        )
+        self.assertEqual(
+            expected_ignored_prefixes,
+            get_checks.call_args.args[1].parent_prefixes_to_ignore,
+        )
+        self.assertEqual(
+            expected_ignored_prefixes,
+            workload["parent_prefixes_to_ignore"],
+        )
+
+    def test_ebb03_and_ebb04_checks_share_merged_prefix_exclusions(
+        self,
+    ) -> None:
+        target = (
+            "neteng.test_infra.dne.taac.playbooks.routing."
+            "bgp_ebb_playbooks.get_profile_checks"
+        )
+        expected_ignored_prefixes = [
+            "2001:db8:feed::/64",
+            "2001:db8:44:a::/80",
+        ]
+        with patch(target) as get_checks:
+            get_checks.return_value = SimpleNamespace(
+                prechecks=[],
+                postchecks=[],
+                snapshot_checks=[],
+            )
+            playbooks = (
+                get_bgp_ebb_ebgp_session_oscillation_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    ipv4_session_count=10,
+                    ipv6_session_count=10,
+                    sessions_per_cycle=2,
+                    parent_prefixes_to_ignore=["2001:db8:feed::/64"],
+                    bgp_mon_parent_network="2001:db8:44:a",
+                ),
+                get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
+                    device_name="dut.example.com",
+                    peergroup_ibgp_v6="IBGP_V6",
+                    peergroup_ibgp_v4="IBGP_V4",
+                    ipv4_sessions_per_plane=10,
+                    ipv6_sessions_per_plane=10,
+                    sessions_per_plane=2,
+                    parent_prefixes_to_ignore=["2001:db8:feed::/64"],
+                    bgp_mon_parent_network="2001:db8:44:a",
+                ),
+            )
+
+        self.assertEqual(
+            [expected_ignored_prefixes, expected_ignored_prefixes],
+            [
+                call.args[1].parent_prefixes_to_ignore
+                for call in get_checks.call_args_list
+            ],
+        )
+        for playbook in playbooks:
+            workload = next(
+                _step_payload(step)
+                for step in _sequential_steps(playbook)
+                if step.step_params is not None
+                and step.step_params.json_params is not None
+                and _step_payload(step).get("custom_step_name")
+                == "bgp_session_oscillation"
+            )
+            self.assertEqual(
+                expected_ignored_prefixes,
+                workload["parent_prefixes_to_ignore"],
+            )
+
     def test_full_scale_factory_does_not_require_observer_parent(self) -> None:
         inventory = MagicMock()
         inventory.device_name = "dut.example.com"
@@ -1203,19 +1365,18 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
             playbook_factory.return_value = MagicMock()
-            bound = MagicMock()
-            bound.device_config = RoutingDeviceConfig(
-                fibagent_bgp_nhg_watermark_high=1000,
-                fibagent_bgp_nhg_watermark_low=1000,
-            )
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                bound=bound,
+                bound=_full_scale_bound(),
                 ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                 selected_tc7_playbooks=set(),
             )
 
+        self.assertEqual(
+            _TEST_BGP_MON_PARENT_NETWORK,
+            playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
+        )
         self.assertNotIn(
             "observer_peer_parent_prefix", playbook_factory.call_args.kwargs
         )
@@ -1342,13 +1503,17 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                bound=MagicMock(),
+                bound=_full_scale_bound(),
                 ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                 selected_tc7_playbooks=set(),
                 enable_update_group=False,
             )
 
         self.assertFalse(playbook_factory.call_args.kwargs["enable_update_group"])
+        self.assertEqual(
+            _TEST_BGP_MON_PARENT_NETWORK,
+            playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
+        )
         self.assertEqual(
             _EBB16_IXIA_ITEMS,
             playbook_factory.call_args.kwargs["ixia_items_by_afi"],
@@ -1363,12 +1528,12 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         )
 
     def test_full_scale_factory_wires_sparse_oracles_to_ebb12(self) -> None:
-        inventory = BAG010_ASH6
-        bound = _bound_full_scale_automation_artifact(
-            inventory,
-            parent_networks=EBB_PARENT_NETWORKS,
-            next_hops=EBB_NEXT_HOPS,
-        )
+        inventory = MagicMock()
+        inventory.device_name = "dut.example.com"
+        inventory.ixia_ports = [["Ethernet1"], ["Ethernet2"]]
+        inventory.openr_standalone_link.owner = "owner"
+        inventory.openr_standalone_link.helper = "helper"
+        inventory.openr_standalone_link.kv_link.return_value = {"ifName": "Ethernet1"}
         automation = _CANONICAL_AUTOMATION_CONTRACT._replace(
             non_monitor_established_session_count=321,
             internal_peer_group_names_by_afi={
@@ -1428,11 +1593,15 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                bound=bound,
+                bound=_full_scale_bound(),
                 ebgp_prefix_count=850,
                 selected_tc7_playbooks=set(),
             )
 
+        self.assertEqual(
+            _TEST_BGP_MON_PARENT_NETWORK,
+            playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
+        )
         self.assertEqual(
             _EBB_ROUTE_HISTOGRAM,
             playbook_factory.call_args.kwargs["expected_route_count_histogram_by_afi"],
@@ -1465,10 +1634,6 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         )
         self.assertEqual(
             321, playbook_factory.call_args.kwargs["expected_established_sessions"]
-        )
-        self.assertEqual(
-            EBB_PARENT_NETWORKS["bgpmon_v6"],
-            playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
         )
 
     def test_ebb12_matches_bag010_and_nrqeb006_bound_artifacts(self) -> None:
@@ -2108,20 +2273,19 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     return_value=_EBB_EXCLUSION_BLOCKS,
                 ),
             ):
-                bound = MagicMock()
-                bound.device_config = RoutingDeviceConfig(
-                    fibagent_bgp_nhg_watermark_high=1000,
-                    fibagent_bgp_nhg_watermark_low=1000,
-                )
                 _get_bgp_ebb_full_scale_playbooks(
                     inventory,
                     BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                    bound=bound,
+                    bound=_full_scale_bound(),
                     ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                     selected_tc7_playbooks=set(),
                 )
 
                 for factory in (fauu_factory, plane_factory):
+                    self.assertEqual(
+                        _TEST_BGP_MON_PARENT_NETWORK,
+                        factory.call_args.kwargs["bgp_mon_parent_network"],
+                    )
                     self.assertEqual(
                         "Ethernet1",
                         factory.call_args.kwargs["tcp_dump_capture_interface_ebgp"],
@@ -2146,11 +2310,6 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
             "bgp_ebb_full_scale.get_bgp_ebb_multipath_group_oscillation_playbook"
         )
-        bound = MagicMock()
-        bound.device_config = RoutingDeviceConfig(
-            fibagent_bgp_nhg_watermark_high=1000,
-            fibagent_bgp_nhg_watermark_low=1000,
-        )
 
         with (
             patch(multipath_target, return_value=MagicMock()) as multipath_factory,
@@ -2165,7 +2324,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
                 BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
-                bound=bound,
+                bound=_full_scale_bound(),
                 ebgp_prefix_count=_DEFAULT_EBGP_PREFIX_COUNT,
                 selected_tc7_playbooks=set(),
                 multipath_min_peers_to_stop=3,
@@ -2174,6 +2333,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         self.assertEqual(3, multipath_factory.call_args.kwargs["min_peers_to_stop"])
         self.assertEqual(7, multipath_factory.call_args.kwargs["max_peers_to_stop"])
+        self.assertEqual(
+            _TEST_BGP_MON_PARENT_NETWORK,
+            multipath_factory.call_args.kwargs["bgp_mon_parent_network"],
+        )
 
     def test_public_full_scale_factory_forwards_c09_peer_range_overrides(
         self,

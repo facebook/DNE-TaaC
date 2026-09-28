@@ -77,7 +77,6 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
     IBGP_PEER_SCALE_PER_PLANE,
-    IXIA_BGP_MON_IC_PARENT_NETWORK,
     PEERGROUP_EBGP_V4,
     PEERGROUP_EBGP_V6,
     PEERGROUP_IBGP_V4,
@@ -1126,9 +1125,12 @@ def _get_bgp_ebb_full_scale_playbooks(
     # for_secondary_ixia() peers on the secondary chassis' subnets, and the
     # ixia11 defaults would mark every one of those sessions unexpected.
     bound_parent_networks = dict(bound.parent_networks)
-    bound_bgp_mon_network = bound_parent_networks.get(
-        "bgpmon_v6", IXIA_BGP_MON_IC_PARENT_NETWORK
-    )
+    try:
+        bound_bgp_mon_network = bound_parent_networks["bgpmon_v6"]
+    except KeyError as error:
+        raise ValueError(
+            "BGP EBB full-scale topology is missing required bgpmon_v6 network"
+        ) from error
     bgp_mon_parent_prefix = f"{bound_bgp_mon_network}::/80"
     expected_peer_identity = build_expected_peer_identity(bound_parent_networks)
     local_link = _openr_owner_kv_link(physical_inventory)
@@ -1168,6 +1170,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             total_session_count=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_attribute_churn_playbook", enable_update_group
@@ -1182,6 +1185,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             observer_peer_parent_prefix=bgp_mon_parent_prefix,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
+            bgp_mon_parent_network=bound_bgp_mon_network,
             cycles=route_storm_cycles,
             quiet_window_seconds=route_storm_quiet_window_seconds,
             bounded_validation=route_storm_bounded_validation,
@@ -1245,6 +1249,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_igp_pnh_metric_oscillation_playbook",
@@ -1284,6 +1289,7 @@ def _get_bgp_ebb_full_scale_playbooks(
         get_bgp_ebb_longevity_playbook(
             device_name=device_name,
             duration=_LONGEVITY_DURATION_SECONDS,
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_longevity_playbook", enable_update_group
@@ -1297,7 +1303,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
             # Deliberately unmeasured. Restarting bgpcpp replaces the PID
             # mid-bracket, and both collectors resolve the PID once at START:
             # CPU then reads a dead /proc entry and silently drops every
@@ -1317,7 +1323,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
         ),
         get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name=device_name,
@@ -1329,7 +1335,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_ebgp_session_oscillation_playbook", enable_update_group
@@ -1348,7 +1354,7 @@ def _get_bgp_ebb_full_scale_playbooks(
                 automation.ebgp_route_item_names_by_afi["ipv6"],
             ),
             prefix_pool_names_by_afi=automation.ebgp_route_item_names_by_afi,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_ebgp_route_oscillation_playbook", enable_update_group
@@ -1364,7 +1370,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_ibgp_plane_session_oscillation_playbook",
@@ -1379,7 +1385,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_ibgp_route_oscillation_playbook", enable_update_group

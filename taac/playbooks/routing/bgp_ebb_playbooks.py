@@ -261,6 +261,21 @@ def _characterization_profile_configs(
     return (cpu, rss)
 
 
+def _all_parent_prefixes_to_ignore(
+    parent_prefixes_to_ignore: t.Iterable[str] | None,
+    bgp_mon: BgpMonScope,
+) -> list[str]:
+    """Combine explicit exclusions with the bound BGP-MON prefix once."""
+    return list(
+        dict.fromkeys(
+            [
+                *(parent_prefixes_to_ignore or ()),
+                *(bgp_mon.ignore_prefixes() or ()),
+            ]
+        )
+    )
+
+
 def get_bgp_ebb_daemon_restart_playbook(
     device_name: str,
     peergroup_ibgp_v6: str,
@@ -283,6 +298,7 @@ def get_bgp_ebb_daemon_restart_playbook(
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-01: BGP daemon restart.
@@ -325,6 +341,15 @@ def get_bgp_ebb_daemon_restart_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
+
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
@@ -342,7 +367,7 @@ def get_bgp_ebb_daemon_restart_playbook(
             expected_peer_identity=expected_peer_identity,
             parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             expected_established_sessions=expected_established_sessions,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -353,7 +378,7 @@ def get_bgp_ebb_daemon_restart_playbook(
             device_name=device_name,
             start_with_active_peers=True,
             expected_established_sessions=expected_established_sessions,
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore or (),
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
         ),
         prechecks=restart_checks.prechecks,
         postchecks=restart_checks.postchecks,
@@ -377,7 +402,7 @@ def get_bgp_ebb_daemon_restart_playbook(
                     reactivate_device_groups=False,
                     adaptive_convergence=True,
                     expected_established_sessions=expected_established_sessions,
-                    parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+                    parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
                 ),
             ],
             playbook_name="bgp_ebb_daemon_restart_playbook",
@@ -412,6 +437,7 @@ def get_bgp_ebb_cold_start_playbook(
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None,
     exclude_bgp_mon: bool = True,
     enable_rss_delta_gate: bool = True,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-02: BGP cold start.
@@ -469,6 +495,15 @@ def get_bgp_ebb_cold_start_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
+
     cold_start_checks = get_profile_checks(
         CheckProfile.COLD_START,
         ProfileContext(
@@ -480,7 +515,7 @@ def get_bgp_ebb_cold_start_playbook(
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
             expected_established_sessions=expected_established_sessions,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             fail_on_eor_expired=fail_on_eor_expired,
             # Observe-only characterization postchecks (results land in the
             # POST-HEALTH CHECK RESULTS table). CPU percentile is reported from
@@ -519,7 +554,7 @@ def get_bgp_ebb_cold_start_playbook(
             enable_socket_monitoring=enable_socket_monitoring,
             adaptive_convergence=True,
             expected_established_sessions=expected_established_sessions,
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
             enable_cpu_percentile_characterization=True,
             enable_rss_delta_characterization=enable_rss_delta_gate,
             # Must match the Playbook name below: it is the identity embedded
@@ -645,6 +680,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     transient_observation_logging: str = "off",
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """Build CICD-EBB-10: BGP attribute churn.
 
@@ -678,6 +714,10 @@ def get_bgp_ebb_attribute_churn_playbook(
         tasks (CPU/memory @ 9 GiB, non-terminating), and one audited custom
         attribute-churn stage.
     """
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
@@ -691,7 +731,7 @@ def get_bgp_ebb_attribute_churn_playbook(
             precheck_thresholds=precheck_thresholds,
             expected_established_sessions=total_session_count,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             full_session_snapshot=True,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
@@ -803,6 +843,7 @@ def get_bgp_ebb_route_storm_playbook(
     bounded_validation: bool = False,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """Build CICD-EBB-11: BGP route storm.
 
@@ -833,6 +874,10 @@ def get_bgp_ebb_route_storm_playbook(
         BGP++ prechecks/postchecks, core-dump snapshots, and one audited
         failure-safe route-storm stage.
     """
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
@@ -847,7 +892,7 @@ def get_bgp_ebb_route_storm_playbook(
             expected_established_sessions=total_session_count,
             check_cpu_load_average=False,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -910,6 +955,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-07: IGP PNH metric oscillation.
@@ -957,6 +1003,11 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
     cpu_characterization, rss_delta = _characterization_profile_configs(
@@ -973,7 +1024,7 @@ def get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -1148,7 +1199,6 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         parent_network=bgp_mon_parent_network,
     )
     parent_prefixes_to_ignore = bgp_mon_scope.ignore_prefixes() or []
-
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
     )
@@ -1672,6 +1722,7 @@ def get_bgp_ebb_longevity_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-15: Longevity.
@@ -1695,6 +1746,10 @@ def get_bgp_ebb_longevity_playbook(
     Returns:
         Playbook configured for BGP longevity soak testing
     """
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
     # SOAK_NO_PRECHECK has no prechecks (the prechecks field is left unset).
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
@@ -1706,7 +1761,7 @@ def get_bgp_ebb_longevity_playbook(
         ProfileContext(
             postcheck_thresholds=postcheck_thresholds,
             check_bgp_convergence=False,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -1762,6 +1817,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-05: eBGP route oscillation.
@@ -1776,6 +1832,15 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
 
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
+
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
 
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
@@ -1793,8 +1858,8 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            bgp_mon=bgp_mon_scope,
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -1835,7 +1900,7 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
                                 "withdraw_time": 60,
                                 "readvertise_time": 60,
                                 "parent_prefixes_to_ignore": (
-                                    parent_prefixes_to_ignore or ()
+                                    all_parent_prefixes_to_ignore
                                 ),
                             }
                         ),
@@ -1883,6 +1948,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-06: iBGP route oscillation.
@@ -1897,6 +1963,15 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
 
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
+
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
 
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
@@ -1914,8 +1989,8 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
+            bgp_mon=bgp_mon_scope,
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -1955,7 +2030,7 @@ def get_bgp_ebb_ibgp_route_oscillation_playbook(
                                 "withdraw_time": 60,
                                 "readvertise_time": 60,
                                 "parent_prefixes_to_ignore": (
-                                    parent_prefixes_to_ignore or ()
+                                    all_parent_prefixes_to_ignore
                                 ),
                             }
                         ),
@@ -2135,6 +2210,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-03: eBGP session oscillation.
@@ -2148,6 +2224,15 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
 
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
+
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
 
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
@@ -2163,8 +2248,8 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
+            bgp_mon=bgp_mon_scope,
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
             cpu_characterization=cpu_characterization,
@@ -2217,7 +2302,7 @@ def get_bgp_ebb_ebgp_session_oscillation_playbook(
                                 "uptime_seconds": uptime_seconds,
                                 "downtime_seconds": downtime_seconds,
                                 "parent_prefixes_to_ignore": (
-                                    parent_prefixes_to_ignore or ()
+                                    all_parent_prefixes_to_ignore
                                 ),
                                 "ixia_restore_timeout_floor_seconds": 180,
                             }
@@ -2263,6 +2348,7 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-04: iBGP plane session oscillation.
@@ -2280,6 +2366,15 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    all_parent_prefixes_to_ignore = _all_parent_prefixes_to_ignore(
+        parent_prefixes_to_ignore,
+        bgp_mon_scope,
+    )
+
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
     )
@@ -2294,8 +2389,8 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
             expected_peer_identity=expected_peer_identity,
-            parent_prefixes_to_ignore=parent_prefixes_to_ignore,
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            parent_prefixes_to_ignore=all_parent_prefixes_to_ignore,
+            bgp_mon=bgp_mon_scope,
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
             cpu_characterization=cpu_characterization,
@@ -2370,7 +2465,7 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
                                 "uptime_seconds": uptime_seconds,
                                 "downtime_seconds": downtime_seconds,
                                 "parent_prefixes_to_ignore": (
-                                    parent_prefixes_to_ignore or ()
+                                    all_parent_prefixes_to_ignore
                                 ),
                                 "ixia_restore_timeout_floor_seconds": 600,
                             }

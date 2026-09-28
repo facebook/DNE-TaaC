@@ -6,6 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_PARENT_NETWORKS,
+    EBB_PARENT_NETWORKS_IXIA03,
+)
 from taac.abstractions.topology.model import BoundTopology
 from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
@@ -14,6 +18,30 @@ from taac.test_as_a_config import types as taac_types
 
 
 _C16_PLAYBOOK = "bgp_ebb_nexthop_group_count_threshold_playbook"
+_BGP_MON_CANARY_BUILDERS = {
+    "CICD-EBB-05": "get_bgp_ebb_ebgp_route_oscillation_playbook",
+    "CICD-EBB-09": "get_bgp_ebb_multipath_group_oscillation_playbook",
+    "CICD-EBB-12": "get_bgp_ebb_route_registry_runtime_update_playbook",
+    "CICD-EBB-16": "get_bgp_ebb_nexthop_group_count_threshold_playbook",
+}
+_EBB_PLAYBOOK_BUILDERS = (
+    "get_bgp_ebb_attribute_churn_playbook",
+    "get_bgp_ebb_route_storm_playbook",
+    "get_bgp_ebb_route_registry_runtime_update_playbook",
+    "get_bgp_ebb_multipath_group_oscillation_playbook",
+    "get_bgp_ebb_igp_pnh_metric_oscillation_playbook",
+    "get_bgp_ebb_fauu_drain_undrain_playbook",
+    "get_bgp_ebb_plane_drain_undrain_playbook",
+    "get_bgp_ebb_longevity_playbook",
+    "get_bgp_ebb_daemon_restart_playbook",
+    "get_bgp_ebb_cold_start_playbook",
+    "get_bgp_ebb_ebgp_session_oscillation_playbook",
+    "get_bgp_ebb_ebgp_route_oscillation_playbook",
+    "get_bgp_ebb_ibgp_plane_session_oscillation_playbook",
+    "get_bgp_ebb_ibgp_route_oscillation_playbook",
+    "get_bgp_ebb_igp_unresolvable_pnh_playbook",
+    "get_bgp_ebb_nexthop_group_count_threshold_playbook",
+)
 
 
 def _inventory() -> mock.MagicMock:
@@ -71,6 +99,178 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
             "ipv6": "ROUTE+POOL(V6)",
         },
     )
+
+    def test_all_ebb_playbooks_use_bound_bgp_mon_network(self) -> None:
+        bgp_mon_parent_network = "2401:db00:e50d:44:a"
+        inventory = _inventory()
+        inventory.ixia_ports = [("Ethernet1",), ("Ethernet2",)]
+        bound = t.cast(
+            BoundTopology,
+            SimpleNamespace(
+                device_config=SimpleNamespace(
+                    fibagent_bgp_nhg_watermark_high=1000,
+                    fibagent_bgp_nhg_watermark_low=1000,
+                ),
+                parent_networks={"bgpmon_v6": bgp_mon_parent_network},
+            ),
+        )
+        builders = {
+            name: mock.Mock(return_value=taac_types.Playbook(name=name))
+            for name in _EBB_PLAYBOOK_BUILDERS
+        }
+        with (
+            mock.patch.multiple(factory, **builders),
+            mock.patch.object(
+                factory,
+                "_ebb_route_count_histogram_by_afi",
+                return_value={"ipv4": {}, "ipv6": {}},
+            ),
+            mock.patch.object(
+                factory,
+                "_ebb_peer_prefix_exclusion_blocks_by_pool",
+                return_value={
+                    "ROUTE.POOL[V4]": [],
+                    "ROUTE+POOL(V6)": [],
+                },
+            ),
+            mock.patch.object(
+                factory,
+                "_ebb_automation_contract",
+                return_value=self._AUTOMATION,
+            ),
+            mock.patch.object(factory, "_nhg_storm_ixia_items", return_value={}),
+            mock.patch.object(factory, "build_expected_peer_identity", return_value={}),
+            mock.patch.object(factory, "_openr_owner_kv_link", return_value={}),
+            mock.patch.object(factory, "_openr_helper_kv_link", return_value={}),
+        ):
+            playbooks = factory._get_bgp_ebb_full_scale_playbooks(
+                inventory,
+                profile=factory.DEFAULT_PROFILE,
+                bound=bound,
+                ebgp_prefix_count=850,
+                selected_tc7_playbooks=set(),
+            )
+
+        self.assertEqual(len(_EBB_PLAYBOOK_BUILDERS), len(playbooks))
+        for name, builder in builders.items():
+            with self.subTest(builder=name):
+                self.assertEqual(
+                    bgp_mon_parent_network,
+                    builder.call_args.kwargs["bgp_mon_parent_network"],
+                )
+
+    def test_canary_cases_use_paired_canonical_bgp_mon_network(self) -> None:
+        inventory = _inventory()
+        inventory.ixia_ports = [("Ethernet1",), ("Ethernet2",)]
+        canonical_pairs = (
+            (
+                "BAG/IXIA11",
+                EBB_PARENT_NETWORKS,
+                "2401:db00:e50d:22:a",
+                "2401:db00:e50d:44:a",
+            ),
+            (
+                "NRQ/IXIA03",
+                EBB_PARENT_NETWORKS_IXIA03,
+                "2401:db00:e50d:44:a",
+                "2401:db00:e50d:22:a",
+            ),
+        )
+
+        for profile, parent_networks, expected, forbidden in canonical_pairs:
+            with self.subTest(profile=profile):
+                self.assertEqual(expected, parent_networks["bgpmon_v6"])
+                self.assertNotEqual(forbidden, parent_networks["bgpmon_v6"])
+                bound = t.cast(
+                    BoundTopology,
+                    SimpleNamespace(
+                        device_config=SimpleNamespace(
+                            fibagent_bgp_nhg_watermark_high=1000,
+                            fibagent_bgp_nhg_watermark_low=1000,
+                        ),
+                        parent_networks=parent_networks,
+                    ),
+                )
+                builders = {
+                    name: mock.Mock(return_value=taac_types.Playbook(name=name))
+                    for name in _EBB_PLAYBOOK_BUILDERS
+                }
+                with (
+                    mock.patch.multiple(factory, **builders),
+                    mock.patch.object(
+                        factory,
+                        "_ebb_route_count_histogram_by_afi",
+                        return_value={"ipv4": {}, "ipv6": {}},
+                    ),
+                    mock.patch.object(
+                        factory,
+                        "_ebb_peer_prefix_exclusion_blocks_by_pool",
+                        return_value={
+                            "ROUTE.POOL[V4]": [],
+                            "ROUTE+POOL(V6)": [],
+                        },
+                    ),
+                    mock.patch.object(
+                        factory,
+                        "_ebb_automation_contract",
+                        return_value=self._AUTOMATION,
+                    ),
+                    mock.patch.object(
+                        factory, "_nhg_storm_ixia_items", return_value={}
+                    ),
+                    mock.patch.object(
+                        factory, "build_expected_peer_identity", return_value={}
+                    ),
+                    mock.patch.object(factory, "_openr_owner_kv_link", return_value={}),
+                    mock.patch.object(
+                        factory, "_openr_helper_kv_link", return_value={}
+                    ),
+                ):
+                    factory._get_bgp_ebb_full_scale_playbooks(
+                        inventory,
+                        profile=factory.DEFAULT_PROFILE,
+                        bound=bound,
+                        ebgp_prefix_count=850,
+                        selected_tc7_playbooks=set(),
+                    )
+
+                for catalog_id, builder_name in _BGP_MON_CANARY_BUILDERS.items():
+                    with self.subTest(profile=profile, catalog_id=catalog_id):
+                        configured = builders[builder_name].call_args.kwargs[
+                            "bgp_mon_parent_network"
+                        ]
+                        self.assertEqual(expected, configured)
+                        self.assertNotEqual(forbidden, configured)
+
+    def test_full_scale_rejects_missing_bgp_mon_network(self) -> None:
+        inventory = _inventory()
+        inventory.ixia_ports = [("Ethernet1",), ("Ethernet2",)]
+        bound = t.cast(
+            BoundTopology,
+            SimpleNamespace(
+                device_config=SimpleNamespace(
+                    fibagent_bgp_nhg_watermark_high=1000,
+                    fibagent_bgp_nhg_watermark_low=1000,
+                ),
+                parent_networks={},
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                factory,
+                "_ebb_automation_contract",
+                return_value=self._AUTOMATION,
+            ),
+            self.assertRaisesRegex(ValueError, "missing required bgpmon_v6"),
+        ):
+            factory._get_bgp_ebb_full_scale_playbooks(
+                inventory,
+                profile=factory.DEFAULT_PROFILE,
+                bound=bound,
+                ebgp_prefix_count=850,
+                selected_tc7_playbooks=set(),
+            )
 
     def test_canonical_route_contract_is_derived_per_afi(self) -> None:
         bound = _bound_shape(850)

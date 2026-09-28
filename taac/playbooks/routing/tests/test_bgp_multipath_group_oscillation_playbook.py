@@ -16,9 +16,6 @@ from taac.steps.step_definitions import (
     create_bgp_multipath_oscillation_step,
     create_multipath_churn_step,
 )
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    IXIA_BGP_MON_IC_PARENT_NETWORK,
-)
 from taac.test_as_a_config import types as taac_types
 
 
@@ -133,12 +130,14 @@ class BgpMultipathGroupOscillationPlaybookTest(unittest.TestCase):
         self.assertEqual(1, workflow["cycle_count"])
 
     def test_playbook_adds_strict_fallback_cleanup_for_both_afis(self) -> None:
+        bgp_mon_parent_network = "2401:db00:e50d:44:a"
         playbook = get_bgp_ebb_multipath_group_oscillation_playbook(
             device_name="dut.example.com",
             peergroup_ibgp_v6="IBGP_V6",
             peergroup_ibgp_v4="IBGP_V4",
             expected_established_sessions=42,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            bgp_mon_parent_network=bgp_mon_parent_network,
         )
 
         cleanup_steps = playbook.cleanup_steps
@@ -171,7 +170,7 @@ class BgpMultipathGroupOscillationPlaybookTest(unittest.TestCase):
         )
         self.assertEqual(42, session_params["expected_established_session_count"])
         self.assertEqual(
-            [f"{IXIA_BGP_MON_IC_PARENT_NETWORK}::/80"],
+            [f"{bgp_mon_parent_network}::/80"],
             session_params["parent_prefixes_to_ignore"],
         )
         self.assertEqual(0, width_params["peers_stopped_delta"])
