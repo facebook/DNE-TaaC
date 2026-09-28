@@ -1687,6 +1687,11 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
     cpu_util_terminate_on_error: bool = False,
     memory_terminate_on_error: bool = False,
     prefix_pool_regex: str = r"^PREFIX_POOL_IPV[46]_EBGP$",
+    expected_prefix_pool_names: t.Sequence[str] = (
+        "PREFIX_POOL_IPV4_EBGP",
+        "PREFIX_POOL_IPV6_EBGP",
+    ),
+    prefix_pool_names_by_afi: t.Mapping[str, str] | None = None,
     prefix_start_index: int = 0,
     prefix_end_index: int = 750,
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
@@ -1757,9 +1762,9 @@ def get_bgp_ebb_ebgp_route_oscillation_playbook(
                                 "scenario_id": "bgp_ebb_ebgp_route_oscillation",
                                 "prefix_pool_regex": prefix_pool_regex,
                                 "expected_prefix_pool_names": (
-                                    "PREFIX_POOL_IPV4_EBGP",
-                                    "PREFIX_POOL_IPV6_EBGP",
+                                    expected_prefix_pool_names
                                 ),
+                                "prefix_pool_names_by_afi": (prefix_pool_names_by_afi),
                                 "expected_established_sessions": (
                                     expected_established_sessions
                                 ),

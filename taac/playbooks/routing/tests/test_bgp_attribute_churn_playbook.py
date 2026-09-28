@@ -1437,6 +1437,83 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             contract.exact_ebgp_route_regex(),
         )
 
+    def test_ebb05_uses_exact_route_handles_on_bag013_and_nrqeb009(self) -> None:
+        profiles = (
+            (
+                BAG013_ASH6,
+                NRQEB009_ASH6,
+                EBB_PARENT_NETWORKS,
+                EBB_NEXT_HOPS,
+                EBB_PARENT_NETWORKS["bgpmon_v6"],
+                EBB_PARENT_NETWORKS_IXIA03["bgpmon_v6"],
+            ),
+            (
+                NRQEB009_ASH6,
+                BAG013_ASH6,
+                EBB_PARENT_NETWORKS_IXIA03,
+                EBB_NEXT_HOPS_IXIA03,
+                EBB_PARENT_NETWORKS_IXIA03["bgpmon_v6"],
+                EBB_PARENT_NETWORKS["bgpmon_v6"],
+            ),
+        )
+
+        for (
+            inventory,
+            counterpart,
+            parent_networks,
+            next_hops,
+            expected_bgp_mon,
+            forbidden_bgp_mon,
+        ) in profiles:
+            with self.subTest(inventory=inventory.device_name):
+                config = create_bgp_ebb_full_scale_test_config(
+                    inventory,
+                    name=f"{inventory.device_name}:EBB05",
+                    playbooks_selected=["bgp_ebb_ebgp_route_oscillation_playbook"],
+                    profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                    parent_networks=dict(parent_networks),
+                    next_hops=next_hops,
+                )
+
+                self.assertEqual(1, len(config.playbooks))
+                playbook = config.playbooks[0]
+                serialized = thrift_to_json(playbook)
+                self.assertIn(inventory.device_name, serialized)
+                self.assertNotIn(counterpart.device_name, serialized)
+
+                workload = next(
+                    _step_payload(step)
+                    for step in _sequential_steps(playbook)
+                    if step.step_params is not None
+                    and step.step_params.json_params is not None
+                    and _step_payload(step).get("custom_step_name")
+                    == "bgp_route_oscillation"
+                )
+                self.assertEqual(
+                    r"^(?:PREFIX_POOL_IPV4_EBGP|PREFIX_POOL_IPV6_EBGP)$",
+                    workload["prefix_pool_regex"],
+                )
+                self.assertEqual(
+                    {
+                        "ipv4": "PREFIX_POOL_IPV4_EBGP",
+                        "ipv6": "PREFIX_POOL_IPV6_EBGP",
+                    },
+                    workload["prefix_pool_names_by_afi"],
+                )
+                self.assertEqual(
+                    ["PREFIX_POOL_IPV4_EBGP", "PREFIX_POOL_IPV6_EBGP"],
+                    workload["expected_prefix_pool_names"],
+                )
+                self.assertEqual(1272, workload["expected_established_sessions"])
+                self.assertEqual(
+                    [f"{expected_bgp_mon}::/80"],
+                    workload["parent_prefixes_to_ignore"],
+                )
+                self.assertNotIn(
+                    f"{forbidden_bgp_mon}::/80",
+                    workload["parent_prefixes_to_ignore"],
+                )
+
     def test_ebb09_and_ebb16_use_exact_handles_on_bag_and_nrq(self) -> None:
         cases = (
             (

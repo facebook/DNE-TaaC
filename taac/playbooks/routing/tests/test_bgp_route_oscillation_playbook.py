@@ -53,6 +53,31 @@ class BgpRouteOscillationPlaybookTest(unittest.TestCase):
         )
         self.assertEqual(_step_payload(legacy.steps[0]), payload)
 
+    def test_ebgp_playbook_preserves_topology_derived_pool_identity(self) -> None:
+        names_by_afi = {
+            "ipv4": "ROUTE.POOL[V4]",
+            "ipv6": "ROUTE+POOL(V6)",
+        }
+        playbook = get_bgp_ebb_ebgp_route_oscillation_playbook(
+            device_name="dut.example.com",
+            peergroup_ibgp_v6="IBGP_V6",
+            peergroup_ibgp_v4="IBGP_V4",
+            expected_established_sessions=744,
+            prefix_pool_regex=r"^(?:ROUTE\.POOL\[V4\]|ROUTE\+POOL\(V6\))$",
+            expected_prefix_pool_names=tuple(names_by_afi.values()),
+            prefix_pool_names_by_afi=names_by_afi,
+        )
+
+        payload = _step_payload(playbook.stages[0].steps[0])
+        self.assertEqual(
+            r"^(?:ROUTE\.POOL\[V4\]|ROUTE\+POOL\(V6\))$",
+            payload["prefix_pool_regex"],
+        )
+        self.assertEqual(
+            list(names_by_afi.values()), payload["expected_prefix_pool_names"]
+        )
+        self.assertEqual(names_by_afi, payload["prefix_pool_names_by_afi"])
+
     def test_ibgp_playbook_wires_exact_multi_plane_contract(self) -> None:
         playbook = get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name="dut.example.com",

@@ -1190,6 +1190,12 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
+            prefix_pool_regex=automation.exact_ebgp_route_regex(),
+            expected_prefix_pool_names=(
+                automation.ebgp_route_item_names_by_afi["ipv4"],
+                automation.ebgp_route_item_names_by_afi["ipv6"],
+            ),
+            prefix_pool_names_by_afi=automation.ebgp_route_item_names_by_afi,
             parent_prefixes_to_ignore=[bgp_mon_parent_prefix],
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(

@@ -49,6 +49,7 @@ class RouteTargetSelector:
     prefix_end_index: int
     expected_established_sessions: int
     parent_prefixes_to_ignore: tuple[str, ...] = ()
+    prefix_pool_names_by_afi: t.Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -56,6 +57,18 @@ class RouteTargetSelector:
             or self.prefix_end_index <= self.prefix_start_index
         ):
             raise ValueError("prefix range must be nonempty and half-open")
+        if self.prefix_pool_names_by_afi is not None:
+            if set(self.prefix_pool_names_by_afi) != {"ipv4", "ipv6"}:
+                raise ValueError(
+                    "prefix_pool_names_by_afi keys must be exactly ipv4 and ipv6"
+                )
+            if set(self.prefix_pool_names_by_afi.values()) != set(
+                self.expected_prefix_pool_names
+            ):
+                raise ValueError(
+                    "prefix_pool_names_by_afi must exactly match "
+                    "expected_prefix_pool_names"
+                )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -122,6 +135,10 @@ class RouteChurn:
             ),
             "parent_prefixes_to_ignore": list(self.selector.parent_prefixes_to_ignore),
         }
+        if self.selector.prefix_pool_names_by_afi is not None:
+            params["prefix_pool_names_by_afi"] = dict(
+                self.selector.prefix_pool_names_by_afi
+            )
         optional_defaults: tuple[tuple[str, t.Any, t.Any], ...] = (
             (
                 "poll_interval_seconds",
@@ -211,6 +228,16 @@ class RouteChurn:
                 DEFAULT_ROUTE_CHURN_TRANSITION_HARD_TIMEOUT_SECONDS,
             )
         )
+        raw_prefix_pool_names_by_afi = params.get("prefix_pool_names_by_afi")
+        if raw_prefix_pool_names_by_afi is not None and not isinstance(
+            raw_prefix_pool_names_by_afi, dict
+        ):
+            raise ValueError("prefix_pool_names_by_afi must be a mapping")
+        prefix_pool_names_by_afi = (
+            {str(afi): str(name) for afi, name in raw_prefix_pool_names_by_afi.items()}
+            if raw_prefix_pool_names_by_afi is not None
+            else None
+        )
         return cls(
             scenario=ChurnScenario(
                 scenario_id=str(params.get("scenario_id", "bgp_route_oscillation")),
@@ -264,6 +291,7 @@ class RouteChurn:
                     str(prefix)
                     for prefix in params.get("parent_prefixes_to_ignore", ())
                 ),
+                prefix_pool_names_by_afi=prefix_pool_names_by_afi,
             ),
             cycle=cycle,
             observation=RouteObservationPolicy(
