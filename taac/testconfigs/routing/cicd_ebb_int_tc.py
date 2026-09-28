@@ -3,19 +3,22 @@
 """EBB CICD lifecycle bindings scheduled on the ``dne_routing`` conveyor.
 
 The lifecycle layout schedules full-scale coverage plus a first promotion-gating
-wave of one scale-and-characteristic case per BAG device. Stage 1 partitions the
-retained Non-UG Playbooks into four runtime-balanced groups. Playbooks excluded
-from the Non-UG conveyor remain in the promotion-gating UG configs. The
-characteristic nodes retain one device-specific binding per BAG device. Catalog
-governance lives in
-``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml``.
+wave of one scale-and-characteristic case per scheduled device. Stage 1
+partitions the retained Non-UG Playbooks into four runtime-balanced groups. The
+former BAG010 logical track runs on NRQEB006 with NRQEB006 TestConfig and
+Conveyor identities while preserving every Playbook list. Catalog governance
+lives in ``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml``.
 """
 
 from taac.abstractions.physical_inventory import (
-    BAG010_ASH6,
     BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,
+    NRQEB006_ASH6,
+)
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_NEXT_HOPS_IXIA03,
+    EBB_PARENT_NETWORKS_IXIA03,
 )
 from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
@@ -40,22 +43,24 @@ _OPENR_STANDALONE = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
 # Each config lists its playbooks inline so what a Conveyor node runs is
 # readable at the node, without resolving a shared constant. The promotion-
 # gating UG configs remain unchanged; a rebalanced Non-UG case can therefore
-# have its UG coverage on a different BAG device.
-# CONVEYOR: dne_routing / bag010_stage1_node
-BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
-    BAG010_ASH6,
-    name="BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+# have its UG coverage on a different scheduled device.
+# CONVEYOR: dne_routing / nrqeb006_stage1_node
+NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB006_ASH6,
+    name="NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     playbooks_selected=[
         "bgp_ebb_route_registry_runtime_update_playbook",
         "bgp_ebb_daemon_restart_playbook",
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
-BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
-    BAG010_ASH6,
-    name="BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB006_ASH6,
+    name="NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     playbooks_selected=[
         "bgp_ebb_route_registry_runtime_update_playbook",
         "bgp_ebb_daemon_restart_playbook",
@@ -64,6 +69,8 @@ BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
 # CONVEYOR: dne_routing / bag011_stage1_node
@@ -144,15 +151,16 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
 )
 
 
-# First characteristic promotion-gating wave: one node per BAG device. These TestConfigs
-# intentionally use stable runtime selectors that do not encode the inventory's
-# site suffix, so later inventory maintenance does not rename a Conveyor input.
-# CONVEYOR: dne_routing / bag010_characteristics_wave1_node
-BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG = (
+# First characteristic promotion-gating wave: one node per scheduled device.
+# These TestConfigs intentionally use runtime selectors that do not encode the
+# inventory's site suffix.
+# CONVEYOR: dne_routing / nrqeb006_characteristics_wave1_node
+NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG = (
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
-        BAG010_ASH6,
+        NRQEB006_ASH6,
         enable_update_group=True,
-        name_override="BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+        name_override="NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+        include_direct_ixia_connections=True,
     )
 )
 
@@ -222,9 +230,6 @@ BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
 
 
 __all__ = [
-    "BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
-    "BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    "BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG",
     "BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
     "BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
@@ -238,4 +243,7 @@ __all__ = [
     "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
     "BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+    "NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+    "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+    "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
 ]

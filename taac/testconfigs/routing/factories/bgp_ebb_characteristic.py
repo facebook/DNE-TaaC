@@ -31,6 +31,7 @@ factories stay in ``playbook_definitions.py``.
 See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
+import ipaddress
 import os
 from dataclasses import replace
 
@@ -39,6 +40,10 @@ from taac.abstractions.eos_bgpcpp_setup_tasks import (
     openr_mode_for_bgpcpp_profile,
 )
 from taac.abstractions.physical_inventory import PhysicalInventory
+from taac.abstractions.physical_inventory.routing_ebb_testbed import (
+    IXIA03_ASH6,
+    IXIA11_ASH6,
+)
 from taac.abstractions.topologies.bounded_ecmp import (
     BOUNDED_ECMP,
     BOUNDED_ECMP_AS_NUMBERS,
@@ -50,6 +55,7 @@ from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE,
     EGRESS_PEER_SCALE_AS_NUMBERS,
     EGRESS_PEER_SCALE_PARENT_NETWORKS,
+    EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
     EGRESS_PEER_SCALE_PEER_GROUPS,
     EGRESS_PEER_SCALE_PORT_MAP,
     EGRESS_PEER_SCALE_PREFIX_COUNT,
@@ -143,7 +149,6 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
     create_standard_periodic_tasks,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
-    build_per_iteration_factory_ingress_v4_capable,
     build_per_iteration_factory_v4_capable,
     get_update_packing_setup_tasks,
 )
@@ -161,6 +166,83 @@ from taac.test_as_a_config.types import (
     Task,
     TestConfig,
 )
+
+
+_EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS = {
+    IXIA11_ASH6: EGRESS_PEER_SCALE_PARENT_NETWORKS,
+    IXIA03_ASH6: EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+}
+
+
+def _resolve_egress_peer_scale_parent_networks(  # noqa: C901
+    parent_networks: dict[str, str] | None,
+    *,
+    ixia_chassis_ip: str,
+) -> dict[str, str]:
+    expected = _EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS.get(ixia_chassis_ip)
+    if parent_networks is None:
+        if expected is None:
+            raise ValueError(
+                f"unsupported IXIA chassis for parent networks: {ixia_chassis_ip}"
+            )
+        resolved = expected
+    else:
+        resolved = parent_networks
+    canonical_maps = tuple(_EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS.values())
+    if expected is not None:
+        required_keys = frozenset(expected)
+    elif not canonical_maps:
+        raise ValueError(
+            "cannot derive egress peer-scale parent-network keys without a "
+            "canonical IXIA chassis map"
+        )
+    else:
+        required_keys = frozenset().union(
+            *(frozenset(canonical) for canonical in canonical_maps)
+        )
+    missing_keys = sorted(required_keys - resolved.keys())
+    if missing_keys:
+        raise ValueError(
+            f"egress peer-scale parent_networks missing required keys: {missing_keys}"
+        )
+    # Only topology-owned keys enter runtime configuration. Explicit callers may
+    # carry unrelated metadata, but it must not become an address-plan input.
+    required_parent_networks = {key: resolved[key] for key in sorted(required_keys)}
+    if expected is not None and required_parent_networks != expected:
+        raise ValueError(
+            "egress peer-scale parent_networks do not match IXIA chassis "
+            f"{ixia_chassis_ip}"
+        )
+    for key, parent_network in required_parent_networks.items():
+        if not isinstance(parent_network, str) or not parent_network:
+            raise ValueError(
+                f"egress peer-scale parent_networks[{key!r}] must be a nonempty "
+                "network prefix"
+            )
+        if key.endswith("_v4"):
+            network = f"{parent_network}.0/24"
+            expected_version = 4
+        elif key.endswith("_v6"):
+            hextets = parent_network.split(":")
+            if len(hextets) != 5 or any(not hextet for hextet in hextets):
+                raise ValueError(
+                    f"egress peer-scale parent_networks[{key!r}] is not a valid "
+                    f"bare IPv6 parent-network prefix: {parent_network!r}"
+                )
+            network = f"{parent_network}::/80"
+            expected_version = 6
+        else:
+            raise ValueError(
+                f"egress peer-scale parent_networks key {key!r} must end in _v4 or _v6"
+            )
+        try:
+            ipaddress.ip_network(network, strict=True)
+        except ValueError as error:
+            raise ValueError(
+                f"egress peer-scale parent_networks[{key!r}] is not a valid bare "
+                f"IPv{expected_version} parent-network prefix: {parent_network!r}"
+            ) from error
+    return required_parent_networks
 
 
 # =============================================================================
@@ -1809,11 +1891,13 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    parent_networks: dict[str, str] | None = None,
+    include_direct_ixia_connections: bool = False,
 ) -> taac_types.TestConfig:
     """SC2 constant-attribute-storage INGRESS-ONLY test config (testbed-driven).
 
     The SC2 "scale & characteristics" test (char-2). Reuses the BAG012
-    varying-combinations engine but made INGRESS-ONLY and non-vacuous on bag010:
+    varying-combinations engine but made INGRESS-ONLY and non-vacuous on NRQEB006:
     8 eBGP peers advertise 100K prefixes each (800K paths); routes are accepted
     into the RIB with resolvable directly connected nexthops. No iBGP egress is
     configured, so the workload remains ingress-only without weakening the
@@ -1841,6 +1925,10 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     All SC tests run with update-group enabled; only the ``_UPDATE_GROUP``
     variant is registered. ``name_override`` provides a stable lifecycle
     selector when the same factory is rebound to another physical inventory.
+    ``parent_networks=None`` derives the canonical address map from the
+    inventory's IXIA chassis. An explicit map may carry unrelated metadata but
+    must match that chassis for every required address. Direct IXIA ownership
+    is controlled independently by ``include_direct_ixia_connections``.
     """
     assert testbed.ixia_ports, "factory requires IXIA port map on testbed"
     assert testbed.bgpcpp_configerator_path, (
@@ -1850,9 +1938,14 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
 
     device_name = testbed.device_name
     ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
-    # get_update_packing_setup_tasks requires an iBGP interface arg; with
-    # ibgp_peer_count=0 it lays zero iBGP peers (eBGP-only device config).
-    ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
+    # get_update_packing_setup_tasks requires an iBGP interface argument even
+    # when ibgp_peer_count=0. Reuse the eBGP interface when inventory exposes
+    # only the single port that this ingress-only scenario actually consumes.
+    ixia_interface_mimic_ibgp = (
+        testbed.ixia_ports[1][0]
+        if len(testbed.ixia_ports) >= 2
+        else ixia_interface_mimic_ebgp
+    )
 
     name = name_override or (
         f"{device_name.upper().replace('.', '_')}"
@@ -1860,6 +1953,10 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
     )
     if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
+    resolved_parent_networks = _resolve_egress_peer_scale_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=testbed.ixia_chassis_ip,
+    )
 
     # Ingress-only device setup: eBGP peers only (ibgp_peer_count=0), IPv6-only.
     setup_tasks = get_update_packing_setup_tasks(
@@ -1871,8 +1968,8 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         ibgp_peer_count=0,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
         router_id=testbed.router_id,
         bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
@@ -1906,8 +2003,8 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         host_os_type_map={device_name: taac_types.DeviceOsType.ARISTA_FBOSS},
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ebgp_remote_as=EBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ebgp_ic_parent_network_v4=resolved_parent_networks["ebgp_v4"],
         # INGRESS-ONLY: no iBGP egress device group / peers.
         ixia_interface_mimic_ibgp=None,
         ibgp_local_as=None,
@@ -1918,6 +2015,17 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config
         constant_total_paths=_INGRESS_ATTR_TOTAL_PATHS,
         unique_combination_counts=_INGRESS_ATTR_COMBINATION_SWEEP,
         soak_time_minutes=2,
+        direct_ixia_connections=(
+            [
+                DirectIxiaConnection(
+                    interface=ixia_interface_mimic_ebgp,
+                    ixia_chassis_ip=testbed.ixia_chassis_ip,
+                    ixia_port=testbed.ixia_ports[0][1],
+                )
+            ]
+            if include_direct_ixia_connections
+            else None
+        ),
         # SC2 is a scale-CHARACTERISTIC measurement, so both activities this
         # flag enables are switched off:
         #   - Step 9 (dump_and_verify_rib_attributes) pulls the whole 800K-path
@@ -2750,7 +2858,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy(
     )
 
 
-def test_config_bgp_update_packing_validation(
+def test_config_bgp_update_packing_validation(  # noqa: C901
     test_config_name: str,
     device_name: str,
     # IBGP configuration (ingress)

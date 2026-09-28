@@ -2,15 +2,24 @@
 # pyre-unsafe
 import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from taac.abstractions.physical_inventory import (
     BAG010_ASH6,
     BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,
+    NRQEB006_ASH6,
 )
 from taac.abstractions.topologies.egress_peer_scale import (
+    EGRESS_PEER_SCALE_PARENT_NETWORKS,
+    EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
+)
+from taac.constants import BgpPlusPlusProfile
+from taac.testconfigs.routing.factories import (
+    bgp_ebb_characteristic as characteristic_factory,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
@@ -24,7 +33,9 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
+    get_update_packing_setup_tasks,
 )
+from taac.test_as_a_config.types import Params, Task
 
 # The router_id splice fragment written into the in-shell bgpcpp_config merge.
 _ROUTER_ID_ASSIGN = "c['router_id']="
@@ -95,12 +106,6 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                 "bag012.ash6",
             ),
             (
-                create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
-                BAG010_ASH6,
-                "BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
-                "bag010.ash6",
-            ),
-            (
                 create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
                 BAG011_ASH6,
                 "BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
@@ -132,6 +137,496 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                     [expected_dut],
                     [endpoint.name for endpoint in config.endpoints if endpoint.dut],
                 )
+
+    def test_nrqeb006_sc2_uses_primary_ixia03_addresses_and_port(self) -> None:
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            NRQEB006_ASH6,
+            enable_update_group=True,
+            name_override="NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+            include_direct_ixia_connections=True,
+        )
+
+        self.assertEqual(
+            "NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+            config.name,
+        )
+        self.assertEqual(
+            ["nrqeb006.ash6:Ethernet3/35/1"],
+            [port.endpoint for port in config.basic_port_configs or []],
+        )
+        dut_endpoints = [endpoint for endpoint in config.endpoints if endpoint.dut]
+        self.assertEqual(1, len(dut_endpoints))
+        self.assertEqual(
+            [
+                (
+                    "Ethernet3/35/1",
+                    "2401:db00:2066:3036::3003",
+                    "1/81",
+                )
+            ],
+            [
+                (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
+                for connection in dut_endpoints[0].direct_ixia_connections or []
+            ],
+        )
+        self.assertEqual(
+            ["2401:db00:e50d:33:8::11"],
+            [
+                group.v6_addresses_config.starting_ip
+                for port in config.basic_port_configs or []
+                for group in port.device_group_configs or []
+                if group.v6_addresses_config is not None
+            ],
+        )
+        setup_payloads = "\n".join(
+            task.params.json_params or "" for task in config.setup_tasks or []
+        )
+        interface_ip_tasks = [
+            _task_json_params(task)
+            for task in config.setup_tasks or []
+            if task.task_name == "interface_ip_configuration"
+        ]
+        self.assertEqual(
+            [("Ethernet3/35/1", 8)],
+            [
+                (params["interface"], params["peer_count"])
+                for params in interface_ip_tasks
+            ],
+        )
+        self.assertNotIn("Ethernet3/35/2", setup_payloads)
+        self.assertNotIn("2401:db00:e50d:33:9", setup_payloads)
+        self.assertIn("2401:db00:e50d:33:8", setup_payloads)
+        self.assertNotIn("2401:db00:e50d:11:8", setup_payloads)
+
+    def test_sc2_one_ixia_port_reuses_interface_for_zero_peer_helper(self) -> None:
+        one_port = replace(
+            NRQEB006_ASH6,
+            ixia_ports=NRQEB006_ASH6.ixia_ports[:1],
+            secondary_ixia_chassis_ip=None,
+            secondary_ixia_ports=[],
+        )
+
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            one_port,
+            include_direct_ixia_connections=True,
+        )
+
+        self.assertEqual(
+            ["nrqeb006.ash6:Ethernet3/35/1"],
+            [port.endpoint for port in config.basic_port_configs or []],
+        )
+        interface_ip_tasks = [
+            _task_json_params(task)
+            for task in config.setup_tasks or []
+            if task.task_name == "interface_ip_configuration"
+        ]
+        self.assertEqual(
+            [("Ethernet3/35/1", 8)],
+            [
+                (params["interface"], params["peer_count"])
+                for params in interface_ip_tasks
+            ],
+        )
+
+    def test_sc2_rejects_parent_networks_for_another_ixia_chassis(self) -> None:
+        with self.assertRaisesRegex(ValueError, "do not match IXIA chassis"):
+            create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+                NRQEB006_ASH6,
+                parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS,
+            )
+
+    def test_sc2_empty_parent_networks_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing required keys"):
+            create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+                BAG010_ASH6,
+                parent_networks={},
+            )
+
+    def test_sc2_explicit_parent_networks_support_unknown_ixia_chassis(self) -> None:
+        unknown_chassis = replace(
+            BAG010_ASH6,
+            primary_ixia_chassis_ip="2401:db00:2066:3036::ffff",
+        )
+
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            unknown_chassis,
+            parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS,
+        )
+
+        self.assertIn(
+            EGRESS_PEER_SCALE_PARENT_NETWORKS["ebgp_v6"],
+            "\n".join(
+                task.params.json_params or "" for task in config.setup_tasks or []
+            ),
+        )
+
+    def test_sc2_required_keys_are_derived_from_canonical_maps(self) -> None:
+        unknown_chassis = replace(
+            BAG010_ASH6,
+            primary_ixia_chassis_ip="2401:db00:2066:3036::ffff",
+        )
+        first_canonical_map = {
+            **EGRESS_PEER_SCALE_PARENT_NETWORKS,
+            "future_first_v6": "2001:db8:fffe:1:1",
+        }
+        second_canonical_map = {
+            **EGRESS_PEER_SCALE_PARENT_NETWORKS,
+            "future_second_v6": "2001:db8:ffff:1:1",
+        }
+
+        with (
+            patch.dict(
+                characteristic_factory._EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS,
+                {
+                    "first-chassis": first_canonical_map,
+                    "second-chassis": second_canonical_map,
+                },
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "future_second_v6"),
+        ):
+            create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+                unknown_chassis,
+                parent_networks=first_canonical_map,
+            )
+
+    def test_sc2_unknown_chassis_requires_a_canonical_key_map(self) -> None:
+        with (
+            patch.dict(
+                characteristic_factory._EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS,
+                {},
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "without a canonical IXIA chassis map"),
+        ):
+            characteristic_factory._resolve_egress_peer_scale_parent_networks(
+                EGRESS_PEER_SCALE_PARENT_NETWORKS,
+                ixia_chassis_ip="2401:db00:2066:3036::ffff",
+            )
+
+    def test_sc2_known_chassis_uses_only_its_canonical_keys(self) -> None:
+        legacy_chassis = BAG010_ASH6.primary_ixia_chassis_ip
+        extended_other_chassis_map = {
+            **EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+            "future_required": "2001:db8:ffff::",
+        }
+
+        with patch.dict(
+            characteristic_factory._EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS,
+            {
+                legacy_chassis: EGRESS_PEER_SCALE_PARENT_NETWORKS,
+                "future-chassis": extended_other_chassis_map,
+            },
+            clear=True,
+        ):
+            resolved = (
+                characteristic_factory._resolve_egress_peer_scale_parent_networks(
+                    EGRESS_PEER_SCALE_PARENT_NETWORKS,
+                    ixia_chassis_ip=legacy_chassis,
+                )
+            )
+
+        self.assertEqual(EGRESS_PEER_SCALE_PARENT_NETWORKS, resolved)
+        self.assertEqual(sorted(EGRESS_PEER_SCALE_PARENT_NETWORKS), list(resolved))
+
+    def test_sc2_rejects_parent_network_key_without_address_family(self) -> None:
+        extended_canonical_map = {
+            **EGRESS_PEER_SCALE_PARENT_NETWORKS,
+            "future_required": "2001:db8:ffff",
+        }
+
+        with (
+            patch.dict(
+                characteristic_factory._EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS,
+                {"future-chassis": extended_canonical_map},
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "must end in _v4 or _v6"),
+        ):
+            characteristic_factory._resolve_egress_peer_scale_parent_networks(
+                extended_canonical_map,
+                ixia_chassis_ip="future-chassis",
+            )
+
+    def test_sc2_unknown_chassis_rejects_invalid_parent_network_values(self) -> None:
+        unknown_chassis_ip = "2401:db00:2066:3036::ffff"
+        for key, invalid_value in (
+            ("ebgp_v6", ""),
+            ("ebgp_v6", "2001:db8:1"),
+            ("ebgp_v4", "not-a-network"),
+            ("ibgp_v6", "10.0.0"),
+            ("ibgp_v4", "2001:db8"),
+        ):
+            with (
+                self.subTest(key=key, invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, key),
+            ):
+                characteristic_factory._resolve_egress_peer_scale_parent_networks(
+                    {
+                        **EGRESS_PEER_SCALE_PARENT_NETWORKS,
+                        key: invalid_value,
+                    },
+                    ixia_chassis_ip=unknown_chassis_ip,
+                )
+
+    def test_sc2_explicit_legacy_parent_networks_do_not_imply_direct_binding(
+        self,
+    ) -> None:
+        config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
+            BAG010_ASH6,
+            parent_networks={
+                **EGRESS_PEER_SCALE_PARENT_NETWORKS,
+                "metadata": "ignored",
+            },
+        )
+        dut_endpoints = [endpoint for endpoint in config.endpoints if endpoint.dut]
+
+        self.assertEqual(1, len(dut_endpoints))
+        self.assertFalse(dut_endpoints[0].direct_ixia_connections)
+        self.assertIn(
+            EGRESS_PEER_SCALE_PARENT_NETWORKS["ebgp_v6"],
+            "\n".join(
+                task.params.json_params or "" for task in config.setup_tasks or []
+            ),
+        )
+
+    def test_custom_interface_tasks_reject_zero_peer_interface(self) -> None:
+        custom_task = Task(
+            task_name="interface_ip_configuration",
+            params=Params(
+                json_params=json.dumps({"interface": "Ethernet2", "peer_count": 4})
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "positive peer counts"):
+            get_update_packing_setup_tasks(
+                device_name="dut.example.com",
+                bgp_asn=65001,
+                ixia_interface_mimic_ebgp="Ethernet1",
+                ixia_interface_mimic_ibgp="Ethernet2",
+                ebgp_peer_count=8,
+                ibgp_peer_count=0,
+                ebgp_remote_as=65002,
+                ibgp_remote_as=65001,
+                ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+                ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+                router_id=None,
+                bgpcpp_configerator_path="bgpcpp/config",
+                profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+                interface_ip_tasks=[custom_task],
+            )
+
+    def test_custom_interface_tasks_validate_params_and_peer_count(self) -> None:
+        for task_name, json_params, error_pattern in (
+            ("not_interface_ip_configuration", "{}", "contain only"),
+            ("interface_ip_configuration", None, "valid JSON object"),
+            ("interface_ip_configuration", "not-json", "valid JSON object"),
+            ("interface_ip_configuration", "[]", "valid JSON object"),
+            (
+                "interface_ip_configuration",
+                json.dumps({"peer_count": 8}),
+                "nonempty interface",
+            ),
+            (
+                "interface_ip_configuration",
+                json.dumps({"interface": "Ethernet1"}),
+                "positive integer peer_count",
+            ),
+            (
+                "interface_ip_configuration",
+                json.dumps({"interface": "Ethernet1", "peer_count": 4}),
+                "does not match the topology-derived positive peer counts",
+            ),
+        ):
+            with self.subTest(task_name=task_name, json_params=json_params):
+                custom_task = Task(
+                    task_name=task_name,
+                    params=Params(json_params=json_params),
+                )
+
+                with self.assertRaisesRegex(ValueError, error_pattern):
+                    get_update_packing_setup_tasks(
+                        device_name="dut.example.com",
+                        bgp_asn=65001,
+                        ixia_interface_mimic_ebgp="Ethernet1",
+                        ixia_interface_mimic_ibgp="Ethernet2",
+                        ebgp_peer_count=8,
+                        ibgp_peer_count=0,
+                        ebgp_remote_as=65002,
+                        ibgp_remote_as=65001,
+                        ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+                        ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+                        router_id=None,
+                        bgpcpp_configerator_path="bgpcpp/config",
+                        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+                        interface_ip_tasks=[custom_task],
+                    )
+
+    def test_custom_interface_peer_count_error_preserves_role_order(self) -> None:
+        custom_task = Task(
+            task_name="interface_ip_configuration",
+            params=Params(
+                json_params=json.dumps({"interface": "Ethernet1", "peer_count": 5})
+            ),
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            get_update_packing_setup_tasks(
+                device_name="dut.example.com",
+                bgp_asn=65001,
+                ixia_interface_mimic_ebgp="Ethernet1",
+                ixia_interface_mimic_ibgp="Ethernet1",
+                ebgp_peer_count=8,
+                ibgp_peer_count=4,
+                ebgp_remote_as=65002,
+                ibgp_remote_as=65001,
+                ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+                ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+                router_id=None,
+                bgpcpp_configerator_path="bgpcpp/config",
+                profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+                interface_ip_tasks=[custom_task],
+            )
+
+        self.assertIn(
+            "expected=[('Ethernet1', 8), ('Ethernet1', 4)], actual=5",
+            str(raised.exception),
+        )
+
+    def test_update_packing_rejects_empty_custom_interface_tasks(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            get_update_packing_setup_tasks(
+                device_name="dut.example.com",
+                bgp_asn=65001,
+                ixia_interface_mimic_ebgp="Ethernet1",
+                ixia_interface_mimic_ibgp="Ethernet2",
+                ebgp_peer_count=8,
+                ibgp_peer_count=0,
+                ebgp_remote_as=65002,
+                ibgp_remote_as=65001,
+                ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+                ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+                router_id=None,
+                bgpcpp_configerator_path="bgpcpp/config",
+                profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+                interface_ip_tasks=[],
+            )
+
+    def test_shared_custom_interface_tasks_cover_both_roles_and_clear_once(
+        self,
+    ) -> None:
+        def task(peer_count: int, clear_existing: bool) -> Task:
+            return Task(
+                task_name="interface_ip_configuration",
+                params=Params(
+                    json_params=json.dumps(
+                        {
+                            "interface": "Ethernet1",
+                            "peer_count": peer_count,
+                            "clear_existing": clear_existing,
+                        }
+                    )
+                ),
+            )
+
+        common_args = {
+            "device_name": "dut.example.com",
+            "bgp_asn": 65001,
+            "ixia_interface_mimic_ebgp": "Ethernet1",
+            "ixia_interface_mimic_ibgp": "Ethernet1",
+            "ebgp_peer_count": 8,
+            "ibgp_peer_count": 4,
+            "ebgp_remote_as": 65002,
+            "ibgp_remote_as": 65001,
+            "ixia_ebgp_ic_parent_network_v6": "2001:db8:1::",
+            "ixia_ibgp_ic_parent_network_v6": "2001:db8:2::",
+            "router_id": None,
+            "bgpcpp_configerator_path": "bgpcpp/config",
+            "profile": BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        }
+
+        with self.assertRaisesRegex(ValueError, "cover every topology-derived"):
+            get_update_packing_setup_tasks(
+                **common_args,
+                interface_ip_tasks=[task(8, True)],
+            )
+        with self.assertRaisesRegex(
+            ValueError, "must clear each IXIA interface exactly once"
+        ):
+            get_update_packing_setup_tasks(
+                **common_args,
+                interface_ip_tasks=[task(8, True), task(4, True)],
+            )
+        with self.assertRaisesRegex(ValueError, "eBGP/iBGP role order"):
+            get_update_packing_setup_tasks(
+                **common_args,
+                interface_ip_tasks=[task(4, True), task(8, False)],
+            )
+
+        custom_tasks = [task(8, True), task(4, False)]
+        setup_tasks = get_update_packing_setup_tasks(
+            **common_args,
+            interface_ip_tasks=custom_tasks,
+        )
+        self.assertEqual(
+            custom_tasks,
+            [
+                setup_task
+                for setup_task in setup_tasks
+                if setup_task.task_name == "interface_ip_configuration"
+            ],
+        )
+
+    def test_update_packing_rejects_zero_peers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one IXIA peer count"):
+            get_update_packing_setup_tasks(
+                device_name="dut.example.com",
+                bgp_asn=65001,
+                ixia_interface_mimic_ebgp="Ethernet1",
+                ixia_interface_mimic_ibgp="Ethernet2",
+                ebgp_peer_count=0,
+                ibgp_peer_count=0,
+                ebgp_remote_as=65002,
+                ibgp_remote_as=65001,
+                ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+                ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+                router_id=None,
+                bgpcpp_configerator_path="bgpcpp/config",
+                profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+            )
+
+    def test_shared_active_interface_is_configured_without_second_clear(self) -> None:
+        tasks = get_update_packing_setup_tasks(
+            device_name="dut.example.com",
+            bgp_asn=65001,
+            ixia_interface_mimic_ebgp="Ethernet1",
+            ixia_interface_mimic_ibgp="Ethernet1",
+            ebgp_peer_count=8,
+            ibgp_peer_count=4,
+            ebgp_remote_as=65002,
+            ibgp_remote_as=65001,
+            ixia_ebgp_ic_parent_network_v6="2001:db8:1::",
+            ixia_ibgp_ic_parent_network_v6="2001:db8:2::",
+            router_id=None,
+            bgpcpp_configerator_path="bgpcpp/config",
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+        )
+
+        interface_ip_tasks = [
+            _task_json_params(task)
+            for task in tasks
+            if task.task_name == "interface_ip_configuration"
+        ]
+        self.assertEqual(
+            [("Ethernet1", True), ("Ethernet1", False)],
+            [
+                (params["interface"], params["clear_existing"])
+                for params in interface_ip_tasks
+            ],
+        )
+        setup_payloads = "\n".join(task.params.json_params or "" for task in tasks)
+        self.assertEqual(1, setup_payloads.count("description IXIA_MIMIC_EBGP"))
+        self.assertIn("description IXIA_MIMIC_EBGP_IBGP", setup_payloads)
 
     def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
         config = create_bgp_ebb_update_packing_test_config(

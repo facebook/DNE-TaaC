@@ -1,9 +1,10 @@
 # pyre-unsafe
 """Aggregated EBB BGP++ conveyor node TestConfig list.
 
-Exposes ``EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS`` — every
-BAG002/BAG010/BAG011/BAG012/BAG013 TestConfig referenced by the EBB
-conveyor scheduler, in execution order.
+Exposes ``EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS`` with the scheduled
+NRQEB006/BAG011/BAG012/BAG013 entries first. Retained BAG010 selectors and
+other ad-hoc qualification configs are appended to the same registry list for
+CLI resolution, but are not Conveyor-scheduled.
 
 Previously this aggregation lived in the package ``__init__.py``,
 which meant the eager TestConfig imports ran on *any* attribute
@@ -33,9 +34,6 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
 # ``cicd_ebb_int_tc.py``. Every scheduled entry has an inline
 # ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
-    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
@@ -49,6 +47,9 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
+    NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 
 # Migrated to the routing framework in Diffs 2 + 3 (Wave 1 Struct-Init):
@@ -95,18 +96,18 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 #   3. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
 #      via Netcastle CLI but not (yet) wired into a conveyor node.
 EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
-    # Stage 1 — runtime-balanced full-scale playbooks on each BAG.
-    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    # Stage 1 — runtime-balanced full-scale playbooks on each scheduled device.
+    NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     # Stage 1 UG counterparts for promotion gating and A/B comparison.
-    BAG010_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    # First promotion-gating scale-and-characteristic wave — one node per BAG.
-    BAG010_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
+    # First promotion-gating scale-and-characteristic wave — one node per device.
+    NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
     BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
     BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,

@@ -1492,7 +1492,7 @@ def build_expected_peer_identity(
 # =============================================================================
 # Public API: Update packing setup (used by bag012 update packing test)
 # =============================================================================
-def get_update_packing_setup_tasks(
+def get_update_packing_setup_tasks(  # noqa: C901
     device_name: str,
     bgp_asn: int,
     ixia_interface_mimic_ebgp: str,
@@ -1524,7 +1524,7 @@ def get_update_packing_setup_tasks(
     Generate setup tasks for the BGP UPDATE packing validation conveyor test.
 
     Uses the same core BGP++ setup as full-scale tests but with:
-    - Only 2 IXIA interfaces (eBGP + iBGP, no BGP MON)
+    - Up to 2 active IXIA interfaces (eBGP + iBGP, no BGP MON)
     - Simplified IP configuration (e.g. 10 eBGP + 1 iBGP, IPv6 only)
     - Peer modification to update bgpcpp_config with matching peers
 
@@ -1544,6 +1544,18 @@ def get_update_packing_setup_tasks(
     Returns:
         List of setup Task objects.
     """
+    if (
+        isinstance(ebgp_peer_count, bool)
+        or isinstance(ibgp_peer_count, bool)
+        or not isinstance(ebgp_peer_count, int)
+        or not isinstance(ibgp_peer_count, int)
+        or ebgp_peer_count < 0
+        or ibgp_peer_count < 0
+    ):
+        raise ValueError("eBGP and iBGP peer counts must be non-negative integers")
+    if ebgp_peer_count == 0 and ibgp_peer_count == 0:
+        raise ValueError("at least one IXIA peer count must be positive")
+
     setup_tasks: t.List[Task] = []
 
     # Disable BgpTcpdump daemon before any setup
@@ -1556,14 +1568,28 @@ def get_update_packing_setup_tasks(
         )
     )
 
-    # 1. Pre-IXIA interface configuration (2 interfaces, no BGP MON)
+    # 1. Pre-IXIA interface configuration (active peer-facing interfaces only,
+    # no BGP MON). A zero-peer role must not clear or otherwise mutate its
+    # placeholder interface.
+    active_ixia_interfaces: dict[str, str] = {}
+    required_interface_peer_counts: list[tuple[str, int]] = []
+    if ebgp_peer_count > 0:
+        active_ixia_interfaces[ixia_interface_mimic_ebgp] = "IXIA_MIMIC_EBGP"
+        required_interface_peer_counts.append(
+            (ixia_interface_mimic_ebgp, ebgp_peer_count)
+        )
+    if ibgp_peer_count > 0:
+        if ixia_interface_mimic_ibgp in active_ixia_interfaces:
+            active_ixia_interfaces[ixia_interface_mimic_ibgp] = "IXIA_MIMIC_EBGP_IBGP"
+        else:
+            active_ixia_interfaces[ixia_interface_mimic_ibgp] = "IXIA_MIMIC_IBGP"
+        required_interface_peer_counts.append(
+            (ixia_interface_mimic_ibgp, ibgp_peer_count)
+        )
     setup_tasks.extend(
         _get_pre_ixia_interface_tasks(
             device_name=device_name,
-            ixia_interfaces=[
-                (ixia_interface_mimic_ebgp, "IXIA_MIMIC_EBGP"),
-                (ixia_interface_mimic_ibgp, "IXIA_MIMIC_IBGP"),
-            ],
+            ixia_interfaces=list(active_ixia_interfaces.items()),
         )
     )
 
@@ -1601,44 +1627,133 @@ def get_update_packing_setup_tasks(
 
     # 4. Simplified IP configuration (IPv6 + optional IPv4)
     if interface_ip_tasks is not None:
+        if not interface_ip_tasks:
+            raise ValueError("interface_ip_tasks must not be empty")
+        remaining_interface_peer_counts = list(required_interface_peer_counts)
+        actual_interface_peer_counts: list[tuple[str, int]] = []
+        configured_interfaces: set[str] = set()
+        for task in interface_ip_tasks:
+            if task.task_name != "interface_ip_configuration":
+                raise ValueError(
+                    "interface_ip_tasks must contain only "
+                    "interface_ip_configuration tasks"
+                )
+            if task.params is None:
+                raise ValueError(
+                    "interface_ip_tasks must contain valid JSON object params"
+                )
+            raw_task_params = task.params.json_params
+            if raw_task_params is None:
+                raise ValueError(
+                    "interface_ip_tasks must contain valid JSON object params"
+                )
+            try:
+                task_params = json.loads(raw_task_params)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    "interface_ip_tasks must contain valid JSON object params"
+                ) from error
+            if not isinstance(task_params, dict):
+                raise ValueError(
+                    "interface_ip_tasks must contain valid JSON object params"
+                )
+            interface = task_params.get("interface")
+            if not isinstance(interface, str) or not interface:
+                raise ValueError("interface_ip_tasks must declare a nonempty interface")
+            if interface not in active_ixia_interfaces:
+                raise ValueError(
+                    "interface_ip_tasks may only target IXIA interfaces with "
+                    "positive peer counts"
+                )
+            peer_count = task_params.get("peer_count")
+            if (
+                isinstance(peer_count, bool)
+                or not isinstance(peer_count, int)
+                or peer_count <= 0
+            ):
+                raise ValueError(
+                    "interface_ip_tasks must declare a positive integer peer_count"
+                )
+            interface_peer_count = (interface, peer_count)
+            if interface_peer_count not in remaining_interface_peer_counts:
+                raise ValueError(
+                    "interface_ip_tasks peer_count does not match the "
+                    "topology-derived positive peer counts for "
+                    f"{interface}: expected={required_interface_peer_counts}, "
+                    f"actual={peer_count}"
+                )
+            remaining_interface_peer_counts.remove(interface_peer_count)
+            actual_interface_peer_counts.append(interface_peer_count)
+            clear_existing = task_params.get("clear_existing", True)
+            if not isinstance(clear_existing, bool):
+                raise ValueError("interface_ip_tasks clear_existing must be a boolean")
+            expected_clear_existing = interface not in configured_interfaces
+            if clear_existing != expected_clear_existing:
+                raise ValueError(
+                    "interface_ip_tasks must clear each IXIA interface exactly once: "
+                    f"interface={interface}, expected_clear_existing="
+                    f"{expected_clear_existing}, actual={clear_existing}"
+                )
+            configured_interfaces.add(interface)
+        if remaining_interface_peer_counts:
+            raise ValueError(
+                "interface_ip_tasks must cover every topology-derived active "
+                "interface and peer count: "
+                f"missing={sorted(remaining_interface_peer_counts)}"
+            )
+        if actual_interface_peer_counts != required_interface_peer_counts:
+            raise ValueError(
+                "interface_ip_tasks must follow topology-derived eBGP/iBGP role "
+                f"order: expected={required_interface_peer_counts}, "
+                f"actual={actual_interface_peer_counts}"
+            )
         setup_tasks.extend(interface_ip_tasks)
     else:
+        configured_interfaces: set[str] = set()
         ebgp_address_families = (
             ["ipv6", "ipv4"] if ixia_ebgp_ic_parent_network_v4 is not None else ["ipv6"]
         )
         ibgp_address_families = (
             ["ipv6", "ipv4"] if ixia_ibgp_ic_parent_network_v4 is not None else ["ipv6"]
         )
-        setup_tasks.append(
-            create_interface_ip_configuration_task(
-                interface=ixia_interface_mimic_ebgp,
-                peer_count=ebgp_peer_count,
-                ipv4_base_network=ixia_ebgp_ic_parent_network_v4,
-                ipv6_base_network=ixia_ebgp_ic_parent_network_v6,
-                address_families=ebgp_address_families,
-                clear_existing=True,
-                ipv4_start_offset=IXIA_IPV4_START_OFFSET,
-                ipv6_start_offset=IXIA_IPV6_START_OFFSET,
-                hostname=device_name,
-                ixia_needed=True,
-                save_running_config_backup=False,
+        if ebgp_peer_count > 0:
+            setup_tasks.append(
+                create_interface_ip_configuration_task(
+                    interface=ixia_interface_mimic_ebgp,
+                    peer_count=ebgp_peer_count,
+                    ipv4_base_network=ixia_ebgp_ic_parent_network_v4,
+                    ipv6_base_network=ixia_ebgp_ic_parent_network_v6,
+                    address_families=ebgp_address_families,
+                    clear_existing=(
+                        ixia_interface_mimic_ebgp not in configured_interfaces
+                    ),
+                    ipv4_start_offset=IXIA_IPV4_START_OFFSET,
+                    ipv6_start_offset=IXIA_IPV6_START_OFFSET,
+                    hostname=device_name,
+                    ixia_needed=True,
+                    save_running_config_backup=False,
+                )
             )
-        )
-        setup_tasks.append(
-            create_interface_ip_configuration_task(
-                interface=ixia_interface_mimic_ibgp,
-                peer_count=ibgp_peer_count,
-                ipv4_base_network=ixia_ibgp_ic_parent_network_v4,
-                ipv6_base_network=ixia_ibgp_ic_parent_network_v6,
-                address_families=ibgp_address_families,
-                clear_existing=True,
-                ipv4_start_offset=IXIA_IPV4_START_OFFSET,
-                ipv6_start_offset=IXIA_IPV6_START_OFFSET,
-                hostname=device_name,
-                ixia_needed=True,
-                save_running_config_backup=False,
+            configured_interfaces.add(ixia_interface_mimic_ebgp)
+        if ibgp_peer_count > 0:
+            setup_tasks.append(
+                create_interface_ip_configuration_task(
+                    interface=ixia_interface_mimic_ibgp,
+                    peer_count=ibgp_peer_count,
+                    ipv4_base_network=ixia_ibgp_ic_parent_network_v4,
+                    ipv6_base_network=ixia_ibgp_ic_parent_network_v6,
+                    address_families=ibgp_address_families,
+                    clear_existing=(
+                        ixia_interface_mimic_ibgp not in configured_interfaces
+                    ),
+                    ipv4_start_offset=IXIA_IPV4_START_OFFSET,
+                    ipv6_start_offset=IXIA_IPV6_START_OFFSET,
+                    hostname=device_name,
+                    ixia_needed=True,
+                    save_running_config_backup=False,
+                )
             )
-        )
+            configured_interfaces.add(ixia_interface_mimic_ibgp)
 
     # 5. Peer modification: update bgpcpp_config with IPv6 (+ optional IPv4) peers
     if bgpcpp_peers is not None:
