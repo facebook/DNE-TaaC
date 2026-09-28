@@ -189,6 +189,24 @@ def _bound_full_scale_automation_artifact(
     )
 
 
+_EBB_ROUTE_HISTOGRAM_TARGET = (
+    "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+    "bgp_ebb_full_scale._ebb_route_count_histogram_by_afi"
+)
+_EBB_EXCLUSION_BLOCKS_TARGET = (
+    "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+    "bgp_ebb_full_scale._ebb_peer_prefix_exclusion_blocks_by_pool"
+)
+_EBB_ROUTE_HISTOGRAM = {
+    "ipv4": {720: 50, 750: 90},
+    "ipv6": {720: 50, 750: 90},
+}
+_EBB_EXCLUSION_BLOCKS = {
+    "PREFIX_POOL_IPV4_EBGP": [],
+    "PREFIX_POOL_IPV6_EBGP": [],
+}
+
+
 # The complete flat CustomStep payload the production Playbook serializes.
 #
 # The golden manifest stores only a hash and seven structural counts, and no
@@ -320,6 +338,13 @@ def _step_payload(step: taac_types.Step) -> dict:
     if json_params is None:
         raise AssertionError("custom step is missing serialized json_params")
     return json.loads(json_params)
+
+
+def _task_params(step: taac_types.Step) -> dict:
+    if step.input_json is None:
+        raise AssertionError("RUN_TASK step is missing input_json")
+    payload = json.loads(step.input_json)
+    return json.loads(payload["task"]["params"]["json_params"])
 
 
 def _sequential_steps(playbook: taac_types.Playbook) -> list[taac_types.Step]:
@@ -1174,6 +1199,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
+            patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
             playbook_factory.return_value = MagicMock()
             bound = MagicMock()
@@ -1309,6 +1336,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
+            patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,
@@ -1328,6 +1357,205 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             ("EB-FA-V6", "EB-FA-V4"),
             playbook_factory.call_args.kwargs["exact_ebgp_peer_group_names"],
         )
+        self.assertEqual(
+            _EBB_ROUTE_HISTOGRAM,
+            playbook_factory.call_args.kwargs["route_count_histogram_by_afi"],
+        )
+
+    def test_full_scale_factory_wires_sparse_oracles_to_ebb12(self) -> None:
+        inventory = BAG010_ASH6
+        bound = _bound_full_scale_automation_artifact(
+            inventory,
+            parent_networks=EBB_PARENT_NETWORKS,
+            next_hops=EBB_NEXT_HOPS,
+        )
+        automation = _CANONICAL_AUTOMATION_CONTRACT._replace(
+            non_monitor_established_session_count=321,
+            internal_peer_group_names_by_afi={
+                "ipv4": "CORE.IBGP[V4]",
+                "ipv6": "CORE+IBGP(V6)",
+            },
+            ebgp_peer_group_names_by_afi={
+                "ipv4": "EDGE.PG[V4]",
+                "ipv6": "EDGE+PG(V6)",
+            },
+            ebgp_route_item_names_by_afi={
+                "ipv4": "EDGE.ROUTE[V4]",
+                "ipv6": "EDGE+ROUTE(V6)",
+            },
+        )
+        expanded_histogram = {
+            "ipv4": {816: 50, 850: 90},
+            "ipv6": {816: 50, 850: 90},
+        }
+        exclusion_blocks = {
+            "EDGE.ROUTE[V4]": [
+                {
+                    "prefix_start_index": 750,
+                    "prefix_count": 4,
+                    "peer_indices": [90, 91],
+                }
+            ],
+            "EDGE+ROUTE(V6)": [
+                {
+                    "prefix_start_index": 750,
+                    "prefix_count": 4,
+                    "peer_indices": [90, 91],
+                }
+            ],
+        }
+        target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale.get_bgp_ebb_route_registry_runtime_update_playbook"
+        )
+        ebb16_target = (
+            "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+            "bgp_ebb_full_scale."
+            "get_bgp_ebb_nexthop_group_count_threshold_playbook"
+        )
+
+        with (
+            patch(target, return_value=MagicMock()) as playbook_factory,
+            patch(ebb16_target, return_value=MagicMock()),
+            patch(_AUTOMATION_CONTRACT_TARGET, return_value=automation),
+            patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(
+                _EBB_ROUTE_HISTOGRAM_TARGET,
+                side_effect=(_EBB_ROUTE_HISTOGRAM, expanded_histogram),
+            ),
+            patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=exclusion_blocks),
+        ):
+            _get_bgp_ebb_full_scale_playbooks(
+                inventory,
+                BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                bound=bound,
+                ebgp_prefix_count=850,
+                selected_tc7_playbooks=set(),
+            )
+
+        self.assertEqual(
+            _EBB_ROUTE_HISTOGRAM,
+            playbook_factory.call_args.kwargs["expected_route_count_histogram_by_afi"],
+        )
+        self.assertEqual(
+            expanded_histogram,
+            playbook_factory.call_args.kwargs["expanded_route_count_histogram_by_afi"],
+        )
+        self.assertEqual(
+            exclusion_blocks,
+            playbook_factory.call_args.kwargs["peer_prefix_exclusion_blocks_by_pool"],
+        )
+        self.assertEqual(
+            r"^(?:EDGE\.ROUTE\[V4\]|EDGE\+ROUTE\(V6\))$",
+            playbook_factory.call_args.kwargs["prefix_pool_regex"],
+        )
+        self.assertEqual(
+            ("EDGE.ROUTE[V4]", "EDGE+ROUTE(V6)"),
+            playbook_factory.call_args.kwargs["expected_prefix_pool_names"],
+        )
+        self.assertEqual(
+            ("EDGE+PG(V6)", "EDGE.PG[V4]"),
+            playbook_factory.call_args.kwargs["exact_ebgp_peer_group_names"],
+        )
+        self.assertEqual(
+            "CORE+IBGP(V6)", playbook_factory.call_args.kwargs["peergroup_ibgp_v6"]
+        )
+        self.assertEqual(
+            "CORE.IBGP[V4]", playbook_factory.call_args.kwargs["peergroup_ibgp_v4"]
+        )
+        self.assertEqual(
+            321, playbook_factory.call_args.kwargs["expected_established_sessions"]
+        )
+        self.assertEqual(
+            EBB_PARENT_NETWORKS["bgpmon_v6"],
+            playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
+        )
+
+    def test_ebb12_matches_bag010_and_nrqeb006_bound_artifacts(self) -> None:
+        profiles = (
+            (
+                BAG010_ASH6,
+                NRQEB006_ASH6,
+                EBB_PARENT_NETWORKS,
+                EBB_NEXT_HOPS,
+                EBB_PARENT_NETWORKS["bgpmon_v6"],
+                EBB_PARENT_NETWORKS_IXIA03["bgpmon_v6"],
+            ),
+            (
+                NRQEB006_ASH6,
+                BAG010_ASH6,
+                EBB_PARENT_NETWORKS_IXIA03,
+                EBB_NEXT_HOPS_IXIA03,
+                EBB_PARENT_NETWORKS_IXIA03["bgpmon_v6"],
+                EBB_PARENT_NETWORKS["bgpmon_v6"],
+            ),
+        )
+
+        for (
+            inventory,
+            counterpart,
+            parent_networks,
+            next_hops,
+            expected_bgp_mon,
+            forbidden_bgp_mon,
+        ) in profiles:
+            with self.subTest(inventory=inventory.device_name):
+                config = create_bgp_ebb_full_scale_test_config(
+                    inventory,
+                    name=f"{inventory.device_name}:EBB12",
+                    playbooks_selected=[
+                        "bgp_ebb_route_registry_runtime_update_playbook"
+                    ],
+                    profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                    parent_networks=dict(parent_networks),
+                    next_hops=next_hops,
+                )
+
+                self.assertEqual(1, len(config.playbooks))
+                playbook = config.playbooks[0]
+                serialized = thrift_to_json(playbook)
+                self.assertIn(inventory.device_name, serialized)
+                self.assertNotIn(counterpart.device_name, serialized)
+                self.assertIn(f"{expected_bgp_mon}::/80", serialized)
+                self.assertNotIn(f"{forbidden_bgp_mon}::/80", serialized)
+
+                cleanup_steps = playbook.cleanup_steps
+                self.assertIsNotNone(cleanup_steps)
+                assert cleanup_steps is not None
+                cleanup = _task_params(cleanup_steps[0])
+                self.assertEqual(1272, cleanup["expected_established_sessions"])
+                self.assertEqual(
+                    ["EB-FA-V6", "EB-FA-V4"],
+                    cleanup["exact_peer_group_names"],
+                )
+                self.assertEqual(
+                    ["PREFIX_POOL_IPV4_EBGP", "PREFIX_POOL_IPV6_EBGP"],
+                    cleanup["prefix_pool_names"],
+                )
+                self.assertEqual(
+                    {
+                        "ipv4": {"816": 50, "850": 90},
+                        "ipv6": {"816": 50, "850": 90},
+                    },
+                    cleanup["expected_route_count_histogram_by_afi"],
+                )
+                self.assertEqual(
+                    [f"{expected_bgp_mon}::/80"],
+                    cleanup["parent_prefixes_to_ignore"],
+                )
+                blocks_by_pool = cleanup["peer_prefix_exclusion_blocks_by_pool"]
+                self.assertEqual(
+                    {"PREFIX_POOL_IPV4_EBGP", "PREFIX_POOL_IPV6_EBGP"},
+                    set(blocks_by_pool),
+                )
+                for blocks in blocks_by_pool.values():
+                    runtime_blocks = [
+                        block for block in blocks if block["prefix_start_index"] >= 750
+                    ]
+                    self.assertEqual(25, len(runtime_blocks))
+                    self.assertTrue(
+                        all(block["prefix_count"] == 4 for block in runtime_blocks)
+                    )
 
     def test_ebb16_items_are_derived_from_every_topology_handle(self) -> None:
         groups = []
@@ -1871,6 +2099,14 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     return_value=_CANONICAL_AUTOMATION_CONTRACT,
                 ),
                 patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+                patch(
+                    _EBB_ROUTE_HISTOGRAM_TARGET,
+                    return_value=_EBB_ROUTE_HISTOGRAM,
+                ),
+                patch(
+                    _EBB_EXCLUSION_BLOCKS_TARGET,
+                    return_value=_EBB_EXCLUSION_BLOCKS,
+                ),
             ):
                 bound = MagicMock()
                 bound.device_config = RoutingDeviceConfig(
@@ -1923,6 +2159,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
+            patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
             _get_bgp_ebb_full_scale_playbooks(
                 inventory,

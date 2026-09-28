@@ -643,6 +643,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             check_ibgp_pnh=False,
             bgp_mon=BgpMonScope(exclude=True),
             route_count_expected=650,
+            exact_ebgp_peer_group_names=("TOPOLOGY-V6", "TOPOLOGY-V4"),
         )
         checks = get_profile_checks(CheckProfile.RUNTIME_UPDATE, ctx)
 
@@ -659,7 +660,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             + [
                 create_bgp_route_count_verification_check(
                     json_params={
-                        "exact_peer_group_names": ["EB-FA-V6", "EB-FA-V4"],
+                        "exact_peer_group_names": ["TOPOLOGY-V6", "TOPOLOGY-V4"],
                         "direction": "received",
                         "expected_count": 650,
                         "policy_type": "post_policy",
@@ -672,6 +673,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             checks.postchecks,
             create_standard_postchecks(
                 fail_on_eor_expired=False,
+                expected_established_session_count=42,
                 bgp_mon=BgpMonScope(exclude=True),
             ),
         )
@@ -688,7 +690,6 @@ class CheckProfileRegistryTest(unittest.TestCase):
             ProfileContext(
                 peergroup_ibgp_v6="PG_IBGP_V6",
                 peergroup_ibgp_v4="PG_IBGP_V4",
-                expected_established_sessions=0,
                 route_count_expected=650,
             ),
         )
@@ -712,6 +713,13 @@ class CheckProfileRegistryTest(unittest.TestCase):
                     check_id="startup_bgp_session_verification",
                 ),
             ],
+        )
+        self.assertEqual(
+            checks.postchecks,
+            create_standard_postchecks(
+                fail_on_eor_expired=False,
+                expected_established_session_count=None,
+            ),
         )
 
     def test_soak_no_precheck_longevity_matches_factory(self):

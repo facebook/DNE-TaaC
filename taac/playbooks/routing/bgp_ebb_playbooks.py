@@ -124,7 +124,6 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
     RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
 )
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
-    bgp_mon_ignore_prefix,
     BgpMonScope,
 )
 from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
@@ -1052,8 +1051,20 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         "PREFIX_POOL_IPV4_EBGP",
         "PREFIX_POOL_IPV6_EBGP",
     ),
+    exact_ebgp_peer_group_names: t.Sequence[str] = (
+        RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES
+    ),
     soak_time_seconds: int = 120,
     expected_route_count: int = 750,
+    expected_route_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
+    expanded_route_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
+    peer_prefix_exclusion_blocks_by_pool: t.Optional[
+        t.Mapping[str, t.Sequence[t.Mapping[str, object]]]
+    ] = None,
     runtime_prefix_start_index: int = 750,
     runtime_prefix_end_index: int = 850,
     baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_750.json",
@@ -1063,6 +1074,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-12: Route-registry runtime update.
@@ -1088,8 +1100,16 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         ebgp_peer_description: Deprecated compatibility parameter; ignored
             because CICD-EBB-12 is locked to exact EB-FA peer-group names
         prefix_pool_regex: Anchored regex matching the IPv4 and IPv6 eBGP pools
+        exact_ebgp_peer_group_names: Exact eBGP peer-group names in required
+            IPv6, IPv4 order
         soak_time_seconds: Soak duration for BGP stability (default: 120s)
         expected_route_count: Expected baseline eBGP route count (default: 750)
+        expected_route_count_histogram_by_afi: Optional exact baseline
+            distribution for each address family
+        expanded_route_count_histogram_by_afi: Optional exact expanded and
+            restored distribution for each address family
+        peer_prefix_exclusion_blocks_by_pool: Optional topology-authored sparse
+            activation blocks keyed by IXIA prefix-pool name
         runtime_prefix_start_index: First test prefix index (default: 750)
         runtime_prefix_end_index: Last test prefix index (default: 850)
         baseline_policy_path: Policy that accepts only the baseline route set
@@ -1106,6 +1126,9 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
 
+    # None intentionally preserves this generic builder's no-exact-cardinality
+    # mode; zero is invalid. The topology-bound full-scale factory always
+    # supplies its positive non-monitor session total.
     if expected_established_sessions is not None and (
         isinstance(expected_established_sessions, bool)
         or not isinstance(expected_established_sessions, int)
@@ -1116,7 +1139,15 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         expected_prefix_pool_names
     ):
         raise ValueError("expected_prefix_pool_names must be nonempty and unique")
-    profile_session_count = expected_established_sessions or 0
+    if not exact_ebgp_peer_group_names or len(set(exact_ebgp_peer_group_names)) != len(
+        exact_ebgp_peer_group_names
+    ):
+        raise ValueError("exact_ebgp_peer_group_names must be nonempty and unique")
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
+    parent_prefixes_to_ignore = bgp_mon_scope.ignore_prefixes() or []
 
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
@@ -1129,10 +1160,16 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             precheck_thresholds=precheck_thresholds,
             postcheck_thresholds=postcheck_thresholds,
             cpu_baseline=cpu_baseline,
-            expected_established_sessions=profile_session_count,
+            expected_established_sessions=expected_established_sessions,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
-            route_count_expected=expected_route_count,
+            bgp_mon=bgp_mon_scope,
+            exact_ebgp_peer_group_names=tuple(exact_ebgp_peer_group_names),
+            route_count_expected=(
+                None
+                if expected_route_count_histogram_by_afi is not None
+                else expected_route_count
+            ),
+            route_count_histogram_by_afi=(expected_route_count_histogram_by_afi),
             cpu_characterization=cpu_characterization,
             rss_delta=rss_delta,
         ),
@@ -1141,7 +1178,7 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
         name="bgp_ebb_route_registry_runtime_update_playbook",
         setup_steps=create_route_registry_prefix_list_setup_steps(
             device_name=device_name,
-            exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
+            exact_peer_group_names=list(exact_ebgp_peer_group_names),
             prefix_start_index=runtime_prefix_start_index,
             prefix_end_index=runtime_prefix_end_index,
             prefix_pool_regex=prefix_pool_regex,
@@ -1149,7 +1186,14 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             baseline_policy_path=baseline_policy_path,
             verify_trigger_readback=True,
             verify_policy_readback=True,
-            expected_route_count=expected_route_count,
+            expected_route_count=(
+                None
+                if expected_route_count_histogram_by_afi is not None
+                else expected_route_count
+            ),
+            expected_route_count_histogram_by_afi=(
+                expected_route_count_histogram_by_afi
+            ),
             convergence_soft_threshold_seconds=180,
             convergence_hard_timeout_seconds=300,
             convergence_poll_interval_seconds=5,
@@ -1167,13 +1211,22 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
             [
                 create_route_registry_runtime_update_stage(
                     device_name=device_name,
-                    exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
+                    exact_peer_group_names=list(exact_ebgp_peer_group_names),
                     prefix_pool_regex=prefix_pool_regex,
                     prefix_start_index=runtime_prefix_start_index,
                     prefix_end_index=runtime_prefix_end_index,
                     expected_prefix_pool_names=expected_prefix_pool_names,
                     soak_time_seconds=soak_time_seconds,
                     baseline_route_count=expected_route_count,
+                    baseline_route_count_histogram_by_afi=(
+                        expected_route_count_histogram_by_afi
+                    ),
+                    expanded_route_count_histogram_by_afi=(
+                        expanded_route_count_histogram_by_afi
+                    ),
+                    peer_prefix_exclusion_blocks_by_pool=(
+                        peer_prefix_exclusion_blocks_by_pool
+                    ),
                     convergence_soft_threshold_seconds=180,
                     convergence_hard_timeout_seconds=300,
                     convergence_poll_interval_seconds=5,
@@ -1181,6 +1234,8 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                     baseline_policy_path=baseline_policy_path,
                     verify_trigger_readback=True,
                     verify_policy_readback=True,
+                    expected_established_sessions=expected_established_sessions,
+                    parent_prefixes_to_ignore=parent_prefixes_to_ignore,
                 )
             ],
             playbook_name="bgp_ebb_route_registry_runtime_update_playbook",
@@ -1196,16 +1251,22 @@ def get_bgp_ebb_route_registry_runtime_update_playbook(
                 prefix_end_index=runtime_prefix_end_index,
                 expanded_policy_path=expanded_policy_path,
                 expected_route_count=(
-                    expected_route_count
+                    None
+                    if expanded_route_count_histogram_by_afi is not None
+                    else expected_route_count
                     + runtime_prefix_end_index
                     - runtime_prefix_start_index
                 ),
-                ebgp_peer_description=ebgp_peer_description,
-                exact_peer_group_names=[*RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES],
-                expected_established_sessions=expected_established_sessions,
-                parent_prefixes_to_ignore=(
-                    [bgp_mon_ignore_prefix()] if exclude_bgp_mon else []
+                expected_route_count_histogram_by_afi=(
+                    expanded_route_count_histogram_by_afi
                 ),
+                peer_prefix_exclusion_blocks_by_pool=(
+                    peer_prefix_exclusion_blocks_by_pool
+                ),
+                ebgp_peer_description=ebgp_peer_description,
+                exact_peer_group_names=list(exact_ebgp_peer_group_names),
+                expected_established_sessions=expected_established_sessions,
+                parent_prefixes_to_ignore=parent_prefixes_to_ignore,
             ),
         ],
     )
@@ -2337,6 +2398,9 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
         RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES
     ),
     prefix_pool_scope_regex: str | None = None,
+    route_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
     nexthop_group_threshold: int = 8192,
     seed: int = 160016,
     minimum_distinct_memberships_per_afi: int = 750,
@@ -2390,7 +2454,12 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
             check_bgp_convergence=True,
             convergence_threshold=convergence_threshold,
             expected_established_sessions=expected_established_sessions,
-            route_count_expected=route_count_expected,
+            route_count_expected=(
+                None
+                if route_count_histogram_by_afi is not None
+                else route_count_expected
+            ),
+            route_count_histogram_by_afi=route_count_histogram_by_afi,
             exact_ebgp_peer_group_names=exact_ebgp_peer_group_names,
             enable_update_group=enable_update_group,
             bgp_mon=BgpMonScope(

@@ -269,6 +269,126 @@ def _ebb_automation_contract(bound: BoundTopology) -> _EbbAutomationContract:
     )
 
 
+def _ebb_route_count_histogram_by_afi(
+    bound: BoundTopology,
+    prefix_count: int,
+) -> dict[str, dict[int, int]]:
+    """Derive the exact per-AFI peer route counts from topology activation."""
+    result: dict[str, dict[int, int]] = {}
+    groups = [group for group in bound.device_groups if group.role == "uplink"]
+    for group in groups:
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"eBGP group {group.name!r} must expose one route advertisement"
+            )
+        advertisement = group.prefix_advertisements[0]
+        if prefix_count > advertisement.spec.allocation.prefixes_per_peer:
+            raise ValueError(
+                f"eBGP route-count window {prefix_count} exceeds "
+                f"{advertisement.spec.allocation.prefixes_per_peer} prefixes for "
+                f"{group.name!r}"
+            )
+        activation = advertisement.spec.peer_prefix_activation
+        exclusion_blocks = activation.exclusion_blocks if activation else ()
+        invalid_peer_indices = sorted(
+            {
+                peer_index
+                for block in exclusion_blocks
+                for peer_index in block.peer_indices
+                if peer_index < 0 or peer_index >= group.peer_count
+            }
+        )
+        if invalid_peer_indices:
+            raise ValueError(
+                f"eBGP group {group.name!r} exclusion blocks reference peer "
+                f"indices outside [0, {group.peer_count}): {invalid_peer_indices}"
+            )
+        peer_route_counts = []
+        for peer_index in range(group.peer_count):
+            clipped_exclusion_intervals = sorted(
+                (
+                    max(0, block.prefix_start_index),
+                    min(
+                        prefix_count,
+                        block.prefix_start_index + block.prefix_count,
+                    ),
+                )
+                for block in exclusion_blocks
+                if peer_index in block.peer_indices
+            )
+            excluded_prefixes = 0
+            covered_until = 0
+            for block_start, block_end in clipped_exclusion_intervals:
+                if block_end <= covered_until or block_start >= block_end:
+                    continue
+                excluded_prefixes += block_end - max(block_start, covered_until)
+                covered_until = block_end
+            peer_route_counts.append(prefix_count - excluded_prefixes)
+        afi = "ipv4" if group.afi == "v4" else "ipv6"
+        if afi in result:
+            raise ValueError(f"duplicate eBGP uplink group for {afi}")
+        result[afi] = dict(sorted(Counter(peer_route_counts).items()))
+    if set(result) != {"ipv4", "ipv6"}:
+        raise ValueError("expected exactly one IPv4 and one IPv6 eBGP uplink group")
+    return result
+
+
+def _ebb_peer_prefix_exclusion_blocks_by_pool(
+    bound: BoundTopology,
+) -> dict[str, list[dict[str, object]]]:
+    """Serialize topology-authored sparse cells for deterministic IXIA replay."""
+    result: dict[str, list[dict[str, object]]] = {}
+    for group in (group for group in bound.device_groups if group.role == "uplink"):
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"eBGP group {group.name!r} must expose one route advertisement"
+            )
+        advertisement = group.prefix_advertisements[0]
+        pool_name = advertisement.spec.legacy_ixia_name
+        if not pool_name:
+            raise ValueError(f"eBGP group {group.name!r} has no IXIA prefix-pool name")
+        if pool_name in result:
+            raise ValueError(f"duplicate eBGP IXIA prefix-pool name {pool_name!r}")
+        activation = advertisement.spec.peer_prefix_activation
+        result[pool_name] = [
+            {
+                "prefix_start_index": block.prefix_start_index,
+                "prefix_count": block.prefix_count,
+                "peer_indices": list(block.peer_indices),
+            }
+            for block in (activation.exclusion_blocks if activation else ())
+        ]
+    return result
+
+
+def _validate_ebb12_automation_oracles(
+    automation: _EbbAutomationContract,
+    baseline_route_count_histogram_by_afi: t.Mapping[str, t.Mapping[int, int]],
+    expanded_route_count_histogram_by_afi: t.Mapping[str, t.Mapping[int, int]],
+    peer_prefix_exclusion_blocks_by_pool: t.Mapping[
+        str, t.Sequence[t.Mapping[str, object]]
+    ],
+) -> None:
+    """Keep EBB12's derived oracles keyed to the same bound automation view."""
+    expected_route_afis = set(automation.ebgp_route_item_names_by_afi)
+    for label, histogram in (
+        ("baseline", baseline_route_count_histogram_by_afi),
+        ("expanded", expanded_route_count_histogram_by_afi),
+    ):
+        if set(histogram) != expected_route_afis:
+            raise ValueError(
+                f"CICD-EBB-12 {label} route-count AFIs do not match the "
+                f"bound automation contract: {sorted(histogram)} vs "
+                f"{sorted(expected_route_afis)}"
+            )
+    expected_pool_names = set(automation.ebgp_route_item_names_by_afi.values())
+    if set(peer_prefix_exclusion_blocks_by_pool) != expected_pool_names:
+        raise ValueError(
+            "CICD-EBB-12 exclusion-block pools do not match the bound "
+            "automation contract"
+        )
+
+
 def _nhg_storm_ixia_items(
     bound: BoundTopology,
     automation: _EbbAutomationContract | None = None,
@@ -1017,6 +1137,29 @@ def _get_bgp_ebb_full_scale_playbooks(
     # stimulus, so keep regression headroom without relaxing unrelated suites.
     full_scale_precheck_thresholds = get_precheck_thresholds()
     full_scale_precheck_thresholds.fec_threshold = _FULL_SCALE_FEC_PRECHECK_THRESHOLD
+    baseline_route_count_histogram_by_afi = _ebb_route_count_histogram_by_afi(
+        bound, _DEFAULT_EBGP_PREFIX_COUNT
+    )
+    full_route_count_histogram_by_afi = _ebb_route_count_histogram_by_afi(
+        bound, ebgp_prefix_count
+    )
+    peer_prefix_exclusion_blocks_by_pool = _ebb_peer_prefix_exclusion_blocks_by_pool(
+        bound
+    )
+    _validate_ebb12_automation_oracles(
+        automation,
+        baseline_route_count_histogram_by_afi,
+        full_route_count_histogram_by_afi,
+        peer_prefix_exclusion_blocks_by_pool,
+    )
+    exact_ebgp_route_pool_names = (
+        automation.ebgp_route_item_names_by_afi["ipv4"],
+        automation.ebgp_route_item_names_by_afi["ipv6"],
+    )
+    exact_ebgp_peer_group_names = (
+        automation.ebgp_peer_group_names_by_afi["ipv6"],
+        automation.ebgp_peer_group_names_by_afi["ipv4"],
+    )
     playbooks = [
         get_bgp_ebb_attribute_churn_playbook(
             device_name=device_name,
@@ -1054,6 +1197,15 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
+            prefix_pool_regex=automation.exact_ebgp_route_regex(),
+            expected_prefix_pool_names=exact_ebgp_route_pool_names,
+            exact_ebgp_peer_group_names=exact_ebgp_peer_group_names,
+            expected_route_count_histogram_by_afi=(
+                baseline_route_count_histogram_by_afi
+            ),
+            expanded_route_count_histogram_by_afi=(full_route_count_histogram_by_afi),
+            peer_prefix_exclusion_blocks_by_pool=(peer_prefix_exclusion_blocks_by_pool),
+            bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_route_registry_runtime_update_playbook",
@@ -1257,6 +1409,7 @@ def _get_bgp_ebb_full_scale_playbooks(
                 automation.ebgp_peer_group_names_by_afi["ipv6"],
                 automation.ebgp_peer_group_names_by_afi["ipv4"],
             ),
+            route_count_histogram_by_afi=full_route_count_histogram_by_afi,
             ixia_items_by_afi=_nhg_storm_ixia_items(bound, automation),
             prefix_pool_scope_regex=automation.exact_ebgp_route_regex(),
             nexthop_group_threshold=_NEXTHOP_GROUP_AGGREGATE_GUARDRAIL,

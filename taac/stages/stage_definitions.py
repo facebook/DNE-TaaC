@@ -3866,6 +3866,52 @@ def create_multipath_group_oscillation_cleanup_steps(
     ]
 
 
+def _validate_route_registry_runtime_update_inputs(
+    *,
+    convergence_params: tuple[float | None, float | None, float | None],
+    baseline_route_count_histogram_by_afi: Mapping[str, Mapping[int, int]] | None,
+    expanded_route_count_histogram_by_afi: Mapping[str, Mapping[int, int]] | None,
+    peer_prefix_exclusion_blocks_by_pool: Mapping[str, Sequence[Mapping[str, object]]]
+    | None,
+    expected_prefix_pool_names: Optional[Sequence[str]],
+) -> bool:
+    if any(value is not None for value in convergence_params) and not all(
+        value is not None for value in convergence_params
+    ):
+        raise ValueError(
+            "convergence_soft_threshold_seconds, "
+            "convergence_hard_timeout_seconds, and "
+            "convergence_poll_interval_seconds must be provided together"
+        )
+    if (baseline_route_count_histogram_by_afi is None) != (
+        expanded_route_count_histogram_by_afi is None
+    ):
+        raise ValueError(
+            "baseline and expanded route-count histograms must be provided together"
+        )
+    if baseline_route_count_histogram_by_afi is not None:
+        expected_afis = {"ipv4", "ipv6"}
+        for name, histogram in (
+            ("baseline", baseline_route_count_histogram_by_afi),
+            ("expanded", expanded_route_count_histogram_by_afi),
+        ):
+            if histogram is None or set(histogram) != expected_afis:
+                raise ValueError(
+                    f"{name} route-count histogram keys must be exactly "
+                    "'ipv4' and 'ipv6'"
+                )
+    if peer_prefix_exclusion_blocks_by_pool is not None:
+        expected_names = set(expected_prefix_pool_names or ())
+        if not expected_names or set(peer_prefix_exclusion_blocks_by_pool) != (
+            expected_names
+        ):
+            raise ValueError(
+                "peer-prefix exclusion blocks must exactly match the expected "
+                "prefix-pool names"
+            )
+    return all(value is not None for value in convergence_params)
+
+
 def create_route_registry_runtime_update_stage(
     device_name: str,
     ebgp_peer_description: str = "EBGP",
@@ -3875,6 +3921,12 @@ def create_route_registry_runtime_update_stage(
     expected_prefix_pool_names: Optional[Sequence[str]] = None,
     soak_time_seconds: int = 600,
     baseline_route_count: int = 650,
+    baseline_route_count_histogram_by_afi: Mapping[str, Mapping[int, int]]
+    | None = None,
+    expanded_route_count_histogram_by_afi: Mapping[str, Mapping[int, int]]
+    | None = None,
+    peer_prefix_exclusion_blocks_by_pool: Mapping[str, Sequence[Mapping[str, object]]]
+    | None = None,
     convergence_soft_threshold_seconds: float | None = None,
     convergence_hard_timeout_seconds: float | None = None,
     convergence_poll_interval_seconds: float | None = None,
@@ -3883,6 +3935,8 @@ def create_route_registry_runtime_update_stage(
     exact_peer_group_names: list[str] | None = None,
     verify_trigger_readback: bool = False,
     verify_policy_readback: bool = False,
+    expected_established_sessions: int | None = None,
+    parent_prefixes_to_ignore: Sequence[str] | None = None,
 ) -> Stage:
     """
     Create a test stage to verify route registry runtime update behavior for prefix-lists.
@@ -3908,11 +3962,21 @@ def create_route_registry_runtime_update_stage(
         prefix_end_index: Ending index for the additional prefixes (default: 100)
         soak_time_seconds: Soak duration for BGP stability verification (default: 600 / 10 minutes)
         baseline_route_count: Expected baseline route count (default: 650)
+        baseline_route_count_histogram_by_afi: Optional exact contracted
+            distribution for each address family
+        expanded_route_count_histogram_by_afi: Optional exact expanded and
+            restored distribution for each address family
+        peer_prefix_exclusion_blocks_by_pool: Optional topology-authored sparse
+            activation blocks keyed by IXIA prefix-pool name
         convergence_soft_threshold_seconds: Optional exact-count SLA
         convergence_hard_timeout_seconds: Optional observation timeout
         convergence_poll_interval_seconds: Optional polling interval
         expanded_policy_path: Route-filter policy that includes the test slice
         baseline_policy_path: Route-filter policy that excludes the test slice
+        expected_established_sessions: Exact non-monitor session total for the
+            final restored-state check
+        parent_prefixes_to_ignore: Parent networks excluded from that session
+            check, including the bound BGP-MON network
 
     Returns:
         Stage object for route registry runtime update test
@@ -3922,15 +3986,13 @@ def create_route_registry_runtime_update_stage(
         convergence_hard_timeout_seconds,
         convergence_poll_interval_seconds,
     )
-    if any(value is not None for value in convergence_params) and not all(
-        value is not None for value in convergence_params
-    ):
-        raise ValueError(
-            "convergence_soft_threshold_seconds, "
-            "convergence_hard_timeout_seconds, and "
-            "convergence_poll_interval_seconds must be provided together"
-        )
-    convergence_enabled = all(value is not None for value in convergence_params)
+    convergence_enabled = _validate_route_registry_runtime_update_inputs(
+        convergence_params=convergence_params,
+        baseline_route_count_histogram_by_afi=baseline_route_count_histogram_by_afi,
+        expanded_route_count_histogram_by_afi=expanded_route_count_histogram_by_afi,
+        peer_prefix_exclusion_blocks_by_pool=peer_prefix_exclusion_blocks_by_pool,
+        expected_prefix_pool_names=expected_prefix_pool_names,
+    )
     added_route_count = baseline_route_count + (prefix_end_index - prefix_start_index)
     descriptions_to_check = None if exact_peer_group_names else [ebgp_peer_description]
     peer_scope = (
@@ -3970,6 +4032,11 @@ def create_route_registry_runtime_update_stage(
                 strict_range=verify_trigger_readback,
                 verify_readback=verify_trigger_readback,
                 evidence_label=f"{evidence_phase}:{pool_name}",
+                peer_prefix_exclusion_blocks=(
+                    peer_prefix_exclusion_blocks_by_pool.get(pool_name)
+                    if peer_prefix_exclusion_blocks_by_pool
+                    else None
+                ),
                 description=f"{description} ({pool_name})",
             )
             for pool_name in expected_prefix_pool_names
@@ -3993,8 +4060,18 @@ def create_route_registry_runtime_update_stage(
             device_name=device_name,
             descriptions_to_check=descriptions_to_check,
             exact_peer_group_names=exact_peer_group_names,
-            expected_count=(baseline_route_count if convergence_enabled else None),
-            max_count=(None if convergence_enabled else baseline_route_count),
+            expected_count=(
+                baseline_route_count
+                if convergence_enabled and baseline_route_count_histogram_by_afi is None
+                else None
+            ),
+            expected_count_histogram_by_afi=(baseline_route_count_histogram_by_afi),
+            max_count=(
+                baseline_route_count
+                if not convergence_enabled
+                and baseline_route_count_histogram_by_afi is None
+                else None
+            ),
             description=f"Verify {prefix_end_index - prefix_start_index} additional prefixes are denied by prefix-list on {peer_scope} peers",
         ),
     )
@@ -4015,7 +4092,12 @@ def create_route_registry_runtime_update_stage(
                 device_name=device_name,
                 descriptions_to_check=descriptions_to_check,
                 exact_peer_group_names=exact_peer_group_names,
-                expected_count=added_route_count,
+                expected_count=(
+                    added_route_count
+                    if expanded_route_count_histogram_by_afi is None
+                    else None
+                ),
+                expected_count_histogram_by_afi=(expanded_route_count_histogram_by_afi),
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
                 convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
@@ -4029,7 +4111,12 @@ def create_route_registry_runtime_update_stage(
             device_name=device_name,
             descriptions_to_check=descriptions_to_check,
             exact_peer_group_names=exact_peer_group_names,
-            expected_count=added_route_count,
+            expected_count=(
+                added_route_count
+                if expanded_route_count_histogram_by_afi is None
+                else None
+            ),
+            expected_count_histogram_by_afi=(expanded_route_count_histogram_by_afi),
             stability_duration_seconds=soak_time_seconds,
             stability_hard_timeout_seconds=soak_time_seconds + 30,
             stability_poll_interval_seconds=5,
@@ -4046,7 +4133,12 @@ def create_route_registry_runtime_update_stage(
                 device_name=device_name,
                 descriptions_to_check=descriptions_to_check,
                 exact_peer_group_names=exact_peer_group_names,
-                expected_count=added_route_count,
+                expected_count=(
+                    added_route_count
+                    if expanded_route_count_histogram_by_afi is None
+                    else None
+                ),
+                expected_count_histogram_by_afi=(expanded_route_count_histogram_by_afi),
                 description=f"Verify {prefix_end_index - prefix_start_index} prefixes were accepted after adding to prefix-list on {peer_scope} peers",
             ),
         )
@@ -4067,7 +4159,12 @@ def create_route_registry_runtime_update_stage(
                 device_name=device_name,
                 descriptions_to_check=descriptions_to_check,
                 exact_peer_group_names=exact_peer_group_names,
-                expected_count=baseline_route_count,
+                expected_count=(
+                    baseline_route_count
+                    if baseline_route_count_histogram_by_afi is None
+                    else None
+                ),
+                expected_count_histogram_by_afi=(baseline_route_count_histogram_by_afi),
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
                 convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
@@ -4081,7 +4178,12 @@ def create_route_registry_runtime_update_stage(
             device_name=device_name,
             descriptions_to_check=descriptions_to_check,
             exact_peer_group_names=exact_peer_group_names,
-            expected_count=baseline_route_count,
+            expected_count=(
+                baseline_route_count
+                if baseline_route_count_histogram_by_afi is None
+                else None
+            ),
+            expected_count_histogram_by_afi=(baseline_route_count_histogram_by_afi),
             stability_duration_seconds=soak_time_seconds,
             stability_hard_timeout_seconds=soak_time_seconds + 30,
             stability_poll_interval_seconds=5,
@@ -4098,7 +4200,12 @@ def create_route_registry_runtime_update_stage(
                 device_name=device_name,
                 descriptions_to_check=descriptions_to_check,
                 exact_peer_group_names=exact_peer_group_names,
-                expected_count=baseline_route_count,
+                expected_count=(
+                    baseline_route_count
+                    if baseline_route_count_histogram_by_afi is None
+                    else None
+                ),
+                expected_count_histogram_by_afi=(baseline_route_count_histogram_by_afi),
                 description=f"Verify {prefix_end_index - prefix_start_index} prefixes were denied after removing from prefix-list on {peer_scope} peers",
             ),
         )
@@ -4126,7 +4233,12 @@ def create_route_registry_runtime_update_stage(
                 device_name=device_name,
                 descriptions_to_check=descriptions_to_check,
                 exact_peer_group_names=exact_peer_group_names,
-                expected_count=added_route_count,
+                expected_count=(
+                    added_route_count
+                    if expanded_route_count_histogram_by_afi is None
+                    else None
+                ),
+                expected_count_histogram_by_afi=(expanded_route_count_histogram_by_afi),
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
                 convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
@@ -4142,7 +4254,18 @@ def create_route_registry_runtime_update_stage(
     # BGP daemon restart during setup resetting all session uptimes).
     steps.append(
         create_validation_step(
-            point_in_time_checks=[create_bgp_session_establish_check()],
+            point_in_time_checks=[
+                create_bgp_session_establish_check(
+                    expected_established_sessions_static=(
+                        expected_established_sessions
+                    ),
+                    parent_prefixes_to_ignore=(
+                        list(parent_prefixes_to_ignore)
+                        if parent_prefixes_to_ignore is not None
+                        else None
+                    ),
+                )
+            ],
             stage=taac_types.ValidationStage.POST_TEST,
             description="Post-stage: Verify all BGP sessions are still Established (catch actual flaps)",
         ),

@@ -257,7 +257,7 @@ class ProfileContext:
     fail_on_eor_expired: bool = False
     # Oscillation: expected established session count at precheck, and which
     # snapshot sub-checks to skip (sessions intentionally flap during the test).
-    expected_established_sessions: int = 0
+    expected_established_sessions: int | None = None
     snapshot_skip_flap: bool = False
     snapshot_skip_uptime: bool = False
     # CICD-EBB-10 restores an exact baseline before requiring the full session
@@ -597,7 +597,10 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
     Update Group uses ALL_EOR_RECEIVED. Non-Update Group uses INITIALIZED
     because it is the guaranteed terminal startup milestone for that mode.
     """
-    if ctx.expected_established_sessions <= 0:
+    if (
+        ctx.expected_established_sessions is None
+        or ctx.expected_established_sessions <= 0
+    ):
         raise ValueError("SOAK_READINESS_GATED requires expected_established_sessions")
     if ctx.route_count_expected is None and ctx.route_count_histogram_by_afi is None:
         raise ValueError("SOAK_READINESS_GATED requires a route-count expectation")
@@ -680,7 +683,7 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
             create_bgp_route_count_verification_check(
                 json_params={
                     "exact_peer_group_names": [
-                        *RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
+                        *ctx.exact_ebgp_peer_group_names,
                     ],
                     "direction": "received",
                     **_route_count_expectation(ctx),
@@ -692,6 +695,7 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
         postchecks=create_standard_postchecks(
             postcheck_thresholds=ctx.postcheck_thresholds,
             fail_on_eor_expired=False,
+            expected_established_session_count=ctx.expected_established_sessions,
             bgp_mon=ctx.bgp_mon,
         ),
         snapshot_checks=create_standard_snapshot_checks(

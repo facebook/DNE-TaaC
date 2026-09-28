@@ -1,10 +1,12 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 """Focused coverage for EBB full-scale topology selection."""
 
+import typing as t
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from taac.abstractions.topology.model import BoundTopology
 from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
 )
@@ -33,7 +35,223 @@ def _compiled_topology() -> mock.MagicMock:
     return topology
 
 
+def _bound_shape(prefix_count: int) -> BoundTopology:
+    topology = factory.ebb_full_scale_topology(
+        openr_mode=factory.OpenRMode.STANDALONE,
+        ebgp_prefix_count=prefix_count,
+    )
+    return t.cast(
+        BoundTopology,
+        SimpleNamespace(
+            device_groups=[
+                SimpleNamespace(
+                    role=group.role,
+                    afi=group.afi,
+                    peer_count=group.peer_count,
+                    prefix_advertisements=[
+                        SimpleNamespace(spec=advertisement)
+                        for advertisement in group.prefix_advertisements
+                    ],
+                )
+                for group in topology.device_groups
+            ]
+        ),
+    )
+
+
 class BgpEbbFullScaleFactoryTest(unittest.TestCase):
+    _AUTOMATION = factory._EbbAutomationContract(
+        non_monitor_established_session_count=1272,
+        internal_peer_group_names_by_afi={"ipv4": "IBGP-V4", "ipv6": "IBGP-V6"},
+        ebgp_peer_group_names_by_afi={"ipv4": "EBGP-V4", "ipv6": "EBGP-V6"},
+        ebgp_peer_item_names_by_afi={"ipv4": "PEER-V4", "ipv6": "PEER-V6"},
+        ebgp_peer_counts_by_afi={"ipv4": 140, "ipv6": 140},
+        ebgp_route_item_names_by_afi={
+            "ipv4": "ROUTE.POOL[V4]",
+            "ipv6": "ROUTE+POOL(V6)",
+        },
+    )
+
+    def test_canonical_route_contract_is_derived_per_afi(self) -> None:
+        bound = _bound_shape(850)
+
+        self.assertEqual(
+            {
+                "ipv4": {720: 50, 750: 90},
+                "ipv6": {720: 50, 750: 90},
+            },
+            factory._ebb_route_count_histogram_by_afi(bound, 750),
+        )
+        self.assertEqual(
+            {
+                "ipv4": {816: 50, 850: 90},
+                "ipv6": {816: 50, 850: 90},
+            },
+            factory._ebb_route_count_histogram_by_afi(bound, 850),
+        )
+
+    def test_route_histogram_unions_overlapping_exclusion_blocks(self) -> None:
+        bound = _bound_shape(850)
+        groups: list[t.Any] = list(bound.device_groups)
+        first_uplink_index = next(
+            index for index, group in enumerate(groups) if group.role == "uplink"
+        )
+        first_uplink = groups[first_uplink_index]
+        advertisement = first_uplink.prefix_advertisements[0].spec
+        groups[first_uplink_index] = SimpleNamespace(
+            role=first_uplink.role,
+            afi=first_uplink.afi,
+            peer_count=first_uplink.peer_count,
+            prefix_advertisements=[
+                SimpleNamespace(
+                    spec=SimpleNamespace(
+                        allocation=advertisement.allocation,
+                        peer_prefix_activation=SimpleNamespace(
+                            exclusion_blocks=(
+                                SimpleNamespace(
+                                    prefix_start_index=10,
+                                    prefix_count=10,
+                                    peer_indices=(0,),
+                                ),
+                                SimpleNamespace(
+                                    prefix_start_index=15,
+                                    prefix_count=10,
+                                    peer_indices=(0,),
+                                ),
+                            )
+                        ),
+                    )
+                )
+            ],
+        )
+        overlapping_bound = t.cast(BoundTopology, SimpleNamespace(device_groups=groups))
+
+        histogram = factory._ebb_route_count_histogram_by_afi(overlapping_bound, 850)
+
+        afi = "ipv4" if first_uplink.afi == "v4" else "ipv6"
+        self.assertEqual({835: 1, 850: 139}, histogram[afi])
+
+    def test_route_histogram_rejects_out_of_range_exclusion_peer(self) -> None:
+        bound = _bound_shape(850)
+        groups: list[t.Any] = list(bound.device_groups)
+        first_uplink_index = next(
+            index for index, group in enumerate(groups) if group.role == "uplink"
+        )
+        first_uplink = groups[first_uplink_index]
+        advertisement = first_uplink.prefix_advertisements[0].spec
+        groups[first_uplink_index] = SimpleNamespace(
+            role=first_uplink.role,
+            afi=first_uplink.afi,
+            name="uplink-with-invalid-exclusion",
+            peer_count=first_uplink.peer_count,
+            prefix_advertisements=[
+                SimpleNamespace(
+                    spec=SimpleNamespace(
+                        allocation=advertisement.allocation,
+                        peer_prefix_activation=SimpleNamespace(
+                            exclusion_blocks=(
+                                SimpleNamespace(
+                                    prefix_start_index=750,
+                                    prefix_count=4,
+                                    peer_indices=(first_uplink.peer_count,),
+                                ),
+                            )
+                        ),
+                    )
+                )
+            ],
+        )
+        invalid_bound = t.cast(BoundTopology, SimpleNamespace(device_groups=groups))
+
+        with self.assertRaisesRegex(ValueError, "indices outside"):
+            factory._ebb_route_count_histogram_by_afi(invalid_bound, 850)
+
+    def test_canonical_exclusion_blocks_are_keyed_by_prefix_pool(self) -> None:
+        blocks_by_pool = factory._ebb_peer_prefix_exclusion_blocks_by_pool(
+            _bound_shape(850)
+        )
+
+        self.assertEqual(
+            {"PREFIX_POOL_IPV4_EBGP", "PREFIX_POOL_IPV6_EBGP"},
+            set(blocks_by_pool),
+        )
+        for blocks in blocks_by_pool.values():
+            self.assertEqual(50, len(blocks))
+            self.assertEqual(
+                {
+                    "prefix_start_index": 750,
+                    "prefix_count": 4,
+                    "peer_indices": [90, 91],
+                },
+                blocks[25],
+            )
+
+    def test_exclusion_blocks_reject_duplicate_prefix_pool_names(self) -> None:
+        bound = _bound_shape(850)
+        uplink_groups = [
+            group for group in bound.device_groups if group.role == "uplink"
+        ]
+        first_spec = uplink_groups[0].prefix_advertisements[0].spec
+        second_spec = uplink_groups[1].prefix_advertisements[0].spec
+        duplicate_bound = t.cast(
+            BoundTopology,
+            SimpleNamespace(
+                device_groups=[
+                    SimpleNamespace(
+                        role="uplink",
+                        prefix_advertisements=[SimpleNamespace(spec=first_spec)],
+                    ),
+                    SimpleNamespace(
+                        role="uplink",
+                        prefix_advertisements=[
+                            SimpleNamespace(
+                                spec=SimpleNamespace(
+                                    legacy_ixia_name=first_spec.legacy_ixia_name,
+                                    peer_prefix_activation=(
+                                        second_spec.peer_prefix_activation
+                                    ),
+                                )
+                            )
+                        ],
+                    ),
+                ]
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate eBGP IXIA prefix-pool name"):
+            factory._ebb_peer_prefix_exclusion_blocks_by_pool(duplicate_bound)
+
+    def test_ebb12_oracle_keys_must_match_bound_automation_contract(self) -> None:
+        histograms = {
+            "ipv4": {720: 50, 750: 90},
+            "ipv6": {720: 50, 750: 90},
+        }
+        blocks = {
+            "ROUTE.POOL[V4]": [],
+            "ROUTE+POOL(V6)": [],
+        }
+        factory._validate_ebb12_automation_oracles(
+            self._AUTOMATION,
+            histograms,
+            histograms,
+            blocks,
+        )
+
+        with self.assertRaisesRegex(ValueError, "route-count AFIs"):
+            factory._validate_ebb12_automation_oracles(
+                self._AUTOMATION,
+                {"ipv4": histograms["ipv4"]},
+                histograms,
+                blocks,
+            )
+        with self.assertRaisesRegex(ValueError, "exclusion-block pools"):
+            factory._validate_ebb12_automation_oracles(
+                self._AUTOMATION,
+                histograms,
+                histograms,
+                {"WRONG": []},
+            )
+
     def test_setup_only_compiles_canonical_topology_without_playbooks(self) -> None:
         topology = _compiled_topology()
         with (
