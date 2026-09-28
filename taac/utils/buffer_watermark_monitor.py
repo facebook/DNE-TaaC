@@ -62,6 +62,7 @@ import matplotlib.pyplot as plt
 from fb303.clients import FacebookService
 from libfb.py.asyncio.thrift import ClientType, get_direct_client
 from matplotlib.animation import FuncAnimation  # noqa: F401
+from taac.utils.fboss_ports import fboss_thrift_port
 
 
 logger = logging.getLogger(__name__)
@@ -301,7 +302,9 @@ class BufferWatermarkData:
                 self._trim(vals)
 
 
-FBOSS_FB303_PORT: int = 5909
+# fb303 counters are served by the agent's own ThriftServer, so the migrated
+# port serves them too. 5931 (hwagent) is outside the blocked VNC range.
+FBOSS_FB303_PORT: int = fboss_thrift_port(5909)
 FBOSS_MNPU_FB303_PORT: int = 5931
 
 # Cache the working port after first successful connection

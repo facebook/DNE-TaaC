@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, FrozenSet, List, Optional, Union
 
+from taac.utils.fboss_ports import fboss_thrift_port
 from neteng.test_infra.ixia.ixnetwork_restpy.ixia_config_thrift import (
     types as ixia_config_types,
 )
@@ -501,8 +502,10 @@ FBOSS_COOP_TIER: str = "fboss.coop"
 GALAXY_WEDGE_RE_PATTERN = re.compile(
     r"(^fsw[\d]{3})(-[fl]{1}c[\d]{3})(.p[\d]{3}.f[\d]{2}.[a-z]{3}[\d])", re.IGNORECASE
 )
-DEFAULT_AGENT_REMOTE_PORT = 5909
-DEFAULT_QSFP_PORT = 5910
+# Client-side ports: resolved to the migrated port (legacy + 50) on On-Demand
+# hosts, which drop egress to the VNC range 5900-5910. See utils/fboss_ports.py.
+DEFAULT_AGENT_REMOTE_PORT = fboss_thrift_port(5909)
+DEFAULT_QSFP_PORT = fboss_thrift_port(5910)
 
 FBOSS_AGENT_TIER: str = "fboss.agent"
 
@@ -622,7 +625,11 @@ class AristaAgentStatus(Enum):
     INACTIVE = 1
 
 
-# FIB Agent Port used by openr client
+# FIB Agent Port used by openr client.
+# Deliberately NOT routed through fboss_thrift_port(): this value is written into
+# Open/R's config on the switch (see fboss_switch.py, openr_options.fib_agent_port)
+# and is dialled by Open/R on the device itself, so where TAAC happens to be
+# running is irrelevant to it.
 OPENR_FIB_AGENT_PORT = 5909
 OPENR_FIB_AGENT_MTLS_PORT = 5912
 BGP_FIB_AGENT_MTLS_PORT = 5913
@@ -1410,4 +1417,4 @@ PROD_LIKE_MUTATING_OPTIONS: FrozenSet[ProdLikeEnvOption] = frozenset(
 )
 
 
-FSDB_PORT: int = 5908
+FSDB_PORT: int = fboss_thrift_port(5908)

@@ -43,6 +43,7 @@ from taac.health_checks.constants import (
 )
 from taac.libs.collectors.registry import get_test_case_start_time
 from taac.utils.driver_factory import async_get_device_driver
+from taac.utils.fboss_ports import fboss_thrift_port
 from taac.utils.oss_taac_lib_utils import (
     ConsoleFileLogger,
     get_root_logger,
@@ -52,7 +53,9 @@ from taac.utils.upper_bound_gate import evaluate_upper_bound_gates
 
 LOGGER: ConsoleFileLogger = get_root_logger()
 
-FBOSS_FB303_PORT: int = 5909
+# fb303 counters are served by the agent's own ThriftServer, so the migrated
+# port serves them too. 5931 (hwagent) is outside the blocked VNC range.
+FBOSS_FB303_PORT: int = fboss_thrift_port(5909)
 FBOSS_MNPU_FB303_PORT: int = 5931
 
 

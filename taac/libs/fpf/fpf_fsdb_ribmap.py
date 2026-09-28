@@ -84,6 +84,7 @@ async def get_fsdb_rib_map(
     from neteng.fboss.fsdb.clients import FsdbService
     from neteng.fboss.fsdb_oper import types as fsdb_oper_types
     from neteng.fboss.lib.asyncio import hostnames
+    from taac.utils.fboss_ports import fboss_thrift_port
     from servicerouter.py3 import ClientParams, get_sr_client
 
     ip_addr = await hostnames.host_to_ip(driver.hostname)
@@ -92,7 +93,7 @@ async def get_fsdb_rib_map(
         return {}
     client_params = (
         ClientParams()
-        .setSingleHost(ipAddr=ip_addr, port=5908)
+        .setSingleHost(ipAddr=ip_addr, port=fboss_thrift_port(5908))
         .setOverallTimeoutMs(10000)
     )
     client_params.setProcessingTimeoutMs(10000)

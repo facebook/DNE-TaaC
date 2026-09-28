@@ -49,6 +49,10 @@ async def get_hrt_client(host: str):
     ip_addr = resolve_ipv6(fqdn)
     client_params = (
         ClientParams()
+        # NOT fboss_thrift_port(): this is HostReachTracker on a GPU host, a
+        # different service that merely shares 5909 with wedge_agent. It has no
+        # migrated (+50) port, so this cannot be reached from an On-Demand host
+        # at all -- 5909 is in the VNC range that ODs drop on egress.
         .setSingleHost(ipAddr=ip_addr, port=5909)
         .setOverallTimeoutMs(10000)
     )
