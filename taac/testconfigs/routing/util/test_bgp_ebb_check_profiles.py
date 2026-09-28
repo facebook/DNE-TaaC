@@ -494,6 +494,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
             convergence_threshold=600,
             expected_established_sessions=1272,
             route_count_expected=750,
+            exact_ebgp_peer_group_names=("TOPOLOGY-V6", "TOPOLOGY-V4"),
             bgp_mon=BgpMonScope(
                 exclude=True,
                 parent_network="2401:db00:e50d:22:a",
@@ -521,7 +522,7 @@ class CheckProfileRegistryTest(unittest.TestCase):
                 ),
                 create_bgp_route_count_verification_check(
                     json_params={
-                        "exact_peer_group_names": ["EB-FA-V6", "EB-FA-V4"],
+                        "exact_peer_group_names": ["TOPOLOGY-V6", "TOPOLOGY-V4"],
                         "direction": "received",
                         "expected_count": 750,
                         "policy_type": "post_policy",

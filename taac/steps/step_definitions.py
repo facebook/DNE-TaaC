@@ -1218,6 +1218,7 @@ def create_bgp_nhg_random_storm_step(
     *,
     hostname: str,
     ixia_items_by_afi: t.Mapping[str, t.Mapping[str, t.Any]],
+    prefix_pool_scope_regex: str | None = None,
     seed: int = 160016,
     inactive_paths_per_afi: int = 3_000,
     minimum_distinct_memberships_per_afi: int = 750,
@@ -1249,6 +1250,24 @@ def create_bgp_nhg_random_storm_step(
     for afi, value in items.items():
         if set(value) != required or any(value[key] in (None, "") for key in required):
             raise ValueError(f"{afi} IXIA item contract is incomplete")
+    for key in ("device_group_item", "peer_item", "route_item"):
+        names = tuple(str(items[afi][key]) for afi in ("ipv4", "ipv6"))
+        if len(set(names)) != len(names):
+            raise ValueError(f"{key} must be distinct by AFI")
+    expected_route_items = tuple(
+        str(items[afi]["route_item"]) for afi in ("ipv4", "ipv6")
+    )
+    exact_prefix_pool_scope_regex = (
+        rf"^(?:{'|'.join(re.escape(name) for name in expected_route_items)})$"
+    )
+    if (
+        prefix_pool_scope_regex is not None
+        and prefix_pool_scope_regex != exact_prefix_pool_scope_regex
+    ):
+        raise ValueError(
+            "prefix_pool_scope_regex must exactly select topology route items: "
+            f"{exact_prefix_pool_scope_regex!r}"
+        )
     numeric = {
         "inactive_paths_per_afi": inactive_paths_per_afi,
         "minimum_distinct_memberships_per_afi": minimum_distinct_memberships_per_afi,
@@ -1286,6 +1305,7 @@ def create_bgp_nhg_random_storm_step(
             "custom_step_name": "bgp_nhg_random_storm",
             "hostname": hostname,
             "ixia_items_by_afi": items,
+            "prefix_pool_scope_regex": exact_prefix_pool_scope_regex,
             "seed": seed,
             **numeric,
         },
@@ -6834,6 +6854,7 @@ def create_restore_bgp_peer_ranges_step(
     peer_ranges: t.Sequence[t.Mapping[str, t.Any]],
     description: t.Optional[str] = None,
 ) -> Step:
+    """Restore peer Active vectors, apply/read back, then start the ranges."""
     return create_ixia_api_step(
         api_name="restore_bgp_peer_ranges",
         args_dict={"peer_ranges": list(peer_ranges)},

@@ -3,6 +3,7 @@
 """Factory for the EBB full-scale topology."""
 
 import ipaddress
+import re
 import typing as t
 import uuid
 from collections import Counter
@@ -32,6 +33,7 @@ from taac.abstractions.topology import (
     NextHopMode,
     OpenRMode,
     PeerPrefixDistribution,
+    PeerRelationship,
     PrefixAdvertisement,
     PrefixAllocation,
     PrefixMembership,
@@ -137,8 +139,139 @@ _UG_2_7_2_EBGP_POOLS = (
 )
 
 
+class _EbbAutomationContract(t.NamedTuple):
+    """Runtime selectors derived from one bound full-scale topology."""
+
+    non_monitor_established_session_count: int
+    internal_peer_group_names_by_afi: t.Mapping[str, str]
+    ebgp_peer_group_names_by_afi: t.Mapping[str, str]
+    ebgp_peer_item_names_by_afi: t.Mapping[str, str]
+    ebgp_peer_counts_by_afi: t.Mapping[str, int]
+    ebgp_route_item_names_by_afi: t.Mapping[str, str]
+
+    def exact_ebgp_peer_regex(self, afi: str) -> str:
+        return rf"^{re.escape(self.ebgp_peer_item_names_by_afi[afi])}$"
+
+    def exact_ebgp_route_regex(self) -> str:
+        names = (
+            self.ebgp_route_item_names_by_afi["ipv4"],
+            self.ebgp_route_item_names_by_afi["ipv6"],
+        )
+        return rf"^(?:{'|'.join(re.escape(name) for name in names)})$"
+
+
+def _bound_peer_group_name(group: BoundDeviceGroup) -> str:
+    peer_group = group.peer_group
+    name = peer_group.name if isinstance(peer_group, BgpPeerGroup) else peer_group
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"BGP EBB group {group.name!r} has no bound peer-group name")
+    return name
+
+
+def _unique_peer_group_names_by_afi(
+    groups: t.Iterable[BoundDeviceGroup],
+    *,
+    relationship: PeerRelationship,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for topology_afi, automation_afi in (("v4", "ipv4"), ("v6", "ipv6")):
+        names = {
+            _bound_peer_group_name(group)
+            for group in groups
+            if group.peer_relationship is relationship and group.afi == topology_afi
+        }
+        if len(names) != 1:
+            raise ValueError(
+                "BGP EBB full-scale topology requires one unique "
+                f"{relationship.value} {automation_afi} peer-group name; "
+                f"got {sorted(names)}"
+            )
+        result[automation_afi] = names.pop()
+    if len(set(result.values())) != len(result):
+        raise ValueError(
+            "BGP EBB full-scale topology requires distinct "
+            f"{relationship.value} peer-group names by AFI; got {result}"
+        )
+    return result
+
+
+def _ebb_automation_contract(bound: BoundTopology) -> _EbbAutomationContract:
+    """Resolve every shared BGP/IXIA runtime handle from ``bound``."""
+    groups = tuple(bound.device_groups)
+    session_groups = tuple(
+        group
+        for group in groups
+        if group.peer_relationship is not PeerRelationship.MONITOR
+        and not group.dut_neighbor_absent
+    )
+    session_count = sum(group.peer_count for group in session_groups)
+    if session_count <= 0:
+        raise ValueError("BGP EBB full-scale topology has no non-monitor sessions")
+
+    external_groups = tuple(
+        group
+        for group in groups
+        if group.peer_relationship is PeerRelationship.EXTERNAL
+    )
+    external_by_afi: dict[str, BoundDeviceGroup] = {}
+    for topology_afi, automation_afi in (("v4", "ipv4"), ("v6", "ipv6")):
+        matches = tuple(group for group in external_groups if group.afi == topology_afi)
+        if len(matches) != 1:
+            raise ValueError(
+                "BGP EBB full-scale topology requires exactly one external "
+                f"{automation_afi} device group; got {[group.name for group in matches]}"
+            )
+        external_by_afi[automation_afi] = matches[0]
+
+    peer_item_names: dict[str, str] = {}
+    peer_counts: dict[str, int] = {}
+    route_item_names: dict[str, str] = {}
+    for afi, group in external_by_afi.items():
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"BGP EBB external {afi} group {group.name!r} must expose one "
+                "route advertisement"
+            )
+        peer_item = group.legacy_ixia_bgp_peer_name or group.legacy_ixia_tag_name
+        route_item = group.prefix_advertisements[0].spec.legacy_ixia_name
+        if not peer_item or not route_item:
+            raise ValueError(
+                f"BGP EBB external {afi} group {group.name!r} is missing exact "
+                "IXIA peer or route-item identity"
+            )
+        peer_item_names[afi] = peer_item
+        peer_counts[afi] = group.peer_count
+        route_item_names[afi] = route_item
+
+    for label, names in (
+        ("eBGP peer-item", peer_item_names),
+        ("eBGP route-item", route_item_names),
+    ):
+        if len(set(names.values())) != len(names):
+            raise ValueError(
+                f"BGP EBB full-scale topology requires distinct {label} "
+                f"names by AFI; got {names}"
+            )
+
+    return _EbbAutomationContract(
+        non_monitor_established_session_count=session_count,
+        internal_peer_group_names_by_afi=_unique_peer_group_names_by_afi(
+            groups,
+            relationship=PeerRelationship.INTERNAL,
+        ),
+        ebgp_peer_group_names_by_afi=_unique_peer_group_names_by_afi(
+            groups,
+            relationship=PeerRelationship.EXTERNAL,
+        ),
+        ebgp_peer_item_names_by_afi=peer_item_names,
+        ebgp_peer_counts_by_afi=peer_counts,
+        ebgp_route_item_names_by_afi=route_item_names,
+    )
+
+
 def _nhg_storm_ixia_items(
     bound: BoundTopology,
+    automation: _EbbAutomationContract | None = None,
 ) -> dict[str, dict[str, t.Any]]:
     """Lower every topology-authored eBGP IXIA item into the C16 contract."""
     groups = [group for group in bound.device_groups if group.role == "uplink"]
@@ -154,9 +287,18 @@ def _nhg_storm_ixia_items(
                 f"CICD-EBB-16 group {group.name!r} must expose one route item"
             )
         advertisement = group.prefix_advertisements[0]
-        peer_item = group.legacy_ixia_bgp_peer_name or group.legacy_ixia_tag_name
+        afi = "ipv4" if group.afi == "v4" else "ipv6"
+        peer_item = (
+            automation.ebgp_peer_item_names_by_afi[afi]
+            if automation is not None
+            else group.legacy_ixia_bgp_peer_name or group.legacy_ixia_tag_name
+        )
         device_group_item = group.legacy_ixia_device_group_name
-        route_item = advertisement.spec.legacy_ixia_name
+        route_item = (
+            automation.ebgp_route_item_names_by_afi[afi]
+            if automation is not None
+            else advertisement.spec.legacy_ixia_name
+        )
         missing = [
             label
             for label, value in (
@@ -185,14 +327,17 @@ def _nhg_storm_ixia_items(
                 f"CICD-EBB-16 group {group.name!r} exposes {routes_per_peer} "
                 f"prefixes per peer; requires at least {_DEFAULT_EBGP_PREFIX_COUNT}"
             )
-        afi = "ipv4" if group.afi == "v4" else "ipv6"
         items[afi] = {
             "logical_device_group": group.name,
             "logical_route_advertisement": advertisement.spec.name,
             "device_group_item": device_group_item,
             "peer_item": peer_item,
             "route_item": route_item,
-            "expected_peer_count": group.peer_count,
+            "expected_peer_count": (
+                automation.ebgp_peer_counts_by_afi[afi]
+                if automation is not None
+                else group.peer_count
+            ),
             "expected_routes_per_peer": routes_per_peer,
             "target_prefix_count": _DEFAULT_EBGP_PREFIX_COUNT,
         }
@@ -746,17 +891,6 @@ def _openr_helper_kv_link(physical_inventory: PhysicalInventory) -> dict:
     return link.kv_link(link.helper)
 
 
-def _expected_established_session_count() -> int:
-    return (
-        EBGP_PEER_COUNT_V6
-        + EBGP_PEER_COUNT_V4
-        + IBGP_PEER_SCALE_PER_PLANE * 4
-        + IBGP_PEER_SCALE_PER_PLANE * 4
-        + IBGP_PEER_SCALE_PER_PLANE * 4
-        + IBGP_PEER_SCALE_PER_PLANE * 4
-    )
-
-
 def _characterization_gates(
     playbook_name: str, enable_update_group: bool
 ) -> CharacterizationGates:
@@ -780,6 +914,8 @@ def _get_bgp_ebb_full_scale_playbooks(
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
+    multipath_min_peers_to_stop: int = 1,
+    multipath_max_peers_to_stop: int = 11,
     route_storm_cycles: int = 60,
     route_storm_quiet_window_seconds: int = 120,
     route_storm_bounded_validation: bool = False,
@@ -861,7 +997,10 @@ def _get_bgp_ebb_full_scale_playbooks(
     ixia_interface_mimic_ibgp = physical_inventory.ixia_ports[
         resolved_port_map["ibgp"]
     ][0]
-    session_count = _expected_established_session_count()
+    automation = _ebb_automation_contract(bound)
+    session_count = automation.non_monitor_established_session_count
+    peergroup_ibgp_v4 = automation.internal_peer_group_names_by_afi["ipv4"]
+    peergroup_ibgp_v6 = automation.internal_peer_group_names_by_afi["ipv6"]
     # Derive from the bound topology rather than the module constants, so the
     # checks describe the chassis the run is actually wired to. A config using
     # for_secondary_ixia() peers on the secondary chassis' subnets, and the
@@ -878,12 +1017,11 @@ def _get_bgp_ebb_full_scale_playbooks(
     # stimulus, so keep regression headroom without relaxing unrelated suites.
     full_scale_precheck_thresholds = get_precheck_thresholds()
     full_scale_precheck_thresholds.fec_threshold = _FULL_SCALE_FEC_PRECHECK_THRESHOLD
-
     playbooks = [
         get_bgp_ebb_attribute_churn_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             total_session_count=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -894,8 +1032,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_route_storm_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             total_session_count=session_count,
             ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
             observer_peer_parent_prefix=bgp_mon_parent_prefix,
@@ -911,8 +1049,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_route_registry_runtime_update_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -924,14 +1062,21 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_multipath_group_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
+            ipv4_peer_regex=automation.exact_ebgp_peer_regex("ipv4"),
+            ipv6_peer_regex=automation.exact_ebgp_peer_regex("ipv6"),
+            ipv4_session_count=automation.ebgp_peer_counts_by_afi["ipv4"],
+            ipv6_session_count=automation.ebgp_peer_counts_by_afi["ipv6"],
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
+            bgp_mon_parent_network=bound_bgp_mon_network,
             test_duration_seconds=multipath_test_duration_seconds,
             oscillation_interval_seconds=multipath_oscillation_interval_seconds,
             cycle_count=multipath_cycle_count,
+            min_peers_to_stop=multipath_min_peers_to_stop,
+            max_peers_to_stop=multipath_max_peers_to_stop,
             characterization=OBSERVE_ONLY_ON_DEVICE,
             characterization_gates=_characterization_gates(
                 "bgp_ebb_multipath_group_oscillation_playbook",
@@ -940,8 +1085,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_igp_pnh_metric_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             local_link=local_link,
             other_link=other_link,
             expected_established_sessions=session_count,
@@ -956,8 +1101,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_fauu_drain_undrain_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -971,8 +1116,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_plane_drain_undrain_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -994,8 +1139,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_daemon_restart_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -1014,8 +1159,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_cold_start_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -1024,8 +1169,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_ebgp_session_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             ipv4_session_count=EBGP_PEER_COUNT_V4,
             ipv6_session_count=EBGP_PEER_COUNT_V6,
             expected_established_sessions=session_count,
@@ -1040,8 +1185,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_ebgp_route_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -1053,8 +1198,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             ipv4_sessions_per_plane=IBGP_PEER_SCALE_PER_PLANE,
             ipv6_sessions_per_plane=IBGP_PEER_SCALE_PER_PLANE,
             expected_established_sessions=session_count,
@@ -1070,8 +1215,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_ibgp_route_oscillation_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             expected_established_sessions=session_count,
             profile=profile,
             precheck_thresholds=full_scale_precheck_thresholds,
@@ -1084,8 +1229,8 @@ def _get_bgp_ebb_full_scale_playbooks(
         ),
         get_bgp_ebb_igp_unresolvable_pnh_playbook(
             device_name=device_name,
-            peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
-            peergroup_ibgp_v4=PEERGROUP_IBGP_V4,
+            peergroup_ibgp_v6=peergroup_ibgp_v6,
+            peergroup_ibgp_v4=peergroup_ibgp_v4,
             local_link=local_link,
             other_link=other_link,
             expected_in_scope_sessions=session_count,
@@ -1102,7 +1247,12 @@ def _get_bgp_ebb_full_scale_playbooks(
             device_name=device_name,
             expected_established_sessions=session_count,
             route_count_expected=ebgp_prefix_count,
-            ixia_items_by_afi=_nhg_storm_ixia_items(bound),
+            exact_ebgp_peer_group_names=(
+                automation.ebgp_peer_group_names_by_afi["ipv6"],
+                automation.ebgp_peer_group_names_by_afi["ipv4"],
+            ),
+            ixia_items_by_afi=_nhg_storm_ixia_items(bound, automation),
+            prefix_pool_scope_regex=automation.exact_ebgp_route_regex(),
             nexthop_group_threshold=_NEXTHOP_GROUP_AGGREGATE_GUARDRAIL,
             epoch_count=nhg_storm_epoch_count,
             epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
@@ -1144,6 +1294,8 @@ def create_bgp_ebb_full_scale_test_config(
     multipath_test_duration_seconds: int = 1800,
     multipath_oscillation_interval_seconds: int = 280,
     multipath_cycle_count: int | None = None,
+    multipath_min_peers_to_stop: int = 1,
+    multipath_max_peers_to_stop: int = 11,
     route_storm_cycles: int = 60,
     route_storm_quiet_window_seconds: int = 120,
     route_storm_bounded_validation: bool = False,
@@ -1274,6 +1426,8 @@ def create_bgp_ebb_full_scale_test_config(
         multipath_test_duration_seconds=multipath_test_duration_seconds,
         multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
         multipath_cycle_count=multipath_cycle_count,
+        multipath_min_peers_to_stop=multipath_min_peers_to_stop,
+        multipath_max_peers_to_stop=multipath_max_peers_to_stop,
         route_storm_cycles=route_storm_cycles,
         route_storm_quiet_window_seconds=route_storm_quiet_window_seconds,
         route_storm_bounded_validation=route_storm_bounded_validation,

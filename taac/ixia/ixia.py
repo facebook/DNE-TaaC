@@ -74,6 +74,7 @@ from taac.ixia.ixia_tracer import (
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
 )
+from taac.ixia.route_geometry import IxiaValueVector
 from taac.utils.common import timeit
 from taac.utils.oss_taac_constants import (
     IxiaCandidateSetupError,
@@ -171,6 +172,24 @@ class _BgpPeerTcpWindowWriteResult:
     matched: int
     unsupported: int
     verified: int
+
+
+@dataclass(frozen=True)
+class _BgpPeerActiveWrite:
+    peer_name: str
+    baseline: IxiaValueVector
+    expected_active: tuple[t.Any, ...]
+    write_active: tuple[t.Any, ...]
+
+
+@dataclass(frozen=True)
+class _BgpPeerRangeRestoration:
+    label: str
+    regex: str
+    session_start_idx: int
+    session_end_idx: int
+    expected_peer_count: int
+    writes: tuple[_BgpPeerActiveWrite, ...]
 
 
 def _filter_bgp_stats_by_port(
@@ -4545,41 +4564,299 @@ class Ixia:
 
     @external_api
     def restore_bgp_peer_ranges(
-        self, peer_ranges: t.Sequence[t.Mapping[str, t.Any]]
+        self,
+        peer_ranges: t.Sequence[t.Mapping[str, t.Any]],
+        apply_timeout_seconds: float = 60.0,
+        abort_timeout_seconds: float = 10.0,
     ) -> None:
-        """Best-effort restoration of multiple BGP peer session ranges.
+        """Enable complete peer containers, verify them, then start each range.
 
-        Successful starts are intentionally not undone when another target
-        fails: the desired baseline has every range started, and a subsequent
-        cleanup retry can idempotently reapply the complete target set. A
-        raised ``RuntimeError`` means the environment may be only partially
-        restored and must not be reused until retry or manual recovery
-        succeeds.
+        This cleanup API intentionally restores every session row in each
+        selected peer container to Active before issuing Start. Partial ranges
+        are rejected so rows outside the requested range are never rewritten
+        implicitly.
         """
-        errors = []
-        successful_targets = []
-        for target in peer_ranges:
-            target_label = str(target.get("label", target.get("regex", "<unknown>")))
+        with self.mutation_transaction():
+            plans = self._prepare_bgp_peer_range_restoration(peer_ranges)
             try:
-                self.start_bgp_peers(
-                    start=True,
-                    regex=str(target["regex"]),
-                    session_start_idx=int(target["session_start_idx"]),
-                    session_end_idx=int(target["session_end_idx"]),
-                    expected_peer_count=int(target["expected_peer_count"]),
-                    validate_session_range=True,
+                self._write_bgp_peer_active_baseline(plans)
+                self.apply_changes_bounded(
+                    apply_timeout_seconds,
+                    abort_timeout_seconds=abort_timeout_seconds,
                 )
+                self._verify_bgp_peer_active_baseline(plans)
+            except Exception as error:
+                try:
+                    self._rollback_bgp_peer_active_baseline(
+                        plans,
+                        apply_timeout_seconds=apply_timeout_seconds,
+                        abort_timeout_seconds=abort_timeout_seconds,
+                    )
+                except Exception as rollback_error:
+                    error.add_note(
+                        "BGP peer Active rollback also failed: "
+                        f"{type(rollback_error).__name__}: {rollback_error}"
+                    )
+                raise
+            self._start_restored_bgp_peer_ranges(plans)
+
+    def _prepare_bgp_peer_range_restoration(
+        self, peer_ranges: t.Sequence[t.Mapping[str, t.Any]]
+    ) -> tuple[_BgpPeerRangeRestoration, ...]:
+        plans = []
+        matched_peer_names: set[str] = set()
+        for target in peer_ranges:
+            label = str(target.get("label", target.get("regex", "<unknown>")))
+            regex = str(target["regex"])
+            start = int(target["session_start_idx"])
+            end = int(target["session_end_idx"])
+            expected_count = int(target["expected_peer_count"])
+            peers = self._resolve_bgp_peer_restore_target(
+                label, regex, expected_count
+            )
+            duplicate_names = matched_peer_names.intersection(
+                str(peer.Name) for peer in peers
+            )
+            if duplicate_names:
+                raise ValueError(
+                    f"BGP peer-range restoration targets overlap: {sorted(duplicate_names)}"
+                )
+            matched_peer_names.update(str(peer.Name) for peer in peers)
+            writes = tuple(
+                self._prepare_bgp_peer_active_write(peer, start, end) for peer in peers
+            )
+            plans.append(
+                _BgpPeerRangeRestoration(
+                    label=label,
+                    regex=regex,
+                    session_start_idx=start,
+                    session_end_idx=end,
+                    expected_peer_count=expected_count,
+                    writes=writes,
+                )
+            )
+        if not plans:
+            raise ValueError("BGP peer-range restoration requires at least one target")
+        return tuple(plans)
+
+    def _resolve_bgp_peer_restore_target(
+        self, label: str, regex: str, expected_count: int
+    ) -> tuple[t.Any, ...]:
+        peers = tuple(self.find_bgp_peers(regex))
+        names = [str(peer.Name) for peer in peers]
+        self.logger.info(
+            f"BGP peer-range restoration target {label} matched {names}"
+        )
+        if expected_count <= 0 or len(peers) != expected_count:
+            raise ValueError(
+                f"BGP peer-range restoration target {label} expected "
+                f"{expected_count} peer object(s), got {len(peers)}: {names}"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"BGP peer-range restoration target {label} has duplicate peer "
+                f"names: {names}"
+            )
+        return peers
+
+    def _prepare_bgp_peer_active_write(
+        self, peer: t.Any, start: int, end: int
+    ) -> _BgpPeerActiveWrite:
+        peer_name = str(peer.Name)
+        try:
+            peer_count = int(peer.Count)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"BGP peer {peer_name} has invalid Count {getattr(peer, 'Count', None)!r}"
+            ) from error
+        if start < 1 or end < start or end > peer_count:
+            raise ValueError(
+                f"BGP peer-range restoration invalid session range {start}-{end} "
+                f"for {peer_name} with Count={peer_count}"
+            )
+        if start != 1 or end != peer_count:
+            raise ValueError(
+                "BGP peer-range restoration requires the complete session "
+                f"range 1-{peer_count} for {peer_name}, got {start}-{end}"
+            )
+        baseline = IxiaValueVector.capture(
+            peer.Active,
+            peer_count,
+            f"{peer_name} peer Active baseline",
+            compact_row_count=peer_count,
+        )
+        # Preserve each captured row's IXIA representation while enabling it;
+        # deriving every row independently avoids projecting row zero's type
+        # across a heterogeneous vector.
+        expected = tuple(
+            self._bgp_peer_active_value(baseline.baseline_value(row))
+            for row in range(peer_count)
+        )
+        write = expected
+        if all(value == expected[0] for value in expected[1:]):
+            write = (expected[0],)
+        return _BgpPeerActiveWrite(peer_name, baseline, expected, write)
+
+    @staticmethod
+    def _bgp_peer_active_value(value: t.Any) -> t.Any:
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, str) and value.lower() in {"true", "false"}:
+            return "true"
+        raise ValueError(f"IXIA peer Active has invalid value {value!r}")
+
+    @staticmethod
+    def _write_bgp_peer_active_baseline(
+        plans: t.Sequence[_BgpPeerRangeRestoration],
+    ) -> None:
+        for plan in plans:
+            for write in plan.writes:
+                if len(write.write_active) == 1:
+                    write.baseline.handle.Single(value=write.write_active[0])
+                else:
+                    write.baseline.write_fixed_count(write.write_active)
+
+    def _verify_bgp_peer_active_baseline(
+        self, plans: t.Sequence[_BgpPeerRangeRestoration]
+    ) -> None:
+        for plan in plans:
+            fresh_by_name = self._fresh_bgp_restore_peers(plan)
+            for write in plan.writes:
+                fresh_active = IxiaValueVector.capture(
+                    fresh_by_name[write.peer_name].Active,
+                    write.baseline.expanded_row_count,
+                    f"{write.peer_name} peer Active readback",
+                    compact_row_count=write.baseline.compact_row_count,
+                )
+                fresh_active.assert_exact_fixed_count_readback(write.expected_active)
+
+    def _rollback_bgp_peer_active_baseline(
+        self,
+        plans: t.Sequence[_BgpPeerRangeRestoration],
+        *,
+        apply_timeout_seconds: float,
+        abort_timeout_seconds: float,
+    ) -> None:
+        failures = self._restore_bgp_peer_active_vectors(plans)
+        try:
+            self.apply_changes_bounded(
+                apply_timeout_seconds,
+                abort_timeout_seconds=abort_timeout_seconds,
+            )
+        except Exception as error:
+            failures.append(f"apply: {type(error).__name__}: {error}")
+        failures.extend(self._bgp_peer_active_rollback_readback_failures(plans))
+        if failures:
+            raise RuntimeError(
+                "BGP peer Active rollback failed: " + "; ".join(failures)
+            )
+
+    @staticmethod
+    def _restore_bgp_peer_active_vectors(
+        plans: t.Sequence[_BgpPeerRangeRestoration],
+    ) -> list[str]:
+        failures = []
+        for plan in plans:
+            for write in plan.writes:
+                try:
+                    write.baseline.restore()
+                except Exception as error:
+                    failures.append(
+                        f"{write.peer_name} write: {type(error).__name__}: {error}"
+                    )
+        return failures
+
+    def _bgp_peer_active_rollback_readback_failures(
+        self, plans: t.Sequence[_BgpPeerRangeRestoration]
+    ) -> list[str]:
+        failures = []
+        for plan in plans:
+            try:
+                fresh_by_name = self._fresh_bgp_restore_peers(plan)
+            except Exception as error:
+                failures.append(
+                    f"{plan.label} resolve: {type(error).__name__}: {error}"
+                )
+                continue
+            for write in plan.writes:
+                try:
+                    fresh = IxiaValueVector.capture(
+                        fresh_by_name[write.peer_name].Active,
+                        write.baseline.expanded_row_count,
+                        f"{write.peer_name} peer Active rollback readback",
+                        compact_row_count=write.baseline.compact_row_count,
+                    )
+                    if (
+                        fresh.values != write.baseline.values
+                        or fresh.pattern != write.baseline.pattern
+                    ):
+                        raise RuntimeError("readback differs from baseline")
+                except Exception as error:
+                    failures.append(
+                        f"{write.peer_name} readback: {type(error).__name__}: {error}"
+                    )
+        return failures
+
+    def _fresh_bgp_restore_peers(
+        self, plan: _BgpPeerRangeRestoration
+    ) -> dict[str, t.Any]:
+        fresh_by_name = {
+            str(peer.Name): peer
+            for peer in self._resolve_bgp_peer_restore_target(
+                plan.label, plan.regex, plan.expected_peer_count
+            )
+        }
+        if set(fresh_by_name) != {write.peer_name for write in plan.writes}:
+            raise RuntimeError(
+                f"BGP peer-range restoration target {plan.label} changed "
+                "after preparation"
+            )
+        for write in plan.writes:
+            observed_count = int(fresh_by_name[write.peer_name].Count)
+            if observed_count != write.baseline.expanded_row_count:
+                raise RuntimeError(
+                    f"BGP peer {write.peer_name} Count changed from "
+                    f"{write.baseline.expanded_row_count} to {observed_count}"
+                )
+        return fresh_by_name
+
+    def _start_restored_bgp_peer_ranges(
+        self, plans: t.Sequence[_BgpPeerRangeRestoration]
+    ) -> None:
+        failures = []
+        successful_targets = []
+        for plan in plans:
+            try:
+                peers = self._fresh_bgp_restore_peers(plan)
             except Exception as error:
                 self.logger.exception(
-                    f"Failed to restore BGP peer range {target_label}"
+                    f"Failed to restore BGP peer range {plan.label}"
                 )
-                errors.append(f"{target_label}: {type(error).__name__}: {error}")
-            else:
-                successful_targets.append(target_label)
-        if errors:
+                failures.append(f"{plan.label}: {type(error).__name__}: {error}")
+                continue
+            target_failed = False
+            for write in plan.writes:
+                try:
+                    peers[write.peer_name].Start(
+                        SessionIndices=(
+                            f"{plan.session_start_idx}-{plan.session_end_idx}"
+                        )
+                    )
+                except Exception as error:
+                    target_failed = True
+                    self.logger.exception(
+                        f"Failed to restore BGP peer range {plan.label}"
+                    )
+                    failures.append(
+                        f"{plan.label}/{write.peer_name}: "
+                        f"{type(error).__name__}: {error}"
+                    )
+            if not target_failed:
+                successful_targets.append(plan.label)
+        if failures:
             raise RuntimeError(
                 "BGP peer-range restoration failed after attempting every target: "
-                f"succeeded={successful_targets!r}; failed=" + "; ".join(errors)
+                f"succeeded={successful_targets!r}; failed=" + "; ".join(failures)
             )
 
     @external_api

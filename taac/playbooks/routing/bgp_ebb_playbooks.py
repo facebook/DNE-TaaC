@@ -1238,6 +1238,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     exclude_bgp_mon: bool = True,
     characterization: CharacterizationConfig = DISABLED,
     characterization_gates: CharacterizationGates = NO_CHARACTERIZATION_GATES,
+    bgp_mon_parent_network: str | None = None,
 ) -> Playbook:
     """
     Build CICD-EBB-09: Multipath-group oscillation.
@@ -1250,7 +1251,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
     1. Setting up BGP instability prerequisites
     2. Running standard prechecks
     3. Measuring the live multipath group width as the baseline
-    4. Fluctuating BGP multipath groups by stopping/starting eBGP sessions
+    4. Fluctuating multipath groups by deactivating exact IXIA eBGP rows
     5. Verifying multipath groups reduce/restore relative to the measured baseline
     6. Running standard postchecks (no convergence check)
 
@@ -1267,13 +1268,13 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         ipv4_peer_regex: Regex to match IPv4 eBGP peers (default: ".*IPV4_EBGP$")
         ipv6_peer_regex: Regex to match IPv6 eBGP peers (default: ".*IPV6_EBGP$")
         ipv4_session_count: Number of IPv4 eBGP sessions on the IXIA side
-            (default: 140). Used only for peer-stop indexing — NOT assumed to
+            (default: 140). Used only for peer-selection indexing — NOT assumed to
             equal the DUT-side multipath group width, which is measured live.
         ipv6_session_count: Number of IPv6 eBGP sessions on the IXIA side.
         test_duration_seconds: Total oscillation test duration (default: 1800s)
         oscillation_interval_seconds: Interval between oscillations (default: 280s)
-        min_peers_to_stop: Minimum peers to stop per cycle (default: 1)
-        max_peers_to_stop: Maximum peers to stop per cycle (default: 11)
+        min_peers_to_stop: Minimum peers to deactivate per cycle (default: 1)
+        max_peers_to_stop: Maximum peers to deactivate per cycle (default: 11)
         cycle_count: Optional cycle count for a bounded validation run. The
             cataloged playbook uses six cycles when this value is not set.
         expected_min_baseline_width: Optional sanity lower bound on the measured
@@ -1284,6 +1285,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
         postcheck_thresholds: Custom postcheck thresholds (uses defaults if None)
         exclude_bgp_mon: Exclude the BGP-MON parent prefix from session
             inventory checks, including the recovered-state cleanup gate.
+        bgp_mon_parent_network: Bound topology BGP-MON parent network.
 
     Returns:
         Playbook configured for BGP multipath group oscillation testing
@@ -1293,6 +1295,11 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
 
     if postcheck_thresholds is None:
         postcheck_thresholds = get_postcheck_thresholds()
+
+    bgp_mon_scope = BgpMonScope(
+        exclude=exclude_bgp_mon,
+        parent_network=bgp_mon_parent_network,
+    )
 
     # Same phase as the _characterized() bracket below: the bracket writes
     # these jq vars and these configs read them back.
@@ -1309,7 +1316,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
             expected_established_sessions=expected_established_sessions,
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            bgp_mon=BgpMonScope(exclude=exclude_bgp_mon),
+            bgp_mon=bgp_mon_scope,
             snapshot_skip_flap=True,
             snapshot_skip_uptime=True,
             cpu_characterization=cpu_characterization,
@@ -1361,9 +1368,7 @@ def get_bgp_ebb_multipath_group_oscillation_playbook(
                 ipv6_session_count_to_restore=ipv6_session_count,
                 expected_established_sessions=expected_established_sessions,
                 convergence_wait_seconds=oscillation_interval_seconds // 2,
-                parent_prefixes_to_ignore=(
-                    BgpMonScope(exclude=exclude_bgp_mon).ignore_prefixes()
-                ),
+                parent_prefixes_to_ignore=bgp_mon_scope.ignore_prefixes(),
             ),
         )
     )
@@ -2323,6 +2328,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     expected_established_sessions: int,
     route_count_expected: int,
     ixia_items_by_afi: t.Mapping[str, t.Mapping[str, t.Any]],
+    exact_ebgp_peer_group_names: tuple[str, ...] = (
+        RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES
+    ),
+    prefix_pool_scope_regex: str | None = None,
     nexthop_group_threshold: int = 8192,
     seed: int = 160016,
     minimum_distinct_memberships_per_afi: int = 750,
@@ -2377,6 +2386,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
             convergence_threshold=convergence_threshold,
             expected_established_sessions=expected_established_sessions,
             route_count_expected=route_count_expected,
+            exact_ebgp_peer_group_names=exact_ebgp_peer_group_names,
             enable_update_group=enable_update_group,
             bgp_mon=BgpMonScope(
                 exclude=exclude_bgp_mon,
@@ -2416,6 +2426,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                 create_bgp_nhg_random_storm_stage(
                     hostname=device_name,
                     ixia_items_by_afi=ixia_items_by_afi,
+                    prefix_pool_scope_regex=prefix_pool_scope_regex,
                     seed=seed,
                     inactive_paths_per_afi=inactive_paths_per_afi,
                     minimum_distinct_memberships_per_afi=(

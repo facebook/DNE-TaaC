@@ -2014,6 +2014,7 @@ def create_bgp_nhg_random_storm_stage(
     *,
     hostname: str,
     ixia_items_by_afi: Mapping[str, Mapping[str, Any]],
+    prefix_pool_scope_regex: str | None = None,
     seed: int = 160016,
     inactive_paths_per_afi: int = 3_000,
     minimum_distinct_memberships_per_afi: int = 750,
@@ -2031,6 +2032,7 @@ def create_bgp_nhg_random_storm_stage(
             create_bgp_nhg_random_storm_step(
                 hostname=hostname,
                 ixia_items_by_afi=ixia_items_by_afi,
+                prefix_pool_scope_regex=prefix_pool_scope_regex,
                 seed=seed,
                 inactive_paths_per_afi=inactive_paths_per_afi,
                 minimum_distinct_memberships_per_afi=(

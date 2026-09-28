@@ -278,6 +278,10 @@ class ProfileContext:
     # Expected baseline eBGP route count for readiness and runtime-update
     # route-count verification prechecks.
     route_count_expected: t.Optional[int] = None
+    # Exact bound-topology eBGP peer-group names used by route-count checks.
+    # The default preserves direct callers; full-scale factories override it
+    # from their BoundTopology automation contract.
+    exact_ebgp_peer_group_names: tuple[str, ...] = RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES
     # EBB-16 requires the aggregate EOR milestone only with Update Group.
     enable_update_group: bool = True
     # Opt-in observe-only characterization postchecks (results land in the
@@ -607,9 +611,7 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
             ),
             create_bgp_route_count_verification_check(
                 json_params={
-                    "exact_peer_group_names": [
-                        *RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
-                    ],
+                    "exact_peer_group_names": [*ctx.exact_ebgp_peer_group_names],
                     "direction": "received",
                     "expected_count": ctx.route_count_expected,
                     "policy_type": "post_policy",
