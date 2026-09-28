@@ -267,6 +267,7 @@ def _build_atomic_config_replace_cmd(
             "from pathlib import Path",
             f"path = Path({path!r})",
             f"updated_content = base64.b64decode({encoded_content!r})",
+            "path.parent.mkdir(parents=True, exist_ok=True)",
             "metadata = path.stat() if path.exists() else None",
             "fd, temporary_name = tempfile.mkstemp(",
             "    dir=path.parent, prefix=f'.{path.name}.'",
