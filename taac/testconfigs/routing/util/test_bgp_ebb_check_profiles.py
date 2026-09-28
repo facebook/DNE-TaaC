@@ -585,6 +585,52 @@ class CheckProfileRegistryTest(unittest.TestCase):
             ),
         )
 
+    def test_route_count_histogram_is_serialized_for_affected_profiles(self):
+        histogram = {
+            "ipv4": {720: 50, 750: 90},
+            "ipv6": {720: 50, 750: 90},
+        }
+        for profile in (
+            CheckProfile.SOAK_READINESS_GATED,
+            CheckProfile.RUNTIME_UPDATE,
+        ):
+            with self.subTest(profile=profile):
+                checks = get_profile_checks(
+                    profile,
+                    ProfileContext(
+                        expected_established_sessions=1272,
+                        route_count_histogram_by_afi=histogram,
+                    ),
+                )
+                route_check = next(
+                    check
+                    for check in checks.prechecks
+                    if check.name
+                    == hc_types.CheckName.BGP_ROUTE_COUNT_VERIFICATION_CHECK
+                )
+                self.assertEqual(
+                    {
+                        "ipv4": {"720": 50, "750": 90},
+                        "ipv6": {"720": 50, "750": 90},
+                    },
+                    json.loads(route_check.check_params.json_params)[
+                        "expected_count_histogram_by_afi"
+                    ],
+                )
+
+    def test_route_count_expectations_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            get_profile_checks(
+                CheckProfile.RUNTIME_UPDATE,
+                ProfileContext(
+                    route_count_expected=750,
+                    route_count_histogram_by_afi={
+                        "ipv4": {720: 50, 750: 90},
+                        "ipv6": {720: 50, 750: 90},
+                    },
+                ),
+            )
+
     def test_runtime_update_matches_factory(self):
         """RUNTIME_UPDATE reproduces the route-registry prefix-list runtime-update
         playbook (standard prechecks + a route-count verification add-on,

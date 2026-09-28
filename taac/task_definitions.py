@@ -3036,7 +3036,7 @@ def create_bgp_route_registry_cleanup_task(
     prefix_start_index: int,
     prefix_end_index: int,
     expanded_policy_path: str,
-    expected_route_count: int,
+    expected_route_count: t.Optional[int],
     ebgp_peer_description: str = "EBGP",
     exact_peer_group_names: t.Optional[t.Sequence[str]] = None,
     expected_established_sessions: t.Optional[int] = None,
@@ -3044,26 +3044,60 @@ def create_bgp_route_registry_cleanup_task(
     convergence_soft_threshold_seconds: float = 60,
     convergence_hard_timeout_seconds: float = 300,
     convergence_poll_interval_seconds: float = 5,
+    expected_route_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
+    peer_prefix_exclusion_blocks_by_pool: t.Optional[
+        t.Mapping[str, t.Sequence[t.Mapping[str, object]]]
+    ] = None,
 ) -> Task:
     """Build the failure-safe CICD-EBB-12 cleanup task."""
+    if (expected_route_count is None) == (
+        expected_route_count_histogram_by_afi is None
+    ):
+        raise ValueError(
+            "exactly one of expected_route_count or "
+            "expected_route_count_histogram_by_afi is required"
+        )
+    if peer_prefix_exclusion_blocks_by_pool is not None and set(
+        peer_prefix_exclusion_blocks_by_pool
+    ) != set(prefix_pool_names):
+        raise ValueError(
+            "peer_prefix_exclusion_blocks_by_pool must exactly match prefix_pool_names"
+        )
     params: t.Dict[str, t.Any] = {
         "hostname": hostname,
         "prefix_pool_names": list(prefix_pool_names),
         "prefix_start_index": prefix_start_index,
         "prefix_end_index": prefix_end_index,
         "expanded_policy_path": expanded_policy_path,
-        "expected_route_count": expected_route_count,
-        "ebgp_peer_description": ebgp_peer_description,
-        "expected_established_sessions": expected_established_sessions,
-        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
-        "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
-        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
-        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
-        "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
-        "session_poll_interval_seconds": convergence_poll_interval_seconds,
     }
+    if expected_route_count is not None:
+        params["expected_route_count"] = expected_route_count
+    if expected_route_count_histogram_by_afi is not None:
+        params["expected_route_count_histogram_by_afi"] = {
+            afi: dict(histogram)
+            for afi, histogram in expected_route_count_histogram_by_afi.items()
+        }
+    params.update(
+        {
+            "ebgp_peer_description": ebgp_peer_description,
+            "expected_established_sessions": expected_established_sessions,
+            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+            "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
+            "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+            "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+            "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
+            "session_poll_interval_seconds": convergence_poll_interval_seconds,
+        }
+    )
     if exact_peer_group_names is not None:
         params["exact_peer_group_names"] = list(exact_peer_group_names)
+    if peer_prefix_exclusion_blocks_by_pool is not None:
+        params["peer_prefix_exclusion_blocks_by_pool"] = {
+            pool_name: [dict(block) for block in blocks]
+            for pool_name, blocks in peer_prefix_exclusion_blocks_by_pool.items()
+        }
     return Task(
         task_name="bgp_route_registry_cleanup",
         ixia_needed=True,

@@ -282,6 +282,7 @@ class ProfileContext:
     # The default preserves direct callers; full-scale factories override it
     # from their BoundTopology automation contract.
     exact_ebgp_peer_group_names: tuple[str, ...] = RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES
+    route_count_histogram_by_afi: t.Optional[t.Mapping[str, t.Mapping[int, int]]] = None
     # EBB-16 requires the aggregate EOR milestone only with Update Group.
     enable_update_group: bool = True
     # Opt-in observe-only characterization postchecks (results land in the
@@ -297,6 +298,27 @@ class ProfileChecks(t.NamedTuple):
     prechecks: t.List[PointInTimeHealthCheck]
     postchecks: t.List[PointInTimeHealthCheck]
     snapshot_checks: t.List[SnapshotHealthCheck]
+
+
+def _route_count_expectation(ctx: ProfileContext) -> t.Dict[str, t.Any]:
+    if (
+        ctx.route_count_expected is not None
+        and ctx.route_count_histogram_by_afi is not None
+    ):
+        raise ValueError(
+            "route_count_expected and route_count_histogram_by_afi are mutually "
+            "exclusive"
+        )
+    if ctx.route_count_histogram_by_afi is not None:
+        return {
+            "expected_count_histogram_by_afi": {
+                afi: dict(histogram)
+                for afi, histogram in ctx.route_count_histogram_by_afi.items()
+            }
+        }
+    if ctx.route_count_expected is not None:
+        return {"expected_count": ctx.route_count_expected}
+    return {}
 
 
 def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
@@ -577,8 +599,8 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
     """
     if ctx.expected_established_sessions <= 0:
         raise ValueError("SOAK_READINESS_GATED requires expected_established_sessions")
-    if ctx.route_count_expected is None:
-        raise ValueError("SOAK_READINESS_GATED requires route_count_expected")
+    if ctx.route_count_expected is None and ctx.route_count_histogram_by_afi is None:
+        raise ValueError("SOAK_READINESS_GATED requires a route-count expectation")
 
     convergence_threshold = ctx.convergence_threshold or 600
     if ctx.enable_update_group:
@@ -613,7 +635,7 @@ def _soak_readiness_gated(ctx: ProfileContext) -> ProfileChecks:
                 json_params={
                     "exact_peer_group_names": [*ctx.exact_ebgp_peer_group_names],
                     "direction": "received",
-                    "expected_count": ctx.route_count_expected,
+                    **_route_count_expectation(ctx),
                     "policy_type": "post_policy",
                 },
                 check_id="startup_bgp_route_count_verification",
@@ -661,7 +683,7 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
                         *RUNTIME_UPDATE_EXACT_PEER_GROUP_NAMES,
                     ],
                     "direction": "received",
-                    "expected_count": ctx.route_count_expected,
+                    **_route_count_expectation(ctx),
                     "policy_type": "post_policy",
                 },
                 check_id="startup_bgp_session_verification",

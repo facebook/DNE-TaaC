@@ -6486,6 +6486,9 @@ def create_set_peer_groups_policy_step(
 def _validated_route_stability_params(
     *,
     expected_count: t.Optional[int],
+    expected_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ],
     min_count: t.Optional[int],
     max_count: t.Optional[int],
     convergence_enabled: bool,
@@ -6512,10 +6515,15 @@ def _validated_route_stability_params(
         )
     if convergence_enabled:
         raise ValueError("convergence and stability observation are mutually exclusive")
-    if expected_count is None or min_count is not None or max_count is not None:
+    if (
+        (expected_count is None) == (expected_count_histogram_by_afi is None)
+        or min_count is not None
+        or max_count is not None
+    ):
         raise ValueError(
-            "stability observation requires expected_count and does not support "
-            "min_count or max_count"
+            "stability observation requires exactly one of expected_count or "
+            "expected_count_histogram_by_afi and does not support min_count or "
+            "max_count"
         )
     duration = float(duration_seconds)
     hard_timeout = float(hard_timeout_seconds)
@@ -6537,6 +6545,9 @@ def _received_routes_step_description(
     *,
     device_name: str,
     expected_count: t.Optional[int],
+    expected_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ],
     min_count: t.Optional[int],
     max_count: t.Optional[int],
     descriptions_to_check: t.Optional[t.List[str]],
@@ -6550,6 +6561,11 @@ def _received_routes_step_description(
 
     if expected_count is not None:
         return f"Verify {device_name} receives exactly {expected_count} routes{peer_filter}"
+    if expected_count_histogram_by_afi is not None:
+        return (
+            f"Verify {device_name} receives exact route-count distributions by AFI "
+            f"{dict(expected_count_histogram_by_afi)}{peer_filter}"
+        )
     if max_count is not None:
         return f"Verify {device_name} receives at most {max_count} routes{peer_filter}"
     if min_count is not None:
@@ -6557,9 +6573,12 @@ def _received_routes_step_description(
     return f"Check received routes count on {device_name}{peer_filter}"
 
 
-def create_verify_received_routes_step(
+def create_verify_received_routes_step(  # noqa: C901
     device_name: str,
     expected_count: t.Optional[int] = None,
+    expected_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
     min_count: t.Optional[int] = None,
     max_count: t.Optional[int] = None,
     descriptions_to_check: t.Optional[t.List[str]] = None,
@@ -6585,6 +6604,8 @@ def create_verify_received_routes_step(
     Args:
         device_name: Name of the device to check received routes on
         expected_count: Expected exact number of received routes (optional)
+        expected_count_histogram_by_afi: Exact mapping from address family
+            (ipv4/ipv6) to route-count/peer-cardinality histogram
         min_count: Minimum expected routes (optional)
         max_count: Maximum expected routes (optional)
         descriptions_to_check: List of description substrings to match peers (optional)
@@ -6607,10 +6628,35 @@ def create_verify_received_routes_step(
         raise ValueError(
             "description filters and exact_peer_group_names are mutually exclusive"
         )
+    if expected_count_histogram_by_afi is not None and any(
+        value is not None for value in (expected_count, min_count, max_count)
+    ):
+        raise ValueError(
+            "expected_count_histogram_by_afi is mutually exclusive with "
+            "expected_count, min_count, and max_count"
+        )
+    if expected_count_histogram_by_afi is not None:
+        if not expected_count_histogram_by_afi:
+            raise ValueError("expected_count_histogram_by_afi must not be empty")
+        if not all(
+            afi in ("ipv4", "ipv6")
+            for afi in expected_count_histogram_by_afi
+        ):
+            raise ValueError(
+                "expected_count_histogram_by_afi keys must be 'ipv4' or 'ipv6'"
+            )
+        if any(
+            not histogram
+            for histogram in expected_count_histogram_by_afi.values()
+        ):
+            raise ValueError(
+                "expected_count_histogram_by_afi values must be non-empty mappings"
+            )
     if description is None:
         description = _received_routes_step_description(
             device_name=device_name,
             expected_count=expected_count,
+            expected_count_histogram_by_afi=expected_count_histogram_by_afi,
             min_count=min_count,
             max_count=max_count,
             descriptions_to_check=descriptions_to_check,
@@ -6635,6 +6681,12 @@ def create_verify_received_routes_step(
     if expected_count is not None:
         params_dict["expected_count"] = expected_count
 
+    if expected_count_histogram_by_afi is not None:
+        params_dict["expected_count_histogram_by_afi"] = {
+            afi: dict(histogram)
+            for afi, histogram in expected_count_histogram_by_afi.items()
+        }
+
     if min_count is not None:
         params_dict["min_count"] = min_count
 
@@ -6653,6 +6705,7 @@ def create_verify_received_routes_step(
     params_dict.update(
         _validated_route_stability_params(
             expected_count=expected_count,
+            expected_count_histogram_by_afi=expected_count_histogram_by_afi,
             min_count=min_count,
             max_count=max_count,
             convergence_enabled=any(
@@ -7034,6 +7087,9 @@ def create_advertise_withdraw_prefixes_step(
     strict_range: bool = False,
     verify_readback: bool = False,
     evidence_label: t.Optional[str] = None,
+    peer_prefix_exclusion_blocks: t.Optional[
+        t.Sequence[t.Mapping[str, object]]
+    ] = None,
 ) -> Step:
     """
     Create a step to advertise or withdraw BGP prefixes from matching prefix pools.
@@ -7052,6 +7108,8 @@ def create_advertise_withdraw_prefixes_step(
         strict_range: Reject invalid, truncated, or empty logical ranges.
         verify_readback: Require exact fresh IXIA readback verification.
         evidence_label: Stable phase label for append-only trigger evidence.
+        peer_prefix_exclusion_blocks: Sparse topology-authored blocks that stay
+            inactive while the selected prefix slice is advertised.
 
     Returns:
         Step object for BGP prefix advertisement/withdrawal
@@ -7082,6 +7140,10 @@ def create_advertise_withdraw_prefixes_step(
         params_dicts["verify_readback"] = True
     if evidence_label is not None:
         params_dicts["evidence_label"] = evidence_label
+    if peer_prefix_exclusion_blocks is not None:
+        params_dicts["peer_prefix_exclusion_blocks"] = [
+            dict(block) for block in peer_prefix_exclusion_blocks
+        ]
 
     return create_run_task_step(
         task_name="ixia_enable_disable_bgp_prefixes",
@@ -7097,7 +7159,7 @@ def create_route_registry_cleanup_step(
     prefix_start_index: int,
     prefix_end_index: int,
     expanded_policy_path: str,
-    expected_route_count: int,
+    expected_route_count: int | None,
     ebgp_peer_description: str,
     expected_established_sessions: int | None,
     parent_prefixes_to_ignore: t.Sequence[str],
@@ -7105,25 +7167,62 @@ def create_route_registry_cleanup_step(
     convergence_soft_threshold_seconds: float = 60,
     convergence_hard_timeout_seconds: float = 300,
     convergence_poll_interval_seconds: float = 5,
+    expected_route_count_histogram_by_afi: t.Mapping[
+        str, t.Mapping[int, int]
+    ]
+    | None = None,
+    peer_prefix_exclusion_blocks_by_pool: t.Mapping[
+        str, t.Sequence[t.Mapping[str, object]]
+    ]
+    | None = None,
     description: str = "Restore and validate CICD-EBB-12 state",
 ) -> Step:
     """Create failure-safe D12 cleanup that attempts every restore operation."""
+    if (expected_route_count is None) == (
+        expected_route_count_histogram_by_afi is None
+    ):
+        raise ValueError(
+            "exactly one of expected_route_count or "
+            "expected_route_count_histogram_by_afi is required"
+        )
+    if peer_prefix_exclusion_blocks_by_pool is not None and set(
+        peer_prefix_exclusion_blocks_by_pool
+    ) != set(prefix_pool_names):
+        raise ValueError(
+            "peer_prefix_exclusion_blocks_by_pool must exactly match "
+            "prefix_pool_names"
+        )
     params_dict: t.Dict[str, t.Any] = {
         "hostname": device_name,
         "prefix_pool_names": list(prefix_pool_names),
         "prefix_start_index": prefix_start_index,
         "prefix_end_index": prefix_end_index,
         "expanded_policy_path": expanded_policy_path,
-        "expected_route_count": expected_route_count,
-        "ebgp_peer_description": ebgp_peer_description,
-        "expected_established_sessions": expected_established_sessions,
-        "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
-        "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
-        "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
-        "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
-        "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
-        "session_poll_interval_seconds": convergence_poll_interval_seconds,
     }
+    if expected_route_count is not None:
+        params_dict["expected_route_count"] = expected_route_count
+    if expected_route_count_histogram_by_afi is not None:
+        params_dict["expected_route_count_histogram_by_afi"] = {
+            afi: dict(histogram)
+            for afi, histogram in expected_route_count_histogram_by_afi.items()
+        }
+    params_dict.update(
+        {
+            "ebgp_peer_description": ebgp_peer_description,
+            "expected_established_sessions": expected_established_sessions,
+            "parent_prefixes_to_ignore": list(parent_prefixes_to_ignore),
+            "convergence_soft_threshold_seconds": convergence_soft_threshold_seconds,
+            "convergence_hard_timeout_seconds": convergence_hard_timeout_seconds,
+            "convergence_poll_interval_seconds": convergence_poll_interval_seconds,
+            "session_hard_timeout_seconds": convergence_hard_timeout_seconds,
+            "session_poll_interval_seconds": convergence_poll_interval_seconds,
+        }
+    )
+    if peer_prefix_exclusion_blocks_by_pool is not None:
+        params_dict["peer_prefix_exclusion_blocks_by_pool"] = {
+            pool_name: [dict(block) for block in blocks]
+            for pool_name, blocks in peer_prefix_exclusion_blocks_by_pool.items()
+        }
     if exact_peer_group_names is not None:
         params_dict["exact_peer_group_names"] = list(exact_peer_group_names)
     return create_run_task_step(
@@ -8324,6 +8423,9 @@ def create_route_registry_prefix_list_setup_steps(
     prefix_end_index: int = 100,
     baseline_policy_path: str = "taac/test_bgp_policies/ebb_route_registry_prefix_list_650.json",
     expected_route_count: int | None = None,
+    expected_route_count_histogram_by_afi: t.Optional[
+        t.Mapping[str, t.Mapping[int, int]]
+    ] = None,
     convergence_soft_threshold_seconds: float | None = None,
     convergence_hard_timeout_seconds: float | None = None,
     convergence_poll_interval_seconds: float | None = None,
@@ -8349,6 +8451,8 @@ def create_route_registry_prefix_list_setup_steps(
         prefix_end_index: Last runtime-update prefix index (exclusive)
         baseline_policy_path: Route-filter policy that excludes the test slice
         expected_route_count: Optional exact baseline count to observe
+        expected_route_count_histogram_by_afi: Optional exact baseline route-count
+            distributions by address family across selected peers
         convergence_soft_threshold_seconds: Optional exact-count SLA
         convergence_hard_timeout_seconds: Optional observation timeout
         convergence_poll_interval_seconds: Optional polling interval
@@ -8363,12 +8467,14 @@ def create_route_registry_prefix_list_setup_steps(
     )
     convergence_enabled = any(value is not None for value in convergence_params)
     if convergence_enabled and (
-        expected_route_count is None
+        (expected_route_count is None)
+        == (expected_route_count_histogram_by_afi is None)
         or not all(value is not None for value in convergence_params)
     ):
         raise ValueError(
-            "expected_route_count and all convergence parameters must be "
-            "provided together"
+            "exactly one of expected_route_count or "
+            "expected_route_count_histogram_by_afi and all convergence parameters "
+            "must be provided together"
         )
     standard_steps = create_standard_setup_steps(
         device_name=device_name,
@@ -8436,10 +8542,16 @@ def create_route_registry_prefix_list_setup_steps(
                 descriptions_to_check=(None if exact_peer_group_names else ["EBGP"]),
                 exact_peer_group_names=exact_peer_group_names,
                 expected_count=expected_route_count,
+                expected_count_histogram_by_afi=(
+                    expected_route_count_histogram_by_afi
+                ),
                 convergence_soft_threshold_seconds=(convergence_soft_threshold_seconds),
                 convergence_hard_timeout_seconds=(convergence_hard_timeout_seconds),
                 convergence_poll_interval_seconds=(convergence_poll_interval_seconds),
-                description=f"Observe exact baseline route-count convergence to {expected_route_count}",
+                description=(
+                    "Observe exact baseline route-count convergence to "
+                    f"{expected_route_count_histogram_by_afi or expected_route_count}"
+                ),
             )
         )
     else:

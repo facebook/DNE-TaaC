@@ -11,8 +11,12 @@ and BgpVerifyReceivedRoutesTask.
 """
 
 import asyncio
+import ipaddress
 import json
+import math
 import typing as t
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from neteng.fboss.bgp_thrift.types import TBgpPeerState, TBgpSession
@@ -27,6 +31,241 @@ POLICY_TYPE_POST_POLICY = "post_policy"
 VALID_POLICY_TYPES = [POLICY_TYPE_PRE_POLICY, POLICY_TYPE_POST_POLICY]
 
 _UPDATE_GROUP_DIAGNOSTIC_LIMIT = 20
+_BGP_NEIGHBOR_QUERY_CHUNK_SIZE = 128
+
+RouteCountHistogram = t.Dict[int, int]
+RouteCountHistogramByAfi = t.Dict[str, RouteCountHistogram]
+_VALID_AFI_NAMES = ("ipv4", "ipv6")
+
+
+def _normalize_histogram_integer(value: t.Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError
+    try:
+        normalized = int(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError from error
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError
+    elif str(normalized) != str(value):
+        raise ValueError
+    return normalized
+
+
+def _normalize_route_count_histogram(
+    value: t.Any,
+    *,
+    afi: str,
+) -> RouteCountHistogram:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(
+            f"expected_count_histogram_by_afi[{afi!r}] must be a non-empty mapping"
+        )
+
+    normalized: RouteCountHistogram = {}
+    for raw_route_count, raw_peer_count in value.items():
+        try:
+            route_count = _normalize_histogram_integer(raw_route_count)
+            peer_count = _normalize_histogram_integer(raw_peer_count)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "expected_count_histogram_by_afi route and peer counts must be integers"
+            ) from error
+        if route_count < 0 or peer_count <= 0:
+            raise ValueError(
+                "expected_count_histogram_by_afi route counts must be non-negative "
+                "and peer counts must be positive"
+            )
+        if route_count in normalized:
+            raise ValueError(
+                "expected_count_histogram_by_afi contains duplicate route count "
+                f"{route_count} for {afi}"
+            )
+        normalized[route_count] = peer_count
+
+    return dict(sorted(normalized.items()))
+
+
+def normalize_expected_count_histogram_by_afi(
+    value: t.Optional[Mapping[t.Any, t.Any]],
+) -> t.Optional[RouteCountHistogramByAfi]:
+    """Normalize serialized per-AFI route-count histograms."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("expected_count_histogram_by_afi must be a non-empty mapping")
+
+    normalized: RouteCountHistogramByAfi = {}
+    for raw_afi, raw_histogram in value.items():
+        if raw_afi not in _VALID_AFI_NAMES:
+            raise ValueError(
+                "expected_count_histogram_by_afi keys must be 'ipv4' or 'ipv6'"
+            )
+        afi = t.cast(str, raw_afi)
+        normalized[afi] = _normalize_route_count_histogram(
+            raw_histogram,
+            afi=afi,
+        )
+
+    return {afi: normalized[afi] for afi in _VALID_AFI_NAMES if afi in normalized}
+
+
+_ROUTE_COUNT_FIELD_PREFIX = {
+    (DIRECTION_RECEIVED, POLICY_TYPE_PRE_POLICY): "prepolicy_rcvd_prefix_count",
+    (DIRECTION_RECEIVED, POLICY_TYPE_POST_POLICY): "postpolicy_rcvd_prefix_count",
+    (DIRECTION_ADVERTISED, POLICY_TYPE_PRE_POLICY): "prepolicy_sent_prefix_count",
+    (DIRECTION_ADVERTISED, POLICY_TYPE_POST_POLICY): "postpolicy_sent_prefix_count",
+}
+
+
+def _normalize_session_route_count(
+    value: t.Any,
+    *,
+    peer: str,
+    afi: str,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"BGP neighbor {peer!r} has invalid {afi} route count "
+            f"{field_name}={value!r}; expected a non-negative integer"
+        )
+    return value
+
+
+def _normalize_peer_identity(value: t.Any) -> str:
+    raw_value = str(value)
+    try:
+        # BGP service peer keys and targeted getBgpNeighbors requests use the
+        # bare address.  A link-local scope can appear in higher-level session
+        # renderings, but it is not part of the service identity.
+        return str(ipaddress.ip_address(raw_value.split("%", 1)[0]))
+    except ValueError as error:
+        raise ValueError(
+            f"BGP neighbor identity {raw_value!r} is not an IP address"
+        ) from error
+
+
+def route_count_histogram_from_bgp_neighbors(  # noqa: C901
+    sessions: t.Sequence[TBgpSession],
+    *,
+    requested_peers: t.Sequence[str],
+    afis: t.Collection[str],
+    direction: str,
+    policy_type: str,
+) -> RouteCountHistogramByAfi:
+    """Build route-count distributions from authoritative route-AFI counters.
+
+    A transport peer address does not identify the NLRI address family in
+    MP-BGP.  Detailed neighbor state exposes both negotiated route families and
+    their independent counters, so histogram attribution must come from that
+    state rather than from the peer address literal.
+    """
+    validate_direction(direction)
+    validate_policy_type(policy_type)
+    requested_afis = tuple(afi for afi in _VALID_AFI_NAMES if afi in set(afis))
+    if not requested_afis or set(requested_afis) != set(afis):
+        raise ValueError("route-count histogram AFIs must be 'ipv4' or 'ipv6'")
+
+    requested = tuple(_normalize_peer_identity(peer) for peer in requested_peers)
+    if not requested:
+        raise ValueError("route-count histogram requires at least one selected peer")
+    if len(set(requested)) != len(requested):
+        raise ValueError("route-count histogram peer request contains duplicates")
+    requested_set = set(requested)
+
+    sessions_by_peer: t.Dict[str, TBgpSession] = {}
+    unexpected: t.Set[str] = set()
+    duplicates: t.Set[str] = set()
+    for session in sessions:
+        peer = _normalize_peer_identity(getattr(session, "peer_addr", ""))
+        if peer not in requested_set:
+            unexpected.add(peer)
+            continue
+        if peer in sessions_by_peer:
+            duplicates.add(peer)
+            continue
+        sessions_by_peer[peer] = session
+
+    missing = requested_set - set(sessions_by_peer)
+    if missing or unexpected or duplicates:
+        raise ValueError(
+            "Detailed BGP neighbor response does not exactly match the request: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}, "
+            f"duplicates={sorted(duplicates)}"
+        )
+
+    field_prefix = _ROUTE_COUNT_FIELD_PREFIX[(direction, policy_type)]
+    counters = {afi: Counter[int]() for afi in requested_afis}
+    for peer in requested:
+        session = sessions_by_peer[peer]
+        peer_state = getattr(getattr(session, "peer", None), "peer_state", None)
+        if peer_state != TBgpPeerState.ESTABLISHED:
+            raise ValueError(
+                f"Detailed BGP neighbor {peer!r} is not ESTABLISHED: {peer_state!r}"
+            )
+        details = getattr(session, "details", None)
+        if details is None:
+            raise ValueError(f"Detailed BGP neighbor {peer!r} has no session details")
+
+        for afi in _VALID_AFI_NAMES:
+            negotiated_field = f"{afi}_unicast"
+            negotiated = getattr(details, negotiated_field, None)
+            if not isinstance(negotiated, bool):
+                raise ValueError(
+                    f"Detailed BGP neighbor {peer!r} has invalid "
+                    f"{negotiated_field}={negotiated!r}; expected bool"
+                )
+            count_field = f"{field_prefix}_{afi}"
+            route_count = _normalize_session_route_count(
+                getattr(details, count_field, None),
+                peer=peer,
+                afi=afi,
+                field_name=count_field,
+            )
+            if not negotiated:
+                if route_count:
+                    raise ValueError(
+                        f"Detailed BGP neighbor {peer!r} reports {route_count} "
+                        f"{afi} routes while {negotiated_field}=False"
+                    )
+                continue
+            if afi in counters:
+                counters[afi][route_count] += 1
+
+    return {afi: dict(sorted(counters[afi].items())) for afi in requested_afis}
+
+
+async def get_route_count_histogram_by_afi_for_peers(
+    *,
+    peers: t.Sequence[str],
+    afis: t.Collection[str],
+    direction: str,
+    policy_type: str,
+    bgp_helper: t.Any,
+) -> RouteCountHistogramByAfi:
+    """Fetch detailed neighbors and build an authoritative route-AFI histogram."""
+    normalized_peers = tuple(_normalize_peer_identity(peer) for peer in peers)
+    if not normalized_peers:
+        raise ValueError("route-count histogram requires at least one selected peer")
+    if len(set(normalized_peers)) != len(normalized_peers):
+        raise ValueError("route-count histogram peer request contains duplicates")
+    chunks = tuple(
+        normalized_peers[index : index + _BGP_NEIGHBOR_QUERY_CHUNK_SIZE]
+        for index in range(0, len(normalized_peers), _BGP_NEIGHBOR_QUERY_CHUNK_SIZE)
+    )
+    results = await asyncio.gather(
+        *(bgp_helper.async_get_bgp_neighbors(chunk) for chunk in chunks)
+    )
+    sessions = tuple(session for result in results for session in result)
+    return route_count_histogram_from_bgp_neighbors(
+        sessions,
+        requested_peers=normalized_peers,
+        afis=afis,
+        direction=direction,
+        policy_type=policy_type,
+    )
 
 
 @dataclass
