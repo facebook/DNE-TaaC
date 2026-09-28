@@ -1280,7 +1280,7 @@ def _get_bgp_ebb_full_scale_playbooks(
     return playbooks
 
 
-def create_bgp_ebb_full_scale_test_config(
+def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     physical_inventory: PhysicalInventory,
     *,
     name: str,
@@ -1307,6 +1307,7 @@ def create_bgp_ebb_full_scale_test_config(
     nhg_storm_min_eos_consecutive_samples: int = 3,
     fibagent_bgp_nhg_watermark_high: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
     fibagent_bgp_nhg_watermark_low: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
+    setup_only: bool = False,
 ) -> TestConfig:
     """Build one selectable test suite on the canonical EBB full-scale topology.
 
@@ -1334,7 +1335,12 @@ def create_bgp_ebb_full_scale_test_config(
             another's produce routes the DUT cannot resolve.
         port_map: Optional mapping from logical IXIA roles to ordered physical
             inventory entries. Use this for a testbed-specific role assignment.
+        setup_only: Compile setup and teardown for the selected topology without
+            adding Playbooks. This explicit mode leaves the existing empty-list
+            selector behavior unchanged.
     """
+    if setup_only and playbooks_selected is not None:
+        raise ValueError("setup_only requires playbooks_selected=None")
     resolved_parent_networks = parent_networks or EBB_PARENT_NETWORKS
     if resolved_parent_networks.get("ebgp_v4") != next_hops.ebgp_v4_network:
         raise ValueError(
@@ -1363,11 +1369,12 @@ def create_bgp_ebb_full_scale_test_config(
         if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
         else OpenRMode.NONE
     )
-    enable_runtime_update = not playbooks_selected or (
-        "bgp_ebb_route_registry_runtime_update_playbook" in playbooks_selected
+    enable_runtime_update = not setup_only and (
+        not playbooks_selected
+        or "bgp_ebb_route_registry_runtime_update_playbook" in playbooks_selected
     )
-    enable_route_storm_shards = not playbooks_selected or (
-        "bgp_ebb_route_storm_playbook" in playbooks_selected
+    enable_route_storm_shards = not setup_only and (
+        not playbooks_selected or "bgp_ebb_route_storm_playbook" in playbooks_selected
     )
     runtime_prefix_sets, runtime_advertisements = _tc7_runtime_intents(
         selected_tc7_playbooks
@@ -1415,32 +1422,38 @@ def create_bgp_ebb_full_scale_test_config(
     )
     if selected_tc7_playbooks:
         _validate_tc7_bound_topology(bound)
-    playbooks = _get_bgp_ebb_full_scale_playbooks(
-        physical_inventory,
-        profile=profile,
-        bound=bound,
-        ebgp_prefix_count=ebgp_prefix_count,
-        selected_tc7_playbooks=selected_tc7_playbooks,
-        port_map=resolved_port_map,
-        enable_update_group=enable_update_group,
-        multipath_test_duration_seconds=multipath_test_duration_seconds,
-        multipath_oscillation_interval_seconds=(multipath_oscillation_interval_seconds),
-        multipath_cycle_count=multipath_cycle_count,
-        multipath_min_peers_to_stop=multipath_min_peers_to_stop,
-        multipath_max_peers_to_stop=multipath_max_peers_to_stop,
-        route_storm_cycles=route_storm_cycles,
-        route_storm_quiet_window_seconds=route_storm_quiet_window_seconds,
-        route_storm_bounded_validation=route_storm_bounded_validation,
-        nhg_storm_epoch_count=nhg_storm_epoch_count,
-        nhg_storm_epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
-        nhg_storm_soak_seconds=nhg_storm_soak_seconds,
-        nhg_storm_poll_interval_seconds=nhg_storm_poll_interval_seconds,
-        nhg_storm_min_eos_samples=nhg_storm_min_eos_samples,
-        nhg_storm_min_eos_consecutive_samples=(nhg_storm_min_eos_consecutive_samples),
-        nhg_storm_min_observed_bgp_multiway_memberships=(
-            fibagent_bgp_nhg_watermark_high + 1
-        ),
-    )
+    playbooks = []
+    if not setup_only:
+        playbooks = _get_bgp_ebb_full_scale_playbooks(
+            physical_inventory,
+            profile=profile,
+            bound=bound,
+            ebgp_prefix_count=ebgp_prefix_count,
+            selected_tc7_playbooks=selected_tc7_playbooks,
+            port_map=resolved_port_map,
+            enable_update_group=enable_update_group,
+            multipath_test_duration_seconds=multipath_test_duration_seconds,
+            multipath_oscillation_interval_seconds=(
+                multipath_oscillation_interval_seconds
+            ),
+            multipath_cycle_count=multipath_cycle_count,
+            multipath_min_peers_to_stop=multipath_min_peers_to_stop,
+            multipath_max_peers_to_stop=multipath_max_peers_to_stop,
+            route_storm_cycles=route_storm_cycles,
+            route_storm_quiet_window_seconds=route_storm_quiet_window_seconds,
+            route_storm_bounded_validation=route_storm_bounded_validation,
+            nhg_storm_epoch_count=nhg_storm_epoch_count,
+            nhg_storm_epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
+            nhg_storm_soak_seconds=nhg_storm_soak_seconds,
+            nhg_storm_poll_interval_seconds=nhg_storm_poll_interval_seconds,
+            nhg_storm_min_eos_samples=nhg_storm_min_eos_samples,
+            nhg_storm_min_eos_consecutive_samples=(
+                nhg_storm_min_eos_consecutive_samples
+            ),
+            nhg_storm_min_observed_bgp_multiway_memberships=(
+                fibagent_bgp_nhg_watermark_high + 1
+            ),
+        )
     if playbooks_selected:
         playbooks_by_name = {playbook.name: playbook for playbook in playbooks}
         unknown_names = [
