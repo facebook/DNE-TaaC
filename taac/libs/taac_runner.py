@@ -219,6 +219,9 @@ INVESTIGATION_TIMEOUT_SEC: float = 19000.0
 # share that budget with setup and teardown, so keep their bound substantially
 # smaller than the deep per-test-case investigation budget above.
 LIFECYCLE_INVESTIGATION_TIMEOUT_SEC: float = 1200.0
+# The agent harness is domain-neutral, so the label on its end-of-run stats
+# block is ours to supply.
+INVESTIGATION_STATS_LABEL: str = "INVESTIGATION AGENT STATS"
 
 _IXIA_HOST_TOKEN_RE: re.Pattern[str] = re.compile(
     r"\bixia[0-9][0-9A-Za-z.-]*\b", re.IGNORECASE
@@ -3351,7 +3354,7 @@ class TaacRunner:
     ) -> t.Optional[str]:
         """Run the shared agent loop and retain its durable transcript."""
         # Lazy: the agent pulls the whole confucius dependency tree.
-        from taac.agent.agent import run_agent
+        from neteng.test_infra.dne.taac.agent.agent import AgentConfig, run_agent
 
         with _console_visible(self.logger):
             self._log_investigation_event(f"  Running {label}...")
@@ -3361,6 +3364,7 @@ class TaacRunner:
                 tools=tools,
                 output_format=InvestigationReport,
                 on_event=self._log_investigation_event,
+                config=AgentConfig(stats_label=INVESTIGATION_STATS_LABEL),
                 timeout_sec=timeout_sec,
             )
             self._log_investigation_report(run.output)
