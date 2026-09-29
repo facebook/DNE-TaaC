@@ -76,11 +76,11 @@ from taac.steps.step_definitions import (
     create_bgp_nhg_random_storm_step,
 )
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _DEFAULT_EBGP_PREFIX_COUNT,
@@ -1388,7 +1388,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             playbook.name: playbook
             for test_config in (
                 NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-                BAG011_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
             )

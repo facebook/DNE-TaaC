@@ -821,6 +821,8 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    parent_networks: dict[str, str] | None = None,
+    include_direct_ixia_connections: bool = False,
 ) -> taac_types.TestConfig:
     """SC3 transient-memory route-scale test config (testbed-driven).
 
@@ -839,6 +841,9 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     ``testbed.device_name`` as ``{DEVICE}_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST``
     (+ ``_UPDATE_GROUP``). ``name_override`` provides a stable lifecycle
     selector when the same factory is rebound to another physical inventory.
+    ``include_direct_ixia_connections`` independently opts the TestConfig into
+    explicit chassis/port bindings; overriding address pools alone does not
+    change endpoint binding semantics.
 
     All SC tests run with update-group enabled, so ``enable_update_group=True``
     is the variant that is actually run; the non-UG form does not work and is
@@ -858,6 +863,10 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
     )
     if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
+    resolved_parent_networks = _resolve_egress_peer_scale_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=testbed.ixia_chassis_ip,
+    )
 
     return test_config_sc3_transient_memory_route_scale_on_eos(
         test_config_name=name,
@@ -870,10 +879,10 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
         ixia_interface_mimic_ibgp=testbed.ixia_ports[1][0],
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_local_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ebgp_ic_parent_network_v4=resolved_parent_networks["ebgp_v4"],
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
+        ixia_ibgp_ic_parent_network_v4=resolved_parent_networks["ibgp_v4"],
         # Fixed topology: eBGP=2 ingress source, iBGP=500 egress fan-out.
         ebgp_peer_count=_CONSTANT_ATTR_EBGP_PEER_COUNT,
         ibgp_peer_count=_CONSTANT_ATTR_IBGP_PEER_COUNT,
@@ -894,6 +903,11 @@ def create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
         as_path_pool_size=100,
         community_pool_size=50,
         as_path_length=4,
+        direct_ixia_connections=(
+            _two_port_direct_ixia_connections(testbed)
+            if include_direct_ixia_connections
+            else None
+        ),
     )
 
 

@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 from taac.abstractions.physical_inventory import (
     BAG010_ASH6,
-    BAG011_ASH6,
     BAG012_ASH6,
     BAG013_ASH6,
     NRQEB006_ASH6,
+    NRQEB007_ASH6,
 )
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_PARENT_NETWORKS,
@@ -104,12 +104,6 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                 BAG012_ASH6,
                 "BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
                 "bag012.ash6",
-            ),
-            (
-                create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
-                BAG011_ASH6,
-                "BAG011_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
-                "bag011.ash6",
             ),
             (
                 create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
@@ -627,6 +621,63 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
         setup_payloads = "\n".join(task.params.json_params or "" for task in tasks)
         self.assertEqual(1, setup_payloads.count("description IXIA_MIMIC_EBGP"))
         self.assertIn("description IXIA_MIMIC_EBGP_IBGP", setup_payloads)
+
+    def test_nrqeb007_sc3_uses_primary_ixia03_addresses_and_ports(self) -> None:
+        config = create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
+            NRQEB007_ASH6,
+            enable_update_group=True,
+            name_override="NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
+            parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+            include_direct_ixia_connections=True,
+        )
+
+        self.assertEqual(
+            "NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
+            config.name,
+        )
+        self.assertEqual(
+            [
+                "nrqeb007.ash6:Ethernet3/35/1",
+                "nrqeb007.ash6:Ethernet3/35/2",
+            ],
+            [port.endpoint for port in config.basic_port_configs or []],
+        )
+        self.assertEqual(
+            [
+                ("Ethernet3/35/1", "2401:db00:2066:3036::3003", "1/85"),
+                ("Ethernet3/35/2", "2401:db00:2066:3036::3003", "1/86"),
+            ],
+            [
+                (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
+                for connection in config.endpoints[0].direct_ixia_connections or []
+            ],
+        )
+        address_starts = {
+            address.starting_ip
+            for port in config.basic_port_configs or []
+            for group in port.device_group_configs or []
+            for address in (
+                group.v4_addresses_config,
+                group.v6_addresses_config,
+            )
+            if address is not None
+        }
+        self.assertEqual(
+            {
+                "10.180.28.11",
+                "10.181.28.11",
+                "2401:db00:e50d:33:8::11",
+                "2401:db00:e50d:33:9::11",
+            },
+            address_starts,
+        )
+
+    def test_sc3_rejects_parent_networks_for_different_ixia_chassis(self) -> None:
+        with self.assertRaisesRegex(ValueError, "do not match IXIA chassis"):
+            create_bgp_ebb_characteristic_transient_memory_route_scale_test_config(
+                BAG010_ASH6,
+                parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+            )
 
     def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
         config = create_bgp_ebb_update_packing_test_config(
