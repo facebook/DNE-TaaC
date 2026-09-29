@@ -2,7 +2,7 @@
 """Aggregated EBB BGP++ conveyor node TestConfig list.
 
 Exposes ``EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS`` with the scheduled
-NRQEB006/NRQEB007/BAG012/BAG013 entries first. Retained BAG010 selectors and
+NRQEB006/NRQEB007/NRQEB008/BAG013 entries first. Retained BAG010 selectors and
 other ad-hoc qualification configs are appended to the same registry list for
 CLI resolution, but are not Conveyor-scheduled.
 
@@ -35,10 +35,6 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
 # ``CONVEYOR: dne_routing / <node>`` marker at its definition site.
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
-    BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
-    BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
@@ -50,6 +46,10 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
+    NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 
 # Migrated to the routing framework in Diffs 2 + 3 (Wave 1 Struct-Init):
@@ -99,20 +99,20 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # Stage 1 — runtime-balanced full-scale playbooks on each scheduled device.
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     # Stage 1 UG counterparts for promotion gating and A/B comparison.
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     # First promotion-gating scale-and-characteristic wave — one node per device.
     NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
     NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
-    BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
+    NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
     BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
-    # Second promotion-gating wave; serialized after EBB-17 on BAG012.
-    BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
+    # Second promotion-gating wave; serialized after EBB-17 on NRQEB008.
+    NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     # Legacy retained scale-and-characteristic selectors; these are not the
     # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,

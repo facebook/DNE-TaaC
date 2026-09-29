@@ -76,11 +76,11 @@ from taac.steps.step_definitions import (
     create_bgp_nhg_random_storm_step,
 )
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _DEFAULT_EBGP_PREFIX_COUNT,
@@ -1389,7 +1389,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             for test_config in (
                 NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-                BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
             )
             for playbook in test_config.playbooks
@@ -2481,25 +2481,25 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                     topology_factory.call_args.kwargs["include_bgpmon"],
                 )
 
-    def test_bag012_stage1_uses_default_port_assignment(self) -> None:
+    def test_nrqeb008_stage1_uses_default_port_assignment(self) -> None:
         for config in (
-            BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-            BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+            NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+            NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
         ):
             with self.subTest(config=config.name):
                 endpoint = next(
                     endpoint
                     for endpoint in config.endpoints
-                    if endpoint.name == "bag012.ash6"
+                    if endpoint.name == "nrqeb008.ash6"
                 )
                 connections = endpoint.direct_ixia_connections
                 self.assertIsNotNone(connections)
                 assert connections is not None
                 self.assertCountEqual(
                     [
-                        ("Ethernet3/36/1", "8/1"),
-                        ("Ethernet3/36/2", "8/2"),
-                        ("Ethernet3/36/3", "8/3"),
+                        ("Ethernet3/35/1", "1/89"),
+                        ("Ethernet3/35/2", "1/90"),
+                        ("Ethernet3/35/3", "1/91"),
                     ],
                     [
                         (connection.interface, connection.ixia_port)
@@ -2509,7 +2509,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         route_storm = next(
             playbook
-            for playbook in BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
+            for playbook in NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
             if playbook.name == "bgp_ebb_route_storm_playbook"
         )
         payload = next(
@@ -2522,7 +2522,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             )
             if payload.get("custom_step_name") == "bgp_route_storm"
         )
-        self.assertEqual("Ethernet3/36/2", payload["ixia_interface_mimic_ibgp"])
+        self.assertEqual("Ethernet3/35/2", payload["ixia_interface_mimic_ibgp"])
         self.assertNotIn("ixia_interfaces_mimic_ibgp", payload)
 
     def test_full_scale_factory_rejects_invalid_playbook_selections(self) -> None:

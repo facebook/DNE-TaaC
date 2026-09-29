@@ -11,11 +11,15 @@ from taac.abstractions.physical_inventory import (
     BAG013_ASH6,
     NRQEB006_ASH6,
     NRQEB007_ASH6,
+    NRQEB008_ASH6,
 )
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_PARENT_NETWORKS,
     EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
     EGRESS_PEER_SCALE_SWEEP_PEER_COUNTS,
+)
+from taac.abstractions.topologies.ipv6_update_packing import (
+    IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
 )
 from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.factories import (
@@ -100,22 +104,10 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
     def test_name_override_is_authoritative_for_scheduled_bindings(self) -> None:
         cases = (
             (
-                create_bgp_ebb_characteristic_performance_scaling_test_config,
-                BAG012_ASH6,
-                "BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
-                "bag012.ash6",
-            ),
-            (
                 create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
                 BAG013_ASH6,
                 "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
                 "bag013.ash6",
-            ),
-            (
-                create_bgp_ebb_update_packing_test_config,
-                BAG012_ASH6,
-                "BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
-                "bag012.ash6",
             ),
         )
 
@@ -679,14 +671,79 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                 parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
             )
 
-    def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
-        config = create_bgp_ebb_update_packing_test_config(
-            BAG012_ASH6,
+    def test_nrqeb008_sc1_uses_primary_ixia03_addresses_and_ports(self) -> None:
+        config = create_bgp_ebb_characteristic_performance_scaling_test_config(
+            NRQEB008_ASH6,
             enable_update_group=True,
-            name_override="BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
-            min_advertised_nlri=50000,
+            name_override="NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+            parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
         )
 
+        self.assertEqual(
+            "NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+            config.name,
+        )
+        self.assertEqual(
+            [
+                ("Ethernet3/35/1", "2401:db00:2066:3036::3003", "1/89"),
+                ("Ethernet3/35/2", "2401:db00:2066:3036::3003", "1/90"),
+            ],
+            [
+                (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
+                for connection in config.endpoints[0].direct_ixia_connections or []
+            ],
+        )
+        address_starts = {
+            address.starting_ip
+            for port in config.basic_port_configs or []
+            for group in port.device_group_configs or []
+            for address in (
+                group.v4_addresses_config,
+                group.v6_addresses_config,
+            )
+            if address is not None
+        }
+        self.assertEqual(
+            {
+                "10.180.28.11",
+                "10.181.28.11",
+                "2401:db00:e50d:33:8::11",
+                "2401:db00:e50d:33:9::11",
+            },
+            address_starts,
+        )
+
+    def test_sc1_requires_complete_dual_stack_parent_network_map(self) -> None:
+        cases = (
+            (BAG012_ASH6, EGRESS_PEER_SCALE_PARENT_NETWORKS),
+            (NRQEB008_ASH6, EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03),
+        )
+        required_keys = ("ebgp_v4", "ebgp_v6", "ibgp_v4", "ibgp_v6")
+
+        for inventory, complete_networks in cases:
+            for missing_key in required_keys:
+                with self.subTest(
+                    device=inventory.device_name,
+                    missing_key=missing_key,
+                ):
+                    incomplete_networks = dict(complete_networks)
+                    del incomplete_networks[missing_key]
+                    with self.assertRaisesRegex(ValueError, missing_key):
+                        create_bgp_ebb_characteristic_performance_scaling_test_config(
+                            inventory,
+                            parent_networks=incomplete_networks,
+                        )
+
+    def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
+        config = create_bgp_ebb_update_packing_test_config(
+            NRQEB008_ASH6,
+            enable_update_group=True,
+            name_override="NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+            min_advertised_nlri=50000,
+            parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
+        )
+
+        self.assertEqual("NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG", config.name)
         self.assertEqual(
             ["bgp_ebb_update_packing_playbook"],
             [playbook.name for playbook in config.playbooks or []],
@@ -697,7 +754,7 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
             if task.task_name == "validate_bgpcpp_update_group_state"
         ]
         self.assertEqual(
-            [{"hostname": "bag012.ash6", "expect_enabled": True}],
+            [{"hostname": "nrqeb008.ash6", "expect_enabled": True}],
             update_group_validators,
         )
         startup_flags = [
@@ -728,20 +785,32 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
         self.assertEqual(
             [
                 (
-                    "Ethernet3/36/1",
-                    "2401:db00:2066:303b::3001",
-                    "8/1",
+                    "Ethernet3/35/1",
+                    "2401:db00:2066:3036::3003",
+                    "1/89",
                 ),
                 (
-                    "Ethernet3/36/2",
-                    "2401:db00:2066:303b::3001",
-                    "8/2",
+                    "Ethernet3/35/2",
+                    "2401:db00:2066:3036::3003",
+                    "1/90",
                 ),
             ],
             [
                 (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
                 for connection in direct_connections
             ],
+        )
+        self.assertEqual(
+            {
+                "2401:db00:e50d:33:8::11",
+                "2401:db00:e50d:33:9::11",
+            },
+            {
+                group.v6_addresses_config.starting_ip
+                for port in config.basic_port_configs or []
+                for group in port.device_group_configs or []
+                if group.v6_addresses_config is not None
+            },
         )
         packing_steps = [
             params

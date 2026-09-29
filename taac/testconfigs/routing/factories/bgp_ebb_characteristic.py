@@ -1818,6 +1818,7 @@ def create_bgp_ebb_update_packing_test_config(
     name_override: str | None = None,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     min_advertised_nlri: int = 0,
+    parent_networks: dict[str, str] | None = None,
 ) -> taac_types.TestConfig:
     """BGP Update Packing conveyor test config.
 
@@ -1850,11 +1851,12 @@ def create_bgp_ebb_update_packing_test_config(
     name = name_override or _derive_test_config_name(
         physical_inventory, "UPDATE_PACKING", enable_update_group
     )
+    resolved_parent_networks = parent_networks or IPV6_UPDATE_PACKING_PARENT_NETWORKS
 
     bound = IPV6_UPDATE_PACKING.bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=IPV6_UPDATE_PACKING_PORT_MAP,
-        parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS,
+        parent_networks=resolved_parent_networks,
         peer_groups=IPV6_UPDATE_PACKING_PEER_GROUPS,
         as_numbers=IPV6_UPDATE_PACKING_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
@@ -1870,12 +1872,12 @@ def create_bgp_ebb_update_packing_test_config(
         # EBGP configuration (ingress - routes sent here from Fabric Aggregators)
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ebgp_remote_as=EBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
         ixia_ebgp_ic_parent_network_v4="",
         # IBGP configuration (egress - capture UPDATEs here)
         ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
         ibgp_local_as=IBGP_REMOTE_AS,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
         ixia_ibgp_ic_parent_network_v4="",
         # Test parameters (matching EB02)
         ebgp_peer_count=10,
@@ -2162,6 +2164,7 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     physical_inventory: PhysicalInventory,
     enable_update_group: bool = False,
     name_override: str | None = None,
+    parent_networks: dict[str, str] | None = None,
 ) -> taac_types.TestConfig:
     """Performance-scaling egress IBGP peer-sweep test config (physical-inventory-driven).
 
@@ -2202,11 +2205,15 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
     )
     if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
+    resolved_parent_networks = _resolve_egress_peer_scale_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
+    )
 
     bound = EGRESS_PEER_SCALE.bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=EGRESS_PEER_SCALE_PORT_MAP,
-        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS,
+        parent_networks=resolved_parent_networks,
         peer_groups=EGRESS_PEER_SCALE_PEER_GROUPS,
         as_numbers=EGRESS_PEER_SCALE_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(
@@ -2220,10 +2227,10 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         router_id=physical_inventory.router_id,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
-        ebgp_v6_base=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ebgp_v4_base=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ibgp_v6_base=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ibgp_v4_base=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+        ebgp_v6_base=resolved_parent_networks["ebgp_v6"],
+        ebgp_v4_base=resolved_parent_networks["ebgp_v4"],
+        ibgp_v6_base=resolved_parent_networks["ibgp_v6"],
+        ibgp_v4_base=resolved_parent_networks["ibgp_v4"],
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ebgp_v4=PEERGROUP_EBGP_V4,
         peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
@@ -2246,10 +2253,10 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
         ebgp_peer_count=1,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ebgp_ic_parent_network_v4=resolved_parent_networks["ebgp_v4"],
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
+        ixia_ibgp_ic_parent_network_v4=resolved_parent_networks["ibgp_v4"],
         log_collection_timeout=600,
         setup_tasks=compiled.setup_tasks,
         teardown_tasks=compiled.teardown_tasks,

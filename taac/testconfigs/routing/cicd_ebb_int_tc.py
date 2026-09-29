@@ -5,9 +5,9 @@
 The lifecycle layout schedules full-scale coverage plus a first promotion-gating
 wave of one scale-and-characteristic case per scheduled device. Stage 1
 partitions the retained Non-UG Playbooks into four runtime-balanced groups. The
-former BAG010 and BAG011 logical tracks run on NRQEB006 and NRQEB007 with
-matching TestConfig and Conveyor identities while preserving every Playbook
-list. Catalog governance lives in
+former BAG010, BAG011, and BAG012 logical tracks run on NRQEB006 through
+NRQEB008 with matching TestConfig and Conveyor identities while preserving
+every Playbook list. Catalog governance lives in
 ``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml``.
 """
 
@@ -17,6 +17,7 @@ from taac.abstractions.physical_inventory import (
     BAG013_ASH6,
     NRQEB006_ASH6,
     NRQEB007_ASH6,
+    NRQEB008_ASH6,
 )
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_NEXT_HOPS_IXIA03,
@@ -24,6 +25,9 @@ from taac.abstractions.topologies.ebb_full_scale import (
 )
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+)
+from taac.abstractions.topologies.ipv6_update_packing import (
+    IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
 )
 from taac.constants import BgpPlusPlusProfile
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
@@ -109,21 +113,23 @@ NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_confi
     next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
-# CONVEYOR: dne_routing / bag012_stage1_node
-BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
-    BAG012_ASH6,
-    name="BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+# CONVEYOR: dne_routing / nrqeb008_stage1_node
+NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB008_ASH6,
+    name="NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     playbooks_selected=[
         "bgp_ebb_ebgp_session_oscillation_playbook",
         "bgp_ebb_cold_start_playbook",
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
-BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
-    BAG012_ASH6,
-    name="BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB008_ASH6,
+    name="NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     playbooks_selected=[
         "bgp_ebb_route_storm_playbook",
         "bgp_ebb_multipath_group_oscillation_playbook",
@@ -132,6 +138,8 @@ BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
 # CONVEYOR: dne_routing / bag013_stage1_node
@@ -184,12 +192,13 @@ NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG = (
     )
 )
 
-# CONVEYOR: dne_routing / bag012_characteristics_wave1_node
-BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG = (
+# CONVEYOR: dne_routing / nrqeb008_characteristics_wave1_node
+NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG = (
     create_bgp_ebb_characteristic_performance_scaling_test_config(
-        BAG012_ASH6,
+        NRQEB008_ASH6,
         enable_update_group=True,
-        name_override="BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+        name_override="NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
     )
 )
 
@@ -200,15 +209,16 @@ BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
 
 # Second characteristic promotion-gating wave. EBB-21 has its own logical
 # topology and TestConfig so Conveyor can schedule it independently after the
-# BAG012 Wave 1 node. The no-OpenR profile keeps this binding on one device;
+# NRQEB008 Wave 1 node. The no-OpenR profile keeps this binding on one device;
 # directly connected IXIA next hops are resolved from interface state.
-# CONVEYOR: dne_routing / bag012_characteristics_wave2_node
-BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config(
-    BAG012_ASH6,
+# CONVEYOR: dne_routing / nrqeb008_characteristics_wave2_node
+NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_config(
+    NRQEB008_ASH6,
     enable_update_group=True,
-    name_override="BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+    name_override="NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
     profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     min_advertised_nlri=50000,
+    parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
 )
 
 
@@ -245,10 +255,10 @@ __all__ = [
     "NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
     "NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
-    "BAG012_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
-    "BAG012_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
-    "BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    "BAG012_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+    "NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
+    "NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG",
+    "NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+    "NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG012_UPDATE_PACKING_TEST_CONFIG_UG",
     "BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
     "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
