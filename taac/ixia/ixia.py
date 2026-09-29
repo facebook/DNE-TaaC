@@ -1474,14 +1474,17 @@ class Ixia:
                 "SessionAssistant returned a session without a stable remote identity"
             )
         _chassis, replacement_session_id = replacement_identity
+        # pyrefly: ignore [missing-attribute]
         replacement_session_name = str(replacement_session.Session.Name)
 
         with self._bounded_apply_lock:
             with self._request_deadline_wrapper_lock:
                 self._install_request_deadline_wrapper_locked(replacement_session)
+                # pyrefly: ignore [bad-assignment]
                 self.session = replacement_session
                 self.session_id = replacement_session_id
                 self.session_name = replacement_session_name
+                # pyrefly: ignore [missing-attribute]
                 self.ixnetwork = replacement_session.Ixnetwork
                 if (
                     self._session_quarantine_reason is not None
@@ -3918,6 +3921,7 @@ class Ixia:
                 or isinstance(bgp_peer_obj, UhdBgpIpv6Peer)
             ):
                 bgp_cap_obj_map[capability] = (
+                    # pyrefly: ignore [missing-attribute]
                     bgp_peer_obj.CapabilityNHEncodingCapabilities
                 )  # noqa
             # fmt: on
@@ -7154,24 +7158,32 @@ class Ixia:
         else:
             port_identifier = vport.Name
         if l1_config.enable_fcoe:
+            # pyrefly: ignore [missing-attribute]
             if "Fcoe" not in vport.L1Config.CurrentType:
+                # pyrefly: ignore [missing-attribute]
                 new_current_type = vport.L1Config.CurrentType + "Fcoe"
+                # pyrefly: ignore [missing-attribute]
                 vport.L1Config.CurrentType = new_current_type
                 self.logger.debug(
                     f"Successfully configured L1Config CurrentType for {port_identifier} as {new_current_type}"
                 )
             if l1_config.flow_control_config:
                 fcoe = getattr(
+                    # pyrefly: ignore [missing-attribute]
                     vport.L1Config,
                     (
+                        # pyrefly: ignore [missing-attribute]
                         vport.L1Config.CurrentType[0].upper()
-                        + vport.L1Config.CurrentType[1:]
+                        + vport.L1Config.CurrentType[1:]  # pyrefly: ignore [missing-attribute]
                     ).replace("Fcoe", ""),
                 ).Fcoe
                 self.apply_flow_control_config(fcoe, l1_config.flow_control_config)
         else:
+            # pyrefly: ignore [missing-attribute]
             if "Fcoe" in vport.L1Config.CurrentType:
+                # pyrefly: ignore [missing-attribute]
                 new_current_type = vport.L1Config.CurrentType.replace("Fcoe", "")
+                # pyrefly: ignore [missing-attribute]
                 vport.L1Config.CurrentType = new_current_type
                 self.logger.debug(
                     f"Successfully configured L1Config CurrentType for {port_identifier} as {new_current_type}"
