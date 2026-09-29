@@ -51,8 +51,10 @@ class RbbSrv6VerifyTask(BaseTask):
         params:
             hostname: DUT to query (required).
             show_cmd: command whose stdout is inspected (content checks only).
-            expect_contains: substrings that MUST all appear (optional).
-            expect_absent: substrings that must NOT appear (optional).
+            expect_contains: substrings that MUST all appear, matched without
+                regard to CLI capitalization (optional).
+            expect_absent: substrings that must NOT appear, matched without
+                regard to CLI capitalization (optional).
             interfaces_up: interface names that must all be operationally Up.
             bgp_peers_established: exact peer addresses that must be Established.
             fib_prefixes: exact IPv4/IPv6 prefixes that must exist in the FBOSS
@@ -143,8 +145,23 @@ class RbbSrv6VerifyTask(BaseTask):
         self.logger.info(f"{hostname} -- [{gate}] verify: {show_cmd}")
         output = await driver.async_run_cmd_on_shell(show_cmd) or ""
 
-        missing = [s for s in expect_contains if s not in output]
-        unexpected = [s for s in expect_absent if s in output]
+        # FBOSS CLI labels are presentation text and their capitalization can
+        # change independently of the underlying state. For example,
+        # ``fboss2 show mysid`` currently renders ``Resolved via:``, while the
+        # SRv6 profile deliberately checks the semantic token ``resolved via``.
+        # Keep state verification strict about the token itself, but not its
+        # display capitalization.
+        output_casefold = output.casefold()
+        missing = [
+            substring
+            for substring in expect_contains
+            if substring.casefold() not in output_casefold
+        ]
+        unexpected = [
+            substring
+            for substring in expect_absent
+            if substring.casefold() in output_casefold
+        ]
 
         if missing or unexpected:
             raise TestCaseFailure(

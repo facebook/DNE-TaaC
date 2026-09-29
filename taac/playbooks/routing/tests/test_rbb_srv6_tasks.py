@@ -95,6 +95,38 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
             )
         driver.async_run_cmd_on_shell.assert_awaited_once_with("show ipv6 route")
 
+    async def test_content_checks_ignore_cli_capitalization(self) -> None:
+        task = RbbSrv6VerifyTask(hostname="rbb-r1", logger=MagicMock())
+        driver = self._driver(
+            "fdad:ffff:27cc:: ADJACENCY_MICRO_SID Resolved via: eth1/6/1"
+        )
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+            await task.run(
+                {
+                    "hostname": "rbb-r1",
+                    "show_cmd": "fboss2 show mysid",
+                    "expect_contains": [
+                        "fdad:ffff:27cc::",
+                        "ADJACENCY_MICRO_SID",
+                        "resolved via",
+                    ],
+                    "expect_absent": ["decapsulate_and_lookup"],
+                }
+            )
+
+    async def test_absent_check_ignores_cli_capitalization(self) -> None:
+        task = RbbSrv6VerifyTask(hostname="rbb-r1", logger=MagicMock())
+        driver = self._driver("Route owned by TE_AGENT")
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+            with self.assertRaises(TestCaseFailure):
+                await task.run(
+                    {
+                        "hostname": "rbb-r1",
+                        "show_cmd": "fboss2 show ipv6 route",
+                        "expect_absent": ["te_agent"],
+                    }
+                )
+
     async def test_raises_when_expected_missing(self) -> None:
         task = RbbSrv6VerifyTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver("route 2001:db8:cafe::/48 owner bgp via ...")
