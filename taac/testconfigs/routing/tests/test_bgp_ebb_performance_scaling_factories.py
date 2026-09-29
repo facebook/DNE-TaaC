@@ -8,10 +8,13 @@ from unittest.mock import patch
 from taac.abstractions.physical_inventory import (
     BAG010_ASH6,
     BAG012_ASH6,
-    BAG013_ASH6,
     NRQEB006_ASH6,
     NRQEB007_ASH6,
     NRQEB008_ASH6,
+    NRQEB009_ASH6,
+)
+from taac.abstractions.topologies.bounded_ecmp import (
+    BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
 )
 from taac.abstractions.topologies.egress_peer_scale import (
     EGRESS_PEER_SCALE_PARENT_NETWORKS,
@@ -100,29 +103,6 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
             config.name,
             "BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP",
         )
-
-    def test_name_override_is_authoritative_for_scheduled_bindings(self) -> None:
-        cases = (
-            (
-                create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
-                BAG013_ASH6,
-                "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
-                "bag013.ash6",
-            ),
-        )
-
-        for factory, inventory, expected_name, expected_dut in cases:
-            with self.subTest(expected_name=expected_name):
-                config = factory(
-                    inventory,
-                    enable_update_group=True,
-                    name_override=expected_name,
-                )
-                self.assertEqual(expected_name, config.name)
-                self.assertEqual(
-                    [expected_dut],
-                    [endpoint.name for endpoint in config.endpoints if endpoint.dut],
-                )
 
     def test_nrqeb006_sc2_uses_primary_ixia03_addresses_and_port(self) -> None:
         config = create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config(
@@ -733,6 +713,56 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                             inventory,
                             parent_networks=incomplete_networks,
                         )
+
+    def test_nrqeb009_sc9_uses_primary_ixia03_addresses_and_ports(self) -> None:
+        config = create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
+            NRQEB009_ASH6,
+            enable_update_group=True,
+            name_override="NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+            parent_networks=BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
+        )
+
+        self.assertEqual(
+            "NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+            config.name,
+        )
+        self.assertEqual(
+            ["nrqeb009.ash6"],
+            [endpoint.name for endpoint in config.endpoints if endpoint.dut],
+        )
+        self.assertEqual(
+            [
+                ("Ethernet3/35/1", "2401:db00:2066:3036::3003", "1/93"),
+                ("Ethernet3/35/2", "2401:db00:2066:3036::3003", "1/94"),
+            ],
+            [
+                (connection.interface, connection.ixia_chassis_ip, connection.ixia_port)
+                for connection in config.endpoints[0].direct_ixia_connections or []
+            ],
+        )
+        address_starts = {
+            address.starting_ip
+            for port in config.basic_port_configs or []
+            for group in port.device_group_configs or []
+            for address in (
+                group.v4_addresses_config,
+                group.v6_addresses_config,
+            )
+            if address is not None
+        }
+        self.assertEqual(
+            {
+                "10.180.28.11",
+                "10.180.28.95",
+                "10.180.28.179",
+                "10.181.28.11",
+                "2401:db00:e50d:33:8::11",
+                "2401:db00:e50d:33:8::65",
+                "2401:db00:e50d:33:8::b9",
+                "2401:db00:e50d:33:9::11",
+            },
+            address_starts,
+        )
 
     def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
         config = create_bgp_ebb_update_packing_test_config(

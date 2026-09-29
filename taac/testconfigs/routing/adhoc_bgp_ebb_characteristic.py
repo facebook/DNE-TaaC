@@ -253,9 +253,8 @@ BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
 #           delta bounded by the topology's structural max of 128*2+2 = 258;
 #           recovery to the discovered baseline (postcheck); and instrument
 #           liveness (min_observed_groups) so an all-zero series cannot pass.
-#   NOTE  : retained as a Python import alias for compatibility. The same
-#           runtime selector is scheduled through ``cicd_ebb_int_tc.py`` and
-#           is registered there, so this object is not separately aggregated.
+#   NOTE  : retained as a Python import alias for compatibility and registered
+#           separately from the NRQEB009 Conveyor selector.
 #           BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG remains untouched.
 #   name  : BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG
 #           (DERIVED by _derive_test_config_name as

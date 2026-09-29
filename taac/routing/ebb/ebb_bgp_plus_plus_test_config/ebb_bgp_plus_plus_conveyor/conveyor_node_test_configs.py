@@ -2,7 +2,7 @@
 """Aggregated EBB BGP++ conveyor node TestConfig list.
 
 Exposes ``EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS`` with the scheduled
-NRQEB006/NRQEB007/NRQEB008/BAG013 entries first. Retained BAG010 selectors and
+NRQEB006/NRQEB007/NRQEB008/NRQEB009 entries first. Retained BAG010 selectors and
 other ad-hoc qualification configs are appended to the same registry list for
 CLI resolution, but are not Conveyor-scheduled.
 
@@ -17,10 +17,9 @@ free; consumers that need the aggregated list import it from this
 module directly.
 """
 
-# Durable ad-hoc scale-and-characteristic selectors. The BAG010 variants remain
-# registered for manual comparison after the first scheduled wave was added to
-# ``cicd_ebb_int_tc.py``; their runtime names are distinct from the Conveyor
-# selectors.
+# Durable ad-hoc scale-and-characteristic selectors. The BAG variants remain
+# registered for manual comparison after the scheduled waves moved to NRQEB;
+# their runtime names are distinct from the Conveyor selectors.
 from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC1_EGRESS_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_UPDATE_GROUP_CONFIG,
@@ -28,6 +27,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
+    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
 )
 
 # The Conveyor bindings and retained Stage 1 UG and scale counterparts live in
@@ -37,9 +37,6 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
-    BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
@@ -50,6 +47,9 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 
 # Migrated to the routing framework in Diffs 2 + 3 (Wave 1 Struct-Init):
@@ -91,7 +91,7 @@ from taac.testconfigs.routing.qual_bgp_update_group import (
 #      ``cicd_ebb_int_tc.py`` that are scheduled by
 #      ``dne_routing.conveyor_config.cconf`` (see the ``CONVEYOR:`` markers in
 #      that file for the per-node mapping).
-#   2. RETAINED configs — 3 scale-and-characteristic configs held for later
+#   2. RETAINED configs — 4 scale-and-characteristic configs held for later
 #      onboarding.
 #   3. AD-HOC configs — BGP++ UG qualification testconfigs that are runnable
 #      via Netcastle CLI but not (yet) wired into a conveyor node.
@@ -100,23 +100,24 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
+    NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     # Stage 1 UG counterparts for promotion gating and A/B comparison.
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     # First promotion-gating scale-and-characteristic wave — one node per device.
     NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
     NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
     NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
-    BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     # Second promotion-gating wave; serialized after EBB-17 on NRQEB008.
     NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     # Legacy retained scale-and-characteristic selectors; these are not the
     # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
+    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     # BGP++ Update Group "new peer join" qualification (specs 2.4.1 + 2.4.2
     # + 2.4.3 combined into one TestConfig with 3 playbooks sharing the

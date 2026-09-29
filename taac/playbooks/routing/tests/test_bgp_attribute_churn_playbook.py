@@ -76,11 +76,11 @@ from taac.steps.step_definitions import (
     create_bgp_nhg_random_storm_step,
 )
 from taac.testconfigs.routing.cicd_ebb_int_tc import (
-    BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     _DEFAULT_EBGP_PREFIX_COUNT,
@@ -1390,7 +1390,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
                 NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
-                BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+                NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
             )
             for playbook in test_config.playbooks
         }
@@ -2196,7 +2196,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
     def test_scheduled_ebb16_uses_canonical_48_epoch_contract(self) -> None:
         playbook = next(
             playbook
-            for playbook in BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
+            for playbook in NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
             if playbook.name == "bgp_ebb_nexthop_group_count_threshold_playbook"
         )
         payloads = [

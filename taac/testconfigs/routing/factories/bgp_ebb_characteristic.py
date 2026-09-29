@@ -2585,6 +2585,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
     name_override: str | None = None,
     enable_update_group: bool = True,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    parent_networks: dict[str, str] | None = None,
 ) -> taac_types.TestConfig:
     """Build the SC9 bounded-ECMP characteristic config from DICE intent.
 
@@ -2614,10 +2615,11 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
         "factory requires dut_bgp_as on physical_inventory"
     )
     device_name = physical_inventory.device_name
+    resolved_parent_networks = parent_networks or BOUNDED_ECMP_PARENT_NETWORKS
     bound = BOUNDED_ECMP.bind_to_inventory(
         physical_inventory=physical_inventory,
         port_map=BOUNDED_ECMP_PORT_MAP,
-        parent_networks=BOUNDED_ECMP_PARENT_NETWORKS,
+        parent_networks=resolved_parent_networks,
         peer_groups=BOUNDED_ECMP_PEER_GROUPS,
         as_numbers=BOUNDED_ECMP_AS_NUMBERS,
         device_config_override=RoutingDeviceConfig(

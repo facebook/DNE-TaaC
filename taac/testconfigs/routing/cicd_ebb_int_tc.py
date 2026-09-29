@@ -5,9 +5,9 @@
 The lifecycle layout schedules full-scale coverage plus a first promotion-gating
 wave of one scale-and-characteristic case per scheduled device. Stage 1
 partitions the retained Non-UG Playbooks into four runtime-balanced groups. The
-former BAG010, BAG011, and BAG012 logical tracks run on NRQEB006 through
-NRQEB008 with matching TestConfig and Conveyor identities while preserving
-every Playbook list. Catalog governance lives in
+former BAG010 through BAG013 logical tracks run on NRQEB006 through NRQEB009
+with matching TestConfig and Conveyor identities while preserving every
+Playbook list. Catalog governance lives in
 ``fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml``.
 """
 
@@ -18,6 +18,10 @@ from taac.abstractions.physical_inventory import (
     NRQEB006_ASH6,
     NRQEB007_ASH6,
     NRQEB008_ASH6,
+    NRQEB009_ASH6,
+)
+from taac.abstractions.topologies.bounded_ecmp import (
+    BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
 )
 from taac.abstractions.topologies.ebb_full_scale import (
     EBB_NEXT_HOPS_IXIA03,
@@ -30,10 +34,8 @@ from taac.abstractions.topologies.ipv6_update_packing import (
     IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
 )
 from taac.constants import BgpPlusPlusProfile
-from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
-    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
-)
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config,
     create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config,
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
@@ -142,21 +144,23 @@ NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_confi
     next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
-# CONVEYOR: dne_routing / bag013_stage1_node
-BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
-    BAG013_ASH6,
-    name="BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+# CONVEYOR: dne_routing / nrqeb009_stage1_node
+NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB009_ASH6,
+    name="NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     playbooks_selected=[
         "bgp_ebb_ebgp_route_oscillation_playbook",
         "bgp_ebb_igp_unresolvable_pnh_playbook",
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
-BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
-    BAG013_ASH6,
-    name="BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
+    NRQEB009_ASH6,
+    name="NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     playbooks_selected=[
         "bgp_ebb_ebgp_route_oscillation_playbook",
         "bgp_ebb_ibgp_plane_session_oscillation_playbook",
@@ -165,6 +169,8 @@ BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_config(
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
+    parent_networks=EBB_PARENT_NETWORKS_IXIA03,
+    next_hops=EBB_NEXT_HOPS_IXIA03,
 )
 
 
@@ -202,9 +208,14 @@ NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG = (
     )
 )
 
-# CONVEYOR: dne_routing / bag013_characteristics_wave1_node
-BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
-    BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG
+# CONVEYOR: dne_routing / nrqeb009_characteristics_wave1_node
+NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
+    create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
+        NRQEB009_ASH6,
+        enable_update_group=True,
+        name_override="NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+        parent_networks=BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
+    )
 )
 
 # Second characteristic promotion-gating wave. EBB-21 has its own logical
@@ -261,9 +272,9 @@ __all__ = [
     "NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG012_UPDATE_PACKING_TEST_CONFIG_UG",
     "BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
-    "BAG013_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
-    "BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
-    "BAG013_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
+    "NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+    "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
+    "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
     "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
