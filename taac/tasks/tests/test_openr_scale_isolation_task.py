@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import typing as t
-from collections.abc import Awaitable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from later.unittest import TestCase
@@ -462,24 +461,25 @@ class OpenRScaleIsolationTaskTest(TestCase):
             cleanup_finished.set()
             return CleanupSummary({}, {}, {})
 
-        shield_calls = 0
-        original_shield = asyncio.shield
+        wait_calls = 0
+        original_wait = asyncio.wait
 
-        def shield(
-            awaitable: Awaitable[CleanupSummary] | asyncio.Future[CleanupSummary],
-        ) -> asyncio.Future[CleanupSummary]:
-            nonlocal shield_calls
-            shield_calls += 1
-            if shield_calls == 2:
+        # The second wait on the isolation task is the cancellation join.
+        async def wait(
+            fs: t.Iterable[asyncio.Future[CleanupSummary]], **kwargs: t.Any
+        ) -> tuple[set[t.Any], set[t.Any]]:
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 2:
                 join_started.set()
-            return original_shield(awaitable)
+            return await original_wait(fs, **kwargs)
 
         driver.async_run_cmd_on_shell = AsyncMock(side_effect=stop)
         with (
             patch(f"{_MODULE}._STOP_TIMEOUT_SECONDS", 0.01),
             patch(f"{_MODULE}.async_get_device_driver", AsyncMock(return_value=driver)),
             patch(f"{_MODULE}.expire_scale_keys_and_verify", side_effect=cleanup),
-            patch(f"{_MODULE}.asyncio.shield", side_effect=shield),
+            patch(f"{_MODULE}.asyncio.wait", side_effect=wait),
         ):
             running = asyncio.create_task(_task().run(dict(_PARAMS)))
             await stop_started.wait()
@@ -530,15 +530,25 @@ class OpenRScaleIsolationTaskTest(TestCase):
                 child_cancelled.set()
             return CleanupSummary({}, {}, {})
 
-        async def time_out(_awaitable: object, *, timeout: float) -> None:
+        original_wait = asyncio.wait
+
+        # Time out only the bounded join; the unbounded waits stay real.
+        async def time_out(
+            fs: t.Iterable[asyncio.Future[CleanupSummary]],
+            *,
+            timeout: float | None = None,
+            **kwargs: t.Any,
+        ) -> tuple[set[t.Any], set[t.Any]]:
+            if timeout is None:
+                return await original_wait(fs, **kwargs)
             self.assertAlmostEqual(108, timeout, delta=0.1)
-            raise asyncio.TimeoutError
+            return set(), set(fs)
 
         with (
             patch(f"{_MODULE}._STOP_TIMEOUT_SECONDS", 11),
             patch(f"{_MODULE}._JOIN_GRACE_SECONDS", 7),
             patch(f"{_MODULE}._ordered_isolation", side_effect=isolation),
-            patch(f"{_MODULE}.asyncio.wait_for", side_effect=time_out),
+            patch(f"{_MODULE}.asyncio.wait", side_effect=time_out),
         ):
             running = asyncio.create_task(_task().run(dict(_PARAMS)))
             await child_started.wait()
