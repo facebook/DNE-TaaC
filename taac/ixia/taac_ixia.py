@@ -1594,20 +1594,41 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
             raise
 
     # DLB hardening helpers used by its existing CSV injection workflows.
+    def _walk_device_groups(self, parent) -> t.Iterator[t.Any]:
+        """Yield every DeviceGroup under ``parent``, nested ones included.
+
+        Chained topologies put the route-bearing DeviceGroup *inside* the
+        NDP-bearing one, so a single-level ``topo.DeviceGroup.find()`` walk
+        never sees it and the pool lookup raises "No NetworkGroup named ..."
+        for a pool that is plainly in the session.
+        """
+        for dg in parent.DeviceGroup.find():
+            yield dg
+            yield from self._walk_device_groups(dg)
+
     def _find_dlb_ng_dg(self, pool_name: str):
         """Locate the named NetworkGroup, its parent DeviceGroup, its
         single Ipv6PrefixPool, and its BgpV6IPRouteProperty in the
         IxNetwork session.
 
+        Matches the NetworkGroup name first, then falls back to the
+        Ipv6PrefixPools name: IxNetwork renames auto-created children (it
+        appends a " 1" suffix), so the NG and its pool routinely disagree and
+        an NG-name-only match misses the pool the caller means.
+
         Returns (parent_dg, parent_ng, parent_pool, route_prop) or
         raises RuntimeError if no matching NG is found.
         """
+        seen: t.List[str] = []
         for topo in self.ixnetwork.Topology.find():
-            for dg in topo.DeviceGroup.find():
+            for dg in self._walk_device_groups(topo):
                 for ng in dg.NetworkGroup.find():
-                    if ng.Name != pool_name:
-                        continue
                     pool = next(iter(ng.Ipv6PrefixPools.find()), None)
+                    seen.append(ng.Name)
+                    if ng.Name != pool_name and not (
+                        pool is not None and pool.Name == pool_name
+                    ):
+                        continue
                     if pool is None:
                         raise RuntimeError(f"NG {pool_name!r} has no Ipv6PrefixPools")
                     rp = next(iter(pool.BgpV6IPRouteProperty.find()), None)
@@ -1616,7 +1637,20 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                             f"pool in NG {pool_name!r} has no BgpV6IPRouteProperty"
                         )
                     return dg, ng, pool, rp
-        raise RuntimeError(f"No NetworkGroup named {pool_name!r} found")
+        raise RuntimeError(
+            f"No NetworkGroup named {pool_name!r} found; session has "
+            f"{sorted(set(seen))!r}"
+        )
+
+    @staticmethod
+    def _safe_pool_name(pool_name: str) -> str:
+        """Filesystem-safe form of an IxNetwork pool name.
+
+        Live pool names carry spaces and '/' (e.g. ``vf_gpu /64 pool 1``).
+        Interpolated raw into the scratch path, the '/' reads as a directory
+        separator and open() fails with ENOENT on a directory nobody created.
+        """
+        return "".join(c if c.isalnum() or c in "-_." else "_" for c in pool_name)
 
     def _mutate_pool_config_only(
         self, csv_path: str, pool_name: str
@@ -1637,35 +1671,107 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
 
         prefixes_in_order: t.List[str] = []
         nhs_in_order: t.List[str] = []
+        plens_in_order: t.List[str] = []
+        counts_in_order: t.List[int] = []
+        steps_in_order: t.List[str] = []
         with open(csv_path) as f:
             reader = _csv.reader(f)
-            next(reader, None)
-            for row in reader:
-                if len(row) < 2:
+            header = next(reader, None)
+            if header is None:
+                raise ValueError(f"CSV {csv_path} is empty")
+            # Resolve columns by header NAME, never by position. The
+            # block-consolidated CSV inserts AddressCount/AddressStep between
+            # PrefixLength and the next hop, so positional row[0]/row[1] reads
+            # a prefix LENGTH as a next-hop address and every path is dropped.
+            cols = {name.strip().lower(): i for i, name in enumerate(header)}
+
+            def _col(*names: str) -> t.Optional[int]:
+                for n in names:
+                    if n in cols:
+                        return cols[n]
+                return None
+
+            i_addr = _col("address", "prefix")
+            i_nh = _col("ipv6 next hop", "next hop", "nexthop")
+            i_plen = _col("prefixlength", "prefix length")
+            i_count = _col("addresscount", "address count")
+            i_step = _col("addressstep", "address step")
+            if i_addr is None or i_nh is None:
+                raise ValueError(
+                    f"CSV {csv_path} header {header!r} lacks an 'Address' "
+                    "and/or 'Ipv6 Next Hop' column"
+                )
+            # Every per-row list must stay index-aligned with
+            # prefixes_in_order, because they are handed to IxNetwork as
+            # parallel ValueLists. A row long enough for Address and the next
+            # hop but SHORT of a later resolved column would otherwise append
+            # to some lists and not others, making PrefixLength shorter than
+            # the prefix list and silently shifting every subsequent mask.
+            # Reject such a row instead of mis-masking the injection.
+            required_len = (
+                max(i for i in (i_addr, i_nh, i_plen, i_count, i_step) if i is not None)
+                + 1
+            )
+            for row_number, row in enumerate(reader, start=2):
+                if not row or all(not cell.strip() for cell in row):
                     continue
-                prefixes_in_order.append(row[0])
-                nhs_in_order.append(row[1])
+                if len(row) < required_len:
+                    raise ValueError(
+                        f"CSV {csv_path} line {row_number} has {len(row)} "
+                        f"columns but header {header!r} needs at least "
+                        f"{required_len}; refusing to inject a row set whose "
+                        "per-column ValueLists would be misaligned"
+                    )
+                prefixes_in_order.append(row[i_addr].strip())
+                nhs_in_order.append(row[i_nh].strip())
+                if i_plen is not None:
+                    plens_in_order.append(row[i_plen].strip())
+                if i_count is not None:
+                    counts_in_order.append(int(row[i_count]))
+                if i_step is not None:
+                    steps_in_order.append(row[i_step].strip())
         total_rows = len(prefixes_in_order)
         if total_rows == 0:
             raise ValueError(f"CSV {csv_path} has no data rows")
         distinct_prefixes = len(dict.fromkeys(prefixes_in_order))
         w = total_rows // distinct_prefixes if distinct_prefixes else 0
+
+        # Block-consolidated CSV: one row stands for AddressCount prefixes.
+        # NumberOfAddresses is a pool-wide SCALAR (PrefixAddrStep is not), so
+        # rows disagreeing on the count would silently mis-expand.
+        block_count = 1
+        if counts_in_order:
+            uniq = set(counts_in_order)
+            if len(uniq) > 1:
+                raise ValueError(
+                    "Ipv6PrefixPools.NumberOfAddresses is pool-wide, so all "
+                    f"rows must share AddressCount; CSV {csv_path} mixes "
+                    f"{sorted(uniq)}. Split them into separate pools."
+                )
+            block_count = counts_in_order[0]
         self.logger.info(
             f"[_mutate_pool_config_only] {csv_path}: rows={total_rows} "
-            f"distinct_prefixes={distinct_prefixes} width={w}"
+            f"distinct_prefixes={distinct_prefixes} width={w} "
+            f"addresses_per_row={block_count} "
+            f"advertised_prefixes={distinct_prefixes * block_count}"
         )
 
         scratch_dir = "/tmp/taac_dlb_inject"
         _os.makedirs(scratch_dir, exist_ok=True)
-        prefix_col = _os.path.join(scratch_dir, f"_pfx_{pool_name}.csv")
-        nh_col = _os.path.join(scratch_dir, f"_nh_{pool_name}.csv")
+        safe_pool_name = self._safe_pool_name(pool_name)
+        prefix_col = _os.path.join(scratch_dir, f"_pfx_{safe_pool_name}.csv")
+        nh_col = _os.path.join(scratch_dir, f"_nh_{safe_pool_name}.csv")
         with open(prefix_col, "w") as f:
             f.write("\n".join(prefixes_in_order) + "\n")
         with open(nh_col, "w") as f:
             f.write("\n".join(nhs_in_order) + "\n")
 
         dg, ng, pool, route_prop = self._find_dlb_ng_dg(pool_name)
-        self.logger.info(f"[_mutate_pool_config_only] target dg={dg.Name} ng={ng.Name}")
+        dg_mult = max(1, int(getattr(dg, "Multiplier", 1) or 1))
+        self.logger.info(
+            f"[_mutate_pool_config_only] target dg={dg.Name} ng={ng.Name} "
+            f"dg.Multiplier={dg_mult} -> ng.Multiplier={total_rows // dg_mult}"
+        )
 
         MAX_STOP_RETRY = 4
         for attempt in range(MAX_STOP_RETRY):
@@ -1682,7 +1788,12 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                     f"ng.Stop() attempt {attempt + 1} failed (continuing): {e}"
                 )
             try:
-                ng.Multiplier = total_rows
+                # Rows are split across the DeviceGroup's own devices: the
+                # session materialises dg.Multiplier * ng.Multiplier route
+                # entries. Assigning total_rows here overshoots by exactly
+                # dg.Multiplier and the surplus entries take garbage values
+                # off the end of the ValueLists.
+                ng.Multiplier = max(1, total_rows // dg_mult)
                 break
             except Exception as e:
                 msg = str(e)
@@ -1697,12 +1808,42 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                     _time.sleep(3)
                     continue
                 raise
-        pool.NumberOfAddresses = 1
-        pool.PrefixLength.Single(64)
+        pool.NumberOfAddresses = block_count
+        if plens_in_order:
+            # PrefixLength is a Multivalue, so a mixed-mask set (e.g. /64
+            # VF-GPU plus /46 remote-L2) rides in one pool. Single(64) would
+            # silently re-mask every non-/64 row.
+            pool.PrefixLength.ValueList(plens_in_order)
+        else:
+            pool.PrefixLength.Single(64)
         pool.NetworkAddress.ValueList(prefix_col)
+        if steps_in_order:
+            # Numeric, in units of the prefix size -- PrefixAddrStep rejects
+            # an address literal with "Value <x> is not number".
+            pool.PrefixAddrStep.ValueList(steps_in_order)
         route_prop.Ipv6NextHop.ValueList(nh_col)
+        # Advertise the CSV's next hop verbatim; left on its default the route
+        # property substitutes the session's own local address and every
+        # prefix collapses onto a single path.
+        for attr_name, attr_value in (
+            ("NextHopType", "manual"),
+            ("NextHopIPType", "ipv6"),
+        ):
+            attr = getattr(route_prop, attr_name, None)
+            if attr is None:
+                continue
+            try:
+                attr.Single(attr_value)
+            except Exception as e:
+                self.logger.warning(
+                    f"route_prop.{attr_name}.Single({attr_value!r}) failed: {e}"
+                )
         route_prop.EnableAddPath.Single(True)
-        route_prop.MvNextHopCount.Single(w)
+        # ONE next hop per row. The add-path width comes from emitting w rows
+        # per prefix, each with its own AddPathId -- setting this to w instead
+        # makes IxNetwork expect w next hops *within* a row and advertise only
+        # the first, yielding 1 path per prefix instead of w.
+        route_prop.MvNextHopCount.Single(1)
         route_prop.AddPathId.ValueList([str(i + 1) for i in range(total_rows)])
         try:
             route_prop.Active.Single(True)

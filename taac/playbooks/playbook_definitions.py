@@ -30722,3 +30722,77 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
             ),
         ],
     )
+
+
+def create_prefix_scale_inject_and_observe_playbook(
+    *,
+    name: str,
+    description: str,
+    pool_csvs: list[list[str]],
+    inject_description: str,
+    settle_stage_id: str,
+    settle_seconds: int,
+    observe_stage_id: str,
+    observe_description: str,
+    observe_commands: list[tuple[str, str]],
+    wait_after_inject: bool = False,
+    extra_stages: list[Stage] | None = None,
+) -> Playbook:
+    """Inject prefix/path scale over IXIA, let it settle, then observe it.
+
+    Shared by the UFv2 ETSW prefix-scale configs. All of them do the same
+    three things — push one or more CSV-driven prefix pools through
+    ``apply_pool_mutations``, wait for BGP to converge and the FIB to
+    program, then run read-only SSH commands to report what actually landed.
+
+    Args:
+        pool_csvs: ``[[csv_path, pool_name], ...]`` passed straight to the
+            ``apply_pool_mutations`` IXIA API. One entry per prefix pool; all
+            entries are applied in ONE stop/start/converge cycle, which is
+            what that API is for — injecting pools one at a time re-runs the
+            whole cycle per pool and corrupts traffic state.
+        settle_seconds: convergence budget. Scale runs need this to exceed
+            the time the FIB takes to program, or the observation stage reads
+            a half-programmed device and under-reports.
+        observe_commands: ``[(cmd, description), ...]`` run in order in the
+            observation stage. Read-only by contract.
+        wait_after_inject: add a default convergence wait as a setup step, for
+            multi-pool injections where the sessions need to come up before
+            the settle stage's timed wait starts.
+        extra_stages: appended after the observation stage.
+    """
+    setup_steps = [
+        create_ixia_api_step(
+            api_name="apply_pool_mutations",
+            args_dict={"pool_csvs": pool_csvs},
+            description=inject_description,
+        ),
+    ]
+    if wait_after_inject:
+        setup_steps.append(create_bgp_convergence_wait_step())
+
+    stages = [
+        create_steps_stage(
+            stage_id=settle_stage_id,
+            description="Let BGP converge and the FIB program after injection",
+            steps=[create_bgp_convergence_wait_step(wait_seconds=settle_seconds)],
+        ),
+        create_steps_stage(
+            stage_id=observe_stage_id,
+            description=observe_description,
+            steps=[
+                create_run_ssh_command_step(cmd=cmd, description=cmd_description)
+                for cmd, cmd_description in observe_commands
+            ],
+        ),
+    ]
+    if extra_stages:
+        stages.extend(extra_stages)
+
+    return Playbook(
+        name=name,
+        description=description,
+        setup_steps=setup_steps,
+        stages=stages,
+        snapshot_checks=[create_core_dumps_snapshot_check()],
+    )

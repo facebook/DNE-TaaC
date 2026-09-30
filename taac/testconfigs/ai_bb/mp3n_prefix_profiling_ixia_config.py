@@ -748,6 +748,10 @@ def create_mp3n_setup_tasks(
     ingress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_IN",
     egress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_OUT",
     patcher_suffix: str = "rtsw_ixia",
+    prefix_limit: int = 75000,
+    hold_time_seconds: int = 30,
+    keep_alive_seconds: int = 10,
+    next_hop_self: bool = True,
 ) -> List[taac_types.Task]:
     """Create setup tasks to configure BGP peering on DUT.
 
@@ -755,6 +759,17 @@ def create_mp3n_setup_tasks(
         interface_configs: List of (interface, local_ip, peer_ip, description) tuples.
             When provided, uses configure_parallel_bgp_peers to assign IPs + peers.
             When None, uses raw add_bgp_peers COOP patcher (for devices with pre-existing IPs).
+        prefix_limit: BGP switch-wide prefix limit. Must exceed the advertised
+            scale plus the routes the device already carries, or bgpd rejects
+            the tail of the injection.
+        hold_time_seconds/keep_alive_seconds: peer timers. The defaults are
+            tuned for small sessions; a multi-million-path injection can stall
+            keepalives long enough to flap the session, so scale runs raise
+            them.
+        next_hop_self: when True the DUT rewrites the next hop to itself,
+            which collapses an add-path advertisement carrying N distinct next
+            hops down to one path. Scale runs that depend on the advertised
+            next hops surviving must pass False.
     """
     max_routes = "2000000"
 
@@ -772,15 +787,15 @@ def create_mp3n_setup_tasks(
                 "disable_ipv6_afi": "False",
                 "ingress_policy_name": ingress_policy,
                 "egress_policy_name": egress_policy,
-                "bgp_peer_timers_hold_time_seconds": "30",
-                "bgp_peer_timers_keep_alive_seconds": "10",
+                "bgp_peer_timers_hold_time_seconds": str(hold_time_seconds),
+                "bgp_peer_timers_keep_alive_seconds": str(keep_alive_seconds),
                 "bgp_peer_timers_out_delay_seconds": "0",
                 "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
                 "peer_tag": "IXIA",
                 "max_routes": max_routes,
                 "warning_only": "True",
                 "warning_limit": "0",
-                "next_hop_self": "True",
+                "next_hop_self": str(next_hop_self),
                 "add_path": "BOTH",
                 "is_confed_peer": "False",
                 "is_passive": "False",
@@ -825,7 +840,7 @@ def create_mp3n_setup_tasks(
         ),
         create_bgp_switch_limit_patcher_task(
             hostname=device_name,
-            prefix_limit=75000,
+            prefix_limit=prefix_limit,
         ),
     ]
 
@@ -1143,20 +1158,26 @@ def create_warmboot_playbook(
                 network_group_regex=ng_regex,
                 starting_prefix=mask_config.fixed_prefix,
                 prefix_step=mask_config.prefix_step,
-                fixed_prefix=mask_config.fixed_prefix
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
-                random_mask=mask_config.random_mask
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                fixed_prefix=(
+                    mask_config.fixed_prefix
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
+                random_mask=(
+                    mask_config.random_mask
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 seed=mask_config.seed if distribution_type != DIST_CONTIGUOUS else None,
                 random_mask_count=(
-                    mask_config.prefix_count * mask_config.multiplier
-                    if distribution_type == DIST_HYBRID
-                    else mask_config.multiplier
-                )
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                    (
+                        mask_config.prefix_count * mask_config.multiplier
+                        if distribution_type == DIST_HYBRID
+                        else mask_config.multiplier
+                    )
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(
@@ -1301,20 +1322,26 @@ def create_bgp_restart_playbook(
                 network_group_regex=ng_regex,
                 starting_prefix=mask_config.fixed_prefix,
                 prefix_step=mask_config.prefix_step,
-                fixed_prefix=mask_config.fixed_prefix
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
-                random_mask=mask_config.random_mask
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                fixed_prefix=(
+                    mask_config.fixed_prefix
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
+                random_mask=(
+                    mask_config.random_mask
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 seed=mask_config.seed if distribution_type != DIST_CONTIGUOUS else None,
                 random_mask_count=(
-                    mask_config.prefix_count * mask_config.multiplier
-                    if distribution_type == DIST_HYBRID
-                    else mask_config.multiplier
-                )
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                    (
+                        mask_config.prefix_count * mask_config.multiplier
+                        if distribution_type == DIST_HYBRID
+                        else mask_config.multiplier
+                    )
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(
@@ -1460,20 +1487,26 @@ def create_coldboot_playbook(
                 network_group_regex=ng_regex,
                 starting_prefix=mask_config.fixed_prefix,
                 prefix_step=mask_config.prefix_step,
-                fixed_prefix=mask_config.fixed_prefix
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
-                random_mask=mask_config.random_mask
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                fixed_prefix=(
+                    mask_config.fixed_prefix
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
+                random_mask=(
+                    mask_config.random_mask
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 seed=mask_config.seed if distribution_type != DIST_CONTIGUOUS else None,
                 random_mask_count=(
-                    mask_config.prefix_count * mask_config.multiplier
-                    if distribution_type == DIST_HYBRID
-                    else mask_config.multiplier
-                )
-                if distribution_type != DIST_CONTIGUOUS
-                else None,
+                    (
+                        mask_config.prefix_count * mask_config.multiplier
+                        if distribution_type == DIST_HYBRID
+                        else mask_config.multiplier
+                    )
+                    if distribution_type != DIST_CONTIGUOUS
+                    else None
+                ),
                 network_group_multiplier=mask_config.multiplier,
             ),
             create_wait_convergence_stage(

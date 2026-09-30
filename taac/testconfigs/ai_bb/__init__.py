@@ -29,6 +29,11 @@ from taac.testconfigs.ai_bb.dsf_snc1_c084_test_config import (
 from taac.testconfigs.ai_bb.edsw003_n001_l201_snc1_hardening_test_config import (
     EDSW003_N001_L201_SNC1_HARDENING_NODE,
 )
+from taac.testconfigs.ai_bb.etsw_prefix_scale_gtsw001_config import (
+    ETSW_PREFIX_SCALE_GTSW001,
+    ETSW_PREFIX_SCALE_GTSW001_45PEER,
+    ETSW_PREFIX_SCALE_GTSW001_4PORT,
+)
 from taac.testconfigs.ai_bb.fa003_du003_qza1_prefix_profiling_config import (  # noqa: F401
     FA003_DU003_QZA1_CONTIGUOUS_PREFIX_ALL,
     FA003_DU003_QZA1_HYBRID_PREFIX_ALL,
@@ -65,6 +70,9 @@ __all__ = [
     "CONTIGUOUS_PREFIX_ALL",
     "CONTIGUOUS_PREFIX_ALL_SETUP_ONLY",
     "EDSW003_N001_L201_SNC1_HARDENING_NODE",
+    "ETSW_PREFIX_SCALE_GTSW001",
+    "ETSW_PREFIX_SCALE_GTSW001_45PEER",
+    "ETSW_PREFIX_SCALE_GTSW001_4PORT",
     "EXP1_1_5M_ECMP52",
     "EXP3_4M_ECMP120",
     "EXP5_4M_ECMP240",
